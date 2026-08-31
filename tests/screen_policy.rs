@@ -395,3 +395,113 @@ fn a_screen_notice_is_capped_like_every_other_screen_line() {
 
 /// Room for the marker `truncate_for_display` appends past the cap.
 const TRUNCATION_MARKER_SLACK: usize = 128;
+
+/// The seven diagnostic lines a clean startup produces today (SC-L14).
+///
+/// Shortened stand-ins for the real texts, one per production site the inventory of task 3.1
+/// classified as `info`: the provider banner, the no-config default, the principal probe
+/// result, the memory diagnostics, the log sweep summary, the `base_url` normalisation, and
+/// the per-mage budget derived from `--timeout`.
+const CLEAN_STARTUP_DIAGNOSTICS: [&str; 7] = [
+    "Ollama (kimi-k2.6:cloud)",
+    "no magi.toml found; using the Ollama-first defaults",
+    "kimi-k2.6:cloud: measured window 262144 tokens",
+    "memory: 0 active, 0 archived, 0 pending re-embed (~0 KB index)",
+    "logs: 2 compressed, 0 abandoned temporaries removed",
+    "notice: `base_url` had no `/v1` suffix and one was added",
+    "magi: per-mage ceiling 249s derived from --timeout 1800s",
+];
+
+#[test]
+fn test_a_clean_startup_shows_nothing_on_screen() {
+    // SC-L14, and the scenario that measures whether this milestone met its objective. A
+    // startup with nothing degraded puts NOT ONE line on the screen, while the file keeps
+    // every one of them.
+    //
+    // **The second half is what makes this a guardian.** A test that only asserted the screen
+    // is empty would pass just as well against a screen branch that was never wired at all --
+    // which is what production looks like until the sink is swapped in. So the same live
+    // sink is shown, at the end, to be capable of delivering: one `warn` goes through it and
+    // must appear. Without that, "the screen is clean" and "there is no screen" read alike.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (handle, screen) = start(dir.path(), "info");
+
+    magi_rs::notices::emit_notices(
+        CLEAN_STARTUP_DIAGNOSTICS
+            .iter()
+            .map(|t| magi_rs::notices::Notice::info(*t))
+            .collect(),
+    );
+
+    let shown = screen.joined();
+    assert!(
+        shown.is_empty(),
+        "a clean startup put something on the screen: {shown}"
+    );
+
+    let written = wait_for_file(dir.path(), CLEAN_STARTUP_DIAGNOSTICS[6]);
+    for line in CLEAN_STARTUP_DIAGNOSTICS {
+        assert!(
+            written.contains(line),
+            "the diagnostics must still be in the day's file; {line:?} is missing from: \
+             {written}"
+        );
+    }
+
+    magi_rs::notices::emit_notices(vec![magi_rs::notices::Notice::warn(
+        "the vault could not be opened",
+    )]);
+    assert!(
+        screen.joined().contains("the vault could not be opened"),
+        "the screen mouth was never live, so the emptiness above proves nothing"
+    );
+
+    drop(handle);
+}
+
+/// Comfortably past the cap that used to trim at five.
+const NOTICES_PAST_THE_RETIRED_CAP: usize = 20;
+
+#[test]
+fn test_no_notice_truncation_line_is_ever_emitted() {
+    // REQ-L20/D-L12: `NOTICE_MAX_INFO` and the "… N more diagnostic notice(s) omitted" line
+    // are gone rather than raised. The cap existed because there was nowhere to put what it
+    // discarded, and it produced the worse of both outcomes -- the reader got five lines of
+    // noise AND the rest was destroyed instead of filed.
+    //
+    // Asserting the ABSENCE of the omitted line is not enough on its own: it holds against an
+    // implementation that emits nothing at all. The positive half -- all twenty reached the
+    // file -- is what discriminates.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (handle, screen) = start(dir.path(), "info");
+
+    let notices: Vec<magi_rs::notices::Notice> = (0..NOTICES_PAST_THE_RETIRED_CAP)
+        .map(|i| magi_rs::notices::Notice::info(format!("startup diagnostic number {i}")))
+        .collect();
+    magi_rs::notices::emit_notices(notices);
+
+    let written = wait_for_file(
+        dir.path(),
+        &format!(
+            "startup diagnostic number {}",
+            NOTICES_PAST_THE_RETIRED_CAP - 1
+        ),
+    );
+    for i in 0..NOTICES_PAST_THE_RETIRED_CAP {
+        assert!(
+            written.contains(&format!("startup diagnostic number {i}")),
+            "notice {i} was trimmed instead of filed: {written}"
+        );
+    }
+    assert!(
+        !written.contains("omitted"),
+        "the truncation line survived into the file: {written}"
+    );
+    assert!(
+        !screen.joined().contains("omitted"),
+        "the truncation line reached the screen: {}",
+        screen.joined()
+    );
+
+    drop(handle);
+}

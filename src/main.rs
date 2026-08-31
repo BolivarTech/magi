@@ -4485,7 +4485,7 @@ fn tui_mode_classifier_wiring(
 /// `String` on their own and staying in sync by hand.
 fn trio_unavailable_for_tui(err: &TrioError) -> (Notice, String) {
     let msg = trio_unavailable_message(err);
-    (Notice::blocking(msg.clone()), msg)
+    (Notice::error(msg.clone()), msg)
 }
 
 /// A [`SecretStore`] that always reports "not found" — every method fails or
@@ -6253,8 +6253,8 @@ mod tests {
     }
     use super::*;
     use crate::agent::messages::Message;
-    use magi_rs::notices::NoticeTier;
     use magi_rs::vault::MaskedDek;
+    use tracing::Level;
 
     /// Task 2.2 — `--mode` and `--untrusted-content` across the four surfaces
     /// (REQ-A07/A07b/A07c/A07d). Named `mode_surfaces` so
@@ -7512,38 +7512,41 @@ mod tests {
         });
     }
 
-    /// Addition 2 (coordinator ruling, 2026-08-03, Task 1.5): the module-level
-    /// `notices` tests already pin that `render_notices` never trims `Resolution`/
-    /// `Blocking` under the cap — what they can't see is whether `run()` itself
-    /// files a genuinely important message under `Info` in the first place. Names
-    /// the concrete, known-critical messages instead of re-testing the tiering
-    /// machinery: a future edit that reclassifies one of these downward to `Info`
-    /// breaks THIS test, not just a generic property.
+    /// **Row 1 of task 3.1's classification table** — a capability stopped being available
+    /// and the user will notice the effect, so it is actionable and belongs on the screen.
     ///
-    /// Covers the hardening/vault family (REQ-V42 mlock diagnostics — never
-    /// diagnostic noise, always a security-posture regression) and the fixed
-    /// "no persistence at all" warning.
+    /// A session with no store saves neither the conversation nor project knowledge. Nothing
+    /// else in the run says so, and by the time the user notices, the turn they wanted kept
+    /// is gone.
     #[test]
-    fn known_critical_startup_messages_tier_above_info() {
-        let hardening =
-            low_level_warning_notices(&["could not set RLIMIT_CORE=0: EPERM".to_string()]);
-        assert_eq!(hardening.len(), 1);
-        assert_ne!(
-            hardening[0].tier,
-            NoticeTier::Info,
-            "a hardening warning must never degrade to Info: {}",
-            hardening[0].text
-        );
-        assert!(hardening[0].text.contains("RLIMIT_CORE"));
-
+    fn a_capability_that_became_unavailable_is_shown_on_screen() {
         let np = no_persistence_notice();
-        assert_ne!(
-            np.tier,
-            NoticeTier::Info,
-            "the no-persistence warning must never degrade to Info: {}",
+        assert_eq!(
+            np.level,
+            Level::WARN,
+            "losing persistence for the session is not a diagnostic: {}",
             np.text
         );
         assert!(np.text.contains("WITHOUT persistence"));
+    }
+
+    /// **Row 2** — a silent degradation: everything still works, worse, without failing.
+    ///
+    /// REQ-V42's mlock and dump-suppression diagnostics are the class nobody discovers until
+    /// it hurts. The process starts, the vault opens, and the only thing that changed is that
+    /// the key can now reach the pagefile.
+    #[test]
+    fn a_silent_degradation_is_shown_on_screen() {
+        let hardening =
+            low_level_warning_notices(&["could not set RLIMIT_CORE=0: EPERM".to_string()]);
+        assert_eq!(hardening.len(), 1);
+        assert_eq!(
+            hardening[0].level,
+            Level::WARN,
+            "a security-posture regression must not go only to the file: {}",
+            hardening[0].text
+        );
+        assert!(hardening[0].text.contains("RLIMIT_CORE"));
     }
 
     /// Same guarantee for the family of messages [`open_tui_memory`] produces — the
@@ -7565,9 +7568,9 @@ mod tests {
             let notices = wrap_helper_notices(texts);
             assert!(!notices.is_empty());
             for n in &notices {
-                assert_ne!(
-                    n.tier,
-                    NoticeTier::Info,
+                assert_eq!(
+                    n.level,
+                    Level::WARN,
                     "helper-produced notice degraded to Info: {}",
                     n.text
                 );
@@ -8975,11 +8978,11 @@ mod tests {
         );
     }
 
-    /// The sanity condition reaches the operator too, and as a `Resolution` notice rather
-    /// than `Info`: `render_notices` caps how many `Info` lines survive, and a probable
-    /// typo in the run's wall clock must not be the line that gets dropped.
+    /// The sanity condition reaches the operator too, and on the SCREEN: a `--timeout` with
+    /// an extra digit buys hours per attempt, and the run obeys it. A line that went only to
+    /// the file would be read after the wait, not before it.
     #[test]
-    fn the_sanity_notice_survives_the_info_cap() {
+    fn the_sanity_notice_reaches_the_screen() {
         let n = above_sanity_notice(
             900,
             &magi_rs::magi::BudgetTelemetry {
@@ -8991,17 +8994,21 @@ mod tests {
             },
         )
         .expect("an above-sanity ceiling must produce a notice");
-        assert_eq!(n.tier, NoticeTier::Resolution);
+        assert_eq!(n.level, Level::WARN);
         assert!(n.text.contains("900"));
     }
 
-    /// Loop 1 finding (IMPORTANT 3): `budget_notice` — spec §6b's sole deliverable — had NO
-    /// test at all. It decides which of the two tiers a run's per-mage-ceiling notice gets, and
-    /// the split is the entire reason two `Notice` constructors exist here: `Resolution` for the
-    /// derived path (an explicit `--timeout` IS the config resolving differently from what
-    /// `magi.toml` says, per this function's own rustdoc), `Info` for the configured one.
+    /// **Row 3** — a configuration decision the user made and that is being honoured stays off
+    /// the screen.
+    ///
+    /// Both arms of `budget_notice` report a ceiling that is in force exactly as asked: one
+    /// from `[magi].agent_timeout_secs`, one derived from the operator's own `--timeout`.
+    /// There is nothing to do about either, so confirming them on screen is the noise this
+    /// milestone exists to remove. The two arms differ in TEXT, which is what the notice is
+    /// for, and no longer in level — the split used to exist only so the derived one would
+    /// survive a cap that no longer exists.
     #[test]
-    fn budget_notice_uses_resolution_tier_for_the_derived_path_and_info_for_the_configured_one() {
+    fn a_configuration_decision_that_is_honoured_stays_off_the_screen() {
         let telemetry = magi_rs::magi::BudgetTelemetry {
             operation_budget_secs: 149,
             ceiling_floored: false,
@@ -9012,18 +9019,18 @@ mod tests {
 
         let derived = budget_notice(249, Some(1800), &telemetry);
         assert_eq!(
-            derived.tier,
-            NoticeTier::Resolution,
-            "the derived ceiling must survive NOTICE_MAX_INFO's cap — an Info tier here is \
-             the exact defect the Resolution/Info split exists to prevent"
+            derived.level,
+            Level::INFO,
+            "an honoured --timeout is diagnostic, not actionable: {}",
+            derived.text
         );
 
         let configured = budget_notice(90, None, &telemetry);
         assert_eq!(
-            configured.tier,
-            NoticeTier::Info,
-            "the configured path resolved exactly as written, so it may be capped away \
-             without losing anything"
+            configured.level,
+            Level::INFO,
+            "the configured path resolved exactly as written: {}",
+            configured.text
         );
     }
 
@@ -12694,9 +12701,9 @@ retry_disabled = {retry_disabled}
             let (notice, msg) = trio_unavailable_for_tui(&err);
             assert_eq!(notice.text, msg, "notice and reply must be the SAME text");
             assert_eq!(
-                notice.tier,
-                NoticeTier::Blocking,
-                "an unbuildable trio demands action — it is not a Resolution or an Info"
+                notice.level,
+                Level::ERROR,
+                "an unbuildable trio demands action — it is neither a warning nor a diagnostic"
             );
         }
 
@@ -12833,7 +12840,7 @@ retry_disabled = {retry_disabled}
                 "must say where the content passes through first: {}",
                 n.text
             );
-            assert_eq!(n.tier, NoticeTier::Resolution);
+            assert_eq!(n.level, Level::WARN);
 
             assert!(
                 divergence_notice(&cfg_with_endpoints("http://a/v1", None), true).is_none(),

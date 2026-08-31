@@ -1703,19 +1703,39 @@ mod tests {
         }
     }
 
-    /// SC-R35 tier (plan §Notice tiers): `Resolution`, never `Info`. A declared model that is
-    /// probably not where it was declared is a config that resolved differently from what the
-    /// file looks like — and `Info` is the tier that `render_notices` is allowed to trim.
+    /// SC-R35: a declared model that could not be measured on an endpoint that measured others
+    /// is probably not there at all, and `ollama pull` is the action — so it reaches the
+    /// screen (row 1 of task 3.1's classification table).
     #[test]
-    fn the_missing_model_notice_survives_the_info_cap() {
+    fn the_missing_model_notice_reaches_the_screen() {
         let measured = measurements(&[("a", Some(128_000)), ("b", None)]);
         let notices = missing_model_notices(&measured, &configured(&["a", "b"]));
         assert_eq!(
             notices
                 .first()
                 .expect("the qualifying model must produce a notice")
-                .tier,
-            crate::notices::NoticeTier::Resolution
+                .level,
+            tracing::Level::WARN
+        );
+    }
+
+    /// **Row 4 of task 3.1's classification table** — a normal startup state is diagnostic,
+    /// not action, so it goes only to the file.
+    ///
+    /// Nothing became unavailable here and nothing performs worse: the threshold stays on the
+    /// trio base because the tolerance band says it should, and the notice exists to explain
+    /// why the operator's small candidates did not move it. Its sibling for the same
+    /// candidates — `assumed_window_notices` — has always been `info` for the same reason.
+    #[test]
+    fn a_normal_startup_diagnostic_stays_off_the_screen() {
+        let (_, notices) = derive_input_warn_tokens(&[128_000], &[("tiny", 8_000)]);
+        assert_eq!(
+            notices
+                .first()
+                .expect("an out-of-band candidate must produce a notice")
+                .level,
+            tracing::Level::INFO,
+            "explaining a threshold that resolved as designed is not actionable"
         );
     }
 

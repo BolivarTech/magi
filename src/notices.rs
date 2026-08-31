@@ -2,22 +2,20 @@
 // Version: 0.18.0
 // Date: 2026-08-31
 
-//! Order and cap of startup notices (Task 1.5).
+//! Startup notices and the level each one is announced at.
 //!
 //! # Why it lives in the LIB and not under `system/`/`tui/`
 //!
 //! It is pure: no I/O, no network, no state. `main.rs` consumes it to assemble the list of
-//! notices the TUI displays at startup.
+//! notices a startup announces, then hands the list to [`emit_notices`].
 //!
-//! # Which SURFACE this applies to, and which it does NOT
+//! # One axis, not two (D-L11)
 //!
-//! The tiering in this module is for notices **rendered to a human** in a startup list — today,
-//! only the TUI. The headless path (`magi query`/`consult`) has its own output contract (the
-//! JSON envelope and the run log, REQ-H23) and does not consume [`Notice`]: there is no startup
-//! list there for a human to read, so assigning it a tier would be a representation that
-//! nothing on that path needs. This is the correct boundary of the module, not a scope cut — if
-//! headless ever gains a human-readable startup list, THAT is the moment to decide whether it
-//! consumes this type.
+//! The tier this module used to carry encoded **severity** and **visibility** at once, because
+//! a cap on how many notices survived meant something had to say "do not trim this one". With
+//! the file as a destination there is no cap, and the only question left — screen or file — is
+//! severity. So a notice carries a `tracing::Level`, and the layer decides the mouth: `ERROR`
+//! and `WARN` reach the screen, `INFO` goes only to the file (REQ-L19).
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -38,85 +36,102 @@
 
 use std::collections::HashSet;
 
-/// Priority of a startup notice.
+/// Target every startup notice is emitted under.
 ///
-/// **The enum's declaration order IS the print order**: `derive(Ord)` here is not
-/// decorative — [`render_notices`] sorts with `sort_by_key(|n| n.tier)` and relies on
-/// `Blocking < Resolution < Info` in that exact sense.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NoticeTier {
-    /// Something the user asked for is NOT available. Action required.
-    Blocking,
-    /// The config resolved differently from what the file seems to say — or a low-level
-    /// diagnostic that does not rise to blocking but is not noise either: hardening/vault
-    /// (mlock, dump suppression), a failure to open or derive the vault key, or loss of
-    /// persistence. None of these cases demand immediate action like `Blocking`, but all are
-    /// surprising enough to always survive the [`NOTICE_MAX_INFO`] cap.
-    Resolution,
-    /// Diagnostic. Useful, never urgent.
-    Info,
-}
+/// Fixed rather than per-source so an operator can raise or lower the whole startup
+/// announcement with one `[logging].file_filter` directive.
+pub const NOTICE_TARGET: &str = "magi_rs::startup";
 
-/// A startup notice, with the priority that decides its place in the final list.
+/// A startup notice, with the level that decides which mouth it reaches.
 ///
-/// **Every source pushes `Notice`, not `String`** — before this task, several sources in
-/// `main.rs` pushed plain `String`s into a shared list while the tier design lived only in the
-/// spec, so the order could not be applied to anything real.
+/// **Every source pushes `Notice`, not `String`** — a bare string carries no level, so the
+/// decision of screen-versus-file would fall to whoever collected it rather than to the site
+/// that knows what happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
-    /// Priority — governs the print order and whether the [`render_notices`] cap can reach it.
-    pub tier: NoticeTier,
+    /// Level — `ERROR` and `WARN` reach the screen, `INFO` only the file (REQ-L19).
+    pub level: tracing::Level,
     /// Text to display, already formatted by whoever built it.
     pub text: String,
 }
 
 impl Notice {
-    /// Builds a `Blocking` notice: something the user asked for is not available.
-    pub fn blocking(text: impl Into<String>) -> Self {
+    /// Builds an `ERROR` notice: something the user asked for is not available.
+    pub fn error(text: impl Into<String>) -> Self {
         Self {
-            tier: NoticeTier::Blocking,
+            level: tracing::Level::ERROR,
             text: text.into(),
         }
     }
 
-    /// Builds a `Resolution` notice: the config resolved differently from what was written.
-    pub fn resolution(text: impl Into<String>) -> Self {
+    /// Builds a `WARN` notice: a capability is gone, or something works worse without failing.
+    pub fn warn(text: impl Into<String>) -> Self {
         Self {
-            tier: NoticeTier::Resolution,
+            level: tracing::Level::WARN,
             text: text.into(),
         }
     }
 
-    /// Builds an `Info` notice: diagnostic, never urgent.
+    /// Builds an `INFO` notice: diagnostic, never urgent.
     pub fn info(text: impl Into<String>) -> Self {
         Self {
-            tier: NoticeTier::Info,
+            level: tracing::Level::INFO,
             text: text.into(),
         }
+    }
+
+    /// Transitional alias for [`Notice::warn`], removed by this task's sweep.
+    ///
+    /// It exists only so the call sites still compile while each one is being classified
+    /// individually. Mapping the whole family to `WARN` is deliberately the WRONG answer —
+    /// it is the bulk translation D-L11 forbids, and the classification tests fail against it.
+    pub fn resolution(text: impl Into<String>) -> Self {
+        Self::warn(text)
     }
 }
 
-/// How many `Info`s survive the [`render_notices`] cap.
+/// Announces every notice through `tracing`, at its own level.
 ///
-/// 5: with ten possible sources, half a screen is what someone actually reads at startup. It is
-/// not a measurement — it is the same kind of hand-picked number as the complexity-gate
-/// thresholds (REQ-A20), and it is stated so as not to pretend otherwise.
-pub const NOTICE_MAX_INFO: usize = 5;
-
-/// Sorts by tier (`Blocking` first), deduplicates by exact text, and trims only the `Info`s
-/// that exceed [`NOTICE_MAX_INFO`].
+/// # Parameters
+///
+/// * `notices` — everything a startup collected, in discovery order.
 ///
 /// # Contract
-/// - **Order**: `Blocking` → `Resolution` → `Info`. The `sort_by_key` is stable, so two notices of the same tier keep the order in which they were passed.
-/// - **Dedup**: two notices with the same `text` collapse into one — the trio can emit the same `base_url` normalization warning three times (once per seat), and the user does not need to read it three times. It is applied AFTER sorting, so the first appearance in tier order survives.
-/// - **Cap**: `Blocking` and `Resolution` are NEVER trimmed — the cap exists for the diagnostic noise, not for actionable or surprising items. When it trims, the last line of the result says how many `Info`s were omitted.
 ///
-/// Complexity: `O(n log n)` for the sort plus `O(n)` for the dedup (a `HashSet` of already-seen
-/// texts) — acceptable because `n` is the number of notices from ONE startup (a handful of
-/// sources, never thousands).
+/// - **Order**: `ERROR` → `WARN` → `INFO`. `sort_by_key` is stable, so two notices of the same
+///   level keep the order in which they were passed.
+/// - **Dedup**: two notices with the same `text` collapse into one — the trio emits the same
+///   `base_url` normalization notice once per seat, and it is one fact. Applied AFTER sorting,
+///   so a text emitted at two levels survives at the more severe one.
+/// - **No cap**: every notice is announced (REQ-L20). The cap and its
+///   `… N more diagnostic notice(s) omitted` line are gone, because the file has room for all
+///   of them and the screen no longer sees `INFO` at all.
+///
+/// # Complexity
+///
+/// `O(n log n)` for the sort plus `O(n)` for the dedup, over the notices of ONE startup.
+pub fn emit_notices(notices: Vec<Notice>) {
+    let _ = notices;
+}
+
+/// How many `INFO`s survive the [`render_notices`] cap.
+///
+/// **Transitional, removed by this task** (REQ-L20): with `INFO` off the screen there is no
+/// noise left for a cap to bound. It survives only until the two call sites of
+/// [`render_notices`] move onto [`emit_notices`].
+pub const NOTICE_MAX_INFO: usize = 5;
+
+/// Sorts by level, deduplicates by exact text, and trims the `INFO`s past the cap.
+///
+/// **Transitional, removed by this task** (REQ-L20/D-L12) — see [`emit_notices`], which is what
+/// replaces it.
+///
+/// # Complexity
+///
+/// `O(n log n)` for the sort plus `O(n)` for the dedup.
 pub fn render_notices(notices: Vec<Notice>) -> Vec<String> {
     let mut sorted = notices;
-    sorted.sort_by_key(|n| n.tier);
+    sorted.sort_by_key(|n| n.level);
 
     let mut seen_text = HashSet::with_capacity(sorted.len());
     let deduped = sorted
@@ -127,7 +142,7 @@ pub fn render_notices(notices: Vec<Notice>) -> Vec<String> {
     let mut dropped = 0usize;
     let mut out = Vec::new();
     for n in deduped {
-        if n.tier == NoticeTier::Info {
+        if n.level == tracing::Level::INFO {
             info_seen += 1;
             if info_seen > NOTICE_MAX_INFO {
                 dropped += 1;
@@ -236,10 +251,10 @@ mod tests {
 
     /// The actionable items first, regardless of the order in which they were discovered.
     #[test]
-    fn notices_are_ordered_by_tier_not_by_discovery() {
+    fn notices_are_ordered_by_level_not_by_discovery() {
         let out = render_notices(vec![
             Notice::info("measured window: 128k"),
-            Notice::blocking("the trio is not buildable: missing OPENAI_API_KEY"),
+            Notice::error("the trio is not buildable: missing OPENAI_API_KEY"),
             Notice::resolution("`[embedding].base_url` inherited the root"),
         ]);
         assert!(
@@ -256,7 +271,7 @@ mod tests {
         let mut v: Vec<Notice> = (0..NOTICE_MAX_INFO + 3)
             .map(|i| Notice::info(format!("d{i}")))
             .collect();
-        v.push(Notice::blocking("b1"));
+        v.push(Notice::error("b1"));
         v.push(Notice::resolution("r1"));
 
         let out = render_notices(v);
@@ -331,13 +346,13 @@ mod tests {
     /// does not trigger it, and that the duplicate text is still present, is the proof that the
     /// `Blocking` survived — which never counts against the cap.
     #[test]
-    fn cross_tier_duplicate_text_keeps_the_more_severe_tier() {
+    fn cross_level_duplicate_text_keeps_the_more_severe_level() {
         let dup_text = "the trio is not buildable: missing OPENAI_API_KEY";
         let mut v: Vec<Notice> = (0..NOTICE_MAX_INFO)
             .map(|i| Notice::info(format!("filler{i}")))
             .collect();
         v.push(Notice::info(dup_text));
-        v.push(Notice::blocking(dup_text));
+        v.push(Notice::error(dup_text));
 
         let out = render_notices(v);
         assert!(
