@@ -1169,6 +1169,48 @@ mod tests {
     }
 
     #[test]
+    fn with_no_screen_branch_the_file_filter_alone_decides() {
+        // The `None` arm, which nothing else exercises. It is not dead: MS1
+        // ships without a screen branch, and every caller there passes `None`.
+        // Read through the union, `None` has to mean "there is no second
+        // source of INFO", and the failure mode of getting it wrong is silent
+        // in both directions -- a `None` treated as INFO would suppress the
+        // warning for the exact configuration that needs it.
+        let warn_only = Filter::parse("warn").expect("a valid directive");
+        assert!(
+            recovery_detection_is_off(&warn_only, None),
+            "with no screen branch there is nothing to rescue a file filter \
+             that excludes info"
+        );
+        let admits_info = Filter::parse("info").expect("a valid directive");
+        assert!(
+            !recovery_detection_is_off(&admits_info, None),
+            "and a file filter that admits info needs no rescuing: without \
+             this half the function could answer `true` always"
+        );
+    }
+
+    #[test]
+    fn a_screen_level_that_admits_info_rescues_a_file_filter_that_does_not() {
+        // The UNION is the contract, not the file filter: a screen branch that
+        // admits INFO keeps recovery detection working however narrow the file
+        // filter is. Production cannot reach this today -- `SCREEN_LEVEL` is
+        // `WARN` -- which is exactly why it needs a test: the parameter is what
+        // makes the union a union, and nothing else would notice it being
+        // dropped for `file_filter.max_level()`.
+        let warn_only = Filter::parse("warn").expect("a valid directive");
+        assert!(
+            recovery_detection_is_off(&warn_only, Some(Level::WARN)),
+            "neither branch admits info, so recovery detection is off"
+        );
+        assert!(
+            !recovery_detection_is_off(&warn_only, Some(Level::INFO)),
+            "the same file filter, rescued by the screen branch: the answer is \
+             the union of the two and not the file filter alone"
+        );
+    }
+
+    #[test]
     fn a_clock_jump_produces_no_false_transitions() {
         let mut h = HealthTracker::new();
         let c = CauseKey::new("embedder", "unreachable");
