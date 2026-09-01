@@ -619,6 +619,60 @@ mod tests {
         );
     }
 
+    /// The ordering every predicate in this module and in `logging` is built on, pinned.
+    ///
+    /// **`tracing::Level`'s `Ord` is INVERTED relative to its discriminants**, and reading
+    /// only one of the two halves is how a reviewer arrives at the opposite conclusion.
+    /// `LevelInner` really is declared `Trace = 0 … Error = 4`, so the numbers ascend from
+    /// trace to error; `impl Ord for Level` then compares `(other as usize).cmp(&(self as
+    /// usize))`, swapping the operands, so the ORDER ascends the other way:
+    /// `ERROR < WARN < INFO < DEBUG < TRACE`. "Greater" means MORE VERBOSE.
+    ///
+    /// Everything downstream follows from that one fact and reads backwards without it:
+    /// `sort_by_key(level)` puts `ERROR` first, `level <= SCREEN_LEVEL` selects `ERROR` and
+    /// `WARN` for the screen, and `embedding.rs`'s `level > Level::WARN` calls an `INFO` a
+    /// success. Inverting any one of them would send `ERROR` to the file and `INFO` to the
+    /// screen, which is the inversion this milestone exists to prevent — so the fact is
+    /// asserted here rather than left to a comment a future reader has to trust.
+    #[test]
+    fn tracing_level_orders_most_severe_first() {
+        let mut all = vec![
+            tracing::Level::TRACE,
+            tracing::Level::DEBUG,
+            tracing::Level::INFO,
+            tracing::Level::WARN,
+            tracing::Level::ERROR,
+        ];
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                tracing::Level::ERROR,
+                tracing::Level::WARN,
+                tracing::Level::INFO,
+                tracing::Level::DEBUG,
+                tracing::Level::TRACE,
+            ],
+            "ascending order is most-severe-first; `sort_by_key` in this module depends on it"
+        );
+        assert!(
+            tracing::Level::ERROR < tracing::Level::WARN,
+            "an ERROR sorts before a WARN"
+        );
+        assert!(
+            tracing::Level::INFO > tracing::Level::WARN,
+            "`>` means more verbose, which is why `ok_from_level` reads `level > WARN`"
+        );
+        assert!(
+            tracing::Level::ERROR <= SCREEN_LEVEL && tracing::Level::WARN <= SCREEN_LEVEL,
+            "`<= SCREEN_LEVEL` must select the two levels a human sees"
+        );
+        assert!(
+            !(tracing::Level::INFO <= SCREEN_LEVEL),
+            "and must exclude the diagnostic half"
+        );
+    }
+
     /// The actionable items first, regardless of the order in which they were discovered.
     #[test]
     fn notices_are_ordered_by_level_not_by_discovery() {
