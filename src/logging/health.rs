@@ -1472,10 +1472,17 @@ mod tests {
     fn a_tick_before_a_pendings_window_started_emits_nothing_and_keeps_it() {
         // `tick` measures with `saturating_duration_since`, and the direction
         // that call is FOR is `now < since`: an instant taken before the
-        // pending started serving. Plain subtraction panics there rather than
-        // answering zero, so this is the only test in the module that tells the
-        // two spellings apart -- every other tick here is at or past its
-        // deadline, where both answer identically.
+        // pending started serving, which must measure as zero elapsed rather
+        // than as a due deadline.
+        //
+        // **The SPELLING is not what this pins, and believing otherwise is how
+        // the direction went unguarded.** `Instant`'s plain `-` saturates too
+        // (`duration_since` has, since Rust 1.60), so swapping the two changes
+        // nothing and no test could go red on it. What the module was missing
+        // is a tick placed BEFORE a pending's `since` at all: every other one
+        // here is at or past its deadline, so a `tick` that treated a
+        // not-yet-opened window as due passed the whole module. That is the
+        // mutation this test answers, and it is the only one that does.
         //
         // A monotonic `Instant` does not walk backwards on its own, but the
         // instant is PASSED IN: a caller that reads the clock once and then
