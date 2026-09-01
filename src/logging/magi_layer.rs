@@ -1602,6 +1602,93 @@ mod tests {
         );
     }
 
+    /// Prose of `bytes` length, never one unbroken run of a character.
+    ///
+    /// A long run of the same byte is what `match_generic_secret_run` treats as
+    /// a secret, so padding built that way arrives redacted and every length
+    /// assertion downstream measures the redaction instead of the payload.
+    fn filler(bytes: usize) -> String {
+        let unit = "filler word ";
+        let mut padding = unit.repeat(bytes / unit.len() + 1);
+        padding.truncate(bytes);
+        padding
+    }
+
+    #[test]
+    fn an_oversized_event_is_cut_by_the_screen_branch_and_not_by_the_file() {
+        // The truncation RULE is pinned next door, in
+        // `an_audited_line_truncated_for_display_is_still_an_audited`, which
+        // calls `truncate_for_display` itself. What nothing pinned is the
+        // WIRING: that `on_event`'s screen branch applies it. Delete the call
+        // there and the rule stays green while a 100 MiB `ERROR` reaches the
+        // TUI's message list -- which caps nothing -- and from there the
+        // clipboard with one keystroke.
+        //
+        // Both directions are asserted, because either alone passes a wrong
+        // fix: capping the whole pipeline would satisfy the screen assertion
+        // while silently amputating the file, which is the one mouth that must
+        // hold the event entire.
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let screen = Arc::new(RecordingSink::default());
+        let layer = MagiLayer::new(
+            FileSink::new(Arc::clone(&appender)),
+            crate::logging::filter::Filter::parse("info").expect("valid"),
+            Arc::new(Auditor::new()),
+            Arc::new(crate::logging::DiscardDelivery),
+        )
+        .with_tui(
+            TuiSink::new(Arc::clone(&screen) as Arc<dyn crate::logging::NoticeDelivery>),
+            tracing::Level::WARN,
+        );
+
+        // Comfortably past the cap, and a tail that only survives uncut.
+        const TAIL: &str = "the-tail-only-an-uncut-line-carries";
+        let payload = format!("{}{TAIL}", filler(TUI_PAYLOAD_MAX_BYTES * 2));
+
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "magi_rs::logging", "oversized {payload}");
+        });
+
+        let shown = screen.lines.lock().unwrap().join("\n");
+        assert!(
+            shown.contains("oversized"),
+            "the fixture reached the screen branch not at all: {}",
+            shown.len()
+        );
+        assert!(
+            shown.len() <= TUI_PAYLOAD_MAX_BYTES + 128,
+            "the screen branch applied no cap: it was handed {} bytes",
+            shown.len()
+        );
+        assert!(
+            !shown.contains(TAIL),
+            "the tail of an oversized event reached the screen, so nothing cut it"
+        );
+
+        // And the FILE keeps the whole event: the cap is a screen policy, not a
+        // pipeline one. **Measured in bytes, not by grepping for the tail**,
+        // because the file mouth chunks at `chunk::MAX_LINE_BYTES` and a
+        // continuation header lands wherever the arithmetic puts it -- which
+        // may be inside any given marker. Length survives that; a needle does
+        // not, and a needle that happens to straddle a boundary would report a
+        // truncation that never happened.
+        let written = wait_for_log(dir.path(), "oversized");
+        assert!(
+            written.contains("oversized"),
+            "the fixture reached the file mouth not at all"
+        );
+        assert!(
+            written.len() > payload.len(),
+            "the file holds {} bytes of a {}-byte event: the cut happened \
+             before the fan-out, so the one mouth that must carry the event \
+             entire was amputated by a screen policy",
+            written.len(),
+            payload.len()
+        );
+    }
+
     #[test]
     fn an_audited_line_truncated_for_display_is_still_an_audited() {
         // The screen cap is a TRANSFORMATION, never a second constructor: it
@@ -1623,11 +1710,7 @@ mod tests {
         // and redacting the padding would take the straddling half with it,
         // masking the very leak this test exists to observe. That masked it too.
         let straddle = 10;
-        let unit = "filler word ";
-        let pad = TUI_PAYLOAD_MAX_BYTES - straddle;
-        let mut padding = unit.repeat(pad / unit.len() + 1);
-        padding.truncate(pad);
-        let long = format!("{padding}{SECRET}");
+        let long = format!("{}{SECRET}", filler(TUI_PAYLOAD_MAX_BYTES - straddle));
         let visible_half = SECRET.get(..straddle).expect("ascii");
 
         let (audited, _) = auditor.audit(&long, "magi_rs::tests", None, long.len());
