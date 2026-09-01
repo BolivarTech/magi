@@ -118,16 +118,8 @@ impl NoticeTranscript {
     ///
     /// `O(k*n)` — the auditor's, over one line.
     fn line(&self, text: String) {
-        let auditor = magi_rs::logging::process_auditor();
-        let (audited, alarm) = auditor.audit(&text, TRANSCRIPT_TARGET, None, NO_RESERVATION);
-        self.deliver(audited.as_str().to_string());
-        let mut pending = alarm;
-        while let Some(raised) = pending {
-            let rendered = magi_rs::logging::auditor::render_alarm(&raised);
-            let (audited_alarm, next) =
-                auditor.audit(&rendered, TRANSCRIPT_TARGET, None, NO_RESERVATION);
-            self.deliver(audited_alarm.as_str().to_string());
-            pending = next;
+        for line in audit_for_transcript(&text) {
+            self.deliver(line);
         }
     }
 
@@ -154,6 +146,53 @@ impl NoticeTranscript {
 /// sharing a target with `emit_notices_into` would silence the alarm that says
 /// the value also reached a surface the user can copy out of.
 const TRANSCRIPT_TARGET: &str = "magi_rs::tui::transcript";
+
+/// Audits one line bound for the transcript, and renders any alarm it raised.
+///
+/// **Every line the transcript holds passes through here, whichever door it came
+/// in by** (MS2 gate S4 second pass, Caspar). [`NoticeTranscript`] was the first
+/// door and carried this logic inline; `run_app`'s drain loop is the second and
+/// carried none, so the two were never one rule. They are now, because the
+/// transcript is a single object with a single property: in Selection mode `y`
+/// copies a message to the system CLIPBOARD and Visual mode copies any slice of
+/// one, so an unmasked value in it is exfiltration, not a corrupted frame.
+///
+/// **The alarm travels with the masking — both, never one.** Its target is the
+/// transcript's own, so an alarm the producer already raised at ITS target is
+/// not swallowed by the auditor's latch: a value that reached the clipboard is
+/// a second place worth naming. The loop terminates by that same bookkeeping —
+/// `alarm` latches `(secret, target)` and the target is fixed here, so each pass
+/// must find a secret not yet latched at it, and the registered set is finite.
+///
+/// A second pass over text a producer already masked finds nothing, which is the
+/// point: it costs one scan and it does not depend on a caller in another crate
+/// keeping a promise.
+///
+/// # Parameters
+///
+/// * `text` — the line as its producer composed it.
+///
+/// # Returns
+///
+/// The masked line first, then one line per alarm raised, in order.
+///
+/// # Complexity
+///
+/// `O(k*n)` — the auditor's, over one line.
+fn audit_for_transcript(text: &str) -> Vec<String> {
+    let auditor = magi_rs::logging::process_auditor();
+    let (audited, alarm) = auditor.audit(text, TRANSCRIPT_TARGET, None, NO_RESERVATION);
+    let mut out = vec![audited.as_str().to_string()];
+    let mut pending = alarm;
+    while let Some(raised) = pending {
+        let rendered = magi_rs::logging::auditor::render_alarm(&raised);
+        let (audited_alarm, next) =
+            auditor.audit(&rendered, TRANSCRIPT_TARGET, None, NO_RESERVATION);
+        out.push(audited_alarm.as_str().to_string());
+        pending = next;
+    }
+    out
+}
 
 /// What a transcript line reserves on the log queue: nothing. It never goes
 /// near one — the transcript is a screen.
@@ -2290,20 +2329,34 @@ fn apply_response(app: &mut App, response: AgentResponse) {
                 app.push_message(format!("Magi Agent: {}", t));
             }
         }
+        // The three routes below carry text this crate did not author — an
+        // `anyhow` chain whose innermost context is the provider's resolved
+        // `base_url`, a foreign HTTP error body, a `JoinError`'s payload — into
+        // a transcript the user can copy to the system clipboard. So each is
+        // audited at this boundary, exactly as `NoticeTranscript::line` audits
+        // the door it owns; see `audit_for_transcript` for why the rule is one
+        // rule. `Text` is not among them: it is the assistant's own generated
+        // output, which `Agent::sanitize_text` has already handled upstream.
         AgentResponse::Error(e) => {
             app.finalize_stream();
-            app.push_message(format!("Error: {}", e));
+            for line in audit_for_transcript(&format!("Error: {}", e)) {
+                app.push_message(line);
+            }
         }
         AgentResponse::Info(i) => {
             app.finalize_stream();
-            app.push_message(format!("System: {}", i));
+            for line in audit_for_transcript(&format!("System: {}", i)) {
+                app.push_message(line);
+            }
         }
         AgentResponse::Notice(n) => {
             // Operational notices (memory warnings, truncation advisories) do
             // not end a streamed turn — the assistant is still responding.
             // Rendered with the ⚠ prefix and dimmed/yellow styling in
             // Normal mode so they are visually distinct from model output.
-            app.push_notice(n);
+            for line in audit_for_transcript(&n) {
+                app.push_notice(line);
+            }
         }
     }
 }
