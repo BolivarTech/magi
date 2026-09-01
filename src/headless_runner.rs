@@ -3108,6 +3108,110 @@ mod tests {
         );
     }
 
+    /// REQ-L50, the half the plumbing test above leaves open: the ALARM this
+    /// warning raises is an output too.
+    ///
+    /// The warning was audited and the second element of the pair — the alarm —
+    /// was dropped, so a masking performed on this line happened and nobody was
+    /// told. `src/notices.rs` had the same shape and `src/logging/mod.rs` had it
+    /// with a fresh auditor; "the invariant says it cannot happen" is not
+    /// evidence, the delivered line is.
+    ///
+    /// **Why a redaction is reachable in a message composed only from numbers.**
+    /// It is not the numbers: a registered secret's VALUE can be any string an
+    /// operator put in the environment, and the exact pass matches it wherever
+    /// it appears. Registering a phrase that occurs verbatim in the warning is
+    /// the same fixture `logging::mod`'s already-initialised test uses, and it
+    /// stands in for the operator whose password happens to be a word.
+    ///
+    /// **How the mutation is made to bite.** A second secret whose VALUE is the
+    /// first one's NAME puts a registered value inside the rendered alarm by
+    /// construction, so the alarm's own routing — not merely its delivery — is
+    /// observable. Nothing here depends on `render_alarm`'s wording beyond the
+    /// marker that says an alarm arrived at all.
+    ///
+    /// A LOCAL auditor, not `test_auditor()`: this one registers secrets, and
+    /// that helper's rustdoc reserves the shared instance for tests that do not.
+    #[tokio::test]
+    async fn the_sc_a04d_warning_routes_the_alarm_it_raises() {
+        /// A phrase that appears VERBATIM in `resolve_run_timeout`'s warning.
+        const PHRASE_INSIDE_THE_WARNING: &str = "needs its schema retry";
+        /// Named so the guard below can look for it in the clear.
+        const PROBE: &str = "MS2_HEADLESS_ALARM_PROBE";
+
+        let cfg = MagiConfig::default();
+        let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
+        let decision = magi_rs::magi::resolve_run_timeout(
+            Some(1),
+            ceiling,
+            0,
+            false,
+            magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+        );
+        assert!(
+            decision
+                .warning
+                .as_deref()
+                .is_some_and(|w| w.contains(PHRASE_INSIDE_THE_WARNING)),
+            "test setup: the warning must exist and still carry the registered phrase"
+        );
+
+        let auditor = Auditor::new();
+        assert!(
+            auditor.register_secret(
+                magi_rs::logging::auditor::SecretName::new(PROBE),
+                &[PHRASE_INSIDE_THE_WARNING],
+            ),
+            "test setup: a phrase below the byte floor never enters the exact pass"
+        );
+        assert!(
+            auditor.register_secret(
+                magi_rs::logging::auditor::SecretName::new("MS2_HEADLESS_ALARM_TEXT_GUARD"),
+                &[PROBE],
+            ),
+            "test setup: the name must itself be registrable, or the alarm text carries nothing"
+        );
+
+        let sink = RecordingNoticeSink::default();
+        let _outcome = run_consult(
+            resolved_stub(),
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                kind: ProviderKind::OpenAiCompat,
+                classifier: &NeverClassifier,
+                configured_mode: None,
+                untrusted_content: false,
+                magi_config: &cfg,
+                timeout_decision: decision,
+                notice_sink: &sink,
+                auditor: &auditor,
+                structured_verdicts: StructuredVerdicts::Omit,
+                budget: BudgetTelemetry::default(),
+            },
+        )
+        .await;
+
+        let said = sink.emitted();
+        assert!(
+            said.contains(magi_rs::logging::auditor::REDACTED),
+            "test setup: the warning must actually have been masked, or no alarm was ever \
+             raised and the assertions below hold for the wrong reason: {said}"
+        );
+        assert!(
+            said.contains("SECURITY:"),
+            "the masking happened and nobody was told: the alarm was dropped rather than \
+             routed: {said}"
+        );
+        assert!(
+            !said.contains(PROBE),
+            "the alarm line carried a registered value in the clear, so that write is outside \
+             the audit route: {said}"
+        );
+    }
+
     /// The negative case, in both directions the spec names: a `--timeout` AT OR
     /// ABOVE the formula, and an ABSENT `--timeout`, must emit NOTHING. Without
     /// this, a sink that always fires (an unconditional `eprintln!` regardless of
