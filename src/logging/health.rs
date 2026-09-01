@@ -82,10 +82,13 @@ struct SubsystemState {
 /// failure show immediately (SC-L71) while a later cause change inside the
 /// same subsystem still serves the window (SC-L76).
 ///
-/// Not thread-safe by itself, deliberately: `observe`, `tick` and `flush`
-/// all take `&mut self`; whoever shares one instance across threads supplies
-/// its own `Mutex`, the same trade-off `SqliteVectorStore` already makes in
-/// this repository.
+/// Not thread-safe by itself, deliberately: `observe`, `tick` and `flush` all
+/// take `&mut self`, so whoever shares one instance across threads supplies its
+/// own `Mutex`. The one consumer that does is `MagiLayer`, whose `tracker:
+/// Mutex<HealthTracker>` field lives in `src/logging/magi_layer.rs` — checkable
+/// there, and named because the comparison this line used to draw was to
+/// `SqliteVectorStore`, which holds its lock INTERNALLY and so makes the
+/// opposite trade to this one.
 ///
 /// # Examples
 ///
@@ -167,8 +170,16 @@ impl HealthTracker {
     /// would replace it.
     ///
     /// The scan runs on every call that CARRIES A CAUSE KEY, not on every
-    /// call: `cause?` returns first for the events that have none, which on
-    /// this path is most of them, and those are `O(1)`.
+    /// call: `cause?` returns first for the events that have none, and those
+    /// are `O(1)`.
+    ///
+    /// **That the keyless events are the majority is an attestation, not
+    /// something this file can show.** The caller is
+    /// `MagiLayer::on_event` in `src/logging/magi_layer.rs`, which passes what
+    /// `cause_from_event` read off the event, and only a site that wrote
+    /// `cause.*` fields produces a key — today that is the embedder alone
+    /// (`CauseKey::ALL` in `src/logging/auditor.rs` has two entries). The
+    /// traffic mix behind "most of them" is unmeasured either way.
     pub fn observe(
         &mut self,
         cause: Option<CauseKey>,
@@ -259,8 +270,11 @@ impl HealthTracker {
     }
 
     /// Expires the window without a new event. The caller invokes this
-    /// periodically -- the TUI event loop's own `poll` timeout, or once per
-    /// agent turn in headless mode -- without it, a pending transition whose
+    /// periodically -- reached through `LoggingHandle::health_tick`
+    /// (`src/logging/mod.rs`), whose own "Who calls it" section names the two
+    /// cadences and is where they can be checked: the TUI event loop's `poll`
+    /// timeout (`src/tui/mod.rs`) and once per agent turn in headless mode
+    /// (`src/headless_runner.rs`) -- without it, a pending transition whose
     /// subsystem stops producing events -- exactly what happens when
     /// something goes fully dark -- would never be emitted. What runs at
     /// shutdown is [`Self::flush`], not this: `tick` still respects the
@@ -296,7 +310,11 @@ impl HealthTracker {
 
     /// Emits every pending transition, ignoring whether its window has
     /// elapsed. Used at shutdown (SC-L90): a short headless run would
-    /// otherwise end without ever showing its only pending signal.
+    /// otherwise end without ever showing its only pending signal. The
+    /// shutdown call reaches here through `LoggingHandle::health_flush`
+    /// (`src/logging/mod.rs`), invoked from `main.rs` — which is also where
+    /// the limits of "at shutdown" are written down, since no signal handler
+    /// stands behind it.
     ///
     /// Returns a `Vec`, not an `Option`, because state is per subsystem: a
     /// cascading failure can leave one pending transition per subsystem,
@@ -322,7 +340,16 @@ impl HealthTracker {
     }
 }
 
-/// Target every line this module puts on screen is attributed to.
+/// Target the lines born here are attributed to once somebody emits them.
+///
+/// **Not "every line this module puts on screen", which it used to say and
+/// which contradicts the purity claim at the top of the file: this module puts
+/// nothing anywhere.** The emitting is done by `MagiLayer`'s transition
+/// reporter (`src/logging/magi_layer.rs`, the one `audit` call that passes this
+/// constant) and by `logging::warn_if_recovery_detection_is_off`
+/// (`src/logging/mod.rs`); this constant is what each attributes with. Both are
+/// findable by searching the name — a line number here would drift with their
+/// files and not with this one.
 ///
 /// Fixed rather than inherited from the event that caused it: the alarm path
 /// carries a target so an operator knows where to go look, and a transition's
@@ -463,9 +490,9 @@ pub fn render_transition(t: &Transition, log_path: &Path) -> String {
 ///
 /// The union is taken over the file branch's **filter** and the screen
 /// branch's **level** — two different things, and only the first is
-/// operator-settable. The screen branch is `SCREEN_LEVEL`, a constant that
-/// never admits `INFO`, so in production this is a question about
-/// `file_filter` alone. `screen_level` stays a parameter because MS1's screen
+/// operator-settable. The screen branch is [`crate::logging::SCREEN_LEVEL`], a
+/// constant that never admits `INFO` — it is `WARN`, in `src/logging/mod.rs` —
+/// so in production this is a question about `file_filter` alone. `screen_level` stays a parameter because MS1's screen
 /// branch can be absent, which is what `None` means; it is not a second
 /// configurable filter.
 ///
@@ -1763,6 +1790,13 @@ mod tests {
         // rather than copied, or it would drift and keep passing while the real
         // line was being cut.
         //
+        // **That the layer applies it TO THIS STRING is an attestation.** It is
+        // checkable but not from here: `MagiLayer` renders a transition and
+        // passes the result through `truncate_for_display(TUI_PAYLOAD_MAX_BYTES)`
+        // in `src/logging/magi_layer.rs`. Nothing in this module observes that
+        // call, so if the screen path stopped truncating, or truncated at a
+        // different cap, this loop would go on passing.
+        //
         // **This is a 64 KiB PAYLOAD cap, not a terminal width, and calling it
         // one would be the more comfortable lie.** The plan's SC-L19 also asks
         // for "<= 100 characters" so the message fits a narrow terminal. No
@@ -1866,8 +1900,9 @@ mod tests {
 
     /// Every line a closure emitted, through the real dispatcher.
     ///
-    /// `testutil::capture` returns only the last line, which cannot tell "one
-    /// notice" from "two" -- and "exactly one" is half of what the test below
+    /// `crate::logging::testutil::capture` (`src/logging/testutil.rs`) returns
+    /// only the last line — it ends in `guard.last()` — which cannot tell "one
+    /// notice" from "two", and "exactly one" is half of what the test below
     /// asserts.
     fn capture_all(emit: impl FnOnce()) -> Vec<String> {
         use std::sync::{Arc, Mutex};
@@ -1949,8 +1984,9 @@ mod tests {
     fn a_screen_level_that_admits_info_rescues_a_file_filter_that_does_not() {
         // The UNION is the contract, not the file filter: a screen branch that
         // admits INFO keeps recovery detection working however narrow the file
-        // filter is. Production cannot reach this today -- `SCREEN_LEVEL` is
-        // `WARN` -- which is exactly why it needs a test: the parameter is what
+        // filter is. Production cannot reach this today --
+        // `crate::logging::SCREEN_LEVEL` is `WARN`, in `src/logging/mod.rs` --
+        // which is exactly why it needs a test: the parameter is what
         // makes the union a union, and nothing else would notice it being
         // dropped for `file_filter.max_level()`.
         let warn_only = Filter::parse("warn").expect("a valid directive");
@@ -1967,8 +2003,11 @@ mod tests {
 
     #[test]
     fn the_collected_notice_carries_the_same_warning_as_the_emitted_one() {
-        // `recovery_detection_notice` is the terminal surface's copy of the
-        // warning above, and `main.rs` extends the TUI's startup list with it.
+        // `crate::logging::recovery_detection_notice` is the terminal
+        // surface's copy of the warning above, and `main.rs` extends the TUI's
+        // startup list with it -- the one `startup_notices.extend(...)` call
+        // that names it, which is where that half can be checked rather than
+        // taken on this comment's word.
         // Its two properties are that it fires on the same condition and that
         // it says the same thing: a notice that fired always would be one
         // nobody reads, and one whose text drifted would send an operator
