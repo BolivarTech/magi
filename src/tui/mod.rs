@@ -2128,11 +2128,20 @@ pub async fn run_tui_ext(
     );
     let _ = terminal.show_cursor();
 
+    // `join_event_loop_then_drain` awaits `event_loop` first (MS2 gate S7 finding): draining
+    // straight from `gate_telemetry` here would race the still-running event-loop task.
+    let telemetry = join_event_loop_then_drain(event_loop, &gate_telemetry).await;
+
     // MS2 gate S7-f finding (Caspar): any classifier notice that had to defer instead of
     // printing (because the channel closed or was full while the alternate screen might still
     // have been up) is safe to print only now, strictly AFTER `LeaveAlternateScreen` above —
     // `flush` is what makes that "strictly after" hold even under concurrent scheduling, not
     // just program order; see `PendingNotices`.
+    //
+    // And AFTER the join above, not before it (MS2 gate S4 finding 2): `flush` is a one-way
+    // switch, so throwing it while the event loop and `on_session_close` can still defer
+    // splits the session's notices between what this call returns and what a later fallback
+    // prints for itself, scattered through the telemetry block below.
     for msg in classifier_notices.flush() {
         eprintln!("{msg}");
     }
@@ -2141,10 +2150,7 @@ pub async fn run_tui_ext(
     // line may reach the terminal (that is the whole reason `StreamPiece::Notice` exists). So
     // the session's gate evaluations are reported HERE — after raw mode and the alternate
     // screen are gone and stderr is safe again. Silent when nothing was evaluated.
-    //
-    // `join_event_loop_then_drain` awaits `event_loop` first (MS2 gate S7 finding): draining
-    // straight from `gate_telemetry` here would race the still-running event-loop task.
-    report_gate_telemetry(&join_event_loop_then_drain(event_loop, &gate_telemetry).await);
+    report_gate_telemetry(&telemetry);
 
     if let Err(err) = res {
         eprintln!("TUI Error: {:?}", err)
