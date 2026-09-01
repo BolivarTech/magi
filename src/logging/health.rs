@@ -1819,6 +1819,40 @@ mod tests {
     }
 
     #[test]
+    fn causes_sharing_a_subsystem_declare_the_same_recovery_text() {
+        // Enforces the assumption the keep-`since` arm in `observe` documents
+        // rather than checks: a pending recovery emits the cause of whichever
+        // observation opened its window, not the one that displaced it, and
+        // that choice is invisible to a user only because every cause of one
+        // subsystem renders the identical recovery line. Verified today by
+        // inspection -- `embedder`'s `unreachable` and `http_error` rows both
+        // read "memory: retrieval restored" -- but inspection rots the moment
+        // a new cause is added without re-reading this paragraph. This test
+        // makes it a checked property of `declared_messages` instead: the day
+        // two causes of one subsystem owe different recovery text, this fails
+        // and forces the pin decision the comment above `observe`'s keep-arm
+        // describes, rather than leaving it to a reviewer's memory.
+        use std::collections::HashMap;
+        let mut recovery_by_subsystem: HashMap<&str, &str> = HashMap::new();
+        for (key, _degraded, restored) in declared_messages() {
+            match recovery_by_subsystem.get(key.subsystem()) {
+                Some(seen) => assert_eq!(
+                    *seen,
+                    restored,
+                    "{key:?} declares recovery text that differs from another \
+                     cause of subsystem `{}`: `observe`'s keep-`since` arm \
+                     assumes every cause of a subsystem shares one recovery \
+                     line, and that is no longer true",
+                    key.subsystem()
+                ),
+                None => {
+                    recovery_by_subsystem.insert(key.subsystem(), restored);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn each_declared_cause_names_what_broke_what_it_means_and_where_to_read_more() {
         // REQ-L23's three parts. The first two come from the table; the third
         // is always the day's log file, which is why this function takes a path
