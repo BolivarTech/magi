@@ -251,19 +251,33 @@ impl ProviderClassifier {
     /// A second constructor is exactly what that requirement forbids, so this is
     /// the cheaper contradiction to accept.
     ///
-    /// It is safe and it is not what the plan was guarding against. The text is
-    /// built by [`render_alarm`] from a [`SecretName`] and a target, both program
-    /// constants, so there is nothing in it for the passes to find. What the
+    /// It is safe and it is not what the plan was guarding against. What the
     /// plan forbids is the alarm re-entering as an ORDINARY line — being
     /// filtered away, or citing the offending text — and neither happens: it
     /// goes out through `emit`, which consults no filter, and it never carries
     /// the line.
+    ///
+    /// # Why the alarm's OWN alarm is forwarded rather than dropped
+    ///
+    /// This used to say the text was built from program constants and so
+    /// carried nothing for the passes to find. A [`SecretName`] is a program
+    /// constant, but it is an OPERATOR-chosen one, and nothing stops one
+    /// secret's name from being another secret's value — which is a registered
+    /// value inside the rendered alarm, masked on its way out and, before this,
+    /// masked with nobody told. The chain terminates by the auditor's own
+    /// bookkeeping rather than a cap: `Auditor::alarm` latches
+    /// `(secret, target)` and the target is [`NOTICE_TARGET`] on every pass, so
+    /// each turn must find a secret not yet latched there and the registered set
+    /// is finite.
     fn raise(&self, alarm: Option<AuditExempt>) {
-        if let Some(a) = alarm {
-            let (line, _) =
-                self.auditor
-                    .audit(&render_alarm(&a), NOTICE_TARGET, None, NO_RESERVATION);
+        let mut pending = alarm;
+        while let Some(a) = pending {
+            let rendered = render_alarm(&a);
+            let (line, next) = self
+                .auditor
+                .audit(&rendered, NOTICE_TARGET, None, NO_RESERVATION);
             self.notices.emit(&line);
+            pending = next;
         }
     }
 }
