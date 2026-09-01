@@ -1294,9 +1294,17 @@ mod tests {
     fn tick_returns_none_when_every_subsystem_is_quiet() {
         // The empty direction of `tick`'s pending arm, in both of its shapes:
         // no subsystem at all, and subsystems that exist with nothing waiting.
-        // Every other tick assertion in this module runs against a tracker
-        // that has something pending, so a `tick` that manufactured a
-        // transition out of a settled `shown` would pass all of them.
+        //
+        // The second shape is NOT unique here and this comment used to claim it
+        // was: `a_flapping_service_shows_one_degradation_and_nothing_more`,
+        // `alternating_between_two_failing_causes_is_not_a_recovery` and
+        // `a_clock_jump_produces_no_false_transitions` all tick a tracker whose
+        // pending has been discarded or already emitted. What only this test
+        // does is tick an EMPTY `states` -- where the walk has no entry to visit
+        // at all, so a `tick` that answered out of the loop rather than out of a
+        // pending would be caught nowhere else -- and tick an entry whose
+        // `shown` is HEALTHY and settled, which every other quiet tick above
+        // reaches with a degraded `shown` instead.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
