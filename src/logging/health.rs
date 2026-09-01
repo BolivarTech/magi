@@ -853,6 +853,65 @@ mod tests {
     }
 
     #[test]
+    fn a_flushed_cause_change_leaves_the_subsystem_degraded_under_the_new_cause() {
+        // SC-L90's DEGRADED half, and the half `a_flushed_recovery_leaves_the_
+        // subsystem_healthy` cannot reach: `flush` writes `shown` for every
+        // pending target, not only for the `None` ones. A cause change inside
+        // an already-degraded subsystem is exactly such a pending -- the
+        // subsystem's FIRST degradation was immediate, this one is not -- so a
+        // run that closes here has a `Degraded` to flush, not a `Restored`.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let a = CauseKey::new("embedder", "http_error");
+        let b = CauseKey::new("embedder", "unreachable");
+
+        assert!(matches!(
+            h.observe(Some(a), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(
+            h.observe(Some(b), false, t0 + Duration::from_secs(1))
+                .is_none(),
+            "a cause change inside a degraded subsystem serves the window"
+        );
+
+        let flushed = h.flush();
+        assert!(
+            matches!(flushed.as_slice(), [Transition::Degraded(k)] if k.cause() == b.cause()),
+            "closing must emit the pending cause change, and what comes out is \
+             the NEW cause: {flushed:?}"
+        );
+
+        // What the flush did to `shown` is only visible afterwards. It is now
+        // `Some(b)`, so repeating the flushed cause is the state already on
+        // screen and says nothing...
+        let after = t0 + Duration::from_secs(2);
+        assert!(
+            h.observe(Some(b), false, after).is_none(),
+            "the flushed cause is what is on screen: repeating it is not news"
+        );
+        // ...and the OLD cause is now a change away from it, so it serves the
+        // window. Were `shown` left at `a`, this observation would instead be
+        // the state already shown, the pending would be DISCARDED, and the
+        // tick below would have nothing to give.
+        assert!(
+            h.observe(Some(a), false, after).is_none(),
+            "back to the old cause: a change, so it goes through the window"
+        );
+        assert!(
+            h.tick(after + Duration::from_secs(1)).is_none(),
+            "and it is windowed, not immediate"
+        );
+        let got = h.tick(after + w);
+        assert!(
+            matches!(got, Some(Transition::Degraded(k)) if k.cause() == a.cause()),
+            "it emits once its window elapses, which it can only do if the \
+             flush moved `shown` to the cause it flushed: {got:?}"
+        );
+    }
+
+    #[test]
     fn an_event_without_a_cause_key_is_ignored_rather_than_keyed_off_its_text() {
         let mut h = HealthTracker::new();
         assert!(h.observe(None, false, Instant::now()).is_none());
@@ -860,10 +919,12 @@ mod tests {
 
     #[test]
     fn a_short_headless_run_flushes_a_pending_recovery() {
-        // SC-L90 is about what is left PENDING at close, and the only
-        // transition that can be pending in a short run is a RECOVERY: a
-        // subsystem's first degradation is always immediate (SC-L71), so it
-        // is never left waiting.
+        // SC-L90 is about what is left PENDING at close, and a RECOVERY is
+        // one of the two things that can be. The other is a cause change
+        // inside an already-degraded subsystem, which
+        // `a_flushed_cause_change_leaves_the_subsystem_degraded_under_the_new_cause`
+        // covers. What is never left waiting is a subsystem's FIRST
+        // degradation, because that one is immediate (SC-L71).
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let c = CauseKey::new("embedder", "http_500");
