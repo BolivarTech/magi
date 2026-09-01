@@ -179,12 +179,29 @@ pub fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write
         // The appender is what carries the pair on the layer path; with no layer there is no
         // appender, so the alarm goes to the same last-resort mouth. It quotes neither the
         // secret nor the line (REQ-L50).
-        if let Some(alarm) = alarm {
-            let _ = writeln!(
-                fallback,
-                "{}",
-                crate::logging::auditor::render_alarm(&alarm)
+        //
+        // **The alarm is ROUTED, not merely rendered** (REQ-L48). `render_alarm` promises not
+        // to quote the secret, but that promise is a convention and REQ-L48's whole point is
+        // that a convention is not what stands between a runtime-composed string and a mouth.
+        // The text it does interpolate — a secret's NAME and a target — is composed here, and
+        // a name is operator-chosen: nothing stops one from being another secret's value.
+        //
+        // **The loop terminates, and by the auditor's own bookkeeping rather than a cap.**
+        // `Auditor::alarm` latches `(secret, target)`; the target is fixed at `NOTICE_TARGET`
+        // for every pass, so each iteration must find a secret not yet latched at it. The
+        // registered set is finite, so the chain is bounded by its size and needs no counter
+        // to say so.
+        let mut pending = alarm;
+        while let Some(raised) = pending {
+            let rendered = crate::logging::auditor::render_alarm(&raised);
+            let (audited_alarm, next) = crate::logging::process_auditor().audit(
+                &rendered,
+                NOTICE_TARGET,
+                None,
+                rendered.len(),
             );
+            let _ = writeln!(fallback, "{}", audited_alarm.as_str());
+            pending = next;
         }
     }
 }
