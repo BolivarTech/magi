@@ -1628,6 +1628,41 @@ mod tests {
     const SHAPELESS: &str = "wooden table lamp shade";
 
     #[test]
+    fn the_reporters_own_announcement_is_capped_like_every_other_screen_line() {
+        // The cap was applied per SITE rather than at the mouth: `show` and
+        // `on_event`'s screen branch capped, `Reporter::announce` did not. All
+        // three deliver to the same sink, which in the terminal is a message
+        // list that caps nothing and copies to the clipboard with one
+        // keystroke, so the odd one out is a hole rather than a saving.
+        //
+        // Today's texts are literals, which is why nothing had noticed. The
+        // contract on `announce` already invites the next one not to be:
+        // "anyone who interpolates a path or an error into it owes the
+        // forwarding", and a path or an error is exactly what has no bound.
+        let dir = tempdir().unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = reporter_over(
+            dir.path(),
+            Arc::clone(&sink) as Arc<dyn crate::logging::NoticeDelivery>,
+        );
+
+        reporter.announce(&filler(TUI_PAYLOAD_MAX_BYTES * 2));
+
+        let said = sink.lines.lock().unwrap().join("\n");
+        assert!(
+            said.contains("filler word"),
+            "the fixture announced nothing: {}",
+            said.len()
+        );
+        assert!(
+            said.len() <= TUI_PAYLOAD_MAX_BYTES + 128,
+            "the subsystem's own announcement reaches a screen uncapped: it \
+             was handed {} bytes",
+            said.len()
+        );
+    }
+
+    #[test]
     fn the_alarm_the_file_mouth_writes_names_the_secret_and_never_its_value() {
         // **The appender's alarm arm is the one write in this subsystem that
         // reaches a mouth without passing the auditor**, and following it is
