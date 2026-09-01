@@ -40,7 +40,7 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 
 use crate::logging::appender::{DailyAppender, Priority, Submitted};
-use crate::logging::auditor::{Audited, Auditor, CauseKey, Queued};
+use crate::logging::auditor::{AuditExempt, Audited, Auditor, CauseKey, Queued};
 use crate::logging::health::{render_transition, HealthTracker, Transition, HEALTH_TARGET};
 use crate::logging::render::{escape_for_line, escape_for_screen, render_event};
 
@@ -164,6 +164,15 @@ impl Reporter {
         }
     }
 }
+
+/// What an alarm reserves on the queue: nothing.
+///
+/// The alarm is exempt from the filters, not from the byte budget — it simply
+/// has no rendered length to reserve, because the writer renders it.
+const NO_RESERVATION: usize = 0;
+
+/// Gives an alarm's latch back when the queue refused it.
+fn settle_alarm(_auditor: &Auditor, _alarm: &AuditExempt, _outcome: Submitted) {}
 
 /// Feeds the health tracker, and shows what it decides is worth showing.
 ///
@@ -544,11 +553,13 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         if let Some(alarm) = alarm {
             // The alarm consults NO filter: exemption is from the filters, not
             // from congestion.
-            self.reporter.report(self.file.appender.submit(
-                Queued::Alarm(alarm),
+            let outcome = self.file.appender.submit(
+                Queued::Alarm(alarm.clone()),
                 Priority::High,
-                0,
-            ));
+                NO_RESERVATION,
+            );
+            settle_alarm(&self.auditor, &alarm, outcome);
+            self.reporter.report(outcome);
         }
     }
 }
@@ -766,6 +777,153 @@ mod tests {
                 l.push(line.as_str().to_string());
             }
         }
+    }
+
+    /// Waits until today's log file contains `needle`, and returns what it
+    /// held when the wait ended.
+    ///
+    /// **A condition with a generous failure deadline, never a fixed sleep.**
+    /// Under the `heavy` nextest group a flat wait is a guess; the
+    /// discriminating property is "the writer got to it at all", not "within
+    /// 100 ms".
+    fn wait_for_log(dir: &std::path::Path, needle: &str) -> String {
+        let path = dir.join(crate::logging::rotation::file_name(
+            time::OffsetDateTime::now_utc().date(),
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let written = std::fs::read_to_string(&path).unwrap_or_default();
+            if written.contains(needle) || std::time::Instant::now() >= deadline {
+                return written;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// A phrase that appears VERBATIM in the `DroppedFull` notice.
+    const PHRASE_IN_THE_REPORTER_NOTICE: &str = "being discarded";
+    /// A phrase that appears VERBATIM in a `memory` degradation notice.
+    const PHRASE_IN_THE_HEALTH_NOTICE: &str = "retrieval unavailable";
+
+    #[test]
+    fn a_reporter_notice_that_masks_a_secret_still_raises_the_alarm() {
+        // The auditor's contract is "mask AND say so, both, never one". The
+        // subsystem's own announcements took the first half and threw the
+        // second away: `announce_once` discarded its alarm, so a redaction on
+        // the one path that will grow runtime data was invisible.
+        //
+        // Driven through `Reporter::report`, not a hand-built line, so the
+        // fixture cannot pass while the production path drops the alarm.
+        assert!(
+            PHRASE_IN_THE_REPORTER_NOTICE.len() >= crate::logging::auditor::MIN_SECRET_BYTES,
+            "a phrase below the floor never enters the exact pass"
+        );
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let auditor = Arc::new(Auditor::new());
+        auditor.register_secret(SecretName::new("RPT"), &[PHRASE_IN_THE_REPORTER_NOTICE]);
+        let sink = Arc::new(RecordingSink::default());
+        let layer = MagiLayer::new(
+            FileSink::new(Arc::clone(&appender)),
+            crate::logging::filter::Filter::parse("info").expect("valid"),
+            Arc::clone(&auditor),
+            sink.clone(),
+        );
+
+        layer.reporter.report(Submitted::DroppedFull);
+
+        let said = sink.lines.lock().unwrap().join("\n");
+        assert!(
+            !said.contains(PHRASE_IN_THE_REPORTER_NOTICE),
+            "the notice was not audited at all: {said:?}"
+        );
+        let written = wait_for_log(dir.path(), "SECURITY:");
+        assert!(
+            written.contains("SECURITY:") && written.contains("RPT"),
+            "the reporter masked its own notice and told nobody: {written:?}"
+        );
+    }
+
+    #[test]
+    fn a_health_notice_that_masks_a_secret_still_raises_the_alarm() {
+        // Same hole, on the path that ALREADY carries runtime data: a health
+        // transition names the day's log file, composed from whatever the
+        // operator put in `log_dir`. `show` audited it and dropped the alarm.
+        assert!(
+            PHRASE_IN_THE_HEALTH_NOTICE.len() >= crate::logging::auditor::MIN_SECRET_BYTES,
+            "a phrase below the floor never enters the exact pass"
+        );
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let auditor = Arc::new(Auditor::new());
+        auditor.register_secret(SecretName::new("HLT"), &[PHRASE_IN_THE_HEALTH_NOTICE]);
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = HealthReporter::new(sink.clone(), Arc::clone(&auditor), appender);
+
+        let cause = CauseKey::new("embedder", "unreachable");
+        let (event, _) = auditor.audit(
+            "embedding request failed",
+            "magi_rs::memory",
+            Some(cause),
+            0,
+        );
+        reporter.observe(&event, tracing::Level::WARN);
+
+        let said = sink.lines.lock().unwrap().join("\n");
+        assert!(
+            !said.contains(PHRASE_IN_THE_HEALTH_NOTICE),
+            "the transition was not audited at all: {said:?}"
+        );
+        let written = wait_for_log(dir.path(), "SECURITY:");
+        assert!(
+            written.contains("SECURITY:") && written.contains("HLT"),
+            "the health path masked its own notice and told nobody: {written:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_alarm_gives_its_latch_back() {
+        // `Auditor::alarm` deduplicates by `(secret, target)`: it inserts the
+        // pair -- latching -- and only THEN hands the alarm to a caller that
+        // has yet to submit it. A submission the appender refuses therefore
+        // spends the one alarm that pair will ever produce on a queue entry
+        // that never existed, and the operator is never told.
+        //
+        // The rule is tested with the outcome supplied, because the appender
+        // refuses a zero-byte priority submission only when its 2048 slots are
+        // exhausted or its writer has died -- neither of which a test can
+        // arrange deterministically. The call sites pass this the outcome they
+        // got.
+        let auditor = Auditor::new();
+        auditor.register_secret(SecretName::new("K"), &["a-registered-secret-value"]);
+        let line = "url=https://x/a-registered-secret-value";
+
+        let refusals = [
+            Submitted::DroppedFull,
+            Submitted::DroppedOversized,
+            Submitted::WriterGone,
+            Submitted::WriterHung,
+        ];
+        for refused in refusals {
+            let (_, alarm) = auditor.audit(line, "magi_rs::agent", None, 0);
+            let alarm = alarm.unwrap_or_else(|| panic!("{refused:?}: the fixture raised no alarm"));
+            settle_alarm(&auditor, &alarm, refused);
+            assert!(
+                auditor.audit(line, "magi_rs::agent", None, 0).1.is_some(),
+                "{refused:?} burned the latch: the alarm is marked raised and \
+                 nothing was ever queued"
+            );
+        }
+
+        // And the other half: a submission that WAS accepted must still
+        // deduplicate, or every line carrying the secret raises again.
+        let (_, alarm) = auditor.audit(line, "magi_rs::agent", None, 0);
+        let alarm = alarm.expect("the loop above left the pair retractable");
+        settle_alarm(&auditor, &alarm, Submitted::Queued);
+        assert!(
+            auditor.audit(line, "magi_rs::agent", None, 0).1.is_none(),
+            "an accepted alarm must keep its latch, or one secret floods the log"
+        );
     }
 
     #[test]
