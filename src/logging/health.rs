@@ -7,9 +7,11 @@
 //! This module decides *when* a subsystem's health is worth putting on
 //! screen, and *what* that says. It is pure: it emits nothing, touches no
 //! filesystem and knows no TUI. `observe` takes whatever the caller already
-//! knows about one event and returns a [`Transition`] only when that
-//! transition is worth showing; everything else is silence by design, because
-//! "everything else" is exactly the noise this feature exists to remove.
+//! knows about one event; a [`Transition`] comes back only when one is worth
+//! showing, and for all but a subsystem's first degradation it comes back
+//! later — from `tick` or `flush` — rather than from the `observe` that first
+//! saw it. Everything else is silence by design, because "everything else" is
+//! exactly the noise this feature exists to remove.
 //!
 //! # What lives here and what does not
 //!
@@ -140,9 +142,17 @@ impl HealthTracker {
         }
     }
 
-    /// Observes one event. Returns a transition only when the new state has
-    /// already held for [`HEALTH_MIN_STABLE_SECS`] (R-L13d) -- **except** a
-    /// subsystem's very first degradation, which is immediate (SC-L71).
+    /// Observes one event, and returns a transition for exactly one kind of
+    /// change: a subsystem's very first degradation, which is shown at once
+    /// (SC-L71).
+    ///
+    /// Every other change answers `None` and is recorded as a candidate that
+    /// must hold for [`HEALTH_MIN_STABLE_SECS`] (R-L13d). This function never
+    /// emits one of those however long it has held, because it does not
+    /// consult the window at all: [`Self::tick`] is what lets a candidate
+    /// elapse, and [`Self::flush`] is what gives up on the window at close. A
+    /// `None` here therefore means "nothing to show **yet**", not "nothing
+    /// happened".
     ///
     /// `cause` is `None` for the call sites that carry no cause key; such an
     /// event is ignored rather than keyed off its text (R-L13). `ok` is the
