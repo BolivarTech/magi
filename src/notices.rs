@@ -351,6 +351,64 @@ mod tests {
         );
     }
 
+    /// REQ-L48: the last-resort mouth is an output, so it goes through the auditor too.
+    ///
+    /// The requirement's guarantee is structural — `Audited` has one constructor and every
+    /// output takes only an `Audited`, so handing a sink a raw `String` does not compile. This
+    /// path took a `&str` and wrote it, which is the one shape the type system cannot refuse,
+    /// and so the guarantee held everywhere except here.
+    ///
+    /// **A notice is not static text.** The startup list carries resolved `base_url`s, error
+    /// chains and vault entry names, all composed at runtime, and every one of them is `WARN`
+    /// or `ERROR` — the levels this branch prints. Each site redacts on its own today, which
+    /// is a convention, and a convention is what REQ-L48 exists to replace.
+    ///
+    /// The secret below is registered with the PROCESS auditor, which is the same instance the
+    /// layer uses, and it is placed in free text rather than inside a URL authority on
+    /// purpose: pass 1 would catch a `user:pass@host` by shape whether or not anything was
+    /// registered, so a URL would let this test pass against an auditor that never ran the
+    /// exact pass.
+    #[test]
+    fn the_no_layer_fallback_audits_before_it_writes() {
+        assert_eq!(
+            tracing::level_filters::LevelFilter::current(),
+            tracing::level_filters::LevelFilter::OFF,
+            "this test is about the NO-subscriber path, and something installed one"
+        );
+
+        // Not key-shaped, so no pattern matcher claims it: the exact pass is the only thing
+        // that can redact this, and the exact pass is the auditor.
+        let value = "correct-horse-battery-staple-42";
+        crate::logging::register_process_secrets(&[(
+            crate::logging::auditor::SecretName::new("A_FALLBACK_GUARD_ONLY_SECRET"),
+            value,
+        )]);
+
+        let mut out = Vec::new();
+        emit_notices_into(
+            vec![Notice::warn(format!(
+                "the vault could not be opened with {value}"
+            ))],
+            &mut out,
+        );
+
+        let shown = String::from_utf8(out).expect("the fallback writes UTF-8");
+        assert!(
+            !shown.contains(value),
+            "a registered secret reached the fallback in the clear, so this mouth is outside \
+             the audit: {shown:?}"
+        );
+        assert!(
+            shown.contains(crate::logging::auditor::REDACTED),
+            "the line must arrive masked rather than dropped: {shown:?}"
+        );
+        assert!(
+            shown.contains("the vault could not be opened"),
+            "and the rest of the notice must survive, or the fix traded a leak for a silence: \
+             {shown:?}"
+        );
+    }
+
     /// The actionable items first, regardless of the order in which they were discovered.
     #[test]
     fn notices_are_ordered_by_level_not_by_discovery() {
