@@ -1771,8 +1771,8 @@ pub async fn run_tui_ext(
     // `EnterAlternateScreen`, which made its `?` the one way out of this
     // function that left the alternate screen HELD. Nothing restores it on that
     // path — the teardown below is never reached and the panic hook above only
-    // covers a panic — so every `Drop` that runs while the stack unwinds writes
-    // onto a live frame, `TuiNoticeSink`'s included, and that destructor's whole
+    // covers a panic — so the destructors this frame's locals run on the way out
+    // write onto a live screen, `TuiNoticeSink`'s included, and that one's whole
     // job is to print. Entering LAST leaves the window with no fallible step in
     // it at all, which is a property rather than a promise:
     // `test_nothing_fallible_runs_while_the_alternate_screen_is_held` fails if
