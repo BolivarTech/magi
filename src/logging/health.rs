@@ -1211,6 +1211,35 @@ mod tests {
     }
 
     #[test]
+    fn the_collected_notice_carries_the_same_warning_as_the_emitted_one() {
+        // `recovery_detection_notice` is the terminal surface's copy of the
+        // warning above, and `main.rs` extends the TUI's startup list with it.
+        // Its two properties are that it fires on the same condition and that
+        // it says the same thing: a notice that fired always would be one
+        // nobody reads, and one whose text drifted would send an operator
+        // looking for a setting under a name the other half does not use.
+        let warn_only = Filter::parse("warn").expect("a valid directive");
+        let notice = crate::logging::recovery_detection_notice(&warn_only, Some(Level::WARN))
+            .expect("the union excludes info, so there is a notice");
+        assert_eq!(
+            notice.level,
+            Level::WARN,
+            "it has to reach a screen, which INFO does not (REQ-L19)"
+        );
+        assert!(
+            notice.text.contains("health recovery detection is off"),
+            "the notice must name the consequence, not merely the setting: {notice:?}"
+        );
+
+        let defaults = Filter::parse("info").expect("a valid directive");
+        assert!(
+            crate::logging::recovery_detection_notice(&defaults, Some(Level::WARN)).is_none(),
+            "with the defaults the union admits info, so the startup list gets \
+             nothing to extend with"
+        );
+    }
+
+    #[test]
     fn a_clock_jump_produces_no_false_transitions() {
         let mut h = HealthTracker::new();
         let c = CauseKey::new("embedder", "unreachable");
