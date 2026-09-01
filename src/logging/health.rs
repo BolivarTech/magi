@@ -5,9 +5,10 @@
 //! Transition-only health tracking (D-L13, SC-L14...SC-L119).
 //!
 //! This module decides *when* a subsystem's health is worth putting on
-//! screen, and *what* that says. It is pure: it emits nothing, touches no
-//! filesystem and knows no TUI. `observe` takes whatever the caller already
-//! knows about one event; a [`Transition`] comes back only when one is worth
+//! screen, and *what* that says. It is pure: no tracing I/O, no filesystem
+//! and no TUI -- the `use tracing::Level` below names a type, nothing more.
+//! `observe` takes whatever the caller already knows about one event; a
+//! [`Transition`] comes back only when one is worth
 //! showing, and for all but a degradation of a subsystem currently shown
 //! healthy it comes back later — from `tick` or `flush` — rather than from
 //! the `observe` that first saw it. Everything else is silence by design,
