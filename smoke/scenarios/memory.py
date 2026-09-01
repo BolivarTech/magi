@@ -301,6 +301,15 @@ def _startup_counts(result):
             "shared log directory" % RECALL_RUN
         )
     match, dir_existed, unreadable = logs.scan(_startup_line_matcher(run_id))
+    # A HIT IS THE ANSWER, and it is read before anything is said about what
+    # else in the directory would not open. ``.magi/logs`` is shared and
+    # persistent, so an old rotated file that cannot be read is an ordinary
+    # condition of the environment and has nothing to do with the line this run
+    # wrote -- which the scan has already located. Asking about the unreadable
+    # list first threw that evidence away and reported "cannot test" while
+    # holding the counts. S23 and S24 both order it this way; S9 did not.
+    if match is not None:
+        return tuple(int(group) for group in match.groups()), ""
     directory = logs.log_directory()
     if not dir_existed:
         return None, (
@@ -313,13 +322,11 @@ def _startup_counts(result):
             "could not be read: %s"
             % (RECALL_RUN, directory, "; ".join(unreadable))
         )
-    if match is None:
-        return None, (
-            "no line under %s carries both run=%s and the memory "
-            "diagnostics marker, so neither count can be read"
-            % (directory, run_id)
-        )
-    return tuple(int(group) for group in match.groups()), ""
+    return None, (
+        "no line under %s carries both run=%s and the memory "
+        "diagnostics marker, so neither count can be read"
+        % (directory, run_id)
+    )
 
 
 def _startup_line_matcher(run_id):
