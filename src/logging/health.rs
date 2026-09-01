@@ -905,6 +905,116 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_quiet_subsystem_is_untouched_while_another_ones_window_elapses() {
+        // The mixed-state vector. Every other test here drives ONE subsystem at
+        // a time or drives both the same way, so nothing pins that `tick` and
+        // `flush` -- which both walk the whole `states` vector -- pick out the
+        // subsystem that has something to say and step over the one that does
+        // not. Getting that wrong invents a transition for a subsystem whose
+        // state never changed.
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let quiet = CauseKey::new("provider", "unreachable");
+        let moving = CauseKey::new("embedder", "http_error");
+        let recovered_at = t0 + Duration::from_secs(1);
+
+        // Shown and then silent, versus shown and then recovering: one entry
+        // with no pending, one entry with a pending that goes on to elapse.
+        let arrange = || {
+            let mut h = HealthTracker::new();
+            assert!(matches!(
+                h.observe(Some(quiet), false, t0),
+                Some(Transition::Degraded(_))
+            ));
+            assert!(matches!(
+                h.observe(Some(moving), false, t0),
+                Some(Transition::Degraded(_))
+            ));
+            assert!(
+                h.observe(Some(moving), true, recovered_at).is_none(),
+                "a recovery serves the window"
+            );
+            h
+        };
+
+        let mut ticked = arrange();
+        let got = ticked.tick(recovered_at + w);
+        assert!(
+            matches!(got, Some(Transition::Restored(k)) if k.subsystem() == moving.subsystem()),
+            "the elapsed pending is what comes out, and it belongs to the \
+             subsystem that had one: {got:?}"
+        );
+        assert!(
+            ticked.tick(recovered_at + w + w).is_none(),
+            "and the quiet subsystem contributes nothing however late the tick"
+        );
+
+        let mut flushed = arrange();
+        let out = flushed.flush();
+        assert_eq!(
+            out.len(),
+            1,
+            "flush must not invent a transition for a subsystem with nothing \
+             pending: {out:?}"
+        );
+        assert!(
+            matches!(out.first(), Some(Transition::Restored(k)) if k.subsystem() == moving.subsystem()),
+            "and the one it does emit is the pending one: {out:?}"
+        );
+    }
+
+    #[test]
+    fn flush_order_is_first_observed_even_when_the_first_event_was_healthy() {
+        // `states` is ordered by first OBSERVATION, not by first degradation,
+        // and the two only disagree when some subsystem's first event is a
+        // success -- which no other test arranges. Without this, an
+        // implementation that pushed an entry on first FAILURE would satisfy
+        // every other ordering assertion in the module.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let seen_first = CauseKey::new("provider", "unreachable");
+        let broke_first = CauseKey::new("embedder", "http_error");
+
+        // A healthy event creates the entry and says nothing.
+        assert!(
+            h.observe(Some(seen_first), true, t0).is_none(),
+            "a healthy first event is not a transition"
+        );
+        // The OTHER subsystem is the first one that actually breaks.
+        assert!(matches!(
+            h.observe(Some(broke_first), false, t0 + Duration::from_secs(1)),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(matches!(
+            h.observe(Some(seen_first), false, t0 + Duration::from_secs(2)),
+            Some(Transition::Degraded(_))
+        ));
+
+        // Both leave a pending recovery, so both appear in the flush.
+        assert!(h
+            .observe(Some(broke_first), true, t0 + Duration::from_secs(3))
+            .is_none());
+        assert!(h
+            .observe(Some(seen_first), true, t0 + Duration::from_secs(4))
+            .is_none());
+
+        let order: Vec<&str> = h
+            .flush()
+            .iter()
+            .map(|t| match t {
+                Transition::Degraded(k) | Transition::Restored(k) => k.subsystem(),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![seen_first.subsystem(), broke_first.subsystem()],
+            "first OBSERVED, not first degraded: the subsystem whose opening \
+             event was a success still comes out ahead of the one that broke \
+             before it did"
+        );
+    }
+
     /// The day's log file, as REQ-L23's third part reaches `render_transition`.
     const A_LOG_PATH: &str = ".magi/logs/magi-2026-08-14.log";
     /// The file name inside [`A_LOG_PATH`], which is what a message must name.
