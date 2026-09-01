@@ -580,14 +580,26 @@ pub fn init_logging(
         // second call — a test that starts twice, a `main` that retries, a new
         // surface that does not know another already initialised — would abort
         // the process. REQ-L35 says logging never aborts.
-        let (line, _) = auditor::Auditor::new().audit(
+        // **Through the PROCESS auditor, and escaped for the mouth it goes to.**
+        // A fresh `Auditor` starts with nothing registered, so its exact pass
+        // does nothing and only the pattern pass stands between this line and a
+        // screen — the same defect `main.rs` already guards itself against, in
+        // the one file that guard does not read. The screen escaper rather than
+        // the file one because `sink` is a screen: doubling a backslash here
+        // would show a path nobody can paste.
+        //
+        // The alarm is dropped because the text above is a literal with no
+        // interpolation, so there is nothing in it for the passes to find.
+        // **Anyone who interpolates a path or an error into it owes the
+        // forwarding** that `Reporter::announce` does.
+        let (line, _) = process_auditor().audit(
             "notice: logging was already initialised; this call's configuration \
              (log directory and level) was DISCARDED and the running one kept",
             "magi_rs::logging",
             None,
             0,
         );
-        sink.deliver(&line);
+        sink.deliver(&line.map_line(render::escape_for_screen));
         return Ok(existing.clone());
     }
 
