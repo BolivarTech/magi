@@ -5693,10 +5693,12 @@ async fn prepare_headless(
         .map(|c| c.api_key.as_str()),
         embed_key.as_deref(),
     )) {
-        eprintln!(
-            "warning: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
-            short.as_str()
-        );
+        // Through the notice list, the same way the TUI does it. Written straight to stderr
+        // this said the same thing in a second sentence and skipped `emit_notices`
+        // altogether, so on the surface a CI job reads it never reached the day's file.
+        // It lands after all seven of this function's early returns, so joining the list
+        // costs it nothing.
+        trio_notices.push(short_secret_notice(short));
     }
     // The JSONL run log is retired (REQ-L40). The headless surfaces bring up the
     // SAME single layer the TUI does: one log for the whole product, rather than
