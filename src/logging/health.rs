@@ -1426,8 +1426,24 @@ mod tests {
 
     /// Every cause the message table declares, with the two texts it owes.
     ///
-    /// Kept as one table so a row added to `render_transition` without its
-    /// counterpart here is visible as an omission rather than as absence.
+    /// Kept as one table so the tests below assert on declared text rather than
+    /// on whatever `render_transition` happens to return.
+    ///
+    /// # What holds it level with `screen_messages`, and what does not
+    ///
+    /// `every_instrumented_cause_is_mirrored_here` checks the half that can be
+    /// checked: every key in [`CauseKey::ALL`] — that is, every cause some site
+    /// actually emits — has a row here, so a newly instrumented cause cannot be
+    /// given a message in `screen_messages` while this copy stays behind.
+    ///
+    /// The other half is **not enforced and cannot be**: `screen_messages` is a
+    /// private `match`, nothing can enumerate its arms, and its two
+    /// uninstrumented rows (`provider`/`unreachable`, `vault`/`locked`) are
+    /// absent from `CauseKey::ALL` by design. A third such row added there and
+    /// forgotten here would leave every test green. That direction is
+    /// reviewable — the two tables sit forty lines apart and read as a pair —
+    /// and review is all it is; saying "visible as an omission" implied a
+    /// machine was looking.
     fn declared_messages() -> Vec<(CauseKey, &'static str, &'static str)> {
         vec![
             (
@@ -1451,6 +1467,34 @@ mod tests {
                 "✓ vault: unlocked",
             ),
         ]
+    }
+
+    #[test]
+    fn every_instrumented_cause_is_mirrored_here() {
+        // The enforceable half of `declared_messages`' contract with
+        // `screen_messages`. `every_declared_cause_key_has_a_screen_message`
+        // asks whether the PRODUCTION table answers for every instrumented
+        // cause; this asks whether the TEST table does, which is a different
+        // question and the one that decides whether the assertions built on
+        // `declared_messages` still cover what ships.
+        //
+        // Without it, task 3.4 instrumenting `provider` would add a row to
+        // `CauseKey::ALL`, `screen_messages` would answer for it, and every
+        // assertion in this module that loops over `declared_messages` would
+        // keep passing while quietly saying nothing about the new cause.
+        assert!(
+            !CauseKey::ALL.is_empty(),
+            "with an empty list this test guards nothing, the same way \
+             `every_declared_cause_key_has_a_screen_message` would not"
+        );
+        let mirrored = declared_messages();
+        for key in CauseKey::ALL {
+            assert!(
+                mirrored.iter().any(|(declared, _, _)| declared == key),
+                "{key:?} is instrumented but has no row in `declared_messages`, \
+                 so every assertion here that loops over that table skips it"
+            );
+        }
     }
 
     #[test]
