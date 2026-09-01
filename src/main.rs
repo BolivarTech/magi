@@ -6560,6 +6560,63 @@ mod tests {
         );
     }
 
+    /// A headless run with no `.magi/` workspace still announces, through the fallback.
+    ///
+    /// **The path is reachable, and exactly one flag makes it so.** Without `--no-memory`,
+    /// `prepare_headless` refuses outright — "no .magi/ state directory found", exit 1 — and
+    /// the arm below would be dead code with a test built around a fiction. With it, a
+    /// stateless run proceeds env-only (SC-H24): no workspace means no log directory means
+    /// no layer, `bring_up_headless_logging` is skipped entirely, and every notice collected
+    /// by then has only `emit_notices`'s no-subscriber branch left to reach anyone.
+    ///
+    /// **What is asserted here, and what is not.** What that branch DOES with the list is
+    /// driven for real in `magi_rs::notices`' own tests, against a buffer. `prepare_headless`
+    /// itself cannot be driven from a unit test — it reads input, opens real resources, and
+    /// writes to a stderr no parallel-safe test may redirect — so the property held here is
+    /// the one this file owns and can lose: the skip returns `Ok` rather than an error, and
+    /// the emission sits OUTSIDE the match, with nothing between them that can return. Move
+    /// the emission into the `Some` arm and the workspace-less run goes silent; that is what
+    /// this fails on.
+    #[test]
+    fn a_headless_run_without_a_workspace_still_reaches_the_fallback() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        let start = production
+            .find("async fn prepare_headless(")
+            .expect("the headless prelude is gone; this check needs updating");
+        let body = production.get(start..).unwrap_or("");
+
+        assert!(
+            body.contains("if workspace.is_none() && !h.no_memory"),
+            "without this refusal there is no workspace-less run to test, and the arm below \
+             is unreachable"
+        );
+
+        let skip = body
+            .find("None => Ok(())")
+            .expect("the workspace-less run must skip the bring-up rather than fail it");
+        let emit = body
+            .find("emit_notices(trio_notices)")
+            .expect("the notices must still be announced");
+        assert!(
+            skip < emit,
+            "the emission moved above the workspace match, so the list is announced before \
+             it is complete"
+        );
+        let escapes = body
+            .get(skip..emit)
+            .unwrap_or("")
+            .matches("return ")
+            .count();
+        assert_eq!(
+            escapes, 0,
+            "a path returns between skipping the bring-up and announcing, so a \
+             workspace-less run can reach neither mouth and say nothing at all"
+        );
+    }
+
     /// Both surfaces say the short-credential warning the same way, through the same route.
     ///
     /// The TUI pushed a `Notice::warn` and headless wrote its own `eprintln!`. Same fact,
@@ -13156,6 +13213,28 @@ retry_disabled = {retry_disabled}
             assert!(
                 text.contains("Caspar") && text.contains("connection refused"),
                 "the second seat must be named with its cause: {text}"
+            );
+        }
+
+        /// `NoSeats` renders the generic message, and it is locked here BECAUSE it is
+        /// unreachable.
+        ///
+        /// Nothing constructs it today: a trio with no declared seat cannot get past
+        /// configuration validation. That is exactly why it is worth a test — an arm no
+        /// caller reaches is an arm no reviewer re-reads, and it shares its match arm with
+        /// `Builder`, which IS reachable. Change the grouping and this says so; leave it
+        /// grouped and this records that the two deliberately answer the same sentence,
+        /// because neither has a per-seat cause to name.
+        #[test]
+        fn trio_unavailable_message_falls_back_to_the_generic_line_for_no_seats() {
+            let msg = trio_unavailable_message(&TrioError::NoSeats);
+            assert_eq!(
+                msg, "MAGI consensus is not available: the trio could not be built.",
+                "the generic arm is what a cause-less failure renders"
+            );
+            assert!(
+                !msg.contains("seats could not be built"),
+                "there is no per-seat detail to give, so it must not promise any: {msg}"
             );
         }
 
