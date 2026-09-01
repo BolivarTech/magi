@@ -1449,9 +1449,12 @@ where
         }
         // SC-L90: a short headless run has no event loop to expire the
         // health window on, so close is the only remaining chance to show a
-        // transition still waiting on it. A no-op until task 2.1 feeds the
-        // tracker; reserved here now so that task does not have to reopen
-        // this call site.
+        // transition still waiting on it. It was reserved here while it was
+        // still a no-op; task 2.1 gave it a body (`LoggingHandle::health_flush`
+        // drains the tracker), so this call now emits, and the comment that
+        // still called it a no-op was describing a version that no longer
+        // exists. `a_pending_recovery_reaches_the_screen_only_when_the_run_
+        // closes` is what holds the behaviour down.
         handle.health_flush();
     }
     code
@@ -5700,7 +5703,7 @@ async fn prepare_headless(
     let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
     // REQ-L49, the headless half. Without this the surface a CI job uses ships
     // a log protected by the pattern pass alone: the exact pass only covers
-    // what was registered, and nothing here registered anything.
+    // what was registered.
     //
     // It sits on THIS `embed_key` and not the one in `run()`. An earlier edit
     // matched the first line of that shape in the file, which belongs to the
@@ -6767,6 +6770,12 @@ mod tests {
     /// Three separate ways the walk can go quietly empty — no files, a cut that eats the
     /// production half, a mouth spelling that stopped matching — and each of them turns a
     /// green guard into no guard at all.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A walk that reads MOST of the tree. The three floors are lower bounds, so a subdirectory
+    /// that stops being visited leaves every count comfortably above them, and rules 1 to 4
+    /// then hold over a tree with a hole in it.
     #[test]
     fn the_class_scan_reads_a_tree_that_still_reaches_the_auditor() {
         let sources = production_sources();
@@ -6813,6 +6822,12 @@ mod tests {
     /// which has to construct it somewhere. It is recognised by `get_or_init` appearing in
     /// the same statement rather than by a file or a line number, so an offender cannot
     /// inherit the exemption by moving.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A second auditor obtained without naming the constructor — through a `Default`, a
+    /// `clone()` of an existing one, or a helper in another crate that builds one for you.
+    /// The rule matches a spelling, and only the spelling this codebase actually uses.
     #[test]
     fn no_surface_builds_an_auditor_of_its_own() {
         // Split so this guard's own needle is not the string it forbids. The
@@ -6852,6 +6867,12 @@ mod tests {
     ///
     /// The cost of the rule is a false positive on a future statement that legitimately
     /// drops one; it fails loudly and prints the statement, so that is cheap.
+    ///
+    /// # What it cannot catch
+    ///
+    /// An alarm that is BOUND and then dropped — kept in a variable the next statement never
+    /// reads. The scan follows one statement, so it sees the binding and calls it forwarded;
+    /// only the immediate `_` discard is visible to it.
     #[test]
     fn no_production_path_discards_an_audit_alarm() {
         let call = concat!(".aud", "it(");
@@ -7010,6 +7031,11 @@ mod tests {
         );
     }
 
+    /// # What it cannot catch
+    ///
+    /// Whether the registration RUNS. It reads the source, so a call sitting behind a
+    /// condition that is never true, or on a path an early return skips, reads as armed —
+    /// which is the shape the headless half had while looking done.
     #[test]
     fn every_surface_arms_the_auditor() {
         // **A source check, and it earned its place.** The registry is

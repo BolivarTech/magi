@@ -298,11 +298,20 @@ fn ordered_for_emission(notices: Vec<Notice>) -> Vec<Notice> {
 
 /// Emits one notice at its own level.
 ///
-/// # Why a chain of comparisons and not a `match`
+/// # Why the three arms are written out
 ///
-/// `tracing::Level`'s constants are associated constants of a struct, which cannot appear in a
-/// pattern. The levels are also compile-time literals in the macro rather than a value it
-/// accepts, so the three arms have to be written out.
+/// `tracing::event!` builds a `static __CALLSITE` around the level, so the level has to be a
+/// compile-time constant: passing `notice.level` is `error[E0435]: attempt to use a
+/// non-constant value in a constant`. One arm per level is the only shape that gives the macro
+/// a literal.
+///
+/// **What this is NOT is a limit on patterns**, and the sentence that used to say so was
+/// wrong. `tracing::Level`'s constants match perfectly well — the compiler even reasons about
+/// exhaustiveness through them, answering a two-arm `match` with `Level(LevelInner::Trace)`,
+/// `Level(LevelInner::Debug)` and `Level(LevelInner::Info)` not covered. Both alternatives
+/// were compiled rather than reasoned about, which is what separated the true half from the
+/// false one. A `match` is therefore available; it would just carry the same three literal
+/// levels inside its arms, so it buys nothing over the comparisons.
 ///
 /// # Complexity
 ///
