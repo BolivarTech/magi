@@ -324,6 +324,30 @@ class MemoryScenarioBodyTests(unittest.TestCase):
         self.assertIn("does not exist", detail)
         self.assertIn("wrote no log at all", detail)
 
+    def test_an_unreadable_sibling_never_discards_a_line_that_was_found(
+            self) -> None:
+        """A found line is the answer, whatever else in the directory would
+        not open.
+
+        ``.magi/logs`` is shared and persistent, so an old rotated file that
+        cannot be read is an ordinary condition -- and it has nothing to do
+        with the line this run wrote and this scenario already located. S23
+        and S24 both honour a hit before they look at the unreadable list;
+        S9 checked the list first and threw the evidence away, reporting
+        "cannot test" while holding the answer.
+        """
+        real_scan = logs.scan
+
+        def scan_reporting_an_unreadable_sibling(matcher):
+            result, dir_existed, _ = real_scan(matcher)
+            return result, dir_existed, ["2026-01-01.log (Permission denied)"]
+
+        with mock.patch.object(logs, "scan",
+                               scan_reporting_an_unreadable_sibling):
+            outcomes = _outcomes(_runs(), _ambient())
+        self.assertEqual(Outcome.PASS, outcomes[memory.ASSERTIONS[0]])
+        self.assertEqual(Outcome.PASS, outcomes[memory.ASSERTIONS[1]])
+
     def test_no_published_run_id_cannot_test_the_first_two(self) -> None:
         """A run that names no id of its own cannot be told apart from any
         other run's line in the shared, persistent log directory.
