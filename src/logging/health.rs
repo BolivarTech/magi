@@ -1469,6 +1469,47 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_before_a_pendings_window_started_emits_nothing_and_keeps_it() {
+        // `tick` measures with `saturating_duration_since`, and the direction
+        // that call is FOR is `now < since`: an instant taken before the
+        // pending started serving. Plain subtraction panics there rather than
+        // answering zero, so this is the only test in the module that tells the
+        // two spellings apart -- every other tick here is at or past its
+        // deadline, where both answer identically.
+        //
+        // A monotonic `Instant` does not walk backwards on its own, but the
+        // instant is PASSED IN: a caller that reads the clock once and then
+        // ticks, or that hands over a value captured a moment earlier, produces
+        // exactly this ordering, and SC-L119's defence for that direction is
+        // this one call.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let c = CauseKey::new("embedder", "http_error");
+
+        assert!(matches!(
+            h.observe(Some(c), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        // The recovery's window opens a minute in, so a tick at `t0` lands a
+        // full minute BEFORE the pending's `since`.
+        let recovered_at = t0 + Duration::from_secs(60);
+        assert!(h.observe(Some(c), true, recovered_at).is_none(), "pending");
+
+        assert!(
+            h.tick(t0).is_none(),
+            "a tick before the pending began serving cannot make it due"
+        );
+        // And the pending has to be put BACK, not consumed by that call: what
+        // proves it survived is that it still comes out at its real deadline.
+        assert!(
+            matches!(h.tick(recovered_at + w), Some(Transition::Restored(_))),
+            "the early tick left the pending intact, so it still emits at its \
+             own deadline"
+        );
+    }
+
+    #[test]
     fn flush_order_is_first_observed_even_when_the_first_event_was_healthy() {
         // `states` is ordered by first OBSERVATION, not by first degradation,
         // and the two only disagree when some subsystem's first event is a
