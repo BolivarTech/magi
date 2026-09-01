@@ -681,29 +681,41 @@ fn intern(
     value: &str,
     fallback: &'static str,
     max_entries: usize,
-    _reporter: &Reporter,
+    reporter: &Reporter,
 ) -> &'static str {
-    let Ok(mut guard) = cache.lock() else {
-        return fallback;
-    };
-    let entry = guard.get_or_insert_with(InternCache::default);
-    if let Some(found) = entry.seen.get(value) {
-        return found;
-    }
-    if entry.seen.len() >= max_entries {
-        if !entry.warned {
-            entry.warned = true;
-            eprintln!(
-                "WARNING: an interning cache reached its cap of {max_entries} \
-                 distinct values; further values collapse to {fallback:?} \
-                 instead of leaking indefinitely"
-            );
+    // **The decision is taken under the guard; the announcement is not.**
+    // Speaking here cost three things at once: an I/O syscall while the mutex
+    // every cause-bearing event needs was held; a panicking construct under
+    // that mutex, which would poison the cache for the rest of the run; and a
+    // raw `eprintln!`, which in the terminal writes over the alternate screen
+    // the frame is drawn on. The latch is still SET inside, so two threads
+    // crossing the cap together still produce one warning.
+    let (interned, warn) = {
+        let Ok(mut guard) = cache.lock() else {
+            return fallback;
+        };
+        let entry = guard.get_or_insert_with(InternCache::default);
+        if let Some(found) = entry.seen.get(value) {
+            return found;
         }
-        return fallback;
+        if entry.seen.len() >= max_entries {
+            let first = !entry.warned;
+            entry.warned = true;
+            (fallback, first)
+        } else {
+            let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
+            entry.seen.insert(leaked);
+            (leaked, false)
+        }
+    };
+    if warn {
+        reporter.announce(&format!(
+            "warning: an interning cache reached its cap of {max_entries} \
+             distinct values; further values collapse to {fallback:?} instead \
+             of leaking indefinitely"
+        ));
     }
-    let leaked: &'static str = Box::leak(value.to_string().into_boxed_str());
-    entry.seen.insert(leaked);
-    leaked
+    interned
 }
 
 /// Interns a target so it can live in a `SecretName`-shaped `'static` slot.
