@@ -437,6 +437,63 @@ mod tests {
         );
     }
 
+    /// REQ-L48, the half the previous pass left open: the ALARM is an output too.
+    ///
+    /// The notice text was routed through the auditor and the alarm raised about it was
+    /// not, so one of the two lines this branch writes still reached a mouth without
+    /// passing the only thing allowed to hand a mouth anything. What kept it safe was
+    /// `render_alarm`'s promise never to quote the secret — a convention, which is exactly
+    /// what REQ-L48 exists to replace with a route. The class had already produced a raw
+    /// `writeln!` and a fresh, empty `Auditor` in this same milestone, so "the invariant
+    /// says it cannot happen" is not evidence; the write is.
+    ///
+    /// **How the mutation is made to bite.** `render_alarm` interpolates the secret's NAME,
+    /// so a second secret whose VALUE is the first one's name puts a registered value into
+    /// the alarm text by construction. Routed, it is masked; written raw, it ships. Nothing
+    /// about the assertion depends on `render_alarm`'s wording.
+    #[test]
+    fn the_no_layer_fallback_audits_the_alarm_it_writes() {
+        assert_eq!(
+            tracing::level_filters::LevelFilter::current(),
+            tracing::level_filters::LevelFilter::OFF,
+            "this test is about the NO-subscriber path, and something installed one"
+        );
+
+        // The trigger's name is the guard's value, which is what puts a registered value
+        // inside the rendered alarm.
+        const TRIGGER_NAME: &str = "MS2_ALARM_ROUTE_TRIGGER";
+        let trigger_value = "alarm-route-trigger-value-77";
+        crate::logging::register_process_secrets(&[
+            (
+                crate::logging::auditor::SecretName::new(TRIGGER_NAME),
+                trigger_value,
+            ),
+            (
+                crate::logging::auditor::SecretName::new("MS2_ALARM_TEXT_GUARD"),
+                TRIGGER_NAME,
+            ),
+        ]);
+
+        let mut out = Vec::new();
+        emit_notices_into(
+            vec![Notice::warn(format!(
+                "the vault could not be opened with {trigger_value}"
+            ))],
+            &mut out,
+        );
+
+        let shown = String::from_utf8(out).expect("the fallback writes UTF-8");
+        assert!(
+            shown.contains("SECURITY:"),
+            "the alarm must still be delivered — routing it must not silence it: {shown:?}"
+        );
+        assert!(
+            !shown.contains(TRIGGER_NAME),
+            "the alarm line carried a registered value in the clear, so this write is \
+             outside the audit route: {shown:?}"
+        );
+    }
+
     /// The actionable items first, regardless of the order in which they were discovered.
     #[test]
     fn notices_are_ordered_by_level_not_by_discovery() {
