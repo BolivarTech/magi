@@ -25,6 +25,16 @@
 //! Delivery is somebody else's job. The layer is what feeds this and what
 //! puts the result on screen, so nothing here decides which mouth a
 //! transition reaches or when the window is expired.
+//!
+//! # Before you add a branch here
+//!
+//! The test module carries a table of **every decision site in this file and
+//! both of its directions**, naming what holds each one down. Adding an arm
+//! means adding its row — the table is what the argument "this class of defect
+//! is closed" rests on, so an arm missing from it makes that argument weaker
+//! than it reads, which is how the row for `tick`'s `shown` write came to be
+//! missing for three review passes. It is an audit trail, not decoration; the
+//! density is the point.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -526,18 +536,31 @@ pub(crate) fn recovery_detection_is_off(file_filter: &Filter, screen_level: Opti
 /// Three review passes each found the next uncovered *direction* of the same
 /// kind of branch: one found two binding rules unguarded, the next the degraded
 /// half of one of them, the next the `Degraded` half of `flush`. That series
-/// does not converge by adding examples, so every arm in `observe`, `tick`,
-/// `flush` and `state_mut` that branches on the kind of a candidate or of a
-/// pending's target is tabulated here instead, with what holds each direction
-/// down.
+/// does not converge by adding examples, so every decision this module makes is
+/// tabulated here instead, with what holds each of its directions down.
 ///
 /// A fourth pass then attacked the TABLE rather than the code and found it
 /// short a row — `tick`'s `shown` write, whose `Some` direction was mutatable
 /// with the whole module green while `flush`'s identical write had both
 /// directions pinned. The table was the evidence that the class was closed, so
 /// a missing row made the argument weaker than it read. Rows are therefore
-/// named after arms **in the code**, and adding one to `observe`, `tick` or
-/// `flush` means adding one here.
+/// named after sites **in the code**, and adding one anywhere in this module
+/// means adding one here.
+///
+/// # Scope and how the rows are counted
+///
+/// **Every function in the module, not only the state machine.** The scope
+/// sentence used to name `observe`, `tick`, `flush` and `state_mut` while the
+/// table already carried `screen_messages` and `recovery_detection_is_off`, so
+/// it described less than it listed — and `render_transition`'s two `match`es,
+/// pinned all along, were left out on the strength of that undersized sentence.
+///
+/// **The convention is one row per decision SITE, and the `debug_assert!`
+/// counts as a site of its own** — its two directions are held down separately,
+/// so folding it into the arm it guards would hide one of them. On that
+/// convention the table below has **nineteen** rows. Counting instead by
+/// `match`/`if` expression alone would give eighteen and lose that distinction;
+/// either is defensible, but only one can be written down, and this is it.
 ///
 /// | Arm | Directions | Held down by |
 /// |---|---|---|
@@ -550,16 +573,25 @@ pub(crate) fn recovery_detection_is_off(file_filter: &Filter, screen_level: Opti
 /// | replace pending | none / `None`→`Some` / `Some`→`None` / `Some`→other `Some` | most tests / `a_cancelled_recovery_followed_by_a_cause_change_…` / `a_pending_cause_change_replaced_by_a_recovery_…` / `a_pending_cause_change_replaced_by_a_third_cause_…` |
 /// | `tick`'s `take` | `Some` / `None` | the tick tests / `tick_returns_none_when_every_subsystem_is_quiet` |
 /// | `tick`'s due check | emit / put back | both by `tick_steps_over_a_pending_that_is_not_due_…` |
+/// | `tick`'s elapsed measurement | `now` at or past `since` / `now` before it | every tick test above / `a_tick_before_a_pendings_window_started_…` |
 /// | `tick`'s walk | returns early / falls to `None` | `tick_emits_due_pendings_one_per_call_…` / `a_quiet_subsystem_is_untouched_…` |
 /// | **`tick`'s `shown` write** | target `None` / target `Some` | `a_degradation_after_a_shown_recovery_…` / `a_ticked_cause_change_leaves_the_subsystem_degraded_…` |
 /// | `flush`'s `take` | `Some` / `None` | `a_short_headless_run_flushes_a_pending_recovery` / `flushing_with_nothing_pending_…` |
 /// | `flush`'s `shown` write | target `None` / target `Some` | `a_flushed_recovery_leaves_the_subsystem_healthy` / `a_flushed_cause_change_leaves_the_subsystem_degraded_…` |
 /// | `state_mut` | found / appended | both by `state_mut_appends_an_unseen_subsystem_…` |
 /// | `screen_messages` | row / no row | `every_declared_cause_key_has_a_screen_message` / `a_cause_with_no_declared_message_…` |
+/// | `render_transition`'s `match t` | `Degraded` / `Restored` | both by `each_declared_cause_names_what_broke_…`, which renders each declared key both ways |
+/// | `render_transition`'s `match text` | declared line / no-row line | `every_declared_cause_key_has_a_screen_message` / `a_cause_with_no_declared_message_…`, whose assertions also carry the no-row line's log path and its call to action |
 /// | `recovery_detection_is_off` | screen `Some` / `None`, and off / on | `a_screen_level_that_admits_info_…` / `with_no_screen_branch_…` |
 ///
 /// Each row's directions were confirmed by mutation — narrow the arm, watch the
 /// named test go red, restore — not by reading the code and agreeing with it.
+/// One caveat belongs with that sentence rather than in a reader's head: a
+/// mutation is only evidence when it can be aimed at ONE direction. `tick`'s
+/// elapsed measurement took three tries to mutate honestly, because `Instant`'s
+/// plain `-` saturates exactly as `saturating_duration_since` does and
+/// reversing its operands breaks fifteen tests at once; only "treat a
+/// not-yet-opened window as due" isolates the row.
 #[cfg(test)]
 mod tests {
     use super::*;
