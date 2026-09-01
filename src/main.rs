@@ -5402,14 +5402,14 @@ async fn prepare_headless(
         },
         None => (MagiConfig::default(), Vec::new()),
     };
-    // The same `config::resolution_notices` the TUI classifies as `info`: an honoured setting
+    // The same `config::resolution_notices` the TUI announces: mostly an honoured setting
     // explaining what it does and does not cover. Printing them raw put five lines on the
     // screen of every headless startup, which is what SC-L14 says must not happen.
     //
     // **Split by mouth, and each half announced where that mouth exists.** Announcing the
     // whole list HERE destroyed it: no subscriber is installed yet, so `emit_notices` takes
-    // its fallback and applies the screen policy, which drops every `info` — and every one of
-    // these is `info`, so a completely successful headless run filed none of them. Carrying
+    // its fallback and applies the screen policy, which drops every `info` — and nearly all
+    // of these are `info`, so a completely successful headless run filed none of them. Carrying
     // the whole list DOWN to the post-layer emission fixes that and breaks the other end:
     // seven paths return between here and there, and each would drop the list, which is the
     // defect `bring_up_headless_logging` was extracted to make unreachable, reintroduced
@@ -5419,9 +5419,10 @@ async fn prepare_headless(
     // those seven paths. The file-bound half rides down to the emission after the layer,
     // where there is a day's file to receive it.
     //
-    // Today the screen half is EMPTY, and the partition is what makes that a fact about the
-    // classification rather than a coincidence this site leans on: reclassify one of these
-    // upward and it starts being shown, instead of starting to be lost.
+    // The screen half is USUALLY empty and is no longer always so, which is the case this
+    // partition was built for: an embedder endpoint inherited from a root off this machine
+    // is a `warn` now, and it is shown here instead of being lost. That was written as a
+    // prediction while the half could not be reached; it is a description now.
     let (cfg_screen, cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
     emit_notices(cfg_screen);
 

@@ -2126,7 +2126,8 @@ base_url = "http://embedder-host:11434/v1"
     // Task 2: load + resolution tests
     // -------------------------------------------------------------------------
     // Task 1.4: `load` takes a FILE path now, not a directory, and returns `Result<(Self,
-    // Vec<String>), ConfigError>`.
+    // Vec<Notice>), ConfigError>` — the notices carry their own level, so the tests below read
+    // `n.text` rather than the string the list used to hold.
 
     /// SC-A21b: an absent `magi.toml` stays a silent default — no error, no degradation.
     #[test]
