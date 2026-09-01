@@ -6989,6 +6989,9 @@ mod tests {
     /// nothing about the other `eprintln!`s in this file: those announce typed vault,
     /// workspace and I/O errors, none of which carry a resolved `base_url`, and putting
     /// them in scope would make the rule an allowlist of exemptions instead of a rule.
+    ///
+    /// **Both limitations were live**, and rule 5 below is what closes them for the one
+    /// region where they mattered most.
     #[test]
     fn no_fatal_error_is_announced_outside_the_audit_route() {
         // Split so this guard's own needles are not the strings it forbids.
@@ -7029,6 +7032,137 @@ mod tests {
             unrouted.is_empty(),
             "a fatal error is announced by something other than the audited route, so a \
              credential in it would reach stderr and CI logs unmasked: {unrouted:#?}"
+        );
+    }
+
+    /// Every top-level function in `text`, as `(name, body)`.
+    ///
+    /// A top-level item begins at column 0 and its body ends at the first line that is
+    /// exactly `}`. That is not a guess about formatting: `cargo fmt --check` runs before
+    /// every commit, so the shape is a property the gate holds rather than a convention a
+    /// future edit can quietly break.
+    ///
+    /// # Parameters
+    ///
+    /// * `text` — production source with whole-line comments already removed.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `text`.
+    fn top_level_fn_bodies(text: &str) -> Vec<(String, String)> {
+        /// The name of the top-level function `line` opens, if it opens one.
+        fn opens_fn(line: &str) -> Option<String> {
+            if line.starts_with(char::is_whitespace) {
+                return None;
+            }
+            let head = line
+                .strip_prefix("pub(crate) ")
+                .or_else(|| line.strip_prefix("pub "))
+                .unwrap_or(line);
+            let head = head.strip_prefix("async ").unwrap_or(head);
+            let rest = head.strip_prefix("fn ")?;
+            Some(
+                rest.chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect(),
+            )
+        }
+
+        let mut out = Vec::new();
+        let mut open: Option<(String, Vec<&str>)> = None;
+        for line in text.lines() {
+            match open.as_mut() {
+                Some((_, body)) => {
+                    body.push(line);
+                    if line == "}" {
+                        if let Some((name, body)) = open.take() {
+                            out.push((name, body.join("\n")));
+                        }
+                    }
+                }
+                None => {
+                    if let Some(name) = opens_fn(line) {
+                        open = Some((name, vec![line]));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// **Rule 5 of the class: the function that brings the audit route up writes through it.**
+    ///
+    /// Two reviewers found the same four announcements independently, and rules 3 and 4 had
+    /// both read past them. The reasons are different and both are worth writing down.
+    ///
+    /// **Rule 3 scopes by FILE.** `mouth_bindings` collects identifiers typed
+    /// `&mut dyn Write`; `main.rs` declares none, so `mouths.is_empty()` returns before any
+    /// needle runs and every statement in the file is out of scope. That is the limitation
+    /// rule 3 documents, and this is what it cost.
+    ///
+    /// **Rule 4 scopes by STATEMENT**, on two funnel anchors, so a piece carrying neither is
+    /// skipped. It is worse than that: `collapsed_pieces` splits on a bare `;` with no idea
+    /// of string literals, so the `;` inside `"…: {e}; the run continues"` cut one of these
+    /// announcements into a piece that could not have carried an anchor at all.
+    ///
+    /// # The property, which is not a list of sites
+    ///
+    /// A function that calls `init_logging` installs the very subsystem every other output is
+    /// required to pass through. If IT writes to a file descriptor directly, the route it just
+    /// built has a hole in it at the one place that cannot claim not to have known. So the
+    /// unit is the whole body of any top-level function that calls `init_logging`, with **no
+    /// exemptions inside it** — an exemption is what turns a rule into an allowlist, which is
+    /// the failure rule 4 names in its own limitations. It covers surfaces that do not exist
+    /// yet: a third one that brings logging up is in scope the moment it is written.
+    ///
+    /// The declaring function is excluded by NAME rather than by qualifying the needle:
+    /// anchoring on `logging::init_logging(` would let a future in-crate caller writing the
+    /// unqualified call escape the rule entirely.
+    ///
+    /// # Why the in-scope set is asserted too
+    ///
+    /// A scan that finds nothing passes, and this project's most common defect is a guardian
+    /// that cannot fail. Renaming `init_logging`, or a `}` appearing at column 0 inside a raw
+    /// string, would empty the scope and leave the assertion below green over an unexamined
+    /// tree. Naming the two surfaces is what makes the silence detectable.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A raw write in a function that does not bring logging up. Rules 3 and 4 hold those,
+    /// each with its own scope, and the three are deliberately not merged: one predicate wide
+    /// enough to cover all of them would also cover `run_vault_subcommand`'s `println!`, which
+    /// is a CLI mouth by design and not a leak.
+    #[test]
+    fn the_logging_bring_up_writes_through_the_audit_route() {
+        // Split so this guard's own needles are not the strings it forbids.
+        let raw_stdout = concat!("println", "!");
+        let brings_up = concat!("init_", "logging(");
+
+        let mut in_scope = Vec::new();
+        let mut offenders = Vec::new();
+        for (path, text) in &production_sources() {
+            for (name, body) in top_level_fn_bodies(&code_lines_only(text)) {
+                if name == "init_logging" || !body.contains(brings_up) {
+                    continue;
+                }
+                in_scope.push(name.clone());
+                for line in body.lines().filter(|l| l.contains(raw_stdout)) {
+                    offenders.push(format!("{path}: {name}: {}", line.trim()));
+                }
+            }
+        }
+
+        in_scope.sort();
+        assert_eq!(
+            in_scope,
+            vec!["bring_up_headless_logging".to_string(), "run".to_string()],
+            "the scan must see both surfaces that bring logging up; a different set means it \
+             is green over a tree it did not read"
+        );
+        assert!(
+            offenders.is_empty(),
+            "the function that installs the audit route writes straight to a file descriptor, \
+             so the route it just built has a hole in it: {offenders:#?}"
         );
     }
 
