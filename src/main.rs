@@ -1860,10 +1860,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         // rolling hash is still registered and still covered by the pattern
         // pass, but the operator deserves to know which one got the weaker of
         // the two.
-        startup_notices.push(Notice::warn(format!(
-            "WARNING: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
-            short.as_str()
-        )));
+        startup_notices.push(short_secret_notice(short));
     }
     // Task 4.1: replaces `resolve_provider`/`legacy_backend_label` — the vocabulary is
     // unified now, so there is nothing left to normalize a raw `ProviderKind` onto.
@@ -4661,6 +4658,36 @@ fn openai_provider_info(base_url: &str, model: &str) -> String {
     )
 }
 
+/// The warning a credential too short for the auditor's exact pass earns.
+///
+/// # Parameters
+///
+/// * `name` — the vault entry or environment variable whose value was too short.
+///
+/// # Returns
+///
+/// A `WARN` [`Notice`]. The credential is still registered and still covered by the pattern
+/// pass; what it lost is the exact pass, which is the stronger of the two, and only the
+/// operator can decide whether that matters for the value they chose.
+///
+/// # Why both surfaces call this instead of composing their own
+///
+/// They composed their own, and the two drifted the way two copies of one sentence always
+/// do. The TUI pushed a `Notice::warn` that the layer routes by level; headless wrote its
+/// own line straight to stderr — outside the notice list, outside the audit route, and
+/// therefore out of the day's file, so the surface a CI job reads was the one that kept no
+/// record of it. One sentence, one level, one delivery.
+///
+/// # Complexity
+///
+/// `O(n)` over the composed text.
+fn short_secret_notice(name: magi_rs::logging::auditor::SecretName) -> Notice {
+    Notice::warn(format!(
+        "WARNING: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
+        name.as_str()
+    ))
+}
+
 /// The Anthropic startup banner, at the level the situation it describes deserves.
 ///
 /// # Parameters
@@ -6529,6 +6556,52 @@ mod tests {
              whose `magi.toml` did not parse, which has no notices to lose. Found {returns}, \
              so some other early failure now shows nothing"
         );
+    }
+
+    /// Both surfaces say the short-credential warning the same way, through the same route.
+    ///
+    /// The TUI pushed a `Notice::warn` and headless wrote its own `eprintln!`. Same fact,
+    /// two sentences, and only one of them reached the notice list — so on the surface a CI
+    /// job actually reads, the warning never went through `emit_notices` and never reached
+    /// the day's file. The count is asserted per surface rather than over the file, so a
+    /// half-finished move leaves one surface at zero and fails here.
+    #[test]
+    fn both_surfaces_warn_about_a_short_credential_the_same_way() {
+        let short =
+            short_secret_notice(magi_rs::logging::auditor::SecretName::new("OPENAI_API_KEY"));
+        assert_eq!(
+            short.level,
+            tracing::Level::WARN,
+            "a credential that got only the weaker protection is a degradation the operator \
+             has to see"
+        );
+        assert!(
+            short.text.contains("OPENAI_API_KEY"),
+            "the warning must name which credential it is about: {}",
+            short.text
+        );
+
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        for surface in ["async fn run(", "async fn prepare_headless("] {
+            let start = production
+                .find(surface)
+                .unwrap_or_else(|| panic!("{surface} is gone; this check needs updating"));
+            let body = production.get(start..).unwrap_or("");
+            let end = body
+                .get(1..)
+                .and_then(|rest| rest.find("\nasync fn "))
+                .map_or(body.len(), |i| i + 1);
+            let body = body.get(..end).unwrap_or(body);
+            assert!(
+                body.contains("short_secret_notice("),
+                "{surface} composes its own short-credential warning, so the two surfaces \
+                 can say different things about one fact -- and the one that does not go \
+                 through the notice list never reaches the log file either"
+            );
+        }
     }
 
     #[test]
