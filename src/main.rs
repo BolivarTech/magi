@@ -3121,8 +3121,8 @@ fn push_divergence_notice(cfg: &MagiConfig, inference_active: bool, notices: &mu
     }
 }
 
-/// Normalizes an Ollama root to the OpenAI-compat shape (`…/v1`), idempotent, **and warns when
-/// it had to touch something**.
+/// Normalizes an Ollama root to the OpenAI-compat shape (`…/v1`), idempotent, **and says so
+/// when it had to touch something**.
 ///
 /// **It is no longer needed to make the URL work, and is kept anyway.** It was written when
 /// `OllamaProvider` was out of the path (D-A07) and nothing else normalized, so a `base_url =
@@ -3133,11 +3133,19 @@ fn push_divergence_notice(cfg: &MagiConfig, inference_active: bool, notices: &mu
 /// behaviour change (R-R04), which is the same objection that made it return the notice instead
 /// of normalizing quietly in the first place.
 ///
+/// **It reports, it does not warn**, and the verb matters now that the level decides the mouth:
+/// the caller files this at `info`, so under REQ-L19 it goes to the day's file and never to the
+/// screen. Nothing here stopped working — a setting is being honoured and explained, which is
+/// row 2 of task 3.1's table. Reading the old "warns" and reclassifying to match would put a
+/// line on the screen of every default Ollama startup, which is what SC-L14 forbids.
+///
 /// **The returned `root` and the notice text do NOT share the same URL** (fix round 2,
 /// C1, REQ-A16c path #2): `base_url` here is already the RESOLVED endpoint — post placeholder
 /// substitution — so it may carry a real credential. The `root` needs it intact (it is what
-/// builds the HTTP client); the notice is text that ends up in the TUI startup list and in
-/// headless stderr, so it goes through [`redact_url`] before being interpolated. Two uses, two
+/// builds the HTTP client); the notice is text that ends up in the startup list of both
+/// surfaces and, through it, in the day's log file, so it goes through [`redact_url`] before
+/// being interpolated — a redaction that matters MORE now that the destination is a file
+/// someone keeps rather than a stderr someone skims. Two uses, two
 /// rules — hence the function builds the notice from `normalized` but redacts a COPY for the
 /// text, instead of redacting `normalized` in place.
 fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
@@ -4137,9 +4145,12 @@ fn build_magi_orchestrator(
     for (seat, provider, lineage, model) in seats {
         // REQ-R28/SC-R56: the probe and the completions provider are declared APART, so keeping
         // them pointed at the same model is the caller's job. magi-core checks it too and warns —
-        // but through `tracing::warn!`, and magi-rs has no subscriber, so that event is emitted
-        // into the void. The comparison is ours to make and costs nothing: both names are in hand
-        // here, and it is a string equality with no I/O.
+        // through `tracing::warn!`, which since MS2 magi-rs DOES subscribe to, so that event now
+        // reaches the day's file. It still does not reach the startup notice list, which is what
+        // this comparison is for: the crate's warning is filed under the crate's target and says
+        // nothing about which SEAT is mis-pointed, and a seat is what an operator can fix. The
+        // comparison is ours to make and costs nothing: both names are in hand here, and it is a
+        // string equality with no I/O.
         //
         // It NEVER rejects, for the same reason the crate does not: a probe is not authoritative
         // over which model a provider serves. But a mis-pointed probe files the window under
