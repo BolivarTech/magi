@@ -1618,8 +1618,12 @@ mod tests {
         // (`duration_since` has, since Rust 1.60), so swapping the two changes
         // nothing and no test could go red on it. What the module was missing
         // is a tick placed BEFORE a pending's `since` at all: every other one
-        // here is at or past its deadline, so a `tick` that treated a
-        // not-yet-opened window as due passed the whole module. That is the
+        // here is at or past that `since` -- not necessarily at or past the
+        // DEADLINE, which is a different and stronger claim that
+        // `tick_steps_over_a_pending_that_is_not_due_and_emits_one_that_is`
+        // already falsifies, ticking at `t0 + 31 s` while the `stuck`
+        // pending's window runs from `t0 + 20 s` to `t0 + 50 s`. So a `tick`
+        // that treated a not-yet-opened window as due passed the whole module. That is the
         // mutation this test answers, and it is the only one that does.
         //
         // A monotonic `Instant` does not walk backwards on its own, but the
