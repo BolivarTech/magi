@@ -87,14 +87,58 @@ impl NoticeTranscript {
         }
     }
 
-    /// Puts one finished line in the transcript.
+    /// Audits one finished line, then puts it — and any alarm it raised — in
+    /// the transcript.
+    ///
+    /// **The audit is HERE, at the boundary, and not only upstream** (MS2 gate
+    /// S4 finding 1). REQ-L48's mechanism is that every sink takes an
+    /// [`Audited`](magi_rs::logging::auditor::Audited), so handing one a raw
+    /// `String` does not compile — and a `&str` written to an `io::Write` is
+    /// the one shape that escapes it. This writer is exactly that shape, and
+    /// what it writes into is worse than a screen: in Selection mode `y` copies
+    /// a message to the system CLIPBOARD, so a credential reaching the
+    /// transcript is exfiltration rather than a corrupted frame.
+    ///
+    /// The one producer today ([`emit_notices_into`]) audits before it writes,
+    /// so this is a second pass over already-masked text and finds nothing —
+    /// which is the point: it costs a scan of a startup line and it does not
+    /// depend on a caller in another crate keeping a promise. Nothing here is
+    /// static; a startup notice carries a resolved `base_url`, an error chain
+    /// or a vault entry name.
+    ///
+    /// **The alarm travels with the masking — both, never one.** Its target is
+    /// this writer's own, so an alarm the producer already raised at ITS target
+    /// is not swallowed by the latch: if a value reached the clipboard, that is
+    /// a second place worth naming. The loop terminates by the auditor's own
+    /// bookkeeping — `alarm` latches `(secret, target)` and the target is fixed
+    /// here, so each pass must find a secret not yet latched at it, and the
+    /// registered set is finite.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k*n)` — the auditor's, over one line.
+    fn line(&self, text: String) {
+        let auditor = magi_rs::logging::process_auditor();
+        let (audited, alarm) = auditor.audit(&text, TRANSCRIPT_TARGET, None, NO_RESERVATION);
+        self.deliver(audited.as_str().to_string());
+        let mut pending = alarm;
+        while let Some(raised) = pending {
+            let rendered = magi_rs::logging::auditor::render_alarm(&raised);
+            let (audited_alarm, next) =
+                auditor.audit(&rendered, TRANSCRIPT_TARGET, None, NO_RESERVATION);
+            self.deliver(audited_alarm.as_str().to_string());
+            pending = next;
+        }
+    }
+
+    /// Sends one already-audited line down the response channel.
     ///
     /// `try_send` cannot fail in practice at the one call site: this runs
     /// before `run_app`, so the receiver is alive and the 100-slot channel is
     /// empty. If it ever did, `stderr` is still correct HERE and only here —
     /// the alternate screen is not up yet — so the line is degraded to the
     /// mouth it would have had, never dropped.
-    fn line(&self, text: String) {
+    fn deliver(&self, text: String) {
         if let Err(mpsc::error::TrySendError::Full(AgentResponse::Notice(text)))
         | Err(mpsc::error::TrySendError::Closed(AgentResponse::Notice(text))) =
             self.tx.try_send(AgentResponse::Notice(text))
@@ -103,6 +147,17 @@ impl NoticeTranscript {
         }
     }
 }
+
+/// Where an alarm raised by [`NoticeTranscript`]'s own audit says it happened.
+///
+/// Its own, not the producer's: the latch is keyed by `(secret, target)`, so
+/// sharing a target with `emit_notices_into` would silence the alarm that says
+/// the value also reached a surface the user can copy out of.
+const TRANSCRIPT_TARGET: &str = "magi_rs::tui::transcript";
+
+/// What a transcript line reserves on the log queue: nothing. It never goes
+/// near one — the transcript is a screen.
+const NO_RESERVATION: usize = 0;
 
 impl io::Write for NoticeTranscript {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
