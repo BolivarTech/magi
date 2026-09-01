@@ -177,7 +177,25 @@ impl HealthTracker {
         if state.shown.is_none() && candidate.is_some() {
             let transition = Transition::Degraded(cause);
             state.shown = candidate;
-            // Already shown, not pending: nothing left to wait on.
+            // **A structural no-op, kept as a statement of the invariant.**
+            // Reaching this arm with a pending is unreachable, and the proof is
+            // short enough to write down: a pending is only ever created in the
+            // final arm below, which needs `candidate != shown` and NOT
+            // (`shown.is_none() && candidate.is_some()`) -- and since
+            // `candidate != shown`, a `shown` of `None` forces `candidate` to be
+            // `Some`, which is this arm. So a pending exists only while `shown`
+            // is `Some`. `shown` returns to `None` only in `tick` and `flush`,
+            // and both `take()` the pending in the same step without putting it
+            // back. Hence `shown.is_none()` implies `pending.is_none()`, which
+            // is exactly this arm's guard.
+            //
+            // It is therefore deletable with the suite green, and deleting it is
+            // still the wrong move: what the line says is that an immediate
+            // emission leaves nothing waiting. Were the arm ever widened -- a
+            // second immediate case, a `shown` written somewhere else -- the
+            // reader would need that decided here, and an absent line decides
+            // nothing. A test cannot hold this down either: no input reaches the
+            // arm with a pending, so any test would pass with or without it.
             state.pending = None;
             return Some(transition);
         }
