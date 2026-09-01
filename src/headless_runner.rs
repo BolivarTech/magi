@@ -310,12 +310,35 @@ async fn analyze_direct(
     // timeout_below_formula` already reports in the JSON (REQ-A11d covers the
     // pipeline consumer; this covers whoever runs the command by hand).
     if let Some(w) = &runtime.timeout_decision.warning {
-        let (audited, _) = runtime
+        let (audited, alarm) = runtime
             .auditor
             .audit(w, NOTICE_TARGET, None, NO_RESERVATION);
         runtime
             .notice_sink
             .once(NOTICE_TIMEOUT_BELOW_FORMULA, &audited);
+        // Masking and the alarm that says masking happened travel together —
+        // both, never one (REQ-L50). The same shape `notices::emit_notices_into`
+        // uses, for the same reason: the alarm is ROUTED, not merely rendered.
+        // `render_alarm` promises not to quote the secret, but it does
+        // interpolate a secret's NAME, and a name is operator-chosen — nothing
+        // stops one from being another secret's value.
+        //
+        // The chain terminates by the auditor's own bookkeeping rather than a
+        // cap: `Auditor::alarm` latches `(secret, target)`, the target is
+        // `NOTICE_TARGET` on every pass, so each turn must find a secret not yet
+        // latched there and the registered set is finite. The alarm goes out
+        // through `emit`, not `once`, because the auditor has already
+        // deduplicated it.
+        let mut pending = alarm;
+        while let Some(raised) = pending {
+            let rendered = magi_rs::logging::auditor::render_alarm(&raised);
+            let (audited_alarm, next) =
+                runtime
+                    .auditor
+                    .audit(&rendered, NOTICE_TARGET, None, NO_RESERVATION);
+            runtime.notice_sink.emit(&audited_alarm);
+            pending = next;
+        }
     }
 
     // SC-A11c: the SAME `check_query_size` the tool path and the TUI's explicit
