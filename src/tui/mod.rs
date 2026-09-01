@@ -4287,6 +4287,53 @@ mod tests {
         );
     }
 
+    /// MS2 gate S4, finding 2: the deferred notices are flushed only once the
+    /// event loop has been joined.
+    ///
+    /// `flush` is a ONE-WAY switch: it swaps `PendingNotices` to `Flushed`, and
+    /// every fallback that observes that state prints for itself instead of
+    /// queueing. Run before `join_event_loop_then_drain`, it throws that switch
+    /// while the event-loop task — and `on_session_close` behind it — are still
+    /// live and can still defer, so part of the session's notices come back
+    /// from this call and the rest print themselves from whichever task
+    /// noticed, scattered through the gate-telemetry block. After the join
+    /// there is nothing left running that defers, so one call collects the lot
+    /// and prints it ahead of the telemetry.
+    ///
+    /// Both statements are still after `LeaveAlternateScreen`, which is the
+    /// safety rule; this is the completeness one. The residual is named: the
+    /// `tokio::spawn`ed waiter [`TuiNoticeSink::route`] starts on a full
+    /// channel is not joined by anything, so a notice can still arrive after
+    /// the flush — it then prints itself, correctly, on a terminal that has
+    /// already been restored.
+    ///
+    /// **Maintenance note:** the needles are a structural dependency on the
+    /// exact spelling of `classifier_notices.flush()` and
+    /// `join_event_loop_then_drain(`; renaming either is a change to this test.
+    #[test]
+    fn test_the_deferred_notices_are_flushed_after_the_event_loop_is_joined() {
+        let source = source_without_comment_lines();
+        let start = source
+            .find("\npub async fn run_tui_ext(")
+            .expect("run_tui_ext must still bring the terminal up");
+        let end = source[start..]
+            .find("\nfn report_gate_telemetry")
+            .map(|offset| start + offset)
+            .expect("the item after run_tui_ext must still bound its body");
+        let body = &source[start..end];
+        let joined = body
+            .find("join_event_loop_then_drain(")
+            .expect("the event loop must still be joined before the session ends");
+        let flushed = body
+            .find("classifier_notices.flush()")
+            .expect("the deferred notices must still be flushed");
+        assert!(
+            joined < flushed,
+            "flushing first throws the one-way `Flushed` switch while the event loop can \
+             still defer, so the session's notices come out in two places instead of one"
+        );
+    }
+
     /// R15: the event loop is what expires the health window while the user is
     /// looking at the screen.
     ///
