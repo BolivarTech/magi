@@ -7764,27 +7764,44 @@ mod tests {
     /// multi-line needle later cannot quietly reintroduce the trap. The forbidden call is
     /// composed with `concat!` so this guard cannot match its own source and pass for free.
     ///
-    /// **It looks for a LINE, not for a spelling, and two mutations are why.** The first
-    /// version forbade the exact call text and went green against a mutation that announced
-    /// a `.clone()` of the list and handed the original on — the defect, one method call
-    /// past the needle. Widening it to end at the argument name then went green against the
-    /// other announcing function, the one taking an explicit fallback, whose name breaks the
-    /// needle in a different place. Both misses are the same mistake: a literal needle is a
-    /// guess about how the next author will spell it. So the rule is a PAIRING: no line of
-    /// this file may name the notice list and an announcing function at once, which holds
-    /// however that function is named. Its cost is a false positive if some future line
-    /// legitimately does both; it fails loudly and prints the line, so that is cheap.
+    /// **It looks for a PAIRING, not for a spelling, and three mutations are why.** The
+    /// first version forbade the exact call text and went green against a mutation that
+    /// announced a `.clone()` of the list and handed the original on — the defect, one
+    /// method call past the needle. Widening it to end at the argument name then went green
+    /// against the other announcing function, the one taking an explicit fallback, whose
+    /// name breaks the needle in a different place. Both misses are the same mistake: a
+    /// literal needle is a guess about how the next author will spell it. So the rule is a
+    /// PAIRING: nothing here may name the notice list and an announcing function at once,
+    /// which holds however that function is named.
+    ///
+    /// **The third mutation is why the unit is a STATEMENT and no longer a LINE.** Scanning
+    /// `lines()` asks the pairing to fit on one, and rustfmt puts a long call on three:
+    /// `emit_notices(` on the first, `startup_notices,` on the second, `);` on the third —
+    /// neither line carries both tokens, and the announcement the guard exists to forbid
+    /// walks past it. Splitting on `;{}` and collapsing whitespace makes the multi-line
+    /// spelling and the one-line spelling the same string, so the guard cannot be evaded by
+    /// where the formatter happens to break.
+    ///
+    /// Restricted to the PRODUCTION half for the same reason its siblings in this file are:
+    /// a test may legitimately build a notice list and announce it, and the guard is about
+    /// what `run()` does. Its cost is a false positive if some future production statement
+    /// legitimately does both; it fails loudly and prints the statement, so that is cheap.
     #[test]
     fn the_startup_notices_are_handed_to_the_tui_rather_than_announced_early() {
         let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
         // Both tokens are split across `concat!` so the two lines below do not
         // themselves carry the pairing they forbid. Written out, this guard
-        // matches its own body and fails on a clean tree.
+        // matches its own body — which the production split already excludes,
+        // but the split is one `expect` away from a rename and this is not.
         let list = concat!("startup_", "notices");
         let announcing = concat!("emit", "_");
-        let announced_here: Vec<&str> = source
-            .lines()
-            .filter(|line| line.contains(list) && line.contains(announcing))
+        let announced_here: Vec<String> = production
+            .split([';', '{', '}'])
+            .map(|stmt| stmt.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|stmt| stmt.contains(list) && stmt.contains(announcing))
             .collect();
         assert!(
             announced_here.is_empty(),
