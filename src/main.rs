@@ -6444,6 +6444,25 @@ mod tests {
     /// a real newline matches on one machine and not the next. Every needle here is
     /// written with escapes.
     ///
+    /// # What the three rules built on this catch, and the one they do not
+    ///
+    /// Verified by evasion rather than by reading: each known instance of the class was
+    /// reintroduced into the tree and the guards were run against it.
+    ///
+    /// * A raw `writeln!` to the last-resort mouth — caught by the mouth rule.
+    /// * A freshly built, empty auditor on a notice path — caught by the auditor rule.
+    /// * An audit of composed text that drops its alarm, in the notice fallback and in the
+    ///   headless timeout warning — caught by the alarm rule.
+    /// * **An alarm latched as delivered before a submission that can refuse it — NOT
+    ///   caught, and no source-text rule can catch it.** That defect was an empty
+    ///   `settle_alarm` body: the call site was present and correctly placed, so nothing
+    ///   about the text of either file distinguished the broken version from the fixed
+    ///   one. It is held instead by `logging::magi_layer::tests::
+    ///   a_refused_alarm_gives_its_latch_back`, which drives the outcome through the
+    ///   function and is red the moment the body stops retracting. A behavioural property
+    ///   needs a behavioural test; recording the boundary here is what stops the next
+    ///   reader from assuming this family covers the whole class.
+    ///
     /// # Returns
     ///
     /// One entry per file, in directory-walk order. A file with no test module contributes
