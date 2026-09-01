@@ -1288,12 +1288,20 @@ mod tests {
 
     #[test]
     fn a_quiet_subsystem_is_untouched_while_another_ones_window_elapses() {
-        // The mixed-state vector. Every other test here drives ONE subsystem at
-        // a time or drives both the same way, so nothing pins that `tick` and
-        // `flush` -- which both walk the whole `states` vector -- pick out the
-        // subsystem that has something to say and step over the one that does
-        // not. Getting that wrong invents a transition for a subsystem whose
-        // state never changed.
+        // The mixed-state vector, in the one shape no other test arranges: an
+        // entry with NO pending sitting ahead of an entry whose pending goes on
+        // to elapse. Other tests here do drive two subsystems differently --
+        // `tick_steps_over_a_pending_that_is_not_due_and_emits_one_that_is`
+        // gives both a pending and staggers their deadlines,
+        // `flush_order_is_first_observed_even_when_the_first_event_was_healthy`
+        // opens one with a success, `tick_returns_none_when_every_subsystem_is_
+        // quiet` leaves one healthy and one degraded -- but in none of them
+        // does the walk pass an empty entry on its way to a full one.
+        //
+        // That is what pins `tick` and `flush`, which both walk the whole
+        // `states` vector, picking out the subsystem that has something to say
+        // and stepping over the one that does not. Getting it wrong invents a
+        // transition for a subsystem whose state never changed.
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
         let quiet = CauseKey::new("provider", "unreachable");
@@ -1350,16 +1358,19 @@ mod tests {
         // The empty direction of `tick`'s pending arm, in both of its shapes:
         // no subsystem at all, and subsystems that exist with nothing waiting.
         //
-        // The second shape is NOT unique here and this comment used to claim it
-        // was: `a_flapping_service_shows_one_degradation_and_nothing_more`,
-        // `alternating_between_two_failing_causes_is_not_a_recovery` and
-        // `a_clock_jump_produces_no_false_transitions` all tick a tracker whose
-        // pending has been discarded or already emitted. What only this test
-        // does is tick an EMPTY `states` -- where the walk has no entry to visit
-        // at all, so a `tick` that answered out of the loop rather than out of a
-        // pending would be caught nowhere else -- and tick an entry whose
-        // `shown` is HEALTHY and settled, which every other quiet tick above
-        // reaches with a degraded `shown` instead.
+        // The second shape is NOT unique here, and this comment has twice
+        // claimed a uniqueness it did not have -- first for the shape itself,
+        // then for a healthy-and-settled `shown`, which
+        // `a_quiet_subsystem_is_untouched_while_another_ones_window_elapses`
+        // and `tick_emits_due_pendings_one_per_call_in_first_observed_order`
+        // both reach on their trailing ticks, after an emission has put
+        // `shown` back to `None`. Plenty of tests above tick a settled
+        // tracker, in both `shown` states.
+        //
+        // What is left is one thing and it is worth the test: only here is
+        // `tick` called on an EMPTY `states`. The walk then has no entry to
+        // visit at all, so a `tick` answering out of the loop rather than out
+        // of a pending would be caught nowhere else in the module.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
@@ -1530,9 +1541,11 @@ mod tests {
     fn flush_order_is_first_observed_even_when_the_first_event_was_healthy() {
         // `states` is ordered by first OBSERVATION, not by first degradation,
         // and the two only disagree when some subsystem's first event is a
-        // success -- which no other test arranges. Without this, an
-        // implementation that pushed an entry on first FAILURE would satisfy
-        // every other ordering assertion in the module.
+        // success. `tick_returns_none_when_every_subsystem_is_quiet` opens with
+        // one of those too, so what is unique here is not the arrangement but
+        // the ASSERTION: this is the only test that then checks an ORDER over
+        // it. Without it, an implementation that pushed an entry on first
+        // FAILURE would satisfy every other ordering assertion in the module.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let seen_first = CauseKey::new("provider", "unreachable");
@@ -1599,9 +1612,13 @@ mod tests {
     /// uninstrumented rows (`provider`/`unreachable`, `vault`/`locked`) are
     /// absent from `CauseKey::ALL` by design. A third such row added there and
     /// forgotten here would leave every test green. That direction is
-    /// reviewable — the two tables sit forty lines apart and read as a pair —
-    /// and review is all it is; saying "visible as an omission" implied a
-    /// machine was looking.
+    /// reviewable — both tables are in this file, `screen_messages` above the
+    /// test module and this one inside it, so a reviewer editing either has the
+    /// other in the same buffer — and review is all it is; saying "visible as
+    /// an omission" implied a machine was looking, and "forty lines apart"
+    /// implied a glance would do it. They are a thousand lines apart, and the
+    /// pairing is a rule someone has to remember rather than a layout that
+    /// enforces itself.
     fn declared_messages() -> Vec<(CauseKey, &'static str, &'static str)> {
         vec![
             (
