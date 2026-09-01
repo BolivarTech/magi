@@ -5320,14 +5320,25 @@ async fn prepare_headless(
     // explaining what it does and does not cover. Printing them raw put five lines on the
     // screen of every headless startup, which is what SC-L14 says must not happen.
     //
-    // **Announced HERE and not carried down to the emission below**, even though down there
-    // the layer would be up and they would reach the file. Seven paths return between this
-    // line and that one, and every one of them would drop the list — which is the defect this
-    // round is closing in `bring_up_headless_logging`, and reintroducing it three hundred
-    // lines earlier is not a trade. With no subscriber yet, `emit_notices` applies the screen
-    // policy on its own: these are `info`, so nothing is shown, and if one is ever
-    // reclassified upward it starts being shown instead of starting to be lost.
-    emit_notices(cfg_notices.into_iter().map(Notice::info).collect());
+    // **Split by mouth, and each half announced where that mouth exists.** Announcing the
+    // whole list HERE destroyed it: no subscriber is installed yet, so `emit_notices` takes
+    // its fallback and applies the screen policy, which drops every `info` — and every one of
+    // these is `info`, so a completely successful headless run filed none of them. Carrying
+    // the whole list DOWN to the post-layer emission fixes that and breaks the other end:
+    // seven paths return between here and there, and each would drop the list, which is the
+    // defect `bring_up_headless_logging` was extracted to make unreachable, reintroduced
+    // three hundred lines earlier. Neither is a trade worth making, so neither is made.
+    //
+    // The screen-bound half goes now, where the fallback still reaches a user on every one of
+    // those seven paths. The file-bound half rides down to the emission after the layer,
+    // where there is a day's file to receive it.
+    //
+    // Today the screen half is EMPTY, and the partition is what makes that a fact about the
+    // classification rather than a coincidence this site leans on: reclassify one of these
+    // upward and it starts being shown, instead of starting to be lost.
+    let (cfg_screen, cfg_file) =
+        magi_rs::notices::partition_by_mouth(cfg_notices.into_iter().map(Notice::info));
+    emit_notices(cfg_screen);
 
     // Resolved BEFORE reading input so the effective `max_input_bytes` (an
     // operator-lowered `[headless]` cap, spec §11) governs the read itself
@@ -5649,6 +5660,11 @@ async fn prepare_headless(
     // through `tracing` now, so emitting them before `init_logging` would put every one of
     // them into a subscriber that does not exist yet. The trio is built long before the log
     // directory is resolved, so the list waits here instead.
+    //
+    // The configuration notices' file-bound half joins them: it was collected three hundred
+    // lines up, where its destination did not exist yet, and this is the first point at which
+    // it does. Its screen-bound half was already announced back there — see that site.
+    trio_notices.extend(cfg_file);
     emit_notices(trio_notices);
     // Only now: the bring-up's own error already printed its reason, and this keeps the
     // context that led up to it from being thrown away with the run.

@@ -232,8 +232,7 @@ pub fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write
 /// `O(n)`.
 #[must_use]
 pub fn partition_by_mouth(notices: impl IntoIterator<Item = Notice>) -> (Vec<Notice>, Vec<Notice>) {
-    let _ = notices;
-    (Vec::new(), Vec::new())
+    notices.into_iter().partition(|n| n.level <= SCREEN_LEVEL)
 }
 
 /// The level at and above which a notice reaches a human.
