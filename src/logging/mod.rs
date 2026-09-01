@@ -588,7 +588,7 @@ pub fn init_logging(
         // the file one because `sink` is a screen: doubling a backslash here
         // would show a path nobody can paste.
         //
-        // The alarm is dropped because the text above is a literal with no
+        // The alarm is dropped because the text below is a literal with no
         // interpolation, so there is nothing in it for the passes to find.
         // **Anyone who interpolates a path or an error into it owes the
         // forwarding** that `Reporter::announce` does.
