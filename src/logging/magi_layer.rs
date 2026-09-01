@@ -617,7 +617,22 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         //
         // The clone is not new cost: the file branch used to clone for its own
         // submission, and now moves instead.
-        let for_screen = audited.clone();
+        //
+        // **Made only when the screen branch will take it.** It used to be
+        // unconditional, which meant a full copy of every audited line for a
+        // branch that may not be wired at all — the headless surface wires
+        // none — and, when it is, for the `INFO` and below that
+        // [`SCREEN_LEVEL`] never admits. The predicate is exactly the one the
+        // delivery below applies, so nothing about WHAT reaches a screen
+        // changes.
+        //
+        // [`SCREEN_LEVEL`]: crate::logging::SCREEN_LEVEL
+        let level = *event.metadata().level();
+        let for_screen = self
+            .tui
+            .as_ref()
+            .is_some_and(|(_, tui_level)| level <= *tui_level)
+            .then(|| audited.clone());
         let escaped = audited.map_line(escape_for_line);
         // **What is reserved is what the writer will release.** `map_line`
         // above recomputed the measure from the escaped text -- which is what
@@ -626,7 +641,6 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         // else here would reserve one number and release another, which is the
         // leak that made the byte budget a lifetime quota.
         let reserved = escaped.reserved_len();
-        let level = *event.metadata().level();
 
         // **Health is observed here: after the audit, before the fan-out.**
         // This is the only point that sees EVERY event, including the ones the
@@ -651,18 +665,20 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
                 reserved,
             ));
         }
-        if let Some((tui, tui_level)) = self.tui.as_ref() {
-            if level <= *tui_level {
-                // **`reserved` above stays the FILE branch's measure** and is
-                // deliberately not recomputed here: it is what the appender's
-                // accounting reserves and what its writer gives back, and the
-                // screen queues nothing.
-                tui.sink.deliver(
-                    &for_screen
-                        .map_line(escape_for_screen)
-                        .truncate_for_display(TUI_PAYLOAD_MAX_BYTES),
-                );
-            }
+        // The level test lives in the copy above, so `for_screen` is `Some`
+        // only on the events that pass it; the `tui` arm here is just how the
+        // sink is reached, not a second decision.
+        //
+        // **`reserved` above stays the FILE branch's measure** and is
+        // deliberately not recomputed here: it is what the appender's
+        // accounting reserves and what its writer gives back, and the screen
+        // queues nothing.
+        if let (Some(for_screen), Some((tui, _))) = (for_screen, self.tui.as_ref()) {
+            tui.sink.deliver(
+                &for_screen
+                    .map_line(escape_for_screen)
+                    .truncate_for_display(TUI_PAYLOAD_MAX_BYTES),
+            );
         }
         if let Some(alarm) = alarm {
             // The alarm consults NO filter: exemption is from the filters, not
