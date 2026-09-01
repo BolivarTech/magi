@@ -51,6 +51,14 @@ directory itself is there to search, both assertions defer to
 directory that does not exist at all is judged differently: that is not an
 absent notice, it is nothing having been written to disk this run, and it
 fails.
+
+**Which is also why a missing run id silences one half and not both.** Absent
+evidence is what defers an assertion, and the two halves do not rest on the
+same evidence: the log search needs the id, because the directory is shared;
+the screen assertion reads the run's own capture. So a marker found ON stderr
+fails the first assertion whether or not an id was published -- there is
+nothing left for a log line to add. Only the vacuity case above still needs
+the id, and it keeps deferring.
 """
 
 from smoke import logs
@@ -84,8 +92,10 @@ def a_clean_startup_shows_nothing_on_screen(run):
 
     The log half is bound to this run's own id, so a marker left behind by an
     earlier run against the persistent environment cannot answer for one that
-    never wrote it. Without a run id there is nothing to bind to, and both
-    assertions defer rather than judge on a shared directory.
+    never wrote it. Without a run id the log half has nothing to bind to and
+    defers; the screen half defers only when the marker is absent, because
+    that is the case a log line would have had to disambiguate. A marker
+    sitting ON stderr is a leak the capture proves by itself.
 
     Complexity: ``O(bytes in the log directory)``.
 
@@ -108,12 +118,26 @@ def a_clean_startup_shows_nothing_on_screen(run):
     run_id = (logs.id_on_stderr(run.output.stderr)
               or logs.id_in_envelope(run.output))
     if run_id is None:
-        for text in ASSERTIONS:
-            yield Finding(text, Outcome.CANNOT_TEST,
-                          "run %s published no run id on stderr or in its JSON "
-                          "envelope, so its own log line cannot be told apart "
-                          "from an earlier run's in the shared log directory"
-                          % RUN_ID, RUN_ID)
+        # **Only the half that needs the id is silenced.** The log search is
+        # the half that does: the directory is shared, so without an id there
+        # is nothing to tell this run's line from an earlier one's. The screen
+        # half is answered by the run's own capture -- if the marker IS on
+        # stderr, that is a leak fully observed, and deferring it would hide a
+        # FAIL behind evidence it never needed. What still defers is the
+        # VACUITY case: with the marker on neither surface, a compliant build
+        # and one whose memory subsystem never attached look identical from
+        # stderr alone, and the log is what separates them.
+        no_id = ("run %s published no run id on stderr or in its JSON "
+                 "envelope, so its own log line cannot be told apart from an "
+                 "earlier run's in the shared log directory" % RUN_ID)
+        if on_screen:
+            yield _screen_finding(on_screen)
+        else:
+            yield Finding(ASSERTIONS[0], Outcome.CANNOT_TEST,
+                          "%s -- and the marker is on neither surface, so a "
+                          "quiet screen cannot be told from a run that never "
+                          "produced the notice" % no_id, RUN_ID)
+        yield Finding(ASSERTIONS[1], Outcome.CANNOT_TEST, no_id, RUN_ID)
         return
 
     found, dir_existed, unreadable = logs.scan(_marker_matcher(run_id))
