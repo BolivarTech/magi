@@ -2261,6 +2261,53 @@ where
     }
 }
 
+/// Puts one [`AgentResponse`] into the transcript.
+///
+/// Extracted from `run_app`'s drain loop for the same reason as
+/// [`consult_unavailable_response`] and [`handle_login`]: the loop around it
+/// needs a live terminal, so the decision each arm makes cannot be observed
+/// where it was written. What each arm does with the text is a decision — most
+/// of all whether the text is audited first.
+///
+/// # Parameters
+///
+/// * `app` — the transcript the line lands in.
+/// * `response` — one message drained from the agent's response channel.
+///
+/// # Complexity
+///
+/// `O(n)` in the response's own length.
+fn apply_response(app: &mut App, response: AgentResponse) {
+    match response {
+        AgentResponse::StreamDelta(delta) => app.append_stream_delta(delta),
+        // Mode-aware: verbose streams the text; compact (default) raises a
+        // "thinking…" indicator without showing the chain-of-thought.
+        AgentResponse::ReasoningDelta(delta) => app.on_reasoning(delta),
+        AgentResponse::Text(t) => {
+            if t.is_empty() {
+                app.finalize_stream();
+            } else {
+                app.push_message(format!("Magi Agent: {}", t));
+            }
+        }
+        AgentResponse::Error(e) => {
+            app.finalize_stream();
+            app.push_message(format!("Error: {}", e));
+        }
+        AgentResponse::Info(i) => {
+            app.finalize_stream();
+            app.push_message(format!("System: {}", i));
+        }
+        AgentResponse::Notice(n) => {
+            // Operational notices (memory warnings, truncation advisories) do
+            // not end a streamed turn — the assistant is still responding.
+            // Rendered with the ⚠ prefix and dimmed/yellow styling in
+            // Normal mode so they are visually distinct from model output.
+            app.push_notice(n);
+        }
+    }
+}
+
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -2281,34 +2328,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
         }
 
         while let Ok(response) = app.response_rx.try_recv() {
-            match response {
-                AgentResponse::StreamDelta(delta) => app.append_stream_delta(delta),
-                // Mode-aware: verbose streams the text; compact (default) raises a
-                // "thinking…" indicator without showing the chain-of-thought.
-                AgentResponse::ReasoningDelta(delta) => app.on_reasoning(delta),
-                AgentResponse::Text(t) => {
-                    if t.is_empty() {
-                        app.finalize_stream();
-                    } else {
-                        app.push_message(format!("Magi Agent: {}", t));
-                    }
-                }
-                AgentResponse::Error(e) => {
-                    app.finalize_stream();
-                    app.push_message(format!("Error: {}", e));
-                }
-                AgentResponse::Info(i) => {
-                    app.finalize_stream();
-                    app.push_message(format!("System: {}", i));
-                }
-                AgentResponse::Notice(n) => {
-                    // Operational notices (memory warnings, truncation advisories) do
-                    // not end a streamed turn — the assistant is still responding.
-                    // Rendered with the ⚠ prefix and dimmed/yellow styling in
-                    // Normal mode so they are visually distinct from model output.
-                    app.push_notice(n);
-                }
-            }
+            apply_response(&mut app, response);
         }
 
         while let Ok(req) = app.approval_rx.try_recv() {
@@ -4157,6 +4177,114 @@ mod tests {
                 .any(|s| s.trim() == format!("app.status_row = {row}")),
             "the renderer's `App` is not handed `{row}`, so whatever the `/consult` arm \
              sets is drawn by nobody (REQ-L25)"
+        );
+    }
+
+    /// A fresh [`App`] with nothing in its transcript.
+    ///
+    /// The two sender halves are dropped here, which closes those channels —
+    /// harmless for a caller that drives [`apply_response`] directly instead of
+    /// sending, and the reason this helper is not a general-purpose one.
+    fn empty_app() -> App {
+        let (event_tx, _events) = mpsc::channel(1);
+        let (_responses, response_rx) = mpsc::channel(1);
+        let (_approvals, approval_rx) = mpsc::channel(1);
+        App::new(event_tx, response_rx, approval_rx)
+    }
+
+    /// The credential a real provider failure puts on the wire, in the shape
+    /// the producer actually composes it.
+    ///
+    /// `connection_error_hint` (`src/agent/provider.rs`) interpolates the
+    /// provider's RESOLVED `base_url` — the one `src/magi/endpoint.rs` built by
+    /// substituting the `[user]`/`[password]` placeholders out of the vault
+    /// (REQ-A16c) — straight into prose, and `OpenAiCompatibleProvider` attaches
+    /// that as `anyhow` context to every connection failure. Driving the guard
+    /// through the producer rather than a hand-written string is the difference
+    /// between pinning the leak and pinning a literal: if that text ever stops
+    /// carrying the endpoint, this stops testing anything and should be deleted
+    /// rather than kept green.
+    fn provider_error_carrying_a_credential() -> String {
+        crate::agent::provider::connection_error_hint(
+            "http://smoke:hunter2@ollama.internal:11434/v1",
+        )
+    }
+
+    /// **The transcript is CLIPBOARD-copyable, so an unaudited line in it is
+    /// exfiltration rather than a formatting problem** (MS2 gate S4 second
+    /// pass, Caspar). In Selection mode `y` copies a whole message to the system
+    /// clipboard, and Visual mode copies any slice of one.
+    ///
+    /// [`NoticeTranscript::line`] already audits at this boundary and says why:
+    /// REQ-L48's mechanism is that a sink takes an `Audited`, so a `String`
+    /// handed to something that is not a sink escapes it. `run_app`'s drain loop
+    /// is a second such escape, and the routes are not decorative — the `Error`
+    /// arm carries `Agent::query_streaming`'s `anyhow` chain, whose innermost
+    /// context is `connection_error_hint`'s resolved `base_url` and whose next
+    /// layer is the provider's verbatim HTTP error body (`src/agent/provider.rs`
+    /// composes both). Neither is redacted on the way here.
+    ///
+    /// Driven through [`apply_response`] rather than through the arm's `format!`
+    /// in isolation, because the property is that the line the TRANSCRIPT ends
+    /// up holding is masked — a helper agreeing with itself proves nothing about
+    /// what `App::messages` contains.
+    #[test]
+    fn test_an_error_reaching_the_transcript_is_audited() {
+        let mut app = empty_app();
+        apply_response(
+            &mut app,
+            AgentResponse::Error(provider_error_carrying_a_credential()),
+        );
+        let shown = app.messages.join("\n");
+        assert!(
+            !shown.contains("hunter2"),
+            "a provider error put a vault-resolved credential in the clipboard-copyable \
+             transcript: {shown}"
+        );
+    }
+
+    /// The `Info` route, same boundary and same reason.
+    ///
+    /// It looks the safer of the two and is not: `/login` sends the vault's own
+    /// error text through it (`handle_login`), and the `/consult` arm sends
+    /// `tui_consult_dispatch_notice`. Both are composed at runtime out of values
+    /// this crate did not author.
+    #[test]
+    fn test_an_info_line_reaching_the_transcript_is_audited() {
+        let mut app = empty_app();
+        apply_response(
+            &mut app,
+            AgentResponse::Info(provider_error_carrying_a_credential()),
+        );
+        let shown = app.messages.join("\n");
+        assert!(
+            !shown.contains("hunter2"),
+            "a system line put a vault-resolved credential in the clipboard-copyable \
+             transcript: {shown}"
+        );
+    }
+
+    /// The `Notice` route, which is the one that looks already covered.
+    ///
+    /// Most of its producers hand over text the auditor has already masked —
+    /// [`TuiNoticeSink`] only ever routes an `Audited`. Two do not:
+    /// `consult_panic_notice` renders a foreign `tokio::task::JoinError`, and
+    /// `StreamPiece::Notice` carries whatever the agent composed. Exempting the
+    /// arm would mean re-deciding, every time a producer is added, whether it
+    /// belongs to the audited majority — so the arm audits like its two
+    /// siblings, and a second pass over already-masked text finds nothing.
+    #[test]
+    fn test_a_notice_reaching_the_transcript_is_audited() {
+        let mut app = empty_app();
+        apply_response(
+            &mut app,
+            AgentResponse::Notice(provider_error_carrying_a_credential()),
+        );
+        let shown = app.messages.join("\n");
+        assert!(
+            !shown.contains("hunter2"),
+            "a notice put a vault-resolved credential in the clipboard-copyable \
+             transcript: {shown}"
         );
     }
 
