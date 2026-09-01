@@ -613,6 +613,161 @@ mod tests {
     }
 
     #[test]
+    fn a_revert_discards_the_pending_transition_instead_of_letting_it_elapse() {
+        // R-L13d's discard half. A revert to the state already on screen is
+        // not merely "no news": it must DROP the transition that was serving
+        // its window, or that transition survives and a later `tick` emits a
+        // change the subsystem has since undone.
+        //
+        // The flapping test above cannot see this: it ticks at 20 s, before
+        // any of its cancelled windows could have elapsed. The tick here is
+        // deliberately placed PAST the discarded recovery's original window.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let c = CauseKey::new("embedder", "http_error");
+
+        assert!(matches!(
+            h.observe(Some(c), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        // A recovery starts serving its window at t0 + 1 s.
+        let recovered_at = t0 + Duration::from_secs(1);
+        assert!(
+            h.observe(Some(c), true, recovered_at).is_none(),
+            "a recovery is never immediate: it serves the window"
+        );
+        // The subsystem fails again before that window elapses, reverting to
+        // the state already shown. That discards the pending recovery.
+        assert!(
+            h.observe(Some(c), false, t0 + Duration::from_secs(2))
+                .is_none(),
+            "reverting to the shown state is not news"
+        );
+
+        // The subsystem stays degraded from here on, so nothing may come out
+        // at the discarded recovery's own deadline...
+        assert!(
+            h.tick(recovered_at + w).is_none(),
+            "the discarded recovery must not surface at its original deadline"
+        );
+        // ...nor at any point after it.
+        assert!(
+            h.tick(recovered_at + w + w).is_none(),
+            "and it must not surface later either: it was discarded, not delayed"
+        );
+    }
+
+    #[test]
+    fn repeating_a_pending_candidate_runs_its_window_from_the_first_observation() {
+        // The keep-original-`since` half of the same rule. A candidate that is
+        // already pending must not restart its window every time the same
+        // state is observed again: a subsystem that keeps reporting success
+        // once a second would then never reach its deadline, and the recovery
+        // would never be shown at all.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let c = CauseKey::new("embedder", "http_error");
+
+        assert!(matches!(
+            h.observe(Some(c), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+
+        // The recovery's window starts at this first observation of it.
+        let first_seen = t0 + Duration::from_secs(1);
+        assert!(h.observe(Some(c), true, first_seen).is_none(), "pending");
+
+        // The same candidate again, once a second, all of it well inside the
+        // window. Every one of these takes the keep-original-`since` arm.
+        for i in 1..HEALTH_MIN_STABLE_SECS {
+            assert!(
+                h.observe(Some(c), true, first_seen + Duration::from_secs(i))
+                    .is_none(),
+                "still the same candidate: nothing to show yet"
+            );
+        }
+
+        // At FIRST observation + window it must emit. Were the window
+        // restarted on each observation, `since` would be the last of them and
+        // this tick would land a whole window early with nothing to give.
+        assert!(
+            matches!(h.tick(first_seen + w), Some(Transition::Restored(_))),
+            "the window runs from the first observation of the candidate, \
+             not from the most recent one"
+        );
+    }
+
+    #[test]
+    fn a_degradation_after_a_shown_recovery_is_immediate_again() {
+        // The immediacy rule of SC-L71 is not a once-per-process privilege: it
+        // is a property of a subsystem that is currently healthy. Once a
+        // recovery has actually been SHOWN the subsystem is healthy again, so
+        // the next degradation is once more a first degradation.
+        //
+        // This also pins what the emission itself did to `shown`, which no
+        // other test continues past a `tick` far enough to see.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let c = CauseKey::new("embedder", "http_error");
+
+        assert!(matches!(
+            h.observe(Some(c), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        let recovered_at = t0 + Duration::from_secs(1);
+        assert!(h.observe(Some(c), true, recovered_at).is_none(), "pending");
+        assert!(
+            matches!(h.tick(recovered_at + w), Some(Transition::Restored(_))),
+            "the recovery reaches the screen once its window elapses"
+        );
+
+        // Emitting it is what moved `shown` back to healthy, so a further
+        // success is now the state already on screen and says nothing.
+        let after = recovered_at + w + Duration::from_secs(1);
+        assert!(
+            h.observe(Some(c), true, after).is_none(),
+            "after the recovery was shown, staying healthy is not news"
+        );
+        // And therefore the next degradation is a first degradation.
+        assert!(
+            matches!(
+                h.observe(Some(c), false, after + Duration::from_secs(1)),
+                Some(Transition::Degraded(_))
+            ),
+            "the immediacy rule re-arms: a healthy subsystem's degradation is \
+             immediate however many times it has already been through one"
+        );
+    }
+
+    #[test]
+    fn a_flushed_recovery_leaves_the_subsystem_healthy() {
+        // `flush`'s counterpart to the test above: it writes `shown` too, and
+        // nothing else looks at the tracker after a flush has emitted.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let c = CauseKey::new("embedder", "http_error");
+
+        assert!(matches!(
+            h.observe(Some(c), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(h
+            .observe(Some(c), true, t0 + Duration::from_secs(1))
+            .is_none());
+        assert!(matches!(h.flush().as_slice(), [Transition::Restored(_)]));
+
+        // Flushed, so the subsystem is healthy: the next degradation is
+        // immediate rather than windowed.
+        assert!(matches!(
+            h.observe(Some(c), false, t0 + Duration::from_secs(2)),
+            Some(Transition::Degraded(_))
+        ));
+    }
+
+    #[test]
     fn an_event_without_a_cause_key_is_ignored_rather_than_keyed_off_its_text() {
         let mut h = HealthTracker::new();
         assert!(h.observe(None, false, Instant::now()).is_none());
