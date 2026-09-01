@@ -1618,6 +1618,78 @@ mod tests {
         );
     }
 
+    /// A secret with NO recognisable shape, and the canary depends on that.
+    ///
+    /// A key-shaped value, or one sitting in a URL authority, is masked by pass
+    /// 1 alone — so a canary built from one stays green against an auditor that
+    /// knows nothing this process registered, which is precisely the defect
+    /// this gate found six times in six files. Only registration finds this
+    /// one, so only the exact pass can produce a green here.
+    const SHAPELESS: &str = "wooden table lamp shade";
+
+    #[test]
+    fn the_alarm_the_file_mouth_writes_names_the_secret_and_never_its_value() {
+        // **The appender's alarm arm is the one write in this subsystem that
+        // reaches a mouth without passing the auditor**, and following it is
+        // what this test records. It is exempt by construction rather than by
+        // omission: what it writes is the auditor's OWN finding, whose type
+        // carries a `SecretName` and a target and nothing else (REQ-L50), and
+        // auditing it would mask the very name the alarm exists to publish.
+        //
+        // So the property is pinned from the outside instead: with a shapeless
+        // secret registered, the file mouth must end up holding the alarm, the
+        // name, and no occurrence of the value -- on the ordinary line or on
+        // the alarm line.
+        //
+        // Mutation-verified twice. Building the layer on a fresh
+        // `Auditor::new()` -- the six-times defect -- ships the value on the
+        // ordinary line; deleting the alarm submission from `on_event` leaves
+        // the masking done and unannounced, which is the auditor keeping half
+        // its contract.
+        assert!(
+            SHAPELESS.len() >= crate::logging::auditor::MIN_SECRET_BYTES,
+            "a value below the floor never enters the exact pass, so this \
+             would hold for free"
+        );
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let auditor = Arc::new(Auditor::new());
+        let name = SecretName::new("SHAPELESS_CANARY");
+        auditor.register_secret(name, &[SHAPELESS]);
+        let layer = MagiLayer::new(
+            FileSink::new(Arc::clone(&appender)),
+            crate::logging::filter::Filter::parse("info").expect("valid"),
+            Arc::clone(&auditor),
+            Arc::new(crate::logging::DiscardDelivery),
+        );
+
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "magi_rs::tests", "configured with {SHAPELESS}");
+        });
+
+        let written = wait_for_log(dir.path(), "SECURITY:");
+        assert!(
+            written.contains("configured with"),
+            "the fixture reached the file mouth not at all: {written:?}"
+        );
+        assert!(
+            written.contains("SECURITY:"),
+            "a value was masked and the file was never told: {written:?}"
+        );
+        assert!(
+            written.contains(name.as_str()),
+            "the alarm names no secret, so it sends a reader nowhere: \
+             {written:?}"
+        );
+        assert!(
+            !written.contains(SHAPELESS),
+            "the shapeless secret reached the file mouth: only the exact pass \
+             can catch this one, so this is the assertion that proves the \
+             auditor ran on this branch at all: {written:?}"
+        );
+    }
+
     #[test]
     fn the_submission_outcome_reaches_the_reporter_from_on_event() {
         // The RULE -- which outcome deserves which notice -- is pinned by

@@ -650,6 +650,18 @@ impl FileSink {
         let text = match item {
             Queued::Line(a) => a.as_str().to_string(),
             Queued::Alarm(x) => {
+                // **This is the one write in the subsystem that reaches a
+                // mouth without passing the auditor, and it is exempt by
+                // CONSTRUCTION rather than by omission.** What it renders is
+                // the auditor's own finding, whose type holds a `SecretName`
+                // and a target and nothing else (REQ-L50) -- so there is no
+                // runtime payload here to mask, and auditing it would mask the
+                // very name the alarm exists to publish. Anyone who widens
+                // `AuditExempt` to carry the offending line, or the value,
+                // takes that guarantee away and owes an audit at this site.
+                // Pinned from the outside by
+                // `magi_layer::tests::the_alarm_the_file_mouth_writes_names_the_secret_and_never_its_value`.
+                //
                 // **An alarm gets a header like any other line**, and it has to:
                 // without one it carries no timestamp, no level and no `run=`,
                 // so filtering the daily file by a run silently drops exactly
