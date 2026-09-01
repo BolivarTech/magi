@@ -482,6 +482,47 @@ pub(crate) fn recovery_detection_is_off(file_filter: &Filter, screen_level: Opti
     union < Level::INFO
 }
 
+/// Tests for the transition rules above.
+///
+/// # Every branching arm, both directions
+///
+/// Three review passes each found the next uncovered *direction* of the same
+/// kind of branch: one found two binding rules unguarded, the next the degraded
+/// half of one of them, the next the `Degraded` half of `flush`. That series
+/// does not converge by adding examples, so every arm in `observe`, `tick`,
+/// `flush` and `state_mut` that branches on the kind of a candidate or of a
+/// pending's target is tabulated here instead, with what holds each direction
+/// down.
+///
+/// A fourth pass then attacked the TABLE rather than the code and found it
+/// short a row — `tick`'s `shown` write, whose `Some` direction was mutatable
+/// with the whole module green while `flush`'s identical write had both
+/// directions pinned. The table was the evidence that the class was closed, so
+/// a missing row made the argument weaker than it read. Rows are therefore
+/// named after arms **in the code**, and adding one to `observe`, `tick` or
+/// `flush` means adding one here.
+///
+/// | Arm | Directions | Held down by |
+/// |---|---|---|
+/// | `observe`'s `cause?` | `None` / `Some` | `an_event_without_a_cause_key_is_ignored_…` / every other test below |
+/// | `candidate == shown` | revert / change | `a_revert_discards_the_pending_transition_…` / the rest |
+/// | first-degradation guard | taken / not taken | `the_first_degradation_is_immediate_…` / `emits_only_on_transition_…` |
+/// | its `debug_assert!` | holds / violated | unreachable through `observe`, proved at the line; violated direction driven through the private field by `the_immediate_arms_invariant_is_checked_…` |
+/// | `match candidate` class | `Restored` / `Degraded` | `emits_only_on_transition_…` / `alternating_between_two_failing_causes_…` |
+/// | keep-`since` | target `None` / target `Some` | `repeating_a_pending_candidate_…` / `a_repeating_new_cause_…` |
+/// | replace pending | none / `None`→`Some` / `Some`→`None` / `Some`→other `Some` | most tests / `a_cancelled_recovery_followed_by_a_cause_change_…` / `a_pending_cause_change_replaced_by_a_recovery_…` / `a_pending_cause_change_replaced_by_a_third_cause_…` |
+/// | `tick`'s `take` | `Some` / `None` | the tick tests / `tick_returns_none_when_every_subsystem_is_quiet` |
+/// | `tick`'s due check | emit / put back | both by `tick_steps_over_a_pending_that_is_not_due_…` |
+/// | `tick`'s walk | returns early / falls to `None` | `tick_emits_due_pendings_one_per_call_…` / `a_quiet_subsystem_is_untouched_…` |
+/// | **`tick`'s `shown` write** | target `None` / target `Some` | `a_degradation_after_a_shown_recovery_…` / `a_ticked_cause_change_leaves_the_subsystem_degraded_…` |
+/// | `flush`'s `take` | `Some` / `None` | `a_short_headless_run_flushes_a_pending_recovery` / `flushing_with_nothing_pending_…` |
+/// | `flush`'s `shown` write | target `None` / target `Some` | `a_flushed_recovery_leaves_the_subsystem_healthy` / `a_flushed_cause_change_leaves_the_subsystem_degraded_…` |
+/// | `state_mut` | found / appended | both by `state_mut_appends_an_unseen_subsystem_…` |
+/// | `screen_messages` | row / no row | `every_declared_cause_key_has_a_screen_message` / `a_cause_with_no_declared_message_…` |
+/// | `recovery_detection_is_off` | screen `Some` / `None`, and off / on | `a_screen_level_that_admits_info_…` / `with_no_screen_branch_…` |
+///
+/// Each row's directions were confirmed by mutation — narrow the arm, watch the
+/// named test go red, restore — not by reading the code and agreeing with it.
 #[cfg(test)]
 mod tests {
     use super::*;
