@@ -6,8 +6,17 @@
 //!
 //! # Why it lives in the LIB and not under `system/`/`tui/`
 //!
-//! It is pure: no I/O, no network, no state. `main.rs` consumes it to assemble the list of
-//! notices a startup announces, then hands the list to [`emit_notices`].
+//! Because both surfaces need it and neither owns it: `main.rs` assembles the list a startup
+//! announces and hands it to [`emit_notices`], and the TUI supplies its own mouth to
+//! [`emit_notices_into`]. Nothing here reaches the network or the filesystem, and no state is
+//! kept in the module.
+//!
+//! **It is not pure, and the sentence that used to say so was wrong.** [`emit_notices`] writes
+//! to `stderr`, [`emit_notices_into`] writes to whatever mouth it is handed, `announce` goes
+//! through the global `tracing` dispatcher, and `write_audited` reads the PROCESS auditor —
+//! shared, mutable, and deliberately so, because a second auditor is a second and emptier idea
+//! of what to mask. The part that really is pure is `ordered_for_emission`, which is why the
+//! order-and-dedup decision was split out of the emitting function in the first place.
 //!
 //! # One axis, not two (D-L11)
 //!
@@ -287,6 +296,18 @@ fn ordered_for_emission(notices: Vec<Notice>) -> Vec<Notice> {
     let mut sorted = notices;
     // `tracing::Level` orders ERROR < WARN < INFO, and `sort_by_key` is stable, so this is
     // "most severe first, discovery order within a level".
+    //
+    // **Its `Ord` is INVERTED relative to its discriminants, and reading only one of the two
+    // halves gives the opposite answer.** `LevelInner` is declared `Trace = 0 … Error = 4`, so
+    // the numbers ascend from trace to error; `impl Ord for Level` then compares
+    // `(other as usize).cmp(&(self as usize))` — operands swapped — so the ORDER ascends the
+    // other way. "Greater" means MORE VERBOSE, which is also why `<= SCREEN_LEVEL` selects the
+    // severe half and `> Level::WARN` reads as "informational, therefore a success".
+    //
+    // A reviewer has already asked for this sort and those comparisons to be reversed "to match
+    // standard `tracing::Level` ordering". Reversing them sends `ERROR` to the file and `INFO`
+    // to the screen. `tracing_level_orders_most_severe_first` asserts the ordering so the next
+    // reader can check it rather than take this paragraph on trust.
     sorted.sort_by_key(|n| n.level);
 
     let mut seen_text = HashSet::with_capacity(sorted.len());
