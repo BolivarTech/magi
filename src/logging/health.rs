@@ -603,14 +603,99 @@ mod tests {
                 .is_none(),
             "cancels it and leaves a cause change pending"
         );
+        // The tick is at the DISCARDED recovery's own deadline (it started
+        // serving at t0 + 5 s), which is the only instant that can tell a
+        // restarted window from an inherited one: had the replacement kept
+        // `since`, the cause change would come out here, a full window early.
         assert!(
-            h.tick(t0 + Duration::from_secs(15)).is_none(),
-            "the window restarted"
+            h.tick(t0 + Duration::from_secs(5 + HEALTH_MIN_STABLE_SECS))
+                .is_none(),
+            "the replacement restarted the window rather than inheriting the \
+             `since` of the pending it displaced"
         );
         let got = h.tick(t0 + Duration::from_secs(10 + HEALTH_MIN_STABLE_SECS));
         assert!(
             matches!(got, Some(Transition::Degraded(_))),
             "and once it elapses, it is a degradation"
+        );
+    }
+
+    #[test]
+    fn a_pending_cause_change_replaced_by_a_recovery_restarts_the_window() {
+        // The replacement arm again, with the kinds swapped. Above, a pending
+        // RECOVERY (`target == None`) was displaced by a cause change; here a
+        // pending CAUSE CHANGE (`target == Some`) is displaced by a recovery.
+        // It is one `match` arm but two directions, and a `since` reset that
+        // held for only one of them would leave the other emitting a window
+        // early -- with the test above still green.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let a = CauseKey::new("embedder", "http_error");
+        let b = CauseKey::new("embedder", "unreachable");
+
+        assert!(matches!(
+            h.observe(Some(a), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        let changed_at = t0 + Duration::from_secs(5);
+        assert!(
+            h.observe(Some(b), false, changed_at).is_none(),
+            "a cause change inside a degraded subsystem serves the window"
+        );
+        let recovered_at = t0 + Duration::from_secs(10);
+        assert!(
+            h.observe(Some(b), true, recovered_at).is_none(),
+            "the recovery displaces it and serves a window of its own"
+        );
+
+        assert!(
+            h.tick(changed_at + w).is_none(),
+            "nothing comes out at the displaced cause change's deadline: it \
+             was replaced, and the replacement started its own window"
+        );
+        let got = h.tick(recovered_at + w);
+        assert!(
+            matches!(got, Some(Transition::Restored(_))),
+            "and what elapses is the recovery, at its own deadline: {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_pending_cause_change_replaced_by_a_third_cause_restarts_the_window() {
+        // The last direction of that arm: both targets `Some`, which needs a
+        // THIRD cause. `one_endpoint_alternating_between_two_causes_shows_
+        // exactly_one_transition` cannot reach it -- alternating back to the
+        // cause already on screen takes the revert arm instead of this one --
+        // so with only two causes the `Some` -> `Some` replacement never runs.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let shown = CauseKey::new("embedder", "http_error");
+        let second = CauseKey::new("embedder", "unreachable");
+        let third = CauseKey::new("embedder", "http_500");
+
+        assert!(matches!(
+            h.observe(Some(shown), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        let second_at = t0 + Duration::from_secs(5);
+        assert!(h.observe(Some(second), false, second_at).is_none());
+        let third_at = t0 + Duration::from_secs(10);
+        assert!(
+            h.observe(Some(third), false, third_at).is_none(),
+            "a further cause change displaces the pending one"
+        );
+
+        assert!(
+            h.tick(second_at + w).is_none(),
+            "the displaced cause change does not surface at its own deadline"
+        );
+        let got = h.tick(third_at + w);
+        assert!(
+            matches!(got, Some(Transition::Degraded(k)) if k.cause() == third.cause()),
+            "and what comes out is the cause that replaced it, at the deadline \
+             its own arrival started: {got:?}"
         );
     }
 
