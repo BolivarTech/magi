@@ -4845,6 +4845,15 @@ mod tests {
     /// real newlines, because `include_str!` keeps CRLF while rustc normalises
     /// it inside a literal — the `\r` strip in
     /// [`source_without_comment_lines`] is the other half of that rule.
+    ///
+    /// **Two assertions, not three** (MS2 gate S4 second pass). A trailing
+    /// `loop_body.contains("health_tick(")` used to close this test and could
+    /// not fail: the `find` above already refuses to return unless the body
+    /// carries `handle.health_tick(`, so by the time that line ran its answer
+    /// was settled. A dead assertion inside a live guard is worse than no
+    /// assertion — it reads as a third thing being checked and inflates what the
+    /// guard appears to cover. What survives is the pair that can each go red
+    /// on their own: the call's position, and nothing skipping past it.
     #[test]
     fn test_the_event_loop_expires_the_health_window_on_every_pass() {
         let source = source_without_comment_lines();
@@ -4871,11 +4880,6 @@ mod tests {
             !loop_body[..ticks].contains("continue"),
             "a `continue` ahead of the tick lets a pass skip it, so the window stops \
              expiring exactly while the session is busy"
-        );
-        assert!(
-            loop_body.contains("health_tick("),
-            "the health window must be expired on every pass of the ratatui loop, or a \
-             recovery is only ever shown after the session it belongs to has ended"
         );
     }
 
