@@ -1393,6 +1393,55 @@ mod tests {
     }
 
     #[test]
+    fn a_poisoned_interning_cache_degrades_to_the_fallback_and_never_panics() {
+        // The `let Ok(mut guard) = cache.lock() else` in `intern` was the one
+        // degradation in this module with nothing driving it, so nothing said
+        // whether the subsystem survives a poisoned cache or takes the process
+        // down with it -- inside the layer that must never panic, on a path
+        // every cause-bearing event runs.
+        //
+        // **It degrades rather than recovering, unlike `HealthReporter::
+        // tracker`, and the asymmetry is not an oversight.** The tracker's
+        // state is structurally whole after a foreign panic; this cache's
+        // entries are `Box::leak`ed pointers, and handing back a fallback loses
+        // nothing but the deduplication. The cost is stated where it bites: for
+        // the rest of the run every cause value collapses onto one key, so the
+        // health tracker merges the subsystems that land on it -- the same
+        // consequence `MAX_INTERNED_CAUSE_VALUES` already documents for its own
+        // cap.
+        let dir = tempdir().unwrap();
+        let reporter = reporter_over(dir.path(), Arc::new(crate::logging::DiscardDelivery));
+        let cache: Arc<Mutex<Option<InternCache>>> = Arc::new(Mutex::new(None));
+
+        // Poisoned exactly as the health-tracker precedent does it: panic while
+        // holding the guard.
+        let poisoner = Arc::clone(&cache);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+        assert!(
+            cache.is_poisoned(),
+            "the fixture must actually poison the lock, or the assertion below \
+             holds for free"
+        );
+
+        const FALLBACK: &str = "poisoned-cache-fallback";
+        assert_eq!(
+            intern(
+                &cache,
+                "a-value-worth-interning",
+                FALLBACK,
+                usize::MAX,
+                &reporter
+            ),
+            FALLBACK,
+            "a poisoned cache must degrade, not panic inside the layer"
+        );
+    }
+
+    #[test]
     fn a_target_interns_to_the_same_static_instead_of_leaking_per_event() {
         let dir = tempdir().unwrap();
         let reporter = reporter_over(dir.path(), Arc::new(crate::logging::DiscardDelivery));
