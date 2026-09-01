@@ -425,13 +425,19 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    // Every `CauseKey` below pairs a real subsystem with a real cause of it.
+    // The state machine never consults the message table -- it keys on the
+    // subsystem half alone -- so a key whose two halves were the same string
+    // would still exercise it, but it would also assert that a "subsystem"
+    // named `embedder_http_500` is a thing this program has, which it is not.
+
     #[test]
     fn the_first_degradation_is_immediate_and_does_not_wait_for_the_window() {
         // SC-L71: making the first "something broke" notice wait 30 s turns
         // the anti-flapping defence into a delay on the signal that matters
         // most.
         let mut h = HealthTracker::new();
-        let c = CauseKey::new("embedder_http_500", "embedder_http_500");
+        let c = CauseKey::new("embedder", "http_error");
         assert!(matches!(
             h.observe(Some(c), false, Instant::now()),
             Some(Transition::Degraded(_))
@@ -443,7 +449,7 @@ mod tests {
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
-        let c = CauseKey::new("embedder_http_500", "embedder_http_500");
+        let c = CauseKey::new("embedder", "http_error");
         assert!(matches!(
             h.observe(Some(c), false, t0),
             Some(Transition::Degraded(_))
@@ -472,7 +478,7 @@ mod tests {
         // twelve occurrences.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
-        let c = CauseKey::new("flapping_endpoint", "flapping_endpoint");
+        let c = CauseKey::new("embedder", "unreachable");
         assert!(matches!(
             h.observe(Some(c), false, t0),
             Some(Transition::Degraded(_))
@@ -940,10 +946,19 @@ mod tests {
         );
         // Part 3 -- where to read more: the exact path passed in, not merely
         // something ending in ".log".
+        //
+        // The needle is what `Path::display` MAKES of the path, never the
+        // literal it was built from: `render_transition` renders through
+        // `display`, and comparing against the literal asserts on top of that
+        // rendering being an identity. It is one today for a path built from a
+        // `/`-separated literal, so this assertion has been passing on Windows
+        // by coincidence rather than by construction -- and the coincidence
+        // ends the moment `A_LOG_PATH` is assembled with `join` instead.
+        let rendered_path = path.display().to_string();
         assert!(
-            line.contains(A_LOG_PATH),
+            line.contains(&rendered_path),
             "REQ-L23 part 3 (where to read more) does not carry the log path \
-             actually passed in: {line}"
+             actually passed in ({rendered_path}): {line}"
         );
 
         // Part 3 must survive the trip to the screen. `TUI_PAYLOAD_MAX_BYTES`
@@ -1095,7 +1110,7 @@ mod tests {
     #[test]
     fn a_clock_jump_produces_no_false_transitions() {
         let mut h = HealthTracker::new();
-        let c = CauseKey::new("cause", "cause");
+        let c = CauseKey::new("embedder", "unreachable");
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
         let t1 = t0 + Duration::from_secs(60 * 60 * 24 * 60); // sixty days later
