@@ -734,6 +734,49 @@ mod tests {
     }
 
     #[test]
+    fn the_installed_layer_publishes_its_hint_as_the_global_level_filter() {
+        // The hint's VALUE is pinned next door, in
+        // `magi_layer::tests::the_level_hint_is_the_maximum_of_both_branches`.
+        // What nothing pinned is that it ARRIVES: `tracing` reads
+        // `Layer::max_level_hint` once, at installation, and publishes it as
+        // `LevelFilter::current()` — which is what every `event!` callsite in
+        // this binary AND in every dependency consults before it builds
+        // anything at all. Without the hint reaching there, `current()` stays
+        // at `TRACE`, every callsite in the tree is enabled, and the whole
+        // reason the static hint exists is paid for and not collected.
+        //
+        // Mutation-verified: with `max_level_hint` deleted from the `Layer`
+        // impl this reads `TRACE` instead of `WARN`.
+        //
+        // Isolated by `cargo nextest`'s one-process-per-test model — the
+        // global subscriber and its published filter are process-wide.
+        use tracing::level_filters::LevelFilter;
+        assert_ne!(
+            LevelFilter::current(),
+            LevelFilter::WARN,
+            "the fixture starts at the level it means to prove was installed, \
+             so the assertion below would hold for free"
+        );
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cfg = LoggingConfig {
+            log_dir: dir.path().to_path_buf(),
+            // Chosen because it is neither the uninstalled default nor the
+            // filter's own default: only the installed hint can produce it.
+            file_filter: filter::Filter::parse("warn").expect("valid"),
+        };
+        let _handle = init_logging(&cfg, std::sync::Arc::new(DiscardDelivery), None)
+            .expect("the subsystem comes up");
+
+        assert_eq!(
+            LevelFilter::current(),
+            LevelFilter::WARN,
+            "the layer's hint never reached the global filter, so every \
+             callsite in the dependency tree is still enabled"
+        );
+    }
+
+    #[test]
     fn the_first_event_names_the_command_and_the_workspace() {
         // REQ-L63's third piece. A reader who opens the file cold has to be
         // able to tell what produced these lines.
