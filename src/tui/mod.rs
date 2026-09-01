@@ -4004,14 +4004,63 @@ mod tests {
     ///
     /// * `text` — production source, already stripped of `\r` and of whole-line
     ///   comments.
+    /// * `seps` — what ends a piece. `[';', '{', '}']` gives one statement per
+    ///   piece; `[';']` alone keeps a block's opening line joined to what
+    ///   follows it, which is what a guard needs when the property is that ONE
+    ///   expression feeds another. It is also the only choice that survives a
+    ///   needle containing `{}` of its own — an inline format argument, say —
+    ///   since splitting on braces would cut the needle in half before the
+    ///   comparison ever happened.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `text`.
+    fn collapsed_pieces(text: &str, seps: &[char]) -> Vec<String> {
+        text.split(seps)
+            .map(|piece| piece.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// [`collapsed_pieces`] cut at every statement boundary.
     ///
     /// # Complexity
     ///
     /// `O(n)` over `text`.
     fn collapsed_statements(text: &str) -> Vec<String> {
-        text.split([';', '{', '}'])
-            .map(|piece| piece.split_whitespace().collect::<Vec<_>>().join(" "))
-            .collect()
+        collapsed_pieces(text, &[';', '{', '}'])
+    }
+
+    /// The body of the `impl` block that starts with `header`.
+    ///
+    /// # Parameters
+    ///
+    /// * `source` — production source, already stripped of `\r` and of
+    ///   whole-line comments.
+    /// * `header` — the `impl` line, written with a leading `\n` so it matches
+    ///   at column zero only.
+    ///
+    /// # Returns
+    ///
+    /// Everything up to the block's closing brace, which is the first `}` back
+    /// at column zero. Bounding a guard this way is what stops it reading a
+    /// spelling out of a neighbouring impl and reporting a wiring that is not
+    /// there.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `source`.
+    fn impl_body<'a>(source: &'a str, header: &str) -> &'a str {
+        let start = source
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` must still exist in production"));
+        let rest = source
+            .get(start + header.len()..)
+            .expect("the offset came from `find`, so it is a boundary");
+        let end = rest
+            .find("\n}")
+            .unwrap_or_else(|| panic!("`{header}` must still be a closed block"));
+        rest.get(..end)
+            .expect("the offset came from `find`, so it is a boundary")
     }
 
     /// The identifier a `let` statement binds, if it binds one.
@@ -4108,6 +4157,44 @@ mod tests {
                 .any(|s| s.trim() == format!("app.status_row = {row}")),
             "the renderer's `App` is not handed `{row}`, so whatever the `/consult` arm \
              sets is drawn by nobody (REQ-L25)"
+        );
+    }
+
+    /// **`Drop` is the sink's last mouth, and nothing pinned that it opens it.**
+    /// `a_notice_raised_before_attach_is_never_silently_dropped` proves what
+    /// [`TuiNoticeSink::flush`] RETURNS; the loop that writes those strings is a
+    /// separate statement, and deleting it leaves every one of the sink's tests
+    /// green. What is lost then is the case the destructor exists for: a `run()`
+    /// that returns before `run_tui_ext` ever attaches a channel, where the
+    /// queue holds a real degradation and no alternate screen was entered — the
+    /// notice would be flushed into a `Vec` and dropped on the floor, which is
+    /// silence, which is B9.
+    ///
+    /// # Why a needle and not a behavioural test
+    ///
+    /// The effect is a write to the process's own `stderr` from inside a
+    /// destructor. Stable Rust has no supported way to capture that — the
+    /// sibling `ProcessNoticeSink` keeps a `#[cfg(test)]` mirror for exactly
+    /// this reason and says so — and a mirror added here would be a seam this
+    /// guard invented for itself, proving that the seam was called rather than
+    /// that anything reached the terminal. The needle asserts the one thing
+    /// still worth asserting: that what `flush` hands back is what gets printed,
+    /// as ONE expression, so a loop over some other collection does not read as
+    /// compliant.
+    ///
+    /// Split on `;` alone rather than on braces, because the needle carries an
+    /// inline format argument and splitting on `{` would cut it in half.
+    #[test]
+    fn test_the_sink_drop_prints_every_flushed_notice() {
+        let source = production_source();
+        let body = impl_body(&source, "\nimpl Drop for TuiNoticeSink {");
+        let pieces = collapsed_pieces(body, &[';']);
+        let needle = "for msg in self.flush() { eprintln!(\"{msg}\")";
+        assert!(
+            pieces.iter().any(|p| p.contains(needle)),
+            "`TuiNoticeSink`'s destructor no longer prints what it flushes, so a notice \
+             deferred on a path that never reaches the TUI is swallowed instead of \
+             reaching stderr; expected a statement carrying `{needle}`, body was: {body}"
         );
     }
 
