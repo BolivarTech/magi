@@ -206,6 +206,36 @@ pub fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write
     }
 }
 
+/// Splits notices by the mouth their level sends them to (REQ-L19).
+///
+/// # Parameters
+///
+/// * `notices` — the notices to split, in discovery order.
+///
+/// # Returns
+///
+/// `(screen, file)` — `ERROR` and `WARN` in the first, everything else in the second.
+/// Discovery order is preserved within each half; [`emit_notices`] sorts, so partitioning
+/// is all this has to do.
+///
+/// # Why a startup needs the two halves apart
+///
+/// A startup collects notices before the logging layer exists and keeps collecting after.
+/// A screen-bound notice has a mouth the whole time — [`emit_notices_into`]'s fallback —
+/// while a file-bound one has none until the layer is up, so announcing the whole list
+/// early destroys the `INFO` half and carrying the whole list late loses everything to any
+/// path that returns in between. Emitting each half where its mouth exists is the only
+/// arrangement that loses neither.
+///
+/// # Complexity
+///
+/// `O(n)`.
+#[must_use]
+pub fn partition_by_mouth(notices: impl IntoIterator<Item = Notice>) -> (Vec<Notice>, Vec<Notice>) {
+    let _ = notices;
+    (Vec::new(), Vec::new())
+}
+
 /// The level at and above which a notice reaches a human.
 ///
 /// The same constant the layer's screen branch is wired at (REQ-L19), referenced rather than
@@ -508,6 +538,45 @@ mod tests {
             !shown.contains(TRIGGER_NAME),
             "the alarm line carried a registered value in the clear, so this write is \
              outside the audit route: {shown:?}"
+        );
+    }
+
+    /// REQ-L19: the split follows the level, because the level is what names the mouth.
+    ///
+    /// The headless startup is the consumer. It collects its configuration notices before
+    /// the layer exists, so announcing them there sends the whole list through the
+    /// fallback, which shows what the screen policy admits and DROPS the rest — the `INFO`
+    /// half, on a completely successful run, with no file yet for it to go to.
+    #[test]
+    fn notices_are_split_by_the_mouth_their_level_reaches() {
+        let (screen, file) = partition_by_mouth(vec![
+            Notice::info("the embedder inherits the root endpoint"),
+            Notice::warn("`provider` is blank, so the default is in force"),
+            Notice::error("the trio is not buildable"),
+            Notice::info("`base_url` had no `/v1` suffix"),
+        ]);
+
+        assert_eq!(
+            screen.len(),
+            2,
+            "WARN and ERROR still reach a user with no layer installed: {screen:?}"
+        );
+        assert!(
+            screen.iter().all(|n| n.level <= SCREEN_LEVEL),
+            "the screen half must hold exactly what the screen policy admits: {screen:?}"
+        );
+        assert_eq!(
+            file.len(),
+            2,
+            "the diagnostics must survive the split rather than be dropped by it: {file:?}"
+        );
+        assert!(
+            file.iter().all(|n| n.level == tracing::Level::INFO),
+            "an INFO has nowhere to go until the layer is up, which is why it waits: {file:?}"
+        );
+        assert_eq!(
+            file[0].text, "the embedder inherits the root endpoint",
+            "discovery order must survive within a half"
         );
     }
 

@@ -6417,6 +6417,71 @@ mod tests {
         }
     }
 
+    /// Each half of the headless configuration notices is announced where its mouth exists.
+    ///
+    /// **The two ends are separate properties and both used to be broken one way or the
+    /// other.** The whole list was announced at the collection point, where no subscriber is
+    /// installed, so the fallback applied the screen policy and the `INFO` half — which is
+    /// all of them — was destroyed on every run, successful ones included. Moving the whole
+    /// list down to the post-layer emission fixes that and breaks the other end: seven paths
+    /// return between the two sites, and each would drop the list, which is precisely the
+    /// defect `bring_up_headless_logging` was extracted to make unreachable.
+    ///
+    /// So the guard asserts the arrangement, not one site: the screen half goes out before
+    /// the bring-up, the file half after it, and — the half that answers "does an early
+    /// failure still show its `WARN`?" — nothing returns between loading the configuration
+    /// and announcing the screen half except the arm that has no notices to lose, because
+    /// its `magi.toml` never parsed.
+    ///
+    /// Every needle is `expect`ed rather than searched leniently, so a rename fails loudly
+    /// here instead of leaving the guard matching nothing and passing.
+    #[test]
+    fn the_headless_config_notices_are_announced_at_both_mouths() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        let start = production
+            .find("async fn prepare_headless(")
+            .expect("the headless prelude is gone; this check needs updating");
+        let body = production.get(start..).unwrap_or("");
+
+        let load = body
+            .find("MagiConfig::load(&ws.config_path())")
+            .expect("the configuration must still be loaded here");
+        let screen = body
+            .find("emit_notices(cfg_screen)")
+            .expect("the screen half must be announced where the fallback still reaches a user");
+        let bring_up = body
+            .find("bring_up_headless_logging(h,")
+            .expect("the layer must still be brought up here");
+        let file = body
+            .find("trio_notices.extend(cfg_file)")
+            .expect("the file half must ride down to the emission after the layer");
+
+        assert!(
+            load < screen && screen < bring_up,
+            "the screen half is not announced between loading the config and the bring-up, \
+             so a WARN is either impossible or lost"
+        );
+        assert!(
+            bring_up < file,
+            "the file half is announced before the layer exists, which is where every INFO \
+             was being destroyed"
+        );
+        let returns = body
+            .get(load..screen)
+            .unwrap_or("")
+            .matches("return Err")
+            .count();
+        assert_eq!(
+            returns, 1,
+            "exactly one path may return before the screen half is announced -- the arm \
+             whose `magi.toml` did not parse, which has no notices to lose. Found {returns}, \
+             so some other early failure now shows nothing"
+        );
+    }
+
     #[test]
     fn no_surface_arms_the_auditor_twice() {
         // A second registration of the same value is not a leak, but it earns a
