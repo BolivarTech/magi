@@ -1127,6 +1127,61 @@ mod tests {
     }
 
     #[test]
+    fn a_per_target_override_survives_the_hint_and_still_binds_the_other_targets() {
+        // `Filter::max_level` folds the per-target overrides into the hint, and
+        // that fold is pinned only where it is DEFINED. Here is where it is
+        // CONSUMED: the hint is a global pre-cut, so a fold that returned the
+        // bare default would make `enabled` reject every event more verbose
+        // than it -- and the override an operator wrote would be silently dead
+        // before `level_for` ever got a chance to honour it.
+        //
+        // Load-bearing beyond the filter itself: `recovery_detection_is_off`
+        // asks the same question of the same fold.
+        //
+        // Driven through the real dispatcher rather than by calling
+        // `max_level()`, because a unit assertion on the fold stays green
+        // through exactly the breakage this exists to catch.
+        //
+        // Mutation-verified: with `max_level` reading the filter's default
+        // instead of the fold, the admitted event never reaches the file.
+        const ADMITTED: &str = "the override admits this one";
+        const EXCLUDED: &str = "the default still refuses this one";
+
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let layer = MagiLayer::new(
+            FileSink::new(Arc::clone(&appender)),
+            // ERROR everywhere, INFO for one target: the hint has to end at
+            // INFO or the override cannot be reached at all.
+            crate::logging::filter::Filter::parse("error,magi_rs::memory=info").expect("valid"),
+            Arc::new(Auditor::new()),
+            Arc::new(crate::logging::DiscardDelivery),
+        );
+
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            // The excluded one FIRST. Both are INFO, so both take the same
+            // priority queue and it is FIFO: once the second has arrived, the
+            // first has had its chance, and the absence below is a decision
+            // rather than a race with the writer thread.
+            tracing::info!(target: "magi_rs::agent", "{EXCLUDED}");
+            tracing::info!(target: "magi_rs::memory", "{ADMITTED}");
+        });
+
+        let written = wait_for_log(dir.path(), ADMITTED);
+        assert!(
+            written.contains(ADMITTED),
+            "the per-target override never reached the file: the hint cut the \
+             event off before `level_for` could honour it: {written:?}"
+        );
+        assert!(
+            !written.contains(EXCLUDED),
+            "the hint became the decision: raising it for ONE target admitted \
+             every target, which is not what the operator wrote: {written:?}"
+        );
+    }
+
+    #[test]
     fn health_tracking_continues_after_its_lock_is_poisoned() {
         // I3: `HealthReporter::tracker` recovers a `PoisonError` with
         // `into_inner` instead of returning early. The pattern, and the reason
