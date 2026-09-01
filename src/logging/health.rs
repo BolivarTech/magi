@@ -215,19 +215,23 @@ impl HealthTracker {
         }
 
         // Rule (SC-L71): a degradation observed while the subsystem is shown
-        // healthy is immediate. The guard is that condition and nothing more,
-        // so the rule re-arms every time a recovery has been shown.
-        if state.shown.is_none() && candidate.is_some() {
+        // healthy is immediate. The guard is that condition and nothing more
+        // -- literally: `candidate.is_some()` was dropped from it as a
+        // provably redundant conjunct, not merely a stylistic trim. The early
+        // return above already established `candidate != state.shown`, so a
+        // `shown` of `None` forces `candidate` to be `Some`; testing
+        // `candidate.is_some()` again here could never turn `true` into
+        // `false`. So the rule re-arms every time a recovery has been shown.
+        if state.shown.is_none() {
             let transition = Transition::Degraded(cause);
             state.shown = candidate;
             // **A CHECKED statement of the invariant, not a no-op assignment.**
             // Reaching this arm with a pending is unreachable, and the proof is
             // short enough to write down: a pending is only ever created in the
-            // final arm below, which needs `candidate != shown` and NOT
-            // (`shown.is_none() && candidate.is_some()`) -- and since
-            // `candidate != shown`, a `shown` of `None` forces `candidate` to be
-            // `Some`, which is this arm. So a pending exists only while `shown`
-            // is `Some`. `shown` returns to `None` only in `tick` and `flush`,
+            // final arm below, which needs `candidate != shown` and `shown`
+            // not `None` -- and that is exactly NOT this arm's guard. So a
+            // pending exists only while `shown` is `Some`. `shown` returns to
+            // `None` only in `tick` and `flush`,
             // and both `take()` the pending in the same step without putting it
             // back. Hence `shown.is_none()` implies `pending.is_none()`, which
             // is exactly this arm's guard.
