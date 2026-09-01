@@ -3967,6 +3967,150 @@ mod tests {
         out
     }
 
+    /// This file's PRODUCTION half only — everything above `mod tests`.
+    ///
+    /// A guard that counts occurrences has to exclude the test module or it
+    /// counts itself: every `StatusRow::new()` an assertion sets up would read
+    /// as a second one minted in production, so "exactly one" could never hold
+    /// and the count would have to be loosened until it stopped meaning
+    /// anything. The needle is written with escapes rather than as a literal
+    /// spanning real newlines, for the reason
+    /// [`source_without_comment_lines`] strips `\r`.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over this file.
+    fn production_source() -> String {
+        let source = source_without_comment_lines();
+        let end = source
+            .find("\n#[cfg(test)]\n")
+            .expect("this file must still carry its test module behind a `cfg(test)` gate");
+        source
+            .get(..end)
+            .expect("the offset came from `find`, so it is a boundary")
+            .to_string()
+    }
+
+    /// `text` cut into statements, each with its whitespace collapsed to single
+    /// spaces.
+    ///
+    /// **Statements, not lines, and the difference is the whole point.** Three
+    /// needles in this milestone stayed green through a reformatting that split
+    /// one call across two lines: a line-oriented `contains` sees two halves of
+    /// a spelling it no longer recognises, while a statement is the same string
+    /// however `rustfmt` chose to wrap it.
+    ///
+    /// # Parameters
+    ///
+    /// * `text` — production source, already stripped of `\r` and of whole-line
+    ///   comments.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `text`.
+    fn collapsed_statements(text: &str) -> Vec<String> {
+        text.split([';', '{', '}'])
+            .map(|piece| piece.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// The identifier a `let` statement binds, if it binds one.
+    ///
+    /// # Parameters
+    ///
+    /// * `stmt` — one collapsed statement.
+    ///
+    /// # Returns
+    ///
+    /// The name, with `mut` and any type ascription already off.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `stmt`.
+    fn binding_of(stmt: &str) -> Option<String> {
+        let at = stmt.find("let ")? + "let ".len();
+        let rest = stmt.get(at..)?.trim_start();
+        let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// **The rules the status row obeys are pinned; the code that INSTALLS them
+    /// was not** (MS2 gate S4 second pass, Caspar). `set` clears on drop,
+    /// `height` collapses when idle, two handles share one line — every one of
+    /// those is mutation-verified, and all three stay green with the row wired
+    /// to nothing at all, because every test that exercises them builds its own
+    /// [`StatusRow`] and assigns it to its own [`App`]. Delete either production
+    /// call site and the suite does not move: the row simply never appears, and
+    /// REQ-L25/L26/L27 are satisfied by a component no session reaches.
+    ///
+    /// So this asserts the CHAIN, not a spelling in isolation: one row is
+    /// minted, a second handle is cloned from it, the clone is what the
+    /// `/consult` arm shows the line on, and the original — not a fresh
+    /// `StatusRow::new()` — is what the renderer is handed. Two handles naming
+    /// two different rows is the reversion that reads as compliant everywhere
+    /// else: the setter would set a line nobody draws.
+    ///
+    /// # Why a needle and not a behavioural test
+    ///
+    /// Both call sites live inside `run_tui_ext`, past `enable_raw_mode` and
+    /// `EnterAlternateScreen`. Driving it needs a real terminal, and the
+    /// property is *where* the calls sit rather than what they compute — the
+    /// same argument
+    /// `test_the_event_loop_expires_the_health_window_on_every_pass` makes.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A spelling, not an identity: `status_row.clone()` handing on something
+    /// derived from a different row would read as compliant. It holds down the
+    /// reversion that actually happens, which is a call site being deleted.
+    #[test]
+    fn test_both_status_row_call_sites_are_wired_to_the_one_row() {
+        let stmts = collapsed_statements(&production_source());
+
+        // `App::new` mints one of its own to initialise the field, which is legitimate
+        // and is exactly why the handoff below has to be asserted: that default is what
+        // the renderer keeps if `run_tui_ext` stops overwriting it, and a default row is
+        // indistinguishable from a wired one that nothing has set yet. Only the `let`
+        // bindings are counted, so the struct-literal default does not have to be spelled
+        // out here — renaming or moving it leaves this guard reading the same.
+        let minted: Vec<&String> = stmts
+            .iter()
+            .filter(|s| s.contains("StatusRow::new()") && binding_of(s).is_some())
+            .collect();
+        assert_eq!(
+            minted.len(),
+            1,
+            "production binds more than one status row, so the setter and the renderer \
+             can hold different ones: {minted:#?}"
+        );
+        let row = binding_of(minted[0]).expect("the status row is bound to a name");
+
+        let cloned = stmts
+            .iter()
+            .find(|s| s.contains(&format!("= {row}.clone()")))
+            .unwrap_or_else(|| panic!("no second handle is cloned from `{row}`"));
+        let handle = binding_of(cloned).expect("the second handle is bound to a name");
+
+        assert!(
+            stmts
+                .iter()
+                .any(|s| s.contains(&format!("{handle}.set(STATUS_CONSULTING_THE_TRIO)"))),
+            "the `/consult` arm no longer shows the status row on `{handle}`, so the one \
+             long operation this surface starts runs with no line at all (REQ-L28)"
+        );
+        assert!(
+            stmts
+                .iter()
+                .any(|s| s.trim() == format!("app.status_row = {row}")),
+            "the renderer's `App` is not handed `{row}`, so whatever the `/consult` arm \
+             sets is drawn by nobody (REQ-L25)"
+        );
+    }
+
     /// I2: the notice sink must be attached BEFORE the alternate screen is
     /// entered, not after.
     ///
