@@ -296,13 +296,56 @@ impl TuiNoticeSink {
         }
     }
 
-    /// Connects the sink to the TUI's response channel; every later notice is rendered in the
-    /// frame instead of written to stderr.
+    /// Connects the sink to the TUI's response channel and hands over everything raised
+    /// before there was one; every later notice is rendered in the frame.
+    ///
+    /// **The hand-over is the point** (MS2 gate S4, finding 2). The sink goes live at
+    /// `init_logging` and this runs inside `run_tui_ext`, so the layer's screen branch has a
+    /// window in which it delivers with no channel to deliver to — and the live emitter in
+    /// that window is magi-core's own `tracing::warn!`. [`Self::route`] used to `eprintln!`
+    /// there, onto the PRIMARY buffer, which `EnterAlternateScreen` covers for the rest of the
+    /// session: written and hidden in the same breath, exactly the defect
+    /// [`NoticeTranscript`] exists to fix for the startup list. It cannot be closed from
+    /// `main.rs` — the channel is born here and `init_logging` is one-shot — so the deferral
+    /// the teardown end already had serves the setup end too.
+    ///
+    /// **The channel is published FIRST, then the queue drained, and the two locks are never
+    /// held at once.** Nesting them would make this the one place in the sink that acquires a
+    /// second lock while holding the first, which is the discipline the rest of the type is
+    /// built on. The residual that ordering leaves is named rather than hidden: a `route`
+    /// that read `tx == None` a moment before the publish, and defers a moment after the
+    /// drain, waits in the queue until [`Self::flush`] prints it at teardown. That is late,
+    /// not lost — and the window is one racing notice wide, against a call that happens once
+    /// on the main task.
+    ///
+    /// The state stays `Buffering` afterwards: the alternate screen is about to go up, and
+    /// only [`Self::flush`] — post-teardown — may license an immediate print.
     ///
     /// # Parameters
     /// * `tx` - the sender half of the channel `run_tui_ext` already owns.
+    ///
+    /// # Complexity
+    /// `O(n)` in what was deferred; bounded by what a startup can emit.
     pub fn attach(&self, tx: mpsc::Sender<AgentResponse>) {
-        *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+        *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx.clone());
+        let waiting = {
+            let mut guard = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            match &mut *guard {
+                PendingNotices::Buffering(queued) => std::mem::take(queued),
+                PendingNotices::Flushed => Vec::new(),
+            }
+        };
+        for msg in waiting {
+            // Degraded to the mouth it already had rather than dropped (B9): the
+            // channel is fresh and 100 slots wide, so this cannot fill in practice,
+            // and the alternate screen is still down if it ever did.
+            if let Err(mpsc::error::TrySendError::Full(AgentResponse::Notice(text)))
+            | Err(mpsc::error::TrySendError::Closed(AgentResponse::Notice(text))) =
+                tx.try_send(AgentResponse::Notice(msg))
+            {
+                eprintln!("{text}");
+            }
+        }
     }
 
     /// Routes one fallback message through [`PendingNotices`]: buffered while the alternate
@@ -350,6 +393,26 @@ impl TuiNoticeSink {
 impl Default for TuiNoticeSink {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for TuiNoticeSink {
+    /// Last resort for anything still queued, so deferral can never become silence.
+    ///
+    /// [`Self::route`]'s unattached arm defers instead of printing, which is right while a
+    /// TUI is on its way. It is wrong if one never arrives: `run()` can return with `?`
+    /// between `init_logging` and `run_tui_ext` — a vault that will not open, a database
+    /// that will not — and on that path no alternate screen was ever entered, so `stderr`
+    /// is the correct mouth and silence is the regression this exists to prevent.
+    ///
+    /// Safe wherever it runs. `flush` is the only producer of `Flushed`, and `run_tui_ext`
+    /// calls it strictly after `LeaveAlternateScreen`, so a normal session finds the queue
+    /// empty here and prints nothing. Best-effort like the rest of the sink: a
+    /// `std::process::exit` runs no destructor.
+    fn drop(&mut self) {
+        for msg in self.flush() {
+            eprintln!("{msg}");
+        }
     }
 }
 
@@ -410,7 +473,14 @@ impl TuiNoticeSink {
             .as_ref()
             .cloned();
         let Some(tx) = tx else {
-            eprintln!("{msg}");
+            // **No channel YET — which is not the same as no TUI** (MS2 gate S4, finding
+            // 2). The sink goes live at `init_logging` and the channel is attached inside
+            // `run_tui_ext`, so this arm covers the whole of startup, and printing here put
+            // the line on the primary buffer that `EnterAlternateScreen` then covered for
+            // the session. Deferred instead: `attach` hands the queue to the transcript,
+            // and on a path that never attaches `flush` — which `Drop` calls — still gets
+            // it to `stderr`, where no frame was ever taken over.
+            Self::defer_or_print(&self.pending, msg.to_string());
             return;
         };
         match tx.try_send(AgentResponse::Notice(msg.to_string())) {
