@@ -93,6 +93,13 @@ struct Reporter {
     sink: Arc<dyn crate::logging::NoticeDelivery>,
     /// The process auditor, shared with the layer that owns this reporter.
     auditor: Arc<Auditor>,
+    /// Where an alarm raised by this reporter's OWN text goes.
+    ///
+    /// Not for the notices themselves — those go to `sink`, which consults no
+    /// filter. It is here so that a redaction the auditor performs on this path
+    /// is announced like any other, instead of being the one masking nobody is
+    /// told about.
+    appender: Arc<DailyAppender>,
     /// Latched so the notice is emitted ONCE, not per discarded event.
     ///
     /// The failure modes here are all high-frequency by nature — a full channel
@@ -125,16 +132,43 @@ impl Reporter {
         {
             return;
         }
-        // Through the PROCESS auditor, not a fresh one, and escaped like every
-        // other line that reaches a mouth. The text is ours and carries no
-        // credential today, so neither step changes what is delivered -- which
-        // is exactly why it would be easy to skip, and why the next author who
-        // interpolates a path or an error into this message would find the one
-        // path that had been left exempt.
-        let (line, _) = self
-            .auditor
-            .audit(text, "magi_rs::logging", None, text.len());
+        self.announce(text);
+    }
+
+    /// Announces `text`, audited, escaped, and with its alarm forwarded.
+    ///
+    /// # Parameters
+    ///
+    /// * `text` — what to say. The caller owns whether it is latched.
+    ///
+    /// # Why the alarm is FORWARDED rather than discarded
+    ///
+    /// The auditor's contract is "mask AND say so — both, never one". This path
+    /// used to take the first half and drop the second, so a redaction here was
+    /// invisible. The texts are ours and carry no credential today, which is
+    /// exactly why it was easy to skip and why the next author who interpolates
+    /// a path or an error would have found the one exempt path in the
+    /// subsystem.
+    ///
+    /// # Why re-entering [`Self::report`] terminates
+    ///
+    /// A refused alarm submission is reported, and `report` announces through a
+    /// latch, so the second pass finds its tier already spoken for and returns.
+    /// The recursion is two deep at most, and no lock is held across it.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k*n)` — the auditor's, over a short line.
+    fn announce(&self, text: &str) {
+        let (line, alarm) = self.auditor.audit(text, REPORTER_TARGET, None, text.len());
         self.sink.deliver(&line.map_line(escape_for_line));
+        if let Some(alarm) = alarm {
+            let outcome =
+                self.appender
+                    .submit(Queued::Alarm(alarm.clone()), Priority::High, NO_RESERVATION);
+            settle_alarm(&self.auditor, &alarm, outcome);
+            self.report(outcome);
+        }
     }
 
     /// Turns a submission outcome into the notice it deserves, if any.
@@ -165,6 +199,9 @@ impl Reporter {
     }
 }
 
+/// Target the subsystem's announcements about ITSELF are attributed to.
+const REPORTER_TARGET: &str = "magi_rs::logging";
+
 /// What an alarm reserves on the queue: nothing.
 ///
 /// The alarm is exempt from the filters, not from the byte budget — it simply
@@ -172,7 +209,29 @@ impl Reporter {
 const NO_RESERVATION: usize = 0;
 
 /// Gives an alarm's latch back when the queue refused it.
-fn settle_alarm(_auditor: &Auditor, _alarm: &AuditExempt, _outcome: Submitted) {}
+///
+/// # Parameters
+///
+/// * `auditor` — the one that raised the alarm, and holds its latch.
+/// * `alarm` — the finding that was submitted.
+/// * `outcome` — what the appender did with it.
+///
+/// # Why the rule lives here rather than inline at the two call sites
+///
+/// The appender refuses a zero-byte priority submission only when its 2048
+/// slots are exhausted or its writer has died, and neither is arrangeable in a
+/// test. Taking the outcome as a parameter is what makes the RULE — "the latch
+/// means delivered, never merely considered" — drivable, so the guard is a
+/// behavioural test rather than a reading of two call sites.
+///
+/// # Complexity
+///
+/// `O(log n)`, the auditor's own.
+fn settle_alarm(auditor: &Auditor, alarm: &AuditExempt, outcome: Submitted) {
+    if outcome != Submitted::Queued {
+        auditor.retract_alarm(alarm);
+    }
+}
 
 /// Feeds the health tracker, and shows what it decides is worth showing.
 ///
@@ -373,10 +432,26 @@ impl HealthReporter {
     /// `O(k*n)` — the auditor's, over a short line.
     fn show(&self, transition: &Transition) {
         let text = render_transition(transition, &self.todays_log_path());
-        // The alarm is discarded exactly as `Reporter::announce_once` discards
-        // its own: this is the layer talking about itself, and the redaction
-        // that matters has already happened inside `audit`.
-        let (line, _alarm) = self.auditor.audit(&text, HEALTH_TARGET, None, text.len());
+        // **The alarm is forwarded, not discarded**, and this is the path where
+        // it matters most: the text carries the operator's own `log_dir`, so it
+        // is the one self-referential line with runtime data in it. Masking
+        // without announcing would be the auditor keeping half its contract in
+        // the subsystem whose job is announcing.
+        let (line, alarm) = self.auditor.audit(&text, HEALTH_TARGET, None, text.len());
+        if let Some(alarm) = alarm {
+            // **The outcome is settled but not reported, and the asymmetry with
+            // `Reporter::announce` is deliberate.** No reporter is reachable
+            // from here -- the layer owns one by value and this is held behind
+            // an `Arc` by the exit path as well -- and reaching one would nest
+            // an announcement inside a health transition. `settle_alarm` is
+            // what keeps that honest: a refused alarm gives its latch back, so
+            // the next transition raises it again rather than the finding being
+            // lost.
+            let outcome =
+                self.appender
+                    .submit(Queued::Alarm(alarm.clone()), Priority::High, NO_RESERVATION);
+            settle_alarm(&self.auditor, &alarm, outcome);
+        }
         self.sink.deliver(
             &line
                 .map_line(escape_for_screen)
@@ -421,10 +496,14 @@ impl MagiLayer {
         auditor: Arc<Auditor>,
         notices: Arc<dyn crate::logging::NoticeDelivery>,
     ) -> Self {
+        // Taken before `file` is moved into the struct below: both the health
+        // reporter and the plain one need somewhere to put an alarm raised by
+        // their own text, and the file branch owns the only appender.
+        let appender = Arc::clone(&file.appender);
         let health = Arc::new(HealthReporter::new(
             Arc::clone(&notices),
             Arc::clone(&auditor),
-            Arc::clone(&file.appender),
+            Arc::clone(&appender),
         ));
         Self {
             file,
@@ -433,6 +512,7 @@ impl MagiLayer {
             reporter: Reporter {
                 sink: notices,
                 auditor: Arc::clone(&auditor),
+                appender,
                 degraded: std::sync::atomic::AtomicBool::new(false),
                 stopped: std::sync::atomic::AtomicBool::new(false),
             },
@@ -898,18 +978,23 @@ mod tests {
         auditor.register_secret(SecretName::new("K"), &["a-registered-secret-value"]);
         let line = "url=https://x/a-registered-secret-value";
 
-        let refusals = [
-            Submitted::DroppedFull,
-            Submitted::DroppedOversized,
-            Submitted::WriterGone,
-            Submitted::WriterHung,
+        // **One target per outcome, because the latch is keyed on
+        // `(secret, target)`.** Reusing one target would make each assertion's
+        // own `audit` call re-latch the pair and starve the next iteration --
+        // and the obvious repair, retracting between rounds, would put the
+        // mechanism under test into the fixture that sets it up.
+        let cases = [
+            (Submitted::DroppedFull, "magi_rs::case_full"),
+            (Submitted::DroppedOversized, "magi_rs::case_oversized"),
+            (Submitted::WriterGone, "magi_rs::case_gone"),
+            (Submitted::WriterHung, "magi_rs::case_hung"),
         ];
-        for refused in refusals {
-            let (_, alarm) = auditor.audit(line, "magi_rs::agent", None, 0);
+        for (refused, target) in cases {
+            let (_, alarm) = auditor.audit(line, target, None, 0);
             let alarm = alarm.unwrap_or_else(|| panic!("{refused:?}: the fixture raised no alarm"));
             settle_alarm(&auditor, &alarm, refused);
             assert!(
-                auditor.audit(line, "magi_rs::agent", None, 0).1.is_some(),
+                auditor.audit(line, target, None, 0).1.is_some(),
                 "{refused:?} burned the latch: the alarm is marked raised and \
                  nothing was ever queued"
             );
@@ -917,11 +1002,12 @@ mod tests {
 
         // And the other half: a submission that WAS accepted must still
         // deduplicate, or every line carrying the secret raises again.
-        let (_, alarm) = auditor.audit(line, "magi_rs::agent", None, 0);
-        let alarm = alarm.expect("the loop above left the pair retractable");
+        let accepted = "magi_rs::case_queued";
+        let (_, alarm) = auditor.audit(line, accepted, None, 0);
+        let alarm = alarm.expect("a target with no history alarms on first sight");
         settle_alarm(&auditor, &alarm, Submitted::Queued);
         assert!(
-            auditor.audit(line, "magi_rs::agent", None, 0).1.is_none(),
+            auditor.audit(line, accepted, None, 0).1.is_none(),
             "an accepted alarm must keep its latch, or one secret floods the log"
         );
     }
@@ -934,10 +1020,12 @@ mod tests {
         // had stopped. Those are different things to know -- one says the file
         // is incomplete, the other says there is no file -- and different
         // things to do about.
+        let dir = tempdir().unwrap();
         let sink = Arc::new(RecordingSink::default());
         let reporter = Reporter {
             sink: sink.clone(),
             auditor: Arc::new(Auditor::new()),
+            appender: Arc::new(DailyAppender::new(dir.path()).unwrap()),
             degraded: std::sync::atomic::AtomicBool::new(false),
             stopped: std::sync::atomic::AtomicBool::new(false),
         };

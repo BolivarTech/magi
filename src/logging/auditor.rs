@@ -567,6 +567,35 @@ impl Auditor {
         Some(AuditExempt { secret, target })
     }
 
+    /// Forgets that an alarm was raised, so a later line can raise it again.
+    ///
+    /// # Parameters
+    ///
+    /// * `alarm` — the finding [`Self::audit`] handed back and the caller could
+    ///   not deliver.
+    ///
+    /// # Why this exists
+    ///
+    /// [`Self::alarm`] deduplicates by `(secret, target)`: it inserts the pair —
+    /// latching — and only THEN returns, before the caller has anywhere to put
+    /// the alarm. A caller whose output refuses it therefore spends the one
+    /// alarm that pair will ever raise on a delivery that never happened, and
+    /// the redaction is never announced at all. Giving the latch back makes it
+    /// mean "this reached an output" rather than "this was considered".
+    ///
+    /// **Idempotent, and a retraction nobody asked for is not an error**: a
+    /// poisoned lock leaves the pair latched, which is the same failure the
+    /// caller already had.
+    ///
+    /// # Complexity
+    ///
+    /// `O(log n)` over the alarms already raised.
+    pub fn retract_alarm(&self, alarm: &AuditExempt) {
+        if let Ok(mut seen) = self.alarmed.lock() {
+            seen.remove(&(alarm.secret(), alarm.target()));
+        }
+    }
+
     /// Whether a name has been registered at all.
     #[cfg(test)]
     pub(crate) fn is_registered(&self, name: SecretName) -> bool {
