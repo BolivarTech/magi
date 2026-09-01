@@ -1517,11 +1517,30 @@ impl MagiConfig {
             if root.as_str() != crate::defaults::DEFAULT_OPENAI_BASE_URL
                 && self.embedding.base_url.is_none()
             {
-                out.push(Notice::info(format!(
+                // **`warn` when the inherited endpoint leaves the machine, `info` when it
+                // does not.** The distiller notice in `main.rs::attach_persistent_memory`
+                // already settled this criterion for the endpoint one level down: nobody
+                // declared `[embedding].base_url`, so nobody chose where the embedder
+                // talks, and cloud egress arrived at by inheritance is a side effect of
+                // something nobody decided. This is the same fact and a WIDER one — the
+                // distiller's batches are a subset of what this endpoint receives, since
+                // every memory and every query is embedded there — so leaving it at `info`
+                // would put the narrower egress on the screen and keep the wider one in the
+                // file alone.
+                //
+                // The discriminator is `is_localhost`, not the `!= DEFAULT` above that
+                // decides whether to speak at all: a second local daemon on another port is
+                // non-default and still sends nothing anywhere.
+                let text = format!(
                     "notice: the embedder inherits `base_url = {}` from the root; declare it \
                      in [embedding] if you want a different one",
                     root.as_str(),
-                )));
+                );
+                out.push(if crate::is_localhost(root.as_str()) {
+                    Notice::info(text)
+                } else {
+                    Notice::warn(text)
+                });
             }
         }
 
