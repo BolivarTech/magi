@@ -1129,6 +1129,131 @@ mod tests {
     }
 
     #[test]
+    fn tick_returns_none_when_every_subsystem_is_quiet() {
+        // The empty direction of `tick`'s pending arm, in both of its shapes:
+        // no subsystem at all, and subsystems that exist with nothing waiting.
+        // Every other tick assertion in this module runs against a tracker
+        // that has something pending, so a `tick` that manufactured a
+        // transition out of a settled `shown` would pass all of them.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        assert!(h.tick(t0).is_none(), "an empty tracker has nothing to say");
+
+        let healthy = CauseKey::new("provider", "unreachable");
+        let broken = CauseKey::new("embedder", "http_error");
+        assert!(
+            h.observe(Some(healthy), true, t0).is_none(),
+            "a healthy first event creates the entry and is not a transition"
+        );
+        assert!(matches!(
+            h.observe(Some(broken), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+
+        // One entry healthy, one entry degraded, neither with a pending.
+        assert!(
+            h.tick(t0 + w).is_none(),
+            "a settled tracker emits nothing however late the tick"
+        );
+        assert!(
+            h.tick(t0 + w + w).is_none(),
+            "and it stays quiet: silence is a state, not a one-off"
+        );
+    }
+
+    #[test]
+    fn tick_emits_due_pendings_one_per_call_in_first_observed_order() {
+        // `tick` hands back at most ONE transition per call, so when two
+        // subsystems come due together which one goes first is a decision
+        // rather than an accident. It is first-observed -- the order `flush`
+        // documents -- so the two surfaces cannot disagree about the sequence
+        // a caller hears.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let first = CauseKey::new("provider", "unreachable");
+        let second = CauseKey::new("embedder", "http_error");
+
+        assert!(matches!(
+            h.observe(Some(first), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(matches!(
+            h.observe(Some(second), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        // Both recoveries start their window at the same instant, so both are
+        // due at the same one.
+        let recovered_at = t0 + Duration::from_secs(1);
+        assert!(h.observe(Some(first), true, recovered_at).is_none());
+        assert!(h.observe(Some(second), true, recovered_at).is_none());
+
+        let one = h.tick(recovered_at + w);
+        assert!(
+            matches!(one, Some(Transition::Restored(k)) if k.subsystem() == first.subsystem()),
+            "the first-OBSERVED subsystem comes out first: {one:?}"
+        );
+        let two = h.tick(recovered_at + w);
+        assert!(
+            matches!(two, Some(Transition::Restored(k)) if k.subsystem() == second.subsystem()),
+            "the next call drains the other one rather than repeating the \
+             first: {two:?}"
+        );
+        assert!(
+            h.tick(recovered_at + w).is_none(),
+            "and a third call has nothing left to give"
+        );
+    }
+
+    #[test]
+    fn tick_steps_over_a_pending_that_is_not_due_and_emits_one_that_is() {
+        // A pending still serving its window is put BACK and the walk carries
+        // on. Were it to end the walk instead, one subsystem stuck mid-window
+        // would hold every later subsystem's transition off the screen for as
+        // long as it kept flapping -- and that silence looks exactly like a
+        // healthy system.
+        //
+        // `a_quiet_subsystem_is_untouched_while_another_ones_window_elapses`
+        // cannot see it: there the earlier entry has NO pending, so the walk
+        // never reaches the put-back at all.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let stuck = CauseKey::new("provider", "unreachable");
+        let due = CauseKey::new("embedder", "http_error");
+
+        assert!(matches!(
+            h.observe(Some(stuck), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        assert!(matches!(
+            h.observe(Some(due), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+
+        // The FIRST-observed subsystem's recovery starts last, so at the tick
+        // below it is the one that has not served its window yet.
+        let due_since = t0 + Duration::from_secs(1);
+        let stuck_since = t0 + Duration::from_secs(20);
+        assert!(h.observe(Some(due), true, due_since).is_none());
+        assert!(h.observe(Some(stuck), true, stuck_since).is_none());
+
+        let got = h.tick(due_since + w);
+        assert!(
+            matches!(got, Some(Transition::Restored(k)) if k.subsystem() == due.subsystem()),
+            "the due pending is emitted even though an earlier entry in the \
+             walk still has one serving its window: {got:?}"
+        );
+        let later = h.tick(stuck_since + w);
+        assert!(
+            matches!(later, Some(Transition::Restored(k)) if k.subsystem() == stuck.subsystem()),
+            "and putting it back must not drop it: it is still there for its \
+             own deadline: {later:?}"
+        );
+    }
+
+    #[test]
     fn flush_order_is_first_observed_even_when_the_first_event_was_healthy() {
         // `states` is ordered by first OBSERVATION, not by first degradation,
         // and the two only disagree when some subsystem's first event is a
