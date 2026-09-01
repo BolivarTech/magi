@@ -3930,6 +3930,37 @@ mod tests {
         assert_eq!(app.input, "xá");
     }
 
+    /// This file with every whole-line `//` comment removed, for the guards
+    /// that read their own source.
+    ///
+    /// **A `contains` over raw source stays green when the call it looks for
+    /// survives only inside a comment** (MS2 gate S4, finding 3). Commenting a
+    /// line out is the single likeliest way for one of these calls to stop
+    /// happening, and it is exactly the edit the guard would not see — a
+    /// guardian that cannot fail in the case it exists for. Only lines whose
+    /// first non-blank characters are `//` are dropped, so a `//` inside a
+    /// string literal (a URL, say) keeps its line.
+    ///
+    /// The `\r` comes out for the reason every guard here strips it:
+    /// `include_str!` returns the file's bytes untouched while rustc
+    /// normalises CRLF inside a source literal, so a needle written with `\n`
+    /// would compare two different things on a Windows checkout. **No needle
+    /// may span a real newline** — write it with escapes.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over this file.
+    fn source_without_comment_lines() -> String {
+        let mut out = String::new();
+        for line in include_str!("mod.rs").replace('\r', "").lines() {
+            if !line.trim_start().starts_with("//") {
+                out.push_str(line);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     /// I2: the notice sink must be attached BEFORE the alternate screen is
     /// entered, not after.
     ///
@@ -3949,9 +3980,15 @@ mod tests {
     /// `run_tui_ext` far enough to observe it needs a real terminal. Both
     /// needles are single-line and the `\r` is stripped, so the guard reads the
     /// same on a CRLF checkout as on an LF one.
+    ///
+    /// **Maintenance note:** the needles below are a structural dependency on
+    /// the exact function name, call spelling and indentation of the code they
+    /// bound. Renaming `run_tui_ext`, `report_gate_telemetry` or `attach`, or
+    /// reindenting them, is a change to this test — the guard will fail on its
+    /// own `expect`, which is the intended way to be told.
     #[test]
     fn test_the_notice_sink_is_attached_before_the_alternate_screen() {
-        let source = include_str!("mod.rs").replace('\r', "");
+        let source = source_without_comment_lines();
         let start = source
             .find("\npub async fn run_tui_ext(")
             .expect("run_tui_ext must still bring the terminal up");
@@ -4193,9 +4230,15 @@ mod tests {
     /// property IS an order, and driving `run_tui_ext` far enough to observe it
     /// needs a real terminal. Every needle is single-line and the `\r` is
     /// stripped, so this reads the same on a CRLF checkout as on an LF one.
+    ///
+    /// **Maintenance note:** every needle below is a structural dependency on
+    /// the exact function name and call spelling it looks for — `run_tui_ext`,
+    /// `report_gate_telemetry`, `attach`, `emit_notices_into`,
+    /// `NoticeTranscript::new`. Renaming one is a change to this test, and it
+    /// says so by failing its own `expect` rather than by quietly passing.
     #[test]
     fn test_the_startup_notices_are_emitted_inside_the_attached_window() {
-        let source = include_str!("mod.rs").replace('\r', "");
+        let source = source_without_comment_lines();
         let start = source
             .find("\npub async fn run_tui_ext(")
             .expect("run_tui_ext must still bring the terminal up");
@@ -4266,13 +4309,20 @@ mod tests {
     /// expiring. `loop {` opens the body and `if event::poll(` is unambiguously
     /// inside it, so a call outside the loop lands outside that pair either way.
     ///
-    /// The `\r` comes out because `include_str!` returns the file's bytes
-    /// untouched while rustc normalises CRLF inside a source literal, so a
-    /// needle spanning lines would compare two different things on a Windows
-    /// checkout.
+    /// **Presence in the body is not yet "on every pass"** (MS2 gate S4,
+    /// finding 5). A call nested inside a first-pass flag, or behind a branch
+    /// that ordinary input does not take, is inside those bounds and still
+    /// ticks once — the same defect the bounds were narrowed to catch, one
+    /// level down. So the shape is asserted too: the call must sit at the loop
+    /// body's OWN indentation, guarded by nothing but the `installed()` lookup
+    /// it cannot do without, with no `continue` able to skip past it. Every
+    /// needle is written with `\n` escapes rather than as a literal spanning
+    /// real newlines, because `include_str!` keeps CRLF while rustc normalises
+    /// it inside a literal — the `\r` strip in
+    /// [`source_without_comment_lines`] is the other half of that rule.
     #[test]
     fn test_the_event_loop_expires_the_health_window_on_every_pass() {
-        let source = include_str!("mod.rs").replace('\r', "");
+        let source = source_without_comment_lines();
         let start = source
             .find("\nasync fn run_app<B: Backend>")
             .expect("run_app must still be the event loop");
@@ -4285,6 +4335,18 @@ mod tests {
             .map(|offset| opens + offset)
             .expect("the loop must still block on the poll timeout");
         let loop_body = &source[opens..polls];
+        let ticks = loop_body
+            .find("\n        if let Some(handle) = magi_rs::logging::installed() {\n            handle.health_tick(")
+            .unwrap_or_else(|| panic!(
+                "the tick must stand at the loop body's own indentation, guarded by the \
+                 `installed()` lookup and nothing else: nested one level deeper it runs on \
+                 some passes and not others, which is the same defect as never running"
+            ));
+        assert!(
+            !loop_body[..ticks].contains("continue"),
+            "a `continue` ahead of the tick lets a pass skip it, so the window stops \
+             expiring exactly while the session is busy"
+        );
         assert!(
             loop_body.contains("health_tick("),
             "the health window must be expired on every pass of the ratatui loop, or a \
