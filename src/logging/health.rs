@@ -179,17 +179,18 @@ impl HealthTracker {
     /// time. `s` is a handful, so the scan stays cheaper than the map that
     /// would replace it.
     ///
-    /// The scan runs on every call that CARRIES A CAUSE KEY, not on every
-    /// call: `cause?` returns first for the events that have none, and those
-    /// are `O(1)`.
+    /// `cause?` returns before the scan for an event with no key, so that call
+    /// is `O(1)`.
     ///
-    /// **That the keyless events are the majority is an attestation, not
-    /// something this file can show.** The caller is
-    /// `MagiLayer::on_event` in `src/logging/magi_layer.rs`, which passes what
-    /// `cause_from_event` read off the event, and only a site that wrote
-    /// `cause.*` fields produces a key — today that is the embedder alone
-    /// (`CauseKey::ALL` in `src/logging/auditor.rs` has two entries). The
-    /// traffic mix behind "most of them" is unmeasured either way.
+    /// **This is an API guard, not a saving on the hot path, and the note here
+    /// used to claim the opposite** — that keyless events "on this path" were
+    /// most of the calls, and so most calls were `O(1)`. The production caller
+    /// (`MagiLayer::observe`, `src/logging/magi_layer.rs`) drops a keyless
+    /// event with an early return of its own and never reaches this function
+    /// with `None`, so the arm's production frequency is not "most" but zero,
+    /// and no traffic mix was ever measured. What the arm buys is that this
+    /// public API cannot be made to key off an event's text (R-L13) by a caller
+    /// that does not filter first.
     pub fn observe(
         &mut self,
         cause: Option<CauseKey>,
@@ -1675,9 +1676,9 @@ mod tests {
     /// test module and this one inside it, so a reviewer editing either has the
     /// other in the same buffer — and review is all it is; saying "visible as
     /// an omission" implied a machine was looking, and "forty lines apart"
-    /// implied a glance would do it. They are a thousand lines apart, and the
-    /// pairing is a rule someone has to remember rather than a layout that
-    /// enforces itself.
+    /// implied a glance would do it. They are over twelve hundred lines apart,
+    /// and the pairing is a rule someone has to remember rather than a layout
+    /// that enforces itself.
     fn declared_messages() -> Vec<(CauseKey, &'static str, &'static str)> {
         vec![
             (
