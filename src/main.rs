@@ -1875,7 +1875,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // read by the retired adapter-naming machinery (`MagiCoreProviderAdapter`'s display
     // name); the native trio resolves its OWN per-seat models from `magi_config`
     // directly (`build_magi_orchestrator`), independent of the principal's model.
-    let (provider, provider_info): (Arc<dyn Provider>, String) = match provider_kind {
+    let (provider, provider_banner): (Arc<dyn Provider>, Notice) = match provider_kind {
         // `Ollama` and `OpenAiCompat` share the `[openai]`-transport branch: they
         // speak the same Chat-Completions protocol and differ only in capability
         // (probeability), never in how the PRINCIPAL provider is built. REQ-R30
@@ -1900,29 +1900,26 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             let model =
                 resolve_openai_model(&magi_config, env::var("OPENAI_MODEL").ok().as_deref());
             let info = openai_provider_info(&base_url, &model);
-            (build_openai_provider(&base_url, &api_key, &model), info)
+            (
+                build_openai_provider(&base_url, &api_key, &model),
+                Notice::info(info),
+            )
         }
         ProviderKind::Anthropic => {
             if let Some(ref c) = config {
                 (
                     Arc::new(AnthropicProvider::new(c.api_key.clone(), c.model.clone())),
-                    format!("Magi API ({}) Model: {}", c.source, c.model),
+                    anthropic_banner(Some((&c.source, &c.model))),
                 )
             } else {
-                (
-                    Arc::new(StaticProvider),
-                    "Static Mode: no API key found. Set ANTHROPIC_API_KEY or run \
-                     `magi-rs vault set ANTHROPIC_API_KEY` (recommended). /login \
-                     (OAuth) is best-effort and may be rate-limited."
-                        .to_string(),
-                )
+                (Arc::new(StaticProvider), anthropic_banner(None))
             }
         }
     };
 
     // Notices shown when the TUI starts — the provider banner plus any persistence,
     // reset, or vault warnings that would otherwise be lost to pre-TUI stderr.
-    startup_notices.push(Notice::info(provider_info));
+    startup_notices.push(provider_banner);
     // REQ-A12b/A12c: notices for resolutions that didn't come straight from what was
     // written in `magi.toml` (a blank `provider`, an inherited non-default embedder
     // endpoint, an Anthropic/base_url incoherence) — surfaced the same way the old
@@ -4662,6 +4659,42 @@ fn openai_provider_info(base_url: &str, model: &str) -> String {
         "OpenAI-compatible ({}) Model: {model}",
         redact_url(base_url)
     )
+}
+
+/// The Anthropic startup banner, at the level the situation it describes deserves.
+///
+/// # Parameters
+///
+/// * `resolved` — `(source, model)` when a credential was found, `None` when none was and
+///   the session falls back to [`StaticProvider`].
+///
+/// # Returns
+///
+/// The banner as a [`Notice`] rather than a `String`, so the level travels with the text
+/// instead of being decided by whoever collects it (task 3.1's classification table).
+///
+/// # Which row of the table each arm is
+///
+/// A credential that resolved is **a configuration decision being honoured** — a normal
+/// startup state, row 2, `info`, and under REQ-L19 that means the day's file and not the
+/// screen. Falling back to static mode is **a silent degradation** — row 1, `warn`: the
+/// session answers from canned text, saves nothing useful, and until this split nothing said
+/// so. It was filed at `info`, which is how a real degradation leaves the screen without
+/// leaving a trace anyone reads.
+///
+/// # Complexity
+///
+/// `O(n)` over the composed text.
+fn anthropic_banner(resolved: Option<(&str, &str)>) -> Notice {
+    match resolved {
+        Some((source, model)) => Notice::info(format!("Magi API ({source}) Model: {model}")),
+        None => Notice::info(
+            "Static Mode: no API key found. Set ANTHROPIC_API_KEY or run \
+             `magi-rs vault set ANTHROPIC_API_KEY` (recommended). /login \
+             (OAuth) is best-effort and may be rate-limited."
+                .to_string(),
+        ),
+    }
 }
 
 /// Wires an opened encrypted store into `agent` as persistent message memory
@@ -8959,6 +8992,43 @@ mod tests {
         assert!(
             !err.contains("[user]") && !err.contains("[password]"),
             "leaked the unresolved template: {err}"
+        );
+    }
+
+    /// Task 3.1's table, applied to the banner: the fallback is row 1, the healthy case
+    /// row 2.
+    ///
+    /// Both were filed at `info`, which meant the ONE arm a user needs to see never reached
+    /// the screen — a run with no credential answers from canned text, and the only line
+    /// that said so went to the day's file with the rest of the diagnostics. That is exactly
+    /// the shape of a degradation disappearing silently, which is what an over-eager `info`
+    /// costs.
+    #[test]
+    fn the_static_mode_fallback_warns_while_a_healthy_banner_stays_info() {
+        let degraded = anthropic_banner(None);
+        assert_eq!(
+            degraded.level,
+            tracing::Level::WARN,
+            "falling back to static mode is a silent degradation, and filed at `info` it \
+             never reaches the screen: a user with no credential is told nothing at all"
+        );
+        assert!(
+            degraded.text.contains("ANTHROPIC_API_KEY"),
+            "the warning has to name the way out of it: {}",
+            degraded.text
+        );
+
+        let healthy = anthropic_banner(Some(("vault", "claude-sonnet-4-6")));
+        assert_eq!(
+            healthy.level,
+            tracing::Level::INFO,
+            "an honoured configuration is a normal startup state, and putting that on the \
+             screen of every run is what SC-L14 exists to stop"
+        );
+        assert!(
+            healthy.text.contains("claude-sonnet-4-6") && healthy.text.contains("vault"),
+            "the banner must still say which model came from where: {}",
+            healthy.text
         );
     }
 
