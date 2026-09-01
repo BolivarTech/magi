@@ -177,7 +177,7 @@ impl HealthTracker {
         if state.shown.is_none() && candidate.is_some() {
             let transition = Transition::Degraded(cause);
             state.shown = candidate;
-            // **A structural no-op, kept as a statement of the invariant.**
+            // **A CHECKED statement of the invariant, not a no-op assignment.**
             // Reaching this arm with a pending is unreachable, and the proof is
             // short enough to write down: a pending is only ever created in the
             // final arm below, which needs `candidate != shown` and NOT
@@ -189,14 +189,28 @@ impl HealthTracker {
             // back. Hence `shown.is_none()` implies `pending.is_none()`, which
             // is exactly this arm's guard.
             //
-            // It is therefore deletable with the suite green, and deleting it is
-            // still the wrong move: what the line says is that an immediate
-            // emission leaves nothing waiting. Were the arm ever widened -- a
+            // What the line says is that an immediate emission leaves nothing
+            // waiting, and that is worth saying: were the arm ever widened -- a
             // second immediate case, a `shown` written somewhere else -- the
-            // reader would need that decided here, and an absent line decides
-            // nothing. A test cannot hold this down either: no input reaches the
-            // arm with a pending, so any test would pass with or without it.
-            state.pending = None;
+            // reader would need it decided here, and an absent line decides
+            // nothing. As an ASSIGNMENT it was dead code, deletable with the
+            // suite green, because no test can hold it down: no input reaches
+            // this arm with a pending, so a test passes with or without it.
+            //
+            // So it is an assertion instead, and `debug_assert!` rather than
+            // `assert!` on purpose. This is the event path, and a check whose
+            // precondition is proved above buys nothing in a shipped build; the
+            // house rule against a `debug_assert!` carrying a precondition that
+            // matters in release does not bite here, because there is no
+            // release behaviour riding on it. Debug-only keeps it verified
+            // wherever tests run and non-deletable by a reader who cannot see
+            // the proof.
+            debug_assert!(
+                state.pending.is_none(),
+                "an immediate emission leaves nothing waiting: a pending exists \
+                 only while `shown` is `Some`, and this arm's guard is that it \
+                 is `None`"
+            );
             return Some(transition);
         }
 
