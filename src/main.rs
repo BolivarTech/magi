@@ -14496,8 +14496,9 @@ agent_timeout_secs = {CEILING}
             a
         }
 
-        /// Before the channel exists the sink falls back to stderr — correct, because raw mode
-        /// has not been entered yet — and it never drops a notice silently (B9).
+        /// Before the channel exists the sink defers instead of printing — raw mode has not
+        /// been entered yet, so the alternate screen has nothing to cover — and it never drops
+        /// a notice silently (B9). `attach` hands over what was held.
         #[test]
         fn an_unattached_sink_still_deduplicates_by_key() {
             let sink = crate::tui::TuiNoticeSink::new();
@@ -14506,6 +14507,10 @@ agent_timeout_secs = {CEILING}
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             sink.attach(tx);
+            assert!(
+                matches!(rx.try_recv(), Ok(AgentResponse::Notice(t)) if t == "first"),
+                "attach hands over what was deferred before the channel existed"
+            );
             sink.once("k", &audited("third"));
             assert!(
                 rx.try_recv().is_err(),
