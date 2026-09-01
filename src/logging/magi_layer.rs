@@ -161,7 +161,9 @@ impl Reporter {
     /// `O(k*n)` — the auditor's, over a short line.
     fn announce(&self, text: &str) {
         let (line, alarm) = self.auditor.audit(text, REPORTER_TARGET, None, text.len());
-        self.sink.deliver(&line.map_line(escape_for_line));
+        // The SCREEN escaper: `sink` is a screen, and the file's doubling would
+        // damage any path or error a future author interpolates here.
+        self.sink.deliver(&line.map_line(escape_for_screen));
         if let Some(alarm) = alarm {
             let outcome =
                 self.appender
@@ -590,7 +592,17 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
             reserved,
         );
 
-        // Stage 3: escape, then fan out.
+        // Stage 3: escape, then fan out. **Each mouth gets its own escaper**,
+        // so one audited copy is kept back before the file's is made. The file
+        // is grepped and parsed, so it needs the backslash doubled; the screen
+        // is read by a person, and there the doubling turns a path REQ-L23
+        // means them to open into one that pastes nowhere. The health path was
+        // given `escape_for_screen` for exactly this reason and the ordinary
+        // screen branch was left on the file's.
+        //
+        // The clone is not new cost: the file branch used to clone for its own
+        // submission, and now moves instead.
+        let for_screen = audited.clone();
         let escaped = audited.map_line(escape_for_line);
         // **What is reserved is what the writer will release.** `map_line`
         // above recomputed the measure from the escaped text -- which is what
@@ -619,15 +631,22 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
             // subsystem whose whole purpose is diagnosis must not be the one
             // thing that fails without saying so.
             self.reporter.report(self.file.appender.submit(
-                Queued::Line(escaped.clone()),
+                Queued::Line(escaped),
                 priority,
                 reserved,
             ));
         }
         if let Some((tui, tui_level)) = self.tui.as_ref() {
             if level <= *tui_level {
-                tui.sink
-                    .deliver(&escaped.truncate_for_display(TUI_PAYLOAD_MAX_BYTES));
+                // **`reserved` above stays the FILE branch's measure** and is
+                // deliberately not recomputed here: it is what the appender's
+                // accounting reserves and what its writer gives back, and the
+                // screen queues nothing.
+                tui.sink.deliver(
+                    &for_screen
+                        .map_line(escape_for_screen)
+                        .truncate_for_display(TUI_PAYLOAD_MAX_BYTES),
+                );
             }
         }
         if let Some(alarm) = alarm {
