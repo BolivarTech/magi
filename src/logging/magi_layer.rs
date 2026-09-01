@@ -1378,12 +1378,28 @@ mod tests {
             FALLBACK,
             "past the cap a new value collapses onto the fallback"
         );
+        // A THIRD, so the latch has something to hold back. With two calls the
+        // count below is satisfied by a latch that works and by one that was
+        // never consulted, because only one call was ever past the cap.
+        assert_eq!(
+            intern(&cache, "third-value", FALLBACK, 1, &reporter),
+            FALLBACK,
+            "and every further value keeps collapsing onto it"
+        );
 
-        let said = probe.lines.lock().unwrap().join("\n");
-        assert!(
-            said.contains(FALLBACK),
-            "the cap warning never reached a mouth, so it is still a raw write \
-             to a terminal the TUI may own: {said:?}"
+        let lines = probe.lines.lock().unwrap().clone();
+        let said = lines.join("\n");
+        // **Exactly one, never `>= 1`.** A latch that fires on every event past
+        // the cap is as broken as one that never fires -- the failure mode is
+        // high-frequency by nature, so an unlatched notice turns one problem
+        // into the flood that hides it -- and an at-least-one assertion cannot
+        // tell the two apart.
+        assert_eq!(
+            lines.iter().filter(|l| l.contains(FALLBACK)).count(),
+            1,
+            "the cap warning must be latched to exactly one announcement, and \
+             must reach a mouth at all rather than stay a raw write to a \
+             terminal the TUI may own: {said:?}"
         );
         assert_eq!(
             probe.locked.load(std::sync::atomic::Ordering::SeqCst),
