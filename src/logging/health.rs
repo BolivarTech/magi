@@ -1813,6 +1813,28 @@ mod tests {
             out.contains("nonesuch") && out.contains("no_such_cause"),
             "and it must name the cause, or nobody can find the missing row: {out}"
         );
+
+        // The rest of that line was deletable with every assertion above still
+        // green, so the two things it carries are asserted here. First REQ-L23's
+        // third part, which the no-row branch owes exactly as a declared row
+        // does -- this is the branch a reader hits when the specific message is
+        // the one thing missing, so the file is the only place left to look.
+        // The needle is what `Path::display` MAKES of the path rather than the
+        // literal it was built from, for the reason
+        // `test_an_actionable_error_names_what_broke_what_it_means_and_where_to_read_more`
+        // records at the same assertion.
+        let rendered_path = path.display().to_string();
+        assert!(
+            out.contains(&rendered_path),
+            "the no-row line owes REQ-L23's third part too ({rendered_path}): {out}"
+        );
+        // And second, what to DO about it: a report that names a missing row
+        // without saying whose row it is leaves the reader knowing only that
+        // something is wrong.
+        assert!(
+            out.contains("the task that introduced the cause owes one"),
+            "the line must say whose defect the missing row is: {out}"
+        );
     }
 
     /// Every line a closure emitted, through the real dispatcher.
