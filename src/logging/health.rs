@@ -152,9 +152,13 @@ impl HealthTracker {
     /// # Complexity
     ///
     /// `O(s)` in the number of distinct subsystems seen so far: the lookup
-    /// into `states` is a linear scan, run on every call, and everything
-    /// after it is constant time. `s` is a handful, so the scan stays
-    /// cheaper than the map that would replace it.
+    /// into `states` is a linear scan, and everything after it is constant
+    /// time. `s` is a handful, so the scan stays cheaper than the map that
+    /// would replace it.
+    ///
+    /// The scan runs on every call that CARRIES A CAUSE KEY, not on every
+    /// call: `cause?` returns first for the events that have none, which on
+    /// this path is most of them, and those are `O(1)`.
     pub fn observe(
         &mut self,
         cause: Option<CauseKey>,
