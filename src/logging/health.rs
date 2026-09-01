@@ -818,7 +818,9 @@ mod tests {
         // The tick is at the DISCARDED recovery's own deadline (it started
         // serving at t0 + 5 s), which is the only instant that can tell a
         // restarted window from an inherited one: had the replacement kept
-        // `since`, the cause change would come out here, a full window early.
+        // `since`, the cause change would come out here -- at the displaced
+        // pending's deadline instead of its own, five seconds early in this
+        // arrangement.
         assert!(
             h.tick(t0 + Duration::from_secs(5 + HEALTH_MIN_STABLE_SECS))
                 .is_none(),
@@ -838,8 +840,9 @@ mod tests {
         // RECOVERY (`target == None`) was displaced by a cause change; here a
         // pending CAUSE CHANGE (`target == Some`) is displaced by a recovery.
         // It is one `match` arm but two directions, and a `since` reset that
-        // held for only one of them would leave the other emitting a window
-        // early -- with the test above still green.
+        // held for only one of them would leave the other emitting at the
+        // displaced pending's deadline instead of its own -- five seconds
+        // early in this arrangement -- with the test above still green.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
@@ -1088,8 +1091,8 @@ mod tests {
         // recovery has actually been SHOWN the subsystem is healthy again, so
         // the next degradation is once more a first degradation.
         //
-        // This also pins what the emission itself did to `shown`, which no
-        // other test continues past a `tick` far enough to see.
+        // This also pins what the emission itself did to `shown`: no other
+        // test observes after a tick-emitted recovery.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
@@ -1348,9 +1351,17 @@ mod tests {
 
     #[test]
     fn a_quiet_subsystem_is_untouched_while_another_ones_window_elapses() {
-        // The mixed-state vector, in the one shape no other test arranges: an
-        // entry with NO pending sitting ahead of an entry whose pending goes on
-        // to elapse. Other tests here do drive two subsystems differently --
+        // The mixed-state vector: an entry with NO pending sitting ahead of an
+        // entry whose pending goes on to elapse. That shape is not exclusive to
+        // this test on the `tick` side --
+        // `tick_emits_due_pendings_one_per_call_in_first_observed_order` walks
+        // the identical shape on its SECOND call, once draining `first`'s
+        // pending on the first call leaves that entry empty ahead of
+        // `second`'s, still pending. What is unique here is the `flush` half
+        // of the shape, and that this test arranges it directly -- the quiet
+        // entry starts empty -- rather than reaching it via an earlier
+        // emission the way `tick`'s second call does. Other tests here do
+        // drive two subsystems differently --
         // `tick_steps_over_a_pending_that_is_not_due_and_emits_one_that_is`
         // gives both a pending and staggers their deadlines,
         // `flush_order_is_first_observed_even_when_the_first_event_was_healthy`
