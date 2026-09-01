@@ -155,54 +155,85 @@ pub fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write
     // `WARN` in this situation says why there is no workspace, which is also why there is no
     // log.
     for notice in ordered.iter().filter(|n| n.level <= SCREEN_LEVEL) {
-        // **Audited, because this is an output** (REQ-L48). The layer path reaches a mouth
-        // through `announce`, and therefore through the auditor; this path reaches one
-        // directly. REQ-L48's guarantee is that the auditor is the only route to any output
-        // and that the COMPILER enforces it — every sink takes an `Audited`, so handing one a
-        // raw `String` does not compile — and a `&str` written straight to a `Write` is the
-        // one shape that escapes the type. Nothing here is static: a startup notice carries a
-        // resolved `base_url`, an error chain or a vault entry name, and each of those sites
-        // redacting on its own is the convention REQ-L48 exists to replace.
-        //
-        // The PROCESS auditor, not a local one: the registered secrets have to be the same set
-        // for every mouth, and a second auditor is a second, emptier idea of what to mask.
-        let (audited, alarm) = crate::logging::process_auditor().audit(
-            &notice.text,
-            NOTICE_TARGET,
-            None,
-            notice.text.len(),
-        );
-        // A failed write to stderr has nowhere to be reported, so it is dropped rather than
-        // escalated: this is already the last resort.
-        let _ = writeln!(fallback, "{}", audited.as_str());
-        // Masking and the alarm that says masking happened travel together — both, never one.
-        // The appender is what carries the pair on the layer path; with no layer there is no
-        // appender, so the alarm goes to the same last-resort mouth. It quotes neither the
-        // secret nor the line (REQ-L50).
-        //
-        // **The alarm is ROUTED, not merely rendered** (REQ-L48). `render_alarm` promises not
-        // to quote the secret, but that promise is a convention and REQ-L48's whole point is
-        // that a convention is not what stands between a runtime-composed string and a mouth.
-        // The text it does interpolate — a secret's NAME and a target — is composed here, and
-        // a name is operator-chosen: nothing stops one from being another secret's value.
-        //
-        // **The loop terminates, and by the auditor's own bookkeeping rather than a cap.**
-        // `Auditor::alarm` latches `(secret, target)`; the target is fixed at `NOTICE_TARGET`
-        // for every pass, so each iteration must find a secret not yet latched at it. The
-        // registered set is finite, so the chain is bounded by its size and needs no counter
-        // to say so.
-        let mut pending = alarm;
-        while let Some(raised) = pending {
-            let rendered = crate::logging::auditor::render_alarm(&raised);
-            let (audited_alarm, next) = crate::logging::process_auditor().audit(
-                &rendered,
-                NOTICE_TARGET,
-                None,
-                rendered.len(),
-            );
-            let _ = writeln!(fallback, "{}", audited_alarm.as_str());
-            pending = next;
-        }
+        write_audited(fallback, &notice.text);
+    }
+}
+
+/// Announces one already-composed line on the process's last-resort mouth, audited.
+///
+/// # Parameters
+///
+/// * `text` — the line to show, without a trailing newline.
+///
+/// # Why a startup's fatal errors need this and cannot use [`emit_notices`]
+///
+/// A `Notice` is something a run collected and hands over; the two funnels this serves are
+/// the opposite — the process is ending, there is no list and frequently no layer, and the
+/// text is an error chain composed from types this crate does not own. `eprintln!` is the one
+/// mouth REQ-L48's type-level guarantee cannot reach, because it takes a format string rather
+/// than an [`Audited`][a]: nothing about it can be made not to compile. So the route is
+/// supplied instead of enforced, and `no_fatal_error_is_announced_outside_the_audit_route`
+/// in `main.rs` is what keeps the two funnels on it.
+///
+/// [a]: crate::logging::auditor::Audited
+///
+/// # Complexity
+///
+/// The auditor's, over `text`, plus one write per alarm the pass raises.
+pub fn eprint_audited(text: &str) {
+    write_audited(&mut std::io::stderr().lock(), text);
+}
+
+/// Audits `text` and writes it — with every alarm it raises — to `mouth`.
+///
+/// # Parameters
+///
+/// * `mouth` — the last-resort destination.
+/// * `text` — runtime-composed text; nothing here may assume it is static.
+///
+/// # Complexity
+///
+/// The auditor's, over `text`, plus one pass per alarm.
+fn write_audited(mouth: &mut dyn std::io::Write, text: &str) {
+    // **Audited, because this is an output** (REQ-L48). The layer path reaches a mouth
+    // through `announce`, and therefore through the auditor; this path reaches one
+    // directly. REQ-L48's guarantee is that the auditor is the only route to any output
+    // and that the COMPILER enforces it — every sink takes an `Audited`, so handing one a
+    // raw `String` does not compile — and a `&str` written straight to a `Write` is the
+    // one shape that escapes the type. Nothing here is static: a startup notice carries a
+    // resolved `base_url`, an error chain or a vault entry name, and each of those sites
+    // redacting on its own is the convention REQ-L48 exists to replace.
+    //
+    // The PROCESS auditor, not a local one: the registered secrets have to be the same set
+    // for every mouth, and a second auditor is a second, emptier idea of what to mask.
+    let (audited, alarm) =
+        crate::logging::process_auditor().audit(text, NOTICE_TARGET, None, text.len());
+    // A failed write to stderr has nowhere to be reported, so it is dropped rather than
+    // escalated: this is already the last resort.
+    let _ = writeln!(mouth, "{}", audited.as_str());
+    // Masking and the alarm that says masking happened travel together — both, never one.
+    // The appender is what carries the pair on the layer path; with no layer there is no
+    // appender, so the alarm goes to the same last-resort mouth. It quotes neither the
+    // secret nor the line (REQ-L50).
+    //
+    // **The alarm is ROUTED, not merely rendered** (REQ-L48). `render_alarm` promises not
+    // to quote the secret, but that promise is a convention and REQ-L48's whole point is
+    // that a convention is not what stands between a runtime-composed string and a mouth.
+    // The text it does interpolate — a secret's NAME and a target — is composed here, and
+    // a name is operator-chosen: nothing stops one from being another secret's value.
+    //
+    // **The loop terminates, and by the auditor's own bookkeeping rather than a cap.**
+    // `Auditor::alarm` latches `(secret, target)`; the target is fixed at `NOTICE_TARGET`
+    // for every pass, so each iteration must find a secret not yet latched at it. The
+    // registered set is finite, so the chain is bounded by its size and needs no counter
+    // to say so.
+    let mut pending = alarm;
+    while let Some(raised) = pending {
+        let rendered = crate::logging::auditor::render_alarm(&raised);
+        let (audited_alarm, next) =
+            crate::logging::process_auditor().audit(&rendered, NOTICE_TARGET, None, rendered.len());
+        let _ = writeln!(mouth, "{}", audited_alarm.as_str());
+        pending = next;
     }
 }
 

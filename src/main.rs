@@ -1416,10 +1416,17 @@ where
             return ExitCode::FAILURE;
         }
     };
+    // **The process's single funnel for every error `run` propagates, so it is the one
+    // announcement that has to be audited** (REQ-L48). What arrives here is an `anyhow`
+    // chain composed by whichever layer failed -- including `MagiConfig::load`, whose
+    // message is built from a file the operator wrote -- and stderr on this path is
+    // frequently the only mouth there is, because a run that died before `init_logging`
+    // has no file to have written to. `eprintln!` is the one output the type-level
+    // guarantee cannot reach, so the route is supplied here instead.
     let code = match runtime.block_on(body(secrets)) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             ExitCode::FAILURE
         }
     };
@@ -5373,7 +5380,11 @@ async fn prepare_headless(
         Some(ws) => match MagiConfig::load(&ws.config_path()) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("error: {e}");
+                // Audited (REQ-L48), for the same reason `bootstrap_headless`'s funnel
+                // is: the message is composed from a file the operator wrote, this
+                // surface is the one a CI job reads, and the run ends here with no
+                // layer to have filed it anywhere else.
+                magi_rs::notices::eprint_audited(&format!("error: {e}"));
                 // 2, not 1: a broken `magi.toml` is invalid INPUT, which is what
                 // `exit::CLI_MISUSE` means and what README and REQ-H23 publish
                 // ("unknown field"). This path returned 1 -- the runtime-error
@@ -6521,6 +6532,34 @@ mod tests {
             .collect()
     }
 
+    /// `text` with every whole-line comment removed.
+    ///
+    /// **A rule that names a macro cannot be scanned against text that discusses it.** Rules 3
+    /// and 4 forbid two spellings that any honest comment about them has to write down — this
+    /// one's own explanation did, and both rules went red against a tree with no defect in it.
+    /// Rules 1 and 2 forbid spellings nobody needs to quote, which is the only reason they
+    /// never met this.
+    ///
+    /// **Whole lines only, and that is the safe half of the choice.** A trailing `// …` after
+    /// code survives, so a spelling hidden there still trips the rule — a false positive,
+    /// which is loud. Dropping to the first `//` on any line would instead cut a statement at
+    /// the `//` inside a `"https://…"` literal, which is a false NEGATIVE in exactly the
+    /// module where URLs and configuration live together.
+    ///
+    /// # Parameters
+    ///
+    /// * `text` — production source, already stripped of `\r`.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `text`.
+    fn code_lines_only(text: &str) -> String {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Whether the statement at `at` (the index of the `.audit(` call) throws its alarm away.
     ///
     /// # Parameters
@@ -6739,7 +6778,7 @@ mod tests {
             .iter()
             .flat_map(|(path, text)| {
                 let mouths = mouth_bindings(text);
-                collapsed_pieces(text, &[';'])
+                collapsed_pieces(&code_lines_only(text), &[';'])
                     .into_iter()
                     .filter(|stmt| {
                         if mouths.is_empty() {
@@ -6809,7 +6848,7 @@ mod tests {
         let mut raw = Vec::new();
         let mut unrouted = Vec::new();
         for (path, text) in &production_sources() {
-            for stmt in collapsed_pieces(text, &[';']) {
+            for stmt in collapsed_pieces(&code_lines_only(text), &[';']) {
                 if !anchors.iter().any(|a| stmt.contains(a)) {
                     continue;
                 }
