@@ -6349,7 +6349,16 @@ mod tests {
     ///
     /// It installs a process-global subscriber, so it needs a process of its own:
     /// run under `cargo nextest`, which gives every test one.
+    ///
+    /// **`serial` as well, and the two are not the same guarantee.** Nextest's
+    /// process-per-test is what makes the `OnceLock` behind `init_logging` free
+    /// here; `serial` is what stops this from racing a sibling that installs one
+    /// too under any runner that shares a process — `cargo test`, a doctest, or
+    /// a future in-process harness. Neither substitutes for the other, and the
+    /// failure the missing one produces is a flake that only appears on a busy
+    /// machine.
     #[test]
+    #[serial_test::serial]
     fn a_warning_reaches_the_tui_buffer_through_the_production_wiring() {
         let sink = std::sync::Arc::new(crate::tui::TuiNoticeSink::new());
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
@@ -6384,6 +6393,130 @@ mod tests {
         assert!(
             seen.iter().any(|t| t.contains("retrieval unavailable")),
             "a WARN must reach the screen buffer the TUI draws from: {seen:?}"
+        );
+    }
+
+    /// The identifier a `let` statement binds, if it binds one.
+    ///
+    /// # Parameters
+    ///
+    /// * `stmt` — one collapsed statement.
+    ///
+    /// # Returns
+    ///
+    /// The name, with `mut` and any type ascription already off.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `stmt`.
+    fn binding_of(stmt: &str) -> Option<String> {
+        let at = stmt.find("let ")? + "let ".len();
+        let rest = stmt.get(at..)?.trim_start();
+        let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// The value a struct-literal field is given.
+    ///
+    /// # Parameters
+    ///
+    /// * `stmt` — one collapsed statement.
+    /// * `field` — the field name WITH its colon, e.g. `"classifier_notices:"`.
+    ///
+    /// # Returns
+    ///
+    /// The text up to the next `,`, trimmed. `None` when the field is absent.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `stmt`.
+    fn field_value(stmt: &str, field: &str) -> Option<String> {
+        let at = stmt.find(field)? + field.len();
+        let rest = stmt.get(at..)?;
+        let end = rest.find(',').unwrap_or(rest.len());
+        Some(rest.get(..end)?.trim().to_string())
+    }
+
+    /// **The layer's screen branch and the TUI's runtime config hold the SAME sink.**
+    ///
+    /// If they ever hold two, every degradation notice is delivered into an allocation
+    /// nobody reads: the layer keeps routing, the sink keeps accepting, the screen stays
+    /// empty and no test fails. There is no error to raise and no output to compare, which
+    /// is why the whole of MS2's screen policy can be reverted by one `Arc::new` and
+    /// nothing would say so.
+    ///
+    /// # Why a needle and not a wiring trace
+    ///
+    /// A trace was preferred and is not reachable. The identity is established inside
+    /// `run()`, which discovers a workspace, unlocks a vault, builds a provider and then
+    /// enters the terminal; it returns an `ExitCode` and hands both values away without
+    /// ever yielding them together. The only way to observe the pair would be a seam added
+    /// for this test and used by nothing else, which the standards refuse — and a seam is
+    /// also not the property: it would prove that the seam reports one sink, not that the
+    /// two consumers received one.
+    ///
+    /// So it is a needle, built to survive the reformatting that made three earlier ones
+    /// pass while guarding nothing: `\r` is already gone (`production_sources`), statements
+    /// are the unit rather than lines, whitespace is collapsed, and the binding names are
+    /// RESOLVED from the source rather than written here — renaming `tui_notices` moves the
+    /// guard with it instead of silently emptying it.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A spelling, not an identity: a statement that names `tui_notices` while handing on
+    /// something else — `Arc::new(TuiNoticeSink::from(&tui_notices))`, say — reads as
+    /// compliant here. It holds down the reversion that actually happens, which is one
+    /// consumer being given a freshly minted sink.
+    #[test]
+    fn the_screen_layer_and_the_tui_runtime_share_one_notice_sink() {
+        let sources = production_sources();
+        let stmts: Vec<String> = sources
+            .iter()
+            .flat_map(|(_, text)| collapsed_pieces(&code_lines_only(text), &[';']))
+            .collect();
+
+        let minted: Vec<&String> = stmts
+            .iter()
+            .filter(|s| s.contains("TuiNoticeSink::new()"))
+            .collect();
+        assert_eq!(
+            minted.len(),
+            1,
+            "production mints more than one notice sink, so two consumers can hold \
+             different ones: {minted:#?}"
+        );
+        let sink = binding_of(minted[0]).expect("the sink is bound to a name");
+
+        // The delivery the layer is given must be built from that sink...
+        let delivery = stmts
+            .iter()
+            .find(|s| s.contains("ScreenDelivery::new(") && s.contains(&sink))
+            .unwrap_or_else(|| panic!("no screen delivery is built from `{sink}`"));
+        let delivered = binding_of(delivery).expect("the delivery is bound to a name");
+
+        // ...and that delivery, not another, must be what reaches `init_logging`.
+        assert!(
+            stmts
+                .iter()
+                .any(|s| s.contains("init_logging(") && s.contains(&delivered)),
+            "the delivery built from `{sink}` is not the one handed to `init_logging`"
+        );
+
+        // The other consumer resolves to the same binding, directly or through one move.
+        let handed = stmts
+            .iter()
+            .find_map(|s| field_value(s, "classifier_notices:"))
+            .expect("the TUI runtime config is given a classifier sink");
+        let moved_from_sink = format!("let {handed} = {sink}");
+        assert!(
+            handed == sink || stmts.iter().any(|s| s.trim() == moved_from_sink),
+            "the TUI runtime config is handed `{handed}`, which does not resolve to the \
+             `{sink}` the logging layer delivers into — every notice would go to a sink \
+             nobody reads, with nothing to say so"
         );
     }
 
