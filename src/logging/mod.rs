@@ -600,7 +600,16 @@ pub fn init_logging(
             None,
             0,
         );
-        sink.deliver(&line.map_line(render::escape_for_screen));
+        // Capped like every other screen delivery. The text above is a literal
+        // and cannot reach the cap today, which is exactly why the omission
+        // was invisible; the cap is a property of the MOUTH, so the next author
+        // who interpolates a `log_dir` into this notice inherits it instead of
+        // having to remember it.
+        sink.deliver(
+            &line
+                .map_line(render::escape_for_screen)
+                .truncate_for_display(magi_layer::TUI_PAYLOAD_MAX_BYTES),
+        );
         return Ok(existing.clone());
     }
 

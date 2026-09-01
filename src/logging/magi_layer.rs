@@ -162,8 +162,15 @@ impl Reporter {
     fn announce(&self, text: &str) {
         let (line, alarm) = self.auditor.audit(text, REPORTER_TARGET, None, text.len());
         // The SCREEN escaper: `sink` is a screen, and the file's doubling would
-        // damage any path or error a future author interpolates here.
-        self.sink.deliver(&line.map_line(escape_for_screen));
+        // damage any path or error a future author interpolates here. And the
+        // cap belongs to the MOUTH, not to the site: every other screen
+        // delivery in this module applies it, and the one that did not is the
+        // hole rather than the saving.
+        self.sink.deliver(
+            &line
+                .map_line(escape_for_screen)
+                .truncate_for_display(TUI_PAYLOAD_MAX_BYTES),
+        );
         if let Some(alarm) = alarm {
             let outcome =
                 self.appender
