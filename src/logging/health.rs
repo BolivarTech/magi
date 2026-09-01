@@ -8,10 +8,11 @@
 //! screen, and *what* that says. It is pure: it emits nothing, touches no
 //! filesystem and knows no TUI. `observe` takes whatever the caller already
 //! knows about one event; a [`Transition`] comes back only when one is worth
-//! showing, and for all but a subsystem's first degradation it comes back
-//! later — from `tick` or `flush` — rather than from the `observe` that first
-//! saw it. Everything else is silence by design, because "everything else" is
-//! exactly the noise this feature exists to remove.
+//! showing, and for all but a degradation of a subsystem currently shown
+//! healthy it comes back later — from `tick` or `flush` — rather than from
+//! the `observe` that first saw it. Everything else is silence by design,
+//! because "everything else" is exactly the noise this feature exists to
+//! remove.
 //!
 //! # What lives here and what does not
 //!
@@ -88,7 +89,7 @@ struct SubsystemState {
 ///
 /// State is kept **per subsystem** ([`CauseKey::subsystem`]), never per
 /// cause: two causes of one subsystem share a single health state, with the
-/// cause riding along to say why. This is what lets a subsystem's first
+/// cause riding along to say why. This is what lets a healthy subsystem's
 /// failure show immediately (SC-L71) while a later cause change inside the
 /// same subsystem still serves the window (SC-L76).
 ///
@@ -110,7 +111,7 @@ struct SubsystemState {
 /// let mut tracker = HealthTracker::new();
 /// let cause = CauseKey::new("embedder", "unreachable");
 ///
-/// // A subsystem's first-ever failure is shown right away (SC-L71).
+/// // A healthy subsystem's failure is shown right away (SC-L71).
 /// let first = tracker.observe(Some(cause), false, Instant::now());
 /// assert!(matches!(first, Some(Transition::Degraded(_))));
 ///
@@ -156,8 +157,11 @@ impl HealthTracker {
     }
 
     /// Observes one event, and returns a transition for exactly one kind of
-    /// change: a subsystem's very first degradation, which is shown at once
-    /// (SC-L71).
+    /// change: a degradation observed while the subsystem is shown healthy,
+    /// which goes out at once (SC-L71). That is not a once-per-process
+    /// privilege — the rule **re-arms after a shown recovery**, so a
+    /// subsystem that has already been through one degradation gets the same
+    /// immediacy on the next.
     ///
     /// Every other change answers `None` and is recorded as a candidate that
     /// must hold for [`HEALTH_MIN_STABLE_SECS`] (R-L13d). This function never
@@ -209,7 +213,9 @@ impl HealthTracker {
             return None;
         }
 
-        // Rule (SC-L71): a subsystem's first-ever degradation is immediate.
+        // Rule (SC-L71): a degradation observed while the subsystem is shown
+        // healthy is immediate. The guard is that condition and nothing more,
+        // so the rule re-arms every time a recovery has been shown.
         if state.shown.is_none() && candidate.is_some() {
             let transition = Transition::Degraded(cause);
             state.shown = candidate;
@@ -584,7 +590,7 @@ pub(crate) fn recovery_detection_is_off(file_filter: &Filter, screen_level: Opti
 /// | `observe`'s `cause?` | `None` / `Some` | `an_event_without_a_cause_key_is_ignored_…` / every other test that calls `observe` |
 /// | `observe`'s `if ok` | success → healthy / failure → degraded | `emits_only_on_transition_…`, whose recovery becomes a `Restored` / `the_first_degradation_is_immediate_…` |
 /// | `candidate == shown` | revert / change | `a_revert_discards_the_pending_transition_…` / the rest of the `observe` tests |
-/// | first-degradation guard | taken / not taken | `the_first_degradation_is_immediate_…` / `emits_only_on_transition_…` |
+/// | healthy → degraded guard | taken / not taken | `the_first_degradation_is_immediate_…` / `emits_only_on_transition_…` |
 /// | its `debug_assert!` | holds / violated | unreachable through `observe`, proved at the line; violated direction driven through the private field by `the_immediate_arms_invariant_is_checked_…` |
 /// | `match candidate` class | `Restored` / `Degraded` | `emits_only_on_transition_…` / `alternating_between_two_failing_causes_…` |
 /// | keep-`since` | target `None` / target `Some` | `repeating_a_pending_candidate_…` / `a_repeating_new_cause_…` |
@@ -1327,8 +1333,9 @@ mod tests {
         // one of the two things that can be. The other is a cause change
         // inside an already-degraded subsystem, which
         // `a_flushed_cause_change_leaves_the_subsystem_degraded_under_the_new_cause`
-        // covers. What is never left waiting is a subsystem's FIRST
-        // degradation, because that one is immediate (SC-L71).
+        // covers. What is never left waiting is a degradation observed while
+        // the subsystem is shown HEALTHY, because that one is immediate
+        // (SC-L71) however many times the subsystem has been through one.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let c = CauseKey::new("embedder", "http_500");
@@ -1353,7 +1360,7 @@ mod tests {
     #[test]
     fn flushing_with_nothing_pending_returns_an_empty_vec() {
         // The complement of the test above, and the one that shows why
-        // SC-L90 does not apply to the first degradation: it was already
+        // SC-L90 does not apply to an immediate degradation: it was already
         // emitted, so there is nothing left to flush.
         let mut h = HealthTracker::new();
         let c = CauseKey::new("embedder", "http_500");
