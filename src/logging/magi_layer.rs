@@ -1445,6 +1445,77 @@ mod tests {
         }
     }
 
+    /// A path shaped like the ones an operator actually reads off a screen.
+    ///
+    /// The separators are what discriminates: a message with no backslash in it
+    /// renders identically under both escapers, so a fixture without one would
+    /// pass whichever is wired.
+    const A_WINDOWS_PATH: &str = r"C:\Users\op\logs\magi.log";
+
+    #[test]
+    fn the_screen_gets_screen_escaping_while_the_file_still_gets_the_file_kind() {
+        // Both mouths shared one `escape_for_line`, which is the FILE escaper:
+        // it doubles the backslash so the file stays parseable. On a screen that
+        // doubling is pure damage -- a Windows path arrives as
+        // `C:\\Users\\...`, which opens nothing and pastes nowhere -- and the
+        // health path had already been given its own escaper for exactly this
+        // reason while the ordinary screen branch was left behind.
+        //
+        // Driven through the real dispatcher, because a hand-built line would
+        // exercise the renderer and stay green through the very swap this
+        // exists to catch.
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let screen = Arc::new(RecordingSink::default());
+        let layer = MagiLayer::new(
+            FileSink::new(Arc::clone(&appender)),
+            crate::logging::filter::Filter::parse("info").expect("valid"),
+            Arc::new(Auditor::new()),
+            Arc::new(crate::logging::DiscardDelivery),
+        )
+        .with_tui(
+            TuiSink::new(Arc::clone(&screen) as Arc<dyn crate::logging::NoticeDelivery>),
+            tracing::Level::WARN,
+        );
+
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "magi_rs::logging", "the log is at {A_WINDOWS_PATH}");
+        });
+
+        let shown = screen.lines.lock().unwrap().join("\n");
+        assert!(
+            shown.contains("the log is at"),
+            "the fixture reached the screen branch not at all: {shown:?}"
+        );
+        assert!(
+            shown.contains(A_WINDOWS_PATH),
+            "the screen carries file escaping: a path shown like this cannot be \
+             pasted anywhere: {shown:?}"
+        );
+
+        let written = wait_for_log(dir.path(), "the log is at");
+        assert!(
+            written.contains(r"C:\\Users\\op\\logs\\magi.log"),
+            "the FILE must keep its own escaping -- it is grepped and parsed, \
+             and a lone backslash there is ambiguous: {written:?}"
+        );
+
+        // And the budget still follows the FILE branch's measure: the writer
+        // releases what the line carries, so reserving anything else makes the
+        // channel's counter drift until it refuses events with capacity spare.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while appender.reserved(Priority::High) != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            appender.reserved(Priority::High),
+            0,
+            "reserved and released disagree, so the two branches' measures were \
+             crossed"
+        );
+    }
+
     #[test]
     fn an_audited_line_truncated_for_display_is_still_an_audited() {
         // The screen cap is a TRANSFORMATION, never a second constructor: it
