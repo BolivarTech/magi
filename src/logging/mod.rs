@@ -589,11 +589,19 @@ pub fn init_logging(
         // the file one because `sink` is a screen: doubling a backslash here
         // would show a path nobody can paste.
         //
-        // The alarm is dropped because the text below is a literal with no
-        // interpolation, so there is nothing in it for the passes to find.
-        // **Anyone who interpolates a path or an error into it owes the
-        // forwarding** that `Reporter::announce` does.
-        let (line, _) = process_auditor().audit(
+        // **The alarm is forwarded**, the same as on every other audited path
+        // in this subsystem. What stood here instead was a justification for
+        // dropping it — the text below is a literal with no interpolation, so
+        // there is nothing in it for the passes to find — and only its first
+        // half is true. Fixed prose does carry no runtime value, which is why
+        // an interpolated `log_dir` or error is where a credential would
+        // ORDINARILY arrive. But the exact pass matches REGISTERED VALUES, not
+        // shapes, and nothing stops a registered one from occurring inside our
+        // own prose: this module's `..._still_raises_the_alarm` test registers
+        // a phrase of the very sentence below and watches it get masked. So the
+        // conclusion did not follow, and a false justification is worse than a
+        // bare gap — it tells the next reader there is nothing here to look at.
+        let (line, alarm) = process_auditor().audit(
             "notice: logging was already initialised; this call's configuration \
              (log directory and level) was DISCARDED and the running one kept",
             "magi_rs::logging",
@@ -610,6 +618,23 @@ pub fn init_logging(
                 .map_line(render::escape_for_screen)
                 .truncate_for_display(magi_layer::TUI_PAYLOAD_MAX_BYTES),
         );
+        if let Some(alarm) = alarm {
+            // The handle's own appender, which is the installed one: this
+            // branch exists precisely because a second must not be built.
+            //
+            // **Settled but not reported, the asymmetry `HealthReporter::show`
+            // already carries.** No `Reporter` is reachable from here — the
+            // layer owns one by value and was consumed by installation — and
+            // `settle_alarm` is what keeps the omission honest: a refused alarm
+            // gives its latch back, so the next masking raises it again instead
+            // of the finding being lost.
+            let outcome = existing.appender.submit(
+                auditor::Queued::Alarm(alarm.clone()),
+                appender::Priority::High,
+                magi_layer::NO_RESERVATION,
+            );
+            magi_layer::settle_alarm(process_auditor(), &alarm, outcome);
+        }
         return Ok(existing.clone());
     }
 

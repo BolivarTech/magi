@@ -215,7 +215,11 @@ const REPORTER_TARGET: &str = "magi_rs::logging";
 ///
 /// The alarm is exempt from the filters, not from the byte budget — it simply
 /// has no rendered length to reserve, because the writer renders it.
-const NO_RESERVATION: usize = 0;
+///
+/// `pub(super)` because `init_logging`'s already-initialised branch forwards an
+/// alarm too, and a second `0` written out there would be the same rule in two
+/// places with nothing tying them together.
+pub(super) const NO_RESERVATION: usize = 0;
 
 /// Gives an alarm's latch back when the queue refused it.
 ///
@@ -236,7 +240,11 @@ const NO_RESERVATION: usize = 0;
 /// # Complexity
 ///
 /// `O(log n)`, the auditor's own.
-fn settle_alarm(auditor: &Auditor, alarm: &AuditExempt, outcome: Submitted) {
+///
+/// `pub(super)` so `init_logging` uses this rule rather than restating it: it
+/// is the fourth alarm-forwarding site in the subsystem, and the first three
+/// all go through here.
+pub(super) fn settle_alarm(auditor: &Auditor, alarm: &AuditExempt, outcome: Submitted) {
     if outcome != Submitted::Queued {
         auditor.retract_alarm(alarm);
     }
