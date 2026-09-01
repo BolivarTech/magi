@@ -68,9 +68,12 @@ it there. Because the log directory is shared and persistent across every run
 in the environment -- R1 attaches memory too, and prints its OWN startup line
 first, with the count from before anything was planted -- a plain substring
 search would risk reading R1's line instead of R3's. The correlation is by
-run id, the same mechanism S23 already established: every rendered log line
-carries ``run=<id>`` (REQ-L63/SC-L79), so the line searched for is bounded to
-the one R3 itself wrote.
+run id, on the model S24 established: every rendered log line carries
+``run=<id>`` (REQ-L63/SC-L79), and the matcher requires ONE LINE to carry both
+the id and the marker, so what is read is bounded to what R3 itself wrote.
+S23 searches the same directory for the same kind of id but does not bind it
+to a line, which is enough for "the log survived process exit" and not for
+this.
 
 **Assertion 4 is a one-off invocation, not a ninth shared run.** Exactly one
 assertion wants that output, it touches neither the trio nor the large payload,
@@ -278,7 +281,11 @@ def _startup_counts(result):
     reaches only the log directory -- R3's own capture no longer carries it.
     The directory is shared by every run in the environment, so the line is
     found by correlating R3's own run id (REQ-L63) against the ``run=<id>``
-    field every rendered log line carries, the same mechanism S23 uses.
+    field every rendered log line carries -- the same LINE-BOUND matcher S24
+    uses. S23 is the looser sibling and is not the model here: it asks only
+    whether its id appears anywhere under the directory, which is enough for
+    what it asserts and not enough for this, where the id has to sit on the
+    very line the counts are read from.
 
     Complexity: ``O(bytes in the log directory)``.
 
