@@ -439,10 +439,19 @@ impl Drop for TuiNoticeSink {
     /// Last resort for anything still queued, so deferral can never become silence.
     ///
     /// [`Self::route`]'s unattached arm defers instead of printing, which is right while a
-    /// TUI is on its way. It is wrong if one never arrives: `run()` can return with `?`
-    /// between `init_logging` and `run_tui_ext` — a vault that will not open, a database
-    /// that will not — and on that path no alternate screen was ever entered, so `stderr`
-    /// is the correct mouth and silence is the regression this exists to prevent.
+    /// TUI is on its way. It is wrong if one never arrives: `run()` can return early between
+    /// `init_logging` and `run_tui_ext`, and on that path no alternate screen was ever
+    /// entered, so `stderr` is the correct mouth and silence is the regression this exists
+    /// to prevent.
+    ///
+    /// **The two ways out of that window, named because guessing them wrong is what put a
+    /// vault and a database here before.** Neither of those is one: `run()` opens the
+    /// database FIRST, several hundred lines above `init_logging`, and a failure there
+    /// pushes a startup notice and runs without persistence rather than returning. What
+    /// actually returns is D-L20's `bail!` — a log directory that was DECLARED and cannot
+    /// be created — and the endpoint resolution below it (`resolve_endpoints`,
+    /// `resolve_effective_principal_endpoint`), which fails closed when a `base_url`
+    /// placeholder names a vault entry that is not there (REQ-A16c).
     ///
     /// Safe wherever it runs. `flush` is the only producer of `Flushed`, and `run_tui_ext`
     /// calls it strictly after `LeaveAlternateScreen`, so a normal session finds the queue
@@ -473,14 +482,24 @@ impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
     ///   synchronized with this one, so printing here directly used to be a second instance of
     ///   the same race the `Full` branch has (MS2 gate S7-f finding, Caspar). This now routes
     ///   through [`Self::defer_or_print`] instead of printing unconditionally.
-    /// - **`TrySendError::Full`** — the frame IS at risk, so this never prints inline. The
-    ///   classifier (`agent::mode_classifier::ProviderClassifier`) only ever emits two distinct
-    ///   keys total in a process's lifetime (the cost heads-up, the expiry report), deduplicated
-    ///   by `seen` above — so a bounded background task per full-channel event cannot
-    ///   accumulate; it waits for room with a real `.send().await` and, if the channel closes
-    ///   before room frees up (the run ended), defers through the same
+    /// - **`TrySendError::Full`** — the frame IS at risk, so this never prints inline. It waits
+    ///   for room with a real `.send().await` in a spawned task (`once` is a sync trait method
+    ///   called from inside an async caller, so it must not stall its executor thread) and, if
+    ///   the channel closes before room frees up (the run ended), defers through the same
     ///   [`Self::defer_or_print`] path rather than printing directly from the spawned task —
     ///   see [`PendingNotices`] for why that indirection is what actually closes the race.
+    ///
+    ///   **How many such tasks can be in flight is bounded by the PRODUCERS, and since MS2
+    ///   there are two of them.** `seen` above caps what reaches here through `once` at two
+    ///   keys for the life of the process — the classifier's cost heads-up and its expiry
+    ///   report — and that used to be the whole answer. It no longer is: `ScreenDelivery`
+    ///   (`agent::mode_classifier`) hands the logging layer's screen branch into this same sink
+    ///   through [`Self::emit`], which does NOT deduplicate, so every `WARN` and `ERROR` the
+    ///   process raises can spawn one. The bound that remains is the layer's own: the tracker
+    ///   deduplicates by cause and window before a line is ever delivered, and each task holds
+    ///   one short `String` and ends as soon as a slot frees or the channel closes. It is a
+    ///   real bound and a looser one than the sentence it replaces, which counted only the
+    ///   producer that existed when this comment was written.
     fn once(&self, key: &'static str, msg: &magi_rs::logging::auditor::Audited) {
         {
             let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
@@ -4666,11 +4685,15 @@ mod tests {
     /// The other half of finding 2: a sink that is NEVER attached still owes
     /// the line a mouth.
     ///
-    /// `run()` can return with `?` between `init_logging` and `run_tui_ext` —
-    /// a vault that will not open, a database that will not — and on that path
-    /// no alternate screen was ever entered, so `stderr` is right and silence
-    /// is the regression. [`TuiNoticeSink::flush`] is the queue `Drop` empties,
-    /// so asserting on it is asserting on what the process would print.
+    /// `run()` can return early between `init_logging` and `run_tui_ext` — a
+    /// DECLARED log directory that cannot be created (D-L20), or an endpoint
+    /// whose `base_url` placeholder names a vault entry that is not there —
+    /// and on that path no alternate screen was ever entered, so `stderr` is
+    /// right and silence is the regression. Not a vault or a database: `run()`
+    /// opens those well BEFORE `init_logging` and degrades to a startup notice
+    /// instead of returning, which is why they are named here as what this is
+    /// not. [`TuiNoticeSink::flush`] is the queue `Drop` empties, so asserting
+    /// on it is asserting on what the process would print.
     #[test]
     fn a_notice_raised_before_attach_is_never_silently_dropped() {
         use crate::agent::mode_classifier::NoticeSink as _;
