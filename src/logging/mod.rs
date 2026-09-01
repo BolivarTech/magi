@@ -651,6 +651,76 @@ pub fn init_logging(
 mod tests {
     use super::*;
 
+    /// Keeps every line a mouth was handed.
+    #[derive(Default)]
+    struct RecordingSink {
+        /// One entry per delivered line, in delivery order.
+        lines: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl NoticeDelivery for RecordingSink {
+        fn deliver(&self, line: &auditor::Audited) {
+            if let Ok(mut l) = self.lines.lock() {
+                l.push(line.as_str().to_string());
+            }
+        }
+    }
+
+    /// A phrase that appears VERBATIM in the already-initialised notice.
+    ///
+    /// Registering it as a secret is what turns "which auditor audits that
+    /// line" into something a test can observe: the process auditor masks it,
+    /// a freshly built one has nothing registered and cannot.
+    const PHRASE_INSIDE_THE_NOTICE: &str = "already initialised";
+
+    #[test]
+    fn the_already_initialised_notice_goes_through_the_process_auditor() {
+        // The notice is the subsystem talking about itself, and it used to be
+        // audited by an `Auditor::new()` built on the spot. A fresh auditor has
+        // no registered secrets, so its exact pass does nothing and only the
+        // pattern pass stands between that line and a mouth -- the same defect
+        // `main.rs`'s `no_surface_builds_an_auditor_of_its_own` was written for,
+        // in the one file that guard does not read.
+        //
+        // Isolated by `cargo nextest`'s one-process-per-test model: both
+        // `HANDLE` and the process auditor are process-global, so a second test
+        // sharing this process would share them too.
+        //
+        // Mutation-verified: with `Auditor::new().audit(..)` back in
+        // `init_logging`, the phrase comes through in the clear and this fails.
+        assert!(
+            PHRASE_INSIDE_THE_NOTICE.len() >= auditor::MIN_SECRET_BYTES,
+            "a phrase below the floor never enters the exact pass, so this \
+             would hold for free"
+        );
+        process_auditor().register_secret(
+            auditor::SecretName::new("NOTICE_PROBE"),
+            &[PHRASE_INSIDE_THE_NOTICE],
+        );
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cfg = LoggingConfig {
+            log_dir: dir.path().to_path_buf(),
+            file_filter: filter::Filter::parse("info").expect("valid"),
+        };
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let first = init_logging(&cfg, sink.clone(), None);
+        assert!(first.is_ok(), "the first call must bring the subsystem up");
+        let _second =
+            init_logging(&cfg, sink.clone(), None).expect("a second call is not an error");
+
+        let said = sink.lines.lock().expect("not poisoned").join("\n");
+        assert!(
+            said.contains("DISCARDED"),
+            "the fixture produced no already-initialised notice: {said:?}"
+        );
+        assert!(
+            !said.contains(PHRASE_INSIDE_THE_NOTICE),
+            "the notice was audited by an auditor that knows nothing this \
+             process registered: {said:?}"
+        );
+    }
+
     #[test]
     fn the_first_event_names_the_command_and_the_workspace() {
         // REQ-L63's third piece. A reader who opens the file cold has to be
