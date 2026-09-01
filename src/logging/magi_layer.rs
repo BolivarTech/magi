@@ -585,8 +585,8 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
             &rendered,
             // `tracing` emits the target as a literal, so it is already
             // `'static` — the same reason `SecretName` is.
-            leak_target(target),
-            cause_from_event(event),
+            leak_target(target, &self.reporter),
+            cause_from_event(event, &self.reporter),
             reserved,
         );
 
@@ -681,6 +681,7 @@ fn intern(
     value: &str,
     fallback: &'static str,
     max_entries: usize,
+    _reporter: &Reporter,
 ) -> &'static str {
     let Ok(mut guard) = cache.lock() else {
         return fallback;
@@ -719,9 +720,9 @@ fn intern(
 /// # Complexity
 ///
 /// `O(log n)` over the distinct targets seen.
-fn leak_target(target: &str) -> &'static str {
+fn leak_target(target: &str, reporter: &Reporter) -> &'static str {
     static SEEN: Mutex<Option<InternCache>> = Mutex::new(None);
-    intern(&SEEN, target, "magi_rs::unknown", usize::MAX)
+    intern(&SEEN, target, "magi_rs::unknown", usize::MAX, reporter)
 }
 
 /// Upper bound on distinct `cause.subsystem`/`cause.name` values this
@@ -791,7 +792,7 @@ const CAUSE_INTERN_CAP_REACHED: &str = "cause-intern-cap-reached";
 /// # Complexity
 ///
 /// `O(k)` over the event's field count, plus `O(log n)` per interned value.
-fn cause_from_event(event: &Event<'_>) -> Option<CauseKey> {
+fn cause_from_event(event: &Event<'_>, reporter: &Reporter) -> Option<CauseKey> {
     /// Collects the two cause fields, if present, off one event.
     #[derive(Default)]
     struct CauseFields {
@@ -826,12 +827,14 @@ fn cause_from_event(event: &Event<'_>) -> Option<CauseKey> {
                 &subsystem,
                 CAUSE_INTERN_CAP_REACHED,
                 MAX_INTERNED_CAUSE_VALUES,
+                reporter,
             ),
             intern(
                 &SEEN,
                 &cause,
                 CAUSE_INTERN_CAP_REACHED,
                 MAX_INTERNED_CAUSE_VALUES,
+                reporter,
             ),
         )),
         _ => None,
@@ -1250,15 +1253,107 @@ mod tests {
         );
     }
 
+    /// Builds a reporter over `sink`, with a real appender under `dir`.
+    fn reporter_over(
+        dir: &std::path::Path,
+        sink: Arc<dyn crate::logging::NoticeDelivery>,
+    ) -> Reporter {
+        Reporter {
+            sink,
+            auditor: Arc::new(Auditor::new()),
+            appender: Arc::new(DailyAppender::new(dir).unwrap()),
+            degraded: std::sync::atomic::AtomicBool::new(false),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// A delivery that reports whether the interning cache was still locked
+    /// while it ran.
+    ///
+    /// `try_lock` is the whole measurement: a `std::sync::Mutex` is not
+    /// reentrant, so the thread that already holds the guard gets `WouldBlock`
+    /// here exactly as a second thread would.
+    struct CacheProbe {
+        /// The cache this probes, shared with the caller of `intern`.
+        cache: Arc<Mutex<Option<InternCache>>>,
+        /// How many deliveries found the cache still locked.
+        locked: std::sync::atomic::AtomicUsize,
+        /// Everything delivered, in order.
+        lines: Mutex<Vec<String>>,
+    }
+
+    impl crate::logging::NoticeDelivery for CacheProbe {
+        fn deliver(&self, line: &Audited) {
+            use std::sync::atomic::Ordering;
+            if self.cache.try_lock().is_err() {
+                self.locked.fetch_add(1, Ordering::SeqCst);
+            }
+            if let Ok(mut l) = self.lines.lock() {
+                l.push(line.as_str().to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn the_interning_cap_warning_speaks_through_a_mouth_and_not_under_the_guard() {
+        // Three defects in one `eprintln!`: it ran I/O while holding the
+        // interning mutex, it put a panicking construct under that mutex --
+        // poisoning the cache for the rest of the run -- and it wrote raw to
+        // stderr, which in the TUI lands on top of the alternate screen the
+        // frame is drawn on.
+        //
+        // Both halves are asserted, because either alone passes the wrong fix:
+        // moving the write out from under the guard leaves it on stderr, and
+        // routing it through a mouth while still holding the guard leaves the
+        // lock nesting.
+        let dir = tempdir().unwrap();
+        let cache: Arc<Mutex<Option<InternCache>>> = Arc::new(Mutex::new(None));
+        let probe = Arc::new(CacheProbe {
+            cache: Arc::clone(&cache),
+            locked: std::sync::atomic::AtomicUsize::new(0),
+            lines: Mutex::new(Vec::new()),
+        });
+        let reporter = reporter_over(
+            dir.path(),
+            Arc::clone(&probe) as Arc<dyn crate::logging::NoticeDelivery>,
+        );
+
+        const FALLBACK: &str = "probe-cap-reached";
+        assert_eq!(
+            intern(&cache, "first-value", FALLBACK, 1, &reporter),
+            "first-value",
+            "the fixture must fill the cap before it can be exceeded"
+        );
+        assert_eq!(
+            intern(&cache, "second-value", FALLBACK, 1, &reporter),
+            FALLBACK,
+            "past the cap a new value collapses onto the fallback"
+        );
+
+        let said = probe.lines.lock().unwrap().join("\n");
+        assert!(
+            said.contains(FALLBACK),
+            "the cap warning never reached a mouth, so it is still a raw write \
+             to a terminal the TUI may own: {said:?}"
+        );
+        assert_eq!(
+            probe.locked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the warning was delivered with the interning guard still held"
+        );
+    }
+
     #[test]
     fn a_target_interns_to_the_same_static_instead_of_leaking_per_event() {
-        let a = leak_target("magi_rs::agent");
-        let b = leak_target("magi_rs::agent");
+        let dir = tempdir().unwrap();
+        let reporter = reporter_over(dir.path(), Arc::new(crate::logging::DiscardDelivery));
+        let a = leak_target("magi_rs::agent", &reporter);
+        let b = leak_target("magi_rs::agent", &reporter);
         assert!(
             std::ptr::eq(a, b),
             "a per-event leak would grow without bound on a long run"
         );
-        assert_ne!(leak_target("magi_rs::other"), a);
+        assert_ne!(leak_target("magi_rs::other", &reporter), a);
     }
 
     /// Task 0.1 fix-round Finding 2: distinct cause-field values past
@@ -1283,21 +1378,25 @@ mod tests {
     /// `static`, so a second test sharing this process would share it too.
     #[test]
     fn interning_past_the_cap_falls_back_instead_of_growing_forever() {
-        struct CaptureCause(Arc<Mutex<Vec<Option<CauseKey>>>>);
+        struct CaptureCause(Arc<Mutex<Vec<Option<CauseKey>>>>, Reporter);
         impl<S: Subscriber> Layer<S> for CaptureCause {
             fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-                let key = cause_from_event(event);
+                let key = cause_from_event(event, &self.1);
                 if let Ok(mut captured) = self.0.lock() {
                     captured.push(key);
                 }
             }
         }
 
+        let dir = tempdir().unwrap();
         let captured: Arc<Mutex<Vec<Option<CauseKey>>>> = Arc::new(Mutex::new(Vec::new()));
         let fills_the_cap = MAX_INTERNED_CAUSE_VALUES / 2;
         let past_the_cap = 40;
 
-        let subscriber = tracing_subscriber::registry().with(CaptureCause(Arc::clone(&captured)));
+        let subscriber = tracing_subscriber::registry().with(CaptureCause(
+            Arc::clone(&captured),
+            reporter_over(dir.path(), Arc::new(crate::logging::DiscardDelivery)),
+        ));
         tracing::subscriber::with_default(subscriber, || {
             for i in 0..(fills_the_cap + past_the_cap) {
                 let subsystem = format!("cause-cap-subsystem-{i}");
