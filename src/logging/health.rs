@@ -273,6 +273,31 @@ impl HealthTracker {
         match &state.pending {
             // Already pending toward this exact candidate: keep its
             // original `since` rather than restarting the window.
+            //
+            // What is kept is the WHOLE pending, so the transition that
+            // eventually emits carries the cause of the observation that
+            // OPENED the window, not this one. That half is deliberately
+            // unspecified and is NOT pinned: rebuilding the transition from
+            // this observation while keeping `since` leaves every test here
+            // green, and the reason to leave it that way is that the
+            // difference cannot reach a user.
+            //
+            // Two steps, both checkable in this file. A target of `Some`
+            // cannot differ at all -- the guard is `pending.target ==
+            // candidate`, which for a degradation makes the two causes the
+            // same key -- so the question exists only for a recovery, where
+            // the target is `None` and the two causes may be different causes
+            // of ONE subsystem. And there `render_transition`'s `Restored`
+            // arm reads only the recovery half of `screen_messages`, never
+            // the key: the sole subsystem with two instrumented causes is
+            // `embedder` (`CauseKey::ALL`, `src/logging/auditor.rs`), whose
+            // `unreachable` and `http_error` rows carry the SAME recovery
+            // string, so both renderings are the identical line.
+            //
+            // Pin it the day two causes of one subsystem owe different
+            // recovery text; that is the change that would make the choice
+            // observable, and until then a test asserting one of them would
+            // be pinning an implementation detail as if it were contract.
             Some(pending) if pending.target == candidate => {}
             _ => {
                 state.pending = Some(PendingTransition {
