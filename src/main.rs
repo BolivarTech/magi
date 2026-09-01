@@ -1929,13 +1929,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // endpoint, an Anthropic/base_url incoherence) — surfaced the same way the old
     // malformed-config warning used to be, but `load()` no longer needs a *malformed*
     // branch here: that path is now fatal and propagated by the `?` above.
-    // `config_notices` stays `Vec<String>` (produced by `config::resolution_notices`,
-    // out of this task's file list). All of them are `info`, and that is one class rather
-    // than a bulk guess: each says "your setting is honoured, and here is what it does and
-    // does not cover" — an empty `provider` taking the default, the embedder inheriting the
-    // root, and three explanations of a `base_url` Anthropic does not use. Nothing became
-    // unavailable and nothing runs worse, so there is nothing to act on before continuing.
-    startup_notices.extend(config_notices.into_iter().map(Notice::info));
+    // `config_notices` arrives already levelled (`config::resolution_notices`), and the
+    // bulk `map(Notice::info)` that used to sit here is why it does. Most of them say "your
+    // setting is honoured, and here is what it does and does not cover" — an empty
+    // `provider` taking the default, three explanations of a `base_url` Anthropic does not
+    // use — and nothing became unavailable, so there is nothing to act on. One of them is
+    // not like that, and a single level for the whole list could not express it: an
+    // embedder endpoint INHERITED from a root that is off this machine.
+    startup_notices.extend(config_notices);
     // B1: surface invalid memory-config values as a startup notice (never panic).
     if let Err(e) = magi_config.memory().validate() {
         startup_notices.push(Notice::warn(format!("memory config warning: {e}")));
@@ -5418,8 +5419,7 @@ async fn prepare_headless(
     // Today the screen half is EMPTY, and the partition is what makes that a fact about the
     // classification rather than a coincidence this site leans on: reclassify one of these
     // upward and it starts being shown, instead of starting to be lost.
-    let (cfg_screen, cfg_file) =
-        magi_rs::notices::partition_by_mouth(cfg_notices.into_iter().map(Notice::info));
+    let (cfg_screen, cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
     emit_notices(cfg_screen);
 
     // Resolved BEFORE reading input so the effective `max_input_bytes` (an

@@ -1437,14 +1437,14 @@ impl MagiConfig {
     /// * `path` - Path to the `magi.toml` file. Recommended absolute/canonical (e.g. `Workspace::config_path()`) so resolution is reproducible.
     /// # Returns
     ///
-    /// `(MagiConfig, Vec<String>)` — the parsed config and the notices from REQ-A12b/A12c about
+    /// `(MagiConfig, Vec<Notice>)` — the parsed config and the notices from REQ-A12b/A12c about
     /// resolutions that did not come from what was written in the file.
     /// Delegates ALL shape+vocabulary validation to `from_toml_str` (migration, safe parsing
     /// via `safe_parse_error`, vocabulary, numeric ranges) — repeating it here would duplicate
     /// exactly the logic that function centralizes (B3) and, worse, would re-filter the
     /// offending line of a malformed TOML through the raw `Display` of `toml::de::Error` (see
     /// `safe_parse_error`'s doc).
-    pub fn load(path: &Path) -> Result<(Self, Vec<String>), ConfigError> {
+    pub fn load(path: &Path) -> Result<(Self, Vec<Notice>), ConfigError> {
         let raw = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1483,7 +1483,7 @@ impl MagiConfig {
     /// `DEFAULT_PROVIDER` is already the REQ-A01b vocabulary value ("ollama"), the same one
     /// `effective_provider()` falls to when `provider` is absent/empty (Task 4.1 collapsed the
     /// separate legacy constant).
-    fn resolution_notices(&self) -> Vec<String> {
+    fn resolution_notices(&self) -> Vec<Notice> {
         let mut out = Vec::new();
 
         if self
@@ -1491,14 +1491,14 @@ impl MagiConfig {
             .as_deref()
             .is_some_and(|s| s.trim().is_empty())
         {
-            out.push(format!(
+            out.push(Notice::info(format!(
                 "notice: `provider` is empty; using the default `{}`",
                 // The TEMPLATE is shown by its text and **not redacted**: by REQ-A16c it cannot
                 // contain a secret (a literal credential is a config error, already rejected by
                 // `load()` before reaching here), so running it through `redact_url` would be
                 // redundant *and* wrongly typed.
                 crate::defaults::DEFAULT_PROVIDER,
-            ));
+            )));
         }
 
         // m2 (fix round 2, coordinator, 2026-08-03): `if let`, NOT `let … else { return out }`.
@@ -1517,11 +1517,11 @@ impl MagiConfig {
             if root.as_str() != crate::defaults::DEFAULT_OPENAI_BASE_URL
                 && self.embedding.base_url.is_none()
             {
-                out.push(format!(
+                out.push(Notice::info(format!(
                     "notice: the embedder inherits `base_url = {}` from the root; declare it \
                      in [embedding] if you want a different one",
                     root.as_str(),
-                ));
+                )));
             }
         }
 
@@ -1532,26 +1532,23 @@ impl MagiConfig {
         // which is also not used.
         if self.effective_provider() == ProviderKind::Anthropic {
             let declared = self.base_url.is_some();
-            out.push(if declared {
+            out.push(Notice::info(if declared {
                 "notice: with `provider = \"anthropic\"` the root `base_url` is NOT used for \
                  the main agent (Anthropic uses its own endpoint); it only applies to [magi] \
                  and [embedding] if they inherit it"
-                    .to_string()
             } else {
                 "notice: `provider = \"anthropic\"` with the default Ollama `base_url`. That \
                  value is NOT used for the main agent; if you wanted Ollama, fix `provider`"
-                    .to_string()
-            });
+            }));
         }
 
         // REQ-A12c, same shape one level down: `[magi].kind = "anthropic"` with its own
         // declared `[magi].base_url` — that endpoint is not used either.
         if self.effective_magi_kind() == ProviderKind::Anthropic && self.magi.base_url.is_some() {
-            out.push(
+            out.push(Notice::info(
                 "notice: with `[magi].kind = \"anthropic\"` the `[magi].base_url` is NOT \
-                 used: Anthropic uses its own endpoint"
-                    .to_string(),
-            );
+                 used: Anthropic uses its own endpoint",
+            ));
         }
 
         out
@@ -3494,20 +3491,64 @@ max_input_bytes = 2048
 
         std::fs::write(&path, "provider = \"\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(notices.iter().any(|n| n.contains("provider")));
+        assert!(notices.iter().any(|n| n.text.contains("provider")));
 
         std::fs::write(&path, "base_url = \"http://lan:11434/v1\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
-            notices.iter().any(|n| n.contains("embedder")),
+            notices.iter().any(|n| n.text.contains("embedder")),
             "the embedder inherits a NON-default base_url: it must be said"
         );
 
         std::fs::write(&path, "base_url = \"http://localhost:11434/v1\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
-            !notices.iter().any(|n| n.contains("embedder")),
+            !notices.iter().any(|n| n.text.contains("embedder")),
             "inheriting the DEFAULT is not surprising: it would be noise on every startup"
+        );
+    }
+
+    /// **An inherited endpoint that leaves the machine warns, by the distiller's own rule.**
+    ///
+    /// The distiller notice a few lines away in `main.rs` already decided this: an
+    /// `[embedding].base_url` that was never written means nobody chose the endpoint the
+    /// embedder talks to, and cloud egress arrived at by inheritance is a side effect of
+    /// something nobody decided. The embedder case is the same fact one level up — the
+    /// distiller's batches are a subset of what this endpoint receives, since every memory
+    /// and every query is embedded there — so a level that disagreed with it would mean
+    /// the narrower egress reaches the screen and the wider one does not.
+    ///
+    /// **`!is_localhost` is the discriminator, not "non-default".** A second local daemon on
+    /// another port is non-default and still leaves nothing; making the notice's own
+    /// condition the level would warn about it.
+    #[test]
+    fn an_inherited_endpoint_warns_only_when_it_leaves_the_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magi.toml");
+
+        std::fs::write(&path, "base_url = \"https://api.example.com/v1\"\n").unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        let cloud = notices
+            .iter()
+            .find(|n| n.text.contains("embedder"))
+            .expect("the inheritance must still be announced");
+        assert_eq!(
+            cloud.level,
+            tracing::Level::WARN,
+            "an endpoint nobody chose for the embedder, off this machine: {cloud:?}"
+        );
+
+        // Non-default, so the notice fires — and local, so it is not a warning.
+        std::fs::write(&path, "base_url = \"http://127.0.0.1:11435/v1\"\n").unwrap();
+        let (_, notices) = MagiConfig::load(&path).unwrap();
+        let local = notices
+            .iter()
+            .find(|n| n.text.contains("embedder"))
+            .expect("a non-default endpoint is still announced");
+        assert_eq!(
+            local.level,
+            tracing::Level::INFO,
+            "nothing left the machine, so there is nothing to act on: {local:?}"
         );
     }
 
@@ -3526,7 +3567,7 @@ max_input_bytes = 2048
         std::fs::write(&path, "provider = \"anthropic\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
-            notices.iter().any(|n| n.contains("default Ollama")),
+            notices.iter().any(|n| n.text.contains("default Ollama")),
             "with no base_url declared the default is still there, and it looks like a \
              migration oversight"
         );
@@ -3538,7 +3579,7 @@ max_input_bytes = 2048
         )
         .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(notices.iter().any(|n| n.contains("NOT used")));
+        assert!(notices.iter().any(|n| n.text.contains("NOT used")));
 
         // Without Anthropic there is nothing to warn about.
         std::fs::write(
@@ -3547,7 +3588,7 @@ max_input_bytes = 2048
         )
         .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(notices.iter().any(|n| n.contains("[magi].base_url")));
+        assert!(notices.iter().any(|n| n.text.contains("[magi].base_url")));
 
         // Needle must match production's actual casing ("NOT used", line ~1902 above) — the
         // lowercase "not used" this assertion used before never matches, so it was vacuously
@@ -3556,7 +3597,7 @@ max_input_bytes = 2048
         let (_, notices) = MagiConfig::load(&path).unwrap();
         // m2 (fix round 2, coordinator, 2026-08-03): a failed `effective_base_url()` must NOT
         // silence the Anthropic inconsistency notices that follow it.
-        assert!(!notices.iter().any(|n| n.contains("NOT used")));
+        assert!(!notices.iter().any(|n| n.text.contains("NOT used")));
     }
 
     /// `resolution_notices()` only runs today inside `load()`, AFTER `load()` already validated
@@ -3588,7 +3629,7 @@ max_input_bytes = 2048
 
         let notices = cfg.resolution_notices();
         assert!(
-            notices.iter().any(|n| n.contains("NOT used")),
+            notices.iter().any(|n| n.text.contains("NOT used")),
             "the Anthropic incoherence notice must not depend on the root template \
              having parsed: {notices:?}"
         );
