@@ -155,9 +155,37 @@ pub fn emit_notices_into(notices: Vec<Notice>, fallback: &mut dyn std::io::Write
     // `WARN` in this situation says why there is no workspace, which is also why there is no
     // log.
     for notice in ordered.iter().filter(|n| n.level <= SCREEN_LEVEL) {
+        // **Audited, because this is an output** (REQ-L48). The layer path reaches a mouth
+        // through `announce`, and therefore through the auditor; this path reaches one
+        // directly. REQ-L48's guarantee is that the auditor is the only route to any output
+        // and that the COMPILER enforces it — every sink takes an `Audited`, so handing one a
+        // raw `String` does not compile — and a `&str` written straight to a `Write` is the
+        // one shape that escapes the type. Nothing here is static: a startup notice carries a
+        // resolved `base_url`, an error chain or a vault entry name, and each of those sites
+        // redacting on its own is the convention REQ-L48 exists to replace.
+        //
+        // The PROCESS auditor, not a local one: the registered secrets have to be the same set
+        // for every mouth, and a second auditor is a second, emptier idea of what to mask.
+        let (audited, alarm) = crate::logging::process_auditor().audit(
+            &notice.text,
+            NOTICE_TARGET,
+            None,
+            notice.text.len(),
+        );
         // A failed write to stderr has nowhere to be reported, so it is dropped rather than
         // escalated: this is already the last resort.
-        let _ = writeln!(fallback, "{}", notice.text);
+        let _ = writeln!(fallback, "{}", audited.as_str());
+        // Masking and the alarm that says masking happened travel together — both, never one.
+        // The appender is what carries the pair on the layer path; with no layer there is no
+        // appender, so the alarm goes to the same last-resort mouth. It quotes neither the
+        // secret nor the line (REQ-L50).
+        if let Some(alarm) = alarm {
+            let _ = writeln!(
+                fallback,
+                "{}",
+                crate::logging::auditor::render_alarm(&alarm)
+            );
+        }
     }
 }
 
