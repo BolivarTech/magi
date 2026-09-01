@@ -7,10 +7,11 @@ import json
 import pathlib
 import tomllib
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
-from smoke import runs
+from smoke import logs, runs
 from smoke.errors import HarnessError
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
@@ -189,6 +190,26 @@ def _outcomes(runs_map, ambient) -> dict[str, Outcome]:
     return {finding.assertion: finding.outcome for finding in findings}
 
 
+def _details(runs_map, ambient) -> dict[str, str]:
+    """Run S9 and index the CAUSE it gave, by assertion text.
+
+    The outcome alone cannot tell two ``CANNOT_TEST`` branches apart, and S9
+    has two that a reader has to act on differently: nothing was written to
+    disk at all, versus a directory that exists and holds no matching line.
+    A test that reads only the outcome passes for either, so the pair it
+    claims to distinguish is not actually distinguished anywhere.
+
+    Args:
+        runs_map: The three results.
+        ambient: The ambient state.
+
+    Returns:
+        dict[str, str]: What each assertion gave as its cause.
+    """
+    findings = list(DEFAULT_REGISTRY.get("S9").func(runs_map, ambient))
+    return {finding.assertion: finding.detail for finding in findings}
+
+
 class MemoryScenarioShapeTests(unittest.TestCase):
     """S9 hangs off three runs and reads state no run produced."""
 
@@ -275,19 +296,33 @@ class MemoryScenarioBodyTests(unittest.TestCase):
 
     def test_a_missing_startup_line_cannot_test_the_first_two(self) -> None:
         """The log directory exists, but nothing under it matches R3's id."""
-        outcomes = _outcomes(_runs(r3_body="note: something else"),
-                             _ambient())
+        runs_map = _runs(r3_body="note: something else")
+        outcomes = _outcomes(runs_map, _ambient())
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[0]])
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[1]])
+        detail = _details(_runs(r3_body="note: something else"),
+                          _ambient())[memory.ASSERTIONS[0]]
+        self.assertIn("no line under", detail)
+        self.assertNotIn("does not exist", detail)
 
     def test_a_missing_log_directory_cannot_test_the_first_two(self) -> None:
         """Nothing written to disk at all is a DIFFERENT finding from an
         existing directory searched clean -- the cause string has to say
         which one this run hit.
+
+        The outcome is the same ``CANNOT_TEST`` in both cases, so asserting
+        on it alone made this test and its sibling above indistinguishable:
+        each passed for the other's condition and neither checked the
+        distinction the name promises. The cause is where that distinction
+        lives, so the cause is what is read.
         """
         outcomes = _outcomes(_runs(write_r3_log=False), _ambient())
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[0]])
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[memory.ASSERTIONS[1]])
+        detail = _details(_runs(write_r3_log=False),
+                          _ambient())[memory.ASSERTIONS[0]]
+        self.assertIn("does not exist", detail)
+        self.assertIn("wrote no log at all", detail)
 
     def test_no_published_run_id_cannot_test_the_first_two(self) -> None:
         """A run that names no id of its own cannot be told apart from any
