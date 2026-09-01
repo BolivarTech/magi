@@ -4688,7 +4688,7 @@ fn openai_provider_info(base_url: &str, model: &str) -> String {
 fn anthropic_banner(resolved: Option<(&str, &str)>) -> Notice {
     match resolved {
         Some((source, model)) => Notice::info(format!("Magi API ({source}) Model: {model}")),
-        None => Notice::info(
+        None => Notice::warn(
             "Static Mode: no API key found. Set ANTHROPIC_API_KEY or run \
              `magi-rs vault set ANTHROPIC_API_KEY` (recommended). /login \
              (OAuth) is best-effort and may be rate-limited."
