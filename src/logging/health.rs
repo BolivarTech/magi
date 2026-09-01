@@ -232,6 +232,16 @@ impl HealthTracker {
     /// window and a closing process has no "later" left for the window to
     /// elapse in.
     ///
+    /// # When more than one subsystem is due
+    ///
+    /// At most **one** transition comes out per call: a cascade that leaves
+    /// several subsystems due at the same instant is drained over as many
+    /// calls, and the caller ticks again rather than receiving a batch. The
+    /// order is **first-observed**, the same one [`Self::flush`] documents, so
+    /// the two surfaces cannot disagree about which subsystem a caller hears
+    /// about first. A subsystem whose pending has not served its window is
+    /// stepped over and left intact, never allowed to hold up a later one.
+    ///
     /// # Complexity
     ///
     /// `O(s)` in the number of distinct subsystems observed so far.
