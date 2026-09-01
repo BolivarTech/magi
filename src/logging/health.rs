@@ -104,8 +104,11 @@ struct SubsystemState {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct HealthTracker {
-    /// One entry per subsystem observed so far, kept in first-observed
-    /// order so [`Self::flush`] can report the earliest degradation first.
+    /// One entry per subsystem, in the order the subsystems were first
+    /// OBSERVED -- which is what gives [`Self::flush`] its order. An entry is
+    /// created by the first event naming that subsystem whatever the event
+    /// said, so this is not an order of degradation: a subsystem whose first
+    /// event was a success still ranks ahead of one that degraded later.
     states: Vec<(&'static str, SubsystemState)>,
 }
 
@@ -121,9 +124,11 @@ impl HealthTracker {
     ///
     /// # Complexity
     ///
-    /// `O(n)` in the number of distinct subsystems seen so far, which in
-    /// practice is a handful (embedder, provider, vault, ...) -- amortised
-    /// `O(1)` per observation against that fixed small `n`.
+    /// `O(s)` in the number of distinct subsystems seen so far: a linear scan
+    /// of `states`, every call. `s` is a handful (embedder, provider,
+    /// vault, ...), which is why a scan is the right structure here -- and it
+    /// is what gives [`Self::flush`] its first-observed order for free. It is
+    /// linear all the same, not amortised constant.
     fn state_mut(&mut self, subsystem: &'static str) -> &mut SubsystemState {
         match self.states.iter().position(|(name, _)| *name == subsystem) {
             Some(idx) => &mut self.states[idx].1,
@@ -146,9 +151,10 @@ impl HealthTracker {
     ///
     /// # Complexity
     ///
-    /// `O(1)` amortised: one lookup into `states` (linear in the small,
-    /// fixed number of subsystems seen so far) plus constant-time state
-    /// comparison.
+    /// `O(s)` in the number of distinct subsystems seen so far: the lookup
+    /// into `states` is a linear scan, run on every call, and everything
+    /// after it is constant time. `s` is a handful, so the scan stays
+    /// cheaper than the map that would replace it.
     pub fn observe(
         &mut self,
         cause: Option<CauseKey>,
@@ -231,9 +237,12 @@ impl HealthTracker {
     ///
     /// Returns a `Vec`, not an `Option`, because state is per subsystem: a
     /// cascading failure can leave one pending transition per subsystem,
-    /// and an `Option` would show one and silently drop the rest. The order
-    /// matches first-observed order, so the earliest subsystem to degrade
-    /// is reported first.
+    /// and an `Option` would show one and silently drop the rest.
+    ///
+    /// The order is **first-observed**: subsystems come out in the order this
+    /// tracker first saw an event naming each of them, degraded or not. That
+    /// is not the same as earliest-degradation-first, and nothing here sorts
+    /// by when a pending transition started serving its window.
     ///
     /// # Complexity
     ///

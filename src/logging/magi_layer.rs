@@ -645,6 +645,19 @@ fn leak_target(target: &str) -> &'static str {
 /// 3.3's own message table lists four causes total, so 256 is headroom for
 /// legitimate growth, not a tuned measurement — the number only has to be
 /// far enough past realistic use that it never fires in ordinary operation.
+///
+/// # What firing costs, downstream
+///
+/// Past the cap, every further distinct value collapses onto
+/// [`CAUSE_INTERN_CAP_REACHED`], and that key is what the health tracker
+/// then receives. Because the tracker keys its state on the SUBSYSTEM half,
+/// two unrelated subsystems that both land on the fallback share one health
+/// state: one's degradation cancels the other's, and a recovery of either
+/// reads as a recovery of both. The key also has no row in
+/// `health::render_transition`'s message table, so whatever does survive
+/// that reaches a screen as the no-row defect line rather than as a message.
+/// Both are the intended trade — a bounded cache degrading loudly beats an
+/// unbounded one — but neither is visible from this constant's own site.
 const MAX_INTERNED_CAUSE_VALUES: usize = 256;
 
 /// Substituted for a cause-field value once [`MAX_INTERNED_CAUSE_VALUES`]
