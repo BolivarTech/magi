@@ -1274,6 +1274,24 @@ mod tests {
             probe.delivered.load(Ordering::SeqCst) > before_tick,
             "the tick delivered nothing, so this measured no delivery at all"
         );
+
+        // **And `flush`, which the paragraph above claimed to watch and this
+        // test never called.** Its deliveries went through the same counter in
+        // principle and through nothing in practice, so the sentence describing
+        // the coverage was the only thing holding the third path down. `flush`
+        // is the one that runs at close, on the thread that is ending the run
+        // and still holds the alternate screen. Verified by mutation: with
+        // `flush` binding its guard in a `let` that outlives the delivery, this
+        // reports 1 of 4 deliveries locked.
+        reporter.observe(&event("embedding request failed"), tracing::Level::WARN);
+        reporter.observe(&event("embedding request ok"), tracing::Level::INFO);
+        let before_flush = probe.delivered.load(Ordering::SeqCst);
+        reporter.flush();
+        assert!(
+            probe.delivered.load(Ordering::SeqCst) > before_flush,
+            "the flush delivered nothing, so it measured no delivery at all"
+        );
+
         assert_eq!(
             probe.locked.load(Ordering::SeqCst),
             0,
