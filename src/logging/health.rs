@@ -715,6 +715,58 @@ mod tests {
     }
 
     #[test]
+    fn a_repeating_new_cause_runs_its_window_from_the_first_observation_too() {
+        // The DEGRADED half of the keep-original-`since` rule, and the half the
+        // test above cannot reach: its pending candidate is a recovery
+        // (`target == None`), so a keep arm narrowed to `candidate.is_none()`
+        // leaves it green while every cause change inside an already-degraded
+        // subsystem silently restarts its window on each observation.
+        //
+        // That is the production case, not a curiosity: a subsystem already
+        // shown as degraded whose NEW cause fires once a second would then
+        // never reach a deadline, and the screen would never be told the cause
+        // changed at all.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let first = CauseKey::new("embedder", "http_error");
+        let second = CauseKey::new("embedder", "unreachable");
+
+        assert!(matches!(
+            h.observe(Some(first), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+
+        // The new cause's window starts at this first observation of it.
+        let first_seen = t0 + Duration::from_secs(1);
+        assert!(
+            h.observe(Some(second), false, first_seen).is_none(),
+            "a cause change inside a degraded subsystem serves the window"
+        );
+
+        // The same new cause again, once a second, all of it well inside the
+        // window. Every one of these takes the keep-original-`since` arm.
+        for i in 1..HEALTH_MIN_STABLE_SECS {
+            assert!(
+                h.observe(Some(second), false, first_seen + Duration::from_secs(i))
+                    .is_none(),
+                "still the same candidate: nothing to show yet"
+            );
+        }
+
+        // At FIRST observation + window it must emit, and it must emit the NEW
+        // cause: were the window restarted on each observation, `since` would be
+        // the last of them and this tick would land a whole window early.
+        let got = h.tick(first_seen + w);
+        assert!(
+            matches!(got, Some(Transition::Degraded(k)) if k.cause() == second.cause()),
+            "the window runs from the first observation of the new cause, not \
+             from the most recent one, and what comes out is that new cause: \
+             {got:?}"
+        );
+    }
+
+    #[test]
     fn a_degradation_after_a_shown_recovery_is_immediate_again() {
         // The immediacy rule of SC-L71 is not a once-per-process privilege: it
         // is a property of a subsystem that is currently healthy. Once a
