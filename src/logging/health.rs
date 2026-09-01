@@ -483,6 +483,32 @@ mod tests {
     // named `embedder_http_500` is a thing this program has, which it is not.
 
     #[test]
+    fn state_mut_appends_an_unseen_subsystem_and_finds_an_existing_one_in_place() {
+        // The lookup's two directions, driven directly rather than inferred
+        // from what `flush` prints. It is `state_mut` -- not `flush` and not
+        // `tick` -- that decides the first-observed order both of them
+        // document, and the found direction is the one with teeth: a second
+        // push for a name already present would leave the first entry, still
+        // carrying its `shown`, shadowed forever, so the subsystem would look
+        // healthy again at every later lookup.
+        let mut h = HealthTracker::new();
+        h.state_mut("provider").shown = Some(CauseKey::new("provider", "unreachable"));
+        h.state_mut("embedder");
+
+        assert!(
+            h.state_mut("provider").shown.is_some(),
+            "an existing subsystem must be found, not appended a second time"
+        );
+        let names: Vec<&str> = h.states.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            vec!["provider", "embedder"],
+            "entries are appended in first-REFERENCED order, and referencing \
+             one again neither reorders nor duplicates it"
+        );
+    }
+
+    #[test]
     fn the_first_degradation_is_immediate_and_does_not_wait_for_the_window() {
         // SC-L71: making the first "something broke" notice wait 30 s turns
         // the anti-flapping defence into a delay on the signal that matters
