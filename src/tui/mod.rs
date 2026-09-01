@@ -1747,10 +1747,19 @@ pub async fn run_tui_ext(
     let _ = io::Write::flush(&mut transcript);
 
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // **The terminal is built BEFORE the screen goes up, and the order is the
+    // point.** `Terminal::new` is fallible and used to sit on the far side of
+    // `EnterAlternateScreen`, which made its `?` the one way out of this
+    // function that left the alternate screen HELD. Nothing restores it on that
+    // path — the teardown below is never reached and the panic hook above only
+    // covers a panic — so every `Drop` that runs while the stack unwinds writes
+    // onto a live frame, `TuiNoticeSink`'s included, and that destructor's whole
+    // job is to print. Entering LAST leaves the window with no fallible step in
+    // it at all, which is a property rather than a promise:
+    // `test_nothing_fallible_runs_while_the_alternate_screen_is_held` fails if
+    // one is ever put back.
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
 
     // Cancelled right after `run_app` returns, below — races an in-flight OAuth callback
     // wait so quitting mid-login does not force the process to sit out
