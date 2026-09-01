@@ -791,6 +791,63 @@ mod tests {
     }
 
     #[test]
+    fn two_first_callers_end_up_holding_the_same_installed_subsystem() {
+        // Two callers can both pass the `HANDLE.get()` check and both build an
+        // appender, each with its own writer thread on the same file. Throwing
+        // the `HANDLE.set` result away left the loser holding a handle that is
+        // not the installed one: `installed()` would find the winner's, the
+        // exit drain would wait on that, and the loser's thread would keep
+        // writing with nobody accounting for it.
+        //
+        // **Deterministic, and honest about what that buys.** The assertions
+        // hold whichever order the two threads take, so this can never fail
+        // spuriously — a flaky race test is worse than none. What it cannot do
+        // is GUARANTEE the interleaving: if one thread finishes before the
+        // other starts, the second takes the already-initialised branch and
+        // reaches the same conclusion by the other road. The barrier is what
+        // makes the overlap likely; the assertions are what make the test safe
+        // either way.
+        //
+        // Separate directories on purpose: a second call whose configuration
+        // differs is the case an operator actually produces, and it is the one
+        // where a loser keeping its own appender would go unnoticed.
+        let a_dir = tempfile::tempdir().expect("a temp dir");
+        let b_dir = tempfile::tempdir().expect("a temp dir");
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let start = |dir: std::path::PathBuf, gate: std::sync::Arc<std::sync::Barrier>| {
+            std::thread::spawn(move || {
+                let cfg = LoggingConfig {
+                    log_dir: dir,
+                    file_filter: filter::Filter::parse("info").expect("valid"),
+                };
+                gate.wait();
+                init_logging(&cfg, std::sync::Arc::new(DiscardDelivery), None)
+            })
+        };
+        let first = start(a_dir.path().to_path_buf(), std::sync::Arc::clone(&gate));
+        let second = start(b_dir.path().to_path_buf(), gate);
+
+        let a = first.join().expect("no panic").expect("a handle");
+        let b = second.join().expect("no panic").expect("a handle");
+        let installed = installed().expect("something was installed");
+
+        for (which, handle) in [("first", &a), ("second", &b)] {
+            assert!(
+                std::sync::Arc::ptr_eq(&handle.appender, &installed.appender),
+                "the {which} caller kept its OWN appender: a second writer \
+                 thread is on the day's file and the exit drain waits on the \
+                 other one"
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(&handle.health, &installed.health),
+                "the {which} caller kept its OWN health reporter, so the exit \
+                 flush shows transitions nobody recorded"
+            );
+        }
+    }
+
+    #[test]
     fn the_first_event_names_the_command_and_the_workspace() {
         // REQ-L63's third piece. A reader who opens the file cold has to be
         // able to tell what produced these lines.
