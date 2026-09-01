@@ -4027,6 +4027,79 @@ mod tests {
         );
     }
 
+    /// Audits `text` so a test can hand a sink the [`Audited`] its trait
+    /// methods take, without reaching for a second constructor.
+    fn audited(text: &str) -> magi_rs::logging::auditor::Audited {
+        let (line, _) =
+            magi_rs::logging::process_auditor().audit(text, "magi_rs::tui::tests", None, 0);
+        line
+    }
+
+    /// MS2 gate S4, finding 2: a notice raised BEFORE the channel is attached
+    /// still reaches the transcript once it is.
+    ///
+    /// The sink goes live at `init_logging` and the channel is attached inside
+    /// `run_tui_ext`, so everything the layer's screen branch delivers in
+    /// between found `tx == None`. That arm used to `eprintln!`, which puts the
+    /// line on the PRIMARY buffer — the one `EnterAlternateScreen` swaps out a
+    /// moment later and does not swap back until the user quits. The live
+    /// emitter is magi-core's own `tracing::warn!`, and the message class is
+    /// "the log writer has stopped": exactly what must not be written and
+    /// hidden in the same breath.
+    ///
+    /// It cannot be fixed from `main.rs` — the channel is born inside
+    /// `run_tui_ext` and `init_logging` is one-shot — so the deferral the
+    /// teardown end already had is what the setup end uses too.
+    #[test]
+    fn a_notice_raised_before_attach_reaches_the_transcript() {
+        use crate::agent::mode_classifier::NoticeSink as _;
+        let sink = TuiNoticeSink::new();
+        sink.emit(&audited("warning: the log writer has stopped"));
+        assert_eq!(
+            sink.pending_len(),
+            1,
+            "with no channel there is nowhere to deliver yet, so the line waits \
+             instead of going to the buffer the alternate screen is about to cover"
+        );
+
+        let (tx, mut rx) = mpsc::channel(8);
+        sink.attach(tx);
+        assert_eq!(
+            sink.pending_len(),
+            0,
+            "attaching the channel must hand over what was waiting for it"
+        );
+        match rx.try_recv() {
+            Ok(AgentResponse::Notice(text)) => assert!(
+                text.contains("the log writer has stopped"),
+                "the deferred line must arrive verbatim: {text:?}"
+            ),
+            other => panic!("the deferred notice never reached the transcript: {other:?}"),
+        }
+    }
+
+    /// The other half of finding 2: a sink that is NEVER attached still owes
+    /// the line a mouth.
+    ///
+    /// `run()` can return with `?` between `init_logging` and `run_tui_ext` —
+    /// a vault that will not open, a database that will not — and on that path
+    /// no alternate screen was ever entered, so `stderr` is right and silence
+    /// is the regression. [`TuiNoticeSink::flush`] is the queue `Drop` empties,
+    /// so asserting on it is asserting on what the process would print.
+    #[test]
+    fn a_notice_raised_before_attach_is_never_silently_dropped() {
+        use crate::agent::mode_classifier::NoticeSink as _;
+        let sink = TuiNoticeSink::new();
+        sink.emit(&audited("warning: the log writer has stopped"));
+        let left = sink.flush();
+        assert_eq!(
+            left.len(),
+            1,
+            "a sink that never got a channel must still be able to say what it \
+             was holding: {left:?}"
+        );
+    }
+
     /// C1: the startup notices are announced INSIDE the attached window — after
     /// `attach`, before `EnterAlternateScreen` — and nowhere else.
     ///
