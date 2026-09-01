@@ -323,9 +323,10 @@ impl HealthTracker {
     /// elapsed. Used at shutdown (SC-L90): a short headless run would
     /// otherwise end without ever showing its only pending signal. The
     /// shutdown call reaches here through `LoggingHandle::health_flush`
-    /// (`src/logging/mod.rs`), invoked from `main.rs` — which is also where
-    /// the limits of "at shutdown" are written down, since no signal handler
-    /// stands behind it.
+    /// (`src/logging/mod.rs`), invoked from `main.rs`. The limits of "at
+    /// shutdown" are written down at that handle method rather than at either
+    /// end of the call: no signal handler stands behind it, so a `SIGKILL` or
+    /// an unhandled `SIGTERM` loses whatever was still pending.
     ///
     /// Returns a `Vec`, not an `Option`, because state is per subsystem: a
     /// cascading failure can leave one pending transition per subsystem,
@@ -395,9 +396,15 @@ const NO_ROW_PREFIX: &str = "internal error: no screen message is declared for c
 /// The screen texts one cause owes: degradation first, recovery second.
 ///
 /// **The table is the contract, not a suggestion.** What a user reads must not
-/// be left to whoever implements the call site, so each pair is written once,
-/// here, and every message carries REQ-L23's first two parts — what broke, and
-/// what it means for this session. [`render_transition`] adds the third.
+/// be left to whoever implements the call site, so each pair is written once in
+/// production code, here. It is not the only copy in the file: the test module
+/// mirrors it in `declared_messages`, deliberately and with its own rustdoc
+/// saying what that mirror can and cannot enforce.
+///
+/// Every DEGRADATION message carries REQ-L23's first two parts — what broke,
+/// and what it means for this session. A recovery states the subsystem and that
+/// it is back, and no more: the consequence it undoes was named when the
+/// degradation was shown. [`render_transition`] adds the third part to both.
 ///
 /// # Two rows have no emitter yet
 ///
@@ -503,9 +510,14 @@ pub fn render_transition(t: &Transition, log_path: &Path) -> String {
 /// branch's **level** — two different things, and only the first is
 /// operator-settable. The screen branch is [`crate::logging::SCREEN_LEVEL`], a
 /// constant that never admits `INFO` — it is `WARN`, in `src/logging/mod.rs` —
-/// so in production this is a question about `file_filter` alone. `screen_level` stays a parameter because MS1's screen
-/// branch can be absent, which is what `None` means; it is not a second
-/// configurable filter.
+/// so in production this is a question about `file_filter` alone.
+///
+/// `screen_level` stays a parameter because the screen branch itself is
+/// optional: `init_logging` takes it as `Option<(TuiSink, Level)>`
+/// (`src/logging/mod.rs`), and `None` here is what a wiring without one means.
+/// It is not a second configurable filter, and it is not a second value an
+/// operator supplies — every production caller passes `Some(SCREEN_LEVEL)`
+/// today.
 ///
 /// # Parameters
 ///
@@ -556,17 +568,22 @@ pub(crate) fn recovery_detection_is_off(file_filter: &Filter, screen_level: Opti
 /// it described less than it listed — and `render_transition`'s two `match`es,
 /// pinned all along, were left out on the strength of that undersized sentence.
 ///
-/// **The convention is one row per decision SITE, and the `debug_assert!`
-/// counts as a site of its own** — its two directions are held down separately,
-/// so folding it into the arm it guards would hide one of them. On that
-/// convention the table below has **nineteen** rows. Counting instead by
-/// `match`/`if` expression alone would give eighteen and lose that distinction;
-/// either is defensible, but only one can be written down, and this is it.
+/// **The convention is one row per fork whose two directions have their own
+/// evidence.** That is what makes the `debug_assert!` a row rather than part of
+/// the arm it guards — the arm is held by one pair of tests and the assertion by
+/// another — and what makes the keep-`since` and replace arms of a single
+/// `match` two rows while `recovery_detection_is_off`'s two forks share one,
+/// since the same pair of tests drives both of them. A loop counts only where it
+/// branches: `tick`'s walk can return early or fall through, `flush`'s cannot.
+/// On that convention the table below has **twenty** rows. More than one
+/// convention is defensible here, which is why this one is written down rather
+/// than left for a reader to reconstruct from the count.
 ///
 /// | Arm | Directions | Held down by |
 /// |---|---|---|
-/// | `observe`'s `cause?` | `None` / `Some` | `an_event_without_a_cause_key_is_ignored_…` / every other test below |
-/// | `candidate == shown` | revert / change | `a_revert_discards_the_pending_transition_…` / the rest |
+/// | `observe`'s `cause?` | `None` / `Some` | `an_event_without_a_cause_key_is_ignored_…` / every other test that calls `observe` |
+/// | `observe`'s `if ok` | success → healthy / failure → degraded | `emits_only_on_transition_…`, whose recovery becomes a `Restored` / `the_first_degradation_is_immediate_…` |
+/// | `candidate == shown` | revert / change | `a_revert_discards_the_pending_transition_…` / the rest of the `observe` tests |
 /// | first-degradation guard | taken / not taken | `the_first_degradation_is_immediate_…` / `emits_only_on_transition_…` |
 /// | its `debug_assert!` | holds / violated | unreachable through `observe`, proved at the line; violated direction driven through the private field by `the_immediate_arms_invariant_is_checked_…` |
 /// | `match candidate` class | `Restored` / `Degraded` | `emits_only_on_transition_…` / `alternating_between_two_failing_causes_…` |
@@ -713,8 +730,17 @@ mod tests {
     fn a_flapping_service_shows_one_degradation_and_nothing_more() {
         // SC-L70: down/up six times in 20 s. The FIRST degradation shows;
         // every later flip is pending and cancelled before its window
-        // elapses, so the screen never flaps. The file still records all
-        // twelve occurrences.
+        // elapses, so the screen never flaps.
+        //
+        // **That the FILE still records all thirteen events -- the opening
+        // failure and the twelve flips -- is an ATTESTATION.** Nothing in this
+        // module can see the file branch. What it rests on is that
+        // `MagiLayer::on_event` observes health BEFORE the file branch and
+        // never gates the submit on the answer (`src/logging/magi_layer.rs`),
+        // and it holds only as far as the operator's `file_filter` admits
+        // these events -- which this module cannot see either. If the layer
+        // stopped writing what the tracker silences, nothing here would go
+        // red.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let c = CauseKey::new("embedder", "unreachable");
@@ -743,7 +769,9 @@ mod tests {
     #[test]
     fn one_endpoint_alternating_between_two_causes_shows_exactly_one_transition() {
         // SC-L76: one subsystem alternating http_500 <-> connection_refused
-        // five times in 20 s. The screen sees ONE transition: the first.
+        // five times, the last flip landing at 21 s -- the scenario says 20 s
+        // and the arrangement runs a second past it. The screen sees ONE
+        // transition: the first.
         // Changing cause inside an already-degraded subsystem is not news,
         // and the window covers Degraded(A) -> Degraded(B).
         let mut h = HealthTracker::new();
@@ -794,9 +822,13 @@ mod tests {
     fn a_cancelled_recovery_followed_by_a_cause_change_shows_nothing() {
         // The edge that combines both mechanisms: a pending recovery gets
         // cancelled, then a cause change inside the same subsystem. Neither
-        // is news, so the screen sees nothing -- but it is the one path
-        // where the pending transition changes CLASS (Restored -> Degraded)
-        // without ever being emitted.
+        // is news, so the screen sees nothing -- but it is the one path where
+        // a pending transition changes class from `Restored` to `Degraded`
+        // without ever being emitted. A class change as such is NOT unique to
+        // this test, and the unqualified word would be false:
+        // `a_pending_cause_change_replaced_by_a_recovery_restarts_the_window`
+        // displaces a pending `Degraded` with a `Restored`, which is this same
+        // change run the other way.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let a = CauseKey::new("embedder", "http_500");
@@ -816,11 +848,12 @@ mod tests {
             "cancels it and leaves a cause change pending"
         );
         // The tick is at the DISCARDED recovery's own deadline (it started
-        // serving at t0 + 5 s), which is the only instant that can tell a
-        // restarted window from an inherited one: had the replacement kept
-        // `since`, the cause change would come out here -- at the displaced
-        // pending's deadline instead of its own, five seconds early in this
-        // arrangement.
+        // serving at t0 + 5 s). What tells a restarted window from an
+        // inherited one is not one instant but the five-second interval
+        // between the two deadlines -- [t0 + 35 s, t0 + 40 s) -- and this is
+        // the EARLIEST instant in it: had the replacement kept `since`, the
+        // cause change would come out here, at the displaced pending's
+        // deadline instead of its own.
         assert!(
             h.tick(t0 + Duration::from_secs(5 + HEALTH_MIN_STABLE_SECS))
                 .is_none(),
@@ -1023,8 +1056,9 @@ mod tests {
         }
 
         // At FIRST observation + window it must emit. Were the window
-        // restarted on each observation, `since` would be the last of them and
-        // this tick would land a whole window early with nothing to give.
+        // restarted on each observation, `since` would be the last of them --
+        // `first_seen + 29 s`, the loop above stopping one short of the window
+        // -- so this tick would land 29 s early with nothing to give.
         assert!(
             matches!(h.tick(first_seen + w), Some(Transition::Restored(_))),
             "the window runs from the first observation of the candidate, \
@@ -1074,7 +1108,8 @@ mod tests {
 
         // At FIRST observation + window it must emit, and it must emit the NEW
         // cause: were the window restarted on each observation, `since` would be
-        // the last of them and this tick would land a whole window early.
+        // the last of them -- `first_seen + 29 s`, the loop above stopping one
+        // short of the window -- so this tick would land 29 s early.
         let got = h.tick(first_seen + w);
         assert!(
             matches!(got, Some(Transition::Degraded(k)) if k.cause() == second.cause()),
@@ -1195,7 +1230,11 @@ mod tests {
     #[test]
     fn a_flushed_recovery_leaves_the_subsystem_healthy() {
         // `flush`'s counterpart to the test above: it writes `shown` too, and
-        // nothing else looks at the tracker after a flush has emitted.
+        // this is the `None` half of that write. It is NOT the only test that
+        // looks at the tracker after a flush has emitted -- the sentence here
+        // said so until the `Some` half was written, and
+        // `a_flushed_cause_change_leaves_the_subsystem_degraded_under_the_new_cause`
+        // has done exactly that ever since.
         let mut h = HealthTracker::new();
         let t0 = Instant::now();
         let c = CauseKey::new("embedder", "http_error");
@@ -2004,8 +2043,15 @@ mod tests {
 
     #[test]
     fn with_no_screen_branch_the_file_filter_alone_decides() {
-        // The `None` arm, which nothing else exercises. It is not dead: MS1
-        // ships without a screen branch, and every caller there passes `None`.
+        // The `None` arm, which nothing else exercises. It is not an invented
+        // shape: `init_logging` takes the screen branch as an `Option`
+        // (`src/logging/mod.rs`), so a wiring without one is representable and
+        // several tests build exactly that. What is NOT true, and was asserted
+        // here until this pass, is that a shipped surface passes `None` -- this
+        // module arrived with MS2, which wires the screen branch, so every
+        // production caller passes `Some(SCREEN_LEVEL)` and this arm is reached
+        // from tests alone.
+        //
         // Read through the union, `None` has to mean "there is no second
         // source of INFO", and the failure mode of getting it wrong is silent
         // in both directions -- a `None` treated as INFO would suppress the
