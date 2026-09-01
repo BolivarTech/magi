@@ -576,10 +576,11 @@ pub fn init_logging(
     tui: Option<(magi_layer::TuiSink, tracing::Level)>,
 ) -> Result<LoggingHandle, LoggingError> {
     if let Some(existing) = HANDLE.get() {
-        // A second call would otherwise reach `set_global_default`, which
-        // second call — a test that starts twice, a `main` that retries, a new
-        // surface that does not know another already initialised — would abort
-        // the process. REQ-L35 says logging never aborts.
+        // A second call — a test that starts twice, a `main` that retries, a
+        // new surface that does not know another already initialised — takes
+        // this branch and reports, rather than building a second appender with
+        // a second writer thread on the same file.
+        //
         // **Through the PROCESS auditor, and escaped for the mouth it goes to.**
         // A fresh `Auditor` starts with nothing registered, so its exact pass
         // does nothing and only the pattern pass stands between this line and a
@@ -650,10 +651,14 @@ pub fn init_logging(
 
     use tracing_subscriber::layer::SubscriberExt as _;
     let subscriber = tracing_subscriber::registry().with(layer);
-    // Deliberately not `set_global_default`, which panics on a second install:
-    // this path is already guarded by the `OnceLock` above, and the result is
-    // discarded so a race between two first-callers degrades to one of them
-    // winning rather than to a panic.
+    // **`set_global_default` RETURNS an error on a second install; it does not
+    // panic.** The comment that stood here said the opposite, and the
+    // difference decides how this line has to be written: the panicking
+    // spellings are `SubscriberInitExt::init` and an `expect` on this result,
+    // and both are what REQ-L35 forbids. Discarding the `Result` is therefore
+    // the whole guard — a race between two first-callers past the `OnceLock`
+    // above degrades to one of them winning, with the loser already holding
+    // the winner's handle.
     let _ = tracing::subscriber::set_global_default(subscriber);
 
     Ok(handle)
