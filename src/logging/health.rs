@@ -963,6 +963,71 @@ mod tests {
     }
 
     #[test]
+    fn a_ticked_cause_change_leaves_the_subsystem_degraded_under_the_new_cause() {
+        // `tick`'s `shown` write, target `Some` -- the direction
+        // `a_degradation_after_a_shown_recovery_is_immediate_again` cannot
+        // reach, because there the pending it lets elapse is a RECOVERY and the
+        // write lands a `None`. Both directions of `flush`'s identical write are
+        // pinned (by `a_flushed_recovery_leaves_the_subsystem_healthy` and
+        // `a_flushed_cause_change_leaves_the_subsystem_degraded_under_the_new_cause`);
+        // this is that pair's second half for `tick`.
+        //
+        // Nothing before this test continued past a tick-emitted `Degraded`, so
+        // `state.shown = pending.target` in `tick` could be narrowed to write
+        // only healthy targets with the whole module still green -- and the
+        // subsystem would then keep looking degraded under the cause it has
+        // already replaced, so the screen would be told about that stale cause a
+        // second time and never about the new one.
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let w = Duration::from_secs(HEALTH_MIN_STABLE_SECS);
+        let a = CauseKey::new("embedder", "http_error");
+        let b = CauseKey::new("embedder", "unreachable");
+
+        assert!(matches!(
+            h.observe(Some(a), false, t0),
+            Some(Transition::Degraded(_))
+        ));
+        let changed_at = t0 + Duration::from_secs(1);
+        assert!(
+            h.observe(Some(b), false, changed_at).is_none(),
+            "a cause change inside a degraded subsystem serves the window"
+        );
+        let emitted = h.tick(changed_at + w);
+        assert!(
+            matches!(emitted, Some(Transition::Degraded(k)) if k.cause() == b.cause()),
+            "the cause change reaches the screen at its own deadline: {emitted:?}"
+        );
+
+        // What the tick did to `shown` is only visible afterwards. It is now
+        // `Some(b)`, so repeating the emitted cause is the state already on
+        // screen and says nothing...
+        let after = changed_at + w + Duration::from_secs(1);
+        assert!(
+            h.observe(Some(b), false, after).is_none(),
+            "the ticked cause is what is on screen: repeating it is not news"
+        );
+        // ...and the DISPLACED cause is now a change away from it, so it serves
+        // the window rather than being immediate. Were `shown` left at `a`, this
+        // observation would instead be the state already shown, the pending
+        // would be DISCARDED, and the tick below would have nothing to give.
+        assert!(
+            h.observe(Some(a), false, after).is_none(),
+            "back to the old cause: a change, so it goes through the window"
+        );
+        assert!(
+            h.tick(after + Duration::from_secs(1)).is_none(),
+            "and it is windowed, not immediate"
+        );
+        let got = h.tick(after + w);
+        assert!(
+            matches!(got, Some(Transition::Degraded(k)) if k.cause() == a.cause()),
+            "it emits once its window elapses, which it can only do if the tick \
+             moved `shown` to the cause it emitted: {got:?}"
+        );
+    }
+
+    #[test]
     fn a_flushed_recovery_leaves_the_subsystem_healthy() {
         // `flush`'s counterpart to the test above: it writes `shown` too, and
         // nothing else looks at the tracker after a flush has emitted.
