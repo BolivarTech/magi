@@ -747,6 +747,79 @@ mod tests {
         );
     }
 
+    /// A second phrase from the same notice, registered by the test below.
+    ///
+    /// Distinct from [`PHRASE_INSIDE_THE_NOTICE`] so the two tests cannot pass
+    /// on each other's registration if they ever share a process.
+    const PHRASE_THE_ALARM_MUST_NAME: &str = "log directory and level";
+
+    /// Reads the day's file until `needle` shows up, or the deadline passes.
+    ///
+    /// The writer is a detached thread, so a bare read races it. A generous
+    /// FAILURE deadline keeps the wait meaningful under load without turning
+    /// the test into a guess about how fast the thread is.
+    fn wait_for_log(dir: &std::path::Path, needle: &str) -> String {
+        let path = dir.join(rotation::file_name(time::OffsetDateTime::now_utc().date()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let written = std::fs::read_to_string(&path).unwrap_or_default();
+            if written.contains(needle) || std::time::Instant::now() >= deadline {
+                return written;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn the_already_initialised_notice_that_masks_a_secret_still_raises_the_alarm() {
+        // The ninth instance of one class, and the last one in this module:
+        // the auditor's contract is "mask AND say so -- both, never one", and
+        // this branch took the first half. `Reporter::announce`,
+        // `HealthReporter::show` and `on_event` all forward their alarm; this
+        // one dropped it, behind a comment claiming the literal text has
+        // nothing in it for the passes to find.
+        //
+        // That claim is what this fixture disproves. The exact pass matches
+        // REGISTERED VALUES, not shapes, and nothing stops a registered
+        // credential from occurring inside our own prose -- so a masking
+        // happens here and, without the forward, nobody is told.
+        //
+        // Isolated by `cargo nextest`'s one-process-per-test model: `HANDLE`
+        // and the process auditor are both process-global.
+        assert!(
+            PHRASE_THE_ALARM_MUST_NAME.len() >= auditor::MIN_SECRET_BYTES,
+            "a phrase below the floor never enters the exact pass, so this \
+             would hold for free"
+        );
+        process_auditor().register_secret(
+            auditor::SecretName::new("ALARM_PROBE"),
+            &[PHRASE_THE_ALARM_MUST_NAME],
+        );
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cfg = LoggingConfig {
+            log_dir: dir.path().to_path_buf(),
+            file_filter: filter::Filter::parse("info").expect("valid"),
+        };
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let _first = init_logging(&cfg, sink.clone(), None).expect("the subsystem comes up");
+        let _second =
+            init_logging(&cfg, sink.clone(), None).expect("a second call is not an error");
+
+        let said = sink.lines.lock().expect("not poisoned").join("\n");
+        assert!(
+            !said.contains(PHRASE_THE_ALARM_MUST_NAME),
+            "the notice was not masked at all, so there is no alarm to forward \
+             and the rest of this proves nothing: {said:?}"
+        );
+        let written = wait_for_log(dir.path(), "SECURITY:");
+        assert!(
+            written.contains("SECURITY:") && written.contains("ALARM_PROBE"),
+            "the already-initialised branch masked its own notice and told \
+             nobody: {written:?}"
+        );
+    }
+
     #[test]
     fn the_installed_layer_publishes_its_hint_as_the_global_level_filter() {
         // The hint's VALUE is pinned next door, in

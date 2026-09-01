@@ -294,10 +294,12 @@ impl HealthTracker {
             // `unreachable` and `http_error` rows carry the SAME recovery
             // string, so both renderings are the identical line.
             //
-            // Pin it the day two causes of one subsystem owe different
-            // recovery text; that is the change that would make the choice
-            // observable, and until then a test asserting one of them would
-            // be pinning an implementation detail as if it were contract.
+            // This is now enforced, not merely observed:
+            // `causes_sharing_a_subsystem_declare_the_same_recovery_text`
+            // asserts it over `declared_messages()`, so the day a cause owes
+            // recovery text that differs from another cause of its
+            // subsystem, that test fails and forces the pin decision here
+            // instead of a reviewer remembering this paragraph.
             Some(pending) if pending.target == candidate => {}
             _ => {
                 state.pending = Some(PendingTransition {
