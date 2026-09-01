@@ -292,8 +292,7 @@ def _startup_counts(result):
     """
     if result is None:
         return None, "run %s produced no capture to inspect" % RECALL_RUN
-    run_id = (logs.id_on_stderr(result.output.stderr)
-             or logs.id_in_envelope(result.output))
+    run_id = logs.resolve_id(result.output)
     if run_id is None:
         return None, (
             "run %s published no run id on stderr or in its JSON envelope, "

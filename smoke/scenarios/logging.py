@@ -77,7 +77,7 @@ def the_run_leaves_a_correlated_log(run):
 
     yield _correlation_finding(stderr_id, envelope_id)
 
-    published = stderr_id or envelope_id
+    published = logs.resolve_id(run.output)
     if published is None:
         yield Finding(ASSERTIONS[1], Outcome.CANNOT_TEST,
                       "neither surface published a run id, so there is nothing "

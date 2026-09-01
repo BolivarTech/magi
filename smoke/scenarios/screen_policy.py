@@ -115,8 +115,7 @@ def a_clean_startup_shows_nothing_on_screen(run):
     on_screen = DIAGNOSTIC_MARKER in run.output.stderr.decode(
         "utf-8", errors="replace")
 
-    run_id = (logs.id_on_stderr(run.output.stderr)
-              or logs.id_in_envelope(run.output))
+    run_id = logs.resolve_id(run.output)
     if run_id is None:
         # **Only the half that needs the id is silenced.** The log search is
         # the half that does: the directory is shared, so without an id there

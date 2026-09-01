@@ -129,6 +129,44 @@ def id_on_stderr(stderr):
     return None
 
 
+def resolve_id(output):
+    """The run's id, from whichever surface published one.
+
+    The precedence is stderr first, then the envelope, and it lives here so
+    it lives in ONE place. Three scenarios need the same answer -- S9 and S24
+    to bind a log search to their own run, S23 to search for the id it agreed
+    on -- and each carried its own copy of the same two-line ``or``. Two
+    copies of a precedence rule is two chances for one to be edited and the
+    others not, and nothing about the resulting disagreement raises an error:
+    the scenarios simply start binding to different runs.
+
+    Telling "no id anywhere" from "an id on one surface only" is the
+    CALLER's job, which is why this returns a single value rather than the
+    pair: S23's first assertion is precisely that the two surfaces agree, so
+    it reads both itself and uses this only for the search that follows.
+
+    Args:
+        output: The run's ``ProductOutput``.
+
+    Returns:
+        str | None: The id, or None when neither surface published one.
+
+    Example:
+        >>> from smoke.product import ProductOutput
+        >>> both = ProductOutput(stdout=b'{"run_id": "from-envelope"}',
+        ...                      stderr=b"run: from-stderr\\n", exit_code=0,
+        ...                      command=["magi-rs"])
+        >>> resolve_id(both)
+        'from-stderr'
+        >>> quiet = ProductOutput(stdout=b'{"run_id": "from-envelope"}',
+        ...                       stderr=b"", exit_code=0,
+        ...                       command=["magi-rs"])
+        >>> resolve_id(quiet)
+        'from-envelope'
+    """
+    return id_on_stderr(output.stderr) or id_in_envelope(output)
+
+
 def id_in_envelope(output):
     """Read ``run_id`` out of the JSON envelope.
 
