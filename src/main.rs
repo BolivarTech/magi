@@ -6720,8 +6720,21 @@ mod tests {
     /// Split on `;` alone rather than on `;{}`, because a format string's own braces would
     /// cut `writeln!(mouth, "{}", audited.as_str())` in half and leave the evidence of
     /// compliance in a different piece from the write.
+    ///
+    /// **`eprintln!`/`println!` count as mouths here too**, and the reason is the file this
+    /// rule was written for: a module that owns the last-resort mouth and audits everything
+    /// it puts through it gains nothing if the next line reaches the same terminal by a macro
+    /// that takes no binding at all. Inside such a module the two spellings are a second,
+    /// unaudited mouth, so they are refused outright rather than checked for `as_str()`.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A write in a file that owns no `&mut dyn Write` binding: the scan is per file and the
+    /// mouth list is what scopes it. The two print macros elsewhere are rule 4's subject, and
+    /// only at the funnels it names.
     #[test]
     fn no_mouth_is_written_without_an_audited_line() {
+        let raw_stdout = concat!("println", "!");
         let offenders: Vec<String> = production_sources()
             .iter()
             .flat_map(|(path, text)| {
@@ -6729,6 +6742,13 @@ mod tests {
                 collapsed_pieces(text, &[';'])
                     .into_iter()
                     .filter(|stmt| {
+                        if mouths.is_empty() {
+                            return false;
+                        }
+                        // `eprintln!` ends in `println!`, so this covers both spellings.
+                        if stmt.contains(raw_stdout) {
+                            return true;
+                        }
                         mouths.iter().any(|name| {
                             [format!("write!({name}"), format!("writeln!({name}")]
                                 .iter()
@@ -6748,6 +6768,73 @@ mod tests {
             offenders.is_empty(),
             "a mouth is written text that no auditor produced, which is the one route the \
              type system cannot close: {offenders:#?}"
+        );
+    }
+
+    /// **Rule 4 of the class: a fatal error is announced through the audit route.**
+    ///
+    /// `eprintln!` is the one mouth the type system cannot reach at all — it takes a
+    /// format string and writes to a file descriptor, so no `Audited` can be demanded
+    /// of it. Rules 1–3 all assume the write goes through a binding; this one does not,
+    /// and that is why it survived them.
+    ///
+    /// **The two anchors are the process's two funnels, not a list of sites.**
+    /// `block_on(body(` catches every error `run` propagates with `?` — including the
+    /// `MagiConfig::load` on the TUI path — and `MagiConfig::load(` is the headless
+    /// surface's own arm. Between them every configuration error reaches a mouth
+    /// through one of the two, so anchoring on the funnels rather than on the messages
+    /// covers the sites that do not exist yet.
+    ///
+    /// Split on `;` alone, like rule 3: the `Err` arm's own braces would otherwise cut
+    /// the announcement into a different piece from the call it announces.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A raw write placed in a SECOND statement of the same `Err` arm — the anchor and
+    /// the offender then sit in different pieces and nothing pairs them. It also says
+    /// nothing about the other `eprintln!`s in this file: those announce typed vault,
+    /// workspace and I/O errors, none of which carry a resolved `base_url`, and putting
+    /// them in scope would make the rule an allowlist of exemptions instead of a rule.
+    #[test]
+    fn no_fatal_error_is_announced_outside_the_audit_route() {
+        // Split so this guard's own needles are not the strings it forbids.
+        let raw_stderr = concat!("eprintln", "!");
+        let raw_stdout = concat!("println", "!");
+        let audited = concat!("eprint_", "audited(");
+        let anchors = [
+            concat!("block_on(", "body("),
+            concat!("MagiConfig::", "load("),
+        ];
+
+        let mut raw = Vec::new();
+        let mut unrouted = Vec::new();
+        for (path, text) in &production_sources() {
+            for stmt in collapsed_pieces(text, &[';']) {
+                if !anchors.iter().any(|a| stmt.contains(a)) {
+                    continue;
+                }
+                let shown = format!("{path}: {}", stmt.chars().take(160).collect::<String>());
+                // `eprintln!` contains `println!`, so one check covers both spellings;
+                // the second is here for a bare `println!` on a future stdout arm.
+                if stmt.contains(raw_stderr) || stmt.contains(raw_stdout) {
+                    raw.push(shown.clone());
+                }
+                // Only an arm that HANDLES the error owes an announcement; the TUI's
+                // `MagiConfig::load(...)?` hands it to the other funnel instead.
+                if stmt.contains("Err(") && !stmt.contains(audited) {
+                    unrouted.push(shown);
+                }
+            }
+        }
+        assert!(
+            raw.is_empty(),
+            "a fatal error is written straight to a file descriptor, which is the one \
+             mouth no `Audited` can be demanded of: {raw:#?}"
+        );
+        assert!(
+            unrouted.is_empty(),
+            "a fatal error is announced by something other than the audited route, so a \
+             credential in it would reach stderr and CI logs unmasked: {unrouted:#?}"
         );
     }
 
