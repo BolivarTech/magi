@@ -4341,6 +4341,57 @@ mod tests {
         );
     }
 
+    /// **Nothing fallible may sit between the alternate screen going up and
+    /// coming down** (MS2 gate S4 second pass).
+    ///
+    /// The window is narrow and it is real. `TuiNoticeSink::drop` prints
+    /// whatever `flush` hands back, and `flush` is documented as safe only
+    /// AFTER `LeaveAlternateScreen`. A `?` inside this window returns from
+    /// `run_tui_ext` with the screen still HELD, and on a session started
+    /// outside a `.magi/` workspace no logging layer was installed, so the
+    /// subscriber holds no clone of the sink and the `Arc` in this frame is the
+    /// last one: the destructor runs right there and writes onto the frame —
+    /// exactly what REQ-L39 forbids, from the one path
+    /// `PendingNotices` cannot see, because it is not a fallback racing the
+    /// teardown but the teardown never happening.
+    ///
+    /// The fix is an ordering, not a check, so the guard is an ordering too:
+    /// `Terminal::new` — the only fallible statement that used to sit here —
+    /// now runs BEFORE the screen goes up, which leaves the window with no way
+    /// out but the teardown. The panic path is already covered by the hook
+    /// `run_tui_ext` installs, and a release build aborts without unwinding, so
+    /// `?` is the whole of what is left.
+    ///
+    /// # Why a needle and not a behavioural test
+    ///
+    /// Reaching it means making `Terminal::new` fail against a real terminal
+    /// that has just been switched to its alternate screen, then observing what
+    /// a destructor wrote to the process's `stderr`. Neither half is reachable
+    /// from a test; the property, meanwhile, is a pure ordering in one function.
+    #[test]
+    fn test_nothing_fallible_runs_while_the_alternate_screen_is_held() {
+        let source = production_source();
+        let entered = source
+            .find("EnterAlternateScreen)?;")
+            .expect("`run_tui_ext` must still enter the alternate screen")
+            + "EnterAlternateScreen)?;".len();
+        let rest = source
+            .get(entered..)
+            .expect("the offset came from `find`, so it is a boundary");
+        let left = rest
+            .find("LeaveAlternateScreen")
+            .expect("`run_tui_ext` must still leave the alternate screen");
+        let held = rest
+            .get(..left)
+            .expect("the offset came from `find`, so it is a boundary");
+        assert!(
+            !held.contains('?'),
+            "a fallible statement sits inside the window where the alternate screen is \
+             held, so `run_tui_ext` can return with the screen still up and the notice \
+             sink's destructor prints onto the frame (REQ-L39); the window was: {held}"
+        );
+    }
+
     /// **`Drop` is the sink's last mouth, and nothing pinned that it opens it.**
     /// `a_notice_raised_before_attach_is_never_silently_dropped` proves what
     /// [`TuiNoticeSink::flush`] RETURNS; the loop that writes those strings is a
