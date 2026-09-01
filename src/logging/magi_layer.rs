@@ -1618,6 +1618,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_submission_outcome_reaches_the_reporter_from_on_event() {
+        // The RULE -- which outcome deserves which notice -- is pinned by
+        // `a_transient_notice_does_not_silence_the_permanent_one`, which calls
+        // `Reporter::report` directly. What nothing pinned is the WIRING:
+        // that `on_event` hands `submit`'s answer to it. Replace the call with
+        // `let _ = ...submit(..)` and every notice test stays green while the
+        // subsystem whose whole purpose is diagnosis becomes the one thing in
+        // the process that fails without saying so.
+        //
+        // **Drivable after all, and this is the closure Caspar asked for.**
+        // The `DroppedFull`, `WriterGone` and `WriterHung` outcomes need 2048
+        // exhausted slots or a dead writer, neither of which a test can
+        // arrange; `DroppedOversized` needs only an event larger than the
+        // channel's byte budget, which is arithmetic. So the wiring is driven
+        // through the real dispatcher rather than recorded as a residual.
+        //
+        // `INFO` puts it on the ORDINARY channel, whose budget is a third of
+        // the priority one's -- the cheapest event that can be refused.
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let notices = Arc::new(RecordingSink::default());
+        let layer = MagiLayer::new(
+            FileSink::new(Arc::clone(&appender)),
+            crate::logging::filter::Filter::parse("info").expect("valid"),
+            Arc::new(Auditor::new()),
+            Arc::clone(&notices) as Arc<dyn crate::logging::NoticeDelivery>,
+        );
+
+        let payload = filler(crate::logging::appender::LOG_CHANNEL_LOW_BYTES + 1024);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "magi_rs::tests", "{payload}");
+        });
+
+        let said = notices.lines.lock().unwrap().join("\n");
+        assert!(
+            said.contains("too large"),
+            "the appender refused the event and `on_event` threw the refusal \
+             away: the log is losing events and nobody is told: {}",
+            said.len()
+        );
+        assert!(
+            said.contains("the log is now incomplete"),
+            "the refusal was reported as something other than a discard: {said}"
+        );
+    }
+
     /// Prose of `bytes` length, never one unbroken run of a character.
     ///
     /// A long run of the same byte is what `match_generic_secret_run` treats as
