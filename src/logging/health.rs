@@ -202,9 +202,16 @@ impl HealthTracker {
             // precondition is proved above buys nothing in a shipped build; the
             // house rule against a `debug_assert!` carrying a precondition that
             // matters in release does not bite here, because there is no
-            // release behaviour riding on it. Debug-only keeps it verified
-            // wherever tests run and non-deletable by a reader who cannot see
-            // the proof.
+            // release behaviour riding on it.
+            //
+            // An assertion no input can reach is deletable with the suite green
+            // for the same reason the assignment was, so this one is NOT left
+            // resting on that argument: `the_immediate_arms_invariant_is_
+            // checked_rather_than_only_written_down` builds the forbidden state
+            // through the private field -- the one thing `observe` cannot do --
+            // and expects the panic. Delete the line and that test stops
+            // panicking and goes red. The guard is debug-only, exactly as the
+            // check is: under `--release` both disappear together.
             debug_assert!(
                 state.pending.is_none(),
                 "an immediate emission leaves nothing waiting: a pending exists \
@@ -506,6 +513,46 @@ mod tests {
             "entries are appended in first-REFERENCED order, and referencing \
              one again neither reorders nor duplicates it"
         );
+    }
+
+    /// The immediate arm's `debug_assert!`, driven rather than admired.
+    ///
+    /// The line it guards was a `state.pending = None;` assignment until a
+    /// review pass observed that no input reaches the arm with a pending, so
+    /// the assignment was deletable with every test green. Turning it into an
+    /// assertion did not by itself fix that: an assertion no input can reach is
+    /// deletable on exactly the same argument, which is the irony this test
+    /// exists to end.
+    ///
+    /// The arrangement therefore goes around `observe` and writes the private
+    /// field directly. That is not a claim about production -- the proof above
+    /// the assertion says production cannot get here, and this test does not
+    /// dispute it. What it pins is narrower and worth pinning: the invariant is
+    /// CHECKED, so removing the check is a change the suite notices.
+    ///
+    /// Debug-only, because `debug_assert!` is: a `--release` test run compiles
+    /// away the check and this guard with it, rather than failing for the
+    /// absence of a panic that was never going to happen.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "an immediate emission leaves nothing waiting")]
+    fn the_immediate_arms_invariant_is_checked_rather_than_only_written_down() {
+        let mut h = HealthTracker::new();
+        let t0 = Instant::now();
+        let c = CauseKey::new("embedder", "http_error");
+
+        // Healthy on screen, yet something waiting: the combination the proof
+        // rules out, which is why `observe` cannot be used to reach it.
+        let state = h.state_mut(c.subsystem());
+        state.shown = None;
+        state.pending = Some(PendingTransition {
+            transition: Transition::Restored(c),
+            target: None,
+            since: t0,
+        });
+
+        // A failure now takes the first-degradation arm holding that pending.
+        let _ = h.observe(Some(c), false, t0 + Duration::from_secs(1));
     }
 
     #[test]
