@@ -576,7 +576,8 @@ impl Auditor {
     ///
     /// # Why this exists
     ///
-    /// [`Self::alarm`] deduplicates by `(secret, target)`: it inserts the pair —
+    /// The private `alarm` helper behind [`Self::audit`] deduplicates by
+    /// `(secret, target)`: it inserts the pair —
     /// latching — and only THEN returns, before the caller has anywhere to put
     /// the alarm. A caller whose output refuses it therefore spends the one
     /// alarm that pair will ever raise on a delivery that never happened, and
