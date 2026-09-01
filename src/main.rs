@@ -6429,39 +6429,306 @@ mod tests {
         );
     }
 
+    /// Every production `.rs` under `src/`, as `(path, text with the test module cut off)`.
+    ///
+    /// **Read from the FILESYSTEM rather than by `include_str!`, and that is the whole
+    /// point of this family of guards.** The defect they hold back is a class — the
+    /// auditor is the only route to any output — and the reason the class survived four
+    /// review passes is that its instances sit in four different files while the guard
+    /// that named it read one. An `include_str!` list is a list someone has to remember
+    /// to extend; a walk covers a file that does not exist yet.
+    ///
+    /// The `\r` comes out for the reason every source-reading guard in this repository
+    /// strips it: the bytes arrive untouched while rustc normalises CRLF inside a source
+    /// literal, and rustfmt writes CRLF on Windows and LF elsewhere, so a needle carrying
+    /// a real newline matches on one machine and not the next. Every needle here is
+    /// written with escapes.
+    ///
+    /// # Returns
+    ///
+    /// One entry per file, in directory-walk order. A file with no test module contributes
+    /// its whole text.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over the bytes of `src/`.
+    fn production_sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir).expect("src/ must be readable");
+            for entry in entries {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path)
+                        .expect("a UTF-8 source file")
+                        .replace('\r', "");
+                    let production = text
+                        .split_once("\n#[cfg(test)]\nmod tests {")
+                        .map_or(text.clone(), |(before, _)| before.to_string());
+                    out.push((path.display().to_string(), production));
+                }
+            }
+        }
+        out
+    }
+
+    /// Splits `text` on `seps` and collapses each piece's whitespace to single spaces.
+    ///
+    /// # Parameters
+    ///
+    /// * `text` — production source.
+    /// * `seps` — `[';', '{', '}']` for a statement, `[';']` where a format string's own
+    ///   braces would otherwise cut the statement in half.
+    ///
+    /// # Why the unit is a statement and not a line
+    ///
+    /// A pairing the guard forbids has to be looked for where the pairing lives, and
+    /// rustfmt decides where the line breaks fall. A needle that assumes one line goes
+    /// green against the same defect spelled across three, which has already happened
+    /// twice in this milestone.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `text`.
+    fn collapsed_pieces(text: &str, seps: &[char]) -> Vec<String> {
+        text.split(seps)
+            .map(|piece| piece.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// Whether the statement at `at` (the index of the `.audit(` call) throws its alarm away.
+    ///
+    /// # Parameters
+    ///
+    /// * `stmt` — one collapsed statement.
+    /// * `at` — byte index of the audit call inside it.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the pair's second element is dropped: bound to `_`/`_name`, reached
+    /// through `.0`, or never destructured at all.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over the statement.
+    fn alarm_is_discarded(stmt: &str, at: usize) -> bool {
+        if stmt.get(at..).is_some_and(|tail| tail.contains(").0")) {
+            return true;
+        }
+        let head = stmt.get(..at).unwrap_or("");
+        let Some(open) = head.rfind("let (") else {
+            return true;
+        };
+        let tuple = head.get(open + "let (".len()..).unwrap_or("");
+        let Some(close) = tuple.find(')') else {
+            return true;
+        };
+        let mut fields = tuple.get(..close).unwrap_or("").split(',').skip(1);
+        fields
+            .next()
+            .is_none_or(|alarm| alarm.trim().starts_with('_'))
+    }
+
+    /// Identifiers bound to a `&mut dyn Write` mouth in `text`.
+    ///
+    /// Derived from the TYPE, never from the name: the last-resort mouth happened to be
+    /// called `fallback`, and a guard keyed on that spelling would be a guess about what
+    /// the next author calls theirs.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n)` over `text`.
+    fn mouth_bindings(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for marker in ["dyn std::io::Write", "dyn io::Write", "dyn Write"] {
+            let mut from = 0;
+            while let Some(offset) = text.get(from..).and_then(|rest| rest.find(marker)) {
+                let at = from + offset;
+                if let Some(colon) = text.get(..at).and_then(|head| head.rfind(':')) {
+                    let ident: String = text
+                        .get(..colon)
+                        .unwrap_or("")
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    if !ident.is_empty() {
+                        names.push(ident);
+                    }
+                }
+                from = at + marker.len();
+            }
+        }
+        names
+    }
+
+    /// The scan must have read a real tree, or every rule below holds for free.
+    ///
+    /// Three separate ways the walk can go quietly empty — no files, a cut that eats the
+    /// production half, a mouth spelling that stopped matching — and each of them turns a
+    /// green guard into no guard at all.
+    #[test]
+    fn the_class_scan_reads_a_tree_that_still_reaches_the_auditor() {
+        let sources = production_sources();
+        assert!(
+            sources.len() > 50,
+            "the walk found {} files, so it is not reading src/",
+            sources.len()
+        );
+        let audits = sources
+            .iter()
+            .flat_map(|(_, text)| collapsed_pieces(text, &[';', '{', '}']))
+            .filter(|stmt| stmt.contains(".audit("))
+            .count();
+        assert!(
+            audits >= 5,
+            "only {audits} production audit statements were found; the test-module cut is \
+             eating the production half"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|(_, text)| !mouth_bindings(text).is_empty()),
+            "no `&mut dyn Write` mouth was found anywhere, so the mouth rule scans nothing"
+        );
+    }
+
+    /// **Rule 1 of the class: nobody builds a second auditor.**
+    ///
+    /// The invariant was written down and then broken directly beneath its own sentence: a
+    /// comment saying "one auditor per process, shared by the classifier and the runtime"
+    /// sat immediately above a line constructing a second one. Two more were elsewhere.
+    ///
+    /// The consequence is not cosmetic. `register_process_secrets` fills the process
+    /// auditor; an auditor built anywhere else starts empty, so the exact pass covers the
+    /// log and nothing that surface redacts. A comment cannot hold this -- it demonstrably
+    /// did not -- so a check does.
+    ///
+    /// **It reads the whole tree, and the previous version reading only `main.rs` is
+    /// exactly how the second instance survived**: it was one file over, in
+    /// `logging::init_logging`, and a guard bounded by a file cannot hold a class that
+    /// lives across files.
+    ///
+    /// The one exemption is the statement that fills the process auditor's own `OnceLock`,
+    /// which has to construct it somewhere. It is recognised by `get_or_init` appearing in
+    /// the same statement rather than by a file or a line number, so an offender cannot
+    /// inherit the exemption by moving.
     #[test]
     fn no_surface_builds_an_auditor_of_its_own() {
-        // The invariant was written down and then broken directly beneath its
-        // own sentence: a comment saying "one auditor per process, shared by the
-        // classifier and the runtime" sat immediately above a line constructing
-        // a second one. Two more were elsewhere.
-        //
-        // The consequence is not cosmetic. `register_process_secrets` fills the
-        // process auditor; an auditor built anywhere else starts empty, so the
-        // exact pass covers the log and nothing that surface redacts. A comment
-        // cannot hold this -- it demonstrably did not -- so a check does.
-        // The `\r` comes out because `include_str!` returns the file's bytes
-        // untouched while every needle below is an escaped `\n`. On a CRLF
-        // working tree they never meet, and rustfmt writes CRLF on Windows, so
-        // this guard passed on a Linux checkout and failed in CI on a Windows
-        // one. Three sibling guards in this file had the same bug.
-        let source = include_str!("main.rs").replace('\r', "");
-        let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .expect("this file has a test module");
-        let offenders: Vec<usize> = production
-            .match_indices("Auditor::new()")
-            .map(|(i, _)| production.get(..i).map_or(0, |p| p.lines().count()) + 1)
+        // Split so this guard's own needle is not the string it forbids. The
+        // production cut already excludes this test module, but that cut is one
+        // rename away from silently matching nothing, and this is not.
+        let forbidden = concat!("Auditor::", "new()");
+        let offenders: Vec<String> = production_sources()
+            .iter()
+            .flat_map(|(path, text)| {
+                collapsed_pieces(text, &[';', '{', '}'])
+                    .into_iter()
+                    .filter(|stmt| stmt.contains(forbidden) && !stmt.contains("get_or_init"))
+                    .map(|stmt| format!("{path}: {}", stmt.chars().take(120).collect::<String>()))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         assert!(
             offenders.is_empty(),
-            "a surface builds its own auditor, which starts with no registered \
-             secrets, at line(s): {offenders:?}"
+            "a surface builds its own auditor, which starts with no registered secrets, so \
+             its exact pass covers nothing this process registered: {offenders:#?}"
         );
-        // And the fixture must have read something, or an empty haystack passes.
+    }
+
+    /// **Rule 2 of the class: an audit of runtime-composed text keeps its alarm.**
+    ///
+    /// The auditor's contract is "mask AND say so -- both, never one". Dropping the second
+    /// element of the pair performs the masking and tells nobody, which is the shape three
+    /// of the five known instances had: the no-layer notice fallback, the layer's own
+    /// reporter, and the headless timeout warning.
+    ///
+    /// **Text given as a LITERAL is exempt, and that is the codebase's own distinction
+    /// rather than a convenience.** `init_logging`'s already-initialised notice says it in
+    /// its comment -- there is nothing in a fixed string for the passes to find, and
+    /// "anyone who interpolates a path or an error into it owes the forwarding". So the
+    /// rule is about composed text, which is every notice that carries a resolved
+    /// `base_url`, an error chain or a vault entry name.
+    ///
+    /// The cost of the rule is a false positive on a future statement that legitimately
+    /// drops one; it fails loudly and prints the statement, so that is cheap.
+    #[test]
+    fn no_production_path_discards_an_audit_alarm() {
+        let call = concat!(".aud", "it(");
+        let offenders: Vec<String> = production_sources()
+            .iter()
+            .flat_map(|(path, text)| {
+                collapsed_pieces(text, &[';', '{', '}'])
+                    .into_iter()
+                    .filter(|stmt| {
+                        stmt.find(call).is_some_and(|at| {
+                            let composed = !stmt
+                                .get(at + call.len()..)
+                                .unwrap_or("")
+                                .trim_start()
+                                .starts_with('"');
+                            composed && alarm_is_discarded(stmt, at)
+                        })
+                    })
+                    .map(|stmt| format!("{path}: {}", stmt.chars().take(160).collect::<String>()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         assert!(
-            production.contains("process_auditor()"),
-            "the source check read a file that does not reach the auditor"
+            offenders.is_empty(),
+            "an audit of runtime-composed text throws its alarm away, so a redaction there \
+             happens and nobody is told: {offenders:#?}"
+        );
+    }
+
+    /// **Rule 3 of the class: a mouth is handed an audited line, never a `&str`.**
+    ///
+    /// REQ-L48's guarantee is structural -- `Audited` has one constructor and every sink
+    /// takes only an `Audited`, so handing one a raw `String` does not compile. A `&str`
+    /// written straight to a `Write` is the one shape the type system cannot refuse, and
+    /// that is precisely where the first instance of this class was found: the no-layer
+    /// notice fallback wrote the notice text and nothing had audited it.
+    ///
+    /// Split on `;` alone rather than on `;{}`, because a format string's own braces would
+    /// cut `writeln!(mouth, "{}", audited.as_str())` in half and leave the evidence of
+    /// compliance in a different piece from the write.
+    #[test]
+    fn no_mouth_is_written_without_an_audited_line() {
+        let offenders: Vec<String> = production_sources()
+            .iter()
+            .flat_map(|(path, text)| {
+                let mouths = mouth_bindings(text);
+                collapsed_pieces(text, &[';'])
+                    .into_iter()
+                    .filter(|stmt| {
+                        mouths.iter().any(|name| {
+                            [format!("write!({name}"), format!("writeln!({name}")]
+                                .iter()
+                                .any(|macro_call| {
+                                    stmt.find(macro_call.as_str()).is_some_and(|at| {
+                                        let args = stmt.get(at..).unwrap_or("");
+                                        args.contains(',') && !args.contains("as_str()")
+                                    })
+                                })
+                        })
+                    })
+                    .map(|stmt| format!("{path}: {}", stmt.chars().take(160).collect::<String>()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "a mouth is written text that no auditor produced, which is the one route the \
+             type system cannot close: {offenders:#?}"
         );
     }
 

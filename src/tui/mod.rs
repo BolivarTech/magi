@@ -3913,6 +3913,65 @@ mod tests {
         );
     }
 
+    /// MS2 gate S4, finding 1: nothing reaches the transcript unaudited.
+    ///
+    /// **Why the transcript and not just any screen.** In Selection mode `y`
+    /// copies a displayed message to the SYSTEM CLIPBOARD, so a credential
+    /// that lands here is exfiltration rather than an ugly frame. That is what
+    /// separates this mouth from the others and why the audit belongs at the
+    /// boundary itself.
+    ///
+    /// **Driven through the writer by hand, deliberately.** The one production
+    /// producer — `emit_notices_into` — audits before it writes, so a test
+    /// going through it would stay green with this boundary wide open and
+    /// would be exactly the guardian-that-cannot-fail this repository keeps
+    /// finding. [`NoticeTranscript`] is an `io::Write`: a `&str` written
+    /// straight to it is the one shape that escapes the `Audited` type, which
+    /// is REQ-L48's whole mechanism, so the type has to redact for itself.
+    ///
+    /// The canary is **shapeless** — no `sk-` prefix, no URL authority around
+    /// it — so only the auditor's exact pass over the registered variants can
+    /// catch it. A pattern-only defence leaves this in the clear.
+    #[test]
+    fn a_registered_secret_never_reaches_the_transcript_in_the_clear() {
+        const CANARY: magi_rs::logging::auditor::SecretName =
+            magi_rs::logging::auditor::SecretName::new("TRANSCRIPT_CANARY");
+        const VALUE: &str = "quaywoodenlanternfeatherbridge";
+        assert!(
+            magi_rs::logging::process_auditor().register_secret(CANARY, &[VALUE]),
+            "the canary must be long enough for the exact pass to carry it"
+        );
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut transcript = NoticeTranscript::new(tx);
+        let raw = format!("warning: vault entry BASE_URL_PASSWORD reads {VALUE}\n");
+        io::Write::write_all(&mut transcript, raw.as_bytes()).expect("the writer never fails");
+
+        let mut seen = Vec::new();
+        while let Ok(response) = rx.try_recv() {
+            match response {
+                AgentResponse::Notice(text) => seen.push(text),
+                other => panic!("the transcript must produce notices, not {other:?}"),
+            }
+        }
+        assert!(
+            !seen.is_empty(),
+            "the line must still be delivered — redaction is not suppression"
+        );
+        assert!(
+            seen.iter().all(|line| !line.contains(VALUE)),
+            "a registered secret reached the clipboard-copyable transcript in \
+             the clear: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|line| line.contains("SECURITY")
+                && line.contains(CANARY.as_str())
+                && !line.contains(VALUE)),
+            "masking and the alarm that says masking happened travel together — \
+             both, never one: {seen:?}"
+        );
+    }
+
     /// C1: the startup notices are announced INSIDE the attached window — after
     /// `attach`, before `EnterAlternateScreen` — and nowhere else.
     ///
