@@ -1450,6 +1450,74 @@ mod tests {
         server
     }
 
+    /// Every `EmbeddingError` variant, so the split `failure_cause` documents can be
+    /// counted rather than described.
+    ///
+    /// Built by hand because `EmbeddingError` carries data and has no iterator. The
+    /// compiler holds the other half: `failure_cause` has no `_` arm, so a new variant
+    /// is a compile error there before it can be a wrong count here.
+    fn every_embedding_error() -> Vec<EmbeddingError> {
+        vec![
+            EmbeddingError::Http("500".into()),
+            EmbeddingError::Auth,
+            EmbeddingError::RateLimited,
+            EmbeddingError::Timeout,
+            EmbeddingError::Network,
+            EmbeddingError::Malformed("not json".into()),
+            EmbeddingError::Dim {
+                expected: 768,
+                got: 1024,
+            },
+        ]
+    }
+
+    /// The two halves of `failure_cause`'s split, counted.
+    ///
+    /// **The prose above `failure_cause` had drifted**: it named four errors on the
+    /// "answered badly" side while the arm covered five, having silently gained `Dim`.
+    /// That is this milestone's most repeated defect — a number that was true once and
+    /// then the code moved — and prose cannot be held to a count by review. Counting
+    /// here is what holds it: adding a variant breaks `failure_cause`'s exhaustive
+    /// `match` first, and then breaks this, which sits one screen from the sentence
+    /// that has to change.
+    ///
+    /// Exact equality rather than `>=`, deliberately: a variant landing in the WRONG
+    /// half is as much a defect as one landing in neither, and only exact counts see it.
+    #[test]
+    fn every_error_variant_falls_on_one_side_of_the_reachability_split() {
+        let all = every_embedding_error();
+        assert_eq!(
+            all.len(),
+            7,
+            "EmbeddingError has gained or lost a variant; `failure_cause`'s rustdoc \
+             enumerates them and has to be corrected with this number"
+        );
+
+        let unreachable = all
+            .iter()
+            .filter(|e| failure_cause(e) == EMBEDDER_UNREACHABLE)
+            .count();
+        let answered_badly = all
+            .iter()
+            .filter(|e| failure_cause(e) == EMBEDDER_HTTP_ERROR)
+            .count();
+
+        assert_eq!(
+            unreachable, 2,
+            "a timeout and a network failure are the only two that never got an answer"
+        );
+        assert_eq!(
+            answered_badly, 5,
+            "a 500, a rejected key, a throttle, an undecodable body AND a dimension \
+             mismatch are all an endpoint that answered"
+        );
+        assert_eq!(
+            unreachable + answered_badly,
+            all.len(),
+            "a variant reached neither cause, so the split is not a split"
+        );
+    }
+
     #[tokio::test]
     async fn test_a_successful_embedder_call_emits_its_cause_key_at_info_level() {
         // The level is `info` and not `debug`, and that is what decides
