@@ -4873,6 +4873,14 @@ mod tests {
     fn a_secret_split_across_reasoning_deltas_is_masked_in_the_transcript() {
         arm_the_delta_secret("TUI_REASONING_DELTA_PROBE");
         let (mut app, responses) = app_on_a_live_channel();
+        // `true` only, and the asymmetry is deliberate rather than an omission
+        // (MS2 gate S4 fourth pass, Melchior). The `false` branch of
+        // `App::on_reasoning` raises the thinking indicator and drops the text
+        // — nothing reaches `App::messages`, so there is no transcript line to
+        // assert about and a `false` case would be asserting that an empty
+        // vector holds no secret, which is true before the auditor exists.
+        // `true` is also the branch that carries the risk: it is the one that
+        // puts the chain-of-thought where `y` can copy it.
         app.show_thinking = true;
         for piece in DELTA_PIECES {
             responses
