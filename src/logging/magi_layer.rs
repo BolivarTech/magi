@@ -603,8 +603,11 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
     /// The UNION of both branches.
     ///
     /// **Careful when a second layer appears:** `Layer::enabled` is evaluated
-    /// globally, so `false` here disables the event for the whole subscriber.
-    /// Harmless while `MagiLayer` is the only one.
+    /// globally, so `false` here disables the event for the whole subscriber —
+    /// including layers that would have wanted it. Harmless while `MagiLayer`
+    /// is the only one, which `init_logging` pins by annotating its
+    /// subscriber's type: a second `.with(..)` there stops the build rather
+    /// than quietly narrowing what every layer sees.
     fn enabled(&self, meta: &tracing::Metadata<'_>, _: Context<'_, S>) -> bool {
         meta.level() <= &self.max_level()
     }

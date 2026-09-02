@@ -707,7 +707,18 @@ pub fn init_logging(
     }
 
     use tracing_subscriber::layer::SubscriberExt as _;
-    let subscriber = tracing_subscriber::registry().with(layer);
+    // **The annotation IS the sole-layer assertion.** `Layer::enabled` is
+    // evaluated for the whole subscriber, not per layer: a `false` from
+    // `MagiLayer` disables the event for every layer beneath it. That is inert
+    // while it is the only one and silently wrong the day it is not — a second
+    // layer would start losing events with nothing to say so. Adding a
+    // `.with(..)` here changes this expression's type and stops the build,
+    // which is the earliest a reader can be told; a test could only observe it
+    // afterwards, and only if somebody wrote one.
+    let subscriber: tracing_subscriber::layer::Layered<
+        magi_layer::MagiLayer,
+        tracing_subscriber::Registry,
+    > = tracing_subscriber::registry().with(layer);
     // **`set_global_default` RETURNS an error on a second install; it does not
     // panic.** The comment that stood here said the opposite, and the
     // difference decides how this line has to be written: the panicking
