@@ -47,7 +47,9 @@ passes: on a run where the memory subsystem never attaches, the leftover from
 an earlier run keeps ``in_log`` true, the ``CANNOT_TEST`` branch below is
 skipped, and both assertions report PASS having checked nothing about this
 run. So the matcher requires one line to carry both ``run=<this run's id>``
-(REQ-L63) and the marker, exactly as S9 and S23 do.
+(REQ-L63) and the marker, as S9 does. S23 is deliberately coarser -- it asks
+whether the run id appears in ANY file under the directory -- so it is not the
+precedent for the line-bound form, only for searching the directory at all.
 
 **The one thing this cannot promise: that the marker was produced at all.**
 Attaching the memory subsystem depends on the embedder answering, which is a

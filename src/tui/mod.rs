@@ -581,8 +581,13 @@ impl crate::agent::mode_classifier::NoticeSink for TuiNoticeSink {
     /// much alive and about to have its frame written over — precisely the corruption this
     /// sink exists to prevent (see the module rustdoc). The two cases are distinguished by
     /// `TrySendError`'s variant, not lumped into "any send failure":
-    /// - **No channel attached yet** (`self.tx` is `None`) — raw mode has not been entered, so
-    ///   there is no frame to protect; stderr is correct — printed directly, no deferral needed.
+    /// - **No channel attached yet** (`self.tx` is `None`) — the sink went live at
+    ///   `init_logging` and the channel is attached inside `run_tui_ext`, so this arm covers
+    ///   the whole of startup, and a TUI is usually still on its way. It DEFERS through
+    ///   [`Self::defer_or_print`] rather than printing: printing here put the line on the
+    ///   primary buffer that `EnterAlternateScreen` covered for the session. `attach` hands
+    ///   the queue to the transcript; on a path that never attaches, `flush` — which `Drop`
+    ///   calls — still reaches stderr, where no frame was ever taken over.
     /// - **`TrySendError::Closed`** — the receiver is gone, which only happens once `run_app`
     ///   has returned and dropped it, i.e. once teardown has *started*. That is not the same as
     ///   teardown having *finished*: `LeaveAlternateScreen` runs on a different task and is not
@@ -1748,7 +1753,8 @@ pub struct TuiMagiRuntimeConfig {
     /// The sink `mode_classifier` writes its two one-time notices to, so
     /// [`run_tui_ext`] can connect it to the response channel once that
     /// channel exists. It MUST be the same instance the classifier was built
-    /// with, or its notices keep going to stderr and over the frame — see
+    /// with: a different one is never attached, so its notices sit deferred
+    /// until `Drop` flushes them to stderr after the session — see
     /// [`TuiNoticeSink`].
     pub classifier_notices: Arc<TuiNoticeSink>,
     /// `[magi].default_mode`, resolved once at startup (REQ-A15).
@@ -1901,8 +1907,10 @@ pub async fn run_tui_ext(
     let (approval_tx, approval_rx) = mpsc::channel(100);
 
     // **Attached BEFORE `EnterAlternateScreen`, and the order is the whole
-    // point.** An unattached sink writes to stderr, which is right only while
-    // there is no frame to write over. This used to sit AFTER the terminal was
+    // point.** An unattached sink DEFERS, and `attach` is what hands the queue
+    // to the transcript — so attaching first is what puts a startup degradation
+    // in front of the user during the session rather than at `Drop`, on stderr,
+    // after the screen is already gone. This used to sit AFTER the terminal was
     // taken over, which was harmless for as long as the sink was reached by the
     // mode classifier alone — it cannot fire that early. Since MS2 the logging
     // layer's screen branch delivers into the same sink from `init_logging`, so
@@ -1917,13 +1925,13 @@ pub async fn run_tui_ext(
     // attached, so the line lands in the 100-slot channel and `run_app`'s
     // `AgentResponse::Notice` arm puts it in the transcript. Announced any
     // earlier — which is where `run()` used to do it — the sink's `tx` is still
-    // `None`, `route` takes its stderr branch, and `EnterAlternateScreen` covers
-    // the result about a millisecond later: a mistyped passphrase's "running
-    // WITHOUT persistence for this session" would be written, hidden, and only
-    // reappear once the user quits, after a whole conversation spent believing
-    // the session was being saved. Announced any later, the same stderr branch
-    // writes on top of the frame instead (REQ-L39). The window is one statement
-    // wide and both walls are guarded.
+    // `None`, so `route` defers and only `Drop`'s flush ever speaks — after
+    // teardown, on stderr, once the conversation is over. A mistyped
+    // passphrase's "running WITHOUT persistence for this session" would then
+    // surface after a whole session spent believing work was saved. Announced
+    // any later, the frame already exists and the notice lands in a transcript
+    // the user has to scroll back for. The window is one statement wide and
+    // both walls are guarded.
     //
     // The fallback is the transcript rather than `stderr`, for the OTHER half
     // of the same defect: outside a `.magi/` workspace no layer is installed at
@@ -5231,8 +5239,8 @@ mod tests {
     /// I2: the notice sink must be attached BEFORE the alternate screen is
     /// entered, not after.
     ///
-    /// An unattached sink is the branch that writes to stderr, and that is
-    /// correct only while there is no frame to write over. The sink went live at
+    /// An unattached sink is the branch that DEFERS, and only `attach` hands
+    /// what it deferred to the transcript. The sink went live at
     /// `init_logging` when the screen branch was connected, so every line
     /// between `EnterAlternateScreen` and `attach` was a window in which a
     /// degradation would have landed on top of the ratatui frame — the exact
@@ -5575,13 +5583,13 @@ mod tests {
     ///
     /// Announcing them earlier (which is what `run()` used to do, one statement
     /// before the handoff) reaches a sink whose `tx` is still `None`, so
-    /// [`TuiNoticeSink::route`] takes its stderr branch and writes to the
-    /// PRIMARY buffer. `EnterAlternateScreen` swaps that buffer out about a
-    /// millisecond later, so a wrong passphrase's "running WITHOUT persistence
-    /// for this session" is written, instantly covered, and stays invisible for
-    /// the whole conversation — reappearing only after the user quits.
-    /// Announcing them LATER, once the frame exists, is the other failure: then
-    /// the same stderr branch writes ON TOP of the frame.
+    /// [`TuiNoticeSink::route`] defers and nothing hands the queue over —
+    /// `Drop`'s flush speaks instead, on stderr, after teardown. A wrong
+    /// passphrase's "running WITHOUT persistence for this session" therefore
+    /// stays invisible for the whole conversation, reappearing only once the
+    /// user quits. Announcing them LATER, once the frame exists, is the other
+    /// failure: the notice lands mid-transcript instead of at the top, where a
+    /// session-wide warning belongs.
     ///
     /// Both bounds therefore have to hold at once, which is why the two
     /// assertions live in one guard: satisfying either alone reopens the other
