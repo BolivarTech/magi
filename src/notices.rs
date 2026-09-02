@@ -245,7 +245,24 @@ fn write_audited(mouth: &mut dyn std::io::Write, text: &str) {
     // for every pass, so each iteration must find a secret not yet latched at it. The
     // registered set is finite, so the chain is bounded by its size and needs no counter
     // to say so.
-    let mut pending = alarm;
+    drain_alarms(alarm, mouth);
+}
+
+/// Routes an alarm chain to `mouth`, audited, until the chain is exhausted.
+///
+/// # Parameters
+///
+/// * `first` — the alarm the caller's own audit raised, if any.
+/// * `mouth` — where the alarms go.
+///
+/// # Complexity
+///
+/// `O(a)` passes for `a` alarms, each the auditor's own over a short line.
+fn drain_alarms(
+    first: Option<crate::logging::auditor::AuditExempt>,
+    mouth: &mut dyn std::io::Write,
+) {
+    let mut pending = first;
     while let Some(raised) = pending {
         let rendered = crate::logging::auditor::render_alarm(&raised);
         let (audited_alarm, next) =
@@ -253,6 +270,42 @@ fn write_audited(mouth: &mut dyn std::io::Write, text: &str) {
         let _ = writeln!(mouth, "{}", audited_alarm.as_str());
         pending = next;
     }
+}
+
+/// Audits `text` and RETURNS it, rather than writing it to a mouth.
+///
+/// # Why a returning variant exists at all
+///
+/// The headless surface composes a structured payload -- a JSON envelope a CI job
+/// parses -- so its error text is not a line to print but a FIELD to fill. The
+/// auditor still has to see it: the payload reaches stdout, and REQ-L48's rule is
+/// about reaching an output, not about the shape of the write.
+///
+/// **This is not a second redaction.** A pattern matcher (`sanitize_error_message`)
+/// masks what LOOKS like a credential; the exact pass masks what this run actually
+/// registered, which no composition site knows about. A vault-substituted password
+/// that is not key-shaped -- an ordinary passphrase -- passes every pattern and only
+/// the exact pass catches it. Both, in that order.
+///
+/// # Parameters
+///
+/// * `text` — runtime-composed text bound for a structured field.
+///
+/// # Returns
+///
+/// The masked text. Any alarm the pass raised goes to `stderr`, which is where the
+/// headless surface's own diagnostics go and is never the payload: putting an alarm
+/// inside the envelope would corrupt a contract a consumer parses.
+///
+/// # Complexity
+///
+/// The auditor's, over `text`, plus one pass per alarm.
+#[must_use]
+pub fn audited_field(text: &str) -> String {
+    let (audited, alarm) =
+        crate::logging::process_auditor().audit(text, NOTICE_TARGET, None, text.len());
+    drain_alarms(alarm, &mut std::io::stderr().lock());
+    audited.as_str().to_string()
 }
 
 /// Splits notices by the mouth their level sends them to (REQ-L19).

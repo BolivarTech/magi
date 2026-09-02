@@ -500,7 +500,7 @@ fn consult_error_outcome(
         // without a declared mode is a configuration problem, not a runtime one
         // (REQ-A07d/REQ-A07r) — `ModeError`'s `Display` already names the fix.
         ConsultRunError::UntrustedContentRequiresMode(e) => ErrorPayload {
-            message: e.to_string(),
+            message: audited_payload(&e.to_string()),
             kind: ErrorKind::InputInvalid,
         },
         ConsultRunError::Timeout => ErrorPayload {
@@ -508,11 +508,42 @@ fn consult_error_outcome(
             kind: ErrorKind::Timeout,
         },
         ConsultRunError::Runtime(message) => ErrorPayload {
-            message: sanitize_error_message(&message),
+            message: audited_payload(&sanitize_error_message(&message)),
             kind: ErrorKind::Runtime,
         },
     };
     (None, None, StopReason::Error, Some(payload))
+}
+
+/// Masks a payload field with the process auditor's exact pass.
+///
+/// # Why the pattern matcher is not enough
+///
+/// `sanitize_error_message` masks what LOOKS like a credential -- an `sk-` key, a long
+/// hex or base64 run. The exact pass masks what this run REGISTERED, which no
+/// composition site knows about: a `base_url` password substituted from the vault is an
+/// ordinary passphrase and matches no pattern at all. Both, in that order -- the pattern
+/// pass first so a credential the vault never held is caught too.
+///
+/// # Why it is here and not in `sanitize_error_message`
+///
+/// That function lives in the pure library half, which is fuzzed and deliberately free of
+/// process-global state. Reaching the process auditor from there would make a fuzz target
+/// depend on what a run happened to register.
+///
+/// # Parameters
+///
+/// * `text` — an already pattern-sanitized message bound for the JSON envelope.
+///
+/// # Returns
+///
+/// The masked text. The alarm goes to stderr, never into the envelope.
+///
+/// # Complexity
+///
+/// The auditor's, over `text`.
+fn audited_payload(text: &str) -> String {
+    magi_rs::notices::audited_field(text)
 }
 
 /// Projects a direct consult into the normalized transcript (REQ-H14): the user
@@ -1191,7 +1222,7 @@ pub async fn run_query(
                     None,
                     StopReason::Error,
                     Some(ErrorPayload {
-                        message: sanitize_error_message(&message),
+                        message: audited_payload(&sanitize_error_message(&message)),
                         kind: ErrorKind::Runtime,
                     }),
                 )
