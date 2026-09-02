@@ -493,7 +493,7 @@ fn consult_error_outcome(
 ) {
     let payload = match err {
         ConsultRunError::InputInvalid => ErrorPayload {
-            message: CONSULT_INPUT_INVALID_MESSAGE.to_string(),
+            message: audited_payload(CONSULT_INPUT_INVALID_MESSAGE),
             kind: ErrorKind::InputInvalid,
         },
         // Same `input_invalid` family as the cap check above: `untrusted_content`
@@ -504,7 +504,7 @@ fn consult_error_outcome(
             kind: ErrorKind::InputInvalid,
         },
         ConsultRunError::Timeout => ErrorPayload {
-            message: TIMEOUT_MESSAGE.to_string(),
+            message: audited_payload(TIMEOUT_MESSAGE),
             kind: ErrorKind::Timeout,
         },
         ConsultRunError::Runtime(message) => ErrorPayload {
@@ -543,7 +543,11 @@ fn consult_error_outcome(
 ///
 /// The auditor's, over `text`.
 fn audited_payload(text: &str) -> String {
-    magi_rs::notices::audited_field(text)
+    /// This surface's own target. Sharing one would share `Auditor::alarm`'s
+    /// `(secret, target)` latch and let another surface's alarm suppress this
+    /// one's (MS2 gate, integration pass, Caspar).
+    const PAYLOAD_TARGET: &str = "magi_rs::headless::payload";
+    magi_rs::notices::audited_field_at(text, PAYLOAD_TARGET)
 }
 
 /// Projects a direct consult into the normalized transcript (REQ-H14): the user
@@ -806,7 +810,7 @@ fn timeout_outcome() -> (Option<String>, StopReason, Option<ErrorPayload>) {
         None,
         StopReason::Error,
         Some(ErrorPayload {
-            message: TIMEOUT_MESSAGE.to_string(),
+            message: audited_payload(TIMEOUT_MESSAGE),
             kind: ErrorKind::Timeout,
         }),
     )
@@ -1319,9 +1323,14 @@ mod audit_route_guard {
         // stderr is a third spelling (MS2 gate S5, Caspar and Balthasar). A
         // needle SET, not a needle.
         let mouths = [
-            concat!("println", "!"),
-            concat!("eprint", "!"),
+            // `println!` also covers `eprintln!` by substring; `print!` also
+            // covers `eprint!`. Both stdout spellings are here because stdout
+            // is where the envelope goes, and the guard that only watched
+            // stderr was watching the smaller of the two mouths (MS2 gate,
+            // integration pass, Caspar and Balthasar).
+            concat!("print", "!"),
             concat!("dbg", "!"),
+            concat!("stdout", "()"),
             concat!("stderr", "()"),
         ];
         // A real carriage return. The first version of this line was written

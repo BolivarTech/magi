@@ -5164,7 +5164,48 @@ impl AuditedOutcome {
     ///
     /// * `outcome` — the run's result, as composed.
     fn new(outcome: &RunOutcome) -> Self {
-        Self(outcome.clone())
+        /// The target these masks are attributed to.
+        ///
+        /// Its OWN target, not the startup one: `Auditor::alarm` latches
+        /// `(secret, target)`, so sharing a target lets a startup alarm for a
+        /// secret silently suppress this surface's alarm for the same secret --
+        /// the masking still happens and the notice that it happened vanishes.
+        const ENVELOPE_TARGET: &str = "magi_rs::headless::envelope";
+
+        use magi_rs::headless::types::{ToolCallRecord, TranscriptEntry};
+
+        let mask = |s: &str| magi_rs::notices::audited_field_at(s, ENVELOPE_TARGET);
+        let mask_record = |r: &ToolCallRecord| ToolCallRecord {
+            name: r.name.clone(),
+            // The INPUT too: a tool is invoked with operator-composed
+            // arguments, and `bash` takes a command line.
+            input: mask_json(&r.input, &mask),
+            result: mask(&r.result),
+            ms: r.ms,
+            ok: r.ok,
+        };
+        let mut out = outcome.clone();
+        out.response = out.response.as_deref().map(&mask);
+        out.tool_calls = out.tool_calls.iter().map(&mask_record).collect();
+        out.transcript = out
+            .transcript
+            .iter()
+            .map(|e| TranscriptEntry {
+                role: e.role.clone(),
+                content: mask(&e.content),
+                tool_calls: e
+                    .tool_calls
+                    .as_ref()
+                    .map(|cs| cs.iter().map(&mask_record).collect()),
+            })
+            .collect();
+        out.consult = out.consult.as_ref().map(|v| mask_json(v, &mask));
+        // `model` and `provider` are resolved at startup from what the operator
+        // wrote, so they are runtime-composed like the rest. `error.message` is
+        // already masked where it is built, and masking twice is the identity.
+        out.model = mask(&out.model);
+        out.provider = mask(&out.provider);
+        Self(out)
     }
 
     /// The masked envelope.
@@ -5172,6 +5213,52 @@ impl AuditedOutcome {
         &self.0
     }
 }
+
+/// Applies `mask` to every string inside `value`, keys included.
+///
+/// # Why keys too
+///
+/// A JSON object built from foreign data can carry a secret in a KEY as easily as
+/// in a value -- a map of endpoint to status, for one -- and a mask that skipped
+/// keys would be a rule with an exception nobody wrote down.
+///
+/// # Parameters
+///
+/// * `value` — the structure to walk.
+/// * `mask` — the per-string transform.
+///
+/// # Complexity
+///
+/// `O(n)` nodes, each paying the auditor's own cost over its text.
+fn mask_json(value: &serde_json::Value, mask: &dyn Fn(&str) -> String) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => serde_json::Value::String(mask(s)),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(|v| mask_json(v, mask)).collect())
+        }
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (mask(k), mask_json(v, mask)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Where a source file's production half ends: the FIRST `#[cfg(test)]` module of any
+/// name, not the one called `tests`.
+///
+/// Eight guards in this file split on the literal `mod tests {`, which treats any test
+/// module placed ABOVE it as production. That is not hypothetical: adding
+/// `mod envelope_audit_guard` made `no_surface_arms_the_auditor_twice` count a test's
+/// `register_process_secrets` as a third production arming (MS2 gate, integration pass).
+/// The other seven had the same latent bug and are fixed with it -- by property, not by
+/// the one site that happened to fire.
+/// `cfg(test)`: only the guards read it, and it names a `mod`, not a `const`, so it
+/// does not move the boundary it defines.
+#[cfg(test)]
+const FIRST_TEST_MODULE: &str = "\n#[cfg(test)]\nmod ";
 
 /// Emits `outcome` in the requested format and returns the process exit code
 /// (shared by `query` and `consult`). An output-write failure is reported to
@@ -6778,7 +6865,7 @@ mod tests {
                         .expect("a UTF-8 source file")
                         .replace('\r', "");
                     let production = text
-                        .split_once("\n#[cfg(test)]\nmod tests {")
+                        .split_once(FIRST_TEST_MODULE)
                         .map_or(text.clone(), |(before, _)| before.to_string());
                     out.push((path.display().to_string(), production));
                 }
@@ -7516,7 +7603,7 @@ mod tests {
         // one. Three sibling guards in this file had the same bug.
         let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
+            .split_once(FIRST_TEST_MODULE)
             .expect("this file has a test module");
 
         // `run` is the TUI surface; `prepare_headless` is query and consult.
@@ -7565,7 +7652,7 @@ mod tests {
     fn the_headless_config_notices_are_announced_at_both_mouths() {
         let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
+            .split_once(FIRST_TEST_MODULE)
             .expect("this file has a test module");
         let start = production
             .find("async fn prepare_headless(")
@@ -7642,7 +7729,7 @@ mod tests {
     fn a_headless_run_without_a_workspace_still_reaches_the_fallback() {
         let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
+            .split_once(FIRST_TEST_MODULE)
             .expect("this file has a test module");
         let start = production
             .find("async fn prepare_headless(")
@@ -7712,7 +7799,7 @@ mod tests {
     fn the_close_flushes_the_health_tracker_before_it_waits_for_the_queue() {
         let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
+            .split_once(FIRST_TEST_MODULE)
             .expect("this file has a test module");
         let start = production
             .find("fn bootstrap_headless<F, Fut>(")
@@ -7767,7 +7854,7 @@ mod tests {
 
         let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
+            .split_once(FIRST_TEST_MODULE)
             .expect("this file has a test module");
         for surface in ["async fn run(", "async fn prepare_headless("] {
             let start = production
@@ -7801,10 +7888,17 @@ mod tests {
         // one. Three sibling guards in this file had the same bug.
         let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
+            .split_once(FIRST_TEST_MODULE)
             .expect("this file has a test module");
+        // **Code, not prose.** It counted raw substring matches over the whole
+        // production half, so a doc comment that NAMES the function read as a
+        // third arming -- which is what a comment added during the integration
+        // pass did. A guard that a sentence can break is a guard that will be
+        // "fixed" by deleting the sentence.
         assert_eq!(
-            production.matches("register_process_secrets").count(),
+            code_lines_only(production)
+                .matches("register_process_secrets")
+                .count(),
             2,
             "expected exactly one arming per surface"
         );
@@ -9161,7 +9255,7 @@ mod tests {
     fn the_startup_notices_are_handed_to_the_tui_rather_than_announced_early() {
         let source = include_str!("main.rs").replace('\r', "");
         let (production, _) = source
-            .split_once("\n#[cfg(test)]\nmod tests {")
+            .split_once(FIRST_TEST_MODULE)
             .expect("this file has a test module");
         // Both tokens are split across `concat!` so the two lines below do not
         // themselves carry the pairing they forbid. Written out, this guard

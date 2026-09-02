@@ -302,8 +302,34 @@ fn drain_alarms(
 /// The auditor's, over `text`, plus one pass per alarm.
 #[must_use]
 pub fn audited_field(text: &str) -> String {
-    let (audited, alarm) =
-        crate::logging::process_auditor().audit(text, NOTICE_TARGET, None, text.len());
+    audited_field_at(text, NOTICE_TARGET)
+}
+
+/// [`audited_field`], attributed to `target`.
+///
+/// # Why the target is a parameter and not a constant
+///
+/// [`crate::logging::auditor::Auditor::alarm`] latches `(secret, target)`. A surface
+/// that borrows another's target therefore shares its latch: a startup notice that
+/// already alarmed for a secret **silently suppresses** this surface's alarm for the
+/// same one. The masking still happens; the notice that it happened disappears, which
+/// is the half an operator acts on (MS2 gate, integration pass, Caspar).
+///
+/// # Parameters
+///
+/// * `text` — runtime-composed text bound for a structured field.
+/// * `target` — the surface this mask belongs to. One per surface, `'static`.
+///
+/// # Returns
+///
+/// The masked text. Any alarm goes to `stderr`, never into the caller's payload.
+///
+/// # Complexity
+///
+/// The auditor's, over `text`, plus one pass per alarm.
+#[must_use]
+pub fn audited_field_at(text: &str, target: &'static str) -> String {
+    let (audited, alarm) = crate::logging::process_auditor().audit(text, target, None, text.len());
     drain_alarms(alarm, &mut std::io::stderr().lock());
     audited.as_str().to_string()
 }

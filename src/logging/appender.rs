@@ -706,9 +706,17 @@ impl FileSink {
                 // pass is the identity over a short line.
                 //
                 // A secondary alarm raised BY this pass is written here too
-                // rather than re-submitted: `write` runs on the writer thread
-                // and enqueueing from inside it is how a queue deadlocks. The
-                // chain is finite because `Auditor::alarm` latches
+                // rather than re-submitted. **Not because re-submitting would
+                // deadlock** -- it would not, on this queue, and an earlier
+                // version of this comment said so wrongly (MS2 gate,
+                // integration pass, Caspar). It is because an alarm about the
+                // line being written belongs WITH that line: routed back
+                // through the queue it arrives out of order, after the write it
+                // describes, and a reader correlating the two has nothing to
+                // correlate on. They are space-joined into one record for the
+                // same reason -- `drain_alarms` writes one per line because its
+                // mouth is a stream of lines; this one is filling a single
+                // record. The chain is finite because `Auditor::alarm` latches
                 // `(secret, target)` and the registered set is finite.
                 // Pinned from the outside by
                 // `magi_layer::tests::the_alarm_the_file_mouth_writes_names_the_secret_and_never_its_value`.

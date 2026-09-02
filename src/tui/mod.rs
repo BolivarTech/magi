@@ -4690,7 +4690,7 @@ mod tests {
         assert_eq!(
             calls.len(),
             2,
-            "append_stream_delta is reachable from somewhere the drain does not follow              with an audit, so unaudited model text stays on screen and in the              clipboard: {calls:#?}"
+            "append_stream_delta is reachable from somewhere IN THIS FILE that the              drain does not follow with an audit, so unaudited model text stays on              screen and in the clipboard. The scan is file-scoped: `tui` is a module              of the bin crate, so no integration test can reach the method, but a              future sibling module could and this would not see it. Calls: {calls:#?}"
         );
     }
 
