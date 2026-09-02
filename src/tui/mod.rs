@@ -1636,7 +1636,14 @@ impl App {
     }
 
     /// Appends a message to the UI history.
-    pub fn push_message(&mut self, message: String) {
+    ///
+    /// **Private, and that is the audit boundary made mechanical** (MS2 gate S4,
+    /// Balthasar). Every line in the transcript is copyable with `y` in Selection
+    /// mode, so a caller that skips [`audit_for_transcript`] is exfiltration rather
+    /// than a formatting slip. All thirty-two call sites live in this module, so
+    /// nothing outside it loses a capability — what changes is that a future one
+    /// cannot be written elsewhere and rely on a comment to have been read.
+    fn push_message(&mut self, message: String) {
         self.messages.push(message);
         // New content → snap back to the tail so it's visible.
         self.scroll_offset = 0;
@@ -1649,7 +1656,10 @@ impl App {
     /// looks up `notice_indices` (recorded here) rather than sniffing the prefix back out
     /// of the rendered line — see `notice_indices`'s rustdoc for why that distinction
     /// matters (MAGI S7 finding 2).
-    pub fn push_notice(&mut self, text: String) {
+    ///
+    /// Private for the same reason as [`Self::push_message`]: the boundary was a
+    /// convention held by comments, and the compiler can hold it instead.
+    fn push_notice(&mut self, text: String) {
         // Ensure the text is valid UTF-8 (it always is, but make the intent explicit).
         let notice = format!("⚠ {}", text);
         self.messages.push(notice);
