@@ -1672,7 +1672,29 @@ impl App {
     }
 
     /// Marks the end of a streamed assistant turn.
+    ///
+    /// **The audit runs HERE, before the state it needs is thrown away** (MS2
+    /// gate S4 fourth pass, Caspar). [`drain_responses`] re-audits after the
+    /// whole batch, and that pass reads `stream_target` and `stream_raw`; every
+    /// arm that ends a turn calls this method, which used to clear both before
+    /// that pass ever ran. Production never streams a turn without ending it,
+    /// and the agent's channel is drained in batches, so the deltas and the
+    /// marker arrive together and the batch's one audit found nothing left to
+    /// audit — every turn's last deltas reached the clipboard-copyable
+    /// transcript in the clear.
+    ///
+    /// Refreshing from inside this method rather than from each arm is what
+    /// makes that hold for all of them: `Text("")`, `Error` and `Info` each end
+    /// a turn on their own line, and a fix applied at one call site leaves the
+    /// other two carrying the defect. The trailing refresh in
+    /// [`drain_responses`] is still needed and is not redundant — it covers the
+    /// batch that ends mid-turn, which is every batch but the last.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k*n)` — the auditor's, over the turn being closed.
     pub fn finalize_stream(&mut self) {
+        refresh_stream_audit(self);
         self.streaming = false;
         self.stream_target = None;
         // The next turn is a different message, so it starts from an empty
