@@ -1494,7 +1494,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // detection, process hardening, subcommand dispatch, `-p`/`--logout`) — the
     // whole point of this message is to be the only thing the user sees.
     if args.init_config {
-        eprintln!("{}", init_config_retired_message());
+        magi_rs::notices::eprint_audited(&init_config_retired_message());
         return Ok(ExitCode::FAILURE);
     }
 
@@ -1516,7 +1516,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let workspace_root = match resolve_workspace_root(workdir_flag, &env::current_dir()?) {
         Ok(root) => root,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Ok(exit_code(headless_error_exit_code(&e)));
         }
     };
@@ -1524,7 +1524,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // REQ-H31: loose legacy state with no `.magi/` ⇒ a visible stderr warning
     // (detect only — never read or migrate the legacy files, D-H07).
     if crate::system::workspace::detect_legacy_files(&workspace_root) {
-        eprintln!("{LEGACY_LAYOUT_WARNING}");
+        magi_rs::notices::eprint_audited(LEGACY_LAYOUT_WARNING);
     }
 
     // REQ-V42: best-effort process hardening, once, before any secret
@@ -1727,7 +1727,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         let parsed = match magi_rs::logging::filter::Filter::parse(&filter) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("error: {e}");
+                magi_rs::notices::eprint_audited(&format!("error: {e}"));
                 return Err(anyhow::anyhow!("invalid log filter"));
             }
         };
@@ -5833,7 +5833,7 @@ fn bring_up_headless_logging(
         Err(e) => {
             // 2 like every other invalid-input path here: a filter the
             // operator wrote and mistyped is bad INPUT, not a runtime fault.
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(2);
         }
     };
@@ -5871,16 +5871,16 @@ fn bring_up_headless_logging(
             // exists to answer. A DEFAULTED directory that cannot be created
             // degrades, because nobody asked for it.
             if resolved_dir.declared {
-                eprintln!(
+                magi_rs::notices::eprint_audited(&format!(
                     "error: the log directory {} could not be used: {e}",
                     log_dir.display()
-                );
+                ));
                 return Err(2);
             }
-            eprintln!(
+            magi_rs::notices::eprint_audited(&format!(
                 "warning: logging is not writing to {}: {e}; the run continues",
                 log_dir.display()
-            );
+            ));
             false
         }
     };
@@ -5898,7 +5898,7 @@ fn bring_up_headless_logging(
         );
         // REQ-L63: on stderr as well as in the envelope, so a CI job can
         // capture it without parsing either the log or the JSON.
-        eprintln!("run: {}", magi_rs::logging::run_id());
+        magi_rs::notices::eprint_audited(&format!("run: {}", magi_rs::logging::run_id()));
         // The third piece of REQ-L63: the run's first event. It cannot come
         // earlier — the layer it goes to is installed just above.
         magi_rs::logging::announce_run(command, &ws.root);
