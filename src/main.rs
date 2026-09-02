@@ -1440,13 +1440,6 @@ where
     // to reach stderr here: the alternate screen is long gone by the time the
     // runtime has stopped.
     if let Some(handle) = magi_rs::logging::installed() {
-        let left = handle.drain(EXIT_DRAIN_BUDGET);
-        if left > 0 {
-            eprintln!(
-                "warning: {left} bytes of log were still queued after waiting {}s and were not written",
-                EXIT_DRAIN_BUDGET.as_secs()
-            );
-        }
         // SC-L90: a short headless run has no event loop to expire the
         // health window on, so close is the only remaining chance to show a
         // transition still waiting on it. It was reserved here while it was
@@ -1455,7 +1448,25 @@ where
         // still called it a no-op was describing a version that no longer
         // exists. `a_pending_recovery_reaches_the_screen_only_when_the_run_
         // closes` is what holds the behaviour down.
+        //
+        // **BEFORE the drain, and that is the whole reason it moved.** A
+        // flushed transition is not only a screen line: its text carries the
+        // operator's `log_dir` and the emitter's cause key, so the auditor can
+        // mask something in it, and the alarm that says masking happened goes
+        // to the appender -- the very queue the wait below exists for. Flushed
+        // afterwards it had no bounded wait left at all and raced the process
+        // out. One drain suffices rather than a second one after it, because
+        // nothing between the two enqueues: the shortfall warning writes to a
+        // file descriptor and never touches the appender. Placing it first also
+        // makes the figure that warning reports include the flush's own bytes.
         handle.health_flush();
+        let left = handle.drain(EXIT_DRAIN_BUDGET);
+        if left > 0 {
+            eprintln!(
+                "warning: {left} bytes of log were still queued after waiting {}s and were not written",
+                EXIT_DRAIN_BUDGET.as_secs()
+            );
+        }
     }
     code
 }
