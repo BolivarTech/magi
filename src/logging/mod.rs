@@ -702,6 +702,45 @@ pub fn init_logging(
 mod tests {
     use super::*;
 
+    /// The environment variable `cargo-nextest` exports into every test process.
+    const NEXTEST_MARKER: &str = "NEXTEST";
+
+    /// This suite requires a process-per-test runner, and says so once instead of
+    /// five times in a row.
+    ///
+    /// # What actually happens under `cargo test`
+    ///
+    /// The subsystem installs itself into a `OnceLock` and raises the process's global
+    /// `LevelFilter`, both of which are per-PROCESS. `cargo test` runs the whole lib in
+    /// ONE process, so the first test to call `init_logging` wins for every test after
+    /// it, and the ones asserting on the *uninstalled* state lose. Measured on this
+    /// tree: `cargo test --lib` gives `503 passed; 5 failed` — three in `notices` and
+    /// two here — with nothing in the output saying the runner is the cause.
+    ///
+    /// # Why this is a pointer and not the only defence
+    ///
+    /// The five that fail are already self-guarding: each opens by asserting
+    /// `LevelFilter::current() == OFF` with "something installed one". So the shared
+    /// process produces a RED, never a false green, which is the safe direction and was
+    /// deliberate. What it does not produce is an explanation — five unrelated-looking
+    /// failures send a reader after a product defect that is not there. This turns them
+    /// into one failure that names the cause.
+    ///
+    /// It is deliberately NOT a check on ordering or a `serial_test` lock: serialising
+    /// would make the assertions pass in one arrangement and hide that the state is
+    /// global. The requirement is the runner, so the runner is what is asserted.
+    #[test]
+    fn the_suite_requires_a_process_per_test_runner() {
+        assert!(
+            std::env::var_os(NEXTEST_MARKER).is_some(),
+            "this suite must be run with `cargo nextest run`, which gives every test its \
+             own process. Under `cargo test` the whole library shares one, so the \
+             `OnceLock` subscriber and the global `LevelFilter` leak between tests and \
+             five of them fail for a reason that has nothing to do with the code under \
+             test. CI runs nextest in both workflows; run it locally too."
+        );
+    }
+
     /// Keeps every line a mouth was handed.
     #[derive(Default)]
     struct RecordingSink {

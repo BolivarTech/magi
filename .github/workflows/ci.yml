@@ -42,6 +42,12 @@ jobs:
       # that introduced it, instead of silently regenerating the lock and letting
       # the drift surface days later as a broken release (see the v0.10.3 run,
       # where every `--locked` platform build and `cargo publish` failed).
+      # **`nextest`, never `cargo test` — this is a requirement, not a preference.**
+      # The logging subsystem installs itself into a `OnceLock` and raises the
+      # process-global `LevelFilter`. `cargo test` runs the whole library in ONE
+      # process, so that state leaks between tests and five of them fail for a
+      # reason unrelated to the code under test. `the_suite_requires_a_process_per_
+      # test_runner` (src/logging/mod.rs) fails loudly if this line is ever changed.
       - run: cargo nextest run --locked
 
   clippy:
