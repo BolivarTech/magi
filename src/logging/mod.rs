@@ -1015,6 +1015,48 @@ mod tests {
         );
     }
 
+    /// A phrase the not-installed notice must carry.
+    ///
+    /// The words an operator would search for, not the whole sentence: a
+    /// verbatim copy of the text would pass while saying anything at all.
+    const PHRASE_IN_THE_NOT_INSTALLED_NOTICE: &str = "will not reach";
+
+    #[test]
+    fn a_subscriber_that_could_not_be_installed_is_announced() {
+        // `set_global_default` fails when something else already holds the
+        // process's global subscriber. Its `Result` was discarded, so the
+        // caller got an `Ok` describing a state that does not exist: the
+        // directory is created, the writer thread is running, `installed()`
+        // answers with a handle -- and NOT ONE EVENT reaches any of it, because
+        // the layer was never mounted.
+        //
+        // REQ-L35 keeps the return `Ok`: logging must never abort the process
+        // that was trying to log. So the failure has to reach the operator
+        // through the mouth instead, which is what this pins.
+        assert!(
+            tracing::subscriber::set_global_default(tracing_subscriber::registry()).is_ok(),
+            "this test owns its process's global subscriber"
+        );
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cfg = LoggingConfig {
+            log_dir: dir.path().to_path_buf(),
+            file_filter: filter::Filter::parse("info").expect("valid"),
+        };
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let handle = init_logging(&cfg, sink.clone(), None);
+
+        assert!(
+            handle.is_ok(),
+            "REQ-L35: a subsystem that cannot come up still never aborts its caller"
+        );
+        let said = sink.lines.lock().expect("not poisoned").join("\n");
+        assert!(
+            said.contains(PHRASE_IN_THE_NOT_INSTALLED_NOTICE),
+            "the caller was told logging was up while nothing was mounted: {said:?}"
+        );
+    }
+
     #[test]
     fn a_different_invocation_produces_a_different_first_event() {
         // Without this, an event that hardcodes one command satisfies the test
