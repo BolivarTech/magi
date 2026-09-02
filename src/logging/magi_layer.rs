@@ -163,8 +163,11 @@ impl Reporter {
     /// # Why re-entering [`Self::report`] terminates
     ///
     /// A refused alarm submission is reported, and `report` announces through a
-    /// latch, so the second pass finds its tier already spoken for and returns.
-    /// The recursion is two deep at most, and no lock is held across it.
+    /// latch. It owns TWO of them -- `degraded` and `stopped` -- so a pass that
+    /// latches one can still re-enter through the other, and only the third
+    /// finds both taken. Termination is latch FINITENESS, not same-tier
+    /// relatching: the recursion is three `announce` frames deep at most, and
+    /// no lock is held across it.
     ///
     /// # Complexity
     ///

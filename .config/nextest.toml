@@ -222,20 +222,21 @@
 #     that waits is a poll on the file mouth with a 30 s FAILURE deadline (see
 #     `wait_for_file` in `screen_policy.rs`), which replaced a flat 300 ms sleep in the
 #     same round this comment was written. **Measured on this box, and the count is part
-#     of the measurement:** the two binaries hold TEN tests between them (nine in
-#     `screen_policy`, one in `tui_buffer_audited_only`); the slowest is 334 ms and the
-#     whole set finishes in 0.34 s. Re-derive both with
+#     of the measurement:** the two binaries hold TWELVE tests between them (eleven
+#     in `screen_policy`, one in `tui_buffer_audited_only`); the slowest is 192 ms and
+#     the whole set finishes in 0.19 s. Re-derive both with
 #     `cargo nextest run -E 'binary(screen_policy) | binary(tui_buffer_audited_only)'`
 #     and read the per-test times, not just the summary. That is still two orders of
 #     magnitude of headroom against the 30 s deadline — strictly more than the four
 #     binaries already outside, which still sleep flat durations.
 #
-#     The figures above replace "the slowest of the seven is 375 ms". Seven was the
-#     count when the section was written and tests were added afterwards, so the
-#     sentence went on reading as a current measurement of a set that had changed
-#     underneath it. It is the same failure this file has watched three times with
-#     filters that quietly stopped matching: a stale number raises no error, it just
-#     stops being true. Whoever adds a test to either binary re-measures here.
+#     Those figures replaced "ten tests, slowest 334 ms", which had themselves
+#     replaced "the slowest of the seven is 375 ms". Each count was true when it was
+#     written and tests were added afterwards, so each sentence went on reading as a
+#     current measurement of a set that had changed underneath it. It is the same
+#     failure this file has watched three times with filters that quietly stopped
+#     matching: a stale number raises no error, it just stops being true. Whoever adds
+#     a test to either binary re-measures here.
 #
 # Adding them would hold one of three scarce slots for a load they do not create, and
 # would give them nothing back: the group caps its members against EACH OTHER, it does
