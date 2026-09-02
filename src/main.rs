@@ -7303,6 +7303,69 @@ mod tests {
              {offenders:#?}"
         );
     }
+    /// **Rule 7 of the class: the process bootstrap announces through the audit route.**
+    ///
+    /// # The property, which is not a list of sites
+    ///
+    /// The function that captures the process secrets is the one place that has held
+    /// every one of them in a local before anything else in the process exists. Rules 4
+    /// and 6 both miss it: rule 4 anchors on the two funnels it names and this function
+    /// announces on a third arm -- the runtime builder's -- and rule 6 scopes by
+    /// `HeadlessArgs`, which the bootstrap does not take because it runs before argument
+    /// parsing. So the exemption existed by SCOPE rather than by decision, which is the
+    /// shape this class keeps taking.
+    ///
+    /// # What the two writes carry, and why that is not the argument
+    ///
+    /// One is an `io::Error` from the runtime builder; the other is a byte count and a
+    /// duration. Neither has a surface a secret reaches today. That is an argument about
+    /// CONTENT, and content arguments are what REQ-L48 replaces with a route: each
+    /// instance this milestone found was safe by a different local reading, and several
+    /// of those readings were wrong.
+    ///
+    /// # Why the in-scope set is asserted too
+    ///
+    /// A scan that finds nothing passes. Renaming the capture, or inlining it, would
+    /// empty the scope and leave this green over the process's own entry point.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A raw write in a helper the bootstrap calls. Rules 3 and 4 hold those.
+    #[test]
+    fn the_process_bootstrap_announces_through_the_audit_route() {
+        // Split so this guard's own needle is not the string it forbids. `eprintln!`
+        // contains `println!`, so one check covers both spellings.
+        let raw_stdout = concat!("println", "!");
+        // The CALL, not the definition: the definition's own signature line would put
+        // `read_then_scrub_secret_env` itself in scope and make the set assertion below
+        // pass for the wrong reason.
+        let captures_secrets = concat!("= read_then_scrub_", "secret_env()");
+
+        let mut in_scope = Vec::new();
+        let mut offenders = Vec::new();
+        for (path, text) in &production_sources() {
+            for (name, body) in top_level_fn_bodies(&code_lines_only(text)) {
+                if !body.contains(captures_secrets) {
+                    continue;
+                }
+                in_scope.push(name.clone());
+                for line in body.lines().filter(|l| l.contains(raw_stdout)) {
+                    offenders.push(format!("{path}: {name}: {}", line.trim()));
+                }
+            }
+        }
+
+        in_scope.sort();
+        assert_eq!(
+            in_scope,
+            vec!["bootstrap_headless".to_string()],
+            "the scan must see the function that captures the process secrets; a              different set means it is green over a surface it did not read"
+        );
+        assert!(
+            offenders.is_empty(),
+            "the process bootstrap writes straight to a file descriptor, so the route it              exists to establish has a hole at its own entry point: {offenders:#?}"
+        );
+    }
 
     /// # What it cannot catch
     ///
