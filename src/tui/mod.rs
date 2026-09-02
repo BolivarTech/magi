@@ -2758,7 +2758,17 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 if let Some(msg) = app.messages.get(app.selected_index) {
                                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                                         let _ = clipboard.set_text(msg.clone());
-                                        app.push_message("System: Message copied".to_string());
+                                        // Audited like every other line, though it is a
+                                        // constant with nothing to mask. The claim
+                                        // `audit_for_transcript` makes is that EVERY line
+                                        // passes through it, and an exemption granted per
+                                        // line is how the model-output arms came to be
+                                        // exempt in the first place. One scan of a
+                                        // constant is the price of keeping the sentence
+                                        // true (MS2 gate S4, Caspar).
+                                        for line in audit_for_transcript("System: Message copied") {
+                                            app.push_message(line);
+                                        }
                                     }
                                 }
                                 app.mode = AppMode::Normal;
