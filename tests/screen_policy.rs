@@ -610,3 +610,100 @@ fn five_consecutive_failures_show_one_notice_and_leave_five_records() {
         );
     }
 }
+
+#[test]
+fn a_transition_flushed_at_close_reaches_the_file() {
+    // What the close-ordering guard in `main.rs` is guarding, and the half a
+    // reader is most likely to doubt. `health_flush` is usually described by
+    // what it puts on the SCREEN, and on that reading where it sits at exit
+    // would not matter. It has a FILE-bound half too: the transition's text
+    // carries the operator's own `log_dir` and the emitter's cause key, both
+    // runtime data, so the auditor masks what it recognises and the alarm that
+    // says masking happened goes to the appender -- a detached writer thread
+    // the exit waits for exactly once.
+    //
+    // # Why the fixture has this shape
+    //
+    // A subsystem's FIRST transition is immediate, so the only thing a flush
+    // can be holding is a later one: here a CAUSE CHANGE inside a subsystem
+    // already degraded. And the secret is registered BETWEEN the two events,
+    // because the alarm latches per `(secret, target)` -- had the first line
+    // carried it, the flushed one would raise nothing and this would pass over
+    // a flush that did no work.
+    //
+    // # What makes it discriminating
+    //
+    // The needle is the alarm's HEALTH target, not the secret's name. The
+    // second event's own file line also carries the value and raises its own
+    // alarm under `magi_rs::memory`, so a check for the name alone is green
+    // with `health_flush` deleted.
+    const SECRET_VALUE: &str = "flushed-transition-secret-value-long-enough";
+    const SECRET: &str = "FLUSHED_TRANSITION_SECRET";
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (handle, _screen) = start(dir.path(), "info");
+
+    tracing::event!(
+        target: "magi_rs::memory",
+        tracing::Level::WARN,
+        cause.subsystem = "nonesuch",
+        cause.name = "first_cause",
+        "a subsystem with no declared message table row"
+    );
+
+    assert!(
+        magi_rs::logging::process_auditor().register_secret(
+            magi_rs::logging::auditor::SecretName::new(SECRET),
+            &[SECRET_VALUE]
+        ),
+        "the value must be long enough for the exact pass, or nothing is masked, no \
+         alarm is raised, and this test proves nothing"
+    );
+
+    tracing::event!(
+        target: "magi_rs::memory",
+        tracing::Level::WARN,
+        cause.subsystem = "nonesuch",
+        cause.name = SECRET_VALUE,
+        "the cause changed inside a subsystem that is already degraded"
+    );
+
+    let before = health_alarm_lines(&everything_written(dir.path()), SECRET);
+    assert!(
+        before.is_empty(),
+        "the health target already raised an alarm before the close, so the assertion          below cannot tell the flush from what preceded it: {before:?}"
+    );
+
+    handle.health_flush();
+
+    let written = wait_for_file(dir.path(), HEALTH_TARGET);
+    let alarms = health_alarm_lines(&written, SECRET);
+    assert!(
+        !alarms.is_empty(),
+        "the transition flushed at close produced no file-bound event, so ordering it \
+         against the exit drain would be guarding nothing: {written}"
+    );
+    assert!(
+        !written.contains(SECRET_VALUE),
+        "the alarm quoted the value it was raised for: {alarms:?}"
+    );
+}
+
+/// The target a health transition's alarm names, which `logging` keeps `pub(crate)`.
+///
+/// Written out rather than imported, and the duplication is the point: this test
+/// asserts on what an OPERATOR reads out of the file, so a rename of the constant
+/// that changed what they read has to fail here rather than follow along silently.
+const HEALTH_TARGET: &str = "magi_rs::logging::health";
+
+/// Every written line that is an alarm raised by `secret` under the health target.
+///
+/// Both halves are required together: the secret's name alone also appears on the
+/// alarm the emitting event raises under its own target, which is present whether or
+/// not the close flushed anything.
+fn health_alarm_lines(written: &str, secret: &str) -> Vec<String> {
+    written
+        .lines()
+        .filter(|l| l.contains(secret) && l.contains(HEALTH_TARGET))
+        .map(ToString::to_string)
+        .collect()
+}

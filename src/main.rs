@@ -7396,6 +7396,59 @@ mod tests {
         );
     }
 
+    /// The close flushes the health tracker BEFORE the one wait the exit has.
+    ///
+    /// **A behavioural test cannot hold this down, and saying so is half the guard.**
+    /// `health_flush` shows what the tracker was holding and, when the auditor masks
+    /// something in that text, puts an alarm into the appender — a file-bound event on a
+    /// detached writer thread. In a test the process never ends, so the writer drains it
+    /// under either order and both read green; the cost is only paid at exit, where the
+    /// queue is abandoned. `a_transition_flushed_at_close_reaches_the_file` in
+    /// `tests/screen_policy.rs` is what shows the flush HAS such an event, and this is what
+    /// keeps it inside the bounded wait that carries it to disk.
+    ///
+    /// # Why one drain after the flush, and not a second drain after it
+    ///
+    /// Both shapes are correct; the second is only needed when something between the two
+    /// can also enqueue. Nothing here does — the only statement that separates them is the
+    /// shortfall `eprintln!`, which writes to a file descriptor and never touches the
+    /// appender. So a single wait placed after the flush covers everything the close can
+    /// produce, and it counts the flush's own bytes into the figure it reports rather than
+    /// leaving them out of it.
+    #[test]
+    fn the_close_flushes_the_health_tracker_before_it_waits_for_the_queue() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module");
+        let start = production
+            .find("fn bootstrap_headless<F, Fut>(")
+            .expect("the startup harness is gone; this check needs updating");
+        let body = production.get(start..).unwrap_or("");
+        // To the next top-level item, so a later `drain` cannot stand in for this one.
+        let end = body
+            .get(1..)
+            .and_then(|b| b.find("\nfn "))
+            .map_or(body.len(), |i| i + 1);
+        let body = body.get(..end).unwrap_or(body);
+        // Statements, not raw text: a legal rustfmt wrap of either call would otherwise
+        // take this red against a tree with no defect in it.
+        let stmts = collapsed_pieces(&code_lines_only(body), &[';']);
+
+        let flush = statement_at(&stmts, &["handle.health_flush("], "the health flush");
+        let drain = statement_at(
+            &stmts,
+            &["handle.drain(", "EXIT_DRAIN_BUDGET"],
+            "the bounded exit drain",
+        );
+        assert!(
+            flush < drain,
+            "the flush is enqueued after the only wait the exit has, so its file-bound \
+             events race the process out — and they are the last events of a run that \
+             ended badly, which are the ones worth having"
+        );
+    }
+
     /// Both surfaces say the short-credential warning the same way, through the same route.
     ///
     /// The TUI pushed a `Notice::warn` and headless wrote its own `eprintln!`. Same fact,
