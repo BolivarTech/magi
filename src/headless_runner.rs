@@ -1370,6 +1370,23 @@ mod payload_audit_guard {
     ///
     /// The secret is deliberately not key-shaped, so a pass would prove the exact pass
     /// ran rather than that a pattern happened to fire.
+    /// The constant arms are masked too, and the reason is the same one the TUI's copy
+    /// confirmation was given: the claim is that EVERY field goes through the pass, and
+    /// an exemption granted per arm is how the model-output arms became exempt in the
+    /// first place (MS2 gate, integration pass, Caspar).
+    ///
+    /// A constant cannot carry a secret, so this asserts the ROUTE rather than a mask:
+    /// the text survives the pass unchanged, which is what an audit of a constant does.
+    #[test]
+    fn the_constant_arms_go_through_the_pass_too() {
+        let (_, _, _, payload) = consult_error_outcome(ConsultRunError::Timeout);
+        let message = payload.expect("a timeout produces a payload").message;
+        assert_eq!(
+            message, TIMEOUT_MESSAGE,
+            "the audit of a constant must be the identity, or the message a user reads              is not the one this crate wrote"
+        );
+    }
+
     #[test]
     fn a_runtime_error_payload_is_masked_by_the_exact_pass() {
         const VALUE: &str = "correct-horse-battery-staple-42";
