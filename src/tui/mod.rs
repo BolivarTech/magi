@@ -4529,10 +4529,27 @@ mod tests {
             "the `/consult` arm no longer shows the status row on `{handle}`, so the one \
              long operation this surface starts runs with no line at all (REQ-L28)"
         );
+        // Token set, not an exact spelling (MS2 gate S4 fourth pass, Balthasar).
+        // This read `s.trim() == format!("app.status_row = {row}")`, which is the
+        // most brittle form a needle can take: every legal rewriting of the same
+        // handoff — a wrap rustfmt is free to choose, a `.clone()` handing on a
+        // second handle to the SAME row, a type ascription — makes an exact
+        // comparison stop matching, and the guard then fails on a change that
+        // broke nothing. Requiring the field on the LEFT of an assignment and
+        // the row on its RIGHT keeps it as specific as the equality was about
+        // what it guards, and survives every one of those rewritings.
+        //
+        // **Split at the `=`, do NOT ask one statement for both names.** The
+        // first draft of this loosening did exactly that, and mutation caught
+        // it in the same round: `"app.status_row"` CONTAINS `"status_row"`, so
+        // the row-name half was satisfied by the field name itself and any
+        // statement mentioning the field at all — `if let Some(text) =
+        // app.status_row.current()`, which is right there in the renderer —
+        // read as the handoff. Deleting the assignment left the guard green.
         assert!(
-            stmts
-                .iter()
-                .any(|s| s.trim() == format!("app.status_row = {row}")),
+            stmts.iter().any(|s| s
+                .split_once('=')
+                .is_some_and(|(lhs, rhs)| lhs.contains("app.status_row") && rhs.contains(&row))),
             "the renderer's `App` is not handed `{row}`, so whatever the `/consult` arm \
              sets is drawn by nobody (REQ-L25)"
         );
@@ -5064,12 +5081,23 @@ mod tests {
         let source = production_source();
         let body = block_body(&source, "\nimpl Drop for TuiNoticeSink {");
         let pieces = collapsed_pieces(body, &[';']);
-        let needle = "for msg in self.flush() { eprintln!(\"{msg}\")";
+        // Token set, not one long spelling (MS2 gate S4 fourth pass, Balthasar).
+        // This was `"for msg in self.flush() { eprintln!(\"{msg}\")"`, which
+        // pins the loop header, the brace and the macro's format string as one
+        // string. rustfmt is free to wrap that header, and `eprintln!("{}", msg)`
+        // is the same statement written another way; either stops an exact
+        // needle matching and the guard then reports a destructor that is doing
+        // its job. Requiring all three tokens inside ONE piece keeps what the
+        // long spelling was actually for — that what `flush` hands back is what
+        // gets printed, in one expression, so a loop over some other collection
+        // does not read as compliant.
+        let tokens = ["for msg in", "self.flush()", "eprintln!"];
         assert!(
-            pieces.iter().any(|p| p.contains(needle)),
+            pieces.iter().any(|p| tokens.iter().all(|t| p.contains(t))),
             "`TuiNoticeSink`'s destructor no longer prints what it flushes, so a notice \
              deferred on a path that never reaches the TUI is swallowed instead of \
-             reaching stderr; expected a statement carrying `{needle}`, body was: {body}"
+             reaching stderr; expected one statement carrying all of {tokens:?}, body \
+             was: {body}"
         );
     }
 
