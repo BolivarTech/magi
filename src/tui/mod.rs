@@ -4738,8 +4738,24 @@ mod tests {
     /// `Terminal::new` — the only fallible statement that used to sit here —
     /// now runs BEFORE the screen goes up, which leaves the window with no way
     /// out but the teardown. The panic path is already covered by the hook
-    /// `run_tui_ext` installs, and a release build aborts without unwinding, so
-    /// `?` is the whole of what is left.
+    /// `run_tui_ext` installs, and a release build aborts without unwinding.
+    ///
+    /// **`?` is not the whole of what is left, which is what this used to
+    /// say** (MS2 gate S4 third pass, Caspar). A bare `return` strands the
+    /// alternate screen exactly as a `?` does — it is the shorter way to write
+    /// the same defect and it was not looked for. Both are checked now.
+    ///
+    /// # What it over-approximates, deliberately
+    ///
+    /// The window contains one `tokio::spawn(async move { … })`, and a `return`
+    /// inside THAT block leaves the spawned task rather than `run_tui_ext`, so
+    /// it would trip this guard without stranding anything. Nothing in the
+    /// block returns today. Distinguishing the two means tracking brace depth
+    /// through string literals and lifetime ticks, which is a parser this test
+    /// would then own; the blanket ban errs toward failing loudly, which is the
+    /// direction a safety guard should fail in. If it ever does fire on a
+    /// legitimate `return`, hoist the spawned block out of the window or teach
+    /// the check about depth — do not delete it.
     ///
     /// # Why a needle and not a behavioural test
     ///
@@ -4768,6 +4784,20 @@ mod tests {
             "a fallible statement sits inside the window where the alternate screen is \
              held, so `run_tui_ext` can return with the screen still up and the notice \
              sink's destructor prints onto the frame (REQ-L39); the window was: {held}"
+        );
+        // Token-bounded, so an identifier that merely starts with the word —
+        // `returned_rows`, say — is not mistaken for the keyword. A statement
+        // is the unit rather than a line, so a `return` that rustfmt wrapped
+        // onto its own line reads the same as one written inline.
+        let escapes: Vec<String> = collapsed_statements(held)
+            .into_iter()
+            .filter(|s| s == "return" || s.starts_with("return "))
+            .collect();
+        assert!(
+            escapes.is_empty(),
+            "a `return` sits inside the window where the alternate screen is held, so \
+             `run_tui_ext` leaves with the screen still up and the notice sink's \
+             destructor prints onto the frame (REQ-L39); found: {escapes:?}"
         );
     }
 
