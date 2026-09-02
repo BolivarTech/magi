@@ -707,3 +707,62 @@ fn health_alarm_lines(written: &str, secret: &str) -> Vec<String> {
         .map(ToString::to_string)
         .collect()
 }
+
+#[test]
+fn the_recovery_detection_warning_is_produced_and_heard_on_both_surfaces() {
+    // Recovery detection stops working the moment `file_filter` excludes `INFO`, because
+    // the success events a recovery is derived from ARE `INFO`. This one warning is the
+    // whole compensation for that, so its own level is load-bearing: a notice saying
+    // detection is off that is itself filtered out is the failure mode wearing the fix's
+    // clothes.
+    //
+    // **Driven through the real startup with a real `INFO`-excluding filter**, not by
+    // calling the predicate. `recovery_detection_is_off` answering `true` says nothing
+    // about whether anybody hears it, and the call sites being present says nothing about
+    // what comes out of them.
+    //
+    // Both surfaces, because they use different shapes for the same fact: headless emits
+    // in place, the terminal collects and announces later (its sink is unreachable at
+    // bring-up). Reaching this screen is what pins each at `WARN` or above -- the branch
+    // is wired at `SCREEN_LEVEL`, so an `INFO` on either side arrives nowhere.
+    const NEEDLE: &str = "health recovery detection is off";
+    const EXCLUDES_INFO: &str = "warn";
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let (_handle, screen) = start(dir.path(), EXCLUDES_INFO);
+    let filter = magi_rs::logging::filter::Filter::parse(EXCLUDES_INFO).expect("a valid filter");
+
+    assert_eq!(
+        occurrences(&screen.joined(), NEEDLE),
+        0,
+        "nothing has warned yet, so neither count below could be attributed"
+    );
+
+    magi_rs::logging::warn_if_recovery_detection_is_off(&filter, Some(SCREEN_LEVEL));
+    assert_eq!(
+        occurrences(&screen.joined(), NEEDLE),
+        1,
+        "the headless surface's warning reached no screen, so a run that silently lost \
+         recovery detection says nothing about it: {}",
+        screen.joined()
+    );
+
+    let notice = magi_rs::logging::recovery_detection_notice(&filter, Some(SCREEN_LEVEL))
+        .expect("the same filter owes the terminal surface a notice too");
+    magi_rs::notices::emit_notices(vec![notice]);
+    assert_eq!(
+        occurrences(&screen.joined(), NEEDLE),
+        2,
+        "the terminal surface's copy is levelled below the screen, so it rides with the \
+         startup list and is dropped: {}",
+        screen.joined()
+    );
+}
+
+/// How many times `needle` appears in `haystack`.
+///
+/// Counted rather than tested for presence: the two surfaces say the same sentence on
+/// purpose (one constant, so they cannot drift), so only the count distinguishes "both
+/// were heard" from "one was heard twice as loud".
+fn occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
