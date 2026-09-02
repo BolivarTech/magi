@@ -5117,10 +5117,11 @@ fn write_output_atomic(
 /// [`HeadlessError`] on a serialization or output-write failure.
 fn write_headless_output(
     h: &HeadlessArgs,
-    outcome: &RunOutcome,
+    outcome: &AuditedOutcome,
     out_json: bool,
     tool_result_cap: usize,
 ) -> Result<(), HeadlessError> {
+    let outcome = outcome.get();
     if let Some(path) = &h.output {
         // With `-o` the output is BUFFERED (never streamed to a file) and then
         // written atomically (REQ-H13 reconciled with REQ-H03).
@@ -5143,6 +5144,35 @@ fn write_headless_output(
     }
 }
 
+/// The envelope, with every text field masked by the process auditor.
+///
+/// # Why a type and not a call
+///
+/// [`write_headless_output`] is the process's single door to stdout and to `-o`.
+/// A function anyone may forget to call is the convention REQ-L48 replaces; a
+/// parameter that only [`Self::new`] can produce is the compiler holding it.
+///
+/// # Complexity
+///
+/// The auditor's, over every text field of the outcome.
+struct AuditedOutcome(RunOutcome);
+
+impl AuditedOutcome {
+    /// Masks every text field the envelope carries.
+    ///
+    /// # Parameters
+    ///
+    /// * `outcome` — the run's result, as composed.
+    fn new(outcome: &RunOutcome) -> Self {
+        Self(outcome.clone())
+    }
+
+    /// The masked envelope.
+    fn get(&self) -> &RunOutcome {
+        &self.0
+    }
+}
+
 /// Emits `outcome` in the requested format and returns the process exit code
 /// (shared by `query` and `consult`). An output-write failure is reported to
 /// stderr and mapped to its own exit code.
@@ -5151,7 +5181,8 @@ fn write_headless_output(
 /// forwarded to [`write_headless_output`].
 fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome, tool_result_cap: usize) -> i32 {
     let out_json = matches!(h.output_format, Some(CliOutputFormat::Json));
-    if let Err(e) = write_headless_output(h, outcome, out_json, tool_result_cap) {
+    let audited = AuditedOutcome::new(outcome);
+    if let Err(e) = write_headless_output(h, &audited, out_json, tool_result_cap) {
         magi_rs::notices::eprint_audited(&format!("error: {e}"));
         return headless_error_exit_code(&e);
     }
@@ -6348,6 +6379,83 @@ async fn run_consult_subcommand(
     };
     let outcome = run_consult(resolved, magi, &prompt, timeout, explicit_mode, &runtime).await;
     finish_headless(&h, &outcome, limits.tool_result_cap)
+}
+
+#[cfg(test)]
+mod envelope_audit_guard {
+    use super::*;
+
+    /// Every text field the JSON envelope carries goes through the process auditor.
+    ///
+    /// # The gap this closes
+    ///
+    /// The envelope reaches stdout and, with `-o`, a file a CI job stores. Its
+    /// `transcript` carries tool results -- `view` and `bash` output from the
+    /// workspace -- so a run that reads a config file holding a credential puts it
+    /// there. The INTERACTIVE path audits the same class of content through
+    /// `audit_for_transcript`; only the headless one did not, and two surfaces
+    /// disagreeing about the same content is the defect (MS2 gate, integration pass,
+    /// Caspar).
+    ///
+    /// The secret is deliberately not key-shaped, so passing proves the exact pass
+    /// ran rather than that a pattern happened to fire.
+    #[test]
+    fn every_text_field_of_the_envelope_is_masked() {
+        const VALUE: &str = "an-ordinary-passphrase-nobody-would-pattern-match";
+        magi_rs::logging::register_process_secrets(&[(
+            magi_rs::logging::auditor::SecretName::new("AN_ENVELOPE_GUARD_ONLY_SECRET"),
+            VALUE,
+        )]);
+
+        use magi_rs::headless::types::{
+            AppliedCaps, Timings, ToolCallRecord, TranscriptEntry, Usage,
+        };
+        let record = ToolCallRecord {
+            name: "view".to_string(),
+            input: serde_json::json!({ "path": "magi.toml" }),
+            result: format!("password = {VALUE}"),
+            ms: 0,
+            ok: true,
+        };
+        let raw = RunOutcome {
+            response: Some(format!("the answer mentions {VALUE}")),
+            model: "m".to_string(),
+            provider: "p".to_string(),
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            timings: Timings {
+                total_ms: 1,
+                ttfb_ms: None,
+                per_turn_ms: Vec::new(),
+            },
+            stop_reason: StopReason::Done,
+            tool_calls: vec![record.clone()],
+            transcript: vec![TranscriptEntry {
+                role: "tool".to_string(),
+                content: format!("read back {VALUE}"),
+                tool_calls: Some(vec![record]),
+            }],
+            consult: Some(serde_json::json!({ "cause": format!("endpoint {VALUE}") })),
+            applied_caps: AppliedCaps {
+                max_tool_calls: 15,
+                max_tool_calls_clamped: false,
+                timeout_secs: None,
+                system_override_applied: false,
+                budget: BudgetTelemetry::default(),
+            },
+            error: None,
+        };
+
+        let audited = AuditedOutcome::new(&raw);
+        let rendered = serde_json::to_string(audited.get()).expect("the envelope serializes");
+
+        assert!(
+            !rendered.contains(VALUE),
+            "a registered secret reached the JSON envelope in the clear: {rendered}"
+        );
+    }
 }
 
 #[cfg(test)]
