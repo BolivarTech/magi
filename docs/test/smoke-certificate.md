@@ -1,16 +1,16 @@
 # Smoke Certificate
 
-- version: 0.18.0
-- commit: 0462732
-- date: 2026-08-31 (UTC)
+- version: 0.18.1
+- commit: 7e5bbd6
+- date: 2026-09-02 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 4e0db062c4697907df048c6240f2e7930f0e2f45ac5ff977833d9bc7ad7db0e4 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 453s
+- binary: sha256 68b94676a488884b33ca0897ae592b39acdf258584e3225c25ad3ad97b86d713 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 645s
 - rounds needed: 1
-- scope: 23 of 23 scenarios evaluated
+- scope: 24 of 24 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: 73 active memories, 2924 KB database, 1096 KB archived
-- result: 71 passed, 0 not passed, 71 total
+- environment: active memories not measured, 5263 KB database, 2037 KB archived
+- result: 73 passed, 0 not passed, 73 total
 
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
 [PASS] S1 run=R1 - schema_version is 1
@@ -83,4 +83,6 @@
 [PASS] S22 run=R4 - degraded is false for a three-verdict run
 [PASS] S23 run=R1 - the run id printed on stderr is the one carried in the JSON envelope
 [PASS] S23 run=R1 - that same run id appears inside a file in the workspace log directory, so the log survived process exit and belongs to this run
+[PASS] S24 run=R1 - the memory-count diagnostic notice never reaches stdout or stderr, the headless run's screen
+[PASS] S24 run=R1 - that same notice is written into the day's log file under the workspace's log directory
 [OUT_OF_SCOPE] - cross-OS linkage and the published crate (REQ-S26, REQ-S27)
