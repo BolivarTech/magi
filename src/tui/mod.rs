@@ -5625,6 +5625,57 @@ mod tests {
         );
     }
 
+    /// **A task registered while the wait is already running escaped it** (MS2
+    /// gate S4 fourth pass, Caspar).
+    ///
+    /// [`TuiNoticeSink::join_spawned`] took the queue once and awaited what it
+    /// took. Its rustdoc argued there was no second wave, and that argument is
+    /// sound about NEW deferrals — once the receiver is gone `try_send` answers
+    /// `Closed`, so [`TuiNoticeSink::route`] stops spawning — but it is an
+    /// argument about what starts, not about what REGISTERS. A `route` already
+    /// in flight when the take happens pushes its handle afterwards, and that
+    /// handle held the only copy of its message: dropping the runtime on it
+    /// loses the notice outright, which is the very defect `join_spawned` was
+    /// added for.
+    ///
+    /// Deterministic, not timed: the first handle IS the straggler's producer,
+    /// so the second registration is ordered strictly inside the first await by
+    /// construction rather than by a sleep that happens to be long enough.
+    ///
+    /// Asserts the queue is empty afterwards rather than that the straggler ran
+    /// — a spawned task makes progress on its own, so "did it finish" cannot
+    /// tell a waited-for handle from a lucky one, while an entry left in the
+    /// queue is exactly the handle nothing awaited.
+    #[tokio::test]
+    async fn a_task_registered_during_the_wait_is_still_joined() {
+        let sink = Arc::new(TuiNoticeSink::default());
+        let producer = Arc::clone(&sink);
+        let first = tokio::spawn(async move {
+            let straggler = tokio::spawn(async {});
+            producer
+                .spawned
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(straggler);
+        });
+        sink.spawned
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(first);
+
+        sink.join_spawned().await;
+
+        assert!(
+            sink.spawned
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "a task that registered while the wait was running was left in the \
+             queue, so nothing ever awaited it and the notice it holds is lost \
+             when the runtime goes"
+        );
+    }
+
     /// MS2 gate S4, finding 2: the deferred notices are flushed only once the
     /// event loop has been joined.
     ///
