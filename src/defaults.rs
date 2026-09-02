@@ -666,6 +666,25 @@ pub fn should_emit_default_notice(
     ) && !magi_toml_exists
 }
 
+/// [`no_config_notice`] as the startup notice a surface pushes, level included.
+///
+/// # Returns
+///
+/// A notice carrying [`no_config_notice`]'s text, at the level RF-9 needs.
+///
+/// # Why the level lives here and not at the call site
+///
+/// It is a property of what the text says, and keeping it beside the text is what lets a
+/// test read it. Neither surface decides it.
+///
+/// # Complexity
+///
+/// [`no_config_notice`]'s.
+#[must_use]
+pub fn no_config_startup_notice() -> magi_rs::notices::Notice {
+    magi_rs::notices::Notice::info(no_config_notice())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,6 +1003,37 @@ mod tests {
                 "the no-config notice must name `{kind}`; it said: {notice:?}"
             );
         }
+    }
+
+    /// RF-9's notice is levelled for the mouth that exists in the state it exists for.
+    ///
+    /// **Not an assertion that it equals `WARN`.** What the requirement needs is that it
+    /// reaches a human, and the predicate the production fallback applies to decide that is
+    /// `partition_by_mouth` — so this drives that, and would still pass if RF-9 were one day
+    /// judged an `ERROR`. Asserting the level as a literal would pin a decision instead of
+    /// the property behind it.
+    ///
+    /// The state under test is the first run with no `.magi/`: no workspace, therefore no
+    /// log directory and no layer, therefore the no-subscriber branch, which keeps only the
+    /// screen half of the list and drops the rest on the floor. `INFO` put this notice in the
+    /// half that is dropped.
+    #[test]
+    fn the_no_config_notice_is_levelled_for_the_mouth_a_first_run_has() {
+        let (screen, file) = magi_rs::notices::partition_by_mouth(vec![no_config_startup_notice()]);
+        assert!(
+            file.is_empty(),
+            "RF-9's notice went to the half whose only mouth is a log file, and the run it \
+             is written for has no log file: {file:?}"
+        );
+        let text = screen
+            .first()
+            .map(|n| n.text.clone())
+            .unwrap_or_else(|| "<nothing reached the screen half>".to_string());
+        assert!(
+            text.contains(DEFAULT_MAGI_MELCHIOR),
+            "the operator must be told which trio the defaults picked for them, and the \
+             `magi init` warning they also get says nothing about it: {text}"
+        );
     }
 
     /// The line above `provider =` must NAME the three accepted values.

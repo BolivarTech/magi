@@ -1965,7 +1965,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         provider_kind,
         magi_toml_exists(workspace.as_ref()),
     ) {
-        startup_notices.push(Notice::info(crate::defaults::no_config_notice()));
+        startup_notices.push(crate::defaults::no_config_startup_notice());
     }
 
     // Build the MAGI trio with magi-core's NATIVE providers (REQ-A01) — independent
