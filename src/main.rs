@@ -1412,7 +1412,13 @@ where
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("error: failed to build the async runtime: {e}");
+            // Rule 7 of the audit class. Nothing an `io::Error` from the
+            // runtime builder carries is a secret, but that is an argument
+            // about content, and this milestone found eleven writes that were
+            // each safe by their own local reading. The route is the guarantee.
+            magi_rs::notices::eprint_audited(&format!(
+                "error: failed to build the async runtime: {e}"
+            ));
             return ExitCode::FAILURE;
         }
     };
@@ -1462,10 +1468,13 @@ where
         handle.health_flush();
         let left = handle.drain(EXIT_DRAIN_BUDGET);
         if left > 0 {
-            eprintln!(
+            // Rule 7 again: a byte count and a duration, routed for the same
+            // reason -- the bootstrap owns the route, so a hole at its own
+            // entry point is the one place the rule cannot be argued away.
+            magi_rs::notices::eprint_audited(&format!(
                 "warning: {left} bytes of log were still queued after waiting {}s and were not written",
                 EXIT_DRAIN_BUDGET.as_secs()
-            );
+            ));
         }
     }
     code
