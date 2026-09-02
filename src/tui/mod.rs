@@ -4258,26 +4258,30 @@ mod tests {
         collapsed_pieces(text, &[';', '{', '}'])
     }
 
-    /// The body of the `impl` block that starts with `header`.
+    /// The body of the column-zero block that starts with `header` — an `impl`,
+    /// a free function, anything closed by a brace back at column zero.
     ///
     /// # Parameters
     ///
     /// * `source` — production source, already stripped of `\r` and of
     ///   whole-line comments.
-    /// * `header` — the `impl` line, written with a leading `\n` so it matches
-    ///   at column zero only.
+    /// * `header` — the opening line, written with a leading `\n` so it matches
+    ///   at column zero only. Give it the part that cannot be reformatted — a
+    ///   `fn` name rather than a whole signature — since rustfmt is free to
+    ///   wrap a long parameter list and a header that spells one out would then
+    ///   stop matching the block it names.
     ///
     /// # Returns
     ///
     /// Everything up to the block's closing brace, which is the first `}` back
     /// at column zero. Bounding a guard this way is what stops it reading a
-    /// spelling out of a neighbouring impl and reporting a wiring that is not
+    /// spelling out of a neighbouring block and reporting a wiring that is not
     /// there.
     ///
     /// # Complexity
     ///
     /// `O(n)` over `source`.
-    fn impl_body<'a>(source: &'a str, header: &str) -> &'a str {
+    fn block_body<'a>(source: &'a str, header: &str) -> &'a str {
         let start = source
             .find(header)
             .unwrap_or_else(|| panic!("`{header}` must still exist in production"));
@@ -4385,6 +4389,79 @@ mod tests {
                 .any(|s| s.trim() == format!("app.status_row = {row}")),
             "the renderer's `App` is not handed `{row}`, so whatever the `/consult` arm \
              sets is drawn by nobody (REQ-L25)"
+        );
+    }
+
+    /// **The audit boundary is tested; the ROUTING through it was not** (MS2
+    /// gate S4 third pass, Caspar).
+    ///
+    /// [`apply_response`] and [`refresh_stream_audit`] are both driven directly
+    /// by the tests above, and every one of them stays green with the event
+    /// loop wired to neither: `run_app` can go back to draining into
+    /// [`App::push_message`] itself, or [`drain_responses`] can stop calling the
+    /// refresh, and nothing moves — the boundary would still behave correctly
+    /// for the callers that reach it, and the session would not reach it. That
+    /// is the same wiring-versus-rule split
+    /// `test_both_status_row_call_sites_are_wired_to_the_one_row` was written
+    /// for, on the path that carries the model's whole output.
+    ///
+    /// So this asserts the CHAIN: the loop drains through [`drain_responses`],
+    /// that function routes each message through [`apply_response`] AND ends
+    /// the batch with [`refresh_stream_audit`], and the session still reports
+    /// its gate telemetry after teardown.
+    ///
+    /// # Why a needle and not a behavioural test
+    ///
+    /// `run_app` needs a live terminal and `run_tui_ext` takes the alternate
+    /// screen; the property is *where* the calls sit rather than what they
+    /// compute — the same argument
+    /// `test_the_event_loop_expires_the_health_window_on_every_pass` makes.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A spelling, not an identity: a `drain_responses` that had been gutted
+    /// would read as compliant here. It holds down the reversion that actually
+    /// happens, which is a call site being inlined or deleted.
+    #[test]
+    fn test_the_drain_loop_routes_every_response_through_the_audit() {
+        let source = production_source();
+
+        let loop_body = block_body(&source, "\nasync fn run_app");
+        assert!(
+            collapsed_statements(loop_body)
+                .iter()
+                .any(|s| s.contains("drain_responses(&mut app)")),
+            "the event loop no longer drains through `drain_responses`, so the \
+             transcript is filled by a path with no audit on it; the loop was: \
+             {loop_body}"
+        );
+
+        let drain_body = block_body(&source, "\nfn drain_responses");
+        let drained = collapsed_statements(drain_body);
+        assert!(
+            drained
+                .iter()
+                .any(|s| s.contains("apply_response(app, response)")),
+            "`drain_responses` no longer hands each message to `apply_response`, \
+             so the audited arms are not reached: {drain_body}"
+        );
+        assert!(
+            drained
+                .iter()
+                .any(|s| s.contains("refresh_stream_audit(app)")),
+            "`drain_responses` no longer re-audits the streamed turn, so a \
+             credential split across deltas reaches the clipboard-copyable \
+             transcript in the clear: {drain_body}"
+        );
+
+        let session = block_body(&source, "\npub async fn run_tui_ext");
+        assert!(
+            collapsed_statements(session)
+                .iter()
+                .any(|s| s.contains("report_gate_telemetry(&telemetry)")),
+            "the session no longer reports its gate telemetry after teardown, so \
+             `report_gate_telemetry`'s own tests guard a function nothing calls \
+             (SC-A20h)"
         );
     }
 
@@ -4721,7 +4798,7 @@ mod tests {
     #[test]
     fn test_the_sink_drop_prints_every_flushed_notice() {
         let source = production_source();
-        let body = impl_body(&source, "\nimpl Drop for TuiNoticeSink {");
+        let body = block_body(&source, "\nimpl Drop for TuiNoticeSink {");
         let pieces = collapsed_pieces(body, &[';']);
         let needle = "for msg in self.flush() { eprintln!(\"{msg}\")";
         assert!(
