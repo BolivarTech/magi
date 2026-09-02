@@ -564,6 +564,15 @@ pub fn installed() -> Option<&'static LoggingHandle> {
 ///
 /// The handle. A second call returns the **same** handle and `Ok`.
 ///
+/// **What `Ok` promises, and what it does not.** It promises what this function
+/// owns: the log directory exists, the appender and its writer thread are
+/// running, and this handle is the installed one. It does **not** promise that
+/// any event will reach them — mounting the layer needs the process's global
+/// subscriber, and another installer may already hold it. That case still
+/// returns `Ok`, deliberately (REQ-L35: logging never aborts the process that
+/// was trying to log), and is announced through `sink`, because it is a state
+/// an operator can act on and a caller cannot.
+///
 /// # A second call with a DIFFERENT configuration is ignored, and says so
 ///
 /// The new `log_dir` or level is not applied and the caller gets no error. That
@@ -703,11 +712,48 @@ pub fn init_logging(
     // panic.** The comment that stood here said the opposite, and the
     // difference decides how this line has to be written: the panicking
     // spellings are `SubscriberInitExt::init` and an `expect` on this result,
-    // and both are what REQ-L35 forbids. Discarding the `Result` is therefore
-    // the whole guard — a race between two first-callers past the `OnceLock`
-    // above degrades to one of them winning, with the loser already holding
-    // the winner's handle.
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    // and both are what REQ-L35 forbids.
+    //
+    // **The error is read rather than discarded, and the difference is what
+    // `Ok` then means.** Discarding it covered two unlike cases with one
+    // silence. A race between two first-callers past the `OnceLock` above is
+    // benign — the loser is already holding the winner's handle by the time it
+    // reaches this line. Another INSTALLER owning the process's subscriber is
+    // not: the directory exists, the writer thread is running, `installed()`
+    // answers with a handle, and no event ever reaches any of it. The return
+    // stays `Ok` because REQ-L35 says a caller must never be aborted over
+    // logging, so the mouth is the only place left that can say so.
+    if tracing::subscriber::set_global_default(subscriber).is_err() {
+        // Audited, escaped and capped exactly like the already-initialised
+        // notice above, and for the same reasons: the process auditor rather
+        // than a fresh one, the SCREEN escaper because `sink` is a screen, and
+        // the cap because it belongs to the mouth rather than to the site.
+        let (line, alarm) = process_auditor().audit(
+            "warning: another subscriber is already installed for this process, \
+             so events will not reach the log; the log directory was created \
+             and stays empty",
+            "magi_rs::logging",
+            None,
+            0,
+        );
+        sink.deliver(
+            &line
+                .map_line(render::escape_for_screen)
+                .truncate_for_display(magi_layer::TUI_PAYLOAD_MAX_BYTES),
+        );
+        if let Some(alarm) = alarm {
+            // Settled but not reported, the asymmetry the other three audited
+            // paths in this subsystem already carry: no `Reporter` is reachable
+            // here, and `settle_alarm` gives a refused alarm its latch back so
+            // the finding is raised again rather than lost.
+            let outcome = appender.submit(
+                auditor::Queued::Alarm(alarm.clone()),
+                appender::Priority::High,
+                magi_layer::NO_RESERVATION,
+            );
+            magi_layer::settle_alarm(process_auditor(), &alarm, outcome);
+        }
+    }
 
     Ok(handle)
 }
