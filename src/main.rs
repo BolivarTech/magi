@@ -6515,6 +6515,86 @@ mod envelope_audit_guard {
     ///
     /// The secret is deliberately not key-shaped, so passing proves the exact pass
     /// ran rather than that a pattern happened to fire.
+    /// A tool result that IS serialized JSON survives the mask as valid JSON.
+    ///
+    /// # The defect this pins, taken from the run that produced it
+    ///
+    /// `tool_calls[].result` is a string whose CONTENT is a JSON document -- the consult
+    /// envelope, for one, and that envelope carries the MAGI report with its
+    /// `+====...====+` banners. `=` is base64 padding, so the auditor's PATTERN pass
+    /// matches such a banner. Masking the SERIALIZED string means the pass sees a newline
+    /// escape as the TWO characters it is, and a match beginning on the `n` leaves the
+    /// backslash orphaned -- an invalid JSON escape, and the document stops parsing.
+    ///
+    /// SMOKE #2 found it against a real backend. Three reviewers had read the same code
+    /// and called the mask safe, one of them answering a question that asked in those
+    /// words whether masking could corrupt legitimate output.
+    ///
+    /// The fixture reproduces the SHAPE production produces: a banner directly after a
+    /// newline inside a JSON string. An earlier version planted an exact registered
+    /// secret instead, which the exact pass replaces cleanly, and it passed against the
+    /// broken code.
+    ///
+    /// Both halves are asserted together: a mask that preserves the document by not
+    /// masking is not a fix, and one that removes the secret by destroying the document
+    /// is not one either.
+    #[test]
+    fn a_json_tool_result_survives_the_mask_as_json() {
+        const VALUE: &str = "a-passphrase-for-the-json-shape-guard";
+        magi_rs::logging::register_process_secrets(&[(
+            magi_rs::logging::auditor::SecretName::new("A_JSON_SHAPE_GUARD_SECRET"),
+            VALUE,
+        )]);
+
+        use magi_rs::headless::types::{AppliedCaps, Timings, ToolCallRecord, Usage};
+        let banner = "+".to_string() + &"=".repeat(50) + "+";
+        let inner = serde_json::json!({
+            "report": format!("{banner}\n|  VERDICT  |\n{banner}\nsaid {VALUE} here"),
+        });
+        let outcome = RunOutcome {
+            response: None,
+            model: "m".to_string(),
+            provider: "p".to_string(),
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            timings: Timings {
+                total_ms: 1,
+                ttfb_ms: None,
+                per_turn_ms: Vec::new(),
+            },
+            stop_reason: StopReason::Done,
+            tool_calls: vec![ToolCallRecord {
+                name: "consult".to_string(),
+                input: serde_json::json!({}),
+                result: serde_json::to_string(&inner).expect("the fixture serializes"),
+                ms: 0,
+                ok: true,
+            }],
+            transcript: Vec::new(),
+            consult: None,
+            applied_caps: AppliedCaps {
+                max_tool_calls: 15,
+                max_tool_calls_clamped: false,
+                timeout_secs: None,
+                system_override_applied: false,
+                budget: BudgetTelemetry::default(),
+            },
+            error: None,
+        };
+
+        let audited = AuditedOutcome::new(&outcome);
+        let masked = &audited.get().tool_calls[0].result;
+
+        serde_json::from_str::<serde_json::Value>(masked).unwrap_or_else(|e| {
+            panic!("the mask broke the document a consumer parses: {e}; got {masked}")
+        });
+        assert!(
+            !masked.contains(VALUE),
+            "the secret survived the mask: {masked}"
+        );
+    }
     #[test]
     fn every_text_field_of_the_envelope_is_masked() {
         const VALUE: &str = "an-ordinary-passphrase-nobody-would-pattern-match";
