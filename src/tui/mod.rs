@@ -480,9 +480,19 @@ impl TuiNoticeSink {
     /// teardown would be a different thing entirely — the channel might still be
     /// drained, so the wait would be for as long as the session runs.
     ///
-    /// One drain is enough. After the receiver is dropped `try_send` answers `Closed`
-    /// rather than `Full`, so [`Self::route`] takes the deferral arm and spawns nothing
-    /// more; there is no second wave to come back for.
+    /// **One drain is NOT enough, and the old claim confused starting with registering**
+    /// (MS2 gate S4 fourth pass, Caspar). It read: after the receiver is dropped
+    /// `try_send` answers `Closed` rather than `Full`, so [`Self::route`] takes the
+    /// deferral arm and spawns nothing more, therefore there is no second wave. The
+    /// premise holds and the conclusion does not — a `route` that spawned just BEFORE the
+    /// teardown pushes its handle whenever it gets the lock, which can be after this
+    /// method has taken the queue, and a single take walks past it. That straggler holds
+    /// the only copy of its message.
+    ///
+    /// So the queue is drained until a take comes back empty. What the old argument
+    /// really established is that this TERMINATES: no new deferral starts once the
+    /// receiver is gone, so each round can only collect handles from calls already in
+    /// flight when it began, and that set is finite and shrinking.
     ///
     /// A task that panicked is not an error here — its message is lost either way and
     /// the process is on its way out — so the join result is discarded rather than
@@ -494,12 +504,22 @@ impl TuiNoticeSink {
         // Taken out from under the lock and awaited outside it: holding a `Mutex` across
         // an `.await` is what the rest of this type is built to avoid, and here it would
         // also block `route` — the very producer whose task is being waited on.
-        let waiting: Vec<tokio::task::JoinHandle<()>> = {
-            let mut spawned = self.spawned.lock().unwrap_or_else(|p| p.into_inner());
-            std::mem::take(&mut *spawned)
-        };
-        for handle in waiting {
-            let _ = handle.await;
+        // Drained until it stays empty, not taken once. A `route` already in
+        // flight when the take happens registers its handle AFTER it, and the
+        // single take left that one unawaited — holding the only copy of its
+        // message, which is precisely what this method exists to stop being
+        // dropped on the way out.
+        loop {
+            let waiting: Vec<tokio::task::JoinHandle<()>> = {
+                let mut spawned = self.spawned.lock().unwrap_or_else(|p| p.into_inner());
+                std::mem::take(&mut *spawned)
+            };
+            if waiting.is_empty() {
+                return;
+            }
+            for handle in waiting {
+                let _ = handle.await;
+            }
         }
     }
 
