@@ -1299,6 +1299,44 @@ mod audit_route_guard {
 }
 
 #[cfg(test)]
+mod payload_audit_guard {
+    use super::*;
+
+    /// A runtime error string bound for the JSON envelope goes through the EXACT pass,
+    /// not only the pattern matcher.
+    ///
+    /// # The gap this closes
+    ///
+    /// `sanitize_error_message` masks what LOOKS like a credential: `sk-...` keys, long
+    /// hex or base64 runs. A `base_url` password substituted from the vault is an
+    /// ordinary passphrase -- it matches no pattern, and the exact pass is the only
+    /// thing that can mask it. That is the same distinction `notices.rs` states at its
+    /// own fallback guard, and the payload reaches stdout, so REQ-L48 covers it: the
+    /// rule is about reaching an output, not about the shape of the write.
+    ///
+    /// The secret is deliberately not key-shaped, so a pass would prove the exact pass
+    /// ran rather than that a pattern happened to fire.
+    #[test]
+    fn a_runtime_error_payload_is_masked_by_the_exact_pass() {
+        const VALUE: &str = "correct-horse-battery-staple-42";
+        magi_rs::logging::register_process_secrets(&[(
+            magi_rs::logging::auditor::SecretName::new("A_PAYLOAD_GUARD_ONLY_SECRET"),
+            VALUE,
+        )]);
+
+        let (_, _, _, payload) = consult_error_outcome(ConsultRunError::Runtime(format!(
+            "upstream refused https://user:{VALUE}@example.invalid/v1"
+        )));
+        let message = payload.expect("a runtime error produces a payload").message;
+
+        assert!(
+            !message.contains(VALUE),
+            "a vault-substituted password reached the JSON envelope in the clear, and              the envelope is what a CI job stores: {message}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
