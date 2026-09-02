@@ -459,6 +459,15 @@ mod tests {
             t.contains("zhipu") && t.contains("minimax"),
             "and both declared lineages, or the operator cannot act: {t}"
         );
+        // **The level, which nothing asserted while this doc said WARNING and the
+        // code said INFO.** A collision means rotation may buy no diversity -- a
+        // capability the pool was declared to provide -- so it belongs on the
+        // screen beside its sibling, the uncovered-seats notice.
+        assert_eq!(
+            notices[0].level,
+            tracing::Level::WARN,
+            "an `info` keeps this in the day's file, where an operator who never              opens it is told nothing: {t}"
+        );
     }
 
     /// Two models of the SAME declared lineage sharing a digest is not a contradiction — it is the

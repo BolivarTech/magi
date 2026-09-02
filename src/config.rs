@@ -3586,11 +3586,16 @@ max_input_bytes = 2048
         // (a) declared explicitly — the user thinks it is used.
         std::fs::write(&path, "provider = \"anthropic\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(
-            notices.iter().any(|n| n.text.contains("default Ollama")),
-            "with no base_url declared the default is still there, and it looks like a \
-             migration oversight"
-        );
+        let defaulted = notices
+            .iter()
+            .find(|n| n.text.contains("default Ollama"))
+            .expect("the untouched default is still there and reads as an oversight");
+        // **The level, asserted because the comment above production says both
+        // sub-cases warn and both emitted `info`.** The precedent is
+        // `strict_context_guard` declared but not in force: `info` is for a decision
+        // that IS being honoured, and a `base_url` the main agent never reads is the
+        // opposite of one. A user who meant Ollama and got Anthropic pays for it.
+        assert_eq!(defaulted.level, tracing::Level::WARN);
 
         // And the same case one level down, in the trio.
         std::fs::write(
@@ -3599,7 +3604,11 @@ max_input_bytes = 2048
         )
         .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(notices.iter().any(|n| n.text.contains("NOT used")));
+        let declared = notices
+            .iter()
+            .find(|n| n.text.contains("NOT used"))
+            .expect("a declared base_url the main agent never reads is announced");
+        assert_eq!(declared.level, tracing::Level::WARN);
 
         // Without Anthropic there is nothing to warn about.
         std::fs::write(
@@ -3608,7 +3617,11 @@ max_input_bytes = 2048
         )
         .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
-        assert!(notices.iter().any(|n| n.text.contains("[magi].base_url")));
+        let magi_declared = notices
+            .iter()
+            .find(|n| n.text.contains("[magi].base_url"))
+            .expect("the same shape one level down is announced too");
+        assert_eq!(magi_declared.level, tracing::Level::WARN);
 
         // Needle must match production's actual casing ("NOT used", line ~1902 above) — the
         // lowercase "not used" this assertion used before never matches, so it was vacuously
