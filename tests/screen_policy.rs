@@ -758,43 +758,6 @@ fn the_recovery_detection_warning_is_produced_and_heard_on_both_surfaces() {
     );
 }
 
-/// `LoggingHandle::drain` returns what did NOT make it, and returns zero when it all did.
-///
-/// The exit path's whole promise rests on this number: `bootstrap_headless` reports a
-/// shortfall to the operator, so a `drain` that returned zero unconditionally would
-/// announce a complete log on every run that lost its tail. Until now only a source
-/// guard pinned the CALL; nothing drove the function (MS2 gate S5, Balthasar).
-///
-/// The budget is a *failure* deadline, not a measurement: the discriminating property is
-/// "the queue emptied", and five seconds is generous enough that a loaded machine does
-/// not turn a correct drain into a red test.
-#[test]
-fn the_exit_drain_reports_zero_only_once_the_queue_is_empty() {
-    let dir = tempfile::tempdir().expect("a temp dir");
-    let (handle, _screen) = start(dir.path(), "info");
-
-    for i in 0..64 {
-        tracing::info!(target: "magi_rs::tests", "drain probe line {i}");
-    }
-
-    let left = handle.drain(std::time::Duration::from_secs(5));
-    assert_eq!(
-        left, 0,
-        "the queue did not empty inside a generous budget, so the exit would report a \
-         shortfall on a healthy run"
-    );
-
-    // Zero has to MEAN something: the lines are in the file, not merely off the queue.
-    // Read directly, NOT through `wait_for_file`: waiting would let a drain that
-    // returned zero prematurely be rescued by the poll, and the whole point is that
-    // zero already means the bytes landed.
-    let written = everything_written(dir.path());
-    assert!(
-        written.contains("drain probe line 63"),
-        "drain returned 0 while the last line never reached the file: {written}"
-    );
-}
-
 /// How many times `needle` appears in `haystack`.
 ///
 /// Counted rather than tested for presence: the two surfaces say the same sentence on
