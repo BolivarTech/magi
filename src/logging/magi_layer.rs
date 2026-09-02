@@ -1597,6 +1597,56 @@ mod tests {
         );
     }
 
+    /// A phrase the non-string-cause-field warning must carry.
+    const PHRASE_IN_THE_MISUSE_WARNING: &str = "non-string";
+
+    #[test]
+    fn a_cause_field_that_is_not_a_string_is_announced_once() {
+        // `record_debug` is a deliberate no-op, so a cause field written with
+        // the `?` sigil produced a KEYLESS event: the emitter believed it had
+        // instrumented its subsystem, and that subsystem's health was never
+        // tracked or reported. A silent failure inside the subsystem whose job
+        // is announcing failure.
+        //
+        // Latched, and the count is what pins it: this is a per-event path, so
+        // an unlatched warning turns one mistake into a flood that hides it.
+        struct ReadCause(Reporter, Mutex<Option<InternCache>>);
+        impl<S: Subscriber> Layer<S> for ReadCause {
+            fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+                let _ = cause_from_event(&self.1, event, &self.0);
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        let subscriber = tracing_subscriber::registry().with(ReadCause(
+            reporter_over(dir.path(), sink.clone()),
+            Mutex::new(None),
+        ));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                cause.subsystem = ?"embedder",
+                cause.name = "unreachable",
+                "a cause half written with the debug sigil"
+            );
+            tracing::warn!(
+                cause.subsystem = ?"embedder",
+                cause.name = "unreachable",
+                "and again, on the next event"
+            );
+        });
+
+        let said = sink.lines.lock().expect("not poisoned");
+        let warnings = said
+            .iter()
+            .filter(|l| l.contains(PHRASE_IN_THE_MISUSE_WARNING))
+            .count();
+        assert_eq!(
+            warnings, 1,
+            "a dropped cause field must be announced, and exactly once: {said:?}"
+        );
+    }
+
     /// How many distinct values `cache` has interned so far.
     ///
     /// A cache still `None` was never even locked-and-initialised, and an empty
