@@ -45,11 +45,11 @@ use std::path::PathBuf;
 
 /// Everything this subsystem can fail at.
 ///
-/// **Defined here because no task owned it.** Three tasks of the plan return
-/// `Result<_, LoggingError>` — the compressor, the retention executor and
-/// `init_logging` — and none declared the type. `mod.rs` is the subsystem's API
-/// surface and is already one of the milestone's files, so putting it here
-/// keeps the file count honest.
+/// **Defined here because no task owned it.** It is returned from all over the
+/// subsystem — the compressor, the retention executor, the appender, the filter
+/// parser, the permission shim and `init_logging` — and no single task declared
+/// it. `mod.rs` is the subsystem's API surface and is already one of the
+/// milestone's files, so putting it here keeps the file count honest.
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
     /// The log directory could not be created.
@@ -796,18 +796,19 @@ mod tests {
     /// The subsystem installs itself into a `OnceLock` and raises the process's global
     /// `LevelFilter`, both of which are per-PROCESS. `cargo test` runs the whole lib in
     /// ONE process, so the first test to call `init_logging` wins for every test after
-    /// it, and the ones asserting on the *uninstalled* state lose. Measured on this
-    /// tree: `cargo test --lib` gives `503 passed; 5 failed` — three in `notices` and
-    /// two here — with nothing in the output saying the runner is the cause.
+    /// it, and the ones asserting on the *uninstalled* state lose — a handful spread
+    /// across `notices` and this module, with nothing in the output saying the runner
+    /// is the cause. **The count is left unstated on purpose**: it moves with every
+    /// test added on either side, and a number here would go stale without going red.
     ///
     /// # Why this is a pointer and not the only defence
     ///
-    /// The five that fail are already self-guarding: each opens by asserting
+    /// Those tests are already self-guarding: each opens by asserting
     /// `LevelFilter::current() == OFF` with "something installed one". So the shared
     /// process produces a RED, never a false green, which is the safe direction and was
-    /// deliberate. What it does not produce is an explanation — five unrelated-looking
-    /// failures send a reader after a product defect that is not there. This turns them
-    /// into one failure that names the cause.
+    /// deliberate. What it does not produce is an explanation — a scatter of
+    /// unrelated-looking failures sends a reader after a product defect that is not
+    /// there. This turns them into one failure that names the cause.
     ///
     /// It is deliberately NOT a check on ordering or a `serial_test` lock: serialising
     /// would make the assertions pass in one arrangement and hide that the state is
