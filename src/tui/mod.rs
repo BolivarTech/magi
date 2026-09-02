@@ -4655,6 +4655,16 @@ mod tests {
              {loop_body}"
         );
 
+        assert!(
+            collapsed_statements(loop_body)
+                .iter()
+                .any(|s| s.contains("drain_approval_requests(&mut app)")),
+            "the event loop no longer drains the approval requests, so the \
+             prompt naming a tool this crate did not author never reaches the \
+             transcript, and the audit route built for it becomes unreachable \
+             code no test notices; the loop was: {loop_body}"
+        );
+
         let drain_body = block_body(&source, "\nfn drain_responses");
         let drained = collapsed_statements(drain_body);
         assert!(
