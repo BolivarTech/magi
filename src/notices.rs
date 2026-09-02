@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.18.0
-// Date: 2026-08-31
+// Version: 0.18.1
+// Date: 2026-09-02
 
 //! Startup notices and the level each one is announced at.
 //!

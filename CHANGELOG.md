@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
-## [Unreleased]
+## [0.18.1] - 2026-09-02
 
 ### Changed
 
@@ -27,6 +27,15 @@ changes and the **patch** position signals backward-compatible fixes.
 - **A screen error names three things: what broke, what it means for this session,
   and where to read more.** The third part is the path of the day's log file, spelled
   the way the filesystem spells it so it can be pasted straight into an editor.
+
+- **Four notices moved from `info` to `warn`, so they reach the screen.** A `base_url`
+  declared under `provider = "anthropic"` and the `[magi]` one under `kind = "anthropic"`
+  are read by nothing, because the endpoint is Anthropic's own; the untouched Ollama
+  default sitting under an Anthropic provider reads as a migration nobody finished; and
+  two seats declared as separate failure domains that share a cached weights digest may
+  buy no diversity when one rotates to the other. The rule that decides is the one
+  `strict_context_guard` already followed: `info` is for a decision that is being
+  honoured, and a setting nothing reads is the opposite of one.
 
 ### Added
 
@@ -75,6 +84,38 @@ changes and the **patch** position signals backward-compatible fixes.
   `None` every time. Nothing in 0.18.0 read that value, so nothing failed and no test
   went red — the health tracking above would have shipped as dead plumbing. The layer
   now reads both fields off the event and passes the key through.
+
+### Security
+
+- **The JSON envelope is audited before it is printed.** `query` and `consult` write
+  `response`, `transcript`, `tool_calls` and the consult object to stdout, and with `-o`
+  to a file. The transcript carries tool output: what `view` read, what `bash` returned.
+  So a run that touched a file holding a credential published it in the clear. The
+  interactive path had been auditing that same content all along. Only the headless one
+  was not, and two surfaces disagreeing about one kind of content is what makes this a
+  defect rather than a gap. The writer now takes a value only the audit can produce, so a
+  raw outcome does not compile at that door.
+
+  A tool result that is itself a JSON document gets masked field by field instead of as
+  flat text, and the reason is worth the sentence. Masking the serialized form hands the
+  pass a newline escape as the two characters it really is. A match that begins on the
+  second one leaves the backslash orphaned, and the document stops parsing. So the mask
+  ran on the decoded text instead. One consequence to know about: if a key inside such a
+  document collides with a credential, the key is masked too and the shape changes. Do
+  not assume a key you did not choose survives verbatim.
+
+- **Every other route to an output now goes through the same auditor.** The alarm the log
+  file writes. The notice the headless drain prints while streaming. Both writes the
+  process bootstrap makes on its way out, and the confirmation the TUI adds when `y` puts
+  a message on the clipboard. Several of these carry nothing secret today. That is an
+  argument about content, and it is exactly the argument the route replaces: each was
+  safe by its own local reading, and several of those readings were wrong.
+
+- **Alarms no longer suppress each other across surfaces.** The auditor remembers an
+  alarm by the pair of secret and target, so two surfaces sharing a target shared the
+  memory. Once startup had reported masking a credential, the headless envelope's report
+  of masking the same one was dropped. The masking always happened. The notice that it
+  happened is the half you act on.
 
 ### Known limitations
 

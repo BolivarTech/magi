@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.18.1
-// Date: 2026-08-31
+// Date: 2026-09-02
 
 //! The screen policy, driven through the REAL dispatcher.
 //!

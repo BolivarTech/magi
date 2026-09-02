@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.18.1
-# Date: 2026-08-31
+# Date: 2026-09-02
 """Unit tests for S24: which half a missing run id is allowed to silence.
 
 S24 asserts two different things about one marker, and they do not need the

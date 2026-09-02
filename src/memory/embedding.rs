@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-26
+// Version: 0.18.1
+// Date: 2026-09-02
 
 //! Agnostic embedding provider trait and OpenAI-compatible HTTP implementation.
 //!

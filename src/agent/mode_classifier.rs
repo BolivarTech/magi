@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.18.0
-// Date: 2026-08-31
+// Version: 0.18.1
+// Date: 2026-09-02
 
 //! Mode classifier over the PRIMARY provider (REQ-A07c).
 //!

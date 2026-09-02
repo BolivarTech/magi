@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.18.1
-// Date: 2026-08-31
+// Date: 2026-09-02
 
 //! SC-L32: the screen branch delivers audited output and nothing else.
 //!

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.18.1
-# Date: 2026-08-31
+# Date: 2026-09-02
 """S9 -- memory persists, embeds and injects.
 
 Protects ``src/memory/``, failure #5 and REQ-29.

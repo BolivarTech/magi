@@ -732,6 +732,31 @@ quietly, so you learn that something tried. The pass runs on the writing side of
 layer rather than at the call sites, which is why it also covers text a dependency
 composed.
 
+The same auditor covers the JSON envelope `query` and `consult` print. The envelope's
+`transcript` carries tool output: what `view` read, what `bash` returned. So a run that
+touches a file holding a credential would otherwise put it on stdout and into whatever
+your CI keeps. A tool result that is itself a JSON document gets masked field by field
+rather than as flat text, so what a consumer parses comes back parseable. One
+consequence to know about: if a key inside that document collides with a credential, the
+key is masked too and the shape changes.
+
+### What reaches the screen
+
+`ERROR` and `WARN` reach the screen. `INFO` and below go to the day's file and nowhere
+else. A startup with nothing degraded and nothing misconfigured therefore prints not one
+line before the first prompt; the diagnostics it used to print are in the log, and the
+screen is quiet because there is somewhere else for them to be.
+
+A subsystem that starts failing says so once, not once per event, and says so again when
+it recovers. The first failure is announced immediately. A defence against flapping that
+delayed the first "something broke" would be defending the wrong thing. Every later
+transition waits out a 30 second stability window, so an endpoint that flaps six times
+in twenty seconds costs you one line while the file still records all twelve events.
+
+An error on the screen names three things: what broke, what it means for this session,
+and where to read more. The third is the day's log path, spelled the way your filesystem
+spells it, so it pastes into an editor without editing.
+
 ### Finding one run in a shared file
 
 Each line carries `run=<id>`. The file belongs to the day, not to an invocation, so
@@ -894,7 +919,7 @@ src/
   config.rs            -- MagiConfig (magi.toml load + provider/model resolution); config/migrate.rs submodule
   defaults.rs          -- single source of truth for all built-in default literals
   redact.rs            -- URL userinfo redaction by position (REQ-A16), never by content
-  notices.rs           -- startup-notice tiering (Blocking / Resolution / Info)
+  notices.rs           -- startup notices: per-site level, split by the mouth it reaches
   magi/                -- MAGI trio subsystem: mode resolution, complexity gate, probe (lib, pure)
     mod.rs             -- shared timeout-scale / gate / probe constants
     kind.rs            -- ProviderKind vocabulary (ollama | openai-compat | anthropic)

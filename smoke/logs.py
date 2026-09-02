@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.18.1
-# Date: 2026-08-31
+# Date: 2026-09-02
 """The one place that locates and searches the product's on-disk log.
 
 ``.magi/logs`` is the workspace's day-file directory the logging layer owns

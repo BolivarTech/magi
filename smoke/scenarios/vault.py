@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.18.1
-# Date: 2026-08-31
+# Date: 2026-09-02
 """The three vault scenarios: S3 -- stores and never reveals; S4 -- never
 deletes; S16 -- rotating a third-party credential costs no local data.
 

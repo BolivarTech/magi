@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.18.1
-// Date: 2026-08-31
+// Date: 2026-09-02
 
 //! Transition-only health tracking (D-L13, SC-L14...SC-L119).
 //!

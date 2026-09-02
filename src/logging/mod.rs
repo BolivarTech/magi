@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.18.0
-// Date: 2026-08-31
+// Version: 0.18.1
+// Date: 2026-09-02
 
 //! Server-grade logging for magi-rs: a daily file rotated in UTC, `.xz`
 //! compression with retention, and an auditor that redacts secrets before they

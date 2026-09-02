@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-11
+// Version: 0.18.1
+// Date: 2026-09-02
 
 //! Shape of the rotation configuration: the fallback candidates declared in `magi.toml`.
 //!

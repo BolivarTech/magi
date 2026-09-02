@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 // Author: Julian Bolivar
-// Version: 0.18.0
-// Date: 2026-08-31
+// Version: 0.18.1
+// Date: 2026-09-02
 
 mod agent;
 mod config;

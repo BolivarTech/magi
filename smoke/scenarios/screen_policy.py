@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.18.1
-# Date: 2026-08-31
+# Date: 2026-09-02
 """S24 -- MS2's own objective: a clean run's diagnostics stay off the screen.
 
 Anchored to **SC-L14** and **REQ-L19**: `ERROR` and `WARN` reach the screen,
