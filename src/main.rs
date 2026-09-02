@@ -5176,7 +5176,12 @@ impl AuditedOutcome {
 
         let mask = |s: &str| magi_rs::notices::audited_field_at(s, ENVELOPE_TARGET);
         let mask_record = |r: &ToolCallRecord| ToolCallRecord {
-            name: r.name.clone(),
+            // The NAME too. Today every tool name is a `&'static str` this crate
+            // wrote, so the pass is the identity -- which is exactly why leaving
+            // it out cost nothing and bought nothing. A boundary with one field
+            // held by convention is the convention it was built to replace
+            // (MS2 gate, second integration pass, Caspar).
+            name: mask(&r.name),
             // The INPUT too: a tool is invoked with operator-composed
             // arguments, and `bash` takes a command line.
             input: mask_json(&r.input, &mask),
@@ -5201,10 +5206,17 @@ impl AuditedOutcome {
             .collect();
         out.consult = out.consult.as_ref().map(|v| mask_json(v, &mask));
         // `model` and `provider` are resolved at startup from what the operator
-        // wrote, so they are runtime-composed like the rest. `error.message` is
-        // already masked where it is built, and masking twice is the identity.
+        // wrote, so they are runtime-composed like the rest.
         out.model = mask(&out.model);
         out.provider = mask(&out.provider);
+        // `error.message` is masked where it is composed too. Doing it here as
+        // well is the identity in every case and costs one pass over a short
+        // string; the alternative is a boundary that delegates one field to its
+        // composition site, which is the convention this type replaces.
+        out.error = out.error.map(|e| magi_rs::headless::types::ErrorPayload {
+            message: mask(&e.message),
+            kind: e.kind,
+        });
         Self(out)
     }
 
@@ -6524,7 +6536,15 @@ mod envelope_audit_guard {
                 content: format!("read back {VALUE}"),
                 tool_calls: Some(vec![record]),
             }],
-            consult: Some(serde_json::json!({ "cause": format!("endpoint {VALUE}") })),
+            // A secret in a KEY as well as in a value: a JSON object built from
+            // foreign data can carry one in either, and masking keys is a
+            // deliberate choice with a cost -- a masked key changes the shape a
+            // consumer parses. Tested so the choice is visible rather than
+            // incidental (MS2 gate, second integration pass, Balthasar).
+            consult: Some(serde_json::json!({
+                "cause": format!("endpoint {VALUE}"),
+                format!("host-{VALUE}"): "reachable",
+            })),
             applied_caps: AppliedCaps {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,

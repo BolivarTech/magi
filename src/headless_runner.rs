@@ -1323,12 +1323,17 @@ mod audit_route_guard {
         // stderr is a third spelling (MS2 gate S5, Caspar and Balthasar). A
         // needle SET, not a needle.
         let mouths = [
-            // `println!` also covers `eprintln!` by substring; `print!` also
-            // covers `eprint!`. Both stdout spellings are here because stdout
-            // is where the envelope goes, and the guard that only watched
-            // stderr was watching the smaller of the two mouths (MS2 gate,
-            // integration pass, Caspar and Balthasar).
+            // **Four macro needles, not two.** `println!` contains `print`
+            // but NOT `print!` -- the character after `print` is `l` -- so the
+            // two are different needles and neither covers the other. Swapping
+            // one for the other lost coverage of the exact macros this guard
+            // exists to catch, and both reviewers saw it (MS2 gate, second
+            // integration pass). `eprintln!`/`eprint!` come free as substrings
+            // of their unprefixed forms. `stdout()` is here because stdout is
+            // where the envelope goes; a guard watching only stderr watched the
+            // smaller mouth.
             concat!("print", "!"),
+            concat!("print", "ln!"),
             concat!("dbg", "!"),
             concat!("stdout", "()"),
             concat!("stderr", "()"),
@@ -1375,10 +1380,35 @@ mod payload_audit_guard {
     /// an exemption granted per arm is how the model-output arms became exempt in the
     /// first place (MS2 gate, integration pass, Caspar).
     ///
-    /// A constant cannot carry a secret, so this asserts the ROUTE rather than a mask:
-    /// the text survives the pass unchanged, which is what an audit of a constant does.
+    /// A constant cannot carry a secret, so a behavioural assertion here is the
+    /// IDENTITY and cannot fail: the first version of this test compared the message
+    /// against the constant, which is true whether or not the route is applied, and
+    /// Caspar caught it (MS2 gate, second integration pass). What can fail is a source
+    /// check that the arms are wired, plus the identity assertion beside it so a route
+    /// that starts CHANGING a constant is caught too.
     #[test]
     fn the_constant_arms_go_through_the_pass_too() {
+        let source = include_str!("headless_runner.rs").replace('\r', "");
+        let wired = source
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            // Split, or the guard's own two needle lines count as call sites and
+            // it passes for the wrong reason -- which is what the first run of
+            // this test did, and what this file already warns about elsewhere.
+            .filter(|l| {
+                l.contains(concat!("audited_payload(TIMEOUT_", "MESSAGE)"))
+                    || l.contains(concat!(
+                        "audited_payload(CONSULT_INPUT_INVALID_",
+                        "MESSAGE)"
+                    ))
+            })
+            .count();
+        assert_eq!(
+            wired, 3,
+            "a constant error arm stopped going through the audit route; the claim the              route makes is that EVERY field passes through it"
+        );
+
         let (_, _, _, payload) = consult_error_outcome(ConsultRunError::Timeout);
         let message = payload.expect("a timeout produces a payload").message;
         assert_eq!(
