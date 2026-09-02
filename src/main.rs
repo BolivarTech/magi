@@ -5450,6 +5450,13 @@ async fn prepare_headless(
     // partition was built for: an embedder endpoint inherited from a root off this machine
     // is a `warn` now, and it is shown here instead of being lost. That was written as a
     // prediction while the half could not be reached; it is a description now.
+    //
+    // **Accepted cost, stated because it is asymmetric:** the screen half is emitted here,
+    // before a layer exists, so it reaches the user and NOT the day's file, while the file
+    // half reaches the file and not the screen. A `warn` config notice is therefore absent
+    // from the log of the run that showed it. Filing it too would mean carrying the screen
+    // half down as well, which is the seven-return-path drop this partition exists to make
+    // unreachable. The user sees every degradation; the file is the half that is lossy here.
     let (cfg_screen, cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
     emit_notices(cfg_screen);
 

@@ -652,18 +652,17 @@ mod tests {
     use super::*;
     use crate::memory::config::EmbeddingConfig;
 
-    // ── W1: new() must return Result<Self, EmbeddingError>, not panic ─────────
+    // ── W1: new() returns Result<Self, EmbeddingError>, and does not panic ────
     //
-    // Red state: this test fails to *compile* against the current `-> Self`
-    // signature. The fix: commit changes new() to `-> Result<Self, EmbeddingError>`
-    // so that `.expect()` is replaced by `?`-propagation and the test becomes green.
+    // The type annotation below is the assertion. It compiles only against a
+    // `-> Result<Self, EmbeddingError>` signature, so narrowing `new` back to
+    // `-> Self` is a compile error here rather than a silent behaviour change.
 
     #[test]
     fn test_new_with_valid_config_returns_ok() {
         let cfg = EmbeddingConfig::default();
-        // Type annotation drives the compile failure: new() currently returns Self,
-        // not Result<Self, EmbeddingError>, so this line does not compile until the
-        // fix: commit changes the signature.
+        // The annotation is load-bearing: it pins the return type at the call
+        // site, so a signature that stops returning `Result` fails to compile.
         let result: Result<OpenAiCompatibleEmbedder, EmbeddingError> =
             OpenAiCompatibleEmbedder::new(&cfg, None);
         assert!(

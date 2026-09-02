@@ -128,6 +128,15 @@ pub fn emit_notices(notices: Vec<Notice>) {
 ///   `stderr` (via [`emit_notices`]); a test passes a buffer, which is what makes the
 ///   no-layer branch observable without capturing a process's own file descriptors.
 ///
+/// **The three no-layer tests below need a process each, so run them under
+/// `cargo nextest`, never plain `cargo test`.** Each asserts
+/// `LevelFilter::current() == OFF` as its precondition, and one registers a
+/// process secret; a shared process in which any other test installs a
+/// subscriber makes them fail on that assertion. They fail loudly rather than
+/// silently, which is why no serialisation crate is pulled in for them: the
+/// runner this repository already uses gives each its own process, and the
+/// precondition names the collision when it does not.
+///
 /// # Why the terminal passes something other than `stderr`
 ///
 /// A TUI session started outside a `.magi/` workspace installs no layer at all —
