@@ -107,6 +107,14 @@ struct Reporter {
     /// one problem into a flood that hides it.
     /// Latched for the DEGRADED tier: events are being lost, the branch lives.
     degraded: std::sync::atomic::AtomicBool,
+    /// Latched for a cause field the emitter wrote with a non-string value.
+    ///
+    /// A third tier rather than a reuse of [`Self::degraded`]: that one means
+    /// "events are being lost from the log", this one means "a subsystem
+    /// believes it is instrumented and is not". They call for different work,
+    /// and sharing one latch would let whichever happened first silence the
+    /// other for the rest of the run.
+    misused_cause_field: std::sync::atomic::AtomicBool,
     /// Latched for the STOPPED tier: the branch is gone for the rest of the run.
     ///
     /// **Two latches and not one.** With a single one, a moment of congestion
@@ -178,6 +186,36 @@ impl Reporter {
             settle_alarm(&self.auditor, &alarm, outcome);
             self.report(outcome);
         }
+    }
+
+    /// Says, once, that a cause field was written with a non-string value.
+    ///
+    /// # Why this is announced rather than silently dropped
+    ///
+    /// [`Visit::record_debug`] reads nothing, so a `cause.name = ?value` gives
+    /// an event with no key at all: the emitter believes it instrumented its
+    /// subsystem, and that subsystem's health is never tracked and never
+    /// reported. That is a silent failure inside the subsystem whose whole job
+    /// is announcing failure, and the convention being documented does not make
+    /// the penalty for missing it visible.
+    ///
+    /// # Why the cost is acceptable on a per-event path
+    ///
+    /// The detection is two `&str` comparisons against the field's name — the
+    /// same two [`Visit::record_str`] already performs on its own branch, so the
+    /// two halves of the visitor now cost the same. The announcement itself
+    /// happens at most once per run.
+    ///
+    /// # Complexity
+    ///
+    /// `O(1)` after the latch is set; the auditor's over a short line before.
+    fn report_misused_cause_field(&self) {
+        self.announce_once(
+            &self.misused_cause_field,
+            "warning: an event declared a cause field with a non-string value; \
+             only string cause fields are read, so the event carries no cause \
+             key and that subsystem's health is not being tracked",
+        );
     }
 
     /// Turns a submission outcome into the notice it deserves, if any.
@@ -540,6 +578,7 @@ impl MagiLayer {
                 auditor: Arc::clone(&auditor),
                 appender,
                 degraded: std::sync::atomic::AtomicBool::new(false),
+                misused_cause_field: std::sync::atomic::AtomicBool::new(false),
                 stopped: std::sync::atomic::AtomicBool::new(false),
             },
             auditor,
@@ -848,17 +887,21 @@ const CAUSE_INTERN_CAP_REACHED: &str = "cause-intern-cap-reached";
 /// interning it bought a lifetime it already had at the price of a mutex on
 /// every event.
 ///
-/// # Only `&str`-valued fields are recognised
+/// # Only `&str`-valued fields are recognised — and the rest are ANNOUNCED
 ///
-/// The `Visit` trait requires a `record_debug` method with no default body,
-/// so this type still implements it — but its body does nothing for the two
-/// cause field names. Task 3.3's only declared convention is a string
-/// literal on both halves; special-casing a `Debug`-formatted value that
-/// nothing today produces would be speculative surface with no consumer
-/// (G2), and it would feed a wider, less predictable set of strings into the
-/// capped cache above than the convention actually allows. If a future task
-/// needs a non-string cause field, that task adds the handling with its
-/// consumer.
+/// A `Debug`-formatted cause value is still not read. Task 3.3's only declared
+/// convention is a string literal on both halves; accepting a `{:?}` rendering
+/// would feed a wider and less predictable set of strings into the capped cache
+/// above than the convention allows, and would be speculative surface with no
+/// consumer (G2). If a future task needs a non-string cause field, that task
+/// adds the handling with its consumer.
+///
+/// What changed is that the drop is no longer **silent**. An emitter that
+/// writes `cause.name = ?value` gets an event with no key at all, believes its
+/// subsystem is instrumented, and never sees its health reported — the one
+/// failure mode this subsystem must not have. So `record_debug` compares the
+/// field's name against the same two constants `record_str` does, and a match
+/// raises [`Reporter::report_misused_cause_field`] once per run.
 ///
 /// # Complexity
 ///
@@ -884,6 +927,8 @@ fn cause_from_event(
         subsystem: Option<String>,
         /// The `cause.name` field's value, once seen.
         cause: Option<String>,
+        /// Whether a cause field arrived with a non-string value.
+        misused: bool,
     }
     impl Visit for CauseFields {
         fn record_str(&mut self, field: &Field, value: &str) {
@@ -894,14 +939,23 @@ fn cause_from_event(
             }
         }
 
-        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {
-            // Deliberately empty — see this function's rustdoc: only
-            // `&str`-valued cause fields are recognised.
+        fn record_debug(&mut self, field: &Field, _value: &dyn std::fmt::Debug) {
+            // The VALUE is still ignored — only `&str`-valued cause fields are
+            // recognised. What is not ignored is that one arrived, because the
+            // event it produces carries no key and the emitter has no way to
+            // tell. Flagged here and announced after the visit, rather than
+            // from inside it, so nothing re-enters the dispatcher mid-record.
+            if matches!(field.name(), CAUSE_SUBSYSTEM_FIELD | CAUSE_NAME_FIELD) {
+                self.misused = true;
+            }
         }
     }
 
     let mut fields = CauseFields::default();
     event.record(&mut fields);
+    if fields.misused {
+        reporter.report_misused_cause_field();
+    }
     match (fields.subsystem, fields.cause) {
         (Some(subsystem), Some(cause)) => Some(CauseKey::new(
             intern(
@@ -1112,6 +1166,7 @@ mod tests {
             auditor: Arc::new(Auditor::new()),
             appender: Arc::new(DailyAppender::new(dir.path()).unwrap()),
             degraded: std::sync::atomic::AtomicBool::new(false),
+            misused_cause_field: std::sync::atomic::AtomicBool::new(false),
             stopped: std::sync::atomic::AtomicBool::new(false),
         };
 
@@ -1418,6 +1473,7 @@ mod tests {
             auditor: Arc::new(Auditor::new()),
             appender: Arc::new(DailyAppender::new(dir).unwrap()),
             degraded: std::sync::atomic::AtomicBool::new(false),
+            misused_cause_field: std::sync::atomic::AtomicBool::new(false),
             stopped: std::sync::atomic::AtomicBool::new(false),
         }
     }
