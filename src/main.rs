@@ -5188,7 +5188,7 @@ impl AuditedOutcome {
             // The INPUT too: a tool is invoked with operator-composed
             // arguments, and `bash` takes a command line.
             input: mask_json(&r.input, &mask),
-            result: mask(&r.result),
+            result: mask_text_or_json(&r.result, &mask),
             ms: r.ms,
             ok: r.ok,
         };
@@ -5200,7 +5200,11 @@ impl AuditedOutcome {
             .iter()
             .map(|e| TranscriptEntry {
                 role: e.role.clone(),
-                content: mask(&e.content),
+                // Same treatment as a tool result, and for the same reason: a
+                // `tool` entry's content IS one, so it can carry a serialized
+                // document the flat pass would break. A parse attempt over
+                // prose costs one failed parse and answers `Err`.
+                content: mask_text_or_json(&e.content, &mask),
                 tool_calls: e
                     .tool_calls
                     .as_ref()
@@ -5231,6 +5235,48 @@ impl AuditedOutcome {
     /// The masked envelope.
     fn get(&self) -> &RunOutcome {
         &self.0
+    }
+}
+
+/// Masks `text`, structurally when it is a JSON document and flatly when it is not.
+///
+/// # Why the distinction is not an optimisation
+///
+/// A tool result is a `String`, and some of them carry a serialized JSON document -- the
+/// consult envelope is one. Masking such a string as flat text hands the auditor the
+/// SERIALIZED form, where a newline is the two characters `\` and `n`. A pattern match
+/// beginning on the `n` -- and the MAGI report's `+====...====+` banners match, because
+/// `=` is base64 padding -- replaces the `n` and leaves the backslash orphaned, which is
+/// not a valid JSON escape. The document a consumer parses is then broken by the very
+/// pass meant to make it safe to publish.
+///
+/// Parsing first puts the auditor in front of the DECODED text, where an escape is one
+/// character and cannot be split. Re-serializing restores whatever escaping the new
+/// content needs.
+///
+/// # Why the fallback is flat rather than an error
+///
+/// Most tool results are not JSON, and a `view` of a file must still be masked. A result
+/// that does not parse gets the flat pass, which is exactly as safe as it was -- the
+/// hazard is specific to a document whose structure the mask can break.
+///
+/// # Parameters
+///
+/// * `text` — the tool result as recorded.
+/// * `mask` — the per-string transform.
+///
+/// # Complexity
+///
+/// One parse and one serialization over `text` when it is JSON, plus the auditor's own
+/// cost per string; the auditor's alone when it is not.
+fn mask_text_or_json(text: &str, mask: &dyn Fn(&str) -> String) -> String {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => serde_json::to_string(&mask_json(&value, mask))
+            // A `Value` that was just parsed re-serializes; the fallback keeps the
+            // masked-but-flat form rather than the unmasked original, because the one
+            // thing that must not happen here is publishing the raw text.
+            .unwrap_or_else(|_| mask(text)),
+        Err(_) => mask(text),
     }
 }
 
