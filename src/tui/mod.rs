@@ -4973,6 +4973,59 @@ mod tests {
         }
     }
 
+    /// **The approval prompt was the last door into the transcript that was
+    /// not audited** (MS2 gate S4 fourth pass, Caspar).
+    ///
+    /// [`audit_for_transcript`] claims every line the transcript holds passes
+    /// through it, and that claim was false here: `run_app` composed the prompt
+    /// with the tool's name interpolated and pushed it straight into
+    /// [`App::messages`], which `y` copies to the system clipboard. The claim is
+    /// the kind that should stay universal, so the door is routed rather than
+    /// the sentence narrowed.
+    ///
+    /// **Not a hypothetical name.** The prompt interpolates `tool_name` as the
+    /// agent hands it over, and the agent's registry is not a closed set of
+    /// literals this crate wrote — MCP-style and configured tools name
+    /// themselves. Even for an in-tree name, an auditor registration is a
+    /// substring rule over whatever string arrives, and a door that is audited
+    /// nowhere cannot be reasoned about one caller at a time; that is the
+    /// argument `NoticeTranscript::line` already makes for a second pass that
+    /// usually finds nothing.
+    ///
+    /// Driven through [`drain_approval_requests`] rather than the `format!` in
+    /// isolation, for the reason `test_an_error_reaching_the_transcript_is_audited`
+    /// gives: the property is what `App::messages` ends up holding.
+    #[test]
+    fn an_approval_prompt_reaching_the_transcript_is_audited() {
+        arm_the_delta_secret("TUI_APPROVAL_PROMPT_PROBE");
+        let (event_tx, _events) = mpsc::channel(1);
+        let (_responses, response_rx) = mpsc::channel(1);
+        let (approvals, approval_rx) = mpsc::channel(4);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        let (decided, _answer) = tokio::sync::oneshot::channel();
+        approvals
+            .try_send(crate::agent::ApprovalRequest {
+                tool_name: format!("mcp__{DELTA_SECRET}__run"),
+                input: serde_json::Value::Null,
+                tx: decided,
+            })
+            .expect("the fixture's channel has room");
+
+        drain_approval_requests(&mut app);
+
+        let shown = app.messages.join("\n");
+        assert!(
+            shown.contains(magi_rs::logging::auditor::REDACTED),
+            "nothing was masked at all, so the approval prompt never saw the \
+             auditor: {shown}"
+        );
+        assert!(
+            !shown.contains(DELTA_SECRET),
+            "the approval prompt put a registered secret in the \
+             clipboard-copyable transcript: {shown}"
+        );
+    }
+
     /// **Nothing fallible may sit between the alternate screen going up and
     /// coming down** (MS2 gate S4 second pass).
     ///
