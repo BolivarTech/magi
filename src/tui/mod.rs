@@ -2641,6 +2641,15 @@ fn refresh_stream_audit(app: &mut App) {
 /// from did: the prompt is a single slot and the key handler answers one at a
 /// time. That is behaviour this extraction preserves rather than introduces.
 ///
+/// **Both lines go through [`audit_for_transcript`], including the static one**
+/// (MS2 gate S4 fourth pass, Caspar). The prompt interpolates a tool name this
+/// crate did not necessarily author, and it lands in a transcript `y` copies to
+/// the system clipboard, so it is a door like any other. The fixed line is
+/// audited too rather than exempted: the claim `audit_for_transcript` makes is
+/// that EVERY line passes through it, and an exemption granted per-line is how
+/// the model-output arms came to be exempt in the first place — the scan of a
+/// constant costs one pass and keeps the sentence true.
+///
 /// # Parameters
 ///
 /// * `app` — the transcript the prompt lands in.
@@ -2650,8 +2659,13 @@ fn refresh_stream_audit(app: &mut App) {
 /// `O(k*n)` — the auditor's, over each queued request's prompt.
 fn drain_approval_requests(app: &mut App) {
     while let Ok(req) = app.approval_rx.try_recv() {
-        app.push_message(format!("APPROVAL REQUIRED: Execute {}?", req.tool_name));
-        app.push_message("Press 'y' to approve, 'c' or 'Esc' to deny.".to_string());
+        let prompt = format!("APPROVAL REQUIRED: Execute {}?", req.tool_name);
+        for line in audit_for_transcript(&prompt) {
+            app.push_message(line);
+        }
+        for line in audit_for_transcript("Press 'y' to approve, 'c' or 'Esc' to deny.") {
+            app.push_message(line);
+        }
         app.pending_approval = Some(req);
     }
 }
