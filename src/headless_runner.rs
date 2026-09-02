@@ -1103,7 +1103,12 @@ pub async fn run_query(
                 // to be consumed and dropped, so an operator whose embedder
                 // was failing was told nothing at all and watched memories
                 // pile up unembedded.
-                StreamPiece::Notice(text) => eprintln!("{}", notice_line(text)),
+                // `notice_line` redacts a URL it can find in the prose; the
+                // process auditor masks the secrets THIS RUN registered, which
+                // no composition site knows about. Both, in that order.
+                StreamPiece::Notice(text) => {
+                    magi_rs::notices::eprint_audited(&notice_line(text));
+                }
                 _ => {}
             }
         }
