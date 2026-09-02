@@ -5603,6 +5603,26 @@ mod tests {
             "the startup notices are announced after the alternate screen is \
              up, so the no-layer fallback writes over the frame"
         );
+        // **The flush was wired and pinned by nothing** (MS2 gate S4 fourth
+        // pass, Caspar). `NoticeTranscript` splits on newlines and holds
+        // whatever comes after the last one in `partial`; `emit_notices_into`
+        // does not flush the mouth it is handed, so a producer whose final
+        // write carries no trailing newline strands that line in the buffer and
+        // it is never seen. The call exists — deleting it left every test
+        // green, because `NoticeTranscript`'s own tests flush for themselves.
+        // Ordered against the alternate screen for the same reason the
+        // announcement is: the line it releases takes the same route.
+        let flushed = statement_at(
+            &stmts,
+            &["flush(", "transcript"],
+            "the flush that releases a startup line with no trailing newline",
+        );
+        assert!(
+            emitted < flushed && flushed < alternate,
+            "the transcript is flushed outside the window its own notices are \
+             announced in, so a trailing partial line is either stranded or \
+             released onto the frame"
+        );
     }
 
     /// MS2 gate S4, finding 2: the deferred notices are flushed only once the
