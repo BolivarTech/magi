@@ -502,6 +502,15 @@ pub struct MagiLayer {
     auditor: Arc<Auditor>,
     reporter: Reporter,
     health: Arc<HealthReporter>,
+    /// Where [`cause_from_event`] interns this layer's cause halves.
+    ///
+    /// **Owned by the layer rather than a function-local `static`**, and the
+    /// difference is testability, not lifetime: a `static` is reachable only
+    /// from whichever test happens to run first in the process, so "a causeless
+    /// event interns nothing" could be asserted about a detached cache and
+    /// never about the one `on_event` actually uses. One layer is installed per
+    /// process, so this is the same single cache either way.
+    cause_cache: Arc<Mutex<Option<InternCache>>>,
 }
 
 impl MagiLayer {
@@ -535,6 +544,7 @@ impl MagiLayer {
             },
             auditor,
             health,
+            cause_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -543,7 +553,7 @@ impl MagiLayer {
     /// Taken before installation, which consumes the layer.
     #[cfg(test)]
     fn cause_cache(&self) -> Arc<Mutex<Option<InternCache>>> {
-        Arc::new(Mutex::new(None))
+        Arc::clone(&self.cause_cache)
     }
 
     /// The health reporter this layer feeds.
@@ -603,15 +613,21 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         // Stage 1: render. Nothing is escaped yet.
         let rendered = render_event(event);
         let reserved = rendered.len();
-        let target = event.metadata().target();
+        // **Annotated, because the annotation is the guard.** `Event::metadata`
+        // hands back a `&'static Metadata<'static>`, so the target is ALREADY
+        // `&'static str`: interning it manufactured a lifetime it already had,
+        // and paid a global mutex per event to do it — on the one path every
+        // event crosses, including the foreign call sites that carry no cause
+        // and are the bulk of the volume. If a future `tracing` shortens either
+        // lifetime this line stops compiling, rather than quietly needing the
+        // mutex back.
+        let target: &'static str = event.metadata().target();
 
         // Stage 2: audit, over the WHOLE line, before anything is cut.
         let (audited, alarm) = self.auditor.audit(
             &rendered,
-            // `tracing` emits the target as a literal, so it is already
-            // `'static` — the same reason `SecretName` is.
-            leak_target(target, &self.reporter),
-            cause_from_event(event, &self.reporter),
+            target,
+            cause_from_event(&self.cause_cache, event, &self.reporter),
             reserved,
         );
 
@@ -705,9 +721,9 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
 /// One interning cache: the leaked values [`intern`] has produced so far,
 /// and whether its once-only capacity warning has already fired.
 ///
-/// The warning is latched **per cache**, not globally — [`leak_target`]'s
-/// cache and [`cause_from_event`]'s cache never share one flag, so one
-/// reaching its cap cannot suppress the other's warning.
+/// The warning is latched **per cache**, not globally, so a second cache added
+/// later cannot have its warning suppressed by the first one reaching its cap.
+/// [`cause_from_event`]'s is the only cache today.
 #[derive(Default)]
 struct InternCache {
     /// Every distinct value interned into this cache so far.
@@ -725,11 +741,10 @@ struct InternCache {
 /// failure mode is high-frequency by nature, the same argument [`Reporter`]
 /// makes for its own two latches above).
 ///
-/// **`max_entries` is not one-size-fits-all — see the callers.**
-/// [`leak_target`] passes `usize::MAX` (its input is compile-time bounded, so
-/// there is nothing to cap); [`cause_from_event`] passes a real ceiling
-/// (its input is runtime text an emitter chooses, which is not compile-time
-/// bounded at all).
+/// **`max_entries` is a parameter and not a constant** because what bounds the
+/// input is a property of the caller, not of the interning. Its one caller,
+/// [`cause_from_event`], passes a real ceiling: the input is runtime text an
+/// emitter chooses, so nothing else bounds it.
 ///
 /// # Complexity
 ///
@@ -776,31 +791,12 @@ fn intern(
     interned
 }
 
-/// Interns a target so it can live in a `SecretName`-shaped `'static` slot.
-///
-/// `tracing` builds each callsite's metadata as a `static`, so every target
-/// **is** `'static` — but the borrow checker cannot see that through
-/// `Metadata::target()`, which hands back a shorter lifetime. Uncapped: a
-/// target is a module path fixed at COMPILE TIME by this program's own
-/// `tracing::warn!`/`info!`/... call sites, so the set of distinct values is
-/// bounded by the binary itself — nothing an attacker or a bug can grow at
-/// runtime. Compare [`cause_from_event`], whose input is NOT compile-time
-/// bounded and therefore does need a real cap.
-///
-/// # Complexity
-///
-/// `O(log n)` over the distinct targets seen.
-fn leak_target(target: &str, reporter: &Reporter) -> &'static str {
-    static SEEN: Mutex<Option<InternCache>> = Mutex::new(None);
-    intern(&SEEN, target, "magi_rs::unknown", usize::MAX, reporter)
-}
-
 /// Upper bound on distinct `cause.subsystem`/`cause.name` values this
 /// process will intern.
 ///
-/// Unlike [`leak_target`]'s targets, a cause field is text the EMITTER
-/// chooses at runtime (`cause.subsystem = "embedder"`), so nothing bounds
-/// how many distinct values a buggy or hostile emitter could mint — restating
+/// A cause field is text the EMITTER chooses at runtime
+/// (`cause.subsystem = "embedder"`), so nothing bounds how many distinct
+/// values a buggy or hostile emitter could mint — restating
 /// "the process bounds it" here would describe a hope, not enforce one. Past
 /// this many distinct values, a new one degrades to
 /// [`CAUSE_INTERN_CAP_REACHED`] instead of growing the cache further. Task
@@ -843,9 +839,11 @@ const CAUSE_INTERN_CAP_REACHED: &str = "cause-intern-cap-reached";
 /// every field an emitter writes as `cause.subsystem = "embedder"` is a
 /// `'static` string literal in practice — the trait's signature cannot see
 /// that. [`CauseKey::new`] requires `&'static str`, so the value is interned
-/// — capped at [`MAX_INTERNED_CAUSE_VALUES`], unlike [`leak_target`]'s
-/// uncapped cache, because this input is runtime text an emitter chooses,
-/// not a compile-time-bounded set of module paths.
+/// — capped at [`MAX_INTERNED_CAUSE_VALUES`], because this input is runtime
+/// text an emitter chooses. The event's TARGET needs none of this:
+/// `Event::metadata` already hands back a `&'static Metadata<'static>`, so
+/// interning it bought a lifetime it already had at the price of a mutex on
+/// every event.
 ///
 /// # Only `&str`-valued fields are recognised
 ///
@@ -862,7 +860,20 @@ const CAUSE_INTERN_CAP_REACHED: &str = "cause-intern-cap-reached";
 /// # Complexity
 ///
 /// `O(k)` over the event's field count, plus `O(log n)` per interned value.
-fn cause_from_event(event: &Event<'_>, reporter: &Reporter) -> Option<CauseKey> {
+///
+/// # Parameters
+///
+/// * `cache` — the interning cache, owned by the layer. **Reached only when
+///   both halves are present**: an event without them returns before any lock
+///   is taken, which is what keeps the mutex off the path of the call sites
+///   that carry no key at all.
+/// * `event` — the event whose fields are read.
+/// * `reporter` — where the cache's once-only capacity warning is announced.
+fn cause_from_event(
+    cache: &Mutex<Option<InternCache>>,
+    event: &Event<'_>,
+    reporter: &Reporter,
+) -> Option<CauseKey> {
     /// Collects the two cause fields, if present, off one event.
     #[derive(Default)]
     struct CauseFields {
@@ -886,21 +897,19 @@ fn cause_from_event(event: &Event<'_>, reporter: &Reporter) -> Option<CauseKey> 
         }
     }
 
-    static SEEN: Mutex<Option<InternCache>> = Mutex::new(None);
-
     let mut fields = CauseFields::default();
     event.record(&mut fields);
     match (fields.subsystem, fields.cause) {
         (Some(subsystem), Some(cause)) => Some(CauseKey::new(
             intern(
-                &SEEN,
+                cache,
                 &subsystem,
                 CAUSE_INTERN_CAP_REACHED,
                 MAX_INTERNED_CAUSE_VALUES,
                 reporter,
             ),
             intern(
-                &SEEN,
+                cache,
                 &cause,
                 CAUSE_INTERN_CAP_REACHED,
                 MAX_INTERNED_CAUSE_VALUES,
@@ -1552,16 +1561,37 @@ mod tests {
     }
 
     #[test]
-    fn a_target_interns_to_the_same_static_instead_of_leaking_per_event() {
-        let dir = tempdir().unwrap();
-        let reporter = reporter_over(dir.path(), Arc::new(crate::logging::DiscardDelivery));
-        let a = leak_target("magi_rs::agent", &reporter);
-        let b = leak_target("magi_rs::agent", &reporter);
-        assert!(
-            std::ptr::eq(a, b),
-            "a per-event leak would grow without bound on a long run"
+    fn an_event_target_is_already_static_and_needs_no_interning() {
+        // The layer used to intern the target through a global mutex, on the
+        // reasoning that `Metadata::target()` hands back a shorter lifetime.
+        // It does not: `Event::metadata` returns `&'static Metadata<'static>`,
+        // so `target()` is `&'static str` and there was nothing to manufacture.
+        //
+        // A compile-level assertion, which is the strongest shape available
+        // here: the binding below only type-checks while the property holds, so
+        // a `tracing` upgrade that shortened either lifetime turns this red at
+        // build time rather than letting the per-event mutex quietly return.
+        struct CaptureTarget(Arc<Mutex<Vec<&'static str>>>);
+        impl<S: Subscriber> Layer<S> for CaptureTarget {
+            fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+                let target: &'static str = event.metadata().target();
+                if let Ok(mut seen) = self.0.lock() {
+                    seen.push(target);
+                }
+            }
+        }
+
+        let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureTarget(Arc::clone(&seen)));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "magi_rs::agent", "an event with a fixed target");
+        });
+
+        assert_eq!(
+            seen.lock().expect("not poisoned").as_slice(),
+            ["magi_rs::agent"],
+            "the target reached the layer unchanged, with no interning between"
         );
-        assert_ne!(leak_target("magi_rs::other", &reporter), a);
     }
 
     /// How many distinct values `cache` has interned so far.
@@ -1633,16 +1663,19 @@ mod tests {
     /// observe "does not keep growing" without a private accessor into the
     /// cache's size.
     ///
-    /// Isolated by relying on `cargo nextest`'s one-process-per-test model
-    /// (documented elsewhere in this file's tests and in
-    /// `tests/canary_both_mouths.rs`): the cache is a function-local
-    /// `static`, so a second test sharing this process would share it too.
+    /// Needs no runner-level isolation any more: the cache is the layer's,
+    /// so this drives one it owns rather than a process-wide `static` a second
+    /// test in the same process would share.
     #[test]
     fn interning_past_the_cap_falls_back_instead_of_growing_forever() {
-        struct CaptureCause(Arc<Mutex<Vec<Option<CauseKey>>>>, Reporter);
+        struct CaptureCause(
+            Arc<Mutex<Vec<Option<CauseKey>>>>,
+            Reporter,
+            Mutex<Option<InternCache>>,
+        );
         impl<S: Subscriber> Layer<S> for CaptureCause {
             fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-                let key = cause_from_event(event, &self.1);
+                let key = cause_from_event(&self.2, event, &self.1);
                 if let Ok(mut captured) = self.0.lock() {
                     captured.push(key);
                 }
@@ -1657,6 +1690,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(CaptureCause(
             Arc::clone(&captured),
             reporter_over(dir.path(), Arc::new(crate::logging::DiscardDelivery)),
+            Mutex::new(None),
         ));
         tracing::subscriber::with_default(subscriber, || {
             for i in 0..(fills_the_cap + past_the_cap) {
