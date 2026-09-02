@@ -5143,7 +5143,7 @@ fn write_headless_output(
 fn finish_headless(h: &HeadlessArgs, outcome: &RunOutcome, tool_result_cap: usize) -> i32 {
     let out_json = matches!(h.output_format, Some(CliOutputFormat::Json));
     if let Err(e) = write_headless_output(h, outcome, out_json, tool_result_cap) {
-        eprintln!("error: {e}");
+        magi_rs::notices::eprint_audited(&format!("error: {e}"));
         return headless_error_exit_code(&e);
     }
     exit_code_for_outcome(outcome)
@@ -5329,7 +5329,7 @@ async fn prepare_headless(
     let workdir = match resolve_workspace_root(h.workdir.clone(), cwd) {
         Ok(root) => root,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(headless_error_exit_code(&e));
         }
     };
@@ -5346,16 +5346,16 @@ async fn prepare_headless(
     let workspace = match crate::system::workspace::discover(&workdir) {
         Ok(ws) => ws,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(headless_error_exit_code(&e));
         }
     };
     // A run that requires persistent state fails clearly without a `.magi/`
     // (REQ-H17); a stateless `--no-memory` run may proceed env-only.
     if workspace.is_none() && !h.no_memory {
-        eprintln!(
+        magi_rs::notices::eprint_audited(
             "error: no .magi/ state directory found in this directory or any \
-             parent; run `magi init` to create one"
+             parent; run `magi init` to create one",
         );
         return Err(1);
     }
@@ -5372,13 +5372,13 @@ async fn prepare_headless(
             match open_headless_memory(db, pass) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    magi_rs::notices::eprint_audited(&format!("error: {e}"));
                     return Err(headless_error_exit_code(&e));
                 }
             }
         } else if !h.no_memory {
             let e = HeadlessError::PassphraseUnavailable;
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(headless_error_exit_code(&e));
         } else {
             None
@@ -5456,7 +5456,7 @@ async fn prepare_headless(
     let bytes = match read_headless_input(h.input.as_deref(), limits.max_input_bytes) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(headless_error_exit_code(&e));
         }
     };
@@ -5464,7 +5464,7 @@ async fn prepare_headless(
     let envelope = match parse_input(&bytes, forced_fmt) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(headless_error_exit_code(&e));
         }
     };
@@ -5476,7 +5476,7 @@ async fn prepare_headless(
     let env_mode = match envelope.resolved_mode() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(2);
         }
     };
@@ -5495,7 +5495,7 @@ async fn prepare_headless(
     ) {
         Ok(k) => k,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(1);
         }
     };
@@ -5525,7 +5525,7 @@ async fn prepare_headless(
             Ok(Some(k)) => k,
             Ok(None) => default_provider_kind, // blank ⇒ absent, falls to the default
             Err(e) => {
-                eprintln!("error: {e}");
+                magi_rs::notices::eprint_audited(&format!("error: {e}"));
                 return Err(1);
             }
         },
@@ -5599,7 +5599,7 @@ async fn prepare_headless(
             ) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    magi_rs::notices::eprint_audited(&format!("error: {e}"));
                     return Err(1);
                 }
             };
@@ -5629,7 +5629,7 @@ async fn prepare_headless(
     ) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("error: {e}");
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
             return Err(1);
         }
     };
@@ -5989,7 +5989,7 @@ async fn run_query_subcommand(
     let consult_magi: Option<Arc<Magi>> = match consult_magi {
         Ok(m) => Some(m),
         Err(e) => {
-            eprintln!("note: {}", trio_unavailable_message(&e));
+            magi_rs::notices::eprint_audited(&format!("note: {}", trio_unavailable_message(&e)));
             None
         }
     };
@@ -6010,18 +6010,18 @@ async fn run_query_subcommand(
             )
             .await
             {
-                eprintln!("error: {e}");
+                magi_rs::notices::eprint_audited(&format!("error: {e}"));
                 return 1;
             }
             // Through the layer, like every other notice: the memory subsystem being
             // disabled belongs on stderr, and a count of memories belongs in the file.
-            // An `eprintln!` here could not tell them apart.
+            // A direct write to stderr here could not tell them apart.
             emit_notices(notices);
         }
     }
 
     if let Err(e) = register_headless_tools(&mut agent, &workdir) {
-        eprintln!("error: {e}");
+        magi_rs::notices::eprint_audited(&format!("error: {e}"));
         return 1;
     }
     register_consult_tool_if_available(
@@ -6059,7 +6059,7 @@ async fn run_query_subcommand(
         timeout_measure,
     );
     if let Some(w) = timeout_decision.as_ref().and_then(|d| d.warning.as_ref()) {
-        eprintln!("{w}");
+        magi_rs::notices::eprint_audited(w);
     }
     let wiring = crate::headless_runner::RunWiring {
         timeout,
@@ -6220,9 +6220,9 @@ async fn run_consult_subcommand(
     // field missing, which is both the latest and the hardest-to-attribute moment. Checked here
     // rather than after setup so a mistyped invocation costs no workspace, vault or trio.
     if structured_verdicts && !matches!(h.output_format, Some(CliOutputFormat::Json)) {
-        eprintln!(
+        magi_rs::notices::eprint_audited(
             "error: --structured-verdicts needs --output-format json; \
-             the structured verdicts have nowhere to go in text output"
+             the structured verdicts have nowhere to go in text output",
         );
         return 2;
     }
@@ -6293,7 +6293,7 @@ async fn run_consult_subcommand(
     let magi = match consult_magi {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: {}", trio_unavailable_message(&e));
+            magi_rs::notices::eprint_audited(&format!("error: {}", trio_unavailable_message(&e)));
             return 1;
         }
     };
