@@ -168,8 +168,18 @@ pub struct ProcessNoticeSink {
 
 impl NoticeSink for ProcessNoticeSink {
     fn once(&self, key: &'static str, msg: &Audited) {
-        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        if seen.insert(key) {
+        // **The lock covers the decision and nothing else.** `insert` is still the
+        // atomic gate -- exactly one caller gets `true` for a given key -- but the
+        // write happens outside it. Holding a mutex across `eprintln!` takes the
+        // process-wide stderr lock underneath it, and in test builds took a SECOND
+        // mutex of this type nested inside the first. Neither is a deadlock today;
+        // both are the shape this repository already refused for the DEK and the
+        // health tracker, where expensive work never runs under a lock.
+        let first = {
+            let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+            seen.insert(key)
+        };
+        if first {
             eprintln!("{}", msg.as_str());
             #[cfg(test)]
             self.record_delivery(msg);
