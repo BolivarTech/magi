@@ -7216,6 +7216,94 @@ mod tests {
         );
     }
 
+    /// **Rule 6 of the class: the headless funnels announce through the audit route.**
+    ///
+    /// # The property, which is not a list of sites
+    ///
+    /// A top-level function that takes the headless argument struct owns a mouth a
+    /// `magi query` or `magi consult` run reaches — and headless "screen" IS stderr, with no
+    /// transcript to fall back on and nothing else that speaks. Nearly every announcement
+    /// these make interpolates something composed at runtime: a path an operator typed, a
+    /// `mode` or `provider` string that arrived in the input envelope, a resolved endpoint,
+    /// an error chain from a crate this one does not own.
+    ///
+    /// Each of those is safe at the site that composes it, and by a DIFFERENT argument each
+    /// time — `SeatError::Transport` carries a `SafeErrorText`, `EndpointError`'s fields are
+    /// all `&'static str`, `resolve_template` redacts on both arms before it returns a
+    /// `String`. That is one guarantee held in a dozen places by a dozen local decisions,
+    /// which is precisely the convention REQ-L48 replaces with a single route. The route
+    /// also adds what none of those arguments can: the process auditor masks the secrets
+    /// this run REGISTERED, which no composition site knows about.
+    ///
+    /// # Scoped by signature, not by name
+    ///
+    /// A seventh headless function is in scope the day it is written, without anybody
+    /// remembering to add it here. `write_headless_output` and `bring_up_headless_logging`
+    /// are in scope and already compliant — the first writes through `Write` bindings, the
+    /// second through `eprint_audited` — so the rule is not shaped around its violations.
+    ///
+    /// # Why the in-scope set is asserted too
+    ///
+    /// A scan that finds nothing passes. Renaming `HeadlessArgs`, or a signature the
+    /// heuristic below stops recognising, would empty the scope and leave this green over an
+    /// unexamined surface.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A raw write in a helper these call. Rules 3 and 4 hold those with their own scopes,
+    /// and the three stay separate deliberately: one predicate wide enough for all of them
+    /// would also cover `run_vault_subcommand`'s `println!`, which is a CLI mouth by design.
+    #[test]
+    fn the_headless_funnels_announce_through_the_audit_route() {
+        // Split so this guard's own needle is not the string it forbids.
+        let raw_stdout = concat!("println", "!");
+
+        let mut in_scope = Vec::new();
+        let mut offenders = Vec::new();
+        for (path, text) in &production_sources() {
+            for (name, body) in top_level_fn_bodies(&code_lines_only(text)) {
+                // The signature is everything up to the first line that opens the block.
+                let sig_end = body
+                    .lines()
+                    .position(|l| l.trim_end().ends_with('{'))
+                    .unwrap_or(0);
+                let sig = body
+                    .lines()
+                    .take(sig_end + 1)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !sig.contains("HeadlessArgs") {
+                    continue;
+                }
+                in_scope.push(name.clone());
+                for line in body.lines().filter(|l| l.contains(raw_stdout)) {
+                    offenders.push(format!("{path}: {name}: {}", line.trim()));
+                }
+            }
+        }
+
+        in_scope.sort();
+        assert_eq!(
+            in_scope,
+            vec![
+                "bring_up_headless_logging".to_string(),
+                "finish_headless".to_string(),
+                "prepare_headless".to_string(),
+                "run_consult_subcommand".to_string(),
+                "run_query_subcommand".to_string(),
+                "write_headless_output".to_string(),
+            ],
+            "the scan must see every headless funnel; a different set means it is green \
+             over a surface it did not read"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a headless funnel writes straight to a file descriptor, so whatever it \
+             interpolates reaches stderr and a CI log without passing the auditor: \
+             {offenders:#?}"
+        );
+    }
+
     /// # What it cannot catch
     ///
     /// Whether the registration RUNS. It reads the source, so a call sitting behind a
