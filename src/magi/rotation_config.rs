@@ -258,7 +258,12 @@ pub fn corroborate_by_digest(entries: &[(String, Lineage, Option<String>)]) -> V
             let Some(digest_b) = digest_b else { continue };
             // Same lineage sharing a digest is the declaration being ACCURATE: nothing to report.
             if digest_a == digest_b && lineage_a != lineage_b {
-                notices.push(Notice::info(format!(
+                // `warn`: rotation between these two may buy no diversity, which is
+                // a capability the pool was declared to provide. Same reason as the
+                // uncovered-seats notice above, and SC-R45 says WARNING outright.
+                // The hedge in the text is about the EVIDENCE being possibly stale,
+                // not about the consequence being minor.
+                notices.push(Notice::warn(format!(
                     "notice: `{model_a}` (lineage `{lineage_a}`) and `{model_b}` (lineage \
                      `{lineage_b}`) are declared as different failure domains but share the same \
                      cached weights digest, so rotating between them may buy no diversity. The \

@@ -1549,9 +1549,15 @@ impl MagiConfig {
         //
         // Same inconsistency one level down: the Anthropic trio with its own declared base_url,
         // which is also not used.
+        //
+        // **Both `warn`, and the precedent is `strict_context_guard` declared but not in
+        // force** (`probe.rs`): `info` is the row for a decision that IS being honoured, and
+        // an endpoint the main agent never reads is the opposite of one. (a) the operator
+        // declared a value they believe is in use; (b) they are billed against Anthropic
+        // while the file still says Ollama. Either is a fact worth interrupting for.
         if self.effective_provider() == ProviderKind::Anthropic {
             let declared = self.base_url.is_some();
-            out.push(Notice::info(if declared {
+            out.push(Notice::warn(if declared {
                 "notice: with `provider = \"anthropic\"` the root `base_url` is NOT used for \
                  the main agent (Anthropic uses its own endpoint); it only applies to [magi] \
                  and [embedding] if they inherit it"
@@ -1563,8 +1569,9 @@ impl MagiConfig {
 
         // REQ-A12c, same shape one level down: `[magi].kind = "anthropic"` with its own
         // declared `[magi].base_url` — that endpoint is not used either.
+        // `warn` by the same precedent: declared, and not in force.
         if self.effective_magi_kind() == ProviderKind::Anthropic && self.magi.base_url.is_some() {
-            out.push(Notice::info(
+            out.push(Notice::warn(
                 "notice: with `[magi].kind = \"anthropic\"` the `[magi].base_url` is NOT \
                  used: Anthropic uses its own endpoint",
             ));
