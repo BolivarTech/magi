@@ -309,7 +309,7 @@ pub fn audited_field(text: &str) -> String {
 ///
 /// # Why the target is a parameter and not a constant
 ///
-/// [`crate::logging::auditor::Auditor::alarm`] latches `(secret, target)`. A surface
+/// The auditor's alarm latch is keyed on `(secret, target)`. A surface
 /// that borrows another's target therefore shares its latch: a startup notice that
 /// already alarmed for a secret **silently suppresses** this surface's alarm for the
 /// same one. The masking still happens; the notice that it happened disappears, which
