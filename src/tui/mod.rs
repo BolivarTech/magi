@@ -5150,6 +5150,50 @@ mod tests {
         );
     }
 
+    /// **The hand-over's own last step used to print to a buffer about to be
+    /// covered** (MS2 gate S4 third pass, Caspar).
+    ///
+    /// [`TuiNoticeSink::attach`] drains the queue into the channel, and a line
+    /// the channel would not take fell back to `eprintln!` — under a comment
+    /// saying the alternate screen is still down, which is true and is not the
+    /// same as the line being read. `EnterAlternateScreen` runs one statement
+    /// later and covers the primary buffer for the rest of the session, so that
+    /// print is written and hidden in one breath: the defect the deferral
+    /// exists to prevent, reintroduced at the last step of the fix for it.
+    ///
+    /// A capacity of one is what makes the arm reachable: the first line takes
+    /// the slot, the second finds none, and the second is the one this is
+    /// about.
+    #[test]
+    fn a_line_the_channel_will_not_take_at_attach_goes_back_in_the_queue() {
+        use crate::agent::mode_classifier::NoticeSink as _;
+        let sink = TuiNoticeSink::new();
+        sink.emit(&audited("warning: the first one takes the slot"));
+        sink.emit(&audited("warning: the second one finds none"));
+        assert_eq!(
+            sink.pending_len(),
+            2,
+            "with no channel both lines must be waiting, or the hand-over below \
+             has nothing to hand over"
+        );
+
+        let (tx, _rx) = mpsc::channel(1);
+        sink.attach(tx);
+
+        let left = sink.flush();
+        assert_eq!(
+            left.len(),
+            1,
+            "the line the channel had no room for was printed onto the buffer \
+             `EnterAlternateScreen` is about to cover, instead of waiting for \
+             the terminal to be restored: {left:?}"
+        );
+        assert!(
+            left[0].contains("the second one finds none"),
+            "and it must be the one that found no room: {left:?}"
+        );
+    }
+
     /// **The third way a notice can go silent: a task the runtime never polls**
     /// (MS2 gate S4 third pass, Melchior).
     ///
