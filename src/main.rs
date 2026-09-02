@@ -1959,8 +1959,15 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     if let Err(e) = magi_config.embedding().validate() {
         startup_notices.push(Notice::warn(format!("embedding config warning: {e}")));
     }
-    // RF-9: when there is no magi.toml at all, make the Ollama-first default visible
-    // (never-silent). A present-but-minimal magi.toml does NOT trigger this.
+    // RF-9: when there is no magi.toml at all, make the Ollama-first default visible.
+    // A present-but-minimal magi.toml does NOT trigger this.
+    //
+    // **"Never-silent" is the requirement, and the level is what delivers it** — which is
+    // why the level travels with the text (`no_config_startup_notice`) instead of being
+    // decided here. It used to be decided here, at `INFO`, while this comment claimed
+    // never-silent: `INFO` goes only to the file (REQ-L19), and RF-9's audience is the
+    // first run with no `.magi/`, which has no file. The claim and the code disagreed, and
+    // the code was the one that was wrong.
     if crate::defaults::should_emit_default_notice(
         provider_kind,
         magi_toml_exists(workspace.as_ref()),

@@ -670,19 +670,39 @@ pub fn should_emit_default_notice(
 ///
 /// # Returns
 ///
-/// A notice carrying [`no_config_notice`]'s text, at the level RF-9 needs.
+/// A `WARN` notice carrying [`no_config_notice`]'s text.
 ///
 /// # Why the level lives here and not at the call site
 ///
 /// It is a property of what the text says, and keeping it beside the text is what lets a
 /// test read it. Neither surface decides it.
 ///
+/// # Why `WARN` follows from RF-9
+///
+/// RF-9 is a never-silent requirement: the operator running without a `magi.toml` is told
+/// which backend and which trio they are talking to. `INFO` cannot satisfy it, because
+/// `ERROR` and `WARN` reach the screen while `INFO` goes only to the file (REQ-L19) — and
+/// RF-9's own audience is the first run with no `.magi/` either. No workspace means no log
+/// directory, no layer, and `emit_notices_into`'s no-subscriber branch, which applies that
+/// same screen policy to the list: filed at `INFO` this notice reached **no mouth at all**
+/// in exactly the state it exists for.
+///
+/// The `magi init` warning that state also produces does not stand in for it — that one
+/// says there is no workspace, never which backend and which three models the defaults
+/// picked. An operator can act on it, keep working, and still never learn what they are
+/// talking to.
+///
+/// Nor is this "a configuration decision the user made and is being honoured", which is
+/// what files a notice at `INFO`: no decision was made here, the default was chosen for
+/// them. The cost is one extra line on screen for an operator with no `magi.toml`, and
+/// only until they run `magi init`.
+///
 /// # Complexity
 ///
 /// [`no_config_notice`]'s.
 #[must_use]
 pub fn no_config_startup_notice() -> magi_rs::notices::Notice {
-    magi_rs::notices::Notice::info(no_config_notice())
+    magi_rs::notices::Notice::warn(no_config_notice())
 }
 
 #[cfg(test)]
