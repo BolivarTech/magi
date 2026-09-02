@@ -699,9 +699,10 @@ const OLLAMA_PULL_COMMAND: &str = "ollama pull";
 ///
 /// - Returns one [`Notice`] per DISTINCT qualifying model, in the order of `configured` — a pool
 ///   that repeats a model does not make the user read the same line twice.
-/// - Tier is `Resolution`, never `Info`: a declared model that is probably not where it was
-///   declared is *"the config resolved differently from what the file looks like"*, not routine
-///   diagnostics.
+/// - Level is `WARN`, never `INFO`: a declared model that is probably not where it was declared
+///   is *"the config resolved differently from what the file looks like"*, not routine
+///   diagnostics, and `INFO` would leave it in the day's file alone. (`NoticeTier` was retired
+///   in MS2; the level is the whole classification now.)
 /// - Never fails and never panics: like the rest of this module, it fails open.
 ///
 /// # Complexity

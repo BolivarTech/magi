@@ -745,7 +745,16 @@ mod tests {
     use super::*;
 
     /// This module's own source, for the structural guards below.
-    const SOURCE: &str = include_str!("auditor.rs");
+    ///
+    /// **A function and not a `const`, so the carriage returns come out.**
+    /// `include_str!` hands back the file's bytes untouched while rustfmt writes
+    /// CRLF on Windows and LF elsewhere, so a needle spanning a real newline
+    /// matches on one machine and not the other. A `const` cannot call `replace`,
+    /// which turns that into a rule every future needle has to remember; this
+    /// removes the rule instead. The project lost a release push to exactly this.
+    fn source() -> String {
+        include_str!("auditor.rs").replace('\r', "")
+    }
 
     #[test]
     fn transforming_the_line_moves_the_measure_with_it() {
@@ -1003,7 +1012,8 @@ mod tests {
         // The compiler enforces it through the private fields; this test guards
         // the shape against a later edit that would quietly reopen the hole.
         let opener = format!("pub struct {} {{", "Audited");
-        let decl = SOURCE
+        let source = source();
+        let decl = source
             .split(&opener)
             .nth(1)
             .expect("the struct is declared here");
@@ -1018,7 +1028,7 @@ mod tests {
         for from in ["String", "&str", "&String", "Box<str>"] {
             let needle = format!("impl From<{from}> for Audited");
             assert!(
-                !SOURCE.contains(&needle),
+                !source.contains(&needle),
                 "{needle} would be a second constructor wearing a different name"
             );
         }
@@ -1027,7 +1037,8 @@ mod tests {
     #[test]
     fn audit_exempt_is_a_disjoint_type_and_carries_no_line() {
         let opener = format!("pub struct {} {{", "AuditExempt");
-        let decl = SOURCE
+        let source = source();
+        let decl = source
             .split(&opener)
             .nth(1)
             .expect("the struct is declared here");

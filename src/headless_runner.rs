@@ -1133,11 +1133,12 @@ pub async fn run_query(
     };
     let ttfb_ms = bounded_drain_result(drain).await;
 
-    // Headless has no event loop to expire the health window on, so the
-    // turn boundary is the only natural cadence: once per agent turn
-    // (`run_query` is exactly one). A no-op until task 2.1 feeds the
-    // tracker; reserved here now so that task does not have to reopen this
-    // call site.
+    // Headless has no event loop to expire the health window on, so the end of
+    // the run is the only natural cadence there is. `run_query` is one RUN, not
+    // one turn -- the tool loop inside it takes up to `max_tool_calls` agent
+    // turns -- so a degradation early in a long run waits here for the window
+    // to be checked at all. That is the accepted cost of having no loop to tick
+    // on; `health_flush` at exit is what keeps it from being lost entirely.
     if let Some(handle) = magi_rs::logging::installed() {
         handle.health_tick(Instant::now());
     }
