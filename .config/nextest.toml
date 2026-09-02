@@ -222,9 +222,9 @@
 #     that waits is a poll on the file mouth with a 30 s FAILURE deadline (see
 #     `wait_for_file` in `screen_policy.rs`), which replaced a flat 300 ms sleep in the
 #     same round this comment was written. **Measured on this box, and the count is part
-#     of the measurement:** the two binaries hold TWELVE tests between them (eleven
-#     in `screen_policy`, one in `tui_buffer_audited_only`); the slowest is 192 ms and
-#     the whole set finishes in 0.19 s. Re-derive both with
+#     of the measurement:** the two binaries hold THIRTEEN tests between them (twelve
+#     in `screen_policy`, one in `tui_buffer_audited_only`); the slowest is 312 ms and
+#     the whole set finishes in 0.31 s. Re-derive both with
 #     `cargo nextest run -E 'binary(screen_policy) | binary(tui_buffer_audited_only)'`
 #     and read the per-test times, not just the summary. That is still two orders of
 #     magnitude of headroom against the 30 s deadline — strictly more than the four
