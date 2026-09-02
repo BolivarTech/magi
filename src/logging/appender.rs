@@ -169,6 +169,44 @@ impl Reservation<'_> {
     }
 }
 
+/// Renders `alarm` and every alarm that rendering it raises, each masked by the
+/// process auditor, joined into one block.
+///
+/// # Why the chain terminates
+///
+/// `Auditor::alarm` latches `(secret, target)` and the target is fixed here, so each
+/// iteration must find a secret not yet latched at it. The registered set is finite,
+/// so the chain is bounded by its size and needs no counter.
+///
+/// # Parameters
+///
+/// * `alarm` — the finding the auditor raised.
+///
+/// # Returns
+///
+/// The rendered text, audited. Never the offending value (REQ-L50).
+///
+/// # Complexity
+///
+/// `O(a)` passes for `a` alarms, each the auditor's own over a short line.
+fn audited_alarm_chain(alarm: &crate::logging::auditor::AuditExempt) -> String {
+    /// The target every alarm this file writes is attributed to.
+    const ALARM_TARGET: &str = "magi_rs::logging";
+    let mut out = String::new();
+    let mut pending = Some(alarm.clone());
+    while let Some(raised) = pending {
+        let rendered = crate::logging::auditor::render_alarm(&raised);
+        let (audited, next) =
+            crate::logging::process_auditor().audit(&rendered, ALARM_TARGET, None, rendered.len());
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(audited.as_str());
+        pending = next;
+    }
+    out
+}
+
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         if !self.committed {
@@ -650,15 +688,28 @@ impl FileSink {
         let text = match item {
             Queued::Line(a) => a.as_str().to_string(),
             Queued::Alarm(x) => {
-                // **This is the one write in the subsystem that reaches a
-                // mouth without passing the auditor, and it is exempt by
-                // CONSTRUCTION rather than by omission.** What it renders is
-                // the auditor's own finding, whose type holds a `SecretName`
-                // and a target and nothing else (REQ-L50) -- so there is no
-                // runtime payload here to mask, and auditing it would mask the
-                // very name the alarm exists to publish. Anyone who widens
-                // `AuditExempt` to carry the offending line, or the value,
-                // takes that guarantee away and owes an audit at this site.
+                // **The rendered alarm IS audited, and the two paths in this
+                // subsystem now agree** (MS2 gate S5, Balthasar). The older
+                // rationale here was that `AuditExempt` holds a `SecretName`
+                // and a `'static` target and therefore has "no runtime payload
+                // to mask". A secret's NAME is operator-chosen -- it is a vault
+                // entry or an environment variable the operator wrote -- so
+                // nothing stops one from being another secret's VALUE, which is
+                // exactly the argument `notices::drain_alarms` already makes
+                // where it audits its own rendered alarms. Two paths carrying
+                // opposite rationales for the same write is the defect; the
+                // safe side is the one that masks.
+                //
+                // **The cost, and why it is acceptable:** in the pathological
+                // case the alarm's own name gets masked, which is the case
+                // where publishing it would be the leak. Everywhere else the
+                // pass is the identity over a short line.
+                //
+                // A secondary alarm raised BY this pass is written here too
+                // rather than re-submitted: `write` runs on the writer thread
+                // and enqueueing from inside it is how a queue deadlocks. The
+                // chain is finite because `Auditor::alarm` latches
+                // `(secret, target)` and the registered set is finite.
                 // Pinned from the outside by
                 // `magi_layer::tests::the_alarm_the_file_mouth_writes_names_the_secret_and_never_its_value`.
                 //
@@ -675,9 +726,7 @@ impl FileSink {
                         time::OffsetDateTime::now_utc(),
                         crate::logging::run_id(),
                     ),
-                    crate::logging::render::escape_for_line(
-                        &crate::logging::auditor::render_alarm(x)
-                    )
+                    crate::logging::render::escape_for_line(&audited_alarm_chain(x))
                 )
             }
         };
