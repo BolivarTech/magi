@@ -34,17 +34,20 @@ _LEAKING = ("memory: 12 active, 0 archived, 0 %s~34 KB index)\n"
             % screen_policy.DIAGNOSTIC_MARKER).encode("utf-8")
 
 
-def _result(stderr) -> RunResult:
-    """Build R1's result with a given stderr stream.
+def _result(stderr, stdout=None) -> RunResult:
+    """Build R1's result with a given pair of standard streams.
 
     Args:
         stderr: What the run wrote to the error stream.
+        stdout: What it wrote to the output stream; defaults to a clean JSON
+            envelope, which is what a well-behaved run puts there.
 
     Returns:
         RunResult: The real type, not a double.
     """
-    output = ProductOutput(stdout=json.dumps({"ok": True}).encode(),
-                           stderr=stderr, exit_code=0,
+    if stdout is None:
+        stdout = json.dumps({"ok": True}).encode()
+    output = ProductOutput(stdout=stdout, stderr=stderr, exit_code=0,
                            command=["magi-rs", "query"])
     return RunResult(run_id=screen_policy.RUN_ID, output=output,
                      duration_s=1.0, timed_out=False, planted=())
@@ -115,6 +118,51 @@ class RunIdPresentTests(unittest.TestCase):
         outcomes = _outcomes(_result(stderr))
         self.assertEqual(Outcome.FAIL,
                          outcomes[screen_policy.ASSERTIONS[0]])
+
+    def test_a_leak_on_stdout_fails_the_first_just_as_stderr_does(
+            self) -> None:
+        """The screen is both standard streams, not the one in use today.
+
+        A regression that turns the notice list's ``eprintln!`` into a
+        ``println!`` puts the diagnostic on the same terminal and in the same
+        redirected pipe. While this scenario read ``stderr`` alone, that move
+        passed -- a leak fully in view, reported green.
+        """
+        stderr = ("run: %s\nnothing to see\n" % _RUN_ID).encode("utf-8")
+        outcomes = _outcomes(_result(stderr, stdout=_LEAKING))
+        self.assertEqual(Outcome.FAIL,
+                         outcomes[screen_policy.ASSERTIONS[0]])
+
+    def test_a_missing_log_directory_is_deferred_not_failed(self) -> None:
+        """An absent directory is missing evidence, not a product defect.
+
+        ``install_fake_runs`` roots the environment in a temporary directory
+        with no ``.magi/logs`` under it, which is the real shape of a run
+        whose logging never initialised. There is nothing to search, so a run
+        that never produced the notice cannot be told from one that produced
+        it and lost it -- and only the second would be a verdict on the
+        product. This used to report FAIL on both halves.
+        """
+        stderr = ("run: %s\nnothing to see\n" % _RUN_ID).encode("utf-8")
+        outcomes = _outcomes(_result(stderr))
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         outcomes[screen_policy.ASSERTIONS[1]])
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         outcomes[screen_policy.ASSERTIONS[0]])
+
+    def test_a_missing_log_directory_never_excuses_a_leak(self) -> None:
+        """The screen half keeps its own evidence.
+
+        Deferring assertion 1 because the log directory is absent would hide
+        a leak the run's own capture already proves, which is the same
+        mistake the missing-run-id branch was written to avoid.
+        """
+        stderr = ("run: %s\n" % _RUN_ID).encode("utf-8") + _LEAKING
+        outcomes = _outcomes(_result(stderr))
+        self.assertEqual(Outcome.FAIL,
+                         outcomes[screen_policy.ASSERTIONS[0]])
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         outcomes[screen_policy.ASSERTIONS[1]])
 
 
 class RunIdAnchorTests(unittest.TestCase):

@@ -15,9 +15,18 @@ that matters.** The milestone's visible promise is "the screen goes quiet",
 and a scenario that only checked that would pass just as well against a build
 where the logging layer stopped writing anywhere at all -- silence on screen
 for the wrong reason. So the marker this scenario searches for has to be
-absent from `stderr` **and** present in the day's log, on the SAME run: only
+absent from the screen **and** present in the day's log, on the SAME run: only
 the second half tells a compliant build apart from a broken one that merely
 went quiet everywhere.
+
+**"The screen" is BOTH standard streams, not `stderr` alone** (MS2 gate S4
+fourth pass, Caspar). It read `stderr` only, which made the guard specific to
+where the notice happens to be written today rather than to the property
+REQ-L19 states: an `INFO` diagnostic does not reach the user's terminal. A
+regression that moved the whole notice list to `stdout` -- one `eprintln!`
+becoming a `println!` -- leaks it to exactly the same terminal, and to the
+pipe a caller redirects, and this scenario passed. Both streams are the
+screen, so both are searched.
 
 **The marker.** `attach_persistent_memory` (`src/main.rs`) builds an `INFO`
 notice reading `"memory: {N} active, {N} archived, {N} pending re-embed (~{N}
@@ -47,18 +56,27 @@ notice would let both halves pass VACUOUSLY -- the same shape the S18/S19
 "talked out of their own subject" trap already named in this project's
 `CLAUDE.local.md` -- so when the marker is on neither surface AND the log
 directory itself is there to search, both assertions defer to
-`CANNOT_TEST` rather than reporting a green that checked nothing. A log
-directory that does not exist at all is judged differently: that is not an
-absent notice, it is nothing having been written to disk this run, and it
-fails.
+`CANNOT_TEST` rather than reporting a green that checked nothing.
+
+**A log directory that does not exist is the SAME deferral, not a failure**
+(MS2 gate S4 fourth pass, Caspar). It used to fail, on the reading that
+"nothing was written to disk this run". That is a verdict this scenario has
+no evidence for: with no directory there is nothing to search, so a run that
+never produced the notice and a run that produced it and lost it are
+indistinguishable from here -- and only the second is a statement about the
+product. It is the exact case the paragraph above already calls untestable,
+reached by a different route. S9 is the model: where a green would no longer
+mean what it says, the honest answer is `CANNOT_TEST` naming what was
+missing, not a red aimed at the product for an environment the harness could
+not establish.
 
 **Which is also why a missing run id silences one half and not both.** Absent
 evidence is what defers an assertion, and the two halves do not rest on the
 same evidence: the log search needs the id, because the directory is shared;
-the screen assertion reads the run's own capture. So a marker found ON stderr
-fails the first assertion whether or not an id was published -- there is
-nothing left for a log line to add. Only the vacuity case above still needs
-the id, and it keeps deferring.
+the screen assertion reads the run's own capture. So a marker found ON the
+screen fails the first assertion whether or not an id was published -- there
+is nothing left for a log line to add. Only the vacuity case above still
+needs the id, and it keeps deferring.
 """
 
 from smoke import logs
@@ -79,8 +97,8 @@ DIAGNOSTIC_MARKER = "pending re-embed ("
 
 #: The verbatim assertion texts, in the order they are yielded.
 ASSERTIONS = (
-    "the memory-count diagnostic notice never reaches stderr, the headless "
-    "run's screen",
+    "the memory-count diagnostic notice never reaches stdout or stderr, the "
+    "headless run's screen",
     "that same notice is written into the day's log file under the "
     "workspace's log directory",
 )
@@ -88,14 +106,14 @@ ASSERTIONS = (
 
 @scenario("S24", assertions=ASSERTIONS, run=RUN_ID, needs_backend=True)
 def a_clean_startup_shows_nothing_on_screen(run):
-    """Correlate stderr and the day's log for the memory-count notice.
+    """Correlate the screen and the day's log for the memory-count notice.
 
     The log half is bound to this run's own id, so a marker left behind by an
     earlier run against the persistent environment cannot answer for one that
     never wrote it. Without a run id the log half has nothing to bind to and
     defers; the screen half defers only when the marker is absent, because
     that is the case a log line would have had to disambiguate. A marker
-    sitting ON stderr is a leak the capture proves by itself.
+    sitting ON the screen is a leak the capture proves by itself.
 
     Complexity: ``O(bytes in the log directory)``.
 
@@ -112,8 +130,7 @@ def a_clean_startup_shows_nothing_on_screen(run):
                           "produced", RUN_ID)
         return
 
-    on_screen = DIAGNOSTIC_MARKER in run.output.stderr.decode(
-        "utf-8", errors="replace")
+    on_screen = _on_screen(run.output)
 
     run_id = logs.resolve_id(run.output)
     if run_id is None:
@@ -121,11 +138,11 @@ def a_clean_startup_shows_nothing_on_screen(run):
         # the half that does: the directory is shared, so without an id there
         # is nothing to tell this run's line from an earlier one's. The screen
         # half is answered by the run's own capture -- if the marker IS on
-        # stderr, that is a leak fully observed, and deferring it would hide a
-        # FAIL behind evidence it never needed. What still defers is the
+        # the screen, that is a leak fully observed, and deferring it would
+        # hide a FAIL behind evidence it never needed. What still defers is the
         # VACUITY case: with the marker on neither surface, a compliant build
         # and one whose memory subsystem never attached look identical from
-        # stderr alone, and the log is what separates them.
+        # the screen alone, and the log is what separates them.
         no_id = ("run %s published no run id on stderr or in its JSON "
                  "envelope, so its own log line cannot be told apart from an "
                  "earlier run's in the shared log directory" % RUN_ID)
@@ -141,19 +158,59 @@ def a_clean_startup_shows_nothing_on_screen(run):
 
     found, dir_existed, unreadable = logs.scan(_marker_matcher(run_id))
     in_log = bool(found)
+    directory = logs.log_directory()
 
-    if not on_screen and not in_log and dir_existed and not unreadable:
-        directory = logs.log_directory()
-        detail = ("the memory diagnostics notice appears on neither stderr "
-                  "nor on any line carrying run=%s under %s; this run's "
-                  "memory subsystem never attached, so there was nothing to "
-                  "check on either surface" % (run_id, directory))
+    if not dir_existed:
+        # **Not a product verdict.** With no directory there is nothing to
+        # search, so a run that never produced the notice and one that
+        # produced it and failed to persist it read identically from here --
+        # and only the second says anything about the product. The screen
+        # half keeps its own evidence: a marker sitting ON the screen is a
+        # leak the capture proves by itself, and no log line could excuse it.
+        missing = ("%s does not exist, so there is nothing to search: a run "
+                   "that never produced the notice cannot be told from one "
+                   "that produced it and did not persist it" % directory)
+        if on_screen:
+            yield _screen_finding(on_screen)
+        else:
+            yield Finding(ASSERTIONS[0], Outcome.CANNOT_TEST, missing, RUN_ID)
+        yield Finding(ASSERTIONS[1], Outcome.CANNOT_TEST, missing, RUN_ID)
+        return
+
+    if not on_screen and not in_log and not unreadable:
+        detail = ("the memory diagnostics notice appears on neither stdout "
+                  "nor stderr, nor on any line carrying run=%s under %s; this "
+                  "run's memory subsystem never attached, so there was "
+                  "nothing to check on either surface" % (run_id, directory))
         for text in ASSERTIONS:
             yield Finding(text, Outcome.CANNOT_TEST, detail, RUN_ID)
         return
 
     yield _screen_finding(on_screen)
-    yield _log_finding(in_log, dir_existed, unreadable, run_id)
+    yield _log_finding(in_log, unreadable, run_id)
+
+
+def _on_screen(output):
+    """Whether the marker reached either standard stream.
+
+    Both are the screen: the user sees one terminal, and a regression that
+    turns an ``eprintln!`` into a ``println!`` leaks the notice just as far.
+    Searched separately rather than on the concatenation, so a marker split
+    across the tail of one stream and the head of the other cannot be
+    invented by the join.
+
+    Args:
+        output: The completed run's captured output.
+
+    Returns:
+        bool: True when :data:`DIAGNOSTIC_MARKER` is on stdout or on stderr.
+
+    Complexity: ``O(bytes captured)``.
+    """
+    return any(
+        DIAGNOSTIC_MARKER in stream.decode("utf-8", errors="replace")
+        for stream in (output.stdout, output.stderr)
+    )
 
 
 def _marker_matcher(run_id):
@@ -192,44 +249,43 @@ def _marker_matcher(run_id):
 
 
 def _screen_finding(on_screen):
-    """Judge assertion 1: the notice must not be on stderr.
+    """Judge assertion 1: the notice must not be on either standard stream.
 
     Args:
-        on_screen: Whether the marker was found on the run's stderr.
+        on_screen: Whether the marker was found on the run's stdout or stderr.
 
     Returns:
         Finding: FAIL when the notice leaked to the screen, PASS otherwise.
     """
     if on_screen:
         return Finding(ASSERTIONS[0], Outcome.FAIL,
-                       "the memory diagnostics notice appears on stderr; "
-                       "REQ-L19 sends an INFO notice to the day's file alone",
-                       RUN_ID)
+                       "the memory diagnostics notice appears on stdout or "
+                       "stderr; REQ-L19 sends an INFO notice to the day's "
+                       "file alone", RUN_ID)
     return Finding(ASSERTIONS[0], Outcome.PASS, "", RUN_ID)
 
 
-def _log_finding(in_log, dir_existed, unreadable, run_id):
+def _log_finding(in_log, unreadable, run_id):
     """Judge assertion 2 from what :func:`smoke.logs.scan` found.
+
+    Only reached with the log directory present: its absence is judged by the
+    caller as ``CANNOT_TEST``, because there is nothing to search and so
+    nothing to say about the product.
 
     Args:
         in_log: Whether a line carrying both this run's id and the marker was
             found under the log directory.
-        dir_existed: Whether the log directory existed at all.
         unreadable: Files that could not be opened while searching.
         run_id: This run's id, named in every failure detail so a reader can
             see which run was searched for.
 
     Returns:
-        Finding: PASS when found; FAIL when the directory is missing or was
-        searched clean; CANNOT_TEST when a file blocked the search.
+        Finding: PASS when found; FAIL when the directory was searched clean;
+        CANNOT_TEST when a file blocked the search.
     """
     if in_log:
         return Finding(ASSERTIONS[1], Outcome.PASS, "", RUN_ID)
     directory = logs.log_directory()
-    if not dir_existed:
-        return Finding(ASSERTIONS[1], Outcome.FAIL,
-                       "%s does not exist, so nothing was written to disk "
-                       "this run" % directory, RUN_ID)
     if unreadable:
         return Finding(ASSERTIONS[1], Outcome.CANNOT_TEST,
                        "no line carrying run=%s and the marker was found, but "
