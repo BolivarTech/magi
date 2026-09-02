@@ -2630,6 +2630,32 @@ fn refresh_stream_audit(app: &mut App) {
     }
 }
 
+/// Puts every queued tool-approval request into the transcript.
+///
+/// Extracted from `run_app`'s loop for the same reason as [`apply_response`]
+/// and [`drain_responses`]: the loop around it needs a live terminal, so what
+/// the prompt does with the tool's name cannot be observed where it was
+/// written.
+///
+/// Only the LAST request drained stays pending, which is what the loop it came
+/// from did: the prompt is a single slot and the key handler answers one at a
+/// time. That is behaviour this extraction preserves rather than introduces.
+///
+/// # Parameters
+///
+/// * `app` — the transcript the prompt lands in.
+///
+/// # Complexity
+///
+/// `O(k*n)` — the auditor's, over each queued request's prompt.
+fn drain_approval_requests(app: &mut App) {
+    while let Ok(req) = app.approval_rx.try_recv() {
+        app.push_message(format!("APPROVAL REQUIRED: Execute {}?", req.tool_name));
+        app.push_message("Press 'y' to approve, 'c' or 'Esc' to deny.".to_string());
+        app.pending_approval = Some(req);
+    }
+}
+
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -2651,11 +2677,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
         drain_responses(&mut app);
 
-        while let Ok(req) = app.approval_rx.try_recv() {
-            app.push_message(format!("APPROVAL REQUIRED: Execute {}?", req.tool_name));
-            app.push_message("Press 'y' to approve, 'c' or 'Esc' to deny.".to_string());
-            app.pending_approval = Some(req);
-        }
+        drain_approval_requests(&mut app);
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
