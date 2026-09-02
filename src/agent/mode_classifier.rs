@@ -626,6 +626,35 @@ mod tests {
     /// `NoticeSink` is declared in this file, which is part of the **binary**
     /// crate (`mod agent;` in `main.rs`) — an integration test under `tests/`
     /// links only against the library crate and cannot name it at all.
+    /// The layer's screen delivery must NOT deduplicate, and nothing pinned the wiring.
+    ///
+    /// A health `Transition` arrives here already deduplicated by the tracker. Routing it
+    /// through `once` would add a SECOND memory, keyed differently, which suppresses a
+    /// legitimate second degradation of the same cause after a recovery -- a service that
+    /// goes down, comes back and goes down again would be announced once.
+    ///
+    /// Verified by mutation: swapping `emit` for `once` in [`ScreenDelivery::deliver`]
+    /// compiles, and left all six tests in this module green before this one existed.
+    #[test]
+    fn the_screen_delivery_does_not_deduplicate() {
+        use magi_rs::logging::NoticeDelivery;
+
+        let sink = std::sync::Arc::new(ProcessNoticeSink::default());
+        let auditor = test_auditor();
+        let (line, _) = auditor.audit("the same degradation twice", "magi_rs::tests", None, 0);
+
+        let delivery = ScreenDelivery::new(sink.clone());
+        delivery.deliver(&line);
+        delivery.deliver(&line);
+
+        assert_eq!(
+            sink.delivered_count("the same degradation twice"),
+            2,
+            "the screen delivery deduplicated, so a service that fails, recovers and \
+             fails again is announced once"
+        );
+    }
+
     #[test]
     fn test_emit_delivers_without_deduplicating() {
         let sink = ProcessNoticeSink::default();

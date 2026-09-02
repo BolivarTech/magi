@@ -397,6 +397,40 @@ b"
         assert_eq!(escape_for_line("a\u{7}b"), "a\\u{7}b");
     }
 
+    /// The two escapers differ in exactly one character, and that difference is the
+    /// reason there are two of them.
+    ///
+    /// `escape_for_line` doubles a backslash so the file stays machine-parseable;
+    /// `escape_for_screen` leaves it, because REQ-L23's third part is a path the user
+    /// is meant to select and paste, and a Windows path with every separator doubled
+    /// cannot be pasted anywhere. Nothing pinned this: unifying the two would keep the
+    /// whole suite green and quietly break the one line the screen policy exists to
+    /// deliver.
+    #[test]
+    fn the_screen_escaper_keeps_a_path_pasteable_where_the_file_escaper_does_not() {
+        let windows_path = r"C:\Users\a\.magi\logs";
+        assert_eq!(
+            escape_for_screen(windows_path),
+            windows_path,
+            "a doubled separator cannot be pasted into a shell or a file dialog"
+        );
+        assert_ne!(
+            escape_for_line(windows_path),
+            windows_path,
+            "the file half must stay unambiguous, or the two escapers are one"
+        );
+
+        // What they share: neither may let a control character reach its mouth. On the
+        // screen that is a write over the ratatui frame; in the file it is a forged line.
+        for hostile in ["a\nb", "a\rb", "a\u{7}b"] {
+            let screened = escape_for_screen(hostile);
+            assert!(
+                !screened.contains(|c: char| c.is_control()),
+                "a control character survived the screen escaper: {screened:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_escaped_line_can_never_contain_a_raw_newline() {
         // The security property: a foreign string cannot forge a second log line.
