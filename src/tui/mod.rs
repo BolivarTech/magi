@@ -433,6 +433,16 @@ impl TuiNoticeSink {
         }
     }
 
+    /// Waits for every task spawned to sit out a full channel.
+    ///
+    /// Must be called by `run_tui_ext` after `LeaveAlternateScreen` and BEFORE
+    /// [`Self::flush`]: by then the receiver is gone with `run_app`'s `App`, so each
+    /// task's `send` fails immediately and the wait is bounded.
+    ///
+    /// # Complexity
+    /// `O(n)` in the tasks still in flight, which the layer's own deduplication bounds.
+    pub(crate) async fn join_spawned(&self) {}
+
     /// Test-only, non-destructive peek at how many notices are currently buffered — lets a
     /// test poll for "the background fallback landed" without calling [`Self::flush`] itself,
     /// which would prematurely flip the sink to `Flushed` and hide the very race window under
@@ -2253,6 +2263,13 @@ pub async fn run_tui_ext(
     // switch, so throwing it while the event loop and `on_session_close` can still defer
     // splits the session's notices between what this call returns and what a later fallback
     // prints for itself, scattered through the telemetry block below.
+    // And AFTER every task that was sitting out a full channel (MS2 gate S4 third pass,
+    // Melchior): that task holds the only copy of its message — it is in neither the queue
+    // nor the channel — so a `flush` that runs first cannot return it and the runtime drops
+    // it unpolled when `run()` returns. The receiver went with `run_app`'s `App` above, so
+    // every one of those sends fails immediately and this wait is bounded.
+    classifier_notices.join_spawned().await;
+
     for msg in classifier_notices.flush() {
         eprintln!("{msg}");
     }
@@ -5086,6 +5103,64 @@ mod tests {
             1,
             "a sink that never got a channel must still be able to say what it \
              was holding: {left:?}"
+        );
+    }
+
+    /// **The third way a notice can go silent: a task the runtime never polls**
+    /// (MS2 gate S4 third pass, Melchior).
+    ///
+    /// [`TuiNoticeSink::route`]'s `Full` arm hands the message to a spawned
+    /// task and keeps nothing. The message is therefore in neither
+    /// [`PendingNotices`] nor the channel, so `flush` cannot return it and
+    /// `Drop` cannot rescue it. Everything after `run_app` returns is a race
+    /// the sink does not win by construction: `run_tui_ext` returns, `run()`
+    /// returns, the runtime is dropped, and a task that was never polled is
+    /// dropped with it — B9 with no trace.
+    ///
+    /// The window is narrow (the 100-slot channel has to be full at exactly
+    /// that moment) and it is not closable by ordering alone, because the loss
+    /// happens off this task. What closes it is joining: after the receiver is
+    /// gone every such task's `send` fails at once, so the join is bounded and
+    /// each message lands in the queue `flush` empties.
+    ///
+    /// # Why this is deterministic and not a race dressed as a test
+    ///
+    /// A single-threaded runtime cannot poll the spawned task until this one
+    /// awaits. So with the join the message is there and without it the flush
+    /// runs before the task has existed for a single poll — the two outcomes do
+    /// not depend on timing.
+    #[tokio::test]
+    async fn a_notice_waiting_for_room_survives_the_end_of_the_session() {
+        use crate::agent::mode_classifier::NoticeSink as _;
+        let sink = TuiNoticeSink::new();
+        let (tx, rx) = mpsc::channel(1);
+        sink.attach(tx);
+
+        sink.emit(&audited("warning: the log writer has stopped"));
+        sink.emit(&audited("warning: the second one finds no room"));
+        assert_eq!(
+            sink.pending_len(),
+            0,
+            "neither line may be deferred here: the first took the only slot \
+             and the second has to be waiting for room, which is the arm under \
+             test"
+        );
+
+        // The session ending, in the order `run_tui_ext` ends it: the receiver
+        // goes with `run_app`'s `App`, so every waiting task fails at once.
+        drop(rx);
+        sink.join_spawned().await;
+
+        let left = sink.flush();
+        assert_eq!(
+            left.len(),
+            1,
+            "the line that was waiting for room was dropped with the runtime \
+             instead of reaching a mouth: {left:?}"
+        );
+        assert!(
+            left[0].contains("the second one finds no room"),
+            "and it must be the one that had to wait: {left:?}"
         );
     }
 
