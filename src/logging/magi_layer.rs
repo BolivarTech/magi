@@ -538,6 +538,14 @@ impl MagiLayer {
         }
     }
 
+    /// The cache this layer interns cause-field halves into.
+    ///
+    /// Taken before installation, which consumes the layer.
+    #[cfg(test)]
+    fn cause_cache(&self) -> Arc<Mutex<Option<InternCache>>> {
+        Arc::new(Mutex::new(None))
+    }
+
     /// The health reporter this layer feeds.
     ///
     /// `init_logging` takes a handle on it BEFORE installing the subscriber,
@@ -1554,6 +1562,59 @@ mod tests {
             "a per-event leak would grow without bound on a long run"
         );
         assert_ne!(leak_target("magi_rs::other", &reporter), a);
+    }
+
+    /// How many distinct values `cache` has interned so far.
+    ///
+    /// A cache still `None` was never even locked-and-initialised, and an empty
+    /// one interned nothing; both are zero, which is what the guardian below
+    /// means by "interns nothing".
+    fn interned_values(cache: &Mutex<Option<InternCache>>) -> usize {
+        cache
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.seen.len()))
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn an_event_with_no_cause_fields_interns_nothing() {
+        // The layer took an interning mutex for EVERY event: the target was
+        // interned before the cause was so much as looked at, and the call
+        // sites that carry no cause are the bulk of the volume. A counting
+        // probe rather than a lock probe, because "did not lock" and "did not
+        // intern" are one question here, and a count also goes red if a future
+        // author routes something else through the same cache.
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let layer = MagiLayer::new(
+            FileSink::new(appender),
+            crate::logging::filter::Filter::parse("info").expect("valid"),
+            Arc::new(Auditor::new()),
+            Arc::new(crate::logging::DiscardDelivery),
+        );
+        // Taken before installation, which consumes the layer.
+        let cache = layer.cause_cache();
+
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(detail = "no cause fields here", "a foreign call site");
+            assert_eq!(
+                interned_values(&cache),
+                0,
+                "a causeless event reached the interning cache"
+            );
+            tracing::warn!(
+                cause.subsystem = "embedder",
+                cause.name = "unreachable",
+                "an instrumented call site"
+            );
+            assert_eq!(
+                interned_values(&cache),
+                2,
+                "a cause-bearing event must intern exactly its two halves"
+            );
+        });
     }
 
     /// Task 0.1 fix-round Finding 2: distinct cause-field values past
