@@ -157,6 +157,16 @@ const TRANSCRIPT_TARGET: &str = "magi_rs::tui::transcript";
 /// copies a message to the system CLIPBOARD and Visual mode copies any slice of
 /// one, so an unmasked value in it is exfiltration, not a corrupted frame.
 ///
+/// **That sentence was false when it was written, on the arms that matter
+/// most** (MS2 gate S4 third pass, all three seats). `AgentResponse::Text` and
+/// both delta arms were exempt, on the reasoning that model output is
+/// `Agent::sanitize_text`'s business — and `sanitize_text` strips ANSI escapes
+/// and control characters and consults no auditor, so it masks nothing. The
+/// exemption is gone. The streamed arms reach this through
+/// [`refresh_stream_audit`] rather than through [`apply_response`], because a
+/// credential leaves a model one token at a time and only the assembled turn
+/// can be scanned for it; every other arm calls this directly.
+///
 /// **The alarm travels with the masking — both, never one.** Its target is the
 /// transcript's own, so an alarm the producer already raised at ITS target is
 /// not swallowed by the auditor's latch: a value that reached the clipboard is
@@ -197,6 +207,13 @@ fn audit_for_transcript(text: &str) -> Vec<String> {
 /// What a transcript line reserves on the log queue: nothing. It never goes
 /// near one — the transcript is a screen.
 const NO_RESERVATION: usize = 0;
+
+/// What the transcript prefixes an assistant message with.
+///
+/// Named because [`App::append_stream_delta`] writes it and
+/// [`refresh_stream_audit`] rewrites the same line: two literals would let one
+/// of them drift and the label would change mid-turn.
+const STREAM_LABEL: &str = "Magi Agent: ";
 
 impl io::Write for NoticeTranscript {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -1318,6 +1335,14 @@ pub struct App {
     /// it: whoever starts a long operation sets the text there, and this side
     /// only reads it while drawing (see [`StatusRow`]).
     pub status_row: StatusRow,
+    /// The current streamed turn as the model sent it, before the transcript's
+    /// audit — the buffer [`refresh_stream_audit`] re-scans as the turn grows.
+    ///
+    /// **The whole turn, not the last delta, and that is the point.** A
+    /// credential leaves a model one token at a time, so a scan that only ever
+    /// sees one delta cannot recognise a value that spans three. Cleared by
+    /// [`App::finalize_stream`], so the buffer is one turn wide.
+    pub stream_raw: String,
 }
 
 impl App {
@@ -1349,6 +1374,7 @@ impl App {
             thinking_active: false,
             spinner_frame: 0,
             status_row: StatusRow::new(),
+            stream_raw: String::new(),
         }
     }
 
@@ -1531,11 +1557,25 @@ impl App {
     /// `messages` while a stream is still in progress (see `stream_target`'s doc), and writing
     /// blindly to "whatever is last" would then corrupt that interleaved entry instead of the
     /// reply actually being streamed.
+    ///
+    /// **What this writes is NOT audited yet, and the caller closes that.**
+    /// [`drain_responses`] calls [`refresh_stream_audit`] once it has drained
+    /// the batch and before the frame is drawn, which overwrites the line with
+    /// the audited render of [`App::stream_raw`]. Nothing reads `messages`
+    /// between the two — no draw, no key handling — so the unaudited text is
+    /// never displayed and never copyable. Calling this from anywhere but that
+    /// path would leave it displayed, which is why there is a guard asserting
+    /// there is nowhere else.
     pub fn append_stream_delta(&mut self, delta: String) {
         // Answer content arriving means the thinking phase is over.
         self.thinking_active = false;
         // Streaming content → follow the tail so the live reply stays visible.
         self.scroll_offset = 0;
+        // The audit re-runs over the WHOLE turn rather than over each delta,
+        // so the turn as the model sent it has to be kept: a credential is
+        // emitted a token at a time, and a value split across two deltas is
+        // invisible to any scan that only ever sees one of them.
+        self.stream_raw.push_str(&delta);
         if let Some(target) = self
             .stream_target
             .and_then(|idx| self.messages.get_mut(idx))
@@ -1543,7 +1583,7 @@ impl App {
             target.push_str(&delta);
             return;
         }
-        self.messages.push(format!("Magi Agent: {}", delta));
+        self.messages.push(format!("{STREAM_LABEL}{delta}"));
         self.stream_target = Some(self.messages.len() - 1);
         self.streaming = true;
     }
@@ -1552,6 +1592,10 @@ impl App {
     pub fn finalize_stream(&mut self) {
         self.streaming = false;
         self.stream_target = None;
+        // The next turn is a different message, so it starts from an empty
+        // accumulation — otherwise the audit would keep rescanning text that
+        // is already in the transcript, and the scan would grow without bound.
+        self.stream_raw.clear();
         // Turn over → drop any lingering "thinking…" indicator (covers turns that
         // reasoned but produced no content: empty answer, error, or tool-only).
         self.thinking_active = false;
@@ -2354,17 +2398,31 @@ fn apply_response(app: &mut App, response: AgentResponse) {
             if t.is_empty() {
                 app.finalize_stream();
             } else {
-                app.push_message(format!("Magi Agent: {}", t));
+                for line in audit_for_transcript(&format!("{STREAM_LABEL}{t}")) {
+                    app.push_message(line);
+                }
             }
         }
-        // The three routes below carry text this crate did not author — an
+        // Every route here carries text into a transcript the user can copy to
+        // the system clipboard, so every route is audited at this boundary,
+        // exactly as `NoticeTranscript::line` audits the door it owns; see
+        // `audit_for_transcript` for why the rule is one rule.
+        //
+        // **Model output is not the exception it was written as** (MS2 gate S4
+        // third pass, all three seats). The three arms above used to be exempt
+        // because `Agent::sanitize_text` had "already handled" them. It has
+        // not: `sanitize_text` strips ANSI escapes and control characters and
+        // consults no auditor, so it masks no secret at all. Nor is the model's
+        // input audited on the way in — a tool result (`view` on a file, `bash`
+        // running `cat`) or a pasted message puts a registered credential in
+        // the context, and the model can put it straight back on the wire. The
+        // two delta arms audit through `refresh_stream_audit` instead of here,
+        // because a streamed secret spans several deltas and only the assembled
+        // turn can be scanned for it.
+        //
+        // The three below carry text this crate did not author at all — an
         // `anyhow` chain whose innermost context is the provider's resolved
-        // `base_url`, a foreign HTTP error body, a `JoinError`'s payload — into
-        // a transcript the user can copy to the system clipboard. So each is
-        // audited at this boundary, exactly as `NoticeTranscript::line` audits
-        // the door it owns; see `audit_for_transcript` for why the rule is one
-        // rule. `Text` is not among them: it is the assistant's own generated
-        // output, which `Agent::sanitize_text` has already handled upstream.
+        // `base_url`, a foreign HTTP error body, a `JoinError`'s payload.
         AgentResponse::Error(e) => {
             app.finalize_stream();
             for line in audit_for_transcript(&format!("Error: {}", e)) {
@@ -2405,6 +2463,58 @@ fn apply_response(app: &mut App, response: AgentResponse) {
 fn drain_responses(app: &mut App) {
     while let Ok(response) = app.response_rx.try_recv() {
         apply_response(app, response);
+    }
+    refresh_stream_audit(app);
+}
+
+/// Rewrites the in-progress streamed message as the audit renders it.
+///
+/// **Once per batch, not once per delta, and both halves of that are load
+/// bearing.** The scan has to run over the whole turn, because a credential
+/// leaves a model one token at a time and a value split across three deltas is
+/// invisible to any pass that sees one of them alone — that is a guard which
+/// cannot fire in the case it exists for. Running that whole-turn scan on every
+/// delta instead makes the cost quadratic in the turn, and a long reply arrives
+/// in thousands of deltas, so the event loop would spend the turn rescanning
+/// its own output. Running it once per drained batch bounds the rescans by the
+/// frame rate rather than by the delta rate, which is the same order the draw
+/// below it already pays.
+///
+/// It sits between the drain and `terminal.draw`, and nothing reads
+/// [`App::messages`] in between, so the unaudited text
+/// [`App::append_stream_delta`] wrote is never displayed and never copyable.
+///
+/// # Parameters
+///
+/// * `app` — the transcript holding the turn.
+///
+/// # Complexity
+///
+/// `O(k*n)` — the auditor's, over the turn accumulated so far.
+fn refresh_stream_audit(app: &mut App) {
+    let Some(target) = app.stream_target else {
+        return;
+    };
+    if app.stream_raw.is_empty() {
+        return;
+    }
+    let mut rendered = audit_for_transcript(&app.stream_raw);
+    // The masked line comes first and the alarms after it; see
+    // `audit_for_transcript`. An empty vector is not reachable — it always
+    // returns at least the masked line — but draining it this way says so
+    // without an index that could panic if that ever changed.
+    if rendered.is_empty() {
+        return;
+    }
+    let masked = rendered.remove(0);
+    let Some(line) = app.messages.get_mut(target) else {
+        return;
+    };
+    *line = format!("{STREAM_LABEL}{masked}");
+    // Pushed AFTER the line they describe, and they land past `stream_target`,
+    // so the next delta still appends to the reply rather than to an alarm.
+    for alarm in rendered {
+        app.push_message(alarm);
     }
 }
 
