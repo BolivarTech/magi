@@ -2389,6 +2389,25 @@ fn apply_response(app: &mut App, response: AgentResponse) {
     }
 }
 
+/// Drains everything the agent has queued into the transcript.
+///
+/// Extracted from `run_app` so the routing is reachable from a test: the loop
+/// it used to be written as needs a live terminal around it, which is the same
+/// reason [`apply_response`] was extracted from it in turn.
+///
+/// # Parameters
+///
+/// * `app` — the transcript the batch lands in.
+///
+/// # Complexity
+///
+/// `O(total bytes drained)`.
+fn drain_responses(app: &mut App) {
+    while let Ok(response) = app.response_rx.try_recv() {
+        apply_response(app, response);
+    }
+}
+
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -2408,9 +2427,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
             handle.health_tick(std::time::Instant::now());
         }
 
-        while let Ok(response) = app.response_rx.try_recv() {
-            apply_response(&mut app, response);
-        }
+        drain_responses(&mut app);
 
         while let Ok(req) = app.approval_rx.try_recv() {
             app.push_message(format!("APPROVAL REQUIRED: Execute {}?", req.tool_name));
@@ -4366,6 +4383,153 @@ mod tests {
             !shown.contains("hunter2"),
             "a notice put a vault-resolved credential in the clipboard-copyable \
              transcript: {shown}"
+        );
+    }
+
+    /// A value long enough for the auditor's exact pass, in the shape a
+    /// credential actually has.
+    ///
+    /// Registered by the three tests below. Its length is asserted against
+    /// [`magi_rs::logging::auditor::MIN_SECRET_BYTES`] in each, because a
+    /// variant under the floor never enters the exact pass at all and the
+    /// assertion would then hold for free.
+    const DELTA_SECRET: &str = "sk-ant-delta-0123456789abcdef";
+
+    /// [`DELTA_SECRET`] cut the way a tokeniser cuts it.
+    ///
+    /// **No piece is the whole value, and that is the fixture's whole job.** A
+    /// streamed credential does not arrive in one delta — the model emits it a
+    /// token at a time — so a guard that hands the value over in a single
+    /// chunk passes against an implementation that audits each delta in
+    /// isolation, which is precisely the implementation that cannot see the
+    /// real case. Splitting it here is what makes the guard able to fail.
+    const DELTA_PIECES: [&str; 3] = ["sk-ant-de", "lta-01234567", "89abcdef"];
+
+    /// An [`App`] wired to a live sender, so a test can drive
+    /// [`drain_responses`] the way `run_app` does.
+    ///
+    /// [`empty_app`] drops its sender halves, which is right for a caller that
+    /// hands [`apply_response`] one message directly and wrong for one that
+    /// needs the channel to carry several.
+    ///
+    /// # Returns
+    ///
+    /// The app and the sender, which the caller must keep alive: dropping it
+    /// closes the channel.
+    fn app_on_a_live_channel() -> (App, mpsc::Sender<AgentResponse>) {
+        let (event_tx, _events) = mpsc::channel(1);
+        let (responses, response_rx) = mpsc::channel(16);
+        let (_approvals, approval_rx) = mpsc::channel(1);
+        (App::new(event_tx, response_rx, approval_rx), responses)
+    }
+
+    /// Registers [`DELTA_SECRET`] with the process auditor.
+    ///
+    /// Isolated by `cargo nextest`'s one-process-per-test model: the process
+    /// auditor is process-global, so a second test sharing this process would
+    /// share the registration too.
+    ///
+    /// # Parameters
+    ///
+    /// * `name` — distinct per test, so no test can pass on another's
+    ///   registration if they ever do share a process.
+    fn arm_the_delta_secret(name: &'static str) {
+        assert!(
+            DELTA_SECRET.len() >= magi_rs::logging::auditor::MIN_SECRET_BYTES,
+            "a value below the floor never enters the exact pass, so the \
+             assertion below would hold for free"
+        );
+        assert!(
+            magi_rs::logging::process_auditor().register_secret(
+                magi_rs::logging::auditor::SecretName::new(name),
+                &[DELTA_SECRET]
+            ),
+            "the fixture must be registrable, or nothing is being masked"
+        );
+    }
+
+    /// **The reasoning stream is a mouth into the clipboard, and it was the
+    /// one arm nothing audited** (MS2 gate S4 third pass, Melchior).
+    ///
+    /// `audit_for_transcript` claimed every line the transcript holds passes
+    /// through it. `StreamDelta`, `ReasoningDelta` and `Text` did not, behind a
+    /// comment saying the model's own output is `Agent::sanitize_text`'s
+    /// business. It is not: `sanitize_text` strips ANSI escapes and control
+    /// characters and consults no auditor, so it masks nothing. And the model's
+    /// input is not audited upstream either — a tool result (`view` on a file,
+    /// `bash` running `cat`) or a pasted message puts a registered credential
+    /// in the context, and the model can put it straight back on the wire.
+    ///
+    /// With `show_thinking = true` the chain-of-thought is streamed verbatim
+    /// into the same transcript `y` copies to the system clipboard, which makes
+    /// this the shortest path from a registered secret to exfiltration.
+    #[test]
+    fn a_secret_split_across_reasoning_deltas_is_masked_in_the_transcript() {
+        arm_the_delta_secret("TUI_REASONING_DELTA_PROBE");
+        let (mut app, responses) = app_on_a_live_channel();
+        app.show_thinking = true;
+        for piece in DELTA_PIECES {
+            responses
+                .try_send(AgentResponse::ReasoningDelta(piece.to_string()))
+                .expect("the fixture's channel has room");
+        }
+
+        drain_responses(&mut app);
+
+        let shown = app.messages.join("\n");
+        assert!(
+            shown.contains(magi_rs::logging::auditor::REDACTED),
+            "nothing was masked at all, so the transcript never saw the \
+             auditor: {shown}"
+        );
+        assert!(
+            !shown.contains(DELTA_SECRET),
+            "a reasoning delta put a registered secret in the \
+             clipboard-copyable transcript: {shown}"
+        );
+    }
+
+    /// The answer stream, which is the most-travelled of the three.
+    ///
+    /// Same argument as the reasoning arm and a wider audience: this one needs
+    /// no `/toggle-show-thinking` to be reached.
+    #[test]
+    fn a_secret_split_across_answer_deltas_is_masked_in_the_transcript() {
+        arm_the_delta_secret("TUI_ANSWER_DELTA_PROBE");
+        let (mut app, responses) = app_on_a_live_channel();
+        for piece in DELTA_PIECES {
+            responses
+                .try_send(AgentResponse::StreamDelta(piece.to_string()))
+                .expect("the fixture's channel has room");
+        }
+
+        drain_responses(&mut app);
+
+        let shown = app.messages.join("\n");
+        assert!(
+            !shown.contains(DELTA_SECRET),
+            "an answer delta put a registered secret in the clipboard-copyable \
+             transcript: {shown}"
+        );
+    }
+
+    /// The non-streamed assistant message, for the same reason.
+    ///
+    /// It arrives whole, so no split is needed — what it shares with the two
+    /// above is the exemption the rustdoc used to grant all three.
+    #[test]
+    fn a_secret_in_a_finished_assistant_message_is_masked_in_the_transcript() {
+        arm_the_delta_secret("TUI_TEXT_PROBE");
+        let mut app = empty_app();
+        apply_response(
+            &mut app,
+            AgentResponse::Text(format!("the key is {DELTA_SECRET}")),
+        );
+        let shown = app.messages.join("\n");
+        assert!(
+            !shown.contains(DELTA_SECRET),
+            "a finished assistant message put a registered secret in the \
+             clipboard-copyable transcript: {shown}"
         );
     }
 
