@@ -500,7 +500,7 @@ fn consult_error_outcome(
         // without a declared mode is a configuration problem, not a runtime one
         // (REQ-A07d/REQ-A07r) — `ModeError`'s `Display` already names the fix.
         ConsultRunError::UntrustedContentRequiresMode(e) => ErrorPayload {
-            message: audited_payload(&e.to_string()),
+            message: audited_payload(&sanitize_error_message(&e.to_string())),
             kind: ErrorKind::InputInvalid,
         },
         ConsultRunError::Timeout => ErrorPayload {
@@ -1314,13 +1314,27 @@ mod audit_route_guard {
         // Split so this guard's own needle is not the string it forbids, and
         // stripped of carriage returns because `include_str!` returns the file's
         // bytes untouched while rustfmt writes CRLF on Windows and LF elsewhere.
-        let raw_stdout = concat!("println", "!");
-        let source = include_str!("headless_runner.rs").replace("\\'\\\\r\\'", "");
+        // `eprintln!` contains `println!`, so one needle covers both -- but
+        // `eprint!` and `dbg!` contain neither, and a `write!` to a locked
+        // stderr is a third spelling (MS2 gate S5, Caspar and Balthasar). A
+        // needle SET, not a needle.
+        let mouths = [
+            concat!("println", "!"),
+            concat!("eprint", "!"),
+            concat!("dbg", "!"),
+            concat!("stderr", "()"),
+        ];
+        // A real carriage return. The first version of this line was written
+        // through a generator and landed as a seven-character literal that
+        // appears in no source file, so the strip was a no-op wearing a comment
+        // that said otherwise -- worse than no strip, because it tells the next
+        // reader the problem is handled.
+        let source = include_str!("headless_runner.rs").replace('\r', "");
         let offenders: Vec<&str> = source
             .lines()
             .map(str::trim)
             .filter(|l| !l.starts_with("//"))
-            .filter(|l| l.contains(raw_stdout))
+            .filter(|l| mouths.iter().any(|m| l.contains(m)))
             .collect();
         assert!(
             offenders.is_empty(),
