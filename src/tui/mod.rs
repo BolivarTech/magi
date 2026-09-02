@@ -1682,7 +1682,8 @@ impl App {
     /// the audited render of [`App::stream_raw`]. Nothing reads `messages`
     /// between the two — no draw, no key handling — so the unaudited text is
     /// never displayed and never copyable. Calling this from anywhere but that
-    /// path would leave it displayed, which is why there is a guard asserting
+    /// path would leave it displayed, which is why
+    /// `the_only_stream_delta_call_sites_are_the_drain_and_its_helper` asserts
     /// there is nowhere else.
     pub fn append_stream_delta(&mut self, delta: String) {
         // Answer content arriving means the thinking phase is over.
@@ -4659,6 +4660,60 @@ mod tests {
     /// A spelling, not an identity: a `drain_responses` that had been gutted
     /// would read as compliant here. It holds down the reversion that actually
     /// happens, which is a call site being inlined or deleted.
+    /// The doc on [`App::append_stream_delta`] says the unaudited window is closed by
+    /// the drain calling [`refresh_stream_audit`], and that calling it from anywhere else
+    /// would leave unaudited text displayed. It claimed a guard said so; none existed
+    /// (MS2 gate S4, Caspar).
+    ///
+    /// A spelling check, like its neighbours, and it holds down the reversion that
+    /// actually happens: a third call site added somewhere with no audit after it.
+    #[test]
+    fn the_only_stream_delta_call_sites_are_the_drain_and_its_helper() {
+        let source = production_source();
+        let calls: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//") && !l.starts_with("///"))
+            .filter(|l| l.contains("append_stream_delta("))
+            .filter(|l| !l.contains("fn append_stream_delta"))
+            .collect();
+        assert_eq!(
+            calls.len(),
+            2,
+            "append_stream_delta is reachable from somewhere the drain does not follow              with an audit, so unaudited model text stays on screen and in the              clipboard: {calls:#?}"
+        );
+    }
+
+    /// `stream_raw` is cleared when a turn ends, and deleting that line left the whole
+    /// tui suite green (MS2 gate S4, Caspar).
+    ///
+    /// Without the clear, the next turn's audit re-scans the previous turn's raw text and
+    /// rewrites the new message with BOTH — so turn two displays turn one's answer — and
+    /// the buffer grows for the life of the session.
+    #[test]
+    fn a_second_turn_shows_only_its_own_text() {
+        let (event_tx, _) = mpsc::channel(1);
+        let (_, response_rx) = mpsc::channel(1);
+        let (_, approval_rx) = mpsc::channel(1);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+
+        app.append_stream_delta("first turn answer".to_string());
+        app.finalize_stream();
+
+        app.append_stream_delta("second turn answer".to_string());
+        refresh_stream_audit(&mut app);
+
+        let last = app.messages.last().expect("the second turn has a message");
+        assert!(
+            last.contains("second turn answer"),
+            "the second turn lost its own text: {last}"
+        );
+        assert!(
+            !last.contains("first turn answer"),
+            "the second turn's line carries the first turn's text, so the audit target              was never reset: {last}"
+        );
+    }
+
     #[test]
     fn test_the_drain_loop_routes_every_response_through_the_audit() {
         let source = production_source();
