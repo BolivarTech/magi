@@ -117,5 +117,50 @@ class RunIdPresentTests(unittest.TestCase):
                          outcomes[screen_policy.ASSERTIONS[0]])
 
 
+class RunIdAnchorTests(unittest.TestCase):
+    """The correlation binds to the id, not to what the renderer puts after it.
+
+    The needle used to end in a space, which tied the scenario to a field
+    separator REQ-L63 never promised. Two properties have to hold at once and
+    neither is free: a line whose separator is not a space must still be found,
+    and another run's line must still be refused.
+    """
+
+    #: One rendered event, with a placeholder where the separator goes.
+    _LINE = ("2026-08-31T00:00:00Z INFO run=%s%smagi_rs::main: memory: "
+             "5 active, 1 archived, 0 %s~9 KB index)")
+
+    def _line(self, run_id, separator) -> bytes:
+        """Render the fixture line for one id and one separator.
+
+        Args:
+            run_id: The id to stamp the line with.
+            separator: What sits between the id and the target.
+
+        Returns:
+            bytes: The line as the day's file would hold it.
+        """
+        return (self._LINE
+                % (run_id, separator,
+                   screen_policy.DIAGNOSTIC_MARKER)).encode("utf-8")
+
+    def test_the_line_is_found_whatever_separates_the_id_from_the_target(
+            self) -> None:
+        matcher = screen_policy._marker_matcher(_RUN_ID)
+        for separator in (" ", "|", "\t", " target="):
+            with self.subTest(separator=separator):
+                self.assertTrue(
+                    matcher(self._line(_RUN_ID, separator)),
+                    "the run's own line stopped being found because the "
+                    "separator changed, which misattributes rather than fails")
+
+    def test_another_run_s_line_is_still_refused(self) -> None:
+        matcher = screen_policy._marker_matcher(_RUN_ID)
+        self.assertIsNone(
+            matcher(self._line("999999-0123456789abcdef", " ")),
+            "dropping the trailing space must not widen the match to a "
+            "neighbouring run's line")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -667,5 +667,40 @@ def _status_of(url: str) -> int | None:
         return None
 
 
+class RunIdAnchorTests(unittest.TestCase):
+    """The correlation binds to the id, not to what the renderer puts after it.
+
+    The needle used to end in a space, which tied the scenario to a field
+    separator REQ-L63 never promised. Two properties have to hold at once and
+    neither is free: a line whose separator is not a space must still be found,
+    and another run's line must still be refused.
+    """
+
+    #: One rendered event, with a placeholder where the separator goes.
+    _LINE = ("2026-08-31T00:00:00Z INFO run=%s%smagi_rs::main: memory: "
+             "5 active, 1 archived, 0 pending re-embed (~9 KB index)")
+
+    def test_the_line_is_found_whatever_separates_the_id_from_the_target(
+            self) -> None:
+        matcher = memory._startup_line_matcher(_R3_RUN_ID)
+        for separator in (" ", "|", "\t", " target="):
+            with self.subTest(separator=separator):
+                line = (self._LINE % (_R3_RUN_ID, separator)).encode("utf-8")
+                match = matcher(line)
+                self.assertIsNotNone(
+                    match,
+                    "the run's own line stopped being found because the "
+                    "separator changed, which misattributes rather than fails")
+                self.assertEqual((b"5", b"1", b"0"), match.groups())
+
+    def test_another_run_s_line_is_still_refused(self) -> None:
+        matcher = memory._startup_line_matcher(_R3_RUN_ID)
+        other = (self._LINE % ("999999-0123456789abcdef", " ")).encode("utf-8")
+        self.assertIsNone(
+            matcher(other),
+            "dropping the trailing space must not widen the match to a "
+            "neighbouring run's line")
+
+
 if __name__ == "__main__":
     unittest.main()

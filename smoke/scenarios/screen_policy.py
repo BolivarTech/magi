@@ -164,6 +164,13 @@ def _marker_matcher(run_id):
     stage 3), so one physical line is always exactly one event -- a foreign
     string can never fold two events together or split one apart.
 
+    **The needle ends at the id, not at the separator after it.** It used to
+    carry a trailing space, which made the guard depend on how the renderer
+    joins fields -- a detail REQ-L63 never promised. Anchoring on the id alone
+    cannot widen the match either, because an id is ``<pid>-<16 hex>`` with the
+    hex half a fixed width: no id is a prefix of a different one, so a bare
+    ``run=<id>`` still binds the line to exactly this run.
+
     Args:
         run_id: The id to bind the search to.
 
@@ -172,7 +179,7 @@ def _marker_matcher(run_id):
         returning True for the first line carrying both this run's id and
         :data:`DIAGNOSTIC_MARKER`, or None when the file has no such line.
     """
-    id_needle = ("run=%s " % run_id).encode("utf-8")
+    id_needle = ("run=%s" % run_id).encode("utf-8")
     marker = DIAGNOSTIC_MARKER.encode("utf-8")
 
     def matcher(data):
