@@ -207,7 +207,21 @@ pub fn recovery_detection_notice(
         .then(|| crate::notices::Notice::warn(RECOVERY_DETECTION_OFF))
 }
 
-/// A delivery that shows nothing, for the tests and for MS1's absent screen.
+/// A delivery that shows nothing.
+///
+/// **Half its stated reason expired in MS2 and the other half is load-bearing.** "For
+/// MS1's absent screen" is gone: both surfaces now wire a real sink, so no production
+/// path constructs this. What is left is not "for the tests" in the loose sense that
+/// would make it public surface with no consumer — it is consumed from OUTSIDE the
+/// crate, by `tests/ms1_interface_probe.rs`, `tests/prompt_never_logged.rs` and
+/// `tests/tui_buffer_audited_only.rs`, which are separate binaries linking `magi_rs`
+/// the way a downstream user would.
+///
+/// That is why it is `pub` and must stay `pub`. Gating it `#[cfg(test)]` was tried and
+/// fails to compile all three of those binaries: `cfg(test)` covers the lib's own unit
+/// tests and nothing else. A reviewer grepping only `src/` sees eleven unit-test call
+/// sites and concludes this is deletable; the three integration consumers are the part
+/// that is not visible from there.
 pub struct DiscardDelivery;
 
 impl NoticeDelivery for DiscardDelivery {
