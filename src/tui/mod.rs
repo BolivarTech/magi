@@ -127,9 +127,28 @@ impl NoticeTranscript {
     ///
     /// `try_send` cannot fail in practice at the one call site: this runs
     /// before `run_app`, so the receiver is alive and the 100-slot channel is
-    /// empty. If it ever did, `stderr` is still correct HERE and only here —
-    /// the alternate screen is not up yet — so the line is degraded to the
-    /// mouth it would have had, never dropped.
+    /// empty.
+    ///
+    /// **What the fallback actually costs, said plainly** (MS2 gate S4 third
+    /// pass, Caspar). "`stderr` is still correct here" was too kind to it. This
+    /// runs before `EnterAlternateScreen`, so the write lands on the PRIMARY
+    /// buffer — the one the alternate screen covers a moment later and does not
+    /// uncover until the user quits. Nothing is corrupted, because there is no
+    /// frame yet; but the line is written and hidden in the same breath, which
+    /// is the very defect this whole type exists to fix for the startup list.
+    /// So the fallback is a degradation to a mouth that will be looked at
+    /// AFTER the session rather than during it — not silence, and not the
+    /// screen either.
+    ///
+    /// **Not closed, and the reason is the branch, not the cost.** The
+    /// deferral that would close it is [`TuiNoticeSink`]'s `PendingNotices`,
+    /// which means giving this writer a second queue and `run_tui_ext` a second
+    /// thing to flush. It would buy that for a branch reachable only if a
+    /// 100-slot channel created two statements earlier, whose receiver this
+    /// function's own caller is holding, were already full or already closed.
+    /// A queue for a state that cannot arise is machinery to maintain and
+    /// nothing to show for it; the honest move is to name what the branch does
+    /// if it ever fires.
     fn deliver(&self, text: String) {
         if let Err(mpsc::error::TrySendError::Full(AgentResponse::Notice(text)))
         | Err(mpsc::error::TrySendError::Closed(AgentResponse::Notice(text))) =
@@ -402,14 +421,24 @@ impl TuiNoticeSink {
             }
         };
         for msg in waiting {
-            // Degraded to the mouth it already had rather than dropped (B9): the
-            // channel is fresh and 100 slots wide, so this cannot fill in practice,
-            // and the alternate screen is still down if it ever did.
+            // **Put back in the queue rather than printed** (MS2 gate S4 third pass,
+            // Caspar). This used to `eprintln!`, on the reasoning that the alternate
+            // screen is still down — which is true and is not the same as the line
+            // being seen. `EnterAlternateScreen` runs one statement after this call
+            // and covers the primary buffer for the whole session, so the print would
+            // be written and hidden in one breath: the exact defect the deferral was
+            // introduced to fix, taken at the last step of the hand-over.
+            //
+            // Deferring costs nothing here. The queue was just emptied above, `flush`
+            // has not run yet so the state is still `Buffering`, and `flush` — after
+            // `LeaveAlternateScreen` — prints whatever went back into it. The loop is
+            // over `waiting`, which was taken out of `pending`, so putting a message
+            // back cannot feed this loop again.
             if let Err(mpsc::error::TrySendError::Full(AgentResponse::Notice(text)))
             | Err(mpsc::error::TrySendError::Closed(AgentResponse::Notice(text))) =
                 tx.try_send(AgentResponse::Notice(msg))
             {
-                eprintln!("{text}");
+                Self::defer_or_print(&self.pending, text);
             }
         }
     }
