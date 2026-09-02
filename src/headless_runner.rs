@@ -1247,6 +1247,52 @@ pub async fn run_query(
 }
 
 #[cfg(test)]
+mod audit_route_guard {
+    /// **The headless streaming surface writes through the audit route.**
+    ///
+    /// # The property
+    ///
+    /// This file IS the headless surface: `magi query` and `magi consult` have no
+    /// transcript to fall back on, so stderr is the only mouth there is. Every line
+    /// it puts there interpolates something composed at runtime -- a notice a
+    /// provider produced, an error chain from a crate this one does not own.
+    ///
+    /// `redact_foreign_text` is NOT the route. It masks a URL it can find in prose;
+    /// the process auditor masks the secrets THIS RUN registered, which no
+    /// composition site knows about. The two are complementary, and only the second
+    /// is REQ-L48's guarantee.
+    ///
+    /// # Why the file rather than a list
+    ///
+    /// The two rules in `main.rs` that hold this class scope by signature
+    /// (`HeadlessArgs`) and by funnel; neither reaches a `tokio::spawn` closure
+    /// inside `run_query`, and that is where the instance was. Scoping by FILE
+    /// covers the arm nobody has written yet.
+    ///
+    /// # What it cannot catch
+    ///
+    /// A raw write in a helper this file calls. `main.rs`'s rules 3 and 4 hold those.
+    #[test]
+    fn the_headless_stream_surface_writes_through_the_audit_route() {
+        // Split so this guard's own needle is not the string it forbids, and
+        // stripped of carriage returns because `include_str!` returns the file's
+        // bytes untouched while rustfmt writes CRLF on Windows and LF elsewhere.
+        let raw_stdout = concat!("println", "!");
+        let source = include_str!("headless_runner.rs").replace("\\'\\\\r\\'", "");
+        let offenders: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .filter(|l| l.contains(raw_stdout))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "the headless surface writes straight to a file descriptor, so whatever              it interpolates reaches stderr and a CI log without passing the process              auditor: {offenders:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
