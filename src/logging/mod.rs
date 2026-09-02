@@ -9,10 +9,18 @@
 //! # The shape, and why it is this shape
 //!
 //! Everything decidable is a **pure function that returns a decision**;
-//! a thin shim executes it. Rotation, retention, chunking and rendering never
-//! touch the filesystem or read a clock. That is what makes "on day 8 it is
-//! compressed and on day 31 it is deleted" testable with two dates instead of
-//! thirty-one days of real files.
+//! a thin shim executes it. Rotation, retention and chunking take the date, the
+//! clock reading and the file list as PARAMETERS and touch nothing: that is what
+//! makes "on day 8 it is compressed and on day 31 it is deleted" testable with
+//! two dates instead of thirty-one days of real files.
+//!
+//! **Rendering is the exception, and it is one on purpose.** `render_event`
+//! reads `OffsetDateTime::now_utc()` itself, because the stamp an event carries
+//! must be when it was EMITTED; taking it from a parameter filled in further
+//! down would record when the writer got to it, which on a queue that is
+//! draining is a different and less useful time. Its escapers and its header
+//! composition stay pure. `EventId::new` is the other clock reader here, and
+//! only on the fallback branch where the OS random source refuses.
 //!
 //! # Lint policy, which is stricter here than in most of the crate
 //!
@@ -667,7 +675,11 @@ pub fn init_logging(
     // Step 3: resolve the zone offset. Constant in MS1 (UTC) and cannot fail.
     // The step keeps its number because THE ORDER IS THE CONTRACT.
 
-    // Step 4: build the auditor and register the environment's secrets.
+    // Step 4: take the PROCESS auditor. It is neither built nor filled here --
+    // `process_auditor` owns the single instance and `register_process_secrets`
+    // fills it, called by whichever surface resolved the secrets. Both happen
+    // outside this function, and the step number is kept because THE ORDER IS
+    // THE CONTRACT.
     let audit = std::sync::Arc::clone(process_auditor());
 
     // Step 5: mount the layer and install the subscriber.

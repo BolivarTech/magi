@@ -117,11 +117,13 @@ struct Reporter {
     misused_cause_field: std::sync::atomic::AtomicBool,
     /// Latched for the STOPPED tier: the branch is gone for the rest of the run.
     ///
-    /// **Two latches and not one.** With a single one, a moment of congestion
-    /// fires the notice and the writer's death is then silent forever: the
-    /// operator is told events are being discarded and never told the log
-    /// stopped. Those are different things to know and different things to do
-    /// about, so the worse of the two must always be able to speak.
+    /// **A latch per tier, never one shared.** With a single one, a moment of
+    /// congestion fires the notice and the writer's death is then silent
+    /// forever: the operator is told events are being discarded and never told
+    /// the log stopped. Those are different things to know and different things
+    /// to do about, so each tier must always be able to speak whatever the
+    /// others already said. There are three: this one, [`Self::degraded`], and
+    /// [`Self::misused_cause_field`].
     stopped: std::sync::atomic::AtomicBool,
 }
 
@@ -254,8 +256,8 @@ const REPORTER_TARGET: &str = "magi_rs::logging";
 /// The alarm is exempt from the filters, not from the byte budget — it simply
 /// has no rendered length to reserve, because the writer renders it.
 ///
-/// `pub(super)` because `init_logging`'s already-initialised branch forwards an
-/// alarm too, and a second `0` written out there would be the same rule in two
+/// `pub(super)` because `init_logging` forwards an alarm from two of its own
+/// branches, and a `0` written out there would be the same rule in several
 /// places with nothing tying them together.
 pub(super) const NO_RESERVATION: usize = 0;
 
@@ -279,9 +281,11 @@ pub(super) const NO_RESERVATION: usize = 0;
 ///
 /// `O(log n)`, the auditor's own.
 ///
-/// `pub(super)` so `init_logging` uses this rule rather than restating it: it
-/// is the fourth alarm-forwarding site in the subsystem, and the first three
-/// all go through here.
+/// `pub(super)` so `init_logging` uses this rule at each of its two branches
+/// rather than restating it. Five sites in the subsystem forward an alarm — `Reporter::announce`, `HealthReporter::show`,
+/// `MagiLayer::on_event`, and `init_logging`'s already-initialised and
+/// subscriber-not-installed branches — and every one of them goes through
+/// here.
 pub(super) fn settle_alarm(auditor: &Auditor, alarm: &AuditExempt, outcome: Submitted) {
     if outcome != Submitted::Queued {
         auditor.retract_alarm(alarm);
@@ -339,11 +343,17 @@ impl HealthReporter {
     ///   from. Deriving it from the text would be what R-L13 forbids for the
     ///   key itself: every HTTP 500 with a fresh request id would read as new.
     ///
-    /// # Why the lock is taken only when there is a cause
+    /// # Why the TRACKER'S lock is taken only when there is a cause
     ///
-    /// magi-core's 46 uninstrumented call sites carry no key and are most of
-    /// the volume. Testing `cause` first trades one comparison for a mutex
-    /// acquisition per foreign event on the hot path.
+    /// Every call site outside the handful task 3.3 instrumented carries no
+    /// key — magi-core's are all of them — and those are the bulk of the
+    /// volume. Testing `cause` first trades one comparison for a mutex
+    /// acquisition per uninstrumented event on the hot path.
+    ///
+    /// Named as the tracker's because it is not the only lock on this path and
+    /// the rule differs between them: the interning cache is likewise reached
+    /// only for a cause-bearing event, while the auditor's registry is taken
+    /// for every event by construction.
     ///
     /// # Complexity
     ///
@@ -709,10 +719,19 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         let reserved = escaped.reserved_len();
 
         // **Health is observed here: after the audit, before the fan-out.**
-        // This is the only point that sees EVERY event, including the ones the
-        // screen filter is about to discard -- and whether a subsystem is
-        // healthy must not depend on what happens to be displayed. It is also
-        // where the `Audited` carrying the cause key already exists.
+        // This is the only point that sees every event the LAYER RECEIVES,
+        // including the ones both branches' filters are about to discard -- and
+        // whether a subsystem is healthy must not depend on what happens to be
+        // written or displayed. It is also where the `Audited` carrying the
+        // cause key already exists.
+        //
+        // **It does not see every event the PROCESS emits**, and the difference
+        // is not academic: `enabled` above admits only what clears the union of
+        // the two branches' levels, so an operator whose `file_filter` excludes
+        // `INFO` starves recovery detection of the success events it is
+        // detected from. That consequence is named rather than carved around --
+        // see `warn_if_recovery_detection_is_off`, which warns about exactly
+        // this at startup.
         self.health.observe(&escaped, level);
 
         if level <= self.file_filter.level_for(target) {
