@@ -309,6 +309,15 @@ pub struct TuiNoticeSink {
     /// while the alternate screen might still be up — see [`Self::flush`] for why a fallback
     /// never prints for itself.
     pending: Arc<Mutex<PendingNotices>>,
+    /// Tasks still waiting for room on a full channel, so [`Self::join_spawned`] has
+    /// something to wait on.
+    ///
+    /// While such a task is in flight it holds the ONLY copy of its message — `pending`
+    /// does not have it and neither does the channel — so a runtime that shuts down
+    /// before polling it drops the notice silently. Finished handles are dropped as new
+    /// ones arrive, so this measures what is in flight rather than what the session has
+    /// spilled.
+    spawned: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 /// The state [`TuiNoticeSink::pending`] moves through exactly once, in exactly one direction.
@@ -349,6 +358,7 @@ impl TuiNoticeSink {
             seen: Mutex::new(std::collections::BTreeSet::new()),
             tx: Mutex::new(None),
             pending: Arc::new(Mutex::new(PendingNotices::Buffering(Vec::new()))),
+            spawned: Mutex::new(Vec::new()),
         }
     }
 
@@ -437,11 +447,32 @@ impl TuiNoticeSink {
     ///
     /// Must be called by `run_tui_ext` after `LeaveAlternateScreen` and BEFORE
     /// [`Self::flush`]: by then the receiver is gone with `run_app`'s `App`, so each
-    /// task's `send` fails immediately and the wait is bounded.
+    /// task's `send` fails immediately and the wait is bounded. Waiting BEFORE the
+    /// teardown would be a different thing entirely — the channel might still be
+    /// drained, so the wait would be for as long as the session runs.
+    ///
+    /// One drain is enough. After the receiver is dropped `try_send` answers `Closed`
+    /// rather than `Full`, so [`Self::route`] takes the deferral arm and spawns nothing
+    /// more; there is no second wave to come back for.
+    ///
+    /// A task that panicked is not an error here — its message is lost either way and
+    /// the process is on its way out — so the join result is discarded rather than
+    /// unwrapped.
     ///
     /// # Complexity
     /// `O(n)` in the tasks still in flight, which the layer's own deduplication bounds.
-    pub(crate) async fn join_spawned(&self) {}
+    pub(crate) async fn join_spawned(&self) {
+        // Taken out from under the lock and awaited outside it: holding a `Mutex` across
+        // an `.await` is what the rest of this type is built to avoid, and here it would
+        // also block `route` — the very producer whose task is being waited on.
+        let waiting: Vec<tokio::task::JoinHandle<()>> = {
+            let mut spawned = self.spawned.lock().unwrap_or_else(|p| p.into_inner());
+            std::mem::take(&mut *spawned)
+        };
+        for handle in waiting {
+            let _ = handle.await;
+        }
+    }
 
     /// Test-only, non-destructive peek at how many notices are currently buffered — lets a
     /// test poll for "the background fallback landed" without calling [`Self::flush`] itself,
@@ -580,7 +611,7 @@ impl TuiNoticeSink {
                 // from inside an async caller and must not stall its executor thread).
                 let msg = msg.to_string();
                 let pending = Arc::clone(&self.pending);
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     if tx.send(AgentResponse::Notice(msg.clone())).await.is_err() {
                         // The channel closed while this was queued (the run ended before
                         // room freed up) — deferred rather than printed here directly, because
@@ -590,6 +621,19 @@ impl TuiNoticeSink {
                         Self::defer_or_print(&pending, msg);
                     }
                 });
+                // **The handle is KEPT, and B9 is why** (MS2 gate S4 third pass, Melchior).
+                // Until `send` resolves, that task holds the only copy of the message: it is
+                // in neither `pending` nor the channel, so `flush` cannot return it and
+                // `Drop` cannot rescue it. A runtime shut down before the task is ever
+                // polled therefore drops the notice with no trace — which is what
+                // `join_spawned` exists to stop, and it needs something to wait on.
+                //
+                // Finished handles are dropped on the way in rather than accumulating: the
+                // vector then measures what is IN FLIGHT, not what the session has ever
+                // spilled, so a long run cannot grow it without bound.
+                let mut spawned = self.spawned.lock().unwrap_or_else(|p| p.into_inner());
+                spawned.retain(|h| !h.is_finished());
+                spawned.push(handle);
             }
         }
     }
@@ -5258,15 +5302,21 @@ mod tests {
     /// and prints it ahead of the telemetry.
     ///
     /// Both statements are still after `LeaveAlternateScreen`, which is the
-    /// safety rule; this is the completeness one. The residual is named: the
-    /// `tokio::spawn`ed waiter [`TuiNoticeSink::route`] starts on a full
-    /// channel is not joined by anything, so a notice can still arrive after
-    /// the flush — it then prints itself, correctly, on a terminal that has
-    /// already been restored.
+    /// safety rule; this is the completeness one.
+    ///
+    /// **The residual that used to be named here is closed** (MS2 gate S4 third
+    /// pass, Melchior). The `tokio::spawn`ed waiter [`TuiNoticeSink::route`]
+    /// starts on a full channel was joined by nothing, and the consequence was
+    /// worse than "arrives late": while that task is in flight it holds the
+    /// only copy of its message, so a runtime shut down before polling it
+    /// dropped the notice outright. [`TuiNoticeSink::join_spawned`] now waits
+    /// for those tasks, and its position is pinned below — after the event-loop
+    /// join, before the flush — because either side of that gets it wrong.
     ///
     /// **Maintenance note:** the needles are a structural dependency on the
-    /// exact spelling of `classifier_notices.flush()` and
-    /// `join_event_loop_then_drain(`; renaming either is a change to this test.
+    /// exact spelling of `classifier_notices.flush()`,
+    /// `classifier_notices.join_spawned()` and `join_event_loop_then_drain(`;
+    /// renaming any of them is a change to this test.
     #[test]
     fn test_the_deferred_notices_are_flushed_after_the_event_loop_is_joined() {
         let source = source_without_comment_lines();
@@ -5284,6 +5334,15 @@ mod tests {
         let flushed = body
             .find("classifier_notices.flush()")
             .expect("the deferred notices must still be flushed");
+        let waited = body
+            .find("classifier_notices.join_spawned()")
+            .expect("the tasks waiting for room must still be joined before the flush");
+        assert!(
+            joined < waited && waited < flushed,
+            "the wait for the tasks that were sitting out a full channel is not between the \
+             event-loop join and the flush, so a notice one of them still holds is either \
+             waited for while the channel can still drain or dropped unpolled at shutdown"
+        );
         assert!(
             joined < flushed,
             "flushing first throws the one-way `Flushed` switch while the event loop can \
