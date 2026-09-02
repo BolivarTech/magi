@@ -4348,6 +4348,40 @@ mod tests {
         collapsed_pieces(text, &[';', '{', '}'])
     }
 
+    /// Where the first statement carrying every token in `tokens` sits.
+    ///
+    /// **Several short tokens beat one long needle** (MS2 gate S4 third pass,
+    /// Balthasar). A needle that spells a whole call out —
+    /// `emit_notices_into(startup_notices, &mut transcript);` — stops matching
+    /// the moment rustfmt decides the arguments want their own lines, because
+    /// collapsing whitespace turns that into `emit_notices_into( startup_notices,
+    /// &mut transcript, )`. The call's name and the names of its arguments
+    /// survive any wrapping the formatter is allowed to choose, and requiring
+    /// all of them inside ONE statement keeps the guard as specific as the long
+    /// spelling was.
+    ///
+    /// # Parameters
+    ///
+    /// * `stmts` — statements in source order, from [`collapsed_pieces`].
+    /// * `tokens` — every one of which the statement must carry.
+    /// * `what` — named in the panic, so a rename says which wiring went
+    ///   missing rather than which string did.
+    ///
+    /// # Returns
+    ///
+    /// The index, so callers can compare positions. Panics when nothing
+    /// matches: a guard whose subject is gone must fail, not pass.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n*k)` over the statements and the tokens.
+    fn statement_at(stmts: &[String], tokens: &[&str], what: &str) -> usize {
+        stmts
+            .iter()
+            .position(|s| tokens.iter().all(|t| s.contains(t)))
+            .unwrap_or_else(|| panic!("{what} is no longer in production (looked for {tokens:?})"))
+    }
+
     /// The body of the column-zero block that starts with `header` — an `impl`,
     /// a free function, anything closed by a brace back at column zero.
     ///
@@ -4855,33 +4889,53 @@ mod tests {
     /// from a test; the property, meanwhile, is a pure ordering in one function.
     #[test]
     fn test_nothing_fallible_runs_while_the_alternate_screen_is_held() {
+        // Statements rather than byte offsets, so the window is bounded by
+        // WHERE the two calls sit and not by how the formatter spelled them:
+        // the entering statement carries its own `?`, so the range starts
+        // after it and ends before the one that leaves.
+        //
+        // Bounded to `run_tui_ext` and searched for the teardown only AFTER
+        // the entry, because two earlier statements name these types without
+        // being them: the `use` at the top of the file imports both, and the
+        // panic hook installed at the head of this function leaves the screen
+        // before anything has entered it.
         let source = production_source();
-        let entered = source
-            .find("EnterAlternateScreen)?;")
-            .expect("`run_tui_ext` must still enter the alternate screen")
-            + "EnterAlternateScreen)?;".len();
-        let rest = source
-            .get(entered..)
-            .expect("the offset came from `find`, so it is a boundary");
-        let left = rest
-            .find("LeaveAlternateScreen")
-            .expect("`run_tui_ext` must still leave the alternate screen");
-        let held = rest
-            .get(..left)
-            .expect("the offset came from `find`, so it is a boundary");
+        let stmts = collapsed_pieces(block_body(&source, "\npub async fn run_tui_ext"), &[';']);
+        let entered = statement_at(&stmts, &["EnterAlternateScreen"], "the alternate screen");
+        let after = stmts
+            .get(entered + 1..)
+            .expect("the index came from `position`, so the tail exists");
+        let left = entered
+            + 1
+            + statement_at(
+                after,
+                &["LeaveAlternateScreen"],
+                "the teardown after the entry",
+            );
+        let held: Vec<&String> = stmts
+            .iter()
+            .take(left)
+            .skip(entered + 1)
+            .collect::<Vec<_>>();
+
+        let fallible: Vec<&&String> = held.iter().filter(|s| s.contains('?')).collect();
         assert!(
-            !held.contains('?'),
+            fallible.is_empty(),
             "a fallible statement sits inside the window where the alternate screen is \
              held, so `run_tui_ext` can return with the screen still up and the notice \
-             sink's destructor prints onto the frame (REQ-L39); the window was: {held}"
+             sink's destructor prints onto the frame (REQ-L39); found: {fallible:?}"
         );
         // Token-bounded, so an identifier that merely starts with the word —
         // `returned_rows`, say — is not mistaken for the keyword. A statement
         // is the unit rather than a line, so a `return` that rustfmt wrapped
         // onto its own line reads the same as one written inline.
-        let escapes: Vec<String> = collapsed_statements(held)
-            .into_iter()
-            .filter(|s| s == "return" || s.starts_with("return "))
+        let escapes: Vec<&&String> = held
+            .iter()
+            .filter(|s| {
+                s.split(['{', '}'])
+                    .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .any(|p| p == "return" || p.starts_with("return "))
+            })
             .collect();
         assert!(
             escapes.is_empty(),
@@ -4957,20 +5011,10 @@ mod tests {
     #[test]
     fn test_the_notice_sink_is_attached_before_the_alternate_screen() {
         let source = source_without_comment_lines();
-        let start = source
-            .find("\npub async fn run_tui_ext(")
-            .expect("run_tui_ext must still bring the terminal up");
-        let end = source[start..]
-            .find("\nfn report_gate_telemetry")
-            .map(|offset| start + offset)
-            .expect("the item after run_tui_ext must still bound its body");
-        let body = &source[start..end];
-        let attached = body
-            .find("classifier_notices.attach(")
-            .expect("the sink must still be attached");
-        let alternate = body
-            .find("EnterAlternateScreen)")
-            .expect("the alternate screen must still be entered");
+        let body = block_body(&source, "\npub async fn run_tui_ext");
+        let stmts = collapsed_pieces(body, &[';']);
+        let attached = statement_at(&stmts, &["classifier_notices.attach("], "the attach");
+        let alternate = statement_at(&stmts, &["EnterAlternateScreen"], "the alternate screen");
         assert!(
             attached < alternate,
             "the sink is still unattached when the alternate screen goes up, so a notice \
@@ -5313,36 +5357,29 @@ mod tests {
     #[test]
     fn test_the_startup_notices_are_emitted_inside_the_attached_window() {
         let source = source_without_comment_lines();
-        let start = source
-            .find("\npub async fn run_tui_ext(")
-            .expect("run_tui_ext must still bring the terminal up");
-        let end = source[start..]
-            .find("\nfn report_gate_telemetry")
-            .map(|offset| start + offset)
-            .expect("the item after run_tui_ext must still bound its body");
-        let body = &source[start..end];
-        let attached = body
-            .find("classifier_notices.attach(")
-            .expect("the sink must still be attached");
-        // The needle carries the ARGUMENT, not just the call. Mutation is what
-        // said so: with only the call named, swapping the fallback back to
-        // `stderr` left this green and left
+        let body = block_body(&source, "\npub async fn run_tui_ext");
+        let stmts = collapsed_pieces(body, &[';']);
+        let attached = statement_at(&stmts, &["classifier_notices.attach("], "the attach");
+        // The statement must carry the ARGUMENTS, not just the call. Mutation
+        // is what said so: with only the call named, swapping the fallback back
+        // to `stderr` left this green and left
         // `a_startup_warning_reaches_the_transcript_when_no_layer_exists` green
         // too, because that one drives the writer rather than the wiring. The
         // fallback is half the fix; a guard that cannot see which one is
-        // passed guards the other half only.
-        let emitted = body
-            .find("emit_notices_into(startup_notices, &mut transcript);")
-            .expect(
-                "run_tui_ext must announce the startup notices it was handed, into the \
-                 transcript fallback",
-            );
-        let built = body
-            .find("NoticeTranscript::new(response_tx")
-            .expect("the fallback must be the session's own response channel");
-        let alternate = body
-            .find("EnterAlternateScreen)")
-            .expect("the alternate screen must still be entered");
+        // passed guards the other half only. Naming the three tokens rather
+        // than the whole call keeps that specificity through any wrapping
+        // rustfmt is free to choose.
+        let emitted = statement_at(
+            &stmts,
+            &["emit_notices_into(", "startup_notices", "transcript"],
+            "the announcement of the startup notices into the transcript fallback",
+        );
+        let built = statement_at(
+            &stmts,
+            &["NoticeTranscript::new(", "response_tx"],
+            "the transcript built on the session's own response channel",
+        );
+        let alternate = statement_at(&stmts, &["EnterAlternateScreen"], "the alternate screen");
         assert!(
             attached < built,
             "the transcript fallback is built before the sink is attached, which is out of \
@@ -5393,23 +5430,19 @@ mod tests {
     #[test]
     fn test_the_deferred_notices_are_flushed_after_the_event_loop_is_joined() {
         let source = source_without_comment_lines();
-        let start = source
-            .find("\npub async fn run_tui_ext(")
-            .expect("run_tui_ext must still bring the terminal up");
-        let end = source[start..]
-            .find("\nfn report_gate_telemetry")
-            .map(|offset| start + offset)
-            .expect("the item after run_tui_ext must still bound its body");
-        let body = &source[start..end];
-        let joined = body
-            .find("join_event_loop_then_drain(")
-            .expect("the event loop must still be joined before the session ends");
-        let flushed = body
-            .find("classifier_notices.flush()")
-            .expect("the deferred notices must still be flushed");
-        let waited = body
-            .find("classifier_notices.join_spawned()")
-            .expect("the tasks waiting for room must still be joined before the flush");
+        let body = block_body(&source, "\npub async fn run_tui_ext");
+        let stmts = collapsed_pieces(body, &[';']);
+        let joined = statement_at(
+            &stmts,
+            &["join_event_loop_then_drain("],
+            "the event-loop join",
+        );
+        let flushed = statement_at(&stmts, &["classifier_notices.flush()"], "the flush");
+        let waited = statement_at(
+            &stmts,
+            &["classifier_notices.join_spawned()"],
+            "the wait for the tasks sitting out a full channel",
+        );
         assert!(
             joined < waited && waited < flushed,
             "the wait for the tasks that were sitting out a full channel is not between the \

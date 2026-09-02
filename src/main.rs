@@ -6669,6 +6669,38 @@ mod tests {
             .collect()
     }
 
+    /// Where the first statement carrying every token in `tokens` sits.
+    ///
+    /// **Several short tokens beat one long needle** (MS2 gate S4 third pass, Balthasar).
+    /// A needle that spells a whole call out — `MagiConfig::load(&ws.config_path())` — stops
+    /// matching the moment rustfmt decides the arguments want their own lines, because
+    /// collapsing whitespace turns that into `MagiConfig::load( &ws.config_path(), )`. The
+    /// call's name and the names of its arguments survive any wrapping the formatter is
+    /// allowed to choose, and requiring all of them inside ONE statement keeps the guard as
+    /// specific as the long spelling was.
+    ///
+    /// # Parameters
+    ///
+    /// * `stmts` — statements in source order, from [`collapsed_pieces`].
+    /// * `tokens` — every one of which the statement must carry.
+    /// * `what` — named in the panic, so a rename says which wiring went missing rather than
+    ///   which string did.
+    ///
+    /// # Returns
+    ///
+    /// The index, so callers can compare positions. Panics when nothing matches: a guard
+    /// whose subject is gone must fail, not pass.
+    ///
+    /// # Complexity
+    ///
+    /// `O(n*k)` over the statements and the tokens.
+    fn statement_at(stmts: &[String], tokens: &[&str], what: &str) -> usize {
+        stmts
+            .iter()
+            .position(|s| tokens.iter().all(|t| s.contains(t)))
+            .unwrap_or_else(|| panic!("{what} is no longer in production (looked for {tokens:?})"))
+    }
+
     /// `text` with every whole-line comment removed.
     ///
     /// **A rule that names a macro cannot be scanned against text that discusses it.** Rules 3
@@ -7230,6 +7262,12 @@ mod tests {
     ///
     /// Every needle is `expect`ed rather than searched leniently, so a rename fails loudly
     /// here instead of leaving the guard matching nothing and passing.
+    ///
+    /// **Read as statements, not as byte offsets** (MS2 gate S4 third pass, Balthasar). The
+    /// four positions used to be found by spelling each call out in full, which a legal
+    /// rustfmt wrap breaks: the guard then panics on a tree with no defect in it. Naming the
+    /// call and its arguments as separate tokens inside ONE statement is the same claim and
+    /// survives any wrapping.
     #[test]
     fn the_headless_config_notices_are_announced_at_both_mouths() {
         let source = include_str!("main.rs").replace('\r', "");
@@ -7240,19 +7278,30 @@ mod tests {
             .find("async fn prepare_headless(")
             .expect("the headless prelude is gone; this check needs updating");
         let body = production.get(start..).unwrap_or("");
+        // Split on `;` alone: a block's opening line stays joined to what follows it, which
+        // is what an ordering guard needs when one of its subjects is a call inside an `if`.
+        let stmts = collapsed_pieces(body, &[';']);
 
-        let load = body
-            .find("MagiConfig::load(&ws.config_path())")
-            .expect("the configuration must still be loaded here");
-        let screen = body
-            .find("emit_notices(cfg_screen)")
-            .expect("the screen half must be announced where the fallback still reaches a user");
-        let bring_up = body
-            .find("bring_up_headless_logging(h,")
-            .expect("the layer must still be brought up here");
-        let file = body
-            .find("trio_notices.extend(cfg_file)")
-            .expect("the file half must ride down to the emission after the layer");
+        let load = statement_at(
+            &stmts,
+            &["MagiConfig::load(", "ws.config_path()"],
+            "the configuration load",
+        );
+        let screen = statement_at(
+            &stmts,
+            &["emit_notices(", "cfg_screen"],
+            "the screen half, announced where the fallback still reaches a user",
+        );
+        let bring_up = statement_at(
+            &stmts,
+            &["bring_up_headless_logging(", "h,"],
+            "the logging bring-up",
+        );
+        let file = statement_at(
+            &stmts,
+            &["trio_notices.extend(", "cfg_file"],
+            "the file half riding down to the emission after the layer",
+        );
 
         assert!(
             load < screen && screen < bring_up,
@@ -7264,16 +7313,18 @@ mod tests {
             "the file half is announced before the layer exists, which is where every INFO \
              was being destroyed"
         );
-        let returns = body
+        let returns: Vec<&String> = stmts
             .get(load..screen)
-            .unwrap_or("")
-            .matches("return Err")
-            .count();
+            .unwrap_or(&[])
+            .iter()
+            .filter(|s| s.contains("return Err"))
+            .collect();
         assert_eq!(
-            returns, 1,
+            returns.len(),
+            1,
             "exactly one path may return before the screen half is announced -- the arm \
-             whose `magi.toml` did not parse, which has no notices to lose. Found {returns}, \
-             so some other early failure now shows nothing"
+             whose `magi.toml` did not parse, which has no notices to lose. Found \
+             {returns:?}, so some other early failure now shows nothing"
         );
     }
 
@@ -7304,33 +7355,44 @@ mod tests {
             .find("async fn prepare_headless(")
             .expect("the headless prelude is gone; this check needs updating");
         let body = production.get(start..).unwrap_or("");
+        // Statements, not raw text: a rustfmt wrap of the refusal's condition or of either
+        // call would otherwise take this guard red on a tree with no defect in it (MS2 gate
+        // S4 third pass, Balthasar).
+        let stmts = collapsed_pieces(body, &[';']);
 
         assert!(
-            body.contains("if workspace.is_none() && !h.no_memory"),
+            stmts
+                .iter()
+                .any(|s| s.contains("workspace.is_none()") && s.contains("!h.no_memory")),
             "without this refusal there is no workspace-less run to test, and the arm below \
              is unreachable"
         );
 
-        let skip = body
-            .find("None => Ok(())")
-            .expect("the workspace-less run must skip the bring-up rather than fail it");
-        let emit = body
-            .find("emit_notices(trio_notices)")
-            .expect("the notices must still be announced");
+        let skip = statement_at(
+            &stmts,
+            &["None =>", "Ok(())"],
+            "the workspace-less run's skip of the bring-up",
+        );
+        let emit = statement_at(
+            &stmts,
+            &["emit_notices(", "trio_notices"],
+            "the announcement of the notices",
+        );
         assert!(
             skip < emit,
             "the emission moved above the workspace match, so the list is announced before \
              it is complete"
         );
-        let escapes = body
+        let escapes: Vec<&String> = stmts
             .get(skip..emit)
-            .unwrap_or("")
-            .matches("return ")
-            .count();
-        assert_eq!(
-            escapes, 0,
+            .unwrap_or(&[])
+            .iter()
+            .filter(|s| s.contains("return "))
+            .collect();
+        assert!(
+            escapes.is_empty(),
             "a path returns between skipping the bring-up and announcing, so a \
-             workspace-less run can reach neither mouth and say nothing at all"
+             workspace-less run can reach neither mouth and say nothing at all: {escapes:?}"
         );
     }
 
@@ -8773,17 +8835,28 @@ mod tests {
              then hidden by EnterAlternateScreen for the whole session. Offending \
              line(s): {announced_here:?}"
         );
-        let call = source
-            .find("crate::tui::run_tui_ext(")
-            .expect("run() must hand off to the TUI");
-        let end = source[call..]
-            .find("\n    .await?;")
-            .map(|offset| call + offset)
-            .expect("the handoff must still end in an awaited result");
+        // **One STATEMENT carries both, rather than a byte range bounded by an indented
+        // `.await?;`** (MS2 gate S4 third pass, Balthasar). The old bound hard-coded four
+        // spaces of indentation, which is a property of where the call sits rather than of
+        // what it does: hoisting the handoff into a block, or rustfmt changing how it wraps,
+        // moved the closing needle and the guard panicked with nothing wrong. Splitting on
+        // `;` alone keeps the whole call in one piece however its arguments are laid out.
+        let handoff: Vec<String> = production
+            .split(';')
+            .map(|stmt| stmt.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|stmt| stmt.contains("crate::tui::run_tui_ext("))
+            .collect();
+        assert_eq!(
+            handoff.len(),
+            1,
+            "run() must hand off to the TUI exactly once, or this guard cannot say which \
+             call it read: {handoff:?}"
+        );
         assert!(
-            source[call..end].contains("startup_notices"),
+            handoff[0].contains(list),
             "run_tui_ext no longer receives the startup notices, so nothing announces them \
-             at all and the whole startup goes silent"
+             at all and the whole startup goes silent: {}",
+            handoff[0]
         );
     }
 
