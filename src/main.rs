@@ -5176,11 +5176,14 @@ impl AuditedOutcome {
 
         let mask = |s: &str| magi_rs::notices::audited_field_at(s, ENVELOPE_TARGET);
         let mask_record = |r: &ToolCallRecord| ToolCallRecord {
-            // The NAME too. Today every tool name is a `&'static str` this crate
-            // wrote, so the pass is the identity -- which is exactly why leaving
-            // it out cost nothing and bought nothing. A boundary with one field
-            // held by convention is the convention it was built to replace
-            // (MS2 gate, second integration pass, Caspar).
+            // **The NAME, and the mask there is LOAD-BEARING** -- an earlier
+            // version of this comment claimed every tool name is a `&'static
+            // str` this crate wrote, and that is false by the runner's own code
+            // (MS2 gate, third integration pass, Caspar). `on_tool_call` takes
+            // the name as a `&str`, and the defensive `Content::ToolUse` branch
+            // builds a record from the name the MODEL emitted. What spares a
+            // well-behaved run is the auditor's minimum-length floor, not the
+            // field's provenance.
             name: mask(&r.name),
             // The INPUT too: a tool is invoked with operator-composed
             // arguments, and `bash` takes a command line.
@@ -5210,8 +5213,13 @@ impl AuditedOutcome {
         out.model = mask(&out.model);
         out.provider = mask(&out.provider);
         // `error.message` is masked where it is composed too. Doing it here as
-        // well is the identity in every case and costs one pass over a short
-        // string; the alternative is a boundary that delegates one field to its
+        // well is the identity **under its premises** -- no registered value
+        // collides with the mask's own marker text, and the registered set does
+        // not change between the two passes -- and costs one pass over a short
+        // string. Stated as premises rather than as "always", because a
+        // universal that quietly acquires an exception is how a claim in this
+        // subsystem becomes false (MS2 gate, third integration pass, Caspar).
+        // The alternative is a boundary that delegates one field to its
         // composition site, which is the convention this type replaces.
         out.error = out.error.map(|e| magi_rs::headless::types::ErrorPayload {
             message: mask(&e.message),
@@ -5233,6 +5241,15 @@ impl AuditedOutcome {
 /// A JSON object built from foreign data can carry a secret in a KEY as easily as
 /// in a value -- a map of endpoint to status, for one -- and a mask that skipped
 /// keys would be a rule with an exception nobody wrote down.
+///
+/// # Consumer contract: an object's KEYS may be rewritten
+///
+/// A masked key changes the shape a consumer parses, so a program reading this
+/// envelope must not assume a key it did not itself choose survives verbatim
+/// (MS2 gate, third integration pass, Balthasar). In practice only the `consult`
+/// object has keys from anywhere but this crate, and only a key that collides
+/// with a registered secret is rewritten -- but the guarantee a consumer can rely
+/// on is the weaker one, so it is the one written down.
 ///
 /// # Parameters
 ///

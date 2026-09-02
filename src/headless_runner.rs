@@ -1323,15 +1323,17 @@ mod audit_route_guard {
         // stderr is a third spelling (MS2 gate S5, Caspar and Balthasar). A
         // needle SET, not a needle.
         let mouths = [
-            // **Four macro needles, not two.** `println!` contains `print`
-            // but NOT `print!` -- the character after `print` is `l` -- so the
-            // two are different needles and neither covers the other. Swapping
+            // **Five needles, and the first two are not redundant.**
+            // `println!` contains `print` but NOT `print!` -- the character
+            // after `print` is `l` -- so neither covers the other, and swapping
             // one for the other lost coverage of the exact macros this guard
-            // exists to catch, and both reviewers saw it (MS2 gate, second
-            // integration pass). `eprintln!`/`eprint!` come free as substrings
-            // of their unprefixed forms. `stdout()` is here because stdout is
-            // where the envelope goes; a guard watching only stderr watched the
-            // smaller mouth.
+            // exists to catch (MS2 gate, second integration pass, Caspar and
+            // Balthasar). `eprint!` and `eprintln!` come free, each as a
+            // substring of its unprefixed form. `stdout()` is here because
+            // stdout is where the envelope goes; a guard watching only stderr
+            // watched the smaller mouth. What it still cannot see is a mouth
+            // reached through a binding this file does not name -- rules 3 and
+            // 4 in `main.rs` hold those.
             concat!("print", "!"),
             concat!("print", "ln!"),
             concat!("dbg", "!"),
