@@ -4844,6 +4844,74 @@ mod tests {
         );
     }
 
+    /// Every response that ENDS a streamed turn, in the order production sends
+    /// them.
+    ///
+    /// `Text("")` is the ordinary close; `Error` and `Info` end a turn too, and
+    /// each one calls [`App::finalize_stream`] on its own line rather than
+    /// through a shared helper. A fixture that only sends the one anybody
+    /// thinks of first would leave the other two carrying the defect.
+    fn end_of_turn_markers() -> [(&'static str, AgentResponse); 3] {
+        [
+            ("Text", AgentResponse::Text(String::new())),
+            (
+                "Error",
+                AgentResponse::Error("the provider hung up".to_string()),
+            ),
+            ("Info", AgentResponse::Info("tool finished".to_string())),
+        ]
+    }
+
+    /// **The turn's LAST deltas were never audited, and the three tests above
+    /// could not see it** (MS2 gate S4 fourth pass, Caspar).
+    ///
+    /// `drain_responses` audits after the batch, and every end-of-turn arm
+    /// calls [`App::finalize_stream`], which clears `stream_target` and
+    /// `stream_raw`. Production never sends deltas without the marker that ends
+    /// the turn, and the agent's channel is drained in batches, so the two
+    /// arrive together: the deltas land unaudited in `messages`, the marker
+    /// throws away the state the one remaining pass needed, and that pass then
+    /// returns at its first line. Every turn's tail reached the
+    /// clipboard-copyable transcript in the clear.
+    ///
+    /// **The shape is the whole fixture.** The three tests above send deltas
+    /// and stop, which is a batch production never produces — a turn always
+    /// ends. They stayed green across the round that introduced this, which is
+    /// what a guardian that cannot fire looks like on a security property.
+    ///
+    /// Driven through [`drain_responses`] with everything queued BEFORE the
+    /// drain, so the deltas and the marker are in one drained batch exactly as
+    /// the event loop sees them.
+    #[test]
+    fn a_secret_in_the_turns_last_deltas_is_masked_when_the_turn_ends_in_the_same_batch() {
+        arm_the_delta_secret("TUI_FINAL_DELTA_PROBE");
+        for (name, marker) in end_of_turn_markers() {
+            let (mut app, responses) = app_on_a_live_channel();
+            for piece in DELTA_PIECES {
+                responses
+                    .try_send(AgentResponse::StreamDelta(piece.to_string()))
+                    .expect("the fixture's channel has room");
+            }
+            responses
+                .try_send(marker)
+                .expect("the fixture's channel has room");
+
+            drain_responses(&mut app);
+
+            let shown = app.messages.join("\n");
+            assert!(
+                shown.contains(magi_rs::logging::auditor::REDACTED),
+                "nothing was masked at all under the `{name}` marker, so the \
+                 transcript never saw the auditor: {shown}"
+            );
+            assert!(
+                !shown.contains(DELTA_SECRET),
+                "the turn's last deltas put a registered secret in the \
+                 clipboard-copyable transcript under the `{name}` marker: {shown}"
+            );
+        }
+    }
+
     /// **Nothing fallible may sit between the alternate screen going up and
     /// coming down** (MS2 gate S4 second pass).
     ///
