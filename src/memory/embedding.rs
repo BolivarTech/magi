@@ -435,10 +435,19 @@ const EMBEDDER_RECOVERY_CAUSE: &str = EMBEDDER_UNREACHABLE;
 ///
 /// # Returns
 ///
-/// The cause half of the key. The split is "did an answer arrive at all": a
-/// timeout and a refused connection are a reachability failure, while a 500, a
-/// rejected key, a throttle and an undecodable body are all an endpoint that
-/// answered badly.
+/// The cause half of the key. The split is "did an answer arrive at all", and
+/// it divides all **seven** `EmbeddingError` variants into **two** and **five**:
+///
+/// - reachability — `Timeout` and `Network`: nothing answered.
+/// - answered badly — `Http`, `Auth`, `RateLimited`, `Malformed` and `Dim`: an
+///   endpoint replied, and the reply was wrong.
+///
+/// **The counts are asserted, not asserted-by-prose.** This sentence named four
+/// on the second side while the arm below covered five, because `Dim` was added
+/// and the paragraph was not — the same drift that has produced a dozen false
+/// counts in this milestone. `every_error_variant_falls_on_one_side_of_the_
+/// reachability_split` counts both halves exactly, so a variant added, moved or
+/// dropped fails there as well as failing the exhaustive `match`.
 fn failure_cause(error: &EmbeddingError) -> &'static str {
     match error {
         EmbeddingError::Timeout | EmbeddingError::Network => EMBEDDER_UNREACHABLE,
