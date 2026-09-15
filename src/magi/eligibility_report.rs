@@ -111,7 +111,7 @@ pub fn render_pool_eligibility(
                     "model": model.as_str(),
                     // The causes need NO redaction: every `IneligibilityCause` variant is either
                     // a unit variant or carries only `u32`/`usize` payloads -- verified against
-                    // the pinned `magi-core = "=4.0.0"`, where not one of the eight holds a
+                    // the pinned `magi-core = "=4.1.0"`, where not one of the eight holds a
                     // `String`, `&str` or `Cow`. RE-VERIFY THIS AT EVERY PIN BUMP: a payload can
                     // gain a field in a minor release, and a new foreign-composed string would
                     // then reach the output unredacted with nothing here to fail.

@@ -6,13 +6,13 @@
 //!
 //! # The crate does the opposite, and this runs underneath it
 //!
-//! magi-core's `run_preflight` wraps `window()` **and** `digest()` in a **single**
-//! `tokio::time::timeout(DEFAULT_PREFLIGHT_TIMEOUT = 30 s)` and, on expiry, discards **both**
-//! (`rotation.rs:756`). That is the *shared deadline* error this project forbids: a slow digest
-//! throws away a window that was already measured. Since the preflight calls this implementation,
-//! the ceilings have to be applied **inside** it and must never delegate to the crate's. Without
-//! that, the defect returns through the back door and **invisibly** — the only symptom is a window
-//! that sometimes is not measured.
+//! As of 4.1.0, `run_preflight` measures `window()` and `digest()` concurrently under one
+//! shared deadline, with each probe keeping its own result independently; a candidate bearing a
+//! measured window and an expired digest remains eligible. Still, this implementation applies its
+//! own ceilings to each probe separately because `run_preflight` runs **per consult**, not once
+//! at startup — an uncapped miss would spend the 30 s of one deadline *inside* a run rather than
+//! at startup where its cost was budgeted (REQ-R12). The ceilings have to live here and bind
+//! the per-call cost before delegating to the crate's larger overall bound.
 //!
 //! It also bounds the second risk the crate's timing creates: `run_preflight` runs **per consult**,
 //! not once at startup, so an unbounded miss would spend the crate's 30 s *inside* a run rather
@@ -166,8 +166,9 @@ impl ProviderProbe for CachedProbe {
             return Ok(None);
         };
 
-        // TWO ceilings, sequential and independent. One `timeout` around both would let a slow
-        // digest discard a window that already resolved — `rotation.rs:756`'s defect.
+        // Two independent timeouts, one for each probe. The 4.1.0 crate already preserves each
+        // result independently under a shared deadline; this layer adds a per-call ceiling to
+        // bound the cost inside a consult (REQ-R12).
         let Some(window) = Self::measure(source.window()).await else {
             return Ok(None);
         };
@@ -220,10 +221,10 @@ mod tests {
 
     /// Our two independent ceilings must fit, **summed**, inside the crate's single outer one.
     ///
-    /// REQ-R12 has this probe apply its own ceiling to `window()` and to `digest()` separately,
-    /// so a slow digest cannot throw away a window that already resolved — the shared-deadline
-    /// defect `run_preflight` itself commits (`rotation.rs:756`, one `timeout` around both) and
-    /// that `SC-R54` pins from the inside.
+    /// REQ-R12 has this probe apply its own ceiling to each probe separately, binding the per-call
+    /// cost inside a consult. The 4.1.0 crate already holds each result independently under a
+    /// shared deadline; this adds the per-call tier (REQ-R12). `SC-R54` pins the correctness from
+    /// inside: a timeout on window does not discard a digest that resolved, and vice versa.
     ///
     /// **This pins it from the outside, which is the half that was open.** Our ceilings are
     /// sequential inside that outer 30 s, so the worst case we can spend is
