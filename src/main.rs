@@ -3269,7 +3269,16 @@ fn build_native_provider(
                 .ok_or(SeatError::MissingCredential {
                     var: "OPENAI_API_KEY",
                 })?;
-            // `with_dialect` (magi-core 4.1.0), `Dialect::MaxTokens` literal (G10).
+            // `with_dialect`, never the deprecated `with_timeout` (magi-core 4.1.0): the fourth
+            // parameter is `Dialect::MaxTokens` LITERAL, never `Dialect::default()` (G10) — even
+            // though the two agree today, a literal keeps this call's promise independent of the
+            // crate's default ever changing. It is the spelling every measured backend honours,
+            // including Ollama's `/v1`, which silently discards `max_completion_tokens` without
+            // an error (measured by the crate's own rustdoc); the resulting wire body is
+            // byte-identical to what 4.0.0 sent for the same inputs
+            // (`the_openai_compat_seat_sends_the_same_body_as_4_0_0`). `client_timeout` is the
+            // one already DERIVED by the caller — REQ-R30 applies to this seat exactly as it
+            // does to the Ollama one — never a constant of our own.
             Arc::new(
                 OpenAiCompatibleProvider::with_dialect(
                     base_url.as_str(),
