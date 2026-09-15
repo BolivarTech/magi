@@ -330,7 +330,7 @@ it is an object with these keys, **all always present**:
 | `degraded` | bool | fewer than 3 agents responded — consensus may be unreliable |
 | `mode` | string | the effective mode: `code-review` / `design` / `analysis` |
 | `mode_source` | string | how it was resolved: `explicit` / `configured` / `agent-chosen` / `inferred` / `default` (see [Mode routing](#mode-routing)) |
-| `extraction_failures` | object | per-seat list of `{model, attempt, cause}`; an empty object certifies every seat adhered to the verdict contract |
+| `extraction_failures` | object | per-seat list of `{model, attempt, cause}`; an empty object certifies every seat adhered to the verdict contract. The `cause` field uses the crate's own serialized names (`invalid-json`, `malformed-object`, `missing-markers`, `unterminated`, `ambiguous`); the set is open on magi-core's side — a value not listed here is a newer cause, spelled as the crate spells it |
 | `input_size` | object | `{estimated_tokens, warn_threshold, exceeded}` — always all three sub-keys, even when unmeasured |
 | `report_truncated` | string | `none` / `structural` / `anchored` / `bytes` — which guarantee survived truncation, never a bare boolean |
 | `endpoint_divergence` | bool | whether this run's content passed through the principal provider (mode classification) before reaching a trio on a different endpoint |
