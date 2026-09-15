@@ -1,16 +1,16 @@
 # Smoke Certificate
 
-- version: 0.18.1
-- commit: 7e5bbd6
-- date: 2026-09-02 (UTC)
+- version: 0.19.0
+- commit: 1996297
+- date: 2026-09-15 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 68b94676a488884b33ca0897ae592b39acdf258584e3225c25ad3ad97b86d713 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 645s
+- binary: sha256 8a75becdd1d79b81ffa8906c6d51c7555150d0e2efe2f3a961333b2897722db1 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 673s
 - rounds needed: 1
 - scope: 24 of 24 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: active memories not measured, 5263 KB database, 2037 KB archived
-- result: 73 passed, 0 not passed, 73 total
+- environment: active memories not measured, 6213 KB database, 2493 KB archived
+- result: 74 passed, 0 not passed, 74 total
 
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
 [PASS] S1 run=R1 - schema_version is 1
@@ -70,6 +70,7 @@
 [PASS] S18 run=R8 - without it, both are absent
 [PASS] S18 run=R4 - agents[] exposes exactly 7 keys
 [PASS] S18 run=R4 - findings[] exposes exactly 6 keys
+[PASS] S18 run=R4 - consensus exposes exactly 7 keys
 [PASS] S19 run=R5 - the consult tool result inside tool_calls[] contains no agents key
 [PASS] S19 run=R5 - it contains no consensus key
 [PASS] S20 run=R4 - the trio completed against the native wire
