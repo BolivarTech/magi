@@ -15155,13 +15155,18 @@ retry_disabled = {retry_disabled}
                         // field.
                         let reads = needles.iter().any(|needle| {
                             code.match_indices(needle).any(|(at, hit)| {
+                                let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+                                let before = code[..at].chars().next_back();
                                 let after = &code[at + hit.len()..];
-                                // magi-rs's OWN `OpenAiCompatibleProvider`
-                                // (`src/agent/provider.rs`) shares the name and is built ONLY as
-                                // `new(OpenAiSettings { .. })` — 18 sites, measured. magi-core's
-                                // takes a URL string first. Same needle, different reader:
-                                // qualify by the argument, not by path.
-                                !code[..at].ends_with('"') && !after.starts_with("OpenAiSettings")
+                                // A hit INSIDE a longer identifier (`no_majority_summary` in a test
+                                // name) is prose, not a reader: a field access, a destructuring or a
+                                // struct literal always starts the identifier at the needle. Only the BEFORE
+                                // side is checked because the constructor needles end in `(` and what
+                                // follows is the call's first argument, usually an identifier.
+                                let inside_ident = before.is_some_and(is_ident);
+                                before != Some('"')
+                                    && !inside_ident
+                                    && !after.starts_with("OpenAiSettings")
                             })
                         });
                         if reads {
