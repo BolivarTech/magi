@@ -688,6 +688,10 @@ def _under_cap_finding(run):
 def the_shape_varies_by_flag_never_by_data(run):
     """Compare the flagged envelope against the flagless one, and count keys.
 
+    The five assertions verify: flag presence, flag absence, agents[] keys (7
+    exact), findings[] keys (6 exact), and consensus keys (7 exact, with
+    ``dissent`` in place of the deprecated ``majority_summary``).
+
     Args:
         run: The two ``RunResult`` objects keyed by id.
 

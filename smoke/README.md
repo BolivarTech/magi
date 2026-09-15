@@ -197,7 +197,7 @@ assumes is the exact failure this harness exists to avoid.
 | S15 | `non_blank`, a blank variable is absent and never invalid |
 | S16 | rotating a third-party credential costs no local data |
 | S17 | REQ-EA01 and REQ-EA06, the structured flag exists only where it should |
-| S18 | REQ-EA03, the structured verdict envelope's exact shape |
+| S18 | REQ-EA03, the structured verdict envelope's exact shape: flag presence, flag absence, agents[] keys (7), findings[] keys (6), consensus keys (7 with `dissent`) |
 | S19 | REQ-EA02, the agent's consult cap |
 | S20 | the trio still completes after magi-core 4.0.0 moved it to `POST {base}/api/chat`, carrying the cap magi-rs declared |
 | S21 | REQ-V4-14, the shape every run emits: a `finish` this build knows on every attempt, and a rotation report whose hops name a known cause and its locality |
