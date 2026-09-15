@@ -2569,6 +2569,39 @@ mod tests {
         );
     }
 
+    /// G5 at the boundary CI reads: a `failed_agents` cause composed by magi-core — as of 4.1.0
+    /// it can carry an outside provider's own `External.message`, which the crate caps but does
+    /// not redact — leaves `consult.rs` with its credential blanked and its host intact.
+    /// A guardian of the existing `redact_foreign_text` call: it passes today. Mutation: replace
+    /// `redact_foreign_text(cause)` with `cause` in `failed_agents_json` and watch it go red.
+    #[test]
+    fn a_failed_seat_cause_with_a_credentialed_url_is_redacted_in_the_consult_json() {
+        let r = report_fixture(
+            json!([]),
+            json!({ "melchior": "external provider error (Network): upstream http://alice:s3cret@backend.example/v1 unreachable" }),
+            json!({}),
+            json!({ "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false }),
+            true,
+            "",
+        );
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+            StructuredVerdicts::Omit,
+        );
+        let text = v["failed_agents"]["melchior"].as_str().expect("a string");
+        assert!(
+            !text.contains("s3cret"),
+            "credential reached the consult JSON: {text}"
+        );
+        assert!(
+            text.contains("backend.example/v1"),
+            "redaction kept the host: {text}"
+        );
+    }
+
     /// SC-A11h: `report_truncated` names the LEVEL applied, never a boolean.
     #[test]
     fn report_truncated_names_the_level_applied() {

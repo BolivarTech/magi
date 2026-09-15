@@ -11389,6 +11389,138 @@ mod tests {
             (format!("http://{addr}"), handle)
         }
 
+        /// A backend that never answers: accepts every connection, reads the request, and holds
+        /// the socket open until the listener task is dropped. What ends each attempt is the
+        /// CLIENT timeout the seat was built with, so the class the seat returns is the one
+        /// production returns for a hang — `ProviderError::Timeout` (`to_provider_error`,
+        /// `is_timeout()`), which cannot be constructed from outside magi-core and does not need
+        /// to be. Binds `127.0.0.1:0`; returns `http://{addr}` and the counter of accepted
+        /// connections.
+        ///
+        /// Each accepted connection is handed to its OWN spawned task (read, then hang forever):
+        /// a client-side timeout drops the whole request future, including its socket, so the
+        /// next retry attempt opens a fresh connection — the accept loop must keep accepting
+        /// concurrently rather than blocking on the one it is holding open.
+        async fn hanging_listener() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+            use tokio::io::AsyncReadExt;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = Arc::clone(&connections);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 1024];
+                        let _ = socket.read(&mut buf).await;
+                        // Held open, unanswered, until the client gives up and the socket drops.
+                        std::future::pending::<()>().await;
+                    });
+                }
+            });
+            (format!("http://{addr}"), connections)
+        }
+
+        /// Like `recording_listener`, but returns the WHOLE request (headers + body), answering
+        /// 404. Reads until the request's own `content-length` is satisfied, so the body is
+        /// never cut.
+        async fn body_recording_listener() -> (String, tokio::task::JoinHandle<String>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let handle = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("the client must connect");
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = socket.read(&mut chunk).await.unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some(header_end) = text.find("\r\n\r\n") {
+                        let headers = text[..header_end].to_owned();
+                        let content_length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                if name.trim().eq_ignore_ascii_case("content-length") {
+                                    value.trim().parse::<usize>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        let body_so_far = buf.len().saturating_sub(header_end + 4);
+                        if body_so_far >= content_length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).into_owned();
+                let _ = socket
+                    .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+                text
+            });
+            (format!("http://{addr}"), handle)
+        }
+
+        /// Answers every request with `status` after `delay`, counting requests. Sequential
+        /// accept loop: a retry chain is several requests on ONE endpoint, so the counter is the
+        /// number of attempts. Binds `127.0.0.1:0`; returns (`http://{addr}`, counter). Every
+        /// accepted connection is counted, read, delayed `delay`, then answered
+        /// `HTTP/1.1 {status}` with `content-length: 0` AND `connection: close`, after which the
+        /// socket is dropped. The header is what makes connections == attempts: `reqwest` pools
+        /// keep-alive connections, and without it the second attempt would be written to the
+        /// socket this loop already stopped reading — one accepted connection for a four-request
+        /// chain, and a chain that dies at the 10 s client timeout as `Timeout` instead of
+        /// `Http`.
+        async fn status_listener(
+            status: u16,
+            delay: Duration,
+        ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = Arc::clone(&count);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut buf = vec![0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    let response = format!(
+                        "HTTP/1.1 {status} Status\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                }
+            });
+            (format!("http://{addr}"), count)
+        }
+
         /// SC-R48: the client timeout a seat is built with is the one it HONOURS — never the
         /// crate's 300 s default.
         ///
@@ -11432,6 +11564,165 @@ mod tests {
             assert!(
                 ended.is_err(),
                 "a server that never answers must surface as an error, not a completion"
+            );
+        }
+
+        /// SC-R48 for the OpenAI-compatible seat, re-asserted across the constructor change
+        /// (`with_timeout` → `with_dialect`, magi-core 4.1.0): the DERIVED client timeout is the
+        /// one the seat honours, never `DEFAULT_CLIENT_TIMEOUT` (300 s). Observed through
+        /// behaviour — a socket that never answers — because neither `reqwest::Client` nor the
+        /// provider exposes its timeout. The 30 s deadline is "not the crate's 300 s", not
+        /// "under 400 ms" (R-R05).
+        #[tokio::test]
+        async fn the_openai_compat_seat_honours_the_client_timeout_it_was_given() {
+            let (base, _guard) = silent_listener().await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::OpenAiCompat,
+                &endpoint_at(&base),
+                "any-model",
+                Some(&creds()),
+                Duration::from_millis(400),
+                &mut notices,
+            )
+            .expect("openai-compat builds with a credential");
+
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(30),
+                provider.complete("s", "u", &CompletionConfig::default()),
+            )
+            .await;
+            let ended = outcome.expect(
+                "the request must end by the client timeout the seat was BUILT with; \
+                 hitting this deadline means the 300 s crate default reached the seat",
+            );
+            assert!(ended.is_err());
+        }
+
+        /// The request BODY the openai-compat seat sent under magi-core 4.0.0 for the inputs of
+        /// the test below, captured from a run with the pin at `=4.0.0` and pasted here verbatim
+        /// — never written by hand, because a hand-written baseline is what one BELIEVES the
+        /// wire to be (the crate's own rule for `BODY_AS_OF_4_0_0`). Capture: run the test once
+        /// with this constant empty; the assertion prints the body; paste; run again. The
+        /// crate's baseline is taken with its default construction; this one is taken with
+        /// `build_native_provider`'s, which is what magi-rs ships.
+        const OPENAI_COMPAT_BODY_AS_OF_4_0_0: &str = "{\"model\":\"any-model\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"max_tokens\":16384,\"temperature\":0.0}";
+
+        /// SC-V41-06: with `Dialect::MaxTokens` the request body is BYTE-IDENTICAL to what 4.0.0
+        /// sent for the same inputs — which entails `max_tokens` present and
+        /// `max_completion_tokens` absent, the spelling Ollama's `/v1` honours.
+        /// `recording_listener` records the request's first line only, so this test has its own
+        /// listener that keeps the whole request.
+        #[tokio::test]
+        async fn the_openai_compat_seat_sends_the_same_body_as_4_0_0() {
+            let (base, body) = body_recording_listener().await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::OpenAiCompat,
+                &endpoint_at(&base),
+                "any-model",
+                Some(&creds()),
+                Duration::from_secs(10),
+                &mut notices,
+            )
+            .expect("openai-compat builds with a credential");
+            let _ = provider
+                .complete("s", "u", &CompletionConfig::default())
+                .await;
+            let request = body.await.expect("the listener task must finish");
+            let (_, wire_body) = request
+                .split_once("\r\n\r\n")
+                .expect("an HTTP request has a body");
+            assert_eq!(
+                wire_body, OPENAI_COMPAT_BODY_AS_OF_4_0_0,
+                "byte-identical to 4.0.0"
+            );
+            assert!(
+                wire_body.contains("\"max_tokens\""),
+                "no max_tokens on the wire: {wire_body}"
+            );
+            assert!(
+                !wire_body.contains("max_completion_tokens"),
+                "the other spelling reached the wire: {wire_body}"
+            );
+        }
+
+        /// SC-V41-08 (a): `529` is transient as of magi-core 4.1.0 — a sustained one costs a
+        /// seat up to `max_retries + 1` requests, and NOT more. Under 4.0.0 it cost exactly one
+        /// (measured: `TRANSIENT_STATUSES` has no `529` at `provider.rs:1549`), which is this
+        /// test's Red. RED form: `with_timeout`; Paso 8 migrates the seat to `with_dialect`
+        /// (seventh reader).
+        #[tokio::test]
+        async fn a_sustained_529_is_retried_up_to_max_retries_plus_one() {
+            let (base, count) = status_listener(529, Duration::ZERO).await;
+            let seat: Arc<dyn LlmProvider> = Arc::new(
+                OpenAiCompatibleProvider::with_timeout(
+                    base,
+                    "m",
+                    Some("k".into()),
+                    Duration::from_secs(10),
+                )
+                .expect("builds"),
+            );
+            let mut retry = RetryConfig::default();
+            retry.base_delay = Duration::ZERO;
+            retry.operation_budget = Duration::from_secs(30);
+            let provider = RetryProvider::with_config(seat, retry.clone());
+            let err = provider
+                .complete("s", "u", &CompletionConfig::default())
+                .await
+                .expect_err("529");
+            assert!(
+                matches!(err, ProviderError::Http { .. }),
+                "retries exhausted return the original: {err}"
+            );
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::SeqCst),
+                (retry.max_retries + 1) as usize,
+                "one call plus max_retries retries, exactly"
+            );
+        }
+
+        /// SC-V41-08 (b): what bounds the chain above `max_retries` is `operation_budget`, which
+        /// magi-rs DERIVES from the ceiling. Red under 4.0.0: the single attempt returns `Http`,
+        /// never `RetryAbandoned`. RED form: `with_timeout`; Paso 8 migrates it (eighth reader).
+        /// Slow 529s (10 ms each) exhaust a 200 ms budget long
+        /// before `max_retries = 50` would, and the exit is the typed abandonment — not the
+        /// original `Http`, and not the outer ceiling. The bounds are deliberately loose: the
+        /// discriminating property is "far fewer than 51 requests", and a lower bound of 2 fails
+        /// only if ONE attempt stalls for the whole budget — ten times the headroom a 25 ms/60 ms
+        /// pairing would leave under a loaded runner. Same arithmetic at scale: 4 × client_timeout
+        /// > 0.6 × ceiling for every admissible ceiling (already pinned in `magi/mod.rs`), so the
+        /// budget always wins first.
+        #[tokio::test]
+        async fn the_derived_budget_cuts_a_529_chain_before_max_retries() {
+            let (base, count) = status_listener(529, Duration::from_millis(10)).await;
+            let seat: Arc<dyn LlmProvider> = Arc::new(
+                OpenAiCompatibleProvider::with_timeout(
+                    base,
+                    "m",
+                    Some("k".into()),
+                    Duration::from_secs(10),
+                )
+                .expect("builds"),
+            );
+            let mut retry = RetryConfig::default();
+            retry.base_delay = Duration::ZERO;
+            retry.operation_budget = Duration::from_millis(200);
+            retry.max_retries = 50;
+            let provider = RetryProvider::with_config(seat, retry);
+            let err = provider
+                .complete("s", "u", &CompletionConfig::default())
+                .await
+                .expect_err("529");
+            assert!(
+                matches!(err, ProviderError::RetryAbandoned { .. }),
+                "budget exhaustion is typed: {err}"
+            );
+            let n = count.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                (2..=25).contains(&n),
+                "the budget, not max_retries (50), ended the chain: {n} requests"
             );
         }
 
@@ -14129,32 +14420,86 @@ retry_disabled = {retry_disabled}
             }
         }
 
-        /// SC-A05: a provider that never produces a verdict gives up with a TYPED reason, and
-        /// does so well BEFORE exhausting the per-mage ceiling — a blunt cut from the external
-        /// ceiling does not distinguish "hung" from "slow". It uses a small `operation_budget`
-        /// instead of the one derived from `AGENT_TIMEOUT_SECS` (90 s): the property under test
-        /// is the SHAPE of the abandonment (early, typed), not the exact value of the derived
-        /// budget — that is already tested by
-        /// `derived_scale_satisfies_invariant_across_the_whole_admissible_range` in
-        /// `magi/mod.rs`, exhaustively, without spending real wall-clock seconds. A high
-        /// `max_retries` (50) is what makes the signal unambiguous: if the budget were NOT
-        /// capping the abandonment, exhausting 50 retries at 20 ms each would take ~1 s — far
-        /// above the margin this test tolerates.
+        /// SC-A05 / SC-V41-02 (corrected — see the plan's deviation 3, dated): a provider that
+        /// never answers gives up TYPED, and does so well BEFORE the per-mage ceiling. The type
+        /// is the ORIGINAL `ProviderError::Timeout`, unwrapped, NOT `RetryAbandoned`.
         ///
-        /// **Honest note (fix round 2, I2)**: as with SC-A03, this test builds its
-        /// OWN `RetryProvider` over a double — there is no way to inject a double inside
-        /// `build_magi_orchestrator` (it always builds real HTTP providers). The DYNAMIC
-        /// behavior of the abandonment is tested here, against a `RetryConfig` with the SAME
-        /// shape the real function derives; that the real function actually applies that shape
-        /// (wraps each seat) is tested by
-        /// `build_magi_orchestrator_wires_three_distinct_seats_each_wrapped_in_retry`, above.
+        /// `Timeout` is a **limited class**: `RetryConfig::default()` puts it in
+        /// `limited_retry_classes` with `limited_max_retries = 1` (`provider.rs:1232`, identical
+        /// in 4.0.0 and 4.1.0), so a hang costs exactly TWO attempts and the retry loop exits
+        /// through that cap — not through `operation_budget` — returning the class production
+        /// emits for a hang, unwrapped. **Production does not override either field**
+        /// (`build_magi_orchestrator` only sets `operation_budget`/`retry_after_cap`), so this is
+        /// what a real hang against the real seat actually does, not a corner the test invented.
+        ///
+        /// The `operation_budget` ⇒ `RetryAbandoned` path is real, but it belongs to
+        /// NON-limited classes — pinned separately by
+        /// `the_derived_budget_cuts_a_529_chain_before_max_retries` (Paso 4b (b), `Http`/`529`).
+        /// Folding both guarantees into one class would have hidden exactly the gap this test
+        /// used to get wrong: a `Timeout` double proves nothing about a class production never
+        /// returns for a hang.
+        ///
+        /// `retry.operation_budget = 60 ms`, `base_delay = ZERO` and `max_retries = 50` are kept
+        /// even though neither ends this loop — they document by their own irrelevance that a
+        /// hang is bounded by the class cap alone, not by either of them: raising `max_retries`
+        /// or shrinking `operation_budget` cannot make this chain run longer than two attempts.
+        /// This is REQ-A04's "typed and before the ceiling" guarantee for the class that matters
+        /// most in practice, restated for the real cap rather than the budget.
         #[tokio::test]
         async fn a_hanging_provider_abandons_before_the_ceiling() {
+            let (base, connections) = hanging_listener().await;
+            // RED form (pin `=4.0.0`, where `with_dialect` does not exist). Paso 8 (Green)
+            // migrates this call to `with_dialect(base, "m", Some("k".into()),
+            // Dialect::MaxTokens, 20 ms)` together with the other deprecated sites — it is the
+            // sixth reader the source test lists.
+            let seat: Arc<dyn LlmProvider> = Arc::new(
+                OpenAiCompatibleProvider::with_timeout(
+                    base,
+                    "m",
+                    Some("k".into()),
+                    Duration::from_millis(20),
+                )
+                .expect("builds"),
+            );
+            let mut retry = RetryConfig::default();
+            retry.operation_budget = Duration::from_millis(60);
+            retry.base_delay = Duration::ZERO;
+            retry.max_retries = 50;
+            let provider = RetryProvider::with_config(seat, retry);
+
+            let started = Instant::now();
+            let err = provider
+                .complete("s", "u", &CompletionConfig::default())
+                .await
+                .expect_err("must abandon");
+            let elapsed = started.elapsed();
+
+            assert!(
+                matches!(err, ProviderError::Timeout { .. }),
+                "a hang ends TYPED, as the original class: {err}"
+            );
+            assert_eq!(
+                connections.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "limited_max_retries + 1 attempts, exactly"
+            );
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "well before the ceiling: {elapsed:?}"
+            );
+        }
+
+        /// SC-V41-03 (retry level): the symmetry 4.1.0 introduced. A mage-local failure that
+        /// exhausts `operation_budget` comes back AS ITSELF — the consumer sees the original
+        /// `External`, not `RetryAbandoned` — so the failure condemns one seat, never the
+        /// lineage. Same budget, same sleep, same `max_retries` as the guardian above: the only
+        /// variable is the error class, which is exactly what the two tests are meant to
+        /// separate.
+        #[tokio::test]
+        async fn an_external_failure_that_exhausts_the_budget_exits_as_itself() {
             let inner = Arc::new(AlwaysFailingProvider {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             });
-            // `RetryConfig` is `#[non_exhaustive]`: build from `default()` and adjust
-            // per field, same as `build_magi_orchestrator` itself.
             let mut retry = RetryConfig::default();
             retry.operation_budget = Duration::from_millis(60);
             retry.base_delay = Duration::ZERO;
@@ -14165,18 +14510,108 @@ retry_disabled = {retry_disabled}
             let err = provider
                 .complete("s", "u", &CompletionConfig::default())
                 .await
-                .expect_err("must abandon");
-            let elapsed = started.elapsed();
+                .expect_err("must give up");
+            assert!(
+                matches!(err, ProviderError::External { .. }),
+                "a mage-local class exits WITHOUT wrapping: {err}"
+            );
+            assert!(started.elapsed() < Duration::from_millis(500));
+        }
 
-            assert!(
-                matches!(err, ProviderError::RetryAbandoned { .. }),
-                "the abandonment must name its cause (RetryAbandoned), not be a silent \
-                 cutoff: {err}"
+        /// Fails every call with an `External` whose message embeds a credentialed URL, the way
+        /// a third-party backend's own error text can. Slow enough that a 60 ms budget is what
+        /// ends it.
+        struct CredentialLeakingExternalProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for CredentialLeakingExternalProvider {
+            /// Sleeps 20 ms, then fails with
+            /// `ProviderError::external("upstream http://alice:s3cret@backend.example/v1
+            /// unreachable", ExternalErrorKind::Network)` — the literal the assertions below
+            /// look for, blanked.
+            async fn complete(
+                &self,
+                _s: &str,
+                _u: &str,
+                _c: &CompletionConfig,
+            ) -> Result<magi_core::provider::Completion, ProviderError> {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Err(ProviderError::external(
+                    "upstream http://alice:s3cret@backend.example/v1 unreachable",
+                    ExternalErrorKind::Network,
+                ))
+            }
+            fn name(&self) -> &str {
+                "leaky-external"
+            }
+            fn model(&self) -> &str {
+                "leaky-external"
+            }
+        }
+
+        /// SC-V41-03 (trio level) + G5: the message an outside provider wrote now REACHES the
+        /// report (4.1.0 stopped discarding it with the `RetryAbandoned` wrapper), and it
+        /// reaches it REDACTED. The other two seats answer, so the run completes with one failed
+        /// seat — under 4.0.0 the same double condemned the lineage and the message never
+        /// arrived.
+        #[tokio::test]
+        async fn an_external_seat_failure_condemns_one_seat_and_its_message_is_redacted() {
+            let ok = Arc::new(
+                magi_core::test_support::RoutingMockProvider::new()
+                    .with_agent_responses(
+                        AgentName::Balthasar,
+                        vec![Ok(verdict_for(AgentName::Balthasar))],
+                    )
+                    .with_agent_responses(
+                        AgentName::Caspar,
+                        vec![Ok(verdict_for(AgentName::Caspar))],
+                    ),
             );
-            assert!(
-                elapsed < Duration::from_millis(500),
-                "abandoned well before what 50 real retries would take: {elapsed:?}"
+            let mut retry = RetryConfig::default();
+            retry.operation_budget = Duration::from_millis(60);
+            retry.base_delay = Duration::ZERO;
+            retry.max_retries = 50;
+            let wrap = |p: Arc<dyn LlmProvider>| {
+                Arc::new(RetryProvider::with_config(p, retry.clone())) as Arc<dyn LlmProvider>
+            };
+            let leaky: Arc<dyn LlmProvider> = Arc::new(CredentialLeakingExternalProvider);
+            let magi = MagiBuilder::new(wrap(ok.clone() as Arc<dyn LlmProvider>))
+                .with_provider(AgentName::Melchior, wrap(leaky))
+                .with_provider(
+                    AgentName::Balthasar,
+                    wrap(ok.clone() as Arc<dyn LlmProvider>),
+                )
+                .with_provider(AgentName::Caspar, wrap(ok.clone() as Arc<dyn LlmProvider>))
+                .build()
+                .expect("test trio should build");
+
+            let report = magi
+                .analyze(&Mode::Analysis, &content_above_gate())
+                .await
+                .expect("two seats answered: the run completes, it is not InsufficientAgents");
+
+            assert_eq!(report.agents.len(), 2, "one seat failed, two answered");
+            assert_eq!(
+                report.failed_agents.len(),
+                1,
+                "exactly the External seat is condemned"
             );
+            let cause = report
+                .failed_agents
+                .get(&AgentName::Melchior)
+                .expect("the failed seat is named");
+            assert!(
+                cause.contains("backend.example/v1"),
+                "the External message itself must arrive, not a wrapper's summary: {cause}"
+            );
+            // SC-V41-03's rotation clause ("the lineage is not condemned run-wide") is DECIDED,
+            // not omitted: with no pool declared, the only observable of a run-wide condemnation
+            // is the run itself — it has nowhere to rotate and ends as `InsufficientAgents` — so
+            // the `Ok`, the two verdicts and the single `failed_agents` entry above ARE the
+            // assertion, and each goes red under 4.0.0. An assertion on `report.rotations` would
+            // be vacuous (empty chains in both worlds); `render_rotations`' one foreign string
+            // has its own guardian in `rotation_report.rs`. A pool-backed variant (a hop with
+            // `mage_local: true`) is a valid future test, not this one's gap: it measures
+            // rotation, which this scenario does not do.
         }
 
         /// `resolve_endpoints`: the two fields it fails closed on (`root`, `magi`) are
@@ -14549,6 +14984,101 @@ retry_disabled = {retry_disabled}
             assert_eq!(overrides.melchior, None);
             assert_eq!(overrides.balthasar, None);
             assert_eq!(overrides.caspar, None);
+        }
+    }
+
+    /// SC-V41-01: whether the deprecated magi-core 4.1.0 surface has any reader left in the
+    /// tree.
+    mod deprecated_surface {
+        use super::*;
+
+        /// Every `*.rs` under `dir`, recursively, in path order. Panics on an unreadable
+        /// directory: a guardian that silently scans nothing is the failure mode this project
+        /// keeps recording.
+        fn rust_files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let mut out = Vec::new();
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("unreadable test directory {}: {e}", dir.display()));
+            let mut entries: Vec<_> = entries
+                .map(|e| e.expect("readable directory entry").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    out.extend(rust_files_under(&path));
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+            out
+        }
+
+        /// SC-V41-01: the objective of the migration, made checkable. The deprecated names may
+        /// survive only in prose that explains why they are not used; a line of code that
+        /// spells one is a reader the next major will break. Read from the tree, not from
+        /// `include_str!`, because the property spans every file under `src/` and `tests/`. The
+        /// guard is lexical: a non-canonical spelling
+        /// (`use …::OpenAiCompatibleProvider as P; P::new(`) evades every needle. Accepted — the
+        /// compiler's deprecation warning under `-D warnings` is the other half of the guard,
+        /// and it is not lexical.
+        #[test]
+        fn no_line_of_code_spells_a_symbol_magi_core_4_1_deprecates() {
+            let needles = [
+                "OpenAiCompatibleProvider::new(",
+                "OpenAiCompatibleProvider::with_timeout(",
+                "majority_summary",
+                "allow(deprecated)",
+                "expect(deprecated)",
+            ];
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let mut offenders = Vec::new();
+            for dir in ["src", "tests"] {
+                for path in rust_files_under(&root.join(dir)) {
+                    let text = std::fs::read_to_string(&path)
+                        .expect("readable")
+                        .replace('\r', "");
+                    for (n, line) in text.lines().enumerate() {
+                        let code = line.trim_start();
+                        if code.starts_with("/*") || code.starts_with('*') {
+                            continue; // block-comment prose (none in the tree today; measured)
+                        }
+                        // Everything from the first `//` on is a comment — a whole-line `///`,
+                        // `//!` or `//`, or a trailing one after code — and prose may name the
+                        // symbols.
+                        let code = code.split("//").next().unwrap_or("");
+                        // Whitespace-insensitive: `allow( deprecated )` and `Provider :: new (`
+                        // are the same reader as their canonical spellings.
+                        let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+                        // A match immediately preceded by `"` is a string literal — a JSON key
+                        // in a fixture, which serde requires — never a reader of the deprecated
+                        // field.
+                        let reads = needles.iter().any(|needle| {
+                            code.match_indices(needle).any(|(at, hit)| {
+                                let after = &code[at + hit.len()..];
+                                // magi-rs's OWN `OpenAiCompatibleProvider`
+                                // (`src/agent/provider.rs`) shares the name and is built ONLY as
+                                // `new(OpenAiSettings { .. })` — 18 sites, measured. magi-core's
+                                // takes a URL string first. Same needle, different reader:
+                                // qualify by the argument, not by path.
+                                !code[..at].ends_with('"') && !after.starts_with("OpenAiSettings")
+                            })
+                        });
+                        if reads {
+                            offenders.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                n + 1,
+                                line.trim()
+                            ));
+                        }
+                    }
+                }
+            }
+            assert!(
+                offenders.is_empty(),
+                "deprecated surface still read in code:\n{}",
+                offenders.join("\n")
+            );
         }
     }
 
