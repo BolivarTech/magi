@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [Unreleased]
+
+### Changed
+
+- **`consensus.majority_summary` is removed from the headless JSON output.** magi-core 4.1.0
+  deprecated this field and replaced it with `consensus.dissent`, which carries the agents whose
+  effective verdict differs from the emitted one, each with their own `summary` and `reasoning`
+  strings. The seven-key contract for `consensus` is now: `consensus`, `consensus_verdict`,
+  `confidence`, `score`, `agent_count`, `votes`, `dissent`.
+
 ## [0.18.1] - 2026-09-02
 
 ### Changed

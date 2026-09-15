@@ -13539,6 +13539,22 @@ mod tests {
             )
         }
 
+        /// Same envelope as `verdict_for` (markers included, `findings: []`, `recommendation: "go"`),
+        /// with the verdict word, summary and reasoning chosen by the caller.
+        fn verdict_with(agent: AgentName, verdict: &str, summary: &str, reasoning: &str) -> String {
+            let name = serde_json::to_value(agent)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "melchior".to_string());
+            format!(
+                "{}\n{{\"agent\":\"{name}\",\"verdict\":\"{verdict}\",\"confidence\":0.9,\
+                 \"summary\":\"{summary}\",\"reasoning\":\"{reasoning}\",\"recommendation\":\"go\",\
+                 \"findings\":[]}}\n{}",
+                magi_core::verdict_markers::VERDICT_OPEN,
+                magi_core::verdict_markers::VERDICT_CLOSE,
+            )
+        }
+
         /// Test provider that records the system/user prompt it receives. Each seat of the trio
         /// gets its OWN instance (not shared): magi-core routes by assignment
         /// (`MagiBuilder::with_provider`), not by task identity, so reading
@@ -14994,6 +15010,81 @@ retry_disabled = {retry_disabled}
             assert_eq!(overrides.melchior, None);
             assert_eq!(overrides.balthasar, None);
             assert_eq!(overrides.caspar, None);
+        }
+
+        /// The assumption behind `dissent[]` sharing `agents_json`'s treatment, pinned on a REAL
+        /// run: 4.1.0 builds `Dissent` from the agents' own outputs, so its `summary`/`reasoning`
+        /// are byte-equal to the same seat's entry in `agents[]`. A crate that synthesized dissent
+        /// text turns this red, and the exemption from `redact_foreign_text` has to be revisited
+        /// with it. Guardian (G9): passes under 4.0.0 too — a lone reject dissents from a 2–1
+        /// approve under either definition. Mutation: make Caspar approve as well ⇒ `dissent` is
+        /// empty ⇒ red.
+        #[tokio::test]
+        async fn dissent_carries_the_dissenting_seat_own_strings_from_a_real_run() {
+            let routed = Arc::new(
+                magi_core::test_support::RoutingMockProvider::new()
+                    .with_agent_responses(
+                        AgentName::Melchior,
+                        vec![Ok(verdict_with(
+                            AgentName::Melchior,
+                            "approve",
+                            "s-mel",
+                            "r-mel",
+                        ))],
+                    )
+                    .with_agent_responses(
+                        AgentName::Balthasar,
+                        vec![Ok(verdict_with(
+                            AgentName::Balthasar,
+                            "approve",
+                            "s-bal",
+                            "r-bal",
+                        ))],
+                    )
+                    .with_agent_responses(
+                        AgentName::Caspar,
+                        vec![Ok(verdict_with(
+                            AgentName::Caspar,
+                            "reject",
+                            "s-cas",
+                            "r-cas",
+                        ))],
+                    ),
+            );
+            let p = routed as Arc<dyn LlmProvider>;
+            let magi = MagiBuilder::new(p.clone())
+                .with_provider(AgentName::Melchior, p.clone())
+                .with_provider(AgentName::Balthasar, p.clone())
+                .with_provider(AgentName::Caspar, p)
+                .build()
+                .expect("test trio should build");
+
+            let report = magi
+                .analyze(&Mode::Analysis, &content_above_gate())
+                .await
+                .expect("three verdicts");
+
+            let d = &report.consensus.dissent;
+            assert_eq!(
+                d.len(),
+                1,
+                "exactly one seat differs from the emitted approve"
+            );
+            assert_eq!(d[0].agent, AgentName::Caspar);
+            let caspar = report
+                .agents
+                .iter()
+                .find(|a| a.agent == AgentName::Caspar)
+                .expect("caspar answered");
+            assert_eq!(
+                d[0].summary, caspar.summary,
+                "dissent carries the seat's own summary"
+            );
+            assert_eq!(
+                d[0].reasoning, caspar.reasoning,
+                "dissent carries the seat's own reasoning"
+            );
+            assert_eq!(d[0].summary, "s-cas");
         }
     }
 

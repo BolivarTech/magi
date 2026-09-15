@@ -954,6 +954,19 @@ fn findings_json(findings: &[magi_core::schema::Finding]) -> Value {
 /// It does not replace a downstream consensus engine: the two are independently written weight and
 /// confidence formulas that need not agree, and a divergence between them is a quality signal
 /// nobody could see if only one of them travelled.
+///
+/// Exposes exactly seven keys: `consensus`, `consensus_verdict`, `confidence`, `score`,
+/// `agent_count`, `votes`, and `dissent`.
+///
+/// `majority_summary` — deprecated in 4.1.0 with no non-deprecated replacement — is NOT exposed.
+/// Its role is filled by `dissent`, which carries the agents whose effective verdict differs from
+/// the emitted one, each with their own `summary` and `reasoning` strings. The exemption of
+/// `dissent[]` from `redact_foreign_text` rests on an assumption: 4.1.0's `Dissent` struct is built
+/// from the agents' own outputs, so its `summary`/`reasoning` are byte-equal to the same seat's
+/// entry in `agents[]`. Both paths sanitize through the reply arms (`tui/mod.rs`) where
+/// `sanitize_text` applies to the entire reply text. If a future version of magi-core synthesizes
+/// dissent text rather than forwarding the agents' own strings, this exemption must be revisited
+/// with a `redact_foreign_text` call.
 fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
     // Map dissent field-by-field rather than with to_value: Dissent is #[non_exhaustive],
     // so a field added in a future minor release would reach the JSON public object with no
