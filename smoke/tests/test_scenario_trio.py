@@ -74,7 +74,7 @@ _ENVELOPE = {
                for seat in ("melchior", "balthasar", "caspar")],
     "consensus": {"consensus": "GO (3-0)", "consensus_verdict": "approve",
                   "confidence": 0.9, "score": 1.0, "agent_count": 3,
-                  "votes": {"approve": 3}, "majority_summary": "m"},
+                  "votes": {"approve": 3}, "dissent": []},
 }
 
 
@@ -567,6 +567,36 @@ class S18Tests(unittest.TestCase):
         outcomes = _outcomes("S18", {"R4": _result()})
         self.assertEqual(list(trio.S18_ASSERTIONS), list(outcomes))
         self.assertEqual(Outcome.CANNOT_TEST, outcomes[trio.S18_ASSERTIONS[1]])
+
+    def test_s18_declares_five_assertions(self) -> None:
+        """The fifth assertion exists: the consensus object is counted exactly,
+        the same way agents[] and findings[] are -- a key too many is as much a
+        defect as one too few, and 4.1.0 swapped one key for another."""
+        self.assertEqual(5, len(trio.S18_ASSERTIONS))
+
+    def test_the_declared_consensus_shape_passes_the_fifth(self) -> None:
+        outcomes = _outcomes("S18", self._pair(r4=_document(copy.deepcopy(_ENVELOPE))))
+        self.assertEqual(Outcome.PASS, outcomes[trio.S18_ASSERTIONS[4]])
+
+    def test_an_eighth_consensus_key_fails_the_fifth(self) -> None:
+        """``majority_summary`` is the key 4.1.0 deprecated; its reappearance is
+        the regression this assertion exists to catch."""
+        envelope = copy.deepcopy(_ENVELOPE)
+        envelope["consensus"]["majority_summary"] = "m"
+        outcomes = _outcomes("S18", self._pair(r4=_document(envelope)))
+        self.assertEqual(Outcome.FAIL, outcomes[trio.S18_ASSERTIONS[4]])
+
+    def test_a_missing_dissent_key_fails_the_fifth(self) -> None:
+        envelope = copy.deepcopy(_ENVELOPE)
+        del envelope["consensus"]["dissent"]
+        outcomes = _outcomes("S18", self._pair(r4=_document(envelope)))
+        self.assertEqual(Outcome.FAIL, outcomes[trio.S18_ASSERTIONS[4]])
+
+    def test_no_consensus_object_cannot_test_the_fifth(self) -> None:
+        envelope = copy.deepcopy(_ENVELOPE)
+        del envelope["consensus"]
+        outcomes = _outcomes("S18", self._pair(r4=_document(envelope)))
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[trio.S18_ASSERTIONS[4]])
 
 
 class _payload:
