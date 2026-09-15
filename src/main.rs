@@ -50,7 +50,7 @@ use magi_core::provider::{
 };
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
-use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
+use magi_core::providers::openai_compat::{Dialect, OpenAiCompatibleProvider};
 use magi_core::rotation::{FallbackPool, Lineage as CoreLineage, ProviderProbe};
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
@@ -3269,11 +3269,13 @@ fn build_native_provider(
                 .ok_or(SeatError::MissingCredential {
                     var: "OPENAI_API_KEY",
                 })?;
+            // `with_dialect` (magi-core 4.1.0), `Dialect::MaxTokens` literal (G10).
             Arc::new(
-                OpenAiCompatibleProvider::with_timeout(
+                OpenAiCompatibleProvider::with_dialect(
                     base_url.as_str(),
                     model,
                     Some(key),
+                    Dialect::MaxTokens,
                     client_timeout,
                 )
                 .map_err(to_seat)?,
@@ -11656,10 +11658,11 @@ mod tests {
         async fn a_sustained_529_is_retried_up_to_max_retries_plus_one() {
             let (base, count) = status_listener(529, Duration::ZERO).await;
             let seat: Arc<dyn LlmProvider> = Arc::new(
-                OpenAiCompatibleProvider::with_timeout(
+                OpenAiCompatibleProvider::with_dialect(
                     base,
                     "m",
                     Some("k".into()),
+                    Dialect::MaxTokens,
                     Duration::from_secs(10),
                 )
                 .expect("builds"),
@@ -11698,10 +11701,11 @@ mod tests {
         async fn the_derived_budget_cuts_a_529_chain_before_max_retries() {
             let (base, count) = status_listener(529, Duration::from_millis(10)).await;
             let seat: Arc<dyn LlmProvider> = Arc::new(
-                OpenAiCompatibleProvider::with_timeout(
+                OpenAiCompatibleProvider::with_dialect(
                     base,
                     "m",
                     Some("k".into()),
+                    Dialect::MaxTokens,
                     Duration::from_secs(10),
                 )
                 .expect("builds"),
@@ -14448,15 +14452,12 @@ retry_disabled = {retry_disabled}
         #[tokio::test]
         async fn a_hanging_provider_abandons_before_the_ceiling() {
             let (base, connections) = hanging_listener().await;
-            // RED form (pin `=4.0.0`, where `with_dialect` does not exist). Paso 8 (Green)
-            // migrates this call to `with_dialect(base, "m", Some("k".into()),
-            // Dialect::MaxTokens, 20 ms)` together with the other deprecated sites — it is the
-            // sixth reader the source test lists.
             let seat: Arc<dyn LlmProvider> = Arc::new(
-                OpenAiCompatibleProvider::with_timeout(
+                OpenAiCompatibleProvider::with_dialect(
                     base,
                     "m",
                     Some("k".into()),
+                    Dialect::MaxTokens,
                     Duration::from_millis(20),
                 )
                 .expect("builds"),

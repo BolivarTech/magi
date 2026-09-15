@@ -962,7 +962,6 @@ fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
         "score": c.score,
         "agent_count": c.agent_count,
         "votes": c.votes,
-        "majority_summary": c.majority_summary,
     })
 }
 

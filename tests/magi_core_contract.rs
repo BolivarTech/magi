@@ -53,7 +53,7 @@ use magi_core::orchestrator::{MagiBuilder, MagiConfig as CoreMagiConfig};
 use magi_core::provider::{LlmProvider, RetryConfig, RetryProvider};
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
-use magi_core::providers::openai_compat::OpenAiCompatibleProvider;
+use magi_core::providers::openai_compat::{Dialect, OpenAiCompatibleProvider};
 use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::rotation::{AgentRotation, FallbackPool, Lineage, ProviderProbe, RotationEvent};
 use magi_core::schema::{AgentName, AgentOutput, Mode};
@@ -275,15 +275,44 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
     let _ = ClaudeProvider::with_timeout("api-key", SYNTHETIC_MODEL, Duration::from_secs(27));
 
     // `Option<String>` in the THIRD parameter; `None` is the Ollama case (keyless).
-    let openai = OpenAiCompatibleProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, None)
-        .expect("valid synthetic base_url");
-    let _ = OpenAiCompatibleProvider::with_timeout(
+    // `with_dialect` (magi-core 4.1.0): `new`/`with_timeout` are deprecated in favour of it —
+    // the FOURTH parameter is the `Dialect`, the FIFTH is the `Duration`, both explicit, never
+    // `Dialect::default()`/an implicit crate default (SC-V41-01, G10).
+    let openai = OpenAiCompatibleProvider::with_dialect(
         SYNTHETIC_BASE_URL,
         SYNTHETIC_MODEL,
         None,
+        Dialect::MaxTokens,
+        Duration::from_secs(27),
+    )
+    .expect("valid synthetic base_url");
+    let _ = OpenAiCompatibleProvider::with_dialect(
+        SYNTHETIC_BASE_URL,
+        SYNTHETIC_MODEL,
+        None,
+        Dialect::MaxCompletionTokens,
         Duration::from_secs(27),
     );
     assert_is_provider(&openai);
+
+    // --- (5b) `Dialect` (magi-core 4.1.0): default, both variants, and its openness -----------
+    // The default is `MaxTokens`, and G10 depends on that staying true: magi-rs passes it as a
+    // LITERAL rather than `Dialect::default()` at the one production call site, but the plan's
+    // choice of literal over default is only correct for as long as the two agree.
+    assert_eq!(Dialect::default(), Dialect::MaxTokens);
+    // Both variants must remain constructible from outside the crate.
+    let _ = Dialect::MaxTokens;
+    let _ = Dialect::MaxCompletionTokens;
+    // `#[non_exhaustive]`: a `match` with no wildcard arm would fail to compile here, which is
+    // the whole point — a third spelling added upstream must not silently fall through a `_` in
+    // PRODUCTION code, but THIS guardian needs one, precisely so a new variant breaks the crate
+    // update at the point that reads its own changelog, not at an unrelated call site.
+    let dialect_field_name = match Dialect::MaxTokens {
+        Dialect::MaxTokens => "max_tokens",
+        Dialect::MaxCompletionTokens => "max_completion_tokens",
+        _ => "unknown-dialect-added-upstream",
+    };
+    assert_eq!(dialect_field_name, "max_tokens");
 
     // `OllamaProvider` serves BOTH roles as of v0.13.0, and `with_timeout` is the load-bearing
     // constructor — the one REQ-R30 requires and §7 of the spec names in the only remaining
@@ -311,8 +340,14 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
     // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the trio loses
     // the retry it currently inherits from the adapter — a resilience regression.
     let inner: Arc<dyn LlmProvider> = Arc::new(
-        OpenAiCompatibleProvider::new(SYNTHETIC_BASE_URL, SYNTHETIC_MODEL, None)
-            .expect("valid synthetic base_url"),
+        OpenAiCompatibleProvider::with_dialect(
+            SYNTHETIC_BASE_URL,
+            SYNTHETIC_MODEL,
+            None,
+            Dialect::MaxTokens,
+            Duration::from_secs(27),
+        )
+        .expect("valid synthetic base_url"),
     );
     let _ = RetryProvider::with_config(inner, RetryConfig::default());
 

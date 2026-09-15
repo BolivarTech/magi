@@ -1736,9 +1736,9 @@ dependencies = [
 
 [[package]]
 name = "magi-core"
-version = "4.0.0"
+version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36cf31aed01a31b78db8ce18abd795f9314f933a41c403207dae817312b231bc"
+checksum = "62ba15a490c6c707e4125b01551637f76138f2dd1cd92d19a3259c699f2f2e93"
 dependencies = [
  "async-trait",
  "caseless",
