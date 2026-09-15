@@ -24,6 +24,11 @@ changes and the **patch** position signals backward-compatible fixes.
   introduced in magi-core 4.1.0. The set is open on the crate's side; a value not listed here is a
   newer cause added to magi-core, spelled as the crate spells it.
 
+### Security
+
+- `rustls` moved to 0.23.45 in `Cargo.lock` (RUSTSEC-2026-0285: TLS 1.3 handshake messages
+  accepted across encryption level boundaries). A transitive pin, no API change.
+
 ## [0.18.1] - 2026-09-02
 
 ### Changed

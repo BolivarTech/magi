@@ -352,7 +352,7 @@ consumer that wants the trio's verdicts typed rather than rendered:
 | Field | Type | Meaning |
 |---|---|---|
 | `agents` | array | one entry per seat that produced a verdict, each with `agent`, `verdict`, `confidence`, `summary`, `reasoning`, `findings`, `recommendation`; each finding with `severity`, `title`, `detail`, `file`, `line`, `category` (`file`/`line` null when the seat did not locate it) |
-| `consensus` | object | magi-core's own `consensus`, `consensus_verdict`, `confidence`, `score`, `agent_count`, `votes`, `dissent`; confidence is the emitted side's confidences summed, divided by the agent count, scaled by `(|score| + 1) / 2` and clamped to `[0, 1]`; dissent is an array of `agent`, `summary`, `reasoning` — the seats whose effective verdict differs from the emitted one; empty when unanimous |
+| `consensus` | object | magi-core's own `consensus`, `consensus_verdict`, `confidence`, `score`, `agent_count`, `votes`, `dissent`; confidence is the emitted side's confidences summed, divided by the agent count, scaled by `(|score| + 1) / 2`, clamped to `[0, 1]` and rounded to two decimals; dissent is an array of `agent`, `summary`, `reasoning` — the seats whose effective verdict differs from the emitted one; empty when unanimous |
 
 Both are **always present when the flag is passed**, empty array included — an empty `agents`
 certifies that no seat completed. Without the flag, neither appears.
