@@ -3470,4 +3470,36 @@ mod tests {
         );
         assert_eq!(v["consensus"]["dissent"], json!([]));
     }
+    /// SC-V41-05: a verdict block that parses as JSON but is not a valid agent output is the
+    /// cause 4.1.0 added, and it is rendered under the crate's own serialized name — the same
+    /// rule `rotation_report::cause_label` applies — not the Rust identifier. Both spellings are
+    /// asserted so the test cannot pass on a rendering that happens to agree for one variant.
+    #[test]
+    fn extraction_causes_are_rendered_in_the_crates_serde_form() {
+        let r = report_fixture(
+            json!([]),
+            json!({}),
+            json!({
+                "caspar": [
+                    { "model": "m", "attempt": 1, "cause": "malformed-object" },
+                    { "model": "m", "attempt": 2, "cause": "invalid-json" }
+                ]
+            }),
+            json!({ "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false }),
+            false,
+            "",
+        );
+        let v = report_to_consult_json(
+            &r, &untruncated(&r), &res_of(Mode::Analysis, ModeSource::Default), &ctx_plain(),
+            StructuredVerdicts::Omit,
+        );
+        let causes: Vec<&str> = v["extraction_failures"]["caspar"]
+            .as_array().unwrap().iter().map(|f| f["cause"].as_str().unwrap()).collect();
+        // Literals on purpose, not `serde_json::to_value(ExtractionFailureCause::…)`: these are the
+        // values the README publishes and CI consumers parse. Deriving them from the enum at run
+        // time would keep this test green through a crate-side respelling that breaks every
+        // consumer — the one event the test exists to notice.
+        assert_eq!(causes, ["malformed-object", "invalid-json"]);
+    }
+
 }
