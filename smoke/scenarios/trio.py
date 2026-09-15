@@ -79,6 +79,7 @@ S18_ASSERTIONS = (
     "without it, both are absent",
     "agents[] exposes exactly 7 keys",
     "findings[] exposes exactly 6 keys",
+    "consensus exposes exactly 7 keys",
 )
 
 #: The runs these four read.
@@ -127,6 +128,12 @@ AGENT_KEYS = ("agent", "verdict", "confidence", "summary", "reasoning",
 
 #: The six keys ``findings[]`` exposes. Counted EXACTLY, same reasoning.
 FINDING_KEYS = ("severity", "title", "detail", "file", "line", "category")
+
+#: The seven keys ``consensus`` exposes. Counted EXACTLY; 4.1.0 removed
+#: ``majority_summary`` and added ``dissent``, so the exact count catches both
+#: the disappearance and any unintended re-addition.
+CONSENSUS_KEYS = ("consensus", "consensus_verdict", "confidence", "score",
+                  "agent_count", "votes", "dissent")
 
 #: The product's own budget constants, mirrored (see the module docstring).
 #: ``magi/mod.rs``: the classifier's slice of the wall clock, the headless slack
@@ -698,6 +705,7 @@ def the_shape_varies_by_flag_never_by_data(run):
                               AGENTS_KEY, flagged)
     yield _exact_keys_finding(S18_ASSERTIONS, 3, _findings_of(agents),
                               FINDING_KEYS, "findings", flagged)
+    yield _consensus_keys_finding(flagged)
 
 
 def _both_present_finding(flagged):
@@ -738,6 +746,39 @@ def _both_absent_finding(bare):
                         "no flag was passed and %s reached the envelope anyway"
                         % " and ".join(present))
     return _finding(S18_ASSERTIONS, 1, Outcome.PASS, BARE_RUN, "")
+
+
+def _consensus_keys_finding(flagged):
+    """Judge assertion 5: consensus exposes exactly 7 keys.
+
+    Args:
+        flagged: R4's reduction.
+
+    Returns:
+        Finding: PASS when consensus has exactly the right keys; CANNOT_TEST
+        when consensus is missing (no shape to count); FAIL otherwise.
+    """
+    if flagged.body is None:
+        return _finding(S18_ASSERTIONS, 4, flagged.outcome, TRIO_RUN,
+                        flagged.detail)
+    consensus = flagged.body.get(CONSENSUS_KEY)
+    if consensus is None:
+        return _finding(S18_ASSERTIONS, 4, Outcome.CANNOT_TEST, TRIO_RUN,
+                        "the run produced no consensus, so there is no shape to "
+                        "count")
+    if not isinstance(consensus, dict):
+        return _finding(S18_ASSERTIONS, 4, Outcome.FAIL, TRIO_RUN,
+                        "%s is not an object, so its shape cannot be counted"
+                        % CONSENSUS_KEY)
+    wanted = set(CONSENSUS_KEYS)
+    missing = sorted(wanted - set(consensus))
+    unexpected = sorted(set(consensus) - wanted)
+    if missing or unexpected:
+        return _finding(S18_ASSERTIONS, 4, Outcome.FAIL, TRIO_RUN,
+                        "%s has %d keys, expected %d: missing [%s], unexpected "
+                        "[%s]" % (CONSENSUS_KEY, len(consensus), len(wanted),
+                                  ", ".join(missing), ", ".join(unexpected)))
+    return _finding(S18_ASSERTIONS, 4, Outcome.PASS, TRIO_RUN, "")
 
 
 def _findings_of(agents):

@@ -209,6 +209,7 @@ class TrioScenarioShapeTests(unittest.TestCase):
                 "without it, both are absent",
                 "agents[] exposes exactly 7 keys",
                 "findings[] exposes exactly 6 keys",
+                "consensus exposes exactly 7 keys",
             ],
             list(trio.S18_ASSERTIONS),
         )

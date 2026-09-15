@@ -34,7 +34,7 @@ DECLARED_SCENARIO_COUNT = 24
 #: landed, and 71 -> 73 on 2026-08-31 when S24 added its two -- MS2's own
 #: smoke coverage, closing the hole the milestone's plan left (CLAUDE.local.md's
 #: smoke doctrine, not any task).
-DECLARED_ASSERTION_COUNT = 73
+DECLARED_ASSERTION_COUNT = 74
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is
