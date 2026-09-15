@@ -264,6 +264,39 @@ pub fn redact_foreign_error(err: &dyn Error) -> SafeErrorText {
     redact_foreign_text(&err.to_string())
 }
 
+/// Renders a foreign enum through its **own serde form** (the spelling the crate publishes on
+/// the wire) and redacts the result like every foreign string. `fallback` supplies the text
+/// when the value does not serialize to a string — a case no current caller reaches, but the
+/// guard exists so a `#[non_exhaustive]` enum growing a data-carrying variant inherits
+/// protection automatically.
+///
+/// # Why serde labels, not Debug strings
+///
+/// The serde label is the contract published to consumers on the wire (CHANGELOG, README,
+/// documentation). Rendering with Debug format (Rust identifiers like `MalformedObject`) breaks
+/// consumers who parse the wire format. Both `rotation_report::cause_label` and
+/// `extraction_causes` in the headless JSON use this: a single rule for a single type, not two
+/// rules for the same type.
+///
+/// # Panics
+///
+/// Never. Even a non-string serde result returns `fallback()` instead of panicking, and
+/// `fallback` is expected to build a string without panicking (failure modes like a recursion
+/// are the caller's responsibility).
+#[must_use]
+pub fn foreign_serde_label<T: serde::Serialize>(
+    value: &T,
+    fallback: impl FnOnce() -> String,
+) -> SafeErrorText {
+    let raw = match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(s)) => s,
+        // Unreachable while every variant is a unit variant, and handled rather than unwrapped
+        // because a panic here would take down a report over one telemetry field.
+        _ => fallback(),
+    };
+    redact_foreign_text(&raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +423,35 @@ mod tests {
             redact_foreign_text("connection reset by peer").as_str(),
             "connection reset by peer"
         );
+    }
+
+    /// `foreign_serde_label` renders through the serde form (kebab-case for rename_all enums)
+    /// and guards non-string serde results with a fallback.
+    #[test]
+    fn foreign_serde_label_renders_through_serde_and_guards_non_strings() {
+        // String path: a unit variant that serializes to a string.
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "kebab-case")]
+        enum TestEnum {
+            MalformedObject,
+            InvalidJson,
+        }
+
+        let label_mo = foreign_serde_label(&TestEnum::MalformedObject, || "fallback".into());
+        assert_eq!(label_mo.as_str(), "malformed-object");
+
+        let label_ij = foreign_serde_label(&TestEnum::InvalidJson, || "fallback".into());
+        assert_eq!(label_ij.as_str(), "invalid-json");
+
+        // Fallback path: a type that serializes to an object, not a string.
+        #[derive(serde::Serialize)]
+        struct NonStringType {
+            field: String,
+        }
+        let obj = NonStringType {
+            field: "value".into(),
+        };
+        let label = foreign_serde_label(&obj, || "fallback-text".into());
+        assert_eq!(label.as_str(), "fallback-text");
     }
 }

@@ -49,7 +49,7 @@ use magi_core::schema::AgentName;
 use serde_json::{json, Value};
 
 use crate::magi::seat_label;
-use crate::redact::redact_foreign_text;
+use crate::redact::{foreign_serde_label, redact_foreign_text};
 
 /// Renders the rotation telemetry as JSON (REQ-R07/R08).
 ///
@@ -220,22 +220,9 @@ pub fn rotation_lines(rotations: &BTreeMap<AgentName, AgentRotation>) -> Vec<Str
 /// The `snake_case` label. Falls back to `Display`, which renders the same string, so no
 /// placeholder is ever invented and none can leak into the JSON.
 fn cause_label(kind: RotationKind) -> String {
-    // REDACTED, and NOT defensively. `RotationKind` is `#[non_exhaustive]`: today all seven
-    // variants are unit variants carrying nothing, but the sibling enum `FinishReason` looked
-    // exactly as closed and turned out to carry `Other(String)` — a hole this milestone's own
-    // redaction table declared safe. Deriving from a foreign enum means inheriting whatever a
-    // future variant puts in its label, so the guard belongs here rather than in a promise about
-    // the crate's shape. On the seven current labels this is the identity function.
-    //
-    // `redact_foreign_text`, never `redact_url`: a bare `transport` has no authority to find and
-    // `redact_url` would collapse it to `***`, corrupting a value CI consumers parse.
-    let raw = match serde_json::to_value(kind) {
-        Ok(Value::String(s)) => s,
-        // Unreachable while every variant is a unit variant, and handled rather than unwrapped
-        // because a panic here would take down a whole report over one diagnostic field.
-        _ => kind.to_string(),
-    };
-    redact_foreign_text(&raw).as_str().to_string()
+    foreign_serde_label(&kind, || kind.to_string())
+        .as_str()
+        .to_string()
 }
 
 /// Unit tests for the rotation telemetry composition.

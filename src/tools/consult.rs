@@ -14,7 +14,6 @@ use magi_core::error::MagiError;
 use magi_core::orchestrator::{Magi, MagiConfig as CoreMagiConfig};
 use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::schema::{AgentName, Mode};
-use magi_core::verdict_markers::ExtractionFailureCause;
 use magi_rs::magi::completion_report::render_completions;
 use magi_rs::magi::eligibility_report::render_pool_eligibility;
 use magi_rs::magi::kind::ProviderKind;
@@ -25,7 +24,7 @@ use magi_rs::magi::{
     bytes_to_tokens_est, mark_overhead, TimeoutDecision, MAX_QUERY_BYTES, TOOL_RESULT_CAP_BYTES,
     TRUNCATION_MARK,
 };
-use magi_rs::redact::{redact_foreign_error, redact_foreign_text};
+use magi_rs::redact::{foreign_serde_label, redact_foreign_error, redact_foreign_text};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -632,34 +631,15 @@ fn seat_key(seat: AgentName) -> String {
     format!("{seat:?}").to_lowercase()
 }
 
-/// Render an extraction failure cause using the crate's serde label (kebab-case), not the Rust
-/// identifier. Applies the same rule as `rotation_report::cause_label`: `ExtractionFailureCause`
-/// is `#[non_exhaustive]`, so the redaction guard belongs here rather than in a promise about
-/// the crate's shape. On the current variants this is the identity function; a future variant
-/// that carries free text inherits protection automatically.
-///
-/// `redact_foreign_text`, never `redact_url`: a bare kebab-case label has no authority to find
-/// and `redact_url` would collapse it to `***`, corrupting a value CI consumers parse.
-#[must_use]
-fn extraction_cause_label(cause: ExtractionFailureCause) -> String {
-    let raw = match serde_json::to_value(cause) {
-        Ok(Value::String(s)) => s,
-        // Unreachable while every variant is a unit variant, and handled rather than unwrapped
-        // because a panic here would take down a whole JSON report over one diagnostic field.
-        _ => format!("{:?}", cause),
-    };
-    redact_foreign_text(&raw).as_str().to_string()
-}
-
 /// `extraction_failures`, keyed by lowercase seat name — ALWAYS present, even when empty
 /// (REQ-A10). An empty map is a positive certificate that every seat adhered to the verdict
 /// contract on every attempt; omitting it would make that certificate indistinguishable from
 /// "this version doesn't report it".
 ///
-/// **`model` and `cause` are safe to interpolate verbatim — verified against magi-core
+/// **`model` and `cause` pass the foreign-string redaction guard — verified against magi-core
 /// 4.1.0, not assumed (fix round 3, refreshed round 6):**
 /// - `model` is `agent.provider_model().to_string()` — the CONFIGURED model identifier for the seat (`orchestrator.rs::dispatch_one_agent`), never text derived from a network/provider error. Not third-party free text.
-/// - `cause: ExtractionFailureCause` is rendered through `extraction_cause_label`, which emits the crate's own serde label (`invalid-json`, `malformed-object`, etc.) — the same rule as `rotation_report::cause_label`. The crate's `#[non_exhaustive]` plus redaction guard means a future variant that carries free text inherits protection automatically.
+/// - `cause: ExtractionFailureCause` is `#[non_exhaustive]` but rendered through `foreign_serde_label` using the crate's own serde label (`invalid-json`, `malformed-object`, `missing-markers`, `unterminated`, `ambiguous`, `schema`, `echoed-example`, `agent-identity`), the same rule as `rotation_report::cause_label`. The guard means a future variant that carries free text inherits protection automatically. `MalformedObject` is the new variant in magi-core 4.1.0.
 ///
 /// Contrast [`failed_agents_json`], whose `cause` is genuinely third-party free text and DOES
 /// need redaction.
@@ -676,7 +656,8 @@ fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
                         json!({
                             "model": x.model,
                             "attempt": x.attempt,
-                            "cause": extraction_cause_label(x.cause),
+                            "cause": foreign_serde_label(&x.cause, || format!("{:?}", x.cause))
+                                .as_str(),
                         })
                     })
                     .collect(),
