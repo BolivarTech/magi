@@ -3306,4 +3306,117 @@ mod tests {
             );
         }
     }
+
+    /// A report with a tie (2–1 vote on approve vs reject) where two seats (melchior and
+    /// balthasar) voted conditional and one (caspar) voted reject. The consensus output is
+    /// `HOLD -- TIE` with the emitted verdict `reject` (consensus.rs:427 in 4.1.0). The confidence
+    /// is the measure per consensus.rs:315-323: sum of emitted-side (0.7) ÷ agent count (3) ×
+    /// (|score|+1)/2 (0.5) = 0.12 (rounded to 2 decimals).
+    fn report_with_a_tie_and_dissent() -> MagiReport {
+        report_fixture(
+            json!([
+                {
+                    "agent": "melchior", "verdict": "conditional", "confidence": 0.8,
+                    "summary": "s-mel", "reasoning": "r-mel", "recommendation": "rec-mel",
+                    "findings": [],
+                },
+                {
+                    "agent": "balthasar", "verdict": "conditional", "confidence": 0.8,
+                    "summary": "s-bal", "reasoning": "r-bal", "recommendation": "rec-bal",
+                    "findings": [],
+                },
+                {
+                    "agent": "caspar", "verdict": "reject", "confidence": 0.7,
+                    "summary": "s-cas", "reasoning": "r-cas", "recommendation": "rec-cas",
+                    "findings": [],
+                },
+            ]),
+            json!({}),
+            json!({}),
+            json!({ "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false }),
+            false,
+            "a report with a tie and dissent",
+        )
+    }
+
+    /// SC-V41-04: the consensus object exposes exactly the seven keys the README declares, and
+    /// `majority_summary` — deprecated in 4.1.0 with no non-deprecated replacement — is not one
+    /// of them. Counted EXACTLY: a key too many is as much a defect as one too few.
+    #[test]
+    fn the_consensus_block_exposes_exactly_seven_keys_and_no_majority_summary() {
+        let r = report_with_a_tie_and_dissent();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+            StructuredVerdicts::Include,
+        );
+        let c = v["consensus"].as_object().expect("consensus is an object");
+        let mut keys: Vec<&str> = c.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "agent_count",
+                "confidence",
+                "consensus",
+                "consensus_verdict",
+                "dissent",
+                "score",
+                "votes"
+            ],
+        );
+        assert!(
+            !v.to_string().contains("majority_summary"),
+            "the false name must not survive anywhere in the document"
+        );
+    }
+
+    /// SC-V41-04: `dissent` names the agents whose effective verdict differs from the EMITTED
+    /// one — here the two conditionals, not the reject — each with exactly three keys, and the
+    /// summary/reasoning are the agents' own strings (same line as `agents[]`: model-authored,
+    /// unredacted, sanitized at the reply arms).
+    #[test]
+    fn dissent_lists_the_side_that_differs_from_the_emitted_verdict() {
+        let r = report_with_a_tie_and_dissent();
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+            StructuredVerdicts::Include,
+        );
+        let d = v["consensus"]["dissent"]
+            .as_array()
+            .expect("dissent is an array");
+        let agents: Vec<&str> = d.iter().map(|x| x["agent"].as_str().unwrap()).collect();
+        assert_eq!(agents, ["melchior", "balthasar"]);
+        for entry in d {
+            let mut keys: Vec<&str> = entry
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["agent", "reasoning", "summary"]);
+        }
+        assert_eq!(d[0]["summary"], "s-mel");
+        assert_eq!(d[0]["reasoning"], "r-mel");
+    }
+
+    /// A unanimous run carries an EMPTY list, not a missing key: the shape never varies by data.
+    #[test]
+    fn a_unanimous_consensus_carries_an_empty_dissent_list() {
+        let r = report_with_three_verdicts(); // existing fixture: dissent []
+        let v = report_to_consult_json(
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
+            StructuredVerdicts::Include,
+        );
+        assert_eq!(v["consensus"]["dissent"], json!([]));
+    }
 }
