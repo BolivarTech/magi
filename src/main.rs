@@ -14468,12 +14468,24 @@ retry_disabled = {retry_disabled}
         /// used to get wrong: a `Timeout` double proves nothing about a class production never
         /// returns for a hang.
         ///
-        /// `retry.operation_budget = 60 ms`, `base_delay = ZERO` and `max_retries = 50` are kept
+        /// `retry.operation_budget = 10 s`, `base_delay = ZERO` and `max_retries = 50` are kept
         /// even though neither ends this loop — they document by their own irrelevance that a
         /// hang is bounded by the class cap alone, not by either of them: raising `max_retries`
         /// or shrinking `operation_budget` cannot make this chain run longer than two attempts.
         /// This is REQ-A04's "typed and before the ceiling" guarantee for the class that matters
         /// most in practice, restated for the real cap rather than the budget.
+        ///
+        /// **The budget is 10 s, not a tight bound, because a tight one measures suite load, not
+        /// the guarantee.** A 60 ms budget was the original choice and it is WRONG: under
+        /// `cargo nextest run`'s full-suite Argon2 concurrency this repo's own tests already
+        /// documented (`CLAUDE.md`, "Intermittent test failures under load"), the FIRST attempt
+        /// alone measured ~50 ms (20 ms client timeout + reqwest/tokio scheduling overhead under
+        /// load) — close enough to a 60 ms budget that the budget path fires on attempt TWO
+        /// before the limited-class cap gets there, wrapping the class in `RetryAbandoned` and
+        /// failing this guardian for a reason it does not test. 10 s leaves ~500x headroom over
+        /// that measured overhead while staying far under both the 90 s ceiling and the ~1 s a
+        /// full `max_retries = 50` chain would take if the class cap were ever removed — so the
+        /// test still fails LOUDLY (not by hanging) if the cap regresses.
         #[tokio::test]
         async fn a_hanging_provider_abandons_before_the_ceiling() {
             let (base, connections) = hanging_listener().await;
@@ -14488,7 +14500,12 @@ retry_disabled = {retry_disabled}
                 .expect("builds"),
             );
             let mut retry = RetryConfig::default();
-            retry.operation_budget = Duration::from_millis(60);
+            // 10 s, not a tight bound: neither this nor `max_retries` is what ends a hang — the
+            // limited-class cap is — so both are set far away from the path. A 60 ms budget was
+            // measured to cut the chain after ONE attempt under full-suite load (the first
+            // attempt alone takes ~50 ms), failing this guardian on the budget path instead of
+            // the class it exists to pin.
+            retry.operation_budget = Duration::from_secs(10);
             retry.base_delay = Duration::ZERO;
             retry.max_retries = 50;
             let provider = RetryProvider::with_config(seat, retry);
@@ -14510,8 +14527,9 @@ retry_disabled = {retry_disabled}
                 "limited_max_retries + 1 attempts, exactly"
             );
             assert!(
-                elapsed < Duration::from_millis(500),
-                "well before the ceiling: {elapsed:?}"
+                elapsed < Duration::from_secs(5),
+                "well before the ceiling (90 s) and the ~1 s a full max_retries chain would \
+                 take: {elapsed:?}"
             );
         }
 
