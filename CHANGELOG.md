@@ -7,27 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
-## [Unreleased]
+## [0.19.0] - 2026-09-15
 
 ### Changed
+
+- **magi-core moves from `=4.0.0` to `=4.1.0`, and nothing in the tree reads the surface 4.1.0
+  deprecates.** The OpenAI-compatible trio seat is now built with `with_dialect`, passing
+  `Dialect::MaxTokens` and the derived client timeout. The request body it sends is byte-identical
+  to what 4.0.0 sent, which a captured baseline in the test suite pins. A source-reading test keeps
+  the deprecated names out of the code for good, so the next magi-core major becomes a pin bump
+  and nothing else.
 
 - **`consensus.majority_summary` is removed from the headless JSON output.** magi-core 4.1.0
   deprecated this field and replaced it with `consensus.dissent`, which carries the agents whose
   effective verdict differs from the emitted one, each with their own `summary` and `reasoning`
   strings. The seven-key contract for `consensus` is now: `consensus`, `consensus_verdict`,
-  `confidence`, `score`, `agent_count`, `votes`, `dissent`.
+  `confidence`, `score`, `agent_count`, `votes`, `dissent`. The README states the confidence
+  formula exactly: the emitted side's confidences summed, divided by the agent count, scaled by
+  `(|score| + 1) / 2`, clamped to `[0, 1]` and rounded to two decimals.
 
 - **`extraction_failures[].cause` now uses magi-core's serde representation** (`missing-markers`,
   `unterminated`, `ambiguous`, `invalid-json`, `malformed-object`, `schema`, `echoed-example`,
   `agent-identity`) instead of Rust Debug format (`MissingMarkers`, `InvalidJson`, etc.), matching
   the representation in all other consult output channels. `malformed-object` is the new variant
   introduced in magi-core 4.1.0. The set is open on the crate's side; a value not listed here is a
-  newer cause added to magi-core, spelled as the crate spells it.
+  newer cause added to magi-core, spelled as the crate spells it. Both reports render a foreign
+  enum through one shared helper, so the two cannot drift apart again.
+
+- **Retry and abandonment semantics the pin brings in, now stated as the code behaves.** A `529`
+  is transient, so an Anthropic seat retries a load spike (up to `max_retries + 1` attempts) inside
+  the budget magi-rs derives from the ceiling instead of condemning the lineage on the first
+  response. A failure local to one mage (`External`, `ResponseContract`, an oversized or empty
+  completion) that exhausts its retries comes back as itself and condemns that seat; the run goes
+  on with the other two. `RetryAbandoned` still condemns the lineage run-wide, but only for the
+  wrapped classes. A seat that never answers ends typed, as the original `Timeout`, after exactly
+  two attempts, well before the ceiling. The `failed_agents` cause that carries an outside
+  provider's own message passes through the same redaction as every other foreign string.
+
+- **The capability probe keeps a measured window when the digest times out.** magi-core 4.1.0
+  runs the two probes concurrently under one shared deadline and lets each keep its own result;
+  the rustdoc that described the old single timeout was corrected, and the per-probe ceilings
+  magi-rs applies stay, since `run_preflight` runs per consult.
 
 ### Security
 
 - `rustls` moved to 0.23.45 in `Cargo.lock` (RUSTSEC-2026-0285: TLS 1.3 handshake messages
   accepted across encryption level boundaries). A transitive pin, no API change.
+
+### Development
+
+- The smoke harness counts the keys of the `consensus` object exactly (seven), so a key too many
+  fails as loudly as one too few. Declared assertions: 74.
 
 ## [0.18.1] - 2026-09-02
 

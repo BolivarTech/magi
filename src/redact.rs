@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.19.0
+// Date: 2026-09-15
 
 //! Redacting credentials in URLs, **by position and never by content** (REQ-A16).
 //!

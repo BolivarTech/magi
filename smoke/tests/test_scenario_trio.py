@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.19.0
+# Date: 2026-09-15
 """Unit tests for the four scenarios that hang off R4."""
 
 import copy

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.19.0
+// Date: 2026-09-15
 
 //! Tool that wraps `magi_core::Magi` to run 3-perspective consensus queries. The agent routes
 //! here only for genuine multi-perspective decisions; trivial or factual lookups are answered
@@ -675,7 +675,10 @@ fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
 /// [`failures_json`]'s `cause`, this one is genuinely third-party free text: verified against
 /// `orchestrator.rs::dispatch_one_agent` (magi-core 3.1.0), it is literally
 /// `MagiError::Provider(e).to_string()`, a `format!("timeout: …")`, or a `format!("retry-
-/// failed: …")` wrapping either — none of which magi-rs controls the content of.
+/// failed: …")` wrapping either — none of which magi-rs controls the content of. As of
+/// magi-core 4.1.0 the same channel also carries `External.message` unwrapped: a mage-local
+/// failure that exhausts the retry budget comes back as itself and condemns one seat, and its
+/// message is an outside provider's own text, capped by the crate but not redacted by it.
 ///
 /// **Fix round 4 correction — the mechanism, not the fix, was wrong in the original
 /// writeup.** magi-core 3.1.0's `Network`/`Timeout` variants are already redacted upstream:

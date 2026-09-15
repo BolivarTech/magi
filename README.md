@@ -362,10 +362,11 @@ release, so a strict validator should treat an unknown value as a new category r
 violation. The other enum-valued fields (`agent`, `verdict`, `severity`) are closed by upstream
 contract and will not gain values without a breaking change.
 
-**`consensus` is a documented SUBSET** — the seven fields in the table above. `dissent`,
-`findings`, `conditions` and `recommendations` are not forwarded: the key exists so a consumer that
-computes its own consensus can contrast the headline result, and the per-finding material is
-already in `agents`. Ask if you need them.
+**`consensus` is a documented SUBSET** — the seven fields in the table above. `findings`,
+`conditions` and `recommendations` are not forwarded, and neither is the deprecated
+`majority_summary`: the key exists so a consumer that computes its own consensus can contrast the
+headline result, `dissent` carries the contrast data, and the per-finding material is already in
+`agents`. Ask if you need them.
 
 **`report_truncated` describes `report` alone.** With the flag on, `report` is still bounded by the
 tool-result cap while `agents` and `consensus` are emitted in full — so a `report_truncated` other

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.19.0
+// Date: 2026-09-15
 
 //! Guardian of the `magi-core 3.2.0` API surface (Task 0.0, MS2 Phase 0; extended in MS3 Phase 4).
 //!

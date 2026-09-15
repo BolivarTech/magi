@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.19.0
+# Date: 2026-09-15
 """S6, S7, S8 and S18 -- the four scenarios that hang off R4.
 
 R4 is the fusion that saves the most: ``--timeout 300``,

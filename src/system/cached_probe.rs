@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-11
+// Version: 0.19.0
+// Date: 2026-09-15
 
 //! `ProviderProbe` answered from the persistent cache, with **independent** ceilings (REQ-R10/R12).
 //!
@@ -13,10 +13,6 @@
 //! at startup — an uncapped miss would spend the 30 s of one deadline *inside* a run rather than
 //! at startup where its cost was budgeted (REQ-R12). The ceilings have to live here and bind
 //! the per-call cost before delegating to the crate's larger overall bound.
-//!
-//! It also bounds the second risk the crate's timing creates: `run_preflight` runs **per consult**,
-//! not once at startup, so an unbounded miss would spend the crate's 30 s *inside* a run rather
-//! than at startup where the cost was budgeted.
 //!
 //! # The digest is measured on the first trip and never re-verified
 //!
