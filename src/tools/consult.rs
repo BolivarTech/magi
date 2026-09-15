@@ -955,6 +955,21 @@ fn findings_json(findings: &[magi_core::schema::Finding]) -> Value {
 /// confidence formulas that need not agree, and a divergence between them is a quality signal
 /// nobody could see if only one of them travelled.
 fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
+    // Map dissent field-by-field rather than with to_value: Dissent is #[non_exhaustive],
+    // so a field added in a future minor release would reach the JSON public object with no
+    // code change and no review — the same reason agents_json maps AgentOutput by hand.
+    let dissent_array: Vec<Value> = c
+        .dissent
+        .iter()
+        .map(|d| {
+            json!({
+                "agent": d.agent,
+                "summary": d.summary,
+                "reasoning": d.reasoning,
+            })
+        })
+        .collect();
+
     json!({
         "consensus": c.consensus,
         "consensus_verdict": c.consensus_verdict,
@@ -962,6 +977,7 @@ fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
         "score": c.score,
         "agent_count": c.agent_count,
         "votes": c.votes,
+        "dissent": dissent_array,
     })
 }
 
@@ -3313,8 +3329,8 @@ mod tests {
     /// is the measure per consensus.rs:315-323: sum of emitted-side (0.7) ÷ agent count (3) ×
     /// (|score|+1)/2 (0.5) = 0.12 (rounded to 2 decimals).
     fn report_with_a_tie_and_dissent() -> MagiReport {
-        report_fixture(
-            json!([
+        serde_json::from_value(json!({
+            "agents": [
                 {
                     "agent": "melchior", "verdict": "conditional", "confidence": 0.8,
                     "summary": "s-mel", "reasoning": "r-mel", "recommendation": "rec-mel",
@@ -3330,13 +3346,35 @@ mod tests {
                     "summary": "s-cas", "reasoning": "r-cas", "recommendation": "rec-cas",
                     "findings": [],
                 },
-            ]),
-            json!({}),
-            json!({}),
-            json!({ "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false }),
-            false,
-            "a report with a tie and dissent",
-        )
+            ],
+            "consensus": {
+                "consensus": "HOLD -- TIE",
+                "consensus_verdict": "reject",
+                "confidence": 0.12,
+                "score": 0.0,
+                "agent_count": 3,
+                "votes": {
+                    "melchior": "conditional",
+                    "balthasar": "conditional",
+                    "caspar": "reject",
+                },
+                "majority_summary": "",
+                "dissent": [
+                    { "agent": "melchior", "summary": "s-mel", "reasoning": "r-mel" },
+                    { "agent": "balthasar", "summary": "s-bal", "reasoning": "r-bal" },
+                ],
+                "findings": [],
+                "conditions": [],
+                "recommendations": {},
+            },
+            "banner": "",
+            "report": "a report with a tie and dissent",
+            "degraded": false,
+            "failed_agents": {},
+            "extraction_failures": {},
+            "input_size": { "estimated_tokens": 10, "warn_threshold": 150_000, "exceeded": false },
+        }))
+        .expect("fixture matches MagiReport's Deserialize shape")
     }
 
     /// SC-V41-04: the consensus object exposes exactly the seven keys the README declares, and
