@@ -17,11 +17,12 @@ changes and the **patch** position signals backward-compatible fixes.
   strings. The seven-key contract for `consensus` is now: `consensus`, `consensus_verdict`,
   `confidence`, `score`, `agent_count`, `votes`, `dissent`.
 
-- **`extraction_failures[].cause` now uses magi-core's serde representation** (`invalid-json`,
-  `malformed-object`, `missing-markers`, `unterminated`, `ambiguous`) instead of Rust Debug format
-  (`InvalidJson`, `MalformedObject`, …), matching the representation in all other consult output
-  channels. The set is open on the crate's side; a value not listed here is a newer cause added
-  to magi-core, spelled as the crate spells it.
+- **`extraction_failures[].cause` now uses magi-core's serde representation** (`missing-markers`,
+  `unterminated`, `ambiguous`, `invalid-json`, `malformed-object`, `schema`, `echoed-example`,
+  `agent-identity`) instead of Rust Debug format (`MissingMarkers`, `InvalidJson`, etc.), matching
+  the representation in all other consult output channels. `malformed-object` is the new variant
+  introduced in magi-core 4.1.0. The set is open on the crate's side; a value not listed here is a
+  newer cause added to magi-core, spelled as the crate spells it.
 
 ## [0.18.1] - 2026-09-02
 
