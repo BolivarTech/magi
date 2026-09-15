@@ -14,6 +14,7 @@ use magi_core::error::MagiError;
 use magi_core::orchestrator::{Magi, MagiConfig as CoreMagiConfig};
 use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::schema::{AgentName, Mode};
+use magi_core::verdict_markers::ExtractionFailureCause;
 use magi_rs::magi::completion_report::render_completions;
 use magi_rs::magi::eligibility_report::render_pool_eligibility;
 use magi_rs::magi::kind::ProviderKind;
@@ -631,15 +632,34 @@ fn seat_key(seat: AgentName) -> String {
     format!("{seat:?}").to_lowercase()
 }
 
+/// Render an extraction failure cause using the crate's serde label (kebab-case), not the Rust
+/// identifier. Applies the same rule as `rotation_report::cause_label`: `ExtractionFailureCause`
+/// is `#[non_exhaustive]`, so the redaction guard belongs here rather than in a promise about
+/// the crate's shape. On the current variants this is the identity function; a future variant
+/// that carries free text inherits protection automatically.
+///
+/// `redact_foreign_text`, never `redact_url`: a bare kebab-case label has no authority to find
+/// and `redact_url` would collapse it to `***`, corrupting a value CI consumers parse.
+#[must_use]
+fn extraction_cause_label(cause: ExtractionFailureCause) -> String {
+    let raw = match serde_json::to_value(cause) {
+        Ok(Value::String(s)) => s,
+        // Unreachable while every variant is a unit variant, and handled rather than unwrapped
+        // because a panic here would take down a whole JSON report over one diagnostic field.
+        _ => format!("{:?}", cause),
+    };
+    redact_foreign_text(&raw).as_str().to_string()
+}
+
 /// `extraction_failures`, keyed by lowercase seat name — ALWAYS present, even when empty
 /// (REQ-A10). An empty map is a positive certificate that every seat adhered to the verdict
 /// contract on every attempt; omitting it would make that certificate indistinguishable from
 /// "this version doesn't report it".
 ///
 /// **`model` and `cause` are safe to interpolate verbatim — verified against magi-core
-/// 3.1.0, not assumed (fix round 3):**
+/// 4.1.0, not assumed (fix round 3, refreshed round 6):**
 /// - `model` is `agent.provider_model().to_string()` — the CONFIGURED model identifier for the seat (`orchestrator.rs::dispatch_one_agent`), never text derived from a network/provider error. Not third-party free text.
-/// - `cause: ExtractionFailureCause` is `#[non_exhaustive]` but every variant is a **fieldless** unit case (`verdict_markers.rs`) — `format!("{:?}", x.cause)` can only ever produce one of a fixed, closed set of Debug strings (`"MissingMarkers"`, …, `"Other"`). There is structurally no way for it to carry a URL or a credential.
+/// - `cause: ExtractionFailureCause` is rendered through `extraction_cause_label`, which emits the crate's own serde label (`invalid-json`, `malformed-object`, etc.) — the same rule as `rotation_report::cause_label`. The crate's `#[non_exhaustive]` plus redaction guard means a future variant that carries free text inherits protection automatically.
 ///
 /// Contrast [`failed_agents_json`], whose `cause` is genuinely third-party free text and DOES
 /// need redaction.
@@ -656,7 +676,7 @@ fn failures_json(f: &BTreeMap<AgentName, Vec<ExtractionFailure>>) -> Value {
                         json!({
                             "model": x.model,
                             "attempt": x.attempt,
-                            "cause": format!("{:?}", x.cause),
+                            "cause": extraction_cause_label(x.cause),
                         })
                     })
                     .collect(),
@@ -3490,16 +3510,22 @@ mod tests {
             "",
         );
         let v = report_to_consult_json(
-            &r, &untruncated(&r), &res_of(Mode::Analysis, ModeSource::Default), &ctx_plain(),
+            &r,
+            &untruncated(&r),
+            &res_of(Mode::Analysis, ModeSource::Default),
+            &ctx_plain(),
             StructuredVerdicts::Omit,
         );
         let causes: Vec<&str> = v["extraction_failures"]["caspar"]
-            .as_array().unwrap().iter().map(|f| f["cause"].as_str().unwrap()).collect();
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["cause"].as_str().unwrap())
+            .collect();
         // Literals on purpose, not `serde_json::to_value(ExtractionFailureCause::…)`: these are the
         // values the README publishes and CI consumers parse. Deriving them from the enum at run
         // time would keep this test green through a crate-side respelling that breaks every
         // consumer — the one event the test exists to notice.
         assert_eq!(causes, ["malformed-object", "invalid-json"]);
     }
-
 }
