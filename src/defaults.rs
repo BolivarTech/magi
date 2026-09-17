@@ -4,8 +4,8 @@
 
 //! Built-in default backend profile (Ollama-first). MANUAL MAINTENANCE: these
 //! `:cloud` tags reflect the Ollama catalog at release time and rot as it changes
-//! (e.g. `qwen3-max` never existed; `qwen3.6` appeared). Refresh per release; users
-//! override via `magi.toml`/env. All default literals live HERE, in one place.
+//! (e.g. `qwen3-max` never existed; `qwen3.5:397b` was retired from the cloud). Refresh per
+//! release; users override via `magi.toml`/env. All default literals live HERE, in one place.
 
 /// Default provider when no `magi.toml`/env is present (RF-1, REQ-A01b).
 ///
@@ -33,10 +33,13 @@ pub const DEFAULT_MAGI_BALTHASAR: &str = "gpt-oss:120b-cloud";
 pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
 /// Lineage of [`DEFAULT_MAGI_MELCHIOR`] — the independent failure domain its model belongs to.
 ///
-/// Read off the model tag by hand, once: `qwen3.5` is Alibaba's family. It is **declared**, not
+/// Read off the model tag by hand, once: `glm-5.3` is Zhipu's family. It is **declared**, not
 /// inferred at runtime (R-R03): a label the project writes down for the models the project ships is
 /// a decision, whereas guessing one from an arbitrary user tag would fabricate the value that
 /// decides all rotation eligibility.
+///
+/// It replaced `alibaba` in v0.19.1 when Ollama retired `qwen3.5:397b` from its cloud and no Qwen
+/// successor shipped a cloud tag — the family left the cloud catalogue, so the label left the trio.
 ///
 /// It is also the label the guided migration error offers as an example, so what `magi init` writes
 /// and what the error suggests cannot drift apart.
@@ -100,18 +103,18 @@ pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
 /// `max_rotations` tells the operator they have a safety net while they silently fall back to
 /// no-rotation behaviour — the same shape of defect as a setting that is declared and not applied.
 ///
-/// **Five entries, matching the trio configuration this project runs alongside**
-/// (`magi-ollama.toml`), so an operator moving between the two finds the same depth rather than
-/// a shorter list here for no stated reason.
+/// **Five entries, one per cloud lineage no seat holds.** Ollama's cloud catalogue offers eight
+/// vendor families; the trio takes three (`zhipu`, `openai`, `deepseek`) and the pool takes the
+/// other five, so depth here is bounded by the catalogue, not chosen. The ordering is rotation
+/// preference, strongest first.
 ///
-/// **What could NOT be carried over, and why it matters more than the count.** Two of that
-/// file's five are `deepseek-v4-pro`/`deepseek` and `gpt-oss`/`openai`. Those are foreign to
-/// ITS trio (qwen / kimi / glm) and are therefore correct there — but they are two of THIS
-/// trio's three seats, model and lineage both. Copying them verbatim would have cut each one's
-/// coverage from three seats to one, by the rule stated above, and tripped the duplicate-model
-/// notice twice over. The two substitutes are the remaining labels from that same file that no
-/// seat here holds, so the pool grows in depth without losing the property that makes depth
-/// worth anything.
+/// **Why `mistral` sits where `zhipu` used to.** Through v0.19.0 Melchior was `qwen3.5:397b`
+/// (`alibaba`) and the pool opened with `glm-5.2` (`zhipu`). When Ollama retired that Qwen tag
+/// with no cloud successor, Melchior moved to `glm-5.3` — and a `zhipu` entry in the pool would
+/// then have covered one seat instead of three, and rotated inside the very failure domain it was
+/// meant to escape. `mistral` was the one label left that no seat holds, so it took the slot; the
+/// test `the_scaffold_ships_an_active_pool_with_lineages_no_seat_has` is what turns that rule
+/// into a compile-adjacent check rather than a note.
 pub const DEFAULT_SCAFFOLD_POOL: [(&str, &str); 5] = [
     ("mistral-large-3:675b-cloud", "mistral"),
     ("kimi-k2.6:cloud", "moonshot"),
