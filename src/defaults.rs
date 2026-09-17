@@ -714,10 +714,33 @@ mod tests {
         assert_eq!(DEFAULT_PROVIDER, "ollama");
         assert_eq!(DEFAULT_OPENAI_BASE_URL, "http://localhost:11434/v1");
         assert_eq!(DEFAULT_OPENAI_MODEL, "kimi-k2.6:cloud");
-        assert_eq!(DEFAULT_MAGI_MELCHIOR, "qwen3.5:397b-cloud");
+        // Melchior moved off qwen3.5:397b when Ollama retired it from its cloud (2026-09-25);
+        // glm-5.3 is the substitute Ollama itself names for that tag.
+        assert_eq!(DEFAULT_MAGI_MELCHIOR, "glm-5.3:cloud");
         assert_eq!(DEFAULT_MAGI_BALTHASAR, "gpt-oss:120b-cloud");
         assert_eq!(DEFAULT_MAGI_CASPAR, "deepseek-v4-pro:cloud");
         assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-sonnet-4-6");
+    }
+
+    /// The seat lineages are declared, never inferred (R-R03), so a model swap that forgets its
+    /// lineage compiles and ships a seat whose halves disagree. Pin both halves together.
+    #[test]
+    fn the_default_seats_declare_three_distinct_lineages_matching_their_models() {
+        assert_eq!(DEFAULT_MAGI_MELCHIOR_LINEAGE, "zhipu");
+        assert_eq!(DEFAULT_MAGI_BALTHASAR_LINEAGE, "openai");
+        assert_eq!(DEFAULT_MAGI_CASPAR_LINEAGE, "deepseek");
+        let mut lineages = vec![
+            DEFAULT_MAGI_MELCHIOR_LINEAGE,
+            DEFAULT_MAGI_BALTHASAR_LINEAGE,
+            DEFAULT_MAGI_CASPAR_LINEAGE,
+        ];
+        lineages.sort_unstable();
+        lineages.dedup();
+        assert_eq!(
+            lineages.len(),
+            3,
+            "the default trio must span three failure domains"
+        );
     }
 
     #[test]
