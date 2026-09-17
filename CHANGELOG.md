@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
-## [0.19.1] - YYYY-MM-DD
+## [0.19.1] - 2026-09-17
 
 ### Changed
 
