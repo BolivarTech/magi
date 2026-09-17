@@ -187,10 +187,6 @@ max_total_bytes = 536870912
 # lineage covers only that seat, because the other two still hold their own lineage in
 # play while it rotates.
 [[magi.fallback]]
-model   = "mistral-large-3:675b-cloud"
-lineage = "mistral"
-
-[[magi.fallback]]
 model   = "kimi-k2.6:cloud"
 lineage = "moonshot"
 
@@ -201,6 +197,10 @@ lineage = "minimax"
 [[magi.fallback]]
 model   = "nemotron-3-super:cloud"
 lineage = "nvidia"
+
+[[magi.fallback]]
+model   = "mistral-large-3:675b-cloud"
+lineage = "mistral"
 
 [[magi.fallback]]
 model   = "gemma4:cloud"

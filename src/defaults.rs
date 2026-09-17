@@ -116,10 +116,10 @@ pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
 /// test `the_scaffold_ships_an_active_pool_with_lineages_no_seat_has` is what turns that rule
 /// into a compile-adjacent check rather than a note.
 pub const DEFAULT_SCAFFOLD_POOL: [(&str, &str); 5] = [
-    ("mistral-large-3:675b-cloud", "mistral"),
     ("kimi-k2.6:cloud", "moonshot"),
     ("minimax-m3:cloud", "minimax"),
     ("nemotron-3-super:cloud", "nvidia"),
+    ("mistral-large-3:675b-cloud", "mistral"),
     ("gemma4:cloud", "google"),
 ];
 
