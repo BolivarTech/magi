@@ -746,6 +746,25 @@ mod tests {
         );
     }
 
+    /// The pool's order is rotation PREFERENCE, so the head is what every first rotation tries.
+    /// The principal model is the one this product exercises most, so it leads; `mistral-large-3`
+    /// is unmeasured against this product's prompts and inherits an exclusion from the smoke
+    /// harness ("invalid JSON, and never reasons"), so it sits at the tail as a last resort, not
+    /// ahead of candidates known to answer.
+    #[test]
+    fn the_scaffold_pool_leads_with_the_principal_and_keeps_the_unmeasured_mistral_last() {
+        assert_eq!(DEFAULT_SCAFFOLD_POOL[0].0, DEFAULT_OPENAI_MODEL);
+        let mistral = DEFAULT_SCAFFOLD_POOL
+            .iter()
+            .position(|(_, lineage)| *lineage == "mistral")
+            .expect("the pool must still carry the mistral lineage — it is the only free one");
+        assert_eq!(
+            mistral,
+            DEFAULT_SCAFFOLD_POOL.len() - 2,
+            "mistral is a last resort: only gemma4, the other inherited exclusion, may follow it"
+        );
+    }
+
     #[test]
     fn test_should_emit_default_notice_only_for_openai_without_file() {
         use magi_rs::magi::kind::ProviderKind;
