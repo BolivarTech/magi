@@ -47,7 +47,7 @@ model = "claude-sonnet-4-6"
 # [magi] — the council of three perspectives
 # ===========================================================================
 [magi]
-melchior_model  = "qwen3.5:397b-cloud"     # Scientist  — theoretical analysis
+melchior_model  = "glm-5.3:cloud"          # Scientist  — theoretical analysis
 balthasar_model = "gpt-oss:120b-cloud"     # Pragmatist — practical trade-offs
 caspar_model    = "deepseek-v4-pro:cloud"  # Critic     — adversarial review
 
@@ -57,7 +57,7 @@ caspar_model    = "deepseek-v4-pro:cloud"  # Critic     — adversarial review
 # every rotation. A file from v0.12.0 fails to start until these three lines exist, and the error
 # names all three at once. A seat left on the built-in model inherits the built-in lineage and owes
 # nothing.
-melchior_lineage  = "alibaba"
+melchior_lineage  = "zhipu"
 balthasar_lineage = "openai"
 caspar_lineage    = "deepseek"
 
@@ -187,8 +187,8 @@ max_total_bytes = 536870912
 # lineage covers only that seat, because the other two still hold their own lineage in
 # play while it rotates.
 [[magi.fallback]]
-model   = "glm-5.2:cloud"
-lineage = "zhipu"
+model   = "mistral-large-3:675b-cloud"
+lineage = "mistral"
 
 [[magi.fallback]]
 model   = "kimi-k2.6:cloud"

@@ -27,8 +27,8 @@ pub const DEFAULT_PROVIDER: &str = "ollama";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "http://localhost:11434/v1";
 /// Default principal model on the openai path (RF-3).
 pub const DEFAULT_OPENAI_MODEL: &str = "kimi-k2.6:cloud";
-/// Default MAGI trio (openai path only, RF-4). Lineages: Alibaba / OpenAI / DeepSeek.
-pub const DEFAULT_MAGI_MELCHIOR: &str = "qwen3.5:397b-cloud";
+/// Default MAGI trio (openai path only, RF-4). Lineages: Zhipu / OpenAI / DeepSeek.
+pub const DEFAULT_MAGI_MELCHIOR: &str = "glm-5.3:cloud";
 pub const DEFAULT_MAGI_BALTHASAR: &str = "gpt-oss:120b-cloud";
 pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
 /// Lineage of [`DEFAULT_MAGI_MELCHIOR`] — the independent failure domain its model belongs to.
@@ -40,7 +40,7 @@ pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
 ///
 /// It is also the label the guided migration error offers as an example, so what `magi init` writes
 /// and what the error suggests cannot drift apart.
-pub const DEFAULT_MAGI_MELCHIOR_LINEAGE: &str = "alibaba";
+pub const DEFAULT_MAGI_MELCHIOR_LINEAGE: &str = "zhipu";
 /// Lineage of [`DEFAULT_MAGI_BALTHASAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
 pub const DEFAULT_MAGI_BALTHASAR_LINEAGE: &str = "openai";
 /// Lineage of [`DEFAULT_MAGI_CASPAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
@@ -113,7 +113,7 @@ pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
 /// seat here holds, so the pool grows in depth without losing the property that makes depth
 /// worth anything.
 pub const DEFAULT_SCAFFOLD_POOL: [(&str, &str); 5] = [
-    ("glm-5.2:cloud", "zhipu"),
+    ("mistral-large-3:675b-cloud", "mistral"),
     ("kimi-k2.6:cloud", "moonshot"),
     ("minimax-m3:cloud", "minimax"),
     ("nemotron-3-super:cloud", "nvidia"),
