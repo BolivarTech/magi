@@ -17,12 +17,15 @@ changes and the **patch** position signals backward-compatible fixes.
   tag. A `magi.toml` that declares its own `melchior_model` is unaffected; one that leaves the
   seat on the built-in inherits the new model and lineage together.
 
-- **The scaffold's rotation pool opens with `mistral-large-3:675b-cloud` (lineage `mistral`)
-  instead of `glm-5.2:cloud`.** With Melchior on `zhipu`, a `zhipu` entry would have covered one
-  seat instead of three and rotated inside the failure domain it exists to escape. `mistral` is
-  the one cloud lineage no seat holds. Existing files keep whatever pool they declare; only what
-  `magi init` writes changes. Run `ollama pull glm-5.3:cloud` and
-  `ollama pull mistral-large-3:675b-cloud` once (manifests only) before the first consult.
+- **The scaffold's rotation pool carries `mistral-large-3:675b-cloud` (lineage `mistral`)
+  instead of `glm-5.2:cloud`, and now opens with the principal, `kimi-k2.6:cloud`.** With
+  Melchior on `zhipu`, a `zhipu` entry would have covered one seat instead of three and rotated
+  inside the failure domain it exists to escape; `mistral` is the one cloud lineage no seat
+  holds. It sits at the tail rather than the head because it has not been measured against
+  this product's prompts, so the first rotation of any seat tries a model known to answer.
+  Existing files keep whatever pool they declare; only what `magi init` writes changes. Run
+  `ollama pull glm-5.3:cloud` and `ollama pull mistral-large-3:675b-cloud` once (manifests only)
+  before the first consult.
 
 ## [0.19.0] - 2026-09-15
 

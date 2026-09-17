@@ -106,12 +106,15 @@ pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
 /// **Five entries, one per cloud lineage no seat holds.** Ollama's cloud catalogue offers eight
 /// vendor families; the trio takes three (`zhipu`, `openai`, `deepseek`) and the pool takes the
 /// other five, so depth here is bounded by the catalogue, not chosen. The ordering is rotation
-/// preference, strongest first.
+/// preference: the principal model leads because it is the one this product exercises most, and
+/// the two candidates the smoke harness lists as excluded for a cheap profile (`mistral-large-3`,
+/// `gemma4`) close the list as last resorts — see
+/// `the_scaffold_pool_leads_with_the_principal_and_keeps_the_unmeasured_mistral_last`.
 ///
-/// **Why `mistral` sits where `zhipu` used to.** Through v0.19.0 Melchior was `qwen3.5:397b`
-/// (`alibaba`) and the pool opened with `glm-5.2` (`zhipu`). When Ollama retired that Qwen tag
-/// with no cloud successor, Melchior moved to `glm-5.3` — and a `zhipu` entry in the pool would
-/// then have covered one seat instead of three, and rotated inside the very failure domain it was
+/// **Why `mistral` is in the pool at all.** Through v0.19.0 Melchior was `qwen3.5:397b`
+/// (`alibaba`) and the pool carried `glm-5.2` (`zhipu`). When Ollama retired that Qwen tag with
+/// no cloud successor, Melchior moved to `glm-5.3` — and a `zhipu` entry in the pool would then
+/// have covered one seat instead of three, and rotated inside the very failure domain it was
 /// meant to escape. `mistral` was the one label left that no seat holds, so it took the slot; the
 /// test `the_scaffold_ships_an_active_pool_with_lineages_no_seat_has` is what turns that rule
 /// into a compile-adjacent check rather than a note.
