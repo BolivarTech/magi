@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.19.1] - YYYY-MM-DD
+
+### Changed
+
+- **The default Melchior seat is `glm-5.3:cloud` (lineage `zhipu`).** Ollama retires
+  `qwen3.5:397b` from its cloud on 2026-09-25 and no Qwen successor ships a cloud tag, so the
+  no-config trio would have stopped starting. `glm-5.3` is the substitute Ollama names for that
+  tag. A `magi.toml` that declares its own `melchior_model` is unaffected; one that leaves the
+  seat on the built-in inherits the new model and lineage together.
+
+- **The scaffold's rotation pool opens with `mistral-large-3:675b-cloud` (lineage `mistral`)
+  instead of `glm-5.2:cloud`.** With Melchior on `zhipu`, a `zhipu` entry would have covered one
+  seat instead of three and rotated inside the failure domain it exists to escape. `mistral` is
+  the one cloud lineage no seat holds. Existing files keep whatever pool they declare; only what
+  `magi init` writes changes. Run `ollama pull glm-5.3:cloud` and
+  `ollama pull mistral-large-3:675b-cloud` once (manifests only) before the first consult.
+
 ## [0.19.0] - 2026-09-15
 
 ### Changed

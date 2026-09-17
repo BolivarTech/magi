@@ -554,7 +554,8 @@ are the same command).
 > defaults to a local **Ollama** backend (`provider = "ollama"` as of v0.12.0 — it was
 > the now-retired `"openai"` value through v0.11.0 —
 > `base_url = http://localhost:11434/v1`, model `kimi-k2.6:cloud`, and the MAGI trio
-> `qwen3.5:397b-cloud` / `gpt-oss:120b-cloud` / `deepseek-v4-pro:cloud`). Previously
+> `glm-5.3:cloud` / `gpt-oss:120b-cloud` / `deepseek-v4-pro:cloud` — Melchior was
+> `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag). Previously
 > the no-config default was Anthropic.
 
 **To use Anthropic instead**, set `provider = "anthropic"` in `magi.toml` **or**
@@ -1044,11 +1045,11 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 |------|---------------|---------|
 | Chat (principal) | `kimi-k2.6:cloud` | `magi-rs` agent — live replies |
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
-| Melchior (Scientist) | `qwen3.5:397b-cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
+| Melchior (Scientist) | `glm-5.3:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Balthasar (Pragmatist) | `gpt-oss:120b-cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 
-> The MAGI trio deliberately runs three distinct model families (Alibaba / OpenAI / DeepSeek) for genuine
+> The MAGI trio deliberately runs three distinct model families (Zhipu / OpenAI / DeepSeek) for genuine
 > cross-lineage diversity. The `consult` tool (and the `/magi` command) only need these when a
 > multi-perspective analysis is requested.
 
