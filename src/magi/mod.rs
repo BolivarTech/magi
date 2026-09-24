@@ -465,6 +465,39 @@ pub fn derive_retry_after_cap(ceiling_secs: u64) -> Duration {
         .max(MIN_RETRY_AFTER_CAP)
 }
 
+/// The retry configuration every trio seat is wrapped with, derived from the per-mage ceiling
+/// (REQ-A04).
+///
+/// # Why this exists — one function, two callers, both derived layers
+///
+/// `build_magi_orchestrator` (startup, `main.rs`) sets `retry.operation_budget` and
+/// `retry.retry_after_cap` from the ceiling; the post-`/login` trio rebuild (`tui/mod.rs`) used
+/// to set NEITHER — it built a bare `RetryConfig::default()` with only `operation_budget`
+/// patched in, so `retry_after_cap` silently fell back to the crate's own 300 s and REQ-A04's
+/// derived scale no longer held for a session that had logged in. Collecting both derivations
+/// in ONE function, called from BOTH sites, makes that drift structurally impossible: a layer
+/// added here later reaches both callers by construction, rather than by whoever remembers to
+/// copy the other call site.
+///
+/// # Arguments
+/// * `ceiling_secs` - the resolved per-mage ceiling (`[magi].agent_timeout_secs`, resolved).
+///
+/// # Returns
+/// `RetryConfig::default()` with `operation_budget` and `retry_after_cap` set from
+/// [`derive_operation_budget`] and [`derive_retry_after_cap`]; every other field keeps the
+/// crate's own default.
+///
+/// # Complexity
+/// `O(1)`.
+#[must_use]
+pub fn derived_retry_config(ceiling_secs: u64) -> magi_core::provider::RetryConfig {
+    // RED stub (Task 4, Paso 4.1): ignores `ceiling_secs` and returns the crate's own default,
+    // so the two callers compile against the new signature while the retry test above fails on
+    // both assertions. Paso 4.3 fills in the real derivation.
+    let _ = ceiling_secs;
+    magi_core::provider::RetryConfig::default()
+}
+
 /// The derived ceiling BEFORE the floor is applied, from an already-computed factor.
 ///
 /// Private, and factor-level rather than rotation-level, for two reasons: the floor is not
@@ -1109,6 +1142,26 @@ mod tests {
             assert!(
                 client >= MIN_CLIENT_TIMEOUT,
                 "ceiling {ceiling}s falls below the floor"
+            );
+        }
+    }
+
+    /// REQ-A04: the shared retry derivation sets BOTH derived layers and leaves the rest at the
+    /// crate's default, over the floor, the default, the old ceiling and far above it.
+    #[test]
+    fn the_derived_retry_config_sets_both_layers_from_the_ceiling() {
+        let default = magi_core::provider::RetryConfig::default();
+        for c in [30_u64, 90, 120, 5_000, 86_400] {
+            let r = derived_retry_config(c);
+            assert_eq!(
+                r.operation_budget,
+                derive_operation_budget(c),
+                "budget at {c}"
+            );
+            assert_eq!(r.retry_after_cap, derive_retry_after_cap(c), "cap at {c}");
+            assert_ne!(
+                r.retry_after_cap, default.retry_after_cap,
+                "not the crate's 300 s at {c}"
             );
         }
     }

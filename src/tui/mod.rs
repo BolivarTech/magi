@@ -20,6 +20,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use magi_core::error::MagiError;
+use magi_core::provider::CompletionConfig;
 use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
 use magi_rs::magi::kind::ProviderKind;
@@ -1790,6 +1791,7 @@ pub struct TuiMagiRuntimeConfig {
 /// - `consult_unavailable_message` (Task 4.3, REQ-A06/SC-A06b) — the SAME text already pushed to `startup_notices` when `consult` is `None`. Read only when a `/consult` is issued with no trio available, so a later `/consult` echoes the exact reason the startup notice already gave instead of a second, independently-worded message.
 /// - `magi_auto_approve` — whether the registered `consult` tool auto-approves an autonomous invocation, mirrored into every rebuilt `ConsultTool` after `/login` (I-5).
 /// - `agent_timeout_secs` — `[magi].agent_timeout_secs` as read from config, UNRESOLVED (may be `None`). Fed to [`post_login_agent_timeout_secs`] on every post-`/login` rebuild, which applies the SAME precedence `build_magi_orchestrator` (`main.rs`) already uses at startup. Before this field existed, the rebuild ignored config entirely and hardcoded [`magi_rs::magi::AGENT_TIMEOUT_SECS`] — a configured ceiling silently stopped applying after a `/login` even though it kept being honored everywhere else in the process.
+/// - `completion` (Task 4, D-8) — the SAME `CompletionConfig` the startup trio was built with. Before this field existed, a post-`/login` rebuild called `magi_core::orchestrator::Magi::new` directly, which uses the crate's own default (32 768 tokens, `ReasoningControl::Default` as of magi-core 4.2.0) — so every configured `[magi]` reasoning/cap key, and S-1's byte-identical wire, silently stopped applying the moment a user logged in.
 pub struct TuiConsultWiring {
     /// The live orchestrator, or `None` if the trio failed to build.
     pub consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
@@ -1800,6 +1802,15 @@ pub struct TuiConsultWiring {
     /// `[magi].agent_timeout_secs`, unresolved; see
     /// [`post_login_agent_timeout_secs`].
     pub agent_timeout_secs: Option<u64>,
+    /// The completion configuration the startup trio was built with; every post-`/login`
+    /// rebuild is built with this SAME value.
+    pub completion: CompletionConfig,
+    /// S-6/S-7 notices for the trio a successful `/login` rebuild always runs on
+    /// (`ProviderKind::Anthropic`): `magi_config.reasoning_wire_notices(ProviderKind::Anthropic)`,
+    /// computed once in `main.rs`. The `/login` success arm emits them through the TUI's notice
+    /// sink, so a declared `reasoning_spelling` that becomes inert after the rebuild is SAID,
+    /// not silent (CP2 seg1 loop 2, Caspar).
+    pub post_login_notices: Vec<Notice>,
 }
 
 /// Resolves the wall-clock ceiling used to rebuild the MAGI trio's native
@@ -1818,6 +1829,96 @@ pub struct TuiConsultWiring {
 /// decision is tested here as a plain `fn`.
 fn post_login_agent_timeout_secs(configured: Option<u64>) -> u64 {
     configured.unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS)
+}
+
+// Test-only (Task 4): what the LAST call to `rebuild_consult_trio_after_login` in this thread
+// handed `with_completion_config`. Same "trace, not a value assertion" discipline as
+// `main.rs`'s `COMPLETION_WIRING_TRACE` — see its comment for the mutation that proved a value
+// equality guards nothing once a defaulted builder can coincidentally match the configured one.
+#[cfg(test)]
+thread_local! {
+    static LOGIN_COMPLETION_TRACE: std::cell::RefCell<Option<CompletionConfig>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Test-only (Task 4): the per-agent ceiling the LAST call handed `MagiBuilder::with_timeout`.
+// `None` until the rebuild sets it — a bare `Magi::new` (today's behaviour, and this stub's)
+// never calls `with_timeout` at all, so the ceiling silently stays the crate's own 1 320 s.
+#[cfg(test)]
+thread_local! {
+    static LOGIN_CEILING_TRACE: std::cell::RefCell<Option<std::time::Duration>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Test-only (Task 4): `(operation_budget, retry_after_cap)` the LAST call wrapped its seat's
+// `RetryProvider` with. Both fields, not one: the pre-Task-4 rebuild set `operation_budget`
+// alone, so a trace of only that field could not have caught `retry_after_cap` silently
+// reverting to the crate's 300 s default (CP2 seg1 loop 1, Caspar).
+#[cfg(test)]
+thread_local! {
+    static LOGIN_RETRY_TRACE: std::cell::RefCell<Option<(std::time::Duration, std::time::Duration)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Rebuilds the consult trio over fresh Anthropic credentials after `/login`, with the SAME
+/// completion configuration AND the same derived retry layers
+/// ([`magi_rs::magi::derived_retry_config`]) as the startup trio.
+///
+/// # Why `MagiBuilder`, never `Magi::new`
+///
+/// `Magi::new` accepts only a provider: every other field — including the per-agent ceiling and
+/// the completion configuration — is left at the crate's own default (a 1 320 s agent timeout,
+/// magi-core 4.2.0's 32 768-token cap, `ReasoningControl::Default`). Before this function
+/// existed, the `/login` handler built the rebuilt trio with `Magi::new` directly, so a
+/// configured `[magi].max_tokens`/`reasoning`/`reasoning_trace` — and S-1's byte-identical cap —
+/// silently stopped applying the moment a user logged in (D-8), and the derived retry layers
+/// this function now shares with `build_magi_orchestrator` (`main.rs`) via
+/// `magi_rs::magi::derived_retry_config` were never applied either (CP2 seg1 loops 1 and 4).
+///
+/// # Single-shared-provider shape, and why `MagiBuilder::build()` cannot fail here
+///
+/// Like the code this replaces, one `ClaudeProvider` serves all three seats — there is no
+/// per-agent override on the OAuth-login rebuild. `MagiBuilder::build()` therefore cannot fail
+/// in this configuration: it only errs on `prompts_dir` I/O (never set here), an empty declared
+/// primary lineage (`with_agent` is never called, so `agent_lineages` stays empty), an empty
+/// fallback-pool lineage (no pool is declared), or an invalid `ReportConfig` (left at the
+/// crate's own default) — the same invariant `magi_core::orchestrator::Magi::new`'s own rustdoc
+/// documents for its own `MagiBuilder::new(provider).build().expect(...)`.
+///
+/// # Arguments
+/// * `api_key` - the freshly minted `sk-ant-…` key.
+/// * `model` - the Anthropic model to use.
+/// * `configured_agent_timeout_secs` - `[magi].agent_timeout_secs`, unresolved; see
+///   [`post_login_agent_timeout_secs`].
+/// * `completion` - the SAME completion configuration the startup trio was built with.
+///
+/// # Errors
+/// [`magi_core::error::ProviderError`] if the Anthropic HTTP client could not be built.
+#[cfg_attr(not(test), allow(clippy::expect_used))]
+fn rebuild_consult_trio_after_login(
+    api_key: String,
+    model: String,
+    configured_agent_timeout_secs: Option<u64>,
+    completion: &CompletionConfig,
+) -> Result<std::sync::Arc<magi_core::orchestrator::Magi>, magi_core::error::ProviderError> {
+    // RED stub (Task 4, Paso 4.1): reproduces TODAY's behaviour exactly — `completion` is
+    // ignored, the retry config only sets `operation_budget` (never `retry_after_cap`), and the
+    // trio is built via `Magi::new` rather than `MagiBuilder` (no per-agent ceiling). Every
+    // `LOGIN_*_TRACE` therefore stays `None`, which is what the three new tests below assert
+    // against. Paso 4.3 replaces this with the real derivation.
+    let _ = completion;
+    let agent_timeout_secs = post_login_agent_timeout_secs(configured_agent_timeout_secs);
+    let client_timeout = magi_rs::magi::derive_client_timeout(agent_timeout_secs);
+    let mut retry = magi_core::provider::RetryConfig::default();
+    retry.operation_budget = magi_rs::magi::derive_operation_budget(agent_timeout_secs);
+    let native =
+        magi_core::providers::claude::ClaudeProvider::with_timeout(api_key, model, client_timeout)?;
+    let wrapped: std::sync::Arc<dyn magi_core::provider::LlmProvider> = std::sync::Arc::new(
+        magi_core::provider::RetryProvider::with_config(std::sync::Arc::new(native), retry),
+    );
+    Ok(std::sync::Arc::new(magi_core::orchestrator::Magi::new(
+        wrapped,
+    )))
 }
 
 /// The [`ProviderKind`] the trio runs under AFTER a successful `/login` rebuild (REQ-A12c).
@@ -1888,6 +1989,8 @@ pub async fn run_tui_ext(
         consult_unavailable_message,
         magi_auto_approve,
         agent_timeout_secs: configured_agent_timeout_secs,
+        completion,
+        post_login_notices,
     } = consult_wiring;
     let TuiMagiRuntimeConfig {
         mode_classifier,
@@ -2248,41 +2351,20 @@ pub async fn run_tui_ext(
                                             // every other native seat. Single-shared-provider shape,
                                             // matching the `Magi::new` path this replaces (no
                                             // per-agent overrides on the OAuth-login rebuild).
-                                            // M1 fix: the ceiling comes from
-                                            // `configured_agent_timeout_secs`
-                                            // (`[magi].agent_timeout_secs`),
-                                            // not the hardcoded built-in — see
-                                            // `post_login_agent_timeout_secs`.
-                                            let agent_timeout_secs = post_login_agent_timeout_secs(
-                                                configured_agent_timeout_secs,
-                                            );
-                                            let client_timeout =
-                                                magi_rs::magi::derive_client_timeout(
-                                                    agent_timeout_secs,
-                                                );
-                                            let mut retry =
-                                                magi_core::provider::RetryConfig::default();
-                                            retry.operation_budget =
-                                                magi_rs::magi::derive_operation_budget(
-                                                    agent_timeout_secs,
-                                                );
-                                            match magi_core::providers::claude::ClaudeProvider::with_timeout(
+                                            // Task 4 (D-8): extracted into
+                                            // `rebuild_consult_trio_after_login`, which carries
+                                            // the SAME completion configuration and the SAME
+                                            // derived retry layers as the startup trio — this
+                                            // block used to build `Magi::new` directly, so every
+                                            // configured `[magi]` reasoning/cap key silently
+                                            // stopped applying the moment a user logged in.
+                                            match rebuild_consult_trio_after_login(
                                                 api_key,
                                                 model,
-                                                client_timeout,
+                                                configured_agent_timeout_secs,
+                                                &completion,
                                             ) {
-                                                Ok(native) => {
-                                                    let wrapped: std::sync::Arc<
-                                                        dyn magi_core::provider::LlmProvider,
-                                                    > = std::sync::Arc::new(
-                                                        magi_core::provider::RetryProvider::with_config(
-                                                            std::sync::Arc::new(native),
-                                                            retry,
-                                                        ),
-                                                    );
-                                                    let new_magi = std::sync::Arc::new(
-                                                        magi_core::orchestrator::Magi::new(wrapped),
-                                                    );
+                                                Ok(new_magi) => {
                                                     // REQ-A12c: the rebuild is Anthropic, so
                                                     // BOTH the session's own `magi_kind` and
                                                     // the rebuilt tool's must say so — a stale
@@ -2290,7 +2372,8 @@ pub async fn run_tui_ext(
                                                     // keyless-endpoint problem that no longer
                                                     // exists.
                                                     magi_kind = post_login_magi_kind(magi_kind);
-                                                    runner_agent.register_or_replace_tool(Box::new(
+                                                    runner_agent
+                                                        .register_or_replace_tool(Box::new(
                                                         crate::tools::consult::ConsultTool::new(
                                                             new_magi.clone(),
                                                             magi_auto_approve,
@@ -2300,6 +2383,17 @@ pub async fn run_tui_ext(
                                                         .with_output_cap(tool_result_cap),
                                                     ));
                                                     consult_magi_runner = Some(new_magi);
+                                                    // S-6/S-7: a declared reasoning key that
+                                                    // cannot reach the wire on the kind this
+                                                    // rebuild just moved to is SAID, not
+                                                    // silent (CP2 seg1 loop 2).
+                                                    for notice in &post_login_notices {
+                                                        let _ = response_tx
+                                                            .send(AgentResponse::Notice(
+                                                                notice.text.clone(),
+                                                            ))
+                                                            .await;
+                                                    }
                                                 }
                                                 Err(e) => {
                                                     let safe = handle_trio_rebuild_failure(
@@ -3842,6 +3936,91 @@ mod tests {
         );
     }
 
+    /// The `/login` rebuild uses the SAME completion configuration as the startup trio. Under
+    /// magi-core 4.2.0 a bare `Magi::new` inherits the crate's 32 768 cap and `Default` control,
+    /// so every configured key — and S-1's byte-identical cap — would silently stop applying
+    /// after a login.
+    #[test]
+    fn the_login_rebuild_uses_the_configured_completion_config() {
+        let completion = magi_core::provider::CompletionConfig::default()
+            .with_reasoning(magi_core::provider::ReasoningControl::Disabled)
+            .with_reasoning_trace(true);
+        let mut completion = completion;
+        completion.max_tokens = 20_000;
+        LOGIN_COMPLETION_TRACE.with(|t| *t.borrow_mut() = None);
+        let rebuilt = rebuild_consult_trio_after_login(
+            "claude-test-key".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            None,
+            &completion,
+        )
+        .expect("building a provider does not touch the network");
+        drop(rebuilt);
+        let seen = LOGIN_COMPLETION_TRACE
+            .with(|t| t.borrow().clone())
+            .expect("the rebuild never called with_completion_config");
+        assert_eq!(seen.max_tokens, 20_000);
+        assert_eq!(
+            seen.reasoning,
+            magi_core::provider::ReasoningControl::Disabled
+        );
+        assert!(seen.reasoning_trace);
+    }
+
+    /// REQ-A04 after `/login`: the rebuilt trio carries the SAME per-agent ceiling and the SAME
+    /// derived retry layers as the startup trio for the same configured ceiling — never the
+    /// crate's 1 320 s agent timeout (a bare `Magi::new`) nor its 300 s `retry_after_cap` (CP2
+    /// seg1 loops 1 and 4, Caspar).
+    #[test]
+    fn the_login_rebuild_uses_the_derived_retry_layers() {
+        LOGIN_RETRY_TRACE.with(|t| *t.borrow_mut() = None);
+        LOGIN_CEILING_TRACE.with(|t| *t.borrow_mut() = None);
+        let rebuilt = rebuild_consult_trio_after_login(
+            "claude-test-key".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            Some(90),
+            &magi_core::provider::CompletionConfig::default(),
+        )
+        .expect("building a provider does not touch the network");
+        drop(rebuilt);
+        let (budget, cap) = LOGIN_RETRY_TRACE
+            .with(|t| *t.borrow())
+            .expect("the rebuild never wrapped its seat in RetryProvider::with_config");
+        let expected = magi_rs::magi::derived_retry_config(post_login_agent_timeout_secs(Some(90)));
+        assert_eq!(budget, expected.operation_budget);
+        assert_eq!(
+            cap, expected.retry_after_cap,
+            "not the crate's 300 s default"
+        );
+        let ceiling = LOGIN_CEILING_TRACE
+            .with(|t| *t.borrow())
+            .expect("the rebuild never set the per-agent ceiling (a bare Magi::new keeps 1 320 s)");
+        assert_eq!(
+            ceiling,
+            std::time::Duration::from_secs(post_login_agent_timeout_secs(Some(90)))
+        );
+    }
+
+    /// S-6/S-7 after `/login`: the success arm emits the post-login notices after the rebuild.
+    ///
+    /// MAINTAINERS: this reads `run_tui_ext`'s own SOURCE TEXT — the full post-`/login` TUI
+    /// event loop is intractable to drive directly, so this pins that the `/login` success arm
+    /// mentions `post_login_notices` somewhere after it calls `rebuild_consult_trio_after_login`.
+    /// If it fails after a restructuring of that arm, re-anchor the needle — do not delete the
+    /// test.
+    #[test]
+    fn the_login_rebuild_announces_the_reasoning_notices_of_its_new_kind() {
+        let source = include_str!("mod.rs").replace('\r', "");
+        let rebuild = source
+            .find("rebuild_consult_trio_after_login(")
+            .expect("the /login arm moved: re-anchor this guard, do not delete it");
+        let rest = &source[rebuild..];
+        assert!(
+            rest.contains("post_login_notices"),
+            "the /login arm must emit the post-login reasoning notices after rebuilding"
+        );
+    }
+
     /// MS2 gate S7 finding: `UiEvent::Login` used to await
     /// `oauth.start_callback_server()` directly inside the event loop's sequential
     /// dispatch. That call is already bounded (RF-4.2, `OAUTH_CALLBACK_TIMEOUT_SECS` =
@@ -4407,8 +4586,15 @@ mod tests {
     /// `O(n)` over this file.
     fn production_source() -> String {
         let source = source_without_comment_lines();
+        // Anchored on the MODULE declaration itself, not on a bare `#[cfg(test)]` line: Task 4
+        // added test-only `thread_local!` blocks ABOVE this module (the same
+        // `#[cfg(test)] thread_local! { ... }` pattern `main.rs`'s `SEAT_WIRING_TRACE` already
+        // uses), each of which also starts with a `#[cfg(test)]` line. A bare marker would match
+        // the FIRST of those instead of the real module boundary and silently truncate
+        // `production_source()` to a fraction of the file — every guard below would then read a
+        // "production" section missing `run_tui_ext`, `run_app` and everything between.
         let end = source
-            .find("\n#[cfg(test)]\n")
+            .find("\n#[cfg(test)]\nmod tests {")
             .expect("this file must still carry its test module behind a `cfg(test)` gate");
         source
             .get(..end)

@@ -1016,14 +1016,17 @@ impl MagiConfig {
     /// default" — there is no default spelling.** Absence means magi-rs sends no reasoning field
     /// at all on the `openai-compat` wire, byte-identical to 0.19.1.
     ///
-    /// Consumed by `magi_completion_config` (Task 4); until then the plain (non-test) binary has
-    /// no live path here — [`Self::reasoning_wire_notices`] reads the RAW declared spelling
-    /// (needed verbatim for its notice text), not this resolved accessor — so `dead_code` is
-    /// allowed only for `not(test)`, same pattern as `Agent::history` (`src/agent/mod.rs`).
+    /// Consumed by `magi_completion_config` and `build_native_provider`'s `openai-compat` arm
+    /// (`with_reasoning_spelling`) — [`Self::reasoning_wire_notices`] reads the RAW declared
+    /// spelling separately (needed verbatim for its notice text), never this resolved accessor.
     ///
     /// # Panics
     /// If called on an unvalidated config (see [`Self::effective_provider`]).
     #[must_use]
+    // RED stub (Task 4, Paso 4.1): production call sites still pass a literal `None` to
+    // `build_native_provider` instead of this accessor's result — see the stubs on the three
+    // `build_native_provider` call sites in `build_magi_orchestrator`. Removed once Paso 4.3
+    // wires it in for real.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn effective_reasoning_spelling(&self) -> Option<ReasoningSpelling> {
         assert!(
@@ -1035,6 +1038,56 @@ impl MagiConfig {
             .reasoning_spelling
             .as_deref()
             .and_then(|raw| parse_reasoning_spelling(raw).ok())
+    }
+
+    /// The trio's output cap per completion, resolved (absent ⇒ `DECLARED_COMPLETION_CAP`,
+    /// REQ-EE-5).
+    ///
+    /// Same infallible-by-precondition contract as [`Self::effective_reasoning`]:
+    /// [`Self::validate_vocabulary`] already runs [`Self::validate_max_tokens`], which rejects
+    /// any declared value that is not representable as `u32`, so the `unwrap_or` fallback below
+    /// is never actually taken in practice — the config is trusted to already be valid by the
+    /// time this runs, never re-validated here.
+    ///
+    /// Consumer: `magi_completion_config` (Task 4), which sends it as every seat's
+    /// `CompletionConfig::max_tokens`.
+    ///
+    /// # Panics
+    /// If called on an unvalidated config (see [`Self::effective_provider`]).
+    #[must_use]
+    // RED stub (Task 4, Paso 4.1): `magi_completion_config` does not call this yet in either
+    // build — unlike `effective_reasoning_spelling`, no test calls it directly either, so the
+    // `not(test)`-gated allow that pattern uses would still leave `cfg(test)` warning. A plain
+    // `allow` here is removed the moment Paso 4.3 wires this into `magi_completion_config`.
+    #[allow(dead_code)]
+    pub(crate) fn effective_max_tokens(&self) -> u32 {
+        assert!(
+            self.validate_vocabulary().is_ok(),
+            "MagiConfig::effective_max_tokens called on an unvalidated config — \
+             construct it via from_toml_str()/load(), never by deserializing it directly"
+        );
+        // RED stub (Task 4, Paso 4.1): ignores the declared value and always returns the
+        // absent-key default, so `the_completion_config_carries_the_configured_reasoning_keys`
+        // fails on its `max_tokens = 65536` case. Paso 4.3 fills in the real resolution.
+        let _ = self.magi.max_tokens;
+        16_384
+    }
+
+    /// Whether cut attempts carry a bounded trace to the log, resolved (absent ⇒ `false`,
+    /// REQ-EE-4).
+    ///
+    /// Consumer: `magi_completion_config` (Task 4), which maps it to
+    /// `CompletionConfig::reasoning_trace`. No range or vocabulary to validate — every `bool` is
+    /// a valid value — so, unlike its neighbours above, this accessor carries no precondition.
+    #[must_use]
+    // RED stub (Task 4, Paso 4.1): see the same attribute on `effective_max_tokens` above.
+    #[allow(dead_code)]
+    pub(crate) fn effective_reasoning_trace(&self) -> bool {
+        // RED stub (Task 4, Paso 4.1): ignores the declared value, so
+        // `the_completion_config_carries_the_configured_reasoning_keys` fails on its
+        // `reasoning_trace = true` case. Paso 4.3 fills in the real resolution.
+        let _ = self.magi.reasoning_trace;
+        false
     }
 
     /// S-6/S-7 notices for a `[magi].reasoning`/`reasoning_spelling` declaration that cannot

@@ -50,7 +50,7 @@ use magi_core::provider::{
 };
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
-use magi_core::providers::openai_compat::{Dialect, OpenAiCompatibleProvider};
+use magi_core::providers::openai_compat::{Dialect, OpenAiCompatibleProvider, ReasoningSpelling};
 use magi_core::rotation::{FallbackPool, Lineage as CoreLineage, ProviderProbe};
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::headless::exit::exit_code as headless_exit_code;
@@ -2156,6 +2156,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // post-`/login` trio rebuild, which used to hardcode the
             // built-in default regardless of this config.
             agent_timeout_secs: magi_config.magi().agent_timeout_secs,
+            // Task 4 (D-8): the SAME completion configuration the startup trio was built with,
+            // so a post-`/login` rebuild carries the operator's `[magi]` reasoning/cap keys
+            // instead of silently reverting to magi-core's own defaults.
+            completion: magi_completion_config(&magi_config),
+            // S-6/S-7: the rebuild always lands on Anthropic, never the startup kind — see
+            // `TuiConsultWiring::post_login_notices`.
+            post_login_notices: magi_config.reasoning_wire_notices(ProviderKind::Anthropic),
         },
         secret_store,
         crate::tui::TuiMagiRuntimeConfig {
@@ -3227,6 +3234,11 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
 /// **`ollama` is keyless**: an authenticated `base_url` under this kind does not fail here —
 /// it fails on first use with a 401, which Task 4.4 translates.
 ///
+/// # Arguments (REQ-V42-4 addition)
+/// * `reasoning_spelling` - declared `[magi].reasoning_spelling`, applied ONLY to the
+///   `openai-compat` arm via `with_reasoning_spelling`. `Ollama`/`Anthropic` ignore it: neither
+///   speaks the OpenAI-compatible reasoning vocabulary, so there is nothing to spell.
+///
 /// # Errors
 /// [`SeatError::MissingCredential`] if the kind requires a credential and none is resolved;
 /// [`SeatError::Transport`] if the HTTP client could not be built.
@@ -3236,11 +3248,17 @@ fn build_native_provider(
     model: &str,
     creds: Option<&dyn Credentials>,
     client_timeout: Duration,
+    reasoning_spelling: Option<ReasoningSpelling>,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<dyn LlmProvider>, SeatError> {
     // `redact_foreign_error`, NOT `to_string()`: magi-core assembles the message, which does
     // not know our redaction rule and may quote `base_url`.
     let to_seat = |e: ProviderError| SeatError::Transport(redact_foreign_error(&e));
+    // RED stub (Task 4, Paso 4.1): the parameter is accepted but not yet applied, so
+    // `a_declared_spelling_reaches_the_compat_wire` and
+    // `without_a_spelling_the_compat_seat_sends_no_reasoning_key_and_reports_unsupported`'s
+    // `Unsupported` case fail. Paso 4.3 applies it on the `OpenAiCompat` arm.
+    let _ = reasoning_spelling;
 
     Ok(match kind {
         // `api_key = None` ⇒ no `Authorization` header, which is what Ollama expects.
@@ -3344,6 +3362,10 @@ struct SeatWiring {
     /// `the_derived_ceiling_reaches_the_seats` possible at all — without it, a ceiling that
     /// stops at the telemetry and never reaches the seat would still pass every other test.
     client_timeout: Duration,
+    /// NEW for Task 4 (REQ-V42-4): the `reasoning_spelling` argument this seat was built with,
+    /// MEASURED from what `build_magi_orchestrator` actually passed to `build_native_provider` —
+    /// never restated as a literal, the same discipline `retry_wrapped` above already follows.
+    reasoning_spelling: Option<ReasoningSpelling>,
 }
 
 #[cfg(test)]
@@ -3756,7 +3778,7 @@ fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice>
 /// future default moves magi-rs with no diff and no failing test.
 const DECLARED_COMPLETION_CAP: u32 = 16_384;
 
-/// The completion configuration for the trio (REQ-V4-12, REQ-V4-13).
+/// The completion configuration for the trio (REQ-V4-12, REQ-V4-13, REQ-EE-3/4/5).
 ///
 /// # Why `ReasoningControl::Default` and not `Disabled`
 ///
@@ -3765,17 +3787,31 @@ const DECLARED_COMPLETION_CAP: u32 = 16_384;
 /// with an exhausted budget yields NO verdict — a blocked gate nobody misses. Reasoning off with
 /// degraded judgment yields a verdict that missed a defect and reads exactly like a good one, and
 /// the trio is a judge. `Disabled` stays available and unmeasured; taking it would trade a loud
-/// failure for a silent one.
+/// failure for a silent one. Same argument for the default cap: too small a budget and a
+/// reasoning model that genuinely needs the room is the one that gets cut, not helped.
+///
+/// # Arguments
+/// * `cfg` - the loaded, validated `magi.toml`. Every field is resolved through its own
+///   `effective_*` accessor and NEVER inherited from `CompletionConfig::default()` — each of the
+///   three lines below overwrites what the crate default would have left in place, so an absent
+///   key resolves through magi-rs's own accessor rather than the crate's (REQ-EE-1's evidence:
+///   the crate's own default cap moved to 32 768 in 4.2.0, and MS1 changes no default).
 ///
 /// # Returns
 ///
 /// A `CompletionConfig` built from the crate's `Default` — the type is `#[non_exhaustive]`, so a
-/// struct literal does not compile here — with both load-bearing fields set explicitly.
-fn magi_completion_config() -> CompletionConfig {
-    let mut cfg = CompletionConfig::default();
-    cfg.max_tokens = DECLARED_COMPLETION_CAP;
-    cfg.reasoning = ReasoningControl::Default;
-    cfg
+/// struct literal does not compile here — with every field this milestone exposes set explicitly
+/// from `cfg`.
+fn magi_completion_config(cfg: &MagiConfig) -> CompletionConfig {
+    // RED stub (Task 4, Paso 4.1): ignores `cfg` and returns today's fixed configuration —
+    // every row but the first (absent keys) of
+    // `the_completion_config_carries_the_configured_reasoning_keys` fails. Paso 4.3 resolves
+    // all three fields from `cfg`'s accessors.
+    let _ = cfg;
+    let mut completion = CompletionConfig::default();
+    completion.max_tokens = DECLARED_COMPLETION_CAP;
+    completion.reasoning = ReasoningControl::Default;
+    completion
 }
 
 /// Builds the MAGI trio with the NATIVE providers of magi-core (REQ-A01).
@@ -3888,7 +3924,10 @@ fn build_magi_orchestrator(
                 continue;
             }
         };
-        match build_native_provider(kind, base, &model, creds, client_timeout, notices) {
+        // RED stub (Task 4, Paso 4.1): every seat is still built with NO spelling, so
+        // `every_compat_seat_is_built_with_the_declared_spelling` fails. Paso 4.3 passes
+        // `cfg.effective_reasoning_spelling()` here.
+        match build_native_provider(kind, base, &model, creds, client_timeout, None, notices) {
             // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the retry
             // the trio inherited from the adapter is lost.
             Ok(p) => {
@@ -3911,6 +3950,8 @@ fn build_magi_orchestrator(
                         model: model.clone(),
                         retry_wrapped: wrapped_addr != unwrapped_addr,
                         client_timeout,
+                        // RED stub: always `None` until Paso 4.3 records the MEASURED argument.
+                        reasoning_spelling: None,
                     });
                 });
                 seats.push((seat, wrapped, lineage, model.clone()));
@@ -3945,12 +3986,15 @@ fn build_magi_orchestrator(
     // it turning false is a notice that never reaches the user, which is the failure mode this
     // project keeps paying for.
     let mut sink: Vec<Notice> = Vec::new();
+    // RED stub (Task 4, Paso 4.1): no spelling reaches the fallback provider either. Paso 4.3
+    // passes `cfg.effective_reasoning_spelling()` here.
     let fallback_provider = build_native_provider(
         kind,
         base,
         cfg.magi().fallback_model(backend_model),
         creds,
         client_timeout,
+        None,
         &mut sink,
     )
     .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))?;
@@ -3964,11 +4008,11 @@ fn build_magi_orchestrator(
     .with_completion_config({
         // The trace is set INSIDE the argument expression, so deleting the
         // `.with_completion_config(...)` call deletes the trace with it. An earlier draft set it
-        // on the following line from a SECOND call to `magi_completion_config()`, which is a pure
-        // argument-free function: the mutation that removes the wiring left the trace populated,
-        // and the guardian could not fail. Its "mutation verified" claim was false because the
-        // mutation had removed the guardian too.
-        let completion = magi_completion_config();
+        // on the following line from a SECOND call to `magi_completion_config(cfg)`, which is a
+        // pure function of its argument: the mutation that removes the wiring left the trace
+        // populated, and the guardian could not fail. Its "mutation verified" claim was false
+        // because the mutation had removed the guardian too.
+        let completion = magi_completion_config(cfg);
         #[cfg(test)]
         COMPLETION_WIRING_TRACE.with(|t| *t.borrow_mut() = Some(completion.clone()));
         completion
@@ -4253,8 +4297,20 @@ fn build_magi_orchestrator(
             // unreachable — candidates share endpoint, kind and client timeout with the seats, so
             // whatever breaks one breaks all three seats first, and THAT is fatal.
             let mut sink: Vec<Notice> = Vec::new();
-            match build_native_provider(kind, base, &entry.model, creds, client_timeout, &mut sink)
-            {
+            // RED stub (Task 4, Paso 4.1): a rotation candidate is also built with no spelling.
+            // Paso 4.3 passes `cfg.effective_reasoning_spelling()` here too — a candidate that
+            // rotates onto an `openai-compat` lineage must honour the same declared control as
+            // the titular seats it replaces, or the rotation would silently degrade the trio's
+            // reasoning behaviour (the same class of defect D-8 fixed for `/login`).
+            match build_native_provider(
+                kind,
+                base,
+                &entry.model,
+                creds,
+                client_timeout,
+                None,
+                &mut sink,
+            ) {
                 Ok(candidate) => {
                     #[cfg(test)]
                     wired.push((entry.model.clone(), entry.lineage.as_str().to_owned()));
@@ -11217,6 +11273,23 @@ mod tests {
         );
     }
 
+    /// Task 4 (REQ-EE-3/REQ-V42-4, S-6/S-7 after `/login`): the post-login notices are evaluated
+    /// for the kind the rebuild runs on — always `Anthropic` — never the startup one. A source
+    /// grep, not a behavioural test: the full post-`/login` TUI event loop is intractable to
+    /// drive directly, so this pins that `TuiConsultWiring::post_login_notices` is filled from
+    /// exactly one call site, with the kind spelled out rather than a variable that could carry
+    /// the wrong resolution.
+    #[test]
+    fn the_tui_wiring_carries_the_anthropic_reasoning_notices() {
+        let needle = format!("{}(ProviderKind::Anthropic)", "reasoning_wire_notices");
+        let main = include_str!("main.rs").replace('\r', "");
+        assert_eq!(
+            main.matches(needle.as_str()).count(),
+            1,
+            "filled once, for the TUI wiring"
+        );
+    }
+
     /// The two clocks agree whenever the operator gave one. When they cannot — a tool-executing
     /// tier synthesising its own deadline — `query_timeout_decision`'s `below_formula` flag
     /// reports the comparison honestly either way, but the WARNING it feeds only fires when the
@@ -11331,7 +11404,7 @@ mod tests {
     mod trio_construction {
         use super::*;
         use magi_core::error::ExternalErrorKind;
-        use magi_core::provider::CompletionConfig;
+        use magi_core::provider::{CompletionConfig, ReasoningState};
         use magi_core::test_support::valid_verdict_for_current_agent;
         use std::time::Instant;
 
@@ -11493,6 +11566,63 @@ mod tests {
             (format!("http://{addr}"), handle)
         }
 
+        /// A loopback backend that answers ONE request with `200 OK`, `content-type:
+        /// application/json` and `body` verbatim, and hands back the full raw request it
+        /// received (request line, headers and body, read up to `content-length`). Binds
+        /// `127.0.0.1:0`; returns `http://{addr}`. Same reading loop as
+        /// `body_recording_listener`; differs only in the answer.
+        async fn json_answering_listener(
+            body: &'static str,
+        ) -> (String, tokio::task::JoinHandle<String>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding a loopback port must succeed");
+            let addr = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+            let handle = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("the client must connect");
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = socket.read(&mut chunk).await.unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some(header_end) = text.find("\r\n\r\n") {
+                        let headers = text[..header_end].to_owned();
+                        let content_length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                if name.trim().eq_ignore_ascii_case("content-length") {
+                                    value.trim().parse::<usize>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        let body_so_far = buf.len().saturating_sub(header_end + 4);
+                        if body_so_far >= content_length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).into_owned();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                text
+            });
+            (format!("http://{addr}"), handle)
+        }
+
         /// Answers every request with `status` after `delay`, counting requests. Sequential
         /// accept loop: a retry chain is several requests on ONE endpoint, so the counter is the
         /// number of attempts. Binds `127.0.0.1:0`; returns (`http://{addr}`, counter). Every
@@ -11562,6 +11692,7 @@ mod tests {
                 "any-model",
                 None,
                 Duration::from_millis(400),
+                None,
                 &mut notices,
             )
             .expect("ollama is keyless: it must build with no credentials");
@@ -11598,6 +11729,7 @@ mod tests {
                 "any-model",
                 Some(&creds()),
                 Duration::from_millis(400),
+                None,
                 &mut notices,
             )
             .expect("openai-compat builds with a credential");
@@ -11662,6 +11794,7 @@ mod tests {
                         "any-model",
                         Some(&creds()),
                         magi_rs::magi::derive_client_timeout(ceiling),
+                        None,
                         &mut notices,
                     )
                     .unwrap_or_else(|e| {
@@ -11669,7 +11802,11 @@ mod tests {
                     });
                     let outcome = tokio::time::timeout(
                         Duration::from_secs(30),
-                        provider.complete("s", "u", &magi_completion_config()),
+                        provider.complete(
+                            "s",
+                            "u",
+                            &magi_completion_config(&MagiConfig::default()),
+                        ),
                     )
                     .await;
                     let ended = outcome.unwrap_or_else(|_| {
@@ -11701,10 +11838,11 @@ mod tests {
         const OPENAI_COMPAT_BODY_AS_OF_4_0_0: &str = "{\"model\":\"any-model\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"max_tokens\":16384,\"temperature\":0.0}";
 
         /// SC-V41-06 and S-1 (MS1 form): the body the openai-compat seat puts on the wire with
-        /// the PRODUCTION completion configuration — `magi_completion_config()`, what
-        /// `build_magi_orchestrator` hands the builder — is byte-identical to the 0.19.1 body,
-        /// cap included. `max_tokens` present, `max_completion_tokens` absent, and no reasoning
-        /// field (no `ReasoningSpelling` is declared, so magi-core 4.2.0 sends nothing).
+        /// the PRODUCTION completion configuration — `magi_completion_config(&MagiConfig::default())`,
+        /// what `build_magi_orchestrator` hands the builder with no declared keys — is
+        /// byte-identical to the 0.19.1 body, cap included. `max_tokens` present,
+        /// `max_completion_tokens` absent, and no reasoning field (no `ReasoningSpelling` is
+        /// declared, so magi-core 4.2.0 sends nothing).
         ///
         /// It used to send `CompletionConfig::default()`, so it tested the CRATE's default body
         /// rather than the seat's: it went red on the 4.2.0 pin only because the crate default
@@ -11721,10 +11859,13 @@ mod tests {
                 "any-model",
                 Some(&creds()),
                 Duration::from_secs(10),
+                None,
                 &mut notices,
             )
             .expect("openai-compat builds with a credential");
-            let _ = provider.complete("s", "u", &magi_completion_config()).await;
+            let _ = provider
+                .complete("s", "u", &magi_completion_config(&MagiConfig::default()))
+                .await;
             let request = body.await.expect("the listener task must finish");
             let (_, wire_body) = request
                 .split_once("\r\n\r\n")
@@ -11755,9 +11896,10 @@ mod tests {
         const OLLAMA_BODY_AS_OF_0_19_1: &str = "{\"model\":\"any-model\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"stream\":false,\"options\":{\"num_predict\":16384,\"temperature\":0.0}}";
 
         /// S-1 (MS1 form), native wire: the body the ollama seat puts on `POST /api/chat` with
-        /// `magi_completion_config()` is byte-identical to 0.19.1's — `num_predict` equal to the
-        /// declared cap, and NO `think` key, which is what `ReasoningControl::Default` means on
-        /// this wire (magi-core `ollama_wire.rs:209`, "Default puts nothing at all").
+        /// `magi_completion_config(&MagiConfig::default())` is byte-identical to 0.19.1's —
+        /// `num_predict` equal to the declared cap, and NO `think` key, which is what
+        /// `ReasoningControl::Default` means on this wire (magi-core `ollama_wire.rs:209`,
+        /// "Default puts nothing at all").
         ///
         /// Captured under 4.1.0 and asserted under 4.2.0: the baseline surviving the bump is the
         /// proof that the migration changed nothing on this wire.
@@ -11775,10 +11917,13 @@ mod tests {
                 "any-model",
                 None,
                 Duration::from_secs(10),
+                None,
                 &mut notices,
             )
             .expect("ollama is keyless: it must build with no credentials");
-            let _ = provider.complete("s", "u", &magi_completion_config()).await;
+            let _ = provider
+                .complete("s", "u", &magi_completion_config(&MagiConfig::default()))
+                .await;
             let request = body.await.expect("the listener task must finish");
             let (head, wire_body) = request
                 .split_once("\r\n\r\n")
@@ -11799,6 +11944,350 @@ mod tests {
                 !wire_body.contains("\"think\""),
                 "a reasoning control reached the wire under Default: {wire_body}"
             );
+        }
+
+        /// REQ-EE-3/4/5: every configured key reaches the `CompletionConfig` the trio is built
+        /// with, and absent keys give exactly 0.19.1's values.
+        #[test]
+        fn the_completion_config_carries_the_configured_reasoning_keys() {
+            let table: [(&str, u32, ReasoningControl, bool); 5] = [
+                (
+                    "",
+                    DECLARED_COMPLETION_CAP,
+                    ReasoningControl::Default,
+                    false,
+                ),
+                (
+                    "reasoning = \"disabled\"\n",
+                    DECLARED_COMPLETION_CAP,
+                    ReasoningControl::Disabled,
+                    false,
+                ),
+                (
+                    "reasoning = \"enabled\"\n",
+                    DECLARED_COMPLETION_CAP,
+                    ReasoningControl::Enabled,
+                    false,
+                ),
+                (
+                    "max_tokens = 65536\n",
+                    65_536,
+                    ReasoningControl::Default,
+                    false,
+                ),
+                (
+                    "reasoning_trace = true\n",
+                    DECLARED_COMPLETION_CAP,
+                    ReasoningControl::Default,
+                    true,
+                ),
+            ];
+            for (body, cap, control, trace) in table {
+                let cfg = MagiConfig::from_toml_str(&format!("[magi]\n{body}")).expect("valid");
+                let c = magi_completion_config(&cfg);
+                assert_eq!(c.max_tokens, cap, "`{body}`");
+                assert_eq!(c.reasoning, control, "`{body}`");
+                assert_eq!(c.reasoning_trace, trace, "`{body}`");
+            }
+        }
+
+        /// S-1 (MS1 form): with none of the new keys, BOTH seat kinds send 0.19.1's body byte
+        /// for byte, cap included — under magi-core 4.2.0, whose own default cap is 32 768.
+        #[tokio::test]
+        async fn with_no_new_keys_both_seat_kinds_send_the_0_19_1_body() {
+            let cfg = MagiConfig::from_toml_str("[magi]\n").expect("valid");
+            let cases = [
+                (ProviderKind::Ollama, OLLAMA_BODY_AS_OF_0_19_1),
+                (ProviderKind::OpenAiCompat, OPENAI_COMPAT_BODY_AS_OF_4_0_0),
+            ];
+            for (kind, expected) in cases {
+                let (base, request) = body_recording_listener().await;
+                let mut notices = Vec::new();
+                let provider = build_native_provider(
+                    kind,
+                    &endpoint_at(&base),
+                    "any-model",
+                    Some(&creds()),
+                    Duration::from_secs(10),
+                    cfg.effective_reasoning_spelling(),
+                    &mut notices,
+                )
+                .expect("builds");
+                let _ = provider
+                    .complete("s", "u", &magi_completion_config(&cfg))
+                    .await;
+                let raw = request.await.expect("the listener task must finish");
+                let (_, wire_body) = raw
+                    .split_once("\r\n\r\n")
+                    .expect("an HTTP request has a body");
+                assert_eq!(wire_body, expected, "{kind}: byte-identical to 0.19.1");
+            }
+        }
+
+        /// REQ-EE-5: a configured cap is the one on the native wire (`num_predict`).
+        #[tokio::test]
+        async fn the_configured_cap_reaches_the_native_wire() {
+            let cfg = MagiConfig::from_toml_str("[magi]\nmax_tokens = 65536\n").expect("valid");
+            let (base, request) = body_recording_listener().await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint_at(&base),
+                "any-model",
+                None,
+                Duration::from_secs(10),
+                None,
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            let _ = provider
+                .complete("s", "u", &magi_completion_config(&cfg))
+                .await;
+            let raw = request.await.expect("the listener task must finish");
+            assert!(raw.contains("\"num_predict\":65536"), "{raw}");
+            assert!(!raw.contains("\"num_predict\":16384"), "{raw}");
+        }
+
+        /// magi-core's capture of a model that HONOURS `think: false`
+        /// (`native-think-false-nonthinking-cloud.json`, 4.2.0), verbatim.
+        const NATIVE_THINK_FALSE_HONOURED: &str = r#"{"model":"gemma4","created_at":"2026-08-21T03:05:41.421663387Z","message":{"role":"assistant","content":"OK"},"done":true,"done_reason":"stop","total_duration":2390654552,"prompt_eval_count":18,"eval_count":2}"#;
+
+        /// magi-core's capture of `gpt-oss:120b` IGNORING `think: false`
+        /// (`native-think-false-gpt-oss.json`, 4.2.0), verbatim.
+        const NATIVE_THINK_FALSE_IGNORED_GPT_OSS: &str = r#"{"model":"gpt-oss:120b","created_at":"2026-09-20T21:50:06.853057283Z","message":{"role":"assistant","content":"9","thinking":"The riddle: \"A farmer has 17 sheep. All but 9 run away. How many are left?\" The phrase \"All but 9 run away\" means that all except 9 run away, so 9 remain. So answer: 9."},"done":true,"done_reason":"stop","total_duration":406608443,"prompt_eval_count":87,"prompt_eval_cached_count":32,"eval_count":65}"#;
+
+        /// S-4, honoured: `reasoning = "disabled"` puts `think: false` on the native wire, and a
+        /// model that honours it reads as a MEASURED zero.
+        #[tokio::test]
+        async fn a_disabled_control_the_model_honours_reads_as_a_measured_zero() {
+            let cfg =
+                MagiConfig::from_toml_str("[magi]\nreasoning = \"disabled\"\n").expect("valid");
+            let (base, request) = json_answering_listener(NATIVE_THINK_FALSE_HONOURED).await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint_at(&base),
+                "gemma4",
+                None,
+                Duration::from_secs(10),
+                None,
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            let completion = provider
+                .complete("s", "u", &magi_completion_config(&cfg))
+                .await
+                .expect("the capture carries content");
+            let raw = request.await.expect("the listener task must finish");
+            assert!(
+                raw.contains("\"think\":false"),
+                "the control must reach the wire: {raw}"
+            );
+            assert_eq!(
+                completion.telemetry.reasoning,
+                ReasoningState::Measured {
+                    chars: 0,
+                    text: None
+                }
+            );
+        }
+
+        /// S-4, ignored: the same control against `gpt-oss:120b`, which reasons anyway, reads as
+        /// `Unsupported { backend: "ollama" }` with the length that came back — never a count
+        /// that reads as though the switch worked.
+        #[tokio::test]
+        async fn a_disabled_control_the_model_ignores_reads_as_unsupported_on_the_native_wire() {
+            let expected_chars =
+                serde_json::from_str::<serde_json::Value>(NATIVE_THINK_FALSE_IGNORED_GPT_OSS)
+                    .expect("the capture is JSON")["message"]["thinking"]
+                    .as_str()
+                    .expect("the capture carries a thinking channel")
+                    .chars()
+                    .count();
+            let cfg =
+                MagiConfig::from_toml_str("[magi]\nreasoning = \"disabled\"\n").expect("valid");
+            let (base, request) = json_answering_listener(NATIVE_THINK_FALSE_IGNORED_GPT_OSS).await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint_at(&base),
+                "gpt-oss:120b",
+                None,
+                Duration::from_secs(10),
+                None,
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            let completion = provider
+                .complete("s", "u", &magi_completion_config(&cfg))
+                .await
+                .expect("the capture carries content");
+            let raw = request.await.expect("the listener task must finish");
+            assert!(raw.contains("\"think\":false"), "{raw}");
+            assert_eq!(
+                completion.telemetry.reasoning,
+                ReasoningState::Unsupported {
+                    backend: "ollama".to_string(),
+                    chars: Some(expected_chars),
+                    text: None
+                }
+            );
+        }
+
+        /// A compat success body with NO reasoning field — the shape of a backend that says
+        /// nothing about the channel.
+        const COMPAT_OK_NO_REASONING: &str = r#"{"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;
+
+        /// S-7 on the wire: `reasoning = "disabled"` on an openai-compat seat WITHOUT a spelling
+        /// puts no reasoning key on the wire, and the record says `Unsupported` — magi-core never
+        /// guesses a backend's vocabulary.
+        #[tokio::test]
+        async fn without_a_spelling_the_compat_seat_sends_no_reasoning_key_and_reports_unsupported()
+        {
+            let cfg =
+                MagiConfig::from_toml_str("[magi]\nreasoning = \"disabled\"\n").expect("valid");
+            let (base, request) = json_answering_listener(COMPAT_OK_NO_REASONING).await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::OpenAiCompat,
+                &endpoint_at(&base),
+                "any-model",
+                Some(&creds()),
+                Duration::from_secs(10),
+                cfg.effective_reasoning_spelling(),
+                &mut notices,
+            )
+            .expect("builds with a credential");
+            let completion = provider
+                .complete("s", "u", &magi_completion_config(&cfg))
+                .await
+                .expect("the body carries content");
+            let raw = request.await.expect("the listener task must finish");
+            let (_, wire_body) = raw.split_once("\r\n\r\n").expect("body");
+            assert!(!wire_body.contains("reasoning_effort"), "{wire_body}");
+            assert!(!wire_body.contains("\"reasoning\""), "{wire_body}");
+            assert_eq!(
+                completion.telemetry.reasoning,
+                ReasoningState::Unsupported {
+                    backend: "openai-compatible".to_string(),
+                    chars: None,
+                    text: None
+                }
+            );
+        }
+
+        /// REQ-V42-4: a declared spelling reaches the compat wire in the form magi-core's table
+        /// assigns to (spelling, control).
+        #[tokio::test]
+        async fn a_declared_spelling_reaches_the_compat_wire() {
+            let table = [
+                (
+                    "reasoning = \"disabled\"\nreasoning_spelling = \"effort-none\"\n",
+                    "\"reasoning_effort\":\"none\"",
+                ),
+                (
+                    "reasoning = \"disabled\"\nreasoning_spelling = \"effort-minimal\"\n",
+                    "\"reasoning_effort\":\"minimal\"",
+                ),
+                (
+                    "reasoning = \"enabled\"\nreasoning_spelling = \"reasoning-enabled-object\"\n",
+                    "\"reasoning\":{\"enabled\":true}",
+                ),
+            ];
+            for (body, needle) in table {
+                let cfg = MagiConfig::from_toml_str(&format!("[magi]\n{body}")).expect("valid");
+                let (base, request) = body_recording_listener().await;
+                let mut notices = Vec::new();
+                let provider = build_native_provider(
+                    ProviderKind::OpenAiCompat,
+                    &endpoint_at(&base),
+                    "any-model",
+                    Some(&creds()),
+                    Duration::from_secs(10),
+                    cfg.effective_reasoning_spelling(),
+                    &mut notices,
+                )
+                .expect("builds");
+                let _ = provider
+                    .complete("s", "u", &magi_completion_config(&cfg))
+                    .await;
+                let raw = request.await.expect("the listener task must finish");
+                assert!(
+                    raw.contains(needle),
+                    "`{body}` must put `{needle}` on the wire: {raw}"
+                );
+            }
+        }
+
+        /// The builder is handed the CONFIGURED completion config, not a default one. Checks the
+        /// VALUES that `the_builder_is_given_a_config_we_constructed_not_the_crates_default`
+        /// (presence-only) no longer does.
+        #[test]
+        fn the_builder_is_given_the_configured_completion_config() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"\n[magi]\nreasoning = \"disabled\"\nmax_tokens = 20000\nreasoning_trace = true\n",
+            )
+            .expect("valid");
+            let mut notices = Vec::new();
+            COMPLETION_WIRING_TRACE.with(|t| *t.borrow_mut() = None);
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &test_endpoints(),
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            drop(magi);
+            let seen = COMPLETION_WIRING_TRACE
+                .with(|t| t.borrow().clone())
+                .expect("with_completion_config was never called on the builder");
+            assert_eq!(seen.max_tokens, 20_000);
+            assert_eq!(seen.reasoning, ReasoningControl::Disabled);
+            assert!(seen.reasoning_trace);
+        }
+
+        /// REQ-V42-4: every seat of an openai-compat trio is built with the declared spelling —
+        /// read from the seat loop's own trace, never restated.
+        #[test]
+        fn every_compat_seat_is_built_with_the_declared_spelling() {
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"openai-compat\"\n[magi]\nreasoning = \"disabled\"\nreasoning_spelling = \"effort-none\"\n",
+            )
+            .expect("valid");
+            let mut notices = Vec::new();
+            let _ = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::OpenAiCompat,
+                    endpoints: &test_endpoints(),
+                    creds: Some(&creds()),
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
+                },
+                &mut notices,
+            )
+            .expect("builds with a credential");
+            let seats = seat_wiring_trace();
+            assert_eq!(seats.len(), 3);
+            for s in &seats {
+                assert_eq!(
+                    s.reasoning_spelling,
+                    Some(ReasoningSpelling::EffortNone),
+                    "{:?} was built without the declared spelling",
+                    s.seat
+                );
+            }
         }
 
         /// SC-V41-08 (a): `529` is transient as of magi-core 4.1.0 — a sustained one costs a
@@ -11901,6 +12390,7 @@ mod tests {
                     "any-model",
                     None,
                     Duration::from_secs(10),
+                    None,
                     &mut notices,
                 )
                 .expect("ollama is keyless");
@@ -11935,6 +12425,7 @@ mod tests {
                 "any-model",
                 Some(&creds),
                 Duration::from_secs(10),
+                None,
                 &mut notices,
             )
             .expect("openai-compat with a key must build");
@@ -11950,6 +12441,7 @@ mod tests {
                 "any-model",
                 None,
                 Duration::from_secs(10),
+                None,
                 &mut notices,
             )
             .expect("ollama is keyless");
@@ -11964,31 +12456,38 @@ mod tests {
         /// `ClaudeProvider` posts to a fixed `https://api.anthropic.com/v1/messages` (magi-core
         /// `providers/claude.rs:17`), so no local listener can capture its body. What magi-rs
         /// controls on that wire is this configuration, so this is pinned field by field at
-        /// the values 0.19.1 sent — including the two it does NOT set explicitly
-        /// (`temperature`, `reasoning_trace`), which it inherits from the crate's `Default`
-        /// and which a future crate default could move with no diff here.
+        /// the values 0.19.1 sent with NO `[magi]` keys declared — including `temperature`,
+        /// which no `[magi]` key exposes and which it inherits from the crate's `Default`, and
+        /// which a future crate default could move with no diff here.
         ///
         /// The cap is the LITERAL 16 384, not `DECLARED_COMPLETION_CAP`, on purpose: MS1
         /// changes no default (spec §2), and a test comparing the constant to itself would
         /// pass whatever the constant became. MS2 moves this literal deliberately.
         ///
+        /// Kept alongside the table test in
+        /// `the_completion_config_carries_the_configured_reasoning_keys` (Task 4) rather than
+        /// subsumed by it: that table does not assert `temperature`, and this is the only test
+        /// pinning the MS1-literal cap against a hand-typed number instead of the constant.
+        ///
         /// MUTATIONS (required): `DECLARED_COMPLETION_CAP = 16_385` ⇒ red on the cap;
-        /// `cfg.reasoning_trace = true` in `magi_completion_config` ⇒ red on the trace flag.
+        /// setting `reasoning_trace` unconditionally to `true` in `magi_completion_config` ⇒
+        /// red on the trace flag.
         #[test]
         fn the_completion_config_is_the_one_0_19_1_sent() {
-            let cfg = magi_completion_config();
+            let cfg = MagiConfig::from_toml_str("[magi]\n").expect("valid");
+            let completion = magi_completion_config(&cfg);
             assert_eq!(
-                cfg.max_tokens, 16_384,
+                completion.max_tokens, 16_384,
                 "MS1 changes no default: the cap stays 16 384"
             );
             assert_eq!(
-                cfg.temperature.to_bits(),
+                completion.temperature.to_bits(),
                 0.0_f64.to_bits(),
                 "temperature moved: every seat's wire changes with it"
             );
-            assert_eq!(cfg.reasoning, ReasoningControl::Default);
+            assert_eq!(completion.reasoning, ReasoningControl::Default);
             assert!(
-                !cfg.reasoning_trace,
+                !completion.reasoning_trace,
                 "the trace is opt-in (REQ-EE-4); on by default it would change what the crate records"
             );
         }
@@ -13944,15 +14443,17 @@ mod tests {
         #[test]
         /// The guardian for the WIRING, and it asserts STRUCTURAL PRESENCE rather than a value.
         ///
-        /// The obvious version — `assert_eq!(trace.max_tokens, DECLARED_COMPLETION_CAP)` — CANNOT
-        /// FAIL, because that constant is numerically the crate's own default: delete the call
-        /// site, the builder falls back to `CompletionConfig::default()`, and the assertion still
-        /// passes. Only the `Option` being `Some` separates a configured builder from a defaulted
-        /// one.
+        /// Its VALUE assertions are superseded by
+        /// `the_builder_is_given_the_configured_completion_config` (Task 4), which checks the
+        /// same trace against a `cfg` that declares every key, so a mutation of any single field
+        /// resolution is caught there. What stays here is the presence check alone: `Option`
+        /// being `Some` is what separates a configured builder from a defaulted one, and no
+        /// value equality — however chosen — can prove `with_completion_config` was called at
+        /// all if the call site disappears and the field values still happen to line up with
+        /// the crate's own default.
         ///
-        /// MUTATION (required): delete `.with_completion_config(magi_completion_config())` from
-        /// `build_magi_orchestrator` and this goes red because the trace is `None` — not because a
-        /// number changed.
+        /// MUTATION (required): delete `.with_completion_config(...)` from
+        /// `build_magi_orchestrator` and this goes red because the trace is `None`.
         fn the_builder_is_given_a_config_we_constructed_not_the_crates_default() {
             let cfg = MagiConfig::from_toml_str(
                 "provider = \"ollama\"
@@ -13979,11 +14480,9 @@ mod tests {
             .expect("ollama is keyless");
             drop(magi);
 
-            let seen = COMPLETION_WIRING_TRACE
+            COMPLETION_WIRING_TRACE
                 .with(|t| t.borrow().clone())
                 .expect("with_completion_config was never called on the builder");
-            assert_eq!(seen.max_tokens, DECLARED_COMPLETION_CAP);
-            assert_eq!(seen.reasoning, ReasoningControl::Default);
         }
 
         #[test]
@@ -16089,6 +16588,7 @@ mod tests {
                 "some-model",
                 None,
                 Duration::from_secs(1),
+                None,
                 &mut notices,
             );
             assert!(built.is_ok(), "keyless ollama over http builds fine");
@@ -16144,6 +16644,7 @@ mod tests {
                 "some-model",
                 None,
                 Duration::from_secs(1),
+                None,
                 &mut notices,
             ) else {
                 panic!("a non-http scheme cannot build a provider");
