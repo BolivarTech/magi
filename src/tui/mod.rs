@@ -1907,13 +1907,18 @@ fn rebuild_consult_trio_after_login(
     // The SAME helper `build_magi_orchestrator` (`main.rs`) uses, so a layer added to it later
     // reaches both callers by construction — see the rustdoc above.
     let retry = magi_rs::magi::derived_retry_config(agent_timeout_secs);
-    #[cfg(test)]
-    LOGIN_RETRY_TRACE
-        .with(|t| *t.borrow_mut() = Some((retry.operation_budget, retry.retry_after_cap)));
     let native =
         magi_core::providers::claude::ClaudeProvider::with_timeout(api_key, model, client_timeout)?;
     let wrapped: std::sync::Arc<dyn magi_core::provider::LlmProvider> = std::sync::Arc::new(
-        magi_core::provider::RetryProvider::with_config(std::sync::Arc::new(native), retry),
+        magi_core::provider::RetryProvider::with_config(std::sync::Arc::new(native), {
+            // Set INSIDE the argument expression, so removing the `RetryProvider::with_config(...)`
+            // wrap deletes the trace with it — same pattern as `.with_timeout(...)` and
+            // `.with_completion_config(...)` below.
+            #[cfg(test)]
+            LOGIN_RETRY_TRACE
+                .with(|t| *t.borrow_mut() = Some((retry.operation_budget, retry.retry_after_cap)));
+            retry
+        }),
     );
     let magi = magi_core::orchestrator::MagiBuilder::new(wrapped)
         .with_timeout({
