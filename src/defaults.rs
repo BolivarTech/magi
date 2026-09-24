@@ -312,6 +312,120 @@ pub fn render_default_magi_toml() -> String {
          # refuse candidates whose context window could not be measured"
     )
     .unwrap();
+
+    // ── E-E (v0.20.0): reasoning control and the output cap ───────────────────
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# Reasoning control for the whole trio (applies to all three seats — magi-core"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# declined a per-seat override). \"default\" says nothing and the backend's own"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# behaviour applies; \"disabled\" asks it to skip its reasoning channel; \"enabled\""
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# forces the channel on. Measured 2026-09-23: turning reasoning off lost 20-48% of"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# detection at every cap tested, so it is not recommended for a review gate even"
+    )
+    .unwrap();
+    writeln!(out, "# though it terminates faster.").unwrap();
+    writeln!(
+        out,
+        "# reasoning = \"default\"  # \"default\" | \"disabled\" | \"enabled\""
+    )
+    .unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# Output cap per completion, per seat, in tokens — billed as completion tokens"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# on every attempt. At roughly 55 tok/s a full cap can take minutes; raise"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# agent_timeout_secs (or --timeout on the headless path) before raising this. A"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# value above the pinned model's own output maximum returns HTTP 400."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# max_tokens = {cap}  # tokens; no upper bound of magi-rs's own",
+        cap = crate::DECLARED_COMPLETION_CAP
+    )
+    .unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# Opt-in: for cut attempts (finish = length or empty content) the log gets a"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# bounded head and tail of the reasoning trace, file only, off by default. The"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# trace is untrusted model text: a credential shorter than 32 characters that was"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# never registered with magi-rs and that the model echoes can still reach the log"
+    )
+    .unwrap();
+    writeln!(out, "# unmasked.").unwrap();
+    writeln!(out, "# reasoning_trace = false").unwrap();
+
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# Only sent to openai-compat seats; no default. Accepted: effort-none,"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# effort-minimal, reasoning-enabled-object. A spelling the pinned model rejects"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# returns HTTP 400, and magi-core treats a 400 as lineage-condemning: all three seats"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# of that lineage are lost for the run. Verify against the pinned model first, and"
+    )
+    .unwrap();
+    writeln!(out, "# again after any provider-side model update.").unwrap();
+    writeln!(
+        out,
+        "# reasoning_spelling = \"effort-none\"  # (no default)"
+    )
+    .unwrap();
     writeln!(out).unwrap();
 
     // ── [memory] active essentials ────────────────────────────────────────────
