@@ -1903,8 +1903,6 @@ fn rebuild_consult_trio_after_login(
 ) -> Result<std::sync::Arc<magi_core::orchestrator::Magi>, magi_core::error::ProviderError> {
     let agent_timeout_secs = post_login_agent_timeout_secs(configured_agent_timeout_secs);
     let ceiling = std::time::Duration::from_secs(agent_timeout_secs);
-    #[cfg(test)]
-    LOGIN_CEILING_TRACE.with(|t| *t.borrow_mut() = Some(ceiling));
     let client_timeout = magi_rs::magi::derive_client_timeout(agent_timeout_secs);
     // The SAME helper `build_magi_orchestrator` (`main.rs`) uses, so a layer added to it later
     // reaches both callers by construction — see the rustdoc above.
@@ -1918,7 +1916,13 @@ fn rebuild_consult_trio_after_login(
         magi_core::provider::RetryProvider::with_config(std::sync::Arc::new(native), retry),
     );
     let magi = magi_core::orchestrator::MagiBuilder::new(wrapped)
-        .with_timeout(ceiling)
+        .with_timeout({
+            // Set INSIDE the argument expression, so deleting the `.with_timeout(...)` call
+            // deletes the trace with it — same pattern as `.with_completion_config(...)` below.
+            #[cfg(test)]
+            LOGIN_CEILING_TRACE.with(|t| *t.borrow_mut() = Some(ceiling));
+            ceiling
+        })
         .with_completion_config({
             // Set INSIDE the argument expression, so deleting the `.with_completion_config(...)`
             // call deletes the trace with it — the same pattern `COMPLETION_WIRING_TRACE`
