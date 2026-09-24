@@ -316,9 +316,10 @@ fn magi_core_api_surface_is_what_the_plan_assumes() {
 
     // `OllamaProvider` serves BOTH roles as of v0.13.0, and `with_timeout` is the load-bearing
     // constructor — the one REQ-R30 requires and §7 of the spec names in the only remaining
-    // prohibition on this type: never `new`, because it delegates with a 300 s default that
+    // prohibition on this type: never `new`, because it delegates with a default that
     // cannot satisfy `operation_budget + client_timeout <= ceiling` and does so while compiling
-    // and running perfectly.
+    // and running perfectly — 300 s through magi-core 4.1.0, 600 s from 4.2.0 (REQ-V42-7):
+    // doubling the default made the relation it breaks WORSE, not better.
     //
     // This comment used to say the opposite — "ONLY as a probe: its sole constructor fixes a
     // 300 s client with no override" — which was the state before 3.2.0 added `with_timeout` and
