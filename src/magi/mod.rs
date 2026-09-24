@@ -52,13 +52,18 @@ pub mod rotation_report;
 
 use std::time::Duration;
 
-/// Bounds of the admissible per-mage ceiling range (§4.9 of the spec). `pub`, not private: they
-/// are consumed by `validate_agent_timeout` from `config.rs` (bin) and the invariant sweep from
-/// `tests/` — two distinct crates, so private ones would not compile in either. The §4.9 range
-/// is contract, not internal detail.
+/// Floor of the admissible per-mage ceiling range (§4.9 of the spec). `pub`, not private: it is
+/// consumed by `validate_agent_timeout` from `config.rs` (bin) and the invariant sweep from
+/// `tests/` — two distinct crates, so a private one would not compile in either. Below it a
+/// legitimate generation does not fit and the two derived timeout layers no longer fit inside
+/// the ceiling.
+///
+/// **There is no matching upper bound any more.** Through v0.19.1 this range was
+/// `AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS` (`120`); REQ-TUI-1 (v0.20.0) removed the
+/// ceiling — an interactive consult is sized for deliberation, not for chat responsiveness, and
+/// the ceiling was a UX cap on exactly the operation known to need more time. The floor is
+/// unchanged.
 pub const AGENT_TIMEOUT_MIN_SECS: u64 = 30;
-/// See [`AGENT_TIMEOUT_MIN_SECS`].
-pub const AGENT_TIMEOUT_MAX_SECS: u64 = 120;
 
 /// Ceiling PER MAGE and PER ATTEMPT (REQ-A04, verified against `orchestrator.rs`).
 ///
@@ -122,8 +127,9 @@ pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =
 /// **Caller contract (documented, not type-enforced — MAGI S2 re-gate, Caspar):** the
 /// "impossible to break by construction" claim holds only for
 /// `ceiling_secs >= AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`. `config.rs` upholds that by validating
-/// `[magi].agent_timeout_secs` into the narrower `AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS`
-/// range before this ever runs. A hypothetical caller outside that validated path that invokes
+/// `[magi].agent_timeout_secs >= AGENT_TIMEOUT_MIN_SECS` before this ever runs — there is no
+/// upper bound to validate since REQ-TUI-1 (v0.20.0). A hypothetical caller outside that
+/// validated path that invokes
 /// this `pub` function directly with a ceiling below the absolute floor gets a `budget +
 /// client_timeout` that legitimately exceeds `ceiling_secs` — the floors win over the fraction,
 /// as `derived_scale_satisfies_invariant_across_the_whole_admissible_range` deliberately
@@ -348,8 +354,9 @@ pub fn headless_consult_timeout_secs(
     // Saturating: this function is `pub` and takes an arbitrary ceiling. The pre-E-B version
     // multiplied by a factor ~100x smaller, so plain arithmetic had far more headroom; folding the
     // hundredths into `attempt_factor` moved the overflow point a hundredfold closer. The
-    // validated config path (30..=120) is nowhere near it, but a caller outside that path — and
-    // SC-EB04 is one, sweeping up to 3600 — must not wrap.
+    // validated config path (`agent_timeout_secs >= 30`, no ceiling since REQ-TUI-1) is nowhere
+    // near it, but a caller outside that path — and SC-EB04 is one, sweeping up to 3600 — must
+    // not wrap.
     CLASSIFY_TIMEOUT_SECS.saturating_add(
         configured_ceiling.saturating_mul(attempt_factor(max_rotations, retry_disabled)) / 100,
     )
@@ -537,11 +544,13 @@ pub fn floor_activation_threshold_secs(max_rotations: u32, retry_disabled: bool)
 ///
 /// # Why this exists
 ///
-/// `[magi].agent_timeout_secs` is validated into `30..=120`, so the per-attempt budget it derives
-/// tops out at 72 s — regardless of how generous the run's `--timeout` is. A caller that grants
-/// 1800 s of wall clock still gets 72 s per attempt, and a mage that needs more simply never
-/// finishes. Deriving the ceiling from the deadline instead makes the budget scale with what the
-/// operator actually granted.
+/// `[magi].agent_timeout_secs` is a PERSISTENT setting in `magi.toml`; `--timeout` is a per-RUN
+/// flag. Through v0.19.1 the persistent ceiling additionally topped out at 120 s, so a caller
+/// that wanted a bigger per-attempt budget for one run had no way to reach it short of editing
+/// the file. REQ-TUI-1 (v0.20.0) removed that cap, but the two settings stay independent: a
+/// generous `--timeout` widens the budget for THIS run without touching the persistent default
+/// every other run inherits, and without requiring the operator to raise it and remember to
+/// lower it back.
 ///
 /// # Why the floor is mandatory, not defensive
 ///
@@ -962,8 +971,9 @@ impl BudgetTelemetry {
             })
             .unwrap_or(configured_ceiling);
         // The floor applies to BOTH branches, and the `None` one is not defensive padding.
-        // `config.rs` validates `agent_timeout_secs` into `30..=120`, so a below-floor configured
-        // ceiling is unreachable through the loaded config — but this function is `pub`, and
+        // `config.rs` validates `agent_timeout_secs >= AGENT_TIMEOUT_MIN_SECS` (no ceiling since
+        // REQ-TUI-1), so a below-floor configured ceiling is unreachable through the loaded
+        // config — but this function is `pub`, and
         // `derive_operation_budget`'s own rustdoc already records that its "impossible by
         // construction" claim holds only above the floor. Leaving `None` unfloored would keep a
         // path on which REQ-A04's invariant is breakable, guarded by a precondition living in a
@@ -1066,6 +1076,11 @@ pub fn min_viable_output_cap() -> usize {
 mod tests {
     use super::*;
 
+    /// Upper end of the DENSE per-second sweep, not an admissible bound: the configured range
+    /// has no ceiling since v0.20.0 (REQ-TUI-1). The unbounded tail is covered by REQ-V42-3's
+    /// point sweep.
+    const DENSE_SWEEP_UPPER_SECS: u64 = 120;
+
     /// SC-A04 / REQ-A04: the scale is satisfied BY CONSTRUCTION for any ceiling in the range.
     #[test]
     fn derived_scale_satisfies_invariant_across_the_whole_admissible_range() {
@@ -1073,13 +1088,14 @@ mod tests {
         // the configurable range, and a sweep that does not cross it proves nothing.
         //
         // Below `AGENT_TIMEOUT_MIN_SECS` (30s) the derived values are dominated by
-        // `MIN_OPERATION_BUDGET`/`MIN_CLIENT_TIMEOUT` rather than the 0.6/0.3 fractions — the
-        // practical, `config.rs`-validated range an operator can actually reach is 30-120s. The
-        // sweep is deliberately WIDER than that: it exists specifically to prove the invariant
-        // holds down at the absolute floor too, for any non-`config.rs` caller of
-        // `derive_operation_budget`/`derive_client_timeout` (both `pub`) that is not gated by
-        // that validation.
-        for ceiling in AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS..=AGENT_TIMEOUT_MAX_SECS {
+        // `MIN_OPERATION_BUDGET`/`MIN_CLIENT_TIMEOUT` rather than the 0.6/0.3 fractions.
+        // `config.rs`-validated range an operator can actually reach has no ceiling since
+        // REQ-TUI-1 (v0.20.0); `DENSE_SWEEP_UPPER_SECS` bounds only THIS per-second sweep, not
+        // the admissible range — REQ-V42-3's point sweep covers the unbounded tail. This sweep
+        // exists specifically to prove the invariant holds down at the absolute floor too, for
+        // any non-`config.rs` caller of `derive_operation_budget`/`derive_client_timeout` (both
+        // `pub`) that is not gated by that validation.
+        for ceiling in AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS..=DENSE_SWEEP_UPPER_SECS {
             let budget = derive_operation_budget(ceiling);
             let client = derive_client_timeout(ceiling);
             assert!(
@@ -1118,7 +1134,7 @@ mod tests {
     /// tied to the built-in default, not to the value the operator put in `[magi]`.
     #[test]
     fn a_raised_ceiling_raises_the_headless_minimum_too() {
-        for ceiling in AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS {
+        for ceiling in AGENT_TIMEOUT_MIN_SECS..=DENSE_SWEEP_UPPER_SECS {
             let dominant = 2 * ceiling;
             let minimum = CLASSIFY_TIMEOUT_SECS + dominant;
             let slack = dominant * HEADLESS_TIMEOUT_SLACK_PCT / 100;
@@ -1391,12 +1407,14 @@ mod tests {
                  invariant and no other test would notice"
             );
         }
-        assert!(
-            (AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS).contains(&AGENT_TIMEOUT_SECS),
-            "the range comes from §4.9, not from repeated literals: with `30..=120` \
-             written by hand here AND in the sweep above, moving the range leaves the \
-             two disagreeing, and the one that fails is the one nobody watches"
-        );
+        const {
+            assert!(
+                AGENT_TIMEOUT_SECS >= AGENT_TIMEOUT_MIN_SECS,
+                "the floor comes from §4.9, not from a repeated literal: with `30` written \
+                 by hand here AND in the sweep above, moving the floor leaves the two \
+                 disagreeing, and the one that fails is the one nobody watches"
+            );
+        }
         assert!((3..=10).contains(&CLASSIFY_TIMEOUT_SECS));
         assert!((3..=10).contains(&PROBE_TIMEOUT_SECS));
         assert!((256 * 1024..=1024 * 1024).contains(&MAX_QUERY_BYTES));
@@ -1471,8 +1489,9 @@ mod tests {
         );
     }
 
-    /// SC-EB02: a generous `--timeout` unlocks a budget far above the 72 s that the
-    /// validated `agent_timeout_secs` range could ever reach. This is the requirement.
+    /// SC-EB02: a generous `--timeout` unlocks a per-run ceiling above `AGENT_TIMEOUT_SECS`,
+    /// the configured default — proving the derived path does not silently fall back to it.
+    /// This is the requirement.
     #[test]
     fn a_generous_timeout_derives_a_ceiling_above_the_configured_maximum() {
         // 2 attempts x 3 models x 1.2 slack = 7.2; (1800 - 6) / 7.2 = 249.16 -> 249
@@ -1482,8 +1501,8 @@ mod tests {
             "the inverse of the formula that produced 1800"
         );
         assert!(
-            ceiling > AGENT_TIMEOUT_MAX_SECS,
-            "the whole point of E-B: the derived path is NOT capped by the configured range"
+            ceiling > AGENT_TIMEOUT_SECS,
+            "the derived path is not limited to the configured default"
         );
         assert_eq!(derive_operation_budget(ceiling).as_secs(), 149);
     }
@@ -1678,8 +1697,9 @@ mod tests {
 
     /// REQ-A04 holds on the `None` path too, for a configured ceiling BELOW the floor.
     ///
-    /// `config.rs` validates `agent_timeout_secs` into `30..=120`, so this is unreachable
-    /// through the loaded config — but `derive` is `pub`, and a precondition enforced in
+    /// `config.rs` validates `agent_timeout_secs >= AGENT_TIMEOUT_MIN_SECS` (no ceiling since
+    /// REQ-TUI-1), so this is unreachable through the loaded config — but `derive` is `pub`, and
+    /// a precondition enforced in
     /// another module is a precondition someone can walk around. The sweep above covers
     /// the validated range; this covers the hole underneath it.
     #[test]
@@ -1893,7 +1913,7 @@ mod tests {
     /// `operation_budget + client_timeout` -- REQ-A04's relation verbatim, with no jitter term.
     #[test]
     fn the_retry_after_cap_plus_jitter_equals_the_client_timeout_at_every_admissible_ceiling() {
-        for ceiling in AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS {
+        for ceiling in AGENT_TIMEOUT_MIN_SECS..=DENSE_SWEEP_UPPER_SECS {
             assert_eq!(
                 derive_retry_after_cap(ceiling) + magi_core::backoff::RETRY_AFTER_JITTER,
                 derive_client_timeout(ceiling),
@@ -1906,7 +1926,7 @@ mod tests {
     /// defect held at 30, 90 and 120 alike, so the fix must be checked across the whole range.
     #[test]
     fn the_mixed_chain_bound_never_exceeds_the_ceiling_across_the_admissible_range() {
-        for ceiling in AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS {
+        for ceiling in AGENT_TIMEOUT_MIN_SECS..=DENSE_SWEEP_UPPER_SECS {
             let bound = derive_operation_budget(ceiling)
                 + std::cmp::max(
                     derive_client_timeout(ceiling),

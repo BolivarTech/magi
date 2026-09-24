@@ -23,7 +23,7 @@ use magi_rs::magi::mode::{ModeExt, ModeParseError};
 use magi_rs::magi::reasoning::{
     parse_reasoning_control, parse_reasoning_spelling, ReasoningVocabularyError,
 };
-use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
+use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MIN_SECS};
 use magi_rs::notices::Notice;
 use serde::Deserialize;
 
@@ -91,6 +91,25 @@ pub enum ConfigError {
         min: u64,
         /// Ceiling of the acceptable range (§4.9).
         max: u64,
+    },
+
+    /// `[magi].agent_timeout_secs` below the floor (REQ-TUI-1: there is no ceiling any more).
+    ///
+    /// RED STUB (Paso 3b.1): not constructed anywhere yet — `validate_agent_timeout`
+    /// (Paso 3b.3) is what builds it, replacing [`Self::AgentTimeoutOutOfRange`] entirely — so
+    /// `dead_code` is allowed only until that Green lands, same pattern as `Agent::history`
+    /// (`src/agent/mod.rs`).
+    #[error(
+        "[magi].agent_timeout_secs = {got} is below the {min}s floor: below it a legitimate \
+         generation does not fit and the two derived timeout layers no longer fit inside the \
+         ceiling. There is no upper bound. Not clamped — rejected."
+    )]
+    #[allow(dead_code)]
+    AgentTimeoutBelowFloor {
+        /// The declared value.
+        got: u64,
+        /// Floor of the admissible range (§4.9).
+        min: u64,
     },
 
     /// `tool_result_cap_bytes` falls below the minimum viable (REQ-A11b).
@@ -666,7 +685,7 @@ pub struct MagiSectionConfig {
     /// [`magi_rs::magi::MAX_QUERY_BYTES`].
     pub max_query_bytes: Option<usize>,
     /// Ceiling per mage; the two internal retry layers are derived from it (REQ-A04/A15). Must
-    /// fall within `[AGENT_TIMEOUT_MIN_SECS, AGENT_TIMEOUT_MAX_SECS]`.
+    /// be at or above `AGENT_TIMEOUT_MIN_SECS`; no upper bound since REQ-TUI-1 (v0.20.0).
     pub agent_timeout_secs: Option<u64>,
     /// Size warning threshold; absent ⇒ measured by probe, or the magi-core default
     /// (REQ-A15/A24b).
@@ -928,13 +947,15 @@ impl MagiConfig {
     /// [`DEFAULT_MAX_ROTATIONS`].
     ///
     /// **No upper bound, and that is deliberate** (asked by S1 Loop 2, Caspar, noting that
-    /// `agent_timeout_secs` and `tool_result_cap_bytes` both carry ranges). Three reasons, in
-    /// order: the arithmetic cannot overflow — `u32::MAX + 1` models times two attempts times a
-    /// ceiling capped at 120 is on the order of `1e12`, against a `u64` headroom of `1.8e19`;
-    /// real rotation is bounded by the POOL, which is finite and declared, so a number past its
-    /// length buys nothing; and REQ-R05 specifies a default and a kill-switch and no range, so
-    /// inventing one here would be behaviour the spec does not define. If a bound is wanted it
-    /// is a spec change, not a hardening patch.
+    /// `tool_result_cap_bytes` carries a range). Three reasons, in order: the arithmetic cannot
+    /// overflow — since REQ-TUI-1 (v0.20.0) removed `agent_timeout_secs`'s own ceiling, the
+    /// argument no longer rests on a bounded product; it rests on `attempt_factor` and
+    /// `headless_consult_timeout_secs` (`src/magi/mod.rs`) being **saturating end to end**
+    /// (`saturating_mul`/`saturating_add`), so an absurd rotation count clamps the derived
+    /// ceiling to `u64::MAX` instead of wrapping; real rotation is bounded by the POOL, which is
+    /// finite and declared, so a number past its length buys nothing; and REQ-R05 specifies a
+    /// default and a kill-switch and no range, so inventing one here would be behaviour the spec
+    /// does not define. If a bound is wanted it is a spec change, not a hardening patch.
     #[must_use]
     pub(crate) fn effective_max_rotations(&self) -> u32 {
         self.magi
@@ -1293,17 +1314,22 @@ impl MagiConfig {
     /// ceiling below the absolute floor of the derivation, the internal floors win and the sum
     /// exceeds the ceiling. "Impossible by construction" is only true if the input range is
     /// bounded.
+    // RED STUB (Paso 3b.1): the old two-sided range, with its former ceiling (120) inlined as a
+    // literal because `AGENT_TIMEOUT_MAX_SECS` no longer exists — kept exactly as it ran through
+    // v0.19.1 so the new tests fail for the right reason (values above 120 still rejected).
+    // Paso 3b.3's Green replaces the whole body with the floor-only check.
     fn validate_agent_timeout(&self) -> Result<(), ConfigError> {
         let Some(secs) = self.magi.agent_timeout_secs else {
             return Ok(()); // absent ⇒ the built-in default, already valid
         };
-        if (AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS).contains(&secs) {
+        const OLD_MAX_SECS: u64 = 120;
+        if (AGENT_TIMEOUT_MIN_SECS..=OLD_MAX_SECS).contains(&secs) {
             return Ok(());
         }
         Err(ConfigError::AgentTimeoutOutOfRange {
             got: secs,
             min: AGENT_TIMEOUT_MIN_SECS,
-            max: AGENT_TIMEOUT_MAX_SECS,
+            max: OLD_MAX_SECS,
         })
     }
 
@@ -3470,25 +3496,62 @@ max_input_bytes = 2048
     // either end is rejected. `validate_agent_timeout` shipped with zero tests and an
     // inclusive-both-ends range with nothing pinning the edge.
 
-    /// I3: both range boundaries of `agent_timeout_secs` (§4.9) are accepted; one step outside
-    /// either end is rejected. `validate_agent_timeout` shipped with zero tests and an
-    /// inclusive-both-ends range with nothing pinning the edge.
+    /// S-13 / REQ-TUI-1: `agent_timeout_secs` has a 30 s floor and NO ceiling. 29 is a typed
+    /// error naming the floor; everything from 30 up loads, far above the old 120 included.
     #[test]
-    fn agent_timeout_secs_accepts_both_boundaries_and_rejects_one_step_outside() {
-        for ok in [AGENT_TIMEOUT_MIN_SECS, AGENT_TIMEOUT_MAX_SECS] {
+    fn agent_timeout_secs_has_a_floor_and_no_ceiling() {
+        for ok in [
+            magi_rs::magi::AGENT_TIMEOUT_MIN_SECS,
+            90,
+            120,
+            121,
+            5_000,
+            86_400,
+            u64::from(u32::MAX),
+        ] {
             let toml = format!("[magi]\nagent_timeout_secs = {ok}\n");
             assert!(
                 MagiConfig::from_toml_str(&toml).is_ok(),
-                "{ok}s is inside [{AGENT_TIMEOUT_MIN_SECS}, {AGENT_TIMEOUT_MAX_SECS}] and must be accepted"
+                "{ok}s is at or above the floor and must load"
             );
         }
-        for bad in [AGENT_TIMEOUT_MIN_SECS - 1, AGENT_TIMEOUT_MAX_SECS + 1] {
-            let toml = format!("[magi]\nagent_timeout_secs = {bad}\n");
-            assert!(
-                MagiConfig::from_toml_str(&toml).is_err(),
-                "{bad}s is one step outside the range and must be rejected"
-            );
-        }
+        let err = MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 29\n")
+            .expect_err("29 is below the floor");
+        assert!(
+            matches!(
+                err,
+                ConfigError::AgentTimeoutBelowFloor { got: 29, min: 30 }
+            ),
+            "typed, with the value and the floor: {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("30"), "names the floor: {text}");
+        assert!(
+            text.contains("no upper bound"),
+            "the message must not leave the operator believing a ceiling exists: {text}"
+        );
+        assert!(
+            !text.contains("out of range"),
+            "the old two-sided wording must be gone (PM-S-16): {text}"
+        );
+    }
+
+    /// S-13: a 5000 s interactive ceiling loads and its two derived layers still satisfy
+    /// REQ-A04, with the retry-after cap still collapsing onto the client timeout.
+    #[test]
+    fn a_5000_second_ceiling_loads_and_derives_its_layers_by_req_a04() {
+        let cfg =
+            MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 5000\n").expect("5000 s loads");
+        let ceiling = cfg.magi().agent_timeout_secs.expect("declared");
+        let budget = magi_rs::magi::derive_operation_budget(ceiling);
+        let client = magi_rs::magi::derive_client_timeout(ceiling);
+        assert_eq!(budget.as_secs(), 3_000);
+        assert_eq!(client.as_secs(), 1_500);
+        assert!(budget + client <= std::time::Duration::from_secs(ceiling));
+        assert_eq!(
+            magi_rs::magi::derive_retry_after_cap(ceiling) + magi_core::backoff::RETRY_AFTER_JITTER,
+            client
+        );
     }
 
     /// I3: the output-cap floor (`min_viable_output_cap()`) itself is accepted; one byte below

@@ -13935,8 +13935,8 @@ mod tests {
         /// above would still pass and E-B would do nothing, which is precisely the silent no-op
         /// the whole feature exists to eliminate.
         ///
-        /// Asserted against a value ABOVE `AGENT_TIMEOUT_MAX_SECS`, so the test cannot pass on a
-        /// path that silently fell back to the configured ceiling.
+        /// Asserted against a value ABOVE `AGENT_TIMEOUT_SECS`, the configured default, so the
+        /// test cannot pass on a path that silently fell back to the configured ceiling.
         #[test]
         /// The guardian for the WIRING, and it asserts STRUCTURAL PRESENCE rather than a value.
         ///
@@ -14086,7 +14086,7 @@ mod tests {
             let (ceiling, _) =
                 BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(1800)), 90, 2, false);
             assert!(
-                ceiling.secs() > magi_rs::magi::AGENT_TIMEOUT_MAX_SECS,
+                ceiling.secs() > magi_rs::magi::AGENT_TIMEOUT_SECS,
                 "precondition"
             );
 
