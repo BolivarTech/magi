@@ -125,16 +125,11 @@ pub enum ConfigError {
     ReasoningVocabulary(#[from] ReasoningVocabularyError),
 
     /// `[magi].max_tokens` is not a positive value the 32-bit wire field can carry (REQ-EE-5).
-    ///
-    /// RED STUB (Paso 3a.1): not constructed anywhere yet — `validate_max_tokens` (Paso 3a.3)
-    /// is what builds it — so `dead_code` is allowed only until that Green lands, same pattern
-    /// as `Agent::history` (`src/agent/mod.rs`).
     #[error(
         "[magi].max_tokens = {got} is not accepted: it must be a positive whole number of \
          tokens, at most {max}, the largest value the 32-bit wire field can carry; magi-rs \
          sets no limit of its own below that."
     )]
-    #[allow(dead_code)]
     MaxTokensOutOfRange {
         /// The declared value, verbatim.
         got: i64,
@@ -1132,6 +1127,16 @@ impl MagiConfig {
         <Mode as ModeExt>::parse_config_value(
             self.magi.default_mode.as_deref().unwrap_or_default(),
         )?;
+        // `reasoning`/`reasoning_spelling` have no "blank is absent" rule the way `provider` or
+        // `kind` do (S-5): a present-but-empty `[magi]` key is still unknown vocabulary, so these
+        // only run when the key is DECLARED at all — `None` (absent) skips straight past.
+        if let Some(raw) = self.magi.reasoning.as_deref() {
+            parse_reasoning_control(raw)?;
+        }
+        if let Some(raw) = self.magi.reasoning_spelling.as_deref() {
+            parse_reasoning_spelling(raw)?;
+        }
+        self.validate_max_tokens()?;
         self.validate_agent_timeout()?;
         self.validate_output_cap()?;
         self.validate_diversity_rules()?;
@@ -1255,6 +1260,25 @@ impl MagiConfig {
         }
 
         notices
+    }
+
+    /// `[magi].max_tokens` outside what the wire can carry is a **configuration error**
+    /// (REQ-EE-5).
+    ///
+    /// # Errors
+    /// [`ConfigError::MaxTokensOutOfRange`] when the declared value is not positive, or is
+    /// larger than `u32::MAX` — the type magi-core's `CompletionConfig::max_tokens` field is.
+    /// **Not clamped, rejected** — same criterion as [`Self::validate_agent_timeout`]: a value
+    /// this crate cannot represent on the wire is silently truncated by no path here.
+    fn validate_max_tokens(&self) -> Result<(), ConfigError> {
+        let Some(got) = self.magi.max_tokens else {
+            return Ok(()); // absent ⇒ the built-in default, already valid
+        };
+        let representable = u32::try_from(got).is_ok_and(|v| v > 0);
+        if representable {
+            return Ok(());
+        }
+        Err(ConfigError::MaxTokensOutOfRange { got, max: u32::MAX })
     }
 
     /// `agent_timeout_secs` outside the range of §4.9 is a **configuration error**.

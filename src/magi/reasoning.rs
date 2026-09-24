@@ -72,10 +72,14 @@ pub struct ReasoningVocabularyError {
 /// # Errors
 /// [`ReasoningVocabularyError`] naming the `"reasoning"` key, the value received, and every
 /// accepted tag, when `raw` is not one of magi-core's three exact tags.
-// RED STUB (Paso 3a.1): accepts everything, so the rejection tests fail by ASSERTION rather
-// than by a missing symbol. Replaced by the real deserialization in Green (Paso 3a.3).
-pub fn parse_reasoning_control(_raw: &str) -> Result<ReasoningControl, ReasoningVocabularyError> {
-    Ok(ReasoningControl::Default)
+pub fn parse_reasoning_control(raw: &str) -> Result<ReasoningControl, ReasoningVocabularyError> {
+    serde_json::from_value(serde_json::Value::String(raw.to_string())).map_err(|e| {
+        ReasoningVocabularyError {
+            key: "reasoning",
+            got: raw.to_string(),
+            reason: e.to_string(),
+        }
+    })
 }
 
 /// Parses `[magi].reasoning_spelling` against [`VALID_REASONING_SPELLINGS`] (REQ-V42-4).
@@ -90,9 +94,17 @@ pub fn parse_reasoning_control(_raw: &str) -> Result<ReasoningControl, Reasoning
 /// # Errors
 /// [`ReasoningVocabularyError`] naming the `"reasoning_spelling"` key, the value received, and
 /// the three accepted tags, when `raw` matches none of them.
-// RED STUB (Paso 3a.1): see `parse_reasoning_control`.
-pub fn parse_reasoning_spelling(_raw: &str) -> Result<ReasoningSpelling, ReasoningVocabularyError> {
-    Ok(ReasoningSpelling::EffortNone)
+pub fn parse_reasoning_spelling(raw: &str) -> Result<ReasoningSpelling, ReasoningVocabularyError> {
+    match raw {
+        "effort-none" => Ok(ReasoningSpelling::EffortNone),
+        "effort-minimal" => Ok(ReasoningSpelling::EffortMinimal),
+        "reasoning-enabled-object" => Ok(ReasoningSpelling::ReasoningEnabledObject),
+        other => Err(ReasoningVocabularyError {
+            key: "reasoning_spelling",
+            got: other.to_string(),
+            reason: format!("valid values: {VALID_REASONING_SPELLINGS}"),
+        }),
+    }
 }
 
 #[cfg(test)]
