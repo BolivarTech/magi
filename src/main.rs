@@ -3264,6 +3264,9 @@ fn build_native_provider(
     // `redact_foreign_error`, NOT `to_string()`: magi-core assembles the message, which does
     // not know our redaction rule and may quote `base_url`.
     let to_seat = |e: ProviderError| SeatError::Transport(redact_foreign_error(&e));
+    // Measured HERE, at the parameter itself — see `BUILD_NATIVE_PROVIDER_SPELLING_TRACE`.
+    #[cfg(test)]
+    BUILD_NATIVE_PROVIDER_SPELLING_TRACE.with(|t| *t.borrow_mut() = Some(reasoning_spelling));
 
     Ok(match kind {
         // `api_key = None` ⇒ no `Authorization` header, which is what Ollama expects.
@@ -3375,8 +3378,9 @@ struct SeatWiring {
     /// stops at the telemetry and never reaches the seat would still pass every other test.
     client_timeout: Duration,
     /// NEW for Task 4 (REQ-V42-4): the `reasoning_spelling` argument this seat was built with,
-    /// MEASURED from what `build_magi_orchestrator` actually passed to `build_native_provider` —
-    /// never restated as a literal, the same discipline `retry_wrapped` above already follows.
+    /// MEASURED from inside `build_native_provider` itself (`BUILD_NATIVE_PROVIDER_SPELLING_
+    /// TRACE`) — never read back from the caller's own local variable, which stays correct even
+    /// when a mutated call site stops passing it. Same discipline `retry_wrapped` above follows.
     reasoning_spelling: Option<ReasoningSpelling>,
 }
 
@@ -3384,6 +3388,19 @@ struct SeatWiring {
 thread_local! {
     static SEAT_WIRING_TRACE: std::cell::RefCell<Vec<SeatWiring>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// Test-only (Task 4): the `reasoning_spelling` parameter the LAST call to
+// `build_native_provider` in this thread actually RECEIVED — set inside `build_native_provider`
+// itself, not read back from the caller's own local variable. A trace anchored at the call site
+// that PASSES the argument (rather than inside the function that RECEIVES it) cannot tell a
+// correctly-wired call from one whose argument was mutated to something else while the caller's
+// variable, read separately for the trace, still held the right value — exactly the class of
+// guardian-that-guards-nothing `SEAT_WIRING_TRACE` above already warns about for `retry_wrapped`.
+#[cfg(test)]
+thread_local! {
+    static BUILD_NATIVE_PROVIDER_SPELLING_TRACE: std::cell::RefCell<Option<Option<ReasoningSpelling>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 // Test-only (Task 3): what `build_magi_orchestrator` handed to `with_completion_config`.
@@ -3962,12 +3979,18 @@ fn build_magi_orchestrator(
                 #[cfg(test)]
                 SEAT_WIRING_TRACE.with(|t| {
                     let wrapped_addr = Arc::as_ptr(&wrapped) as *const () as usize;
+                    // Read from `BUILD_NATIVE_PROVIDER_SPELLING_TRACE`, NOT the outer
+                    // `reasoning_spelling` variable: see that trace's own comment for why.
+                    let measured_spelling = BUILD_NATIVE_PROVIDER_SPELLING_TRACE.with(|t| {
+                        t.borrow()
+                            .expect("build_native_provider must trace the spelling it received")
+                    });
                     t.borrow_mut().push(SeatWiring {
                         seat,
                         model: model.clone(),
                         retry_wrapped: wrapped_addr != unwrapped_addr,
                         client_timeout,
-                        reasoning_spelling,
+                        reasoning_spelling: measured_spelling,
                     });
                 });
                 seats.push((seat, wrapped, lineage, model.clone()));
