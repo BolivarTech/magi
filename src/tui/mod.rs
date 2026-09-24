@@ -1901,24 +1901,39 @@ fn rebuild_consult_trio_after_login(
     configured_agent_timeout_secs: Option<u64>,
     completion: &CompletionConfig,
 ) -> Result<std::sync::Arc<magi_core::orchestrator::Magi>, magi_core::error::ProviderError> {
-    // RED stub (Task 4, Paso 4.1): reproduces TODAY's behaviour exactly — `completion` is
-    // ignored, the retry config only sets `operation_budget` (never `retry_after_cap`), and the
-    // trio is built via `Magi::new` rather than `MagiBuilder` (no per-agent ceiling). Every
-    // `LOGIN_*_TRACE` therefore stays `None`, which is what the three new tests below assert
-    // against. Paso 4.3 replaces this with the real derivation.
-    let _ = completion;
     let agent_timeout_secs = post_login_agent_timeout_secs(configured_agent_timeout_secs);
+    let ceiling = std::time::Duration::from_secs(agent_timeout_secs);
+    #[cfg(test)]
+    LOGIN_CEILING_TRACE.with(|t| *t.borrow_mut() = Some(ceiling));
     let client_timeout = magi_rs::magi::derive_client_timeout(agent_timeout_secs);
-    let mut retry = magi_core::provider::RetryConfig::default();
-    retry.operation_budget = magi_rs::magi::derive_operation_budget(agent_timeout_secs);
+    // The SAME helper `build_magi_orchestrator` (`main.rs`) uses, so a layer added to it later
+    // reaches both callers by construction — see the rustdoc above.
+    let retry = magi_rs::magi::derived_retry_config(agent_timeout_secs);
+    #[cfg(test)]
+    LOGIN_RETRY_TRACE
+        .with(|t| *t.borrow_mut() = Some((retry.operation_budget, retry.retry_after_cap)));
     let native =
         magi_core::providers::claude::ClaudeProvider::with_timeout(api_key, model, client_timeout)?;
     let wrapped: std::sync::Arc<dyn magi_core::provider::LlmProvider> = std::sync::Arc::new(
         magi_core::provider::RetryProvider::with_config(std::sync::Arc::new(native), retry),
     );
-    Ok(std::sync::Arc::new(magi_core::orchestrator::Magi::new(
-        wrapped,
-    )))
+    let magi = magi_core::orchestrator::MagiBuilder::new(wrapped)
+        .with_timeout(ceiling)
+        .with_completion_config({
+            // Set INSIDE the argument expression, so deleting the `.with_completion_config(...)`
+            // call deletes the trace with it — the same pattern `COMPLETION_WIRING_TRACE`
+            // (`main.rs`) uses and the same mutation this guards against.
+            #[cfg(test)]
+            LOGIN_COMPLETION_TRACE.with(|t| *t.borrow_mut() = Some(completion.clone()));
+            completion.clone()
+        })
+        .build()
+        .expect(
+            "MagiBuilder::build() cannot fail here: no prompts_dir, no declared primary \
+             lineage (with_agent is never called) and no fallback pool — the same invariant \
+             magi_core::orchestrator::Magi::new documents for its own build().expect(...)",
+        );
+    Ok(std::sync::Arc::new(magi))
 }
 
 /// The [`ProviderKind`] the trio runs under AFTER a successful `/login` rebuild (REQ-A12c).

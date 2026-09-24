@@ -491,11 +491,12 @@ pub fn derive_retry_after_cap(ceiling_secs: u64) -> Duration {
 /// `O(1)`.
 #[must_use]
 pub fn derived_retry_config(ceiling_secs: u64) -> magi_core::provider::RetryConfig {
-    // RED stub (Task 4, Paso 4.1): ignores `ceiling_secs` and returns the crate's own default,
-    // so the two callers compile against the new signature while the retry test above fails on
-    // both assertions. Paso 4.3 fills in the real derivation.
-    let _ = ceiling_secs;
-    magi_core::provider::RetryConfig::default()
+    // `RetryConfig` is `#[non_exhaustive]`: outside the crate there is no literal nor
+    // `..default()` — it is built with `default()` and adjusted field by field.
+    let mut retry = magi_core::provider::RetryConfig::default();
+    retry.operation_budget = derive_operation_budget(ceiling_secs);
+    retry.retry_after_cap = derive_retry_after_cap(ceiling_secs);
+    retry
 }
 
 /// The derived ceiling BEFORE the floor is applied, from an already-computed factor.

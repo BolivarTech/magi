@@ -1023,11 +1023,6 @@ impl MagiConfig {
     /// # Panics
     /// If called on an unvalidated config (see [`Self::effective_provider`]).
     #[must_use]
-    // RED stub (Task 4, Paso 4.1): production call sites still pass a literal `None` to
-    // `build_native_provider` instead of this accessor's result — see the stubs on the three
-    // `build_native_provider` call sites in `build_magi_orchestrator`. Removed once Paso 4.3
-    // wires it in for real.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn effective_reasoning_spelling(&self) -> Option<ReasoningSpelling> {
         assert!(
             self.validate_vocabulary().is_ok(),
@@ -1055,22 +1050,16 @@ impl MagiConfig {
     /// # Panics
     /// If called on an unvalidated config (see [`Self::effective_provider`]).
     #[must_use]
-    // RED stub (Task 4, Paso 4.1): `magi_completion_config` does not call this yet in either
-    // build — unlike `effective_reasoning_spelling`, no test calls it directly either, so the
-    // `not(test)`-gated allow that pattern uses would still leave `cfg(test)` warning. A plain
-    // `allow` here is removed the moment Paso 4.3 wires this into `magi_completion_config`.
-    #[allow(dead_code)]
     pub(crate) fn effective_max_tokens(&self) -> u32 {
         assert!(
             self.validate_vocabulary().is_ok(),
             "MagiConfig::effective_max_tokens called on an unvalidated config — \
              construct it via from_toml_str()/load(), never by deserializing it directly"
         );
-        // RED stub (Task 4, Paso 4.1): ignores the declared value and always returns the
-        // absent-key default, so `the_completion_config_carries_the_configured_reasoning_keys`
-        // fails on its `max_tokens = 65536` case. Paso 4.3 fills in the real resolution.
-        let _ = self.magi.max_tokens;
-        16_384
+        match self.magi.max_tokens {
+            Some(got) => u32::try_from(got).unwrap_or(crate::DECLARED_COMPLETION_CAP),
+            None => crate::DECLARED_COMPLETION_CAP,
+        }
     }
 
     /// Whether cut attempts carry a bounded trace to the log, resolved (absent ⇒ `false`,
@@ -1080,14 +1069,8 @@ impl MagiConfig {
     /// `CompletionConfig::reasoning_trace`. No range or vocabulary to validate — every `bool` is
     /// a valid value — so, unlike its neighbours above, this accessor carries no precondition.
     #[must_use]
-    // RED stub (Task 4, Paso 4.1): see the same attribute on `effective_max_tokens` above.
-    #[allow(dead_code)]
     pub(crate) fn effective_reasoning_trace(&self) -> bool {
-        // RED stub (Task 4, Paso 4.1): ignores the declared value, so
-        // `the_completion_config_carries_the_configured_reasoning_keys` fails on its
-        // `reasoning_trace = true` case. Paso 4.3 fills in the real resolution.
-        let _ = self.magi.reasoning_trace;
-        false
+        self.magi.reasoning_trace.unwrap_or(false)
     }
 
     /// S-6/S-7 notices for a `[magi].reasoning`/`reasoning_spelling` declaration that cannot

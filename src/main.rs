@@ -45,9 +45,14 @@ use clap::Parser;
 use cryptovault::CryptoVault;
 use magi_core::error::ProviderError;
 use magi_core::orchestrator::{Magi, MagiBuilder};
-use magi_core::provider::{
-    CompletionConfig, LlmProvider, ReasoningControl, RetryConfig, RetryProvider,
-};
+use magi_core::provider::{CompletionConfig, LlmProvider, RetryProvider};
+// Task 4: production no longer references either name directly — `magi_completion_config`
+// resolves the control through `MagiConfig::effective_reasoning`, and `build_magi_orchestrator`
+// builds its retry config through `magi_rs::magi::derived_retry_config`. Both stay test-only
+// imports because the test suite still asserts against them directly (fixture construction,
+// value comparisons).
+#[cfg(test)]
+use magi_core::provider::{ReasoningControl, RetryConfig};
 use magi_core::providers::claude::ClaudeProvider;
 use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::{Dialect, OpenAiCompatibleProvider, ReasoningSpelling};
@@ -73,9 +78,14 @@ use magi_rs::magi::probe::{
 };
 use magi_rs::magi::rotation_config::corroborate_by_digest;
 use magi_rs::magi::{
-    bytes_to_tokens_est, derive_client_timeout, derive_operation_budget, derive_retry_after_cap,
-    BudgetTelemetry, ResolvedCeiling, TimeoutDecision, CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
+    bytes_to_tokens_est, derive_client_timeout, derived_retry_config, BudgetTelemetry,
+    ResolvedCeiling, TimeoutDecision, CHARS_PER_TOKEN_EST, STALE_NOTICE_RATIO,
 };
+// Task 4: `build_magi_orchestrator` derives its retry config through `derived_retry_config`
+// now, so this is a test-only import — the test suite still asserts the underlying derivation
+// directly in several places.
+#[cfg(test)]
+use magi_rs::magi::derive_operation_budget;
 use magi_rs::notices::{emit_notices, Notice};
 use magi_rs::redact::{redact_foreign_error, redact_foreign_text, redact_url, SafeErrorText};
 use magi_rs::vault::{
@@ -3254,11 +3264,6 @@ fn build_native_provider(
     // `redact_foreign_error`, NOT `to_string()`: magi-core assembles the message, which does
     // not know our redaction rule and may quote `base_url`.
     let to_seat = |e: ProviderError| SeatError::Transport(redact_foreign_error(&e));
-    // RED stub (Task 4, Paso 4.1): the parameter is accepted but not yet applied, so
-    // `a_declared_spelling_reaches_the_compat_wire` and
-    // `without_a_spelling_the_compat_seat_sends_no_reasoning_key_and_reports_unsupported`'s
-    // `Unsupported` case fail. Paso 4.3 applies it on the `OpenAiCompat` arm.
-    let _ = reasoning_spelling;
 
     Ok(match kind {
         // `api_key = None` ⇒ no `Authorization` header, which is what Ollama expects.
@@ -3297,16 +3302,23 @@ fn build_native_provider(
             // (`the_openai_compat_seat_sends_the_same_body_as_4_0_0`). `client_timeout` is the
             // one already DERIVED by the caller — REQ-R30 applies to this seat exactly as it
             // does to the Ollama one — never a constant of our own.
-            Arc::new(
-                OpenAiCompatibleProvider::with_dialect(
-                    base_url.as_str(),
-                    model,
-                    Some(key),
-                    Dialect::MaxTokens,
-                    client_timeout,
-                )
-                .map_err(to_seat)?,
+            let provider = OpenAiCompatibleProvider::with_dialect(
+                base_url.as_str(),
+                model,
+                Some(key),
+                Dialect::MaxTokens,
+                client_timeout,
             )
+            .map_err(to_seat)?;
+            // REQ-V42-4: applied ONLY here — `Ollama`/`Anthropic` do not speak the OpenAI-
+            // compatible reasoning vocabulary, so there is nothing to spell for either. Absent
+            // ⇒ nothing sent, byte-identical to 0.19.1 (`with_no_new_keys_both_seat_kinds_send_
+            // the_0_19_1_body`).
+            let provider = match reasoning_spelling {
+                Some(spelling) => provider.with_reasoning_spelling(spelling),
+                None => provider,
+            };
+            Arc::new(provider)
         }
         ProviderKind::Anthropic => {
             let key = creds
@@ -3803,14 +3815,10 @@ const DECLARED_COMPLETION_CAP: u32 = 16_384;
 /// struct literal does not compile here — with every field this milestone exposes set explicitly
 /// from `cfg`.
 fn magi_completion_config(cfg: &MagiConfig) -> CompletionConfig {
-    // RED stub (Task 4, Paso 4.1): ignores `cfg` and returns today's fixed configuration —
-    // every row but the first (absent keys) of
-    // `the_completion_config_carries_the_configured_reasoning_keys` fails. Paso 4.3 resolves
-    // all three fields from `cfg`'s accessors.
-    let _ = cfg;
     let mut completion = CompletionConfig::default();
-    completion.max_tokens = DECLARED_COMPLETION_CAP;
-    completion.reasoning = ReasoningControl::Default;
+    completion.max_tokens = cfg.effective_max_tokens();
+    completion.reasoning = cfg.effective_reasoning();
+    completion.reasoning_trace = cfg.effective_reasoning_trace();
     completion
 }
 
@@ -3884,15 +3892,19 @@ fn build_magi_orchestrator(
     // function configures a trio, it does not resolve policy.
     let ceiling = Duration::from_secs(ceiling.secs());
 
-    // `RetryConfig` is `#[non_exhaustive]`: outside the crate there is NO literal nor
-    // `..default()` — it is built with `default()` and adjusted field by field.
-    let mut retry = RetryConfig::default();
-    retry.operation_budget = derive_operation_budget(ceiling.as_secs());
-    // REQ-V4-04: inherited, this is 300 s against a budget of 54 s at the default ceiling, and no
-    // admissible ceiling satisfies REQ-A04's relation. Derived, the mixed chain collapses back
-    // into it because `cap + jitter == client_timeout` exactly.
-    retry.retry_after_cap = derive_retry_after_cap(ceiling.as_secs());
+    // Task 4: the ONE place both derived retry layers are set — shared with the post-`/login`
+    // rebuild (`tui/mod.rs::rebuild_consult_trio_after_login`) via
+    // `magi_rs::magi::derived_retry_config`, so a layer added there later reaches both callers.
+    // REQ-V4-04: `retry_after_cap` is inherited otherwise as 300 s against a budget of 54 s at
+    // the default ceiling, and no admissible ceiling satisfies REQ-A04's relation. Derived, the
+    // mixed chain collapses back into it because `cap + jitter == client_timeout` exactly.
+    let retry = derived_retry_config(ceiling.as_secs());
     let client_timeout = derive_client_timeout(ceiling.as_secs());
+
+    // REQ-V42-4: resolved ONCE and shared by every `build_native_provider` call below (the
+    // three seats, the builder fallback, and any declared pool candidate) — one declaration
+    // applies to the whole trio, magi-core declined a per-seat override (E-E response §2.2).
+    let reasoning_spelling = cfg.effective_reasoning_spelling();
 
     // The THREE seats are built first, so that ALL that fail can be reported.
     let mut failures: Vec<(AgentName, SeatError)> = Vec::new();
@@ -3924,10 +3936,15 @@ fn build_magi_orchestrator(
                 continue;
             }
         };
-        // RED stub (Task 4, Paso 4.1): every seat is still built with NO spelling, so
-        // `every_compat_seat_is_built_with_the_declared_spelling` fails. Paso 4.3 passes
-        // `cfg.effective_reasoning_spelling()` here.
-        match build_native_provider(kind, base, &model, creds, client_timeout, None, notices) {
+        match build_native_provider(
+            kind,
+            base,
+            &model,
+            creds,
+            client_timeout,
+            reasoning_spelling,
+            notices,
+        ) {
             // REQ-A03: `MagiBuilder::build()` does NOT wrap anything, so without this the retry
             // the trio inherited from the adapter is lost.
             Ok(p) => {
@@ -3950,8 +3967,7 @@ fn build_magi_orchestrator(
                         model: model.clone(),
                         retry_wrapped: wrapped_addr != unwrapped_addr,
                         client_timeout,
-                        // RED stub: always `None` until Paso 4.3 records the MEASURED argument.
-                        reasoning_spelling: None,
+                        reasoning_spelling,
                     });
                 });
                 seats.push((seat, wrapped, lineage, model.clone()));
@@ -3986,15 +4002,13 @@ fn build_magi_orchestrator(
     // it turning false is a notice that never reaches the user, which is the failure mode this
     // project keeps paying for.
     let mut sink: Vec<Notice> = Vec::new();
-    // RED stub (Task 4, Paso 4.1): no spelling reaches the fallback provider either. Paso 4.3
-    // passes `cfg.effective_reasoning_spelling()` here.
     let fallback_provider = build_native_provider(
         kind,
         base,
         cfg.magi().fallback_model(backend_model),
         creds,
         client_timeout,
-        None,
+        reasoning_spelling,
         &mut sink,
     )
     .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))?;
@@ -4297,18 +4311,16 @@ fn build_magi_orchestrator(
             // unreachable — candidates share endpoint, kind and client timeout with the seats, so
             // whatever breaks one breaks all three seats first, and THAT is fatal.
             let mut sink: Vec<Notice> = Vec::new();
-            // RED stub (Task 4, Paso 4.1): a rotation candidate is also built with no spelling.
-            // Paso 4.3 passes `cfg.effective_reasoning_spelling()` here too — a candidate that
-            // rotates onto an `openai-compat` lineage must honour the same declared control as
-            // the titular seats it replaces, or the rotation would silently degrade the trio's
-            // reasoning behaviour (the same class of defect D-8 fixed for `/login`).
+            // A candidate that rotates onto an `openai-compat` lineage honours the SAME declared
+            // spelling as the titular seats it replaces, or the rotation would silently degrade
+            // the trio's reasoning behaviour (the same class of defect D-8 fixed for `/login`).
             match build_native_provider(
                 kind,
                 base,
                 &entry.model,
                 creds,
                 client_timeout,
-                None,
+                reasoning_spelling,
                 &mut sink,
             ) {
                 Ok(candidate) => {
