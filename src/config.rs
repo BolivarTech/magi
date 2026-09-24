@@ -77,34 +77,18 @@ pub enum ConfigError {
     #[error("{0}")]
     Parse(String),
 
-    /// `[magi].agent_timeout_secs` falls outside the acceptable range of §4.9.
-    #[error(
-        "agent_timeout_secs = {got} out of range [{min}, {max}]: below {min}s a legitimate \
-         generation does not fit; above {max}s a consult's worst case — 2 attempts per mage on \
-         each of `1 + max_rotations` models — reaches 12 minutes at the default two rotations, \
-         and grows from there. Not clamped to the extreme — rejected."
-    )]
-    AgentTimeoutOutOfRange {
-        /// The declared value.
-        got: u64,
-        /// Floor of the acceptable range (§4.9).
-        min: u64,
-        /// Ceiling of the acceptable range (§4.9).
-        max: u64,
-    },
-
     /// `[magi].agent_timeout_secs` below the floor (REQ-TUI-1: there is no ceiling any more).
     ///
-    /// RED STUB (Paso 3b.1): not constructed anywhere yet — `validate_agent_timeout`
-    /// (Paso 3b.3) is what builds it, replacing [`Self::AgentTimeoutOutOfRange`] entirely — so
-    /// `dead_code` is allowed only until that Green lands, same pattern as `Agent::history`
-    /// (`src/agent/mod.rs`).
+    /// Through v0.19.1 this was `AgentTimeoutOutOfRange`, a two-sided range: below `min` a
+    /// legitimate generation does not fit, above `max` a consult's worst case reached 12
+    /// minutes. REQ-TUI-1 (v0.20.0) removed the upper half — an interactive consult is sized for
+    /// deliberation, not chat responsiveness — leaving only the floor, which the derivation
+    /// still genuinely needs (see [`Self::validate_agent_timeout`]).
     #[error(
         "[magi].agent_timeout_secs = {got} is below the {min}s floor: below it a legitimate \
          generation does not fit and the two derived timeout layers no longer fit inside the \
          ceiling. There is no upper bound. Not clamped — rejected."
     )]
-    #[allow(dead_code)]
     AgentTimeoutBelowFloor {
         /// The declared value.
         got: u64,
@@ -541,7 +525,7 @@ impl MagiConfigBuilder {
     ///
     /// Whatever [`MagiConfig::validate_vocabulary`] rejects: [`ConfigError::NeedsMigration`] for
     /// a seat declaring a model without its lineage, [`ConfigError::UnknownProviderKind`],
-    /// [`ConfigError::UnknownMode`], [`ConfigError::AgentTimeoutOutOfRange`],
+    /// [`ConfigError::UnknownMode`], [`ConfigError::AgentTimeoutBelowFloor`],
     /// [`ConfigError::OutputCapTooSmall`] or [`ConfigError::Diversity`].
     pub(crate) fn build(self) -> Result<MagiConfig, ConfigError> {
         self.inner.validate_vocabulary()?;
@@ -1302,34 +1286,30 @@ impl MagiConfig {
         Err(ConfigError::MaxTokensOutOfRange { got, max: u32::MAX })
     }
 
-    /// `agent_timeout_secs` outside the range of §4.9 is a **configuration error**.
+    /// `agent_timeout_secs` below the floor of §4.9 is a **configuration error** (REQ-TUI-1).
     ///
     /// # Errors
-    /// [`ConfigError::AgentTimeoutOutOfRange`] with the value, the range, and the why.
+    /// [`ConfigError::AgentTimeoutBelowFloor`] with the value, the floor, and the why.
     ///
-    /// **It is not clamped to the limit, it is rejected** — same criterion as the probe window
+    /// **It is not clamped to the floor, it is rejected** — same criterion as the probe window
     /// (REQ-A16b): clamping turns a value the operator mistyped into a plausible one, and then
     /// the system behaves differently from what the file says.
     /// It exists because without this REQ-A04 would be **breakable from `magi.toml`**: with a
     /// ceiling below the absolute floor of the derivation, the internal floors win and the sum
-    /// exceeds the ceiling. "Impossible by construction" is only true if the input range is
-    /// bounded.
-    // RED STUB (Paso 3b.1): the old two-sided range, with its former ceiling (120) inlined as a
-    // literal because `AGENT_TIMEOUT_MAX_SECS` no longer exists — kept exactly as it ran through
-    // v0.19.1 so the new tests fail for the right reason (values above 120 still rejected).
-    // Paso 3b.3's Green replaces the whole body with the floor-only check.
+    /// exceeds the ceiling. "Impossible by construction" is only true if the input is bounded
+    /// below — there is no longer an upper bound to enforce (REQ-TUI-1, v0.20.0): an interactive
+    /// consult is sized for deliberation, not chat responsiveness, and the old ceiling was a UX
+    /// cap on exactly the operation known to need more time.
     fn validate_agent_timeout(&self) -> Result<(), ConfigError> {
         let Some(secs) = self.magi.agent_timeout_secs else {
             return Ok(()); // absent ⇒ the built-in default, already valid
         };
-        const OLD_MAX_SECS: u64 = 120;
-        if (AGENT_TIMEOUT_MIN_SECS..=OLD_MAX_SECS).contains(&secs) {
+        if secs >= AGENT_TIMEOUT_MIN_SECS {
             return Ok(());
         }
-        Err(ConfigError::AgentTimeoutOutOfRange {
+        Err(ConfigError::AgentTimeoutBelowFloor {
             got: secs,
             min: AGENT_TIMEOUT_MIN_SECS,
-            max: OLD_MAX_SECS,
         })
     }
 
@@ -1604,7 +1584,7 @@ impl MagiConfig {
     /// - [`ConfigError::NeedsMigration`] if the file brings v0.11.0 patterns.
     /// - [`ConfigError::Parse`] if it exists and does not parse, or could not be read.
     /// - [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] if `provider`, `[magi].kind` or `[magi].default_mode` bring a present but unrecognized value.
-    /// - [`ConfigError::AgentTimeoutOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if those numbers fall outside their range.
+    /// - [`ConfigError::AgentTimeoutBelowFloor`] / [`ConfigError::MaxTokensOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if those numbers fall outside their range.
     /// - [`ConfigError::Endpoint`] if the root, `[magi]` or `[embedding]` `base_url` carries a literal credential, an unknown placeholder, or could not be traversed (SC-A16d) — before this, ONLY the embedder path (`main.rs::attach_persistent_memory`) saw this error, and degraded it to a notice + plain-text memory instead of stopping startup.
     /// # Arguments
     ///
