@@ -44,3 +44,6 @@ __pycache__/
 # Smoke harness: the real config carries the passphrase; the lock is runtime state
 smoke/smoke.toml
 smoke/.lock
+
+# MAGI plugin 6.x scaffold (magi-rs init): config, encrypted DB and run logs
+.magi/
