@@ -139,7 +139,46 @@ impl ClockCoverageAnnouncer {
     /// # Complexity
     /// `O(1)` when covered; otherwise the process auditor's cost over one short line, plus one
     /// pass per alarm the audit raises.
-    pub fn announce_activation(&self) {}
+    pub fn announce_activation(&self) {
+        let Some(warning) = &self.warning else {
+            return;
+        };
+        let line = warning.render();
+        if tracing::level_filters::LevelFilter::current()
+            != tracing::level_filters::LevelFilter::OFF
+        {
+            tracing::event!(
+                target: magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET,
+                tracing::Level::WARN,
+                "{}",
+                line
+            );
+            return;
+        }
+        let (audited, alarm) = magi_rs::logging::process_auditor().audit(
+            &line,
+            magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET,
+            None,
+            0,
+        );
+        self.fallback.emit(&audited);
+        // Masking and the alarm that says masking happened travel together — both, never one
+        // (REQ-L50), the same shape `analyze_direct` and `magi_rs::notices::write_audited` use.
+        // The chain terminates by the auditor's own bookkeeping (`(secret, target)` latching),
+        // never a counter.
+        let mut pending = alarm;
+        while let Some(raised) = pending {
+            let rendered = magi_rs::logging::auditor::render_alarm(&raised);
+            let (audited_alarm, next) = magi_rs::logging::process_auditor().audit(
+                &rendered,
+                magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET,
+                None,
+                0,
+            );
+            self.fallback.emit(&audited_alarm);
+            pending = next;
+        }
+    }
 }
 
 /// Did the FIRST FINDING ITSELF — not merely its section heading — survive the cut?
