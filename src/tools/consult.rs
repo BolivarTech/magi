@@ -3670,13 +3670,35 @@ mod tests {
         }
     }
 
-    /// A local `NoticeSink` double that records every line handed to it, through either method.
-    struct RecordingSink(Mutex<Vec<String>>);
+    /// A local `NoticeSink` double. `.0` records every line `emit` is handed, in order — the
+    /// field every test in this module reads back. `.1` is a private dedup set so `once` mirrors
+    /// the REAL `ProcessNoticeSink`/`TuiNoticeSink` contract (`src/agent/mode_classifier.rs`'s own
+    /// `RecordingNoticeSink` test double does the same): without it, `once` would behave exactly
+    /// like `emit` in this double and a mutation swapping one for the other would go unnoticed.
+    struct RecordingSink(
+        Mutex<Vec<String>>,
+        Mutex<std::collections::HashSet<&'static str>>,
+    );
+
+    impl RecordingSink {
+        /// Builds an empty recorder.
+        fn new() -> Self {
+            Self(
+                Mutex::new(Vec::new()),
+                Mutex::new(std::collections::HashSet::new()),
+            )
+        }
+    }
 
     impl NoticeSink for RecordingSink {
-        fn once(&self, _key: &'static str, msg: &Audited) {
-            if let Ok(mut lines) = self.0.lock() {
-                lines.push(msg.as_str().to_string());
+        fn once(&self, key: &'static str, msg: &Audited) {
+            let Ok(mut seen) = self.1.lock() else {
+                return;
+            };
+            if seen.insert(key) {
+                if let Ok(mut lines) = self.0.lock() {
+                    lines.push(msg.as_str().to_string());
+                }
             }
         }
 
@@ -3706,7 +3728,7 @@ mod tests {
     fn every_activation_is_one_warn_under_its_own_target_with_no_cause_fields() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&seen)));
-        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        let sink = Arc::new(RecordingSink::new());
         let announcer = ClockCoverageAnnouncer::new(Some(uncovered()), sink.clone());
         tracing::subscriber::with_default(subscriber, || {
             announcer.announce_activation();
@@ -3742,7 +3764,7 @@ mod tests {
     fn a_covered_clock_announces_nothing() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&seen)));
-        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        let sink = Arc::new(RecordingSink::new());
         let announcer = ClockCoverageAnnouncer::new(None, sink.clone());
         tracing::subscriber::with_default(subscriber, || announcer.announce_activation());
         assert!(seen
@@ -3763,7 +3785,7 @@ mod tests {
             tracing::level_filters::LevelFilter::OFF,
             "precondition: no subscriber in this process (run under cargo nextest)"
         );
-        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        let sink = Arc::new(RecordingSink::new());
         let announcer = ClockCoverageAnnouncer::new(Some(uncovered()), sink.clone());
         announcer.announce_activation();
         announcer.announce_activation();
