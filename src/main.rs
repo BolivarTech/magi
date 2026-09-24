@@ -11613,17 +11613,22 @@ mod tests {
         /// The request BODY the openai-compat seat sent under magi-core 4.0.0 for the inputs of
         /// the test below, captured from a run with the pin at `=4.0.0` and pasted here verbatim
         /// — never written by hand, because a hand-written baseline is what one BELIEVES the
-        /// wire to be (the crate's own rule for `BODY_AS_OF_4_0_0`). Capture: run the test once
-        /// with this constant empty; the assertion prints the body; paste; run again. The
-        /// crate's baseline is taken with its default construction; this one is taken with
-        /// `build_native_provider`'s, which is what magi-rs ships.
+        /// wire to be (the crate's own rule for `BODY_AS_OF_4_0_0`). It is ALSO the body 0.19.1
+        /// sends with its production configuration: the two coincided because the crate's
+        /// default cap and `DECLARED_COMPLETION_CAP` were both 16 384 until magi-core 4.2.0.
         const OPENAI_COMPAT_BODY_AS_OF_4_0_0: &str = "{\"model\":\"any-model\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"max_tokens\":16384,\"temperature\":0.0}";
 
-        /// SC-V41-06: with `Dialect::MaxTokens` the request body is BYTE-IDENTICAL to what 4.0.0
-        /// sent for the same inputs — which entails `max_tokens` present and
-        /// `max_completion_tokens` absent, the spelling Ollama's `/v1` honours.
-        /// `recording_listener` records the request's first line only, so this test has its own
-        /// listener that keeps the whole request.
+        /// SC-V41-06 and S-1 (MS1 form): the body the openai-compat seat puts on the wire with
+        /// the PRODUCTION completion configuration — `magi_completion_config()`, what
+        /// `build_magi_orchestrator` hands the builder — is byte-identical to the 0.19.1 body,
+        /// cap included. `max_tokens` present, `max_completion_tokens` absent, and no reasoning
+        /// field (no `ReasoningSpelling` is declared, so magi-core 4.2.0 sends nothing).
+        ///
+        /// It used to send `CompletionConfig::default()`, so it tested the CRATE's default body
+        /// rather than the seat's: it went red on the 4.2.0 pin only because the crate default
+        /// stopped coinciding with `DECLARED_COMPLETION_CAP`, and moving that constant left it
+        /// green. MUTATION (required): set `DECLARED_COMPLETION_CAP` to any other value and this
+        /// goes red on the identity AND on the `max_tokens` substring.
         #[tokio::test]
         async fn the_openai_compat_seat_sends_the_same_body_as_4_0_0() {
             let (base, body) = body_recording_listener().await;
@@ -11637,24 +11642,80 @@ mod tests {
                 &mut notices,
             )
             .expect("openai-compat builds with a credential");
-            let _ = provider
-                .complete("s", "u", &CompletionConfig::default())
-                .await;
+            let _ = provider.complete("s", "u", &magi_completion_config()).await;
             let request = body.await.expect("the listener task must finish");
             let (_, wire_body) = request
                 .split_once("\r\n\r\n")
                 .expect("an HTTP request has a body");
             assert_eq!(
                 wire_body, OPENAI_COMPAT_BODY_AS_OF_4_0_0,
-                "byte-identical to 4.0.0"
+                "byte-identical to 0.19.1 (and to 4.0.0)"
             );
             assert!(
-                wire_body.contains("\"max_tokens\""),
-                "no max_tokens on the wire: {wire_body}"
+                wire_body.contains(&format!("\"max_tokens\":{DECLARED_COMPLETION_CAP}")),
+                "the production cap did not reach the wire: {wire_body}"
             );
             assert!(
                 !wire_body.contains("max_completion_tokens"),
                 "the other spelling reached the wire: {wire_body}"
+            );
+            assert!(
+                !wire_body.contains("reasoning"),
+                "a reasoning field reached the wire with no spelling declared: {wire_body}"
+            );
+        }
+
+        /// The request BODY the ollama seat sent under magi-rs 0.19.1 (pin `=4.1.0`) for the
+        /// inputs of the test below, with the production completion configuration. Captured,
+        /// never hand-written (same rule as `OPENAI_COMPAT_BODY_AS_OF_4_0_0`). Capture, with the
+        /// pin still at `=4.1.0`: run the test once with this constant empty; the assertion
+        /// prints the body; paste it here; run again.
+        const OLLAMA_BODY_AS_OF_0_19_1: &str = "{\"model\":\"any-model\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"stream\":false,\"options\":{\"num_predict\":16384,\"temperature\":0.0}}";
+
+        /// S-1 (MS1 form), native wire: the body the ollama seat puts on `POST /api/chat` with
+        /// `magi_completion_config()` is byte-identical to 0.19.1's — `num_predict` equal to the
+        /// declared cap, and NO `think` key, which is what `ReasoningControl::Default` means on
+        /// this wire (magi-core `ollama_wire.rs:209`, "Default puts nothing at all").
+        ///
+        /// Captured under 4.1.0 and asserted under 4.2.0: the baseline surviving the bump is the
+        /// proof that the migration changed nothing on this wire.
+        ///
+        /// MUTATIONS (required): `DECLARED_COMPLETION_CAP` to any other value ⇒ red on the
+        /// identity and on `num_predict`; `cfg.reasoning = ReasoningControl::Enabled` in
+        /// `magi_completion_config` (after the pin) ⇒ red on the identity and on `think`.
+        #[tokio::test]
+        async fn the_ollama_seat_sends_the_same_body_as_0_19_1() {
+            let (base, body) = body_recording_listener().await;
+            let mut notices = Vec::new();
+            let provider = build_native_provider(
+                ProviderKind::Ollama,
+                &endpoint_at(&base),
+                "any-model",
+                None,
+                Duration::from_secs(10),
+                &mut notices,
+            )
+            .expect("ollama is keyless: it must build with no credentials");
+            let _ = provider.complete("s", "u", &magi_completion_config()).await;
+            let request = body.await.expect("the listener task must finish");
+            let (head, wire_body) = request
+                .split_once("\r\n\r\n")
+                .expect("an HTTP request has a body");
+            assert!(
+                head.starts_with("POST /api/chat"),
+                "precondition: the native wire, not the compat one: {head}"
+            );
+            assert_eq!(
+                wire_body, OLLAMA_BODY_AS_OF_0_19_1,
+                "byte-identical to 0.19.1"
+            );
+            assert!(
+                wire_body.contains(&format!("\"num_predict\":{DECLARED_COMPLETION_CAP}")),
+                "the production cap did not reach the wire: {wire_body}"
+            );
+            assert!(
+                !wire_body.contains("\"think\""),
+                "a reasoning control reached the wire under Default: {wire_body}"
             );
         }
 
@@ -11817,19 +11878,37 @@ mod tests {
             );
         }
 
-        /// Body of an OpenAI-compatible response carrying a valid verdict for `agent`.
+        /// S-1 (MS1 form) for every seat, and the ONLY form of it for the anthropic seat:
+        /// `ClaudeProvider` posts to a fixed `https://api.anthropic.com/v1/messages` (magi-core
+        /// `providers/claude.rs:17`), so no local listener can capture its body. What magi-rs
+        /// controls on that wire is this configuration, so this is pinned field by field at
+        /// the values 0.19.1 sent — including the two it does NOT set explicitly
+        /// (`temperature`, `reasoning_trace`), which it inherits from the crate's `Default`
+        /// and which a future crate default could move with no diff here.
         ///
-        /// Built with `serde_json` rather than by string interpolation: the verdict itself is
-        /// JSON **inside** a JSON string field, and hand-escaping that is how a mock ends up
-        /// serving something the parser rejects for a reason unrelated to the test.
-        /// REQ-V4-13 and REQ-V4-12: both values are DECLARED, not inherited. The point is not that
-        /// they differ from the crate's defaults — today they do not — but that a change to those
-        /// defaults cannot move magi-rs silently.
+        /// The cap is the LITERAL 16 384, not `DECLARED_COMPLETION_CAP`, on purpose: MS1
+        /// changes no default (spec §2), and a test comparing the constant to itself would
+        /// pass whatever the constant became. MS2 moves this literal deliberately.
+        ///
+        /// MUTATIONS (required): `DECLARED_COMPLETION_CAP = 16_385` ⇒ red on the cap;
+        /// `cfg.reasoning_trace = true` in `magi_completion_config` ⇒ red on the trace flag.
         #[test]
-        fn the_completion_config_declares_the_cap_and_the_reasoning_control() {
+        fn the_completion_config_is_the_one_0_19_1_sent() {
             let cfg = magi_completion_config();
-            assert_eq!(cfg.max_tokens, DECLARED_COMPLETION_CAP);
+            assert_eq!(
+                cfg.max_tokens, 16_384,
+                "MS1 changes no default: the cap stays 16 384"
+            );
+            assert_eq!(
+                cfg.temperature.to_bits(),
+                0.0_f64.to_bits(),
+                "temperature moved: every seat's wire changes with it"
+            );
             assert_eq!(cfg.reasoning, ReasoningControl::Default);
+            assert!(
+                !cfg.reasoning_trace,
+                "the trace is opt-in (REQ-EE-4); on by default it would change what the crate records"
+            );
         }
 
         fn verdict_body(agent: &str) -> String {

@@ -751,10 +751,14 @@ fn magi_core_4_0_0_supplies_the_surface_this_milestone_needs() {
     // that `cap + jitter == client_timeout` exactly.
     assert_eq!(RETRY_AFTER_JITTER, Duration::from_secs(1));
 
-    // REQ-V4-13: the default moved 4096 -> 16384 underneath us. We declare it either way.
-    assert_eq!(CompletionConfig::default().max_tokens, 16_384);
+    // REQ-V4-13, re-read for magi-core 4.2.0 (REQ-V42-2): the crate's default moved AGAIN,
+    // 16_384 -> 32_768. This line records the CRATE's number, never ours: magi-rs declares its
+    // own cap (`DECLARED_COMPLETION_CAP`), and what reaches the wire is pinned by the seat body
+    // tests in `main.rs::trio_construction`, so this move changes nothing magi-rs sends.
+    assert_eq!(CompletionConfig::default().max_tokens, 32_768);
 
-    // REQ-V4-12: exactly two variants, and `Default` is the default.
+    // REQ-V4-12: `Default` is still the crate's default. The enum no longer has two variants —
+    // 4.2.0 added `Enabled` — so this line pins only the default, not the variant count.
     assert_eq!(
         ReasoningControl::default(),
         ReasoningControl::Default,
