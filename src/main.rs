@@ -3833,6 +3833,10 @@ fn build_magi_orchestrator(
     // before, each had its own copy of this same rule, with the risk that a probe measured a
     // different kind from the one the trio actually ends up using.
     let kind = resolve_magi_kind(cfg, principal_kind).map_err(|e| TrioError::UnknownKind(e.got))?;
+    // S-6/S-7 (REQ-EE-3/REQ-V42-4): a reasoning key that cannot reach the wire is announced,
+    // computed from the kind JUST resolved above — never `cfg.effective_magi_kind()`, which is
+    // TOML-only and would stay silent for a trio that inherited its kind from `MAGI_PROVIDER`.
+    notices.extend(cfg.reasoning_wire_notices(kind));
     // The trio uses the ALREADY-RESOLVED endpoint that `main.rs` produced — it does not re-
     // resolve or read the template.
     let base = &endpoints.magi;

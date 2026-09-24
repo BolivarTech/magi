@@ -27,6 +27,22 @@ use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MIN_SECS};
 use magi_rs::notices::Notice;
 use serde::Deserialize;
 
+/// Renders a [`ReasoningControl`] back to the exact kebab-case tag magi-core serializes it as.
+///
+/// Goes through magi-core's own `Serialize` rather than a hand-written `match`, for the same
+/// reason [`magi_rs::magi::reasoning::parse_reasoning_control`] goes through its `Deserialize`
+/// (OQ-10): a hand-written table is a fourth copy of a vocabulary this crate does not own, and a
+/// `#[non_exhaustive]` enum's next variant would silently need a new match arm here that nothing
+/// would catch at compile time. Only used to render text for [`MagiConfig::reasoning_wire_notices`]
+/// (S-7a) — never as a validated value, so an unrepresentable result falls back to `{control:?}`
+/// rather than panicking.
+fn reasoning_control_wire_tag(control: ReasoningControl) -> String {
+    serde_json::to_value(control)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{control:?}"))
+}
+
 /// Configuration errors from `magi.toml` (Task 1.1, REQ-A01b/A04/A11b/A21b).
 ///
 /// Lives in the **bin** (not in `magi_rs::magi`) because it is specific to the SHAPE of the
@@ -975,15 +991,12 @@ impl MagiConfig {
     /// [`magi_rs::magi::reasoning::parse_reasoning_control`] would reject, so the fallback on
     /// `Err` below is unreachable in practice — never a value this function invents.
     ///
-    /// Consumed by [`Self::reasoning_wire_notices`] (Paso 3c) and, from Task 4, by
-    /// `magi_completion_config`; until Paso 3c lands the plain (non-test) binary has no live
-    /// path here, so `dead_code` is allowed only for `not(test)` — same pattern as
-    /// `Agent::history` (`src/agent/mod.rs`).
+    /// Consumed by [`Self::reasoning_wire_notices`] and, from Task 4, by
+    /// `magi_completion_config`.
     ///
     /// # Panics
     /// If called on an unvalidated config (see [`Self::effective_provider`]).
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn effective_reasoning(&self) -> ReasoningControl {
         assert!(
             self.validate_vocabulary().is_ok(),
@@ -1055,14 +1068,51 @@ impl MagiConfig {
     ///
     /// These four are mutually exclusive by construction (kind, then whether a spelling is
     /// declared, then the control), so at most one notice is ever returned.
-    ///
-    /// Consumed by `build_magi_orchestrator` (Paso 3c.3); until then the plain (non-test) binary
-    /// has no live path here, so `dead_code` is allowed only for `not(test)` — same pattern as
-    /// `Agent::history` (`src/agent/mod.rs`).
     #[must_use]
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn reasoning_wire_notices(&self, _trio_kind: ProviderKind) -> Vec<Notice> {
-        Vec::new()
+    pub(crate) fn reasoning_wire_notices(&self, trio_kind: ProviderKind) -> Vec<Notice> {
+        let spelling_raw = self.magi.reasoning_spelling.as_deref();
+
+        if trio_kind != ProviderKind::OpenAiCompat {
+            return match spelling_raw {
+                Some(raw) => vec![Notice::warn(format!(
+                    "notice: `[magi].reasoning_spelling = \"{raw}\"` has no effect: the trio \
+                     runs on `{trio_kind}`, and a spelling is only sent to `openai-compat` seats."
+                ))],
+                None => Vec::new(),
+            };
+        }
+
+        let control = self.effective_reasoning();
+        match (spelling_raw, control) {
+            (None, c) if c != ReasoningControl::Default => {
+                let control_tag = reasoning_control_wire_tag(control);
+                vec![Notice::warn(format!(
+                    "notice: `[magi].reasoning = \"{control_tag}\"` will not reach the wire: the \
+                     trio runs on `openai-compat` and no `[magi].reasoning_spelling` is \
+                     declared, so every completion record will report the reasoning state as \
+                     `Unsupported`. Declare the spelling your pinned model was measured to \
+                     honour — a spelling it rejects returns HTTP 400, which condemns the lineage \
+                     for all three seats of the run."
+                ))]
+            }
+            (Some(spelling), ReasoningControl::Enabled)
+                if spelling == "effort-none" || spelling == "effort-minimal" =>
+            {
+                vec![Notice::warn(format!(
+                    "notice: `[magi].reasoning = \"enabled\"` with `[magi].reasoning_spelling = \
+                     \"{spelling}\"` cannot reach the wire: that spelling has no \"on\" position, \
+                     so the completion record will report the reasoning state as `Unsupported`."
+                ))]
+            }
+            (Some(spelling), ReasoningControl::Default) => {
+                vec![Notice::warn(format!(
+                    "notice: `[magi].reasoning_spelling = \"{spelling}\"` has no effect: \
+                     `[magi].reasoning` is `\"default\"`, so nothing is sent to the wire for \
+                     either key."
+                ))]
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The shared rotation pool, in declared order (strongest to weakest).
