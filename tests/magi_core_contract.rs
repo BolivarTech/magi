@@ -776,3 +776,80 @@ fn magi_core_4_0_0_supplies_the_surface_this_milestone_needs() {
     assert!(!RotationKind::Timeout.is_mage_local());
     assert!(RotationKind::EmptyCompletion.is_mage_local());
 }
+
+/// Type-checked, never called: the field REQ-EE-1 renders and the state beside it.
+/// `CompletionRecord` is `#[non_exhaustive]`, so it cannot be built here.
+fn completion_record_shape(r: &magi_core::reporting::CompletionRecord) {
+    let _: &magi_core::provider::ReasoningControl = &r.control;
+    let _: &magi_core::provider::ReasoningState = &r.reasoning;
+}
+
+/// Type-checked, never called: the per-seat worst case REQ-V42-8's drift guard compares
+/// against. A change of arity or return type breaks HERE, not in the guard.
+fn worst_case_shape(m: &magi_core::orchestrator::Magi) -> Duration {
+    m.worst_case_per_seat()
+}
+
+/// The `magi-core 4.2.0` surface v0.20.0 depends on (REQ-V42-2, U-2).
+///
+/// Written in the Green of the pin bump, not in its Red: none of these items exist in 4.1.0,
+/// so this test cannot compile on both sides of the pin — the same declared exception as the
+/// `Dialect` section of the 4.1.0 migration.
+#[test]
+fn magi_core_4_2_0_supplies_the_surface_this_milestone_needs() {
+    use magi_core::provider::{ReasoningControl, DEFAULT_CLIENT_TIMEOUT};
+    use magi_core::providers::openai_compat::ReasoningSpelling;
+
+    // REQ-EE-3: `[magi] reasoning` mirrors this enum THROUGH magi-core's serde, so its three
+    // kebab-case tags are that key's vocabulary. A renamed tag must break here, not in a
+    // config file an operator already wrote.
+    for (control, tag) in [
+        (ReasoningControl::Default, "\"default\""),
+        (ReasoningControl::Disabled, "\"disabled\""),
+        (ReasoningControl::Enabled, "\"enabled\""),
+    ] {
+        assert_eq!(serde_json::to_string(&control).expect("serializes"), tag);
+        assert_eq!(
+            serde_json::from_str::<ReasoningControl>(tag).expect("deserializes"),
+            control
+        );
+    }
+    // An unknown tag is an ERROR, never a silent `Default` (magi-core `provider.rs:23-30`).
+    // S-5 relies on this: `reasoning = "low"` must fail to load, not load as `default`.
+    assert!(serde_json::from_str::<ReasoningControl>("\"low\"").is_err());
+    // `#[non_exhaustive]`: the wildcard is what makes a fourth position added upstream break
+    // the crate update at the point that reads its own changelog, not at an unrelated call site.
+    let named = match ReasoningControl::Enabled {
+        ReasoningControl::Default => "default",
+        ReasoningControl::Disabled => "disabled",
+        ReasoningControl::Enabled => "enabled",
+        _ => "unknown-control-added-upstream",
+    };
+    assert_eq!(named, "enabled");
+
+    // REQ-V42-4: the three spellings, and a builder method that returns `Self` by value so it
+    // chains after `with_dialect`.
+    let spelled: OpenAiCompatibleProvider = OpenAiCompatibleProvider::with_dialect(
+        SYNTHETIC_BASE_URL,
+        SYNTHETIC_MODEL,
+        None,
+        Dialect::MaxTokens,
+        Duration::from_secs(27),
+    )
+    .expect("valid synthetic base_url")
+    .with_reasoning_spelling(ReasoningSpelling::EffortNone);
+    assert_is_provider(&spelled);
+    let _ = (
+        ReasoningSpelling::EffortNone,
+        ReasoningSpelling::EffortMinimal,
+        ReasoningSpelling::ReasoningEnabledObject,
+    );
+
+    // `src/magi/probe.rs` builds `OllamaProvider::new`, which delegates with this value, and
+    // bounds every probe call with its own 5 s timeout. The number doubled in 4.2.0 (300 -> 600);
+    // pinned so every sentence in the tree that quotes it has something that breaks with it.
+    assert_eq!(DEFAULT_CLIENT_TIMEOUT, Duration::from_secs(600));
+
+    let _ = completion_record_shape;
+    let _ = worst_case_shape;
+}
