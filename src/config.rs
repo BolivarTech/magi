@@ -1003,9 +1003,10 @@ impl MagiConfig {
     /// default" — there is no default spelling.** Absence means magi-rs sends no reasoning field
     /// at all on the `openai-compat` wire, byte-identical to 0.19.1.
     ///
-    /// Consumed by [`Self::reasoning_wire_notices`] (Paso 3c) and, from Task 4, by
-    /// `magi_completion_config`; same temporary `dead_code` allowance as
-    /// [`Self::effective_reasoning`] until then.
+    /// Consumed by `magi_completion_config` (Task 4); until then the plain (non-test) binary has
+    /// no live path here — [`Self::reasoning_wire_notices`] reads the RAW declared spelling
+    /// (needed verbatim for its notice text), not this resolved accessor — so `dead_code` is
+    /// allowed only for `not(test)`, same pattern as `Agent::history` (`src/agent/mod.rs`).
     ///
     /// # Panics
     /// If called on an unvalidated config (see [`Self::effective_provider`]).
@@ -1021,6 +1022,47 @@ impl MagiConfig {
             .reasoning_spelling
             .as_deref()
             .and_then(|raw| parse_reasoning_spelling(raw).ok())
+    }
+
+    /// S-6/S-7 notices for a `[magi].reasoning`/`reasoning_spelling` declaration that cannot
+    /// reach the wire on the trio's RESOLVED kind.
+    ///
+    /// # Why it takes the resolved kind, not `effective_magi_kind()`
+    ///
+    /// An absent `[magi].kind` inherits the PRINCIPAL's kind, which may come from
+    /// `MAGI_PROVIDER` (env), not from the TOML — `effective_magi_kind()` is TOML-only. Computing
+    /// this from that accessor would stay silent for exactly the trio that inherited its kind
+    /// from the environment, which is an ordinary configuration and not a corner case. The
+    /// caller (`build_magi_orchestrator`) passes the SAME resolved value it built the trio with.
+    ///
+    /// # Arguments
+    /// * `trio_kind` - the trio's already-resolved [`ProviderKind`] (principal env/TOML/default
+    ///   inheritance already applied).
+    ///
+    /// # The three rules, mirroring magi-core's `reasoning_field` table
+    ///
+    /// Only `openai-compat` has a declarable spelling at all, so every S-7 rule below is scoped
+    /// to it; S-6 fires for every OTHER kind.
+    ///
+    /// 1. **S-6** — a spelling is declared but no seat runs on `openai-compat`: the spelling
+    ///    reaches nothing.
+    /// 2. **S-7a** — the control is not `Default` and no spelling is declared: nothing goes on
+    ///    the wire for any control without one, so every record reads `Unsupported`.
+    /// 3. **S-7b** — `Enabled` with a spelling that has no "on" position (`EffortNone`,
+    ///    `EffortMinimal`): the wire stays untouched.
+    /// 4. **S-7c** — a spelling is declared but the control is `Default`: nothing is sent for
+    ///    `Default` regardless of spelling, so the declaration has no effect either.
+    ///
+    /// These four are mutually exclusive by construction (kind, then whether a spelling is
+    /// declared, then the control), so at most one notice is ever returned.
+    ///
+    /// Consumed by `build_magi_orchestrator` (Paso 3c.3); until then the plain (non-test) binary
+    /// has no live path here, so `dead_code` is allowed only for `not(test)` — same pattern as
+    /// `Agent::history` (`src/agent/mod.rs`).
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn reasoning_wire_notices(&self, _trio_kind: ProviderKind) -> Vec<Notice> {
+        Vec::new()
     }
 
     /// The shared rotation pool, in declared order (strongest to weakest).
@@ -3465,6 +3507,138 @@ max_input_bytes = 2048
                     Err(ConfigError::Parse(_))
                 ),
                 "`{typo}` must be a parse error"
+            );
+        }
+    }
+
+    // ── Task 3c (E-E): S-6/S-7 wire notices, on the RESOLVED kind ───────────────────────────
+
+    /// S-6: a spelling declared while no seat runs on `openai-compat` is inert, and SAID — one
+    /// WARN naming the key and the kind the trio actually runs on. Precedent: a declared value
+    /// not in force is `warn` (`strict_context_guard`, `[magi].base_url` under anthropic).
+    #[test]
+    fn a_spelling_with_no_openai_compat_seat_is_announced_as_inert() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]\nreasoning = \"disabled\"\nreasoning_spelling = \"effort-none\"\n",
+        )
+        .expect("valid");
+        for kind in [ProviderKind::Ollama, ProviderKind::Anthropic] {
+            let notices = cfg.reasoning_wire_notices(kind);
+            assert_eq!(
+                notices.len(),
+                1,
+                "exactly one notice under {kind}: {notices:?}"
+            );
+            let n = &notices[0];
+            assert_eq!(n.level, tracing::Level::WARN);
+            assert!(n.text.contains("reasoning_spelling"), "{}", n.text);
+            assert!(n.text.contains("openai-compat"), "{}", n.text);
+            assert!(
+                n.text.contains(&kind.to_string()),
+                "names the resolved kind: {}",
+                n.text
+            );
+        }
+        assert!(
+            cfg.reasoning_wire_notices(ProviderKind::OpenAiCompat)
+                .is_empty(),
+            "on an openai-compat trio the spelling is in force: nothing to say"
+        );
+    }
+
+    /// S-7: a non-default control on an `openai-compat` trio WITHOUT a spelling will not reach
+    /// the wire; the notice says so, says the records will read `Unsupported`, and carries the
+    /// 400 hazard so the operator does not fix it by guessing a spelling.
+    #[test]
+    fn a_control_that_cannot_reach_the_compat_wire_is_announced() {
+        for tag in ["disabled", "enabled"] {
+            let cfg = MagiConfig::from_toml_str(&format!("[magi]\nreasoning = \"{tag}\"\n"))
+                .expect("valid");
+            let notices = cfg.reasoning_wire_notices(ProviderKind::OpenAiCompat);
+            assert_eq!(notices.len(), 1, "{tag}: {notices:?}");
+            let n = &notices[0];
+            assert_eq!(n.level, tracing::Level::WARN);
+            for needle in [
+                "reasoning",
+                tag,
+                "reasoning_spelling",
+                "Unsupported",
+                "HTTP 400",
+            ] {
+                assert!(
+                    n.text.contains(needle),
+                    "{tag}: missing `{needle}` in {}",
+                    n.text
+                );
+            }
+        }
+    }
+
+    /// S-7, the pairs magi-core cannot put on the wire (its `reasoning_field` table,
+    /// `providers/openai_compat.rs:365-370`): `enabled` with a spelling that has no "on"
+    /// position, and any spelling while the control is `default`. Both send nothing, so both are
+    /// SAID — spec §0 "a key declared where it has no effect: a notice" (CP2 seg1 loop 3,
+    /// Caspar).
+    #[test]
+    fn a_spelling_that_cannot_express_the_control_is_announced() {
+        for spelling in ["effort-none", "effort-minimal"] {
+            let cfg = MagiConfig::from_toml_str(&format!(
+                "[magi]\nreasoning = \"enabled\"\nreasoning_spelling = \"{spelling}\"\n"
+            ))
+            .expect("valid");
+            let notices = cfg.reasoning_wire_notices(ProviderKind::OpenAiCompat);
+            assert_eq!(notices.len(), 1, "{spelling}: {notices:?}");
+            for needle in ["enabled", spelling, "Unsupported"] {
+                assert!(
+                    notices[0].text.contains(needle),
+                    "{spelling}: missing `{needle}`: {}",
+                    notices[0].text
+                );
+            }
+        }
+        for spelling in ["effort-none", "effort-minimal", "reasoning-enabled-object"] {
+            let cfg = MagiConfig::from_toml_str(&format!(
+                "[magi]\nreasoning_spelling = \"{spelling}\"\n"
+            ))
+            .expect("valid");
+            let notices = cfg.reasoning_wire_notices(ProviderKind::OpenAiCompat);
+            assert_eq!(notices.len(), 1, "{spelling} under `default`: {notices:?}");
+            for needle in ["reasoning_spelling", spelling, "default"] {
+                assert!(
+                    notices[0].text.contains(needle),
+                    "{spelling}: missing `{needle}`: {}",
+                    notices[0].text
+                );
+            }
+        }
+    }
+
+    /// S-7's negatives: the default control never warns, a declared spelling silences it, and a
+    /// native-wire trio is not concerned.
+    #[test]
+    fn no_reasoning_notice_when_the_control_reaches_the_wire_or_asks_nothing() {
+        let quiet = [
+            ("", ProviderKind::OpenAiCompat),
+            ("reasoning = \"default\"\n", ProviderKind::OpenAiCompat),
+            (
+                "reasoning = \"disabled\"\nreasoning_spelling = \"effort-none\"\n",
+                ProviderKind::OpenAiCompat,
+            ),
+            (
+                "reasoning = \"enabled\"\nreasoning_spelling = \"reasoning-enabled-object\"\n",
+                ProviderKind::OpenAiCompat,
+            ),
+            (
+                "reasoning = \"disabled\"\nreasoning_spelling = \"reasoning-enabled-object\"\n",
+                ProviderKind::OpenAiCompat,
+            ),
+            ("reasoning = \"disabled\"\n", ProviderKind::Ollama),
+        ];
+        for (body, kind) in quiet {
+            let cfg = MagiConfig::from_toml_str(&format!("[magi]\n{body}")).expect("valid");
+            assert!(
+                cfg.reasoning_wire_notices(kind).is_empty(),
+                "`{body}` under {kind} must say nothing"
             );
         }
     }

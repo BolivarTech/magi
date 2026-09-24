@@ -15289,6 +15289,37 @@ mod tests {
             );
             assert_eq!(d[0].summary, "s-cas");
         }
+
+        /// S-7 through the real trio construction, and on the RESOLVED kind: with no
+        /// `[magi].kind`, the trio inherits the principal's kind — which may come from
+        /// `MAGI_PROVIDER`, not the TOML. A notice computed from `effective_magi_kind()`
+        /// (TOML-only) would stay silent here.
+        #[test]
+        fn the_trio_announces_a_control_that_cannot_reach_its_inherited_compat_wire() {
+            let cfg =
+                MagiConfig::from_toml_str("[magi]\nreasoning = \"disabled\"\n").expect("valid");
+            let mut notices = Vec::new();
+            let _ = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg,
+                    principal_kind: ProviderKind::OpenAiCompat,
+                    endpoints: &test_endpoints(),
+                    creds: Some(&creds()),
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
+                },
+                &mut notices,
+            );
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.level == tracing::Level::WARN && n.text.contains("Unsupported")),
+                "the inherited openai-compat trio must announce the unreachable control: {notices:?}"
+            );
+        }
     }
 
     /// SC-V41-01: whether the deprecated magi-core 4.1.0 surface has any reader left in the
