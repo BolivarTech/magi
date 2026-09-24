@@ -1934,4 +1934,117 @@ mod tests {
             );
         }
     }
+
+    /// The ceilings REQ-V42-3 enumerates: the configurable floor and its neighbour, the default,
+    /// the old 120 s maximum, two ceilings only an unbounded `agent_timeout_secs` reaches,
+    /// `u32::MAX`, and each boundary of the proof's three saturation cases with its neighbours:
+    /// (A) `6c <= M`, (B) `6c > M >= 3c`, (C) `3c > M`, where `M = u64::MAX`.
+    ///
+    /// Deliberately NOT built from `AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS`: that range
+    /// is what REQ-TUI-1 removes, and a sweep bounded by it certifies the bounded range only.
+    const UNBOUNDED_SWEEP: [u64; 15] = [
+        30,
+        31,
+        90,
+        120,
+        5_000,
+        86_400,
+        u32::MAX as u64,
+        u64::MAX / 6 - 1,
+        u64::MAX / 6,
+        u64::MAX / 6 + 1,
+        u64::MAX / 3 - 1,
+        u64::MAX / 3,
+        u64::MAX / 3 + 1,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+
+    /// REQ-V42-3: over the unbounded ceiling range, the derived scale still satisfies REQ-A04
+    /// STRICTLY (`operation_budget + client_timeout < ceiling`), the Retry-After cap still
+    /// satisfies `cap + RETRY_AFTER_JITTER == client_timeout` exactly, the cap never drops under
+    /// 8 s, and nothing panics or overflows — including in the Duration arithmetic of this test
+    /// itself, which is why it adds with `checked_add`.
+    ///
+    /// Strict, not `<=`: the spec's proof (MAGI loop 4) shows `b + t <= 0.9c < c` in case A and
+    /// `< 0.9c`/`< 0.6c` in cases B and C, so `<` is what holds and what is asserted. The
+    /// neighbouring `derived_scale_satisfies_invariant_across_the_whole_admissible_range` keeps
+    /// `<=` because it starts at the absolute floor (15 s), where equality is the design.
+    ///
+    /// MUTATIONS (required): replace `saturating_mul` with `*` in `derive_operation_budget` ⇒
+    /// panics (overflow) from `u64::MAX / 6 + 1` up; set `CLIENT_TIMEOUT_FRACTION_NUM` to 4 ⇒
+    /// `18 + 12 = 30` at 30 s, red on the strict bound; drop the `.saturating_sub(JITTER)` from
+    /// `derive_retry_after_cap` ⇒ red on the equality.
+    #[test]
+    fn the_derived_scale_holds_at_every_case_boundary_up_to_u64_max() {
+        for ceiling in UNBOUNDED_SWEEP {
+            let budget = derive_operation_budget(ceiling);
+            let client = derive_client_timeout(ceiling);
+            let cap = derive_retry_after_cap(ceiling);
+            let sum = budget.checked_add(client).unwrap_or_else(|| {
+                panic!("ceiling {ceiling}s: budget + client_timeout overflows a Duration")
+            });
+            assert!(
+                sum < Duration::from_secs(ceiling),
+                "ceiling {ceiling}s: {budget:?} + {client:?} is not strictly under it"
+            );
+            assert_eq!(
+                cap.checked_add(magi_core::backoff::RETRY_AFTER_JITTER),
+                Some(client),
+                "ceiling {ceiling}s: cap + jitter must equal the client timeout exactly"
+            );
+            assert!(
+                cap >= Duration::from_secs(8),
+                "ceiling {ceiling}s: the proof bounds the cap at t - 1 >= 8 s, got {cap:?}"
+            );
+        }
+    }
+
+    /// U-1: how many honoured `Retry-After` waits magi-rs's DERIVED budget admits, counted with
+    /// magi-core's own formula — `budget / (retry_after_cap + per-hop margin)`, whole seconds,
+    /// `retry_after_hops_within` at magi-core `provider.rs:1211`. That function is `pub(crate)`
+    /// and `#[cfg(test)]`, so it cannot be called from here and its formula is reproduced; the
+    /// margin is `RETRY_AFTER_JITTER` (what bounds a honoured wait, `backoff.rs:177`), which
+    /// equals the crate's `base_delay` today (both 1 s).
+    ///
+    /// The answer is TWO for every ceiling up to and just past `u64::MAX / 6`, and ONE once the
+    /// budget saturates hard (case B's upper half, and case C): `b = 0.6c`, `t = 0.3c`, and
+    /// `cap + jitter == t` exactly, so `b / t` is 2 while neither term saturates. It did not
+    /// change with the pin: magi-rs overrides both `operation_budget` and `retry_after_cap`, so
+    /// magi-core 4.2.0's own move from one to two (900 s / 301 s) concerns only its defaults.
+    ///
+    /// An UPPER bound, like the crate's: the second wait is admitted only while the check before
+    /// the next attempt lands under the budget, and at `b == 2t` the margin is the sub-second
+    /// part of the jitter plus the attempt's own latency.
+    ///
+    /// MUTATION (required): set `OPERATION_BUDGET_FRACTION_NUM` to 9 ⇒ three waits fit at every
+    /// unsaturated ceiling, red on the first row.
+    #[test]
+    fn the_derived_budget_admits_two_retry_after_waits_until_saturation_cuts_it_to_one() {
+        const EXPECTED: [(u64, u64); 15] = [
+            (30, 2),
+            (31, 2),
+            (90, 2),
+            (120, 2),
+            (5_000, 2),
+            (86_400, 2),
+            (u32::MAX as u64, 2),
+            (u64::MAX / 6 - 1, 2),
+            (u64::MAX / 6, 2),
+            (u64::MAX / 6 + 1, 2),
+            (u64::MAX / 3 - 1, 1),
+            (u64::MAX / 3, 1),
+            (u64::MAX / 3 + 1, 1),
+            (u64::MAX - 1, 1),
+            (u64::MAX, 1),
+        ];
+        for (ceiling, expected) in EXPECTED {
+            let hop = derive_retry_after_cap(ceiling) + magi_core::backoff::RETRY_AFTER_JITTER;
+            let admitted = derive_operation_budget(ceiling).as_secs() / hop.as_secs();
+            assert_eq!(
+                admitted, expected,
+                "ceiling {ceiling}s: {admitted} honoured Retry-After waits fit the budget"
+            );
+        }
+    }
 }

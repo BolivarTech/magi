@@ -11610,6 +11610,84 @@ mod tests {
             assert!(ended.is_err());
         }
 
+        /// REQ-V42-3's "every derived Duration valid for reqwest", observed rather than argued:
+        /// a seat built with the client timeout derived from each ceiling of the unbounded sweep
+        /// — up to `u64::MAX` — arms its request and completes it against a server that answers
+        /// at once. What could fail here is not magi-rs's arithmetic (the lib sweep covers it)
+        /// but the dependencies: reqwest arms the total timeout with `tokio::time::sleep`, and
+        /// tokio saturates an overflowing deadline to `far_future`. A dependency that started
+        /// computing `now + timeout` unchecked would panic on the upper half of this list.
+        ///
+        /// The two kinds whose wire a local listener can reach; the anthropic seat posts to a
+        /// fixed URL (magi-core `providers/claude.rs:17`) and builds its client the same way.
+        ///
+        /// The 30 s deadline is a FAILURE deadline, not a measurement: the server answers 404
+        /// immediately, so a healthy request ends in milliseconds.
+        ///
+        /// No magi-rs subject to mutate — a probe of dependency behaviour, like
+        /// `magi_core_rejects_an_endless_probe_body_instead_of_accumulating_it`. Its sensitivity
+        /// is checked on the precondition instead: a listener that records nothing fails the
+        /// `POST` assertion.
+        #[tokio::test]
+        async fn a_seat_built_with_any_derived_client_timeout_completes_its_request() {
+            const M: u64 = u64::MAX;
+            let sweep: [u64; 15] = [
+                30,
+                31,
+                90,
+                120,
+                5_000,
+                86_400,
+                u64::from(u32::MAX),
+                M / 6 - 1,
+                M / 6,
+                M / 6 + 1,
+                M / 3 - 1,
+                M / 3,
+                M / 3 + 1,
+                M - 1,
+                M,
+            ];
+            for ceiling in sweep {
+                for kind in [ProviderKind::Ollama, ProviderKind::OpenAiCompat] {
+                    let (base, recorded) = recording_listener().await;
+                    let mut notices = Vec::new();
+                    let provider = build_native_provider(
+                        kind,
+                        &endpoint_at(&base),
+                        "any-model",
+                        Some(&creds()),
+                        magi_rs::magi::derive_client_timeout(ceiling),
+                        &mut notices,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("ceiling {ceiling}s, {kind:?}: seat did not build: {e}")
+                    });
+                    let outcome = tokio::time::timeout(
+                        Duration::from_secs(30),
+                        provider.complete("s", "u", &magi_completion_config()),
+                    )
+                    .await;
+                    let ended = outcome.unwrap_or_else(|_| {
+                        panic!(
+                            "ceiling {ceiling}s, {kind:?}: the request never ended against a \
+                             server that answered at once"
+                        )
+                    });
+                    assert!(
+                        ended.is_err(),
+                        "ceiling {ceiling}s, {kind:?}: a 404 must surface as an error"
+                    );
+                    let line = recorded.await.expect("the listener task must finish");
+                    assert!(
+                        line.starts_with("POST "),
+                        "precondition, ceiling {ceiling}s, {kind:?}: the request never reached \
+                         the wire, so nothing was armed: {line:?}"
+                    );
+                }
+            }
+        }
+
         /// The request BODY the openai-compat seat sent under magi-core 4.0.0 for the inputs of
         /// the test below, captured from a run with the pin at `=4.0.0` and pasted here verbatim
         /// — never written by hand, because a hand-written baseline is what one BELIEVES the
@@ -13905,70 +13983,98 @@ mod tests {
         }
 
         #[test]
-        /// REQ-V4-10. Two independent computations of one quantity, which must agree exactly.
+        /// REQ-V4-10 and REQ-V42-8. Two independent computations of one quantity, which must
+        /// agree exactly, now at EVERY rotation count and through the headless wall clock.
         ///
-        /// The crate computes `worst_case_per_seat() = ceiling * calls_per_model * models`, where
-        /// `calls_per_model` is 2 when `MagiConfig::retry_on_schema_error` is on. magi-rs computes
+        /// The crate computes `worst_case_per_seat() = ceiling * calls_per_model * models`,
+        /// where `calls_per_model` is 2 when `MagiConfig::retry_on_schema_error` is on and
+        /// `models = 1 + max_rotations` of the pool it was given. magi-rs computes
         /// `attempt_factor = attempts_per_model * models * (100 + SLACK)` in hundredths, and
-        /// `build_magi_orchestrator` maps our `retry_disabled` onto that very flag — so the two
-        /// numbers are the same product. Therefore:
+        /// `headless_consult_timeout_secs = CLASSIFY + ceiling * attempt_factor / 100`.
+        /// Therefore, for the same configuration:
         ///
         /// ```text
-        /// attempts * models = attempt_factor / (100 + SLACK)
-        /// worst             = ceiling * attempts * models
-        /// => worst * (100 + SLACK) = ceiling * attempt_factor
+        /// worst * (100 + SLACK)          == ceiling * attempt_factor      (no division)
+        /// headless - CLASSIFY_TIMEOUT    == ceiling * attempt_factor / 100
         /// ```
         ///
-        /// Asserted in INTEGERS with no division: a division would round away the very drift this
-        /// guards. Replacement is not an option — `worst_case_per_seat` needs a constructed `Magi`,
-        /// while magi-rs resolves the wall clock BEFORE the trio is built, and our derivation runs
-        /// in the inverse direction. Two computations that must agree is a guardian; one is not.
+        /// The first line is asserted in INTEGERS with no division: a division rounds away the
+        /// very drift this guards. The second pins that the headless clock is built from that
+        /// same factor. Both are needed — a drifted `attempt_factor` can vanish inside the
+        /// second line's `/ 100` (at 90 s, a factor off by one moves `90 * f` by 90, which the
+        /// division hides), and only the first sees it.
         ///
-        /// MUTATION (required): change `attempts_per_model` in `attempt_factor` from 2 to 3 and
-        /// this goes red at every row. NEVER weaken it to an inequality — an inequality still
-        /// passes when the two formulas drift apart in the safe direction.
-        fn our_attempt_factor_agrees_with_the_crates_worst_case_per_seat() {
-            const CEILING_SECS: u64 = magi_rs::magi::AGENT_TIMEOUT_SECS;
-            // ROTATIONS FIXED AT ZERO, and that is a scoping decision rather than a shortcut.
-            // The quantity that can DRIFT is `calls_per_model`: it tracks magi-core's
-            // `retry_on_schema_error`, which we map from `retry_disabled`, and a change on either
-            // side breaks the agreement silently. The `(1 + max_rotations)` factor is the same
-            // multiplication on both sides and cannot drift on its own. Varying it here only
-            // proved that a unit-built orchestrator does not receive the declared pool — a real
-            // fact, but one that belongs to the smoke harness, which runs a configured product.
-            let rotations = 0u32;
-            {
-                for retry_disabled in [false, true] {
-                    let cfg = MagiConfig::from_toml_str(&format!(
-                        "provider = \"ollama\"
-[magi]
-retry_disabled = {retry_disabled}
-"
-                    ))
-                    .unwrap();
-                    let mut notices = Vec::new();
-                    let magi = build_magi_orchestrator(
-                        &TrioBuild {
-                            cfg: &cfg,
-                            principal_kind: ProviderKind::Ollama,
-                            endpoints: &test_endpoints(),
-                            creds: None,
-                            warn_tokens: None,
-                            env_overrides: &MagiEnvModelOverrides::default(),
-                            capability_cache: None,
-                            probe: &ProbeOutcome::default(),
-                            ceiling: ResolvedCeiling::configured(CEILING_SECS),
-                        },
-                        &mut notices,
-                    )
-                    .expect("ollama is keyless");
+        /// The pool is DECLARED (`[[magi.fallback]]`) so `build_magi_orchestrator` hands magi-core
+        /// a `FallbackPool` with `max_rotations`; without one the rotation factor is never on
+        /// either side, which is what the rotation-free version of this test could not see.
+        ///
+        /// MUTATIONS (required): `attempts_per_model` 2 -> 3 in `attempt_factor` ⇒ red at every
+        /// row; `FallbackPool::builder().max_rotations(0)` in place of
+        /// `.max_rotations(cfg.effective_max_rotations())` in `build_magi_orchestrator` ⇒ red at
+        /// every row with rotations > 0 (the trace still records the configured value, so the
+        /// precondition holds and the agreement is what fails); delete
+        /// `builder = builder.with_retry_disabled();` ⇒ red at every `retry_disabled = true` row.
+        /// NEVER weaken either line to an inequality.
+        fn our_headless_wall_clock_agrees_with_the_crates_worst_case_per_seat() {
+            // 90 s is the default; 5 000 s is a ceiling only REQ-TUI-1's unbounded range reaches.
+            // Both keep `ceiling * attempt_factor` far from u64 overflow.
+            for ceiling_secs in [magi_rs::magi::AGENT_TIMEOUT_SECS, 5_000] {
+                for max_rotations in 0u32..=2 {
+                    for retry_disabled in [false, true] {
+                        let cfg = MagiConfig::from_toml_str(&format!(
+                            "provider = \"ollama\"\n\
+                             [magi]\n\
+                             melchior_model = \"ok-model\"\nmelchior_lineage = \"lin-melchior\"\n\
+                             balthasar_model = \"ok-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
+                             caspar_model = \"ok-model\"\ncaspar_lineage = \"lin-caspar\"\n\
+                             max_rotations = {max_rotations}\n\
+                             retry_disabled = {retry_disabled}\n\
+                             [[magi.fallback]]\n\
+                             model = \"rescue-model\"\nlineage = \"lin-rescue\"\n"
+                        ))
+                        .expect("the rotation config must parse");
+                        let mut notices = Vec::new();
+                        let magi = build_magi_orchestrator(
+                            &TrioBuild {
+                                cfg: &cfg,
+                                principal_kind: ProviderKind::Ollama,
+                                endpoints: &test_endpoints(),
+                                creds: None,
+                                warn_tokens: None,
+                                env_overrides: &MagiEnvModelOverrides::default(),
+                                capability_cache: None,
+                                probe: &ProbeOutcome::default(),
+                                ceiling: ResolvedCeiling::configured(ceiling_secs),
+                            },
+                            &mut notices,
+                        )
+                        .expect("ollama is keyless");
+                        let row = format!(
+                            "ceiling={ceiling_secs} rotations={max_rotations} \
+                             retry_disabled={retry_disabled}"
+                        );
+                        let wired = pool_wiring_trace().unwrap_or_else(|| {
+                            panic!("precondition ({row}): the declared pool was never wired")
+                        });
+                        assert_eq!(wired.max_rotations, max_rotations, "precondition ({row})");
 
-                    assert_eq!(
-                        magi.worst_case_per_seat().as_secs()
-                            * (100 + magi_rs::magi::HEADLESS_TIMEOUT_SLACK_PCT),
-                        CEILING_SECS * magi_rs::magi::attempt_factor(rotations, retry_disabled),
-                        "rotations={rotations} retry_disabled={retry_disabled}"
-                    );
+                        let worst = magi.worst_case_per_seat().as_secs();
+                        let factor = magi_rs::magi::attempt_factor(max_rotations, retry_disabled);
+                        assert_eq!(
+                            worst * (100 + magi_rs::magi::HEADLESS_TIMEOUT_SLACK_PCT),
+                            ceiling_secs * factor,
+                            "attempt_factor drifted from the crate's worst case ({row})"
+                        );
+                        assert_eq!(
+                            magi_rs::magi::headless_consult_timeout_secs(
+                                ceiling_secs,
+                                max_rotations,
+                                retry_disabled
+                            ) - magi_rs::magi::CLASSIFY_TIMEOUT_SECS,
+                            ceiling_secs * factor / 100,
+                            "the headless clock is not built from attempt_factor ({row})"
+                        );
+                    }
                 }
             }
         }
