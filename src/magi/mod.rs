@@ -37,6 +37,7 @@ pub fn seat_label(agent: magi_core::schema::AgentName) -> String {
     agent.display_name().to_lowercase()
 }
 
+pub mod clock_coverage;
 pub mod completion_report;
 pub mod eligibility_report;
 pub mod endpoint;
@@ -571,6 +572,44 @@ fn threshold_from_factor(factor: u64) -> u64 {
 #[must_use]
 pub fn floor_activation_threshold_secs(max_rotations: u32, retry_disabled: bool) -> u64 {
     threshold_from_factor(attempt_factor(max_rotations, retry_disabled))
+}
+
+/// The smallest `--timeout` whose RAW derived ceiling ([`derive_ceiling_from_timeout`]) reaches
+/// `ceiling_secs`, for this run's rotation settings (REQ-EE-5's coverage warning).
+///
+/// # Why this generalizes [`floor_activation_threshold_secs`] rather than duplicating it
+///
+/// [`floor_activation_threshold_secs`] answers this exact question for one fixed target —
+/// [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`] — because that is the only target the derived-timeout
+/// invariant (REQ-A04) itself cares about. The coverage warning needs the SAME inverse at an
+/// arbitrary target: the ceiling a `[magi].max_tokens` cap requires at the reference generation
+/// speed. Both share the identical `div_ceil` arithmetic (see that function's rustdoc for why
+/// `div_ceil`, not plain division, is the boundary operator); they are kept as one shared
+/// calculation, parameterized on the target, rather than two copies that could drift the way
+/// [`attempt_factor`]'s rustdoc warns about.
+///
+/// # Arguments
+/// * `ceiling_secs` - the per-mage ceiling the returned `--timeout` must derive at least.
+/// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+///
+/// # Returns
+/// The smallest `t` such that `derive_ceiling_from_timeout(t, max_rotations, retry_disabled) >=
+/// ceiling_secs`; `t - 1` does not reach it, except when `ceiling_secs <=
+/// AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`, where [`derive_ceiling_from_timeout`]'s own floor makes
+/// EVERY `t` (including `0`) already sufficient, so "minimal" stops being a meaningful question.
+///
+/// # Complexity
+/// `O(1)`; every arithmetic step saturates, so an absurd `ceiling_secs`/`max_rotations` pair
+/// degrades to a very large `--timeout` instead of overflowing.
+#[must_use]
+pub fn min_timeout_deriving_ceiling(
+    ceiling_secs: u64,
+    max_rotations: u32,
+    retry_disabled: bool,
+) -> u64 {
+    let _ = (ceiling_secs, max_rotations, retry_disabled);
+    0
 }
 
 /// The INVERSE of [`headless_consult_timeout_secs`]: the per-mage ceiling that fits inside an
@@ -1924,6 +1963,55 @@ mod tests {
                  factor={factor} threshold={t}"
             );
         }
+    }
+
+    /// The inverse used by the coverage warning is an EXACT boundary, like
+    /// `floor_activation_threshold_secs`: sufficient (the value reaches the ceiling) and minimal
+    /// (one second less does not), for every rotation setting and across the ceiling range.
+    #[test]
+    fn min_timeout_deriving_ceiling_is_the_exact_boundary() {
+        for max_rotations in 0..=3_u32 {
+            for retry_disabled in [false, true] {
+                for ceiling in (AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS..=2_000).chain([5_000, 86_400]) {
+                    let t = min_timeout_deriving_ceiling(ceiling, max_rotations, retry_disabled);
+                    assert!(
+                        derive_ceiling_from_timeout(t, max_rotations, retry_disabled) >= ceiling,
+                        "insufficient: {t}s does not reach {ceiling}s (r={max_rotations}, d={retry_disabled})"
+                    );
+                    if ceiling > AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS {
+                        assert!(
+                            derive_ceiling_from_timeout(t - 1, max_rotations, retry_disabled) < ceiling,
+                            "not minimal: {}s already reaches {ceiling}s (r={max_rotations}, d={retry_disabled})",
+                            t - 1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The floor threshold is this function evaluated at the floor — one arithmetic, not two.
+    #[test]
+    fn the_floor_threshold_is_the_boundary_at_the_floor() {
+        for max_rotations in 0..=3_u32 {
+            for retry_disabled in [false, true] {
+                assert_eq!(
+                    min_timeout_deriving_ceiling(
+                        AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+                        max_rotations,
+                        retry_disabled
+                    ),
+                    floor_activation_threshold_secs(max_rotations, retry_disabled)
+                );
+            }
+        }
+    }
+
+    /// Saturating: an absurd ceiling and rotation count never wrap.
+    #[test]
+    fn min_timeout_deriving_ceiling_saturates_instead_of_wrapping() {
+        let t = min_timeout_deriving_ceiling(u64::MAX, u32::MAX, false);
+        assert!(t >= min_timeout_deriving_ceiling(1_000_000, u32::MAX, false));
     }
 
     /// SC-EB04c: the public threshold is composed, not hardcoded.

@@ -854,3 +854,32 @@ fn magi_core_4_2_0_supplies_the_surface_this_milestone_needs() {
     let _ = completion_record_shape;
     let _ = worst_case_shape;
 }
+
+/// REQ-EE-5: magi-rs's reference speed is a COPY of magi-core 4.2.0's `MIN_MEASURED_TOK_S`
+/// (`src/provider.rs:1323`, dated 2026-09-20), which is `pub(crate)` and `#[cfg(test)]` — no
+/// compile-time coupling exists, and that debt is recorded on the constant's rustdoc. This test
+/// is the coupling that remains: it states the value next to the upstream location and version
+/// it copies, and it reads the RESOLVED magi-core version from `Cargo.lock`, so even a mechanical
+/// pin bump turns it red and forces the re-read (REQ-V42-2).
+#[test]
+fn the_reference_speed_is_magi_core_4_2_0s_measured_floor_and_the_pin_is_4_2_0() {
+    /// Where the copied value lives upstream, for whoever re-reads it on the next bump.
+    const UPSTREAM: &str = "magi-core 4.2.0, src/provider.rs:1323, MIN_MEASURED_TOK_S = 55";
+    assert_eq!(
+        magi_rs::magi::clock_coverage::COVERAGE_REFERENCE_TOK_PER_SEC,
+        55,
+        "copied from {UPSTREAM}"
+    );
+    let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).replace('\r', "");
+    let resolved = lock
+        .split("\n[[package]]\n")
+        .find(|pkg| pkg.lines().any(|l| l == "name = \"magi-core\""))
+        .and_then(|pkg| pkg.lines().find_map(|l| l.strip_prefix("version = \"")))
+        .map(|v| v.trim_end_matches('"'));
+    assert_eq!(
+        resolved,
+        Some("4.2.0"),
+        "magi-core moved: re-read {UPSTREAM} and this whole file against the new version \
+         before changing this line"
+    );
+}
