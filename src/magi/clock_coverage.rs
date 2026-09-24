@@ -111,14 +111,21 @@ impl ClockCoverageWarning {
         lever: CoveringLever,
     ) -> Option<Self> {
         let client_timeout_secs = super::derive_client_timeout(ceiling.secs()).as_secs();
-        let covered_tokens = client_timeout_secs.saturating_mul(COVERAGE_REFERENCE_TOK_PER_SEC);
         let cap = u64::from(cap_tokens);
-        if covered_tokens >= cap {
-            return None;
-        }
         // The client timeout, in seconds, that would deliver `cap_tokens` at the reference
         // speed — `div_ceil` so a fractional second still counts as needed, never rounded away.
         let needed_client_timeout_secs = cap.div_ceil(COVERAGE_REFERENCE_TOK_PER_SEC);
+        // Compared in the TIME domain, not by re-multiplying back into tokens: for positive
+        // integers, `client_timeout_secs * REFERENCE >= cap` and `client_timeout_secs >=
+        // needed_client_timeout_secs` are the same boundary (the standard `div_ceil` identity),
+        // but the token-domain form can never land on an exact equality with `cap` unless `cap`
+        // happens to be a multiple of the reference speed — which hides the boundary from a
+        // test that swaps `>=` for `>`. The time domain hits that equality exactly at the
+        // covering ceiling, so a wrong comparison operator here is observable.
+        if client_timeout_secs >= needed_client_timeout_secs {
+            return None;
+        }
+        let covered_tokens = client_timeout_secs.saturating_mul(COVERAGE_REFERENCE_TOK_PER_SEC);
         let covering_ceiling = super::min_ceiling_for_client_timeout(needed_client_timeout_secs);
         let covering_value_secs = match lever {
             // `AGENT_TIMEOUT_MIN_SECS` is the config's own validated floor: a ceiling below it
