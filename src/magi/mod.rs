@@ -45,6 +45,7 @@ pub mod kind;
 pub mod lineage;
 pub mod mode;
 pub mod probe;
+pub mod reasoning;
 pub mod report_anchors;
 pub mod rotation_config;
 pub mod rotation_report;

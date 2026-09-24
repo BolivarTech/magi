@@ -12,12 +12,17 @@ mod migrate;
 
 use std::path::Path;
 
+use magi_core::provider::ReasoningControl;
+use magi_core::providers::openai_compat::ReasoningSpelling;
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::endpoint::{EndpointError, EndpointTemplate};
 use magi_rs::magi::gate::{GateOverrides, GateThresholds};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::lineage::{Lineage, LineageError};
 use magi_rs::magi::mode::{ModeExt, ModeParseError};
+use magi_rs::magi::reasoning::{
+    parse_reasoning_control, parse_reasoning_spelling, ReasoningVocabularyError,
+};
 use magi_rs::magi::{min_viable_output_cap, AGENT_TIMEOUT_MAX_SECS, AGENT_TIMEOUT_MIN_SECS};
 use magi_rs::notices::Notice;
 use serde::Deserialize;
@@ -114,6 +119,28 @@ pub enum ConfigError {
     /// future message that embeds a URL is redacted here instead of printed.
     #[error("{}", magi_rs::redact::redact_foreign_error(_0))]
     Endpoint(#[from] EndpointError),
+
+    /// `[magi].reasoning` or `[magi].reasoning_spelling` outside its vocabulary (S-5).
+    #[error("{0}")]
+    ReasoningVocabulary(#[from] ReasoningVocabularyError),
+
+    /// `[magi].max_tokens` is not a positive value the 32-bit wire field can carry (REQ-EE-5).
+    ///
+    /// RED STUB (Paso 3a.1): not constructed anywhere yet — `validate_max_tokens` (Paso 3a.3)
+    /// is what builds it — so `dead_code` is allowed only until that Green lands, same pattern
+    /// as `Agent::history` (`src/agent/mod.rs`).
+    #[error(
+        "[magi].max_tokens = {got} is not accepted: it must be a positive whole number of \
+         tokens, at most {max}, the largest value the 32-bit wire field can carry; magi-rs \
+         sets no limit of its own below that."
+    )]
+    #[allow(dead_code)]
+    MaxTokensOutOfRange {
+        /// The declared value, verbatim.
+        got: i64,
+        /// The largest value the 32-bit wire field can carry (`u32::MAX`).
+        max: u32,
+    },
 }
 
 impl From<ProviderKindParseError> for ConfigError {
@@ -673,6 +700,42 @@ pub struct MagiSectionConfig {
     /// opaque string.
     pub enforce_diversity: Option<bool>,
 
+    /// Reasoning control for the whole trio; absent ⇒ `ReasoningControl::Default` (REQ-EE-3).
+    ///
+    /// Consumer: `MagiConfig::effective_reasoning`, and from it `magi_completion_config`, which
+    /// sends it to every one of the trio's three seats — magi-core declined a per-seat override
+    /// (E-E response §2.2), so one value applies to all three.
+    pub reasoning: Option<String>,
+    /// Reasoning spelling for `openai-compat` seats; no default (REQ-V42-4).
+    ///
+    /// Consumer: `MagiConfig::effective_reasoning_spelling`, and from it
+    /// `build_native_provider`'s `openai-compat` arm (`with_reasoning_spelling`). Declared while
+    /// no seat runs on `openai-compat`, or while `[magi].reasoning` cannot reach the wire without
+    /// it, is announced rather than silently inert — see `MagiConfig::reasoning_wire_notices`.
+    ///
+    /// **A spelling the pinned model rejects returns HTTP 400, and magi-core treats a 400 as
+    /// lineage-condemning: all three seats of that lineage are lost for the run.** Verify the
+    /// spelling against the pinned model before declaring it, and again after any provider-side
+    /// model update — a spelling that worked can start failing with no change on the magi-rs
+    /// side (OQ-5, accepted risk, PM-S-12).
+    pub reasoning_spelling: Option<String>,
+    /// Output cap per completion, per seat; absent ⇒ `DECLARED_COMPLETION_CAP` (REQ-EE-5).
+    ///
+    /// Consumer: `magi_completion_config` (Task 4), which sends it as every seat's
+    /// `CompletionConfig::max_tokens`. Billed as completion tokens on every attempt, per seat —
+    /// raising it raises cost and, at roughly 55 tok/s, wall clock. No upper bound of magi-rs's
+    /// own (OQ-3): only a non-positive value, or one the wire's 32-bit field cannot carry, is
+    /// rejected at load. A value above the pinned model's own output maximum returns HTTP 400
+    /// (PM-S-2) — that ceiling is the model's, and magi-rs has no way to know it in advance.
+    pub max_tokens: Option<i64>,
+    /// Opt-in bounded reasoning trace in the log for cut attempts; absent ⇒ `false` (REQ-EE-4).
+    ///
+    /// Consumer: `magi_completion_config` (Task 4), which maps it to
+    /// `CompletionConfig::reasoning_trace`. The trace is untrusted model text: it never enters
+    /// the consult envelope, stderr, or the TUI — only the daily log file, at `INFO`, bounded to
+    /// a head and a tail, and only for an attempt that ran out of budget or returned nothing.
+    pub reasoning_trace: Option<bool>,
+
     /// The shared rotation pool, ordered strongest to weakest (REQ-R13).
     ///
     /// **Goes LAST in the file, not last in the `[magi]` block.** In TOML every loose key and
@@ -807,6 +870,10 @@ impl Default for MagiSectionConfig {
             max_rotations: None,
             strict_context_guard: None,
             enforce_diversity: None,
+            reasoning: None,
+            reasoning_spelling: None,
+            max_tokens: None,
+            reasoning_trace: None,
             fallback: Vec::new(),
         }
     }
@@ -901,6 +968,61 @@ impl MagiConfig {
             .unwrap_or(crate::defaults::DEFAULT_ENFORCE_DIVERSITY)
     }
 
+    /// The trio's reasoning control, resolved (absent ⇒ `ReasoningControl::default()`, REQ-EE-3).
+    ///
+    /// Same infallible-by-precondition contract as [`Self::effective_provider`]: by the time this
+    /// runs, [`Self::validate_vocabulary`] has already rejected any value
+    /// [`magi_rs::magi::reasoning::parse_reasoning_control`] would reject, so the fallback on
+    /// `Err` below is unreachable in practice — never a value this function invents.
+    ///
+    /// Consumed by [`Self::reasoning_wire_notices`] (Paso 3c) and, from Task 4, by
+    /// `magi_completion_config`; until Paso 3c lands the plain (non-test) binary has no live
+    /// path here, so `dead_code` is allowed only for `not(test)` — same pattern as
+    /// `Agent::history` (`src/agent/mod.rs`).
+    ///
+    /// # Panics
+    /// If called on an unvalidated config (see [`Self::effective_provider`]).
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn effective_reasoning(&self) -> ReasoningControl {
+        assert!(
+            self.validate_vocabulary().is_ok(),
+            "MagiConfig::effective_reasoning called on an unvalidated config — \
+             construct it via from_toml_str()/load(), never by deserializing it directly"
+        );
+        self.magi
+            .reasoning
+            .as_deref()
+            .and_then(|raw| parse_reasoning_control(raw).ok())
+            .unwrap_or_default()
+    }
+
+    /// The declared `openai-compat` spelling, resolved (absent ⇒ `None`, REQ-V42-4).
+    ///
+    /// **Unlike every other `effective_*` accessor here, `None` is not "fall back to a built-in
+    /// default" — there is no default spelling.** Absence means magi-rs sends no reasoning field
+    /// at all on the `openai-compat` wire, byte-identical to 0.19.1.
+    ///
+    /// Consumed by [`Self::reasoning_wire_notices`] (Paso 3c) and, from Task 4, by
+    /// `magi_completion_config`; same temporary `dead_code` allowance as
+    /// [`Self::effective_reasoning`] until then.
+    ///
+    /// # Panics
+    /// If called on an unvalidated config (see [`Self::effective_provider`]).
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn effective_reasoning_spelling(&self) -> Option<ReasoningSpelling> {
+        assert!(
+            self.validate_vocabulary().is_ok(),
+            "MagiConfig::effective_reasoning_spelling called on an unvalidated config — \
+             construct it via from_toml_str()/load(), never by deserializing it directly"
+        );
+        self.magi
+            .reasoning_spelling
+            .as_deref()
+            .and_then(|raw| parse_reasoning_spelling(raw).ok())
+    }
+
     /// The shared rotation pool, in declared order (strongest to weakest).
     #[must_use]
     pub(crate) fn fallback_pool(&self) -> &[magi_rs::magi::rotation_config::FallbackEntry] {
@@ -950,8 +1072,10 @@ impl MagiConfig {
     /// TOML does not
     /// parse; [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] if
     /// `provider`, `[magi].kind` or `[magi].default_mode` bring a present but unrecognized
-    /// value; [`ConfigError::AgentTimeoutOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if
-    /// those numbers fall outside their range.
+    /// value; [`ConfigError::ReasoningVocabulary`] if `[magi].reasoning` or
+    /// `[magi].reasoning_spelling` bring a present but unrecognized value;
+    /// [`ConfigError::AgentTimeoutBelowFloor`] / [`ConfigError::MaxTokensOutOfRange`] /
+    /// [`ConfigError::OutputCapTooSmall`] if those numbers fall outside their range.
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
         // The migration pass goes FIRST, just like in `load()` (Task 1.4). Without this, tests
         // would exercise an error path that production does not have: a v0.11.0 `magi.toml`
@@ -3176,6 +3300,143 @@ max_input_bytes = 2048
             .build()
             .unwrap();
         assert_eq!(declared.effective_tool_result_cap(), above_min);
+    }
+
+    // ── Task 3 (E-E / magi-core 4.2.0): `[magi].reasoning`/`reasoning_spelling`/`max_tokens`/
+    // `reasoning_trace` vocabulary (REQ-EE-3/4/5, REQ-V42-4, S-5) ────────────────────────────
+
+    /// REQ-EE-3: absent means magi-core's own default control — never a value of ours.
+    #[test]
+    fn an_absent_reasoning_key_resolves_to_magi_cores_default_control() {
+        let cfg = MagiConfig::from_toml_str("[magi]\n").expect("an empty [magi] is valid");
+        assert_eq!(cfg.effective_reasoning(), ReasoningControl::default());
+    }
+
+    /// REQ-EE-3: each accepted tag loads and resolves to its control.
+    #[test]
+    fn each_reasoning_tag_loads_and_resolves_to_its_control() {
+        for (tag, control) in [
+            ("default", ReasoningControl::Default),
+            ("disabled", ReasoningControl::Disabled),
+            ("enabled", ReasoningControl::Enabled),
+        ] {
+            let cfg = MagiConfig::from_toml_str(&format!("[magi]\nreasoning = \"{tag}\"\n"))
+                .unwrap_or_else(|e| panic!("`{tag}` must load: {e}"));
+            assert_eq!(cfg.effective_reasoning(), control, "tag `{tag}`");
+        }
+    }
+
+    /// S-5: an unknown or blank `reasoning` stops the load with a typed error naming the key and
+    /// the accepted values — the `magi.toml`-is-fatal policy, not a silent fallback to `default`.
+    #[test]
+    fn an_unknown_or_blank_reasoning_is_a_load_error_naming_the_key() {
+        for bad in ["low", "", "   "] {
+            let err = MagiConfig::from_toml_str(&format!("[magi]\nreasoning = \"{bad}\"\n"))
+                .expect_err("unknown vocabulary must not load");
+            assert!(
+                matches!(&err, ConfigError::ReasoningVocabulary(e) if e.key == "reasoning"),
+                "typed, naming `reasoning`: {err:?}"
+            );
+            let text = err.to_string();
+            for accepted in ["default", "disabled", "enabled"] {
+                assert!(text.contains(accepted), "names `{accepted}`: {text}");
+            }
+        }
+    }
+
+    /// REQ-V42-4: the spelling loads, and absent means NO spelling (nothing is sent).
+    #[test]
+    fn a_reasoning_spelling_loads_and_its_absence_is_none() {
+        let absent = MagiConfig::from_toml_str("[magi]\n").expect("valid");
+        assert_eq!(absent.effective_reasoning_spelling(), None);
+        let declared = MagiConfig::from_toml_str(
+            "[magi]\nreasoning_spelling = \"reasoning-enabled-object\"\n",
+        )
+        .expect("a declared spelling loads");
+        assert_eq!(
+            declared.effective_reasoning_spelling(),
+            Some(ReasoningSpelling::ReasoningEnabledObject)
+        );
+    }
+
+    /// S-5 for the spelling, through the real load path.
+    #[test]
+    fn an_unknown_or_blank_reasoning_spelling_is_a_load_error_naming_the_key() {
+        for bad in ["none", ""] {
+            let err =
+                MagiConfig::from_toml_str(&format!("[magi]\nreasoning_spelling = \"{bad}\"\n"))
+                    .expect_err("unknown vocabulary must not load");
+            assert!(
+                matches!(&err, ConfigError::ReasoningVocabulary(e) if e.key == "reasoning_spelling"),
+                "typed, naming `reasoning_spelling`: {err:?}"
+            );
+            assert!(err.to_string().contains("effort-none"), "{err}");
+        }
+    }
+
+    /// REQ-EE-5 / OQ-3: any positive value the wire can carry loads — there is NO upper bound of
+    /// ours; far above 65 536 included.
+    #[test]
+    fn max_tokens_accepts_every_positive_32_bit_value_with_no_upper_bound_of_its_own() {
+        for ok in [1_i64, 16_384, 65_536, 1_000_000, i64::from(u32::MAX)] {
+            let cfg = MagiConfig::from_toml_str(&format!("[magi]\nmax_tokens = {ok}\n"))
+                .unwrap_or_else(|e| panic!("{ok} must load: {e}"));
+            assert_eq!(cfg.magi().max_tokens, Some(ok));
+        }
+    }
+
+    /// REQ-EE-5: only a non-positive value is an error of policy; above `u32::MAX` the wire field
+    /// cannot carry it (see "Notas del redactor"). Both are the same typed error, naming the key.
+    #[test]
+    fn a_non_positive_or_unrepresentable_max_tokens_is_a_load_error_naming_the_key() {
+        for bad in [0_i64, -1, i64::MIN, i64::from(u32::MAX) + 1] {
+            let err = MagiConfig::from_toml_str(&format!("[magi]\nmax_tokens = {bad}\n"))
+                .expect_err("must not load");
+            assert!(
+                matches!(err, ConfigError::MaxTokensOutOfRange { got, max } if got == bad && max == u32::MAX),
+                "typed, carrying the value and the wire maximum: {err:?}"
+            );
+            assert!(err.to_string().contains("[magi].max_tokens"), "{err}");
+        }
+    }
+
+    /// REQ-EE-4: the trace key is a plain opt-in boolean; absent stays absent (resolved to
+    /// `false` by its consumer, Tarea 4).
+    #[test]
+    fn reasoning_trace_is_an_optional_boolean() {
+        assert_eq!(
+            MagiConfig::from_toml_str("[magi]\n")
+                .expect("valid")
+                .magi()
+                .reasoning_trace,
+            None
+        );
+        assert_eq!(
+            MagiConfig::from_toml_str("[magi]\nreasoning_trace = true\n")
+                .expect("valid")
+                .magi()
+                .reasoning_trace,
+            Some(true)
+        );
+    }
+
+    /// `deny_unknown_fields` still bites next to the new keys: a misspelling is a parse error,
+    /// never a silently ignored key.
+    #[test]
+    fn a_misspelled_new_magi_key_is_still_rejected() {
+        for typo in [
+            "reasoning_tracee = true",
+            "max_token = 100",
+            "reasoning_spellings = \"effort-none\"",
+        ] {
+            assert!(
+                matches!(
+                    MagiConfig::from_toml_str(&format!("[magi]\n{typo}\n")),
+                    Err(ConfigError::Parse(_))
+                ),
+                "`{typo}` must be a parse error"
+            );
+        }
     }
 
     // Fix round 2 (coordinator review, 2026-08-02): I3/I4/I5/m8 — B13 coverage this task's own
