@@ -6,6 +6,7 @@
 //! here only for genuine multi-perspective decisions; trivial or factual lookups are answered
 //! directly.
 
+use crate::agent::mode_classifier::NoticeSink;
 use crate::config::MagiConfig;
 use crate::task::AbortOnDrop;
 use crate::tools::{Tool, ToolError, ToolResult};
@@ -14,6 +15,7 @@ use magi_core::error::MagiError;
 use magi_core::orchestrator::{Magi, MagiConfig as CoreMagiConfig};
 use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
 use magi_core::schema::{AgentName, Mode};
+use magi_rs::magi::clock_coverage::ClockCoverageWarning;
 use magi_rs::magi::completion_report::render_completions;
 use magi_rs::magi::eligibility_report::render_pool_eligibility;
 use magi_rs::magi::kind::ProviderKind;
@@ -82,6 +84,62 @@ pub(crate) fn check_query_size(query: &str, cap: usize) -> Result<(), ConsultInp
         });
     }
     Ok(())
+}
+
+/// Announces REQ-EE-5's clock-coverage warning (S-9) at every activation of the MAGI panel, on
+/// every surface — TUI `/consult`, an autonomous consult, headless `consult`/`query --consult`.
+///
+/// # Why the assessment happens once, at construction, not per activation
+///
+/// The clock a run's consults execute under is fixed for the run (the effective ceiling does not
+/// change between one activation and the next), so re-deriving it on every call would recompute
+/// an answer that cannot change — the one-knob rule (REQ-A04, §0.1) already forbids a surface
+/// from re-deriving the ceiling here, and doing the assessment once is the same discipline
+/// applied to this warning specifically.
+pub struct ClockCoverageAnnouncer {
+    /// `None` when the clock already covers the configured cap — [`Self::announce_activation`]
+    /// is then a no-op, by construction: there is no way to build a `Some` for a covered clock
+    /// ([`ClockCoverageWarning::assess`] itself returns `None` in that case).
+    warning: Option<ClockCoverageWarning>,
+    /// Where the line goes when no `tracing` subscriber is installed (a TUI session started
+    /// outside a `.magi/` workspace) — the same "no layer, no file, screen still speaks" shape
+    /// `magi_rs::notices::emit_notices_into`'s fallback already uses.
+    fallback: Arc<dyn NoticeSink>,
+}
+
+impl ClockCoverageAnnouncer {
+    /// Builds an announcer over an already-assessed warning (or `None`, when the clock covers
+    /// the cap) and the surface's own screen fallback.
+    ///
+    /// # Arguments
+    /// * `warning` - the result of [`ClockCoverageWarning::assess`] for this run's effective
+    ///   ceiling and configured `[magi].max_tokens`.
+    /// * `fallback` - the surface's screen mouth for the case no logging layer is installed.
+    #[must_use]
+    pub fn new(warning: Option<ClockCoverageWarning>, fallback: Arc<dyn NoticeSink>) -> Self {
+        Self { warning, fallback }
+    }
+
+    /// Announces the coverage warning for one MAGI panel activation.
+    ///
+    /// One `WARN` per call — **never deduplicated** (`NoticeSink::emit`, never `::once`): each
+    /// consult burns real quota and wall clock under the same uncovered clock, so each activation
+    /// earns its own line, the same treatment `analyze_direct`'s own per-run notices already get.
+    /// Does nothing when [`Self::new`] was built with `None` (the clock already covers the cap).
+    ///
+    /// With a `tracing` subscriber installed, the line goes out under
+    /// `magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET` and no other field — the installed
+    /// layer is what routes it to the daily file and, because `WARN` is at or above the screen
+    /// threshold (REQ-L19), to the screen too; carrying no `cause.*` field keeps it from being
+    /// counted as a subsystem failure (this is a configuration fact, not a failure). With no
+    /// subscriber installed (a TUI session outside a `.magi/` workspace), the line is audited
+    /// exactly like `magi_rs::notices`' own no-layer fallback and handed to the fallback sink —
+    /// never raw `eprintln!`.
+    ///
+    /// # Complexity
+    /// `O(1)` when covered; otherwise the process auditor's cost over one short line, plus one
+    /// pass per alarm the audit raises.
+    pub fn announce_activation(&self) {}
 }
 
 /// Did the FIRST FINDING ITSELF — not merely its section heading — survive the cut?
@@ -1379,8 +1437,13 @@ mod tests {
     use magi_core::provider::{Completion, CompletionConfig, LlmProvider};
     use magi_core::test_support::RoutingMockProvider;
     use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
-    use magi_rs::magi::{resolve_run_timeout, TimeoutMeasure, AGENT_TIMEOUT_SECS};
+    use magi_rs::logging::auditor::Audited;
+    use magi_rs::magi::clock_coverage::{ClockCoverageWarning, CoveringLever};
+    use magi_rs::magi::{resolve_run_timeout, ResolvedCeiling, TimeoutMeasure, AGENT_TIMEOUT_SECS};
+    use std::sync::Mutex;
     use std::time::Duration;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     /// Upper bound on how long a *cancelled* `execute` may take to return. The cancel path
     /// aborts the in-flight analysis, so it must resolve almost immediately; sized generously
@@ -3511,5 +3574,165 @@ mod tests {
         // time would keep this test green through a crate-side respelling that breaks every
         // consumer — the one event the test exists to notice.
         assert_eq!(causes, ["malformed-object", "invalid-json"]);
+    }
+
+    /// One event a capturing layer saw: level, target, every field NAME recorded, and the
+    /// `message` field rendered.
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        target: String,
+        fields: Vec<String>,
+        message: Option<String>,
+    }
+
+    /// Installed with `tracing::subscriber::with_default` over
+    /// `tracing_subscriber::registry().with(EventCapture(..))` — the pattern of
+    /// `src/memory/embedding.rs:1343-1400` — so it never touches the global dispatcher.
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            /// Collects every field name and the `message` field's rendered text off one event.
+            #[derive(Default)]
+            struct Fields {
+                names: Vec<String>,
+                message: Option<String>,
+            }
+            impl Visit for Fields {
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    self.names.push(field.name().to_string());
+                    if field.name() == "message" {
+                        self.message = Some(value.to_string());
+                    }
+                }
+
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    self.names.push(field.name().to_string());
+                    if field.name() == "message" {
+                        self.message = Some(format!("{value:?}"));
+                    }
+                }
+            }
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(CapturedEvent {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    fields: fields.names,
+                    message: fields.message,
+                });
+            }
+        }
+    }
+
+    /// A local `NoticeSink` double that records every line handed to it, through either method.
+    struct RecordingSink(Mutex<Vec<String>>);
+
+    impl NoticeSink for RecordingSink {
+        fn once(&self, _key: &'static str, msg: &Audited) {
+            if let Ok(mut lines) = self.0.lock() {
+                lines.push(msg.as_str().to_string());
+            }
+        }
+
+        fn emit(&self, msg: &Audited) {
+            if let Ok(mut lines) = self.0.lock() {
+                lines.push(msg.as_str().to_string());
+            }
+        }
+    }
+
+    /// The default interactive clock (cap 16 384, ceiling 90) does not cover the cap — the same
+    /// fixture `clock_coverage.rs` pins, reused so these tests exercise the SAME warning that
+    /// module already proved arithmetic-correct, rather than a hand-built approximation.
+    fn uncovered() -> ClockCoverageWarning {
+        ClockCoverageWarning::assess(
+            16_384,
+            ResolvedCeiling::configured(90),
+            CoveringLever::AgentTimeoutSecs,
+        )
+        .expect("the default interactive clock does not cover the default cap")
+    }
+
+    /// S-9 with a subscriber: EVERY activation is one WARN (no dedup), under its own target, with
+    /// no `cause.*` field — a WARN carrying a cause key is counted by `MagiLayer` as a subsystem
+    /// failure, and this is a configuration fact, not a failure.
+    #[test]
+    fn every_activation_is_one_warn_under_its_own_target_with_no_cause_fields() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&seen)));
+        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        let announcer = ClockCoverageAnnouncer::new(Some(uncovered()), sink.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            announcer.announce_activation();
+            announcer.announce_activation();
+        });
+        let events = seen.lock().expect("capture lock").clone();
+        let ours: Vec<_> = events
+            .iter()
+            .filter(|e| e.target == magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET)
+            .collect();
+        assert_eq!(
+            ours.len(),
+            2,
+            "one per activation, never deduplicated: {events:?}"
+        );
+        for e in &ours {
+            assert_eq!(e.level, tracing::Level::WARN);
+            assert!(
+                !e.fields.iter().any(|f| f.starts_with("cause.")),
+                "no cause.* field may ride on this event: {:?}",
+                e.fields
+            );
+            assert_eq!(e.message.as_deref(), Some(uncovered().render().as_str()));
+        }
+        assert!(
+            sink.0.lock().expect("sink lock").is_empty(),
+            "with a subscriber the layer owns both mouths; the fallback must stay silent"
+        );
+    }
+
+    /// S-9's negative: a clock that covers the cap says nothing on any mouth.
+    #[test]
+    fn a_covered_clock_announces_nothing() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(Arc::clone(&seen)));
+        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        let announcer = ClockCoverageAnnouncer::new(None, sink.clone());
+        tracing::subscriber::with_default(subscriber, || announcer.announce_activation());
+        assert!(seen
+            .lock()
+            .expect("capture lock")
+            .iter()
+            .all(|e| e.target != magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET));
+        assert!(sink.0.lock().expect("sink lock").is_empty());
+    }
+
+    /// With NO logging layer (a TUI outside a `.magi/` workspace), the line still reaches the
+    /// surface's own sink — never raw stderr, never nothing. Needs a process of its own: run
+    /// under `cargo nextest`, like the three no-layer tests in `src/notices.rs`.
+    #[test]
+    fn without_a_logging_layer_the_warning_reaches_the_surface_sink() {
+        assert_eq!(
+            tracing::level_filters::LevelFilter::current(),
+            tracing::level_filters::LevelFilter::OFF,
+            "precondition: no subscriber in this process (run under cargo nextest)"
+        );
+        let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+        let announcer = ClockCoverageAnnouncer::new(Some(uncovered()), sink.clone());
+        announcer.announce_activation();
+        announcer.announce_activation();
+        let lines = sink.0.lock().expect("sink lock").clone();
+        assert_eq!(lines.len(), 2, "one per activation: {lines:?}");
+        assert!(
+            lines.iter().all(|l| l == &uncovered().render()),
+            "{lines:?}"
+        );
     }
 }
