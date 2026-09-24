@@ -715,6 +715,137 @@ pub fn no_config_startup_notice() -> magi_rs::notices::Notice {
 mod tests {
     use super::*;
 
+    // ── Task 3d (E-E): the new [magi] keys in the scaffold ──────────────────────────────────
+
+    /// The four new keys are SHOWN in the scaffold's [magi] section, commented, with their
+    /// defaults — so an existing `.magi/magi.toml` needs no migration and a fresh one documents
+    /// them.
+    #[test]
+    fn the_scaffold_shows_the_new_magi_keys_commented_with_their_defaults() {
+        let scaffold = render_default_magi_toml();
+        let lines: Vec<&str> = scaffold.lines().collect();
+        let header = lines
+            .iter()
+            .position(|l| l.trim() == "[magi]")
+            .expect("the scaffold declares [magi]");
+        let section: Vec<&str> = lines[header + 1..]
+            .iter()
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .copied()
+            .collect();
+        let expected_prefixes = [
+            "# reasoning = \"default\"".to_string(),
+            format!("# max_tokens = {}", crate::DECLARED_COMPLETION_CAP),
+            "# reasoning_trace = false".to_string(),
+            "# reasoning_spelling = \"".to_string(),
+        ];
+        for prefix in &expected_prefixes {
+            assert!(
+                section
+                    .iter()
+                    .any(|l| l.trim_start().starts_with(prefix.as_str())),
+                "[magi] must show `{prefix}` commented: {section:?}"
+            );
+        }
+        for active in [
+            "reasoning",
+            "max_tokens",
+            "reasoning_trace",
+            "reasoning_spelling",
+        ] {
+            assert!(
+                !section
+                    .iter()
+                    .any(|l| l.trim_start().starts_with(&format!("{active} "))
+                        || l.trim_start().starts_with(&format!("{active}="))),
+                "`{active}` must not be ACTIVE in the scaffold"
+            );
+        }
+    }
+
+    /// Uncommenting each shown line yields a file that loads and resolves to exactly the
+    /// defaults the comments claim — the scaffold cannot advertise a value the product does not
+    /// use.
+    #[test]
+    fn uncommenting_the_new_scaffold_keys_loads_and_resolves_to_the_defaults() {
+        let uncommented: String = render_default_magi_toml()
+            .lines()
+            .map(|l| {
+                let t = l.trim_start();
+                for key in ["# reasoning = ", "# max_tokens = ", "# reasoning_trace = "] {
+                    if let Some(rest) = t.strip_prefix(key) {
+                        return format!("{}{rest}", key.trim_start_matches("# "));
+                    }
+                }
+                l.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cfg = crate::config::MagiConfig::from_toml_str(&uncommented)
+            .expect("the uncommented scaffold must load");
+        assert_eq!(
+            cfg.effective_reasoning(),
+            magi_core::provider::ReasoningControl::default()
+        );
+        assert_eq!(
+            cfg.magi().max_tokens,
+            Some(i64::from(crate::DECLARED_COMPLETION_CAP))
+        );
+        assert_eq!(cfg.magi().reasoning_trace, Some(false));
+    }
+
+    /// REQ-V42-4 / PM-S-12: the spelling's comment carries the accepted hazard — a rejected
+    /// spelling is HTTP 400 and condemns the lineage for all three seats; verify first, and
+    /// again after any provider-side model update.
+    #[test]
+    fn the_scaffold_warns_that_a_rejected_spelling_condemns_the_lineage() {
+        let scaffold = render_default_magi_toml();
+        let at = scaffold
+            .find("# reasoning_spelling = \"")
+            .expect("the spelling line is shown");
+        // The comment block that precedes the line (up to the previous blank line) carries the
+        // hazard; `rfind` on the text before it is char-boundary safe (ASCII needle).
+        let before = &scaffold[..at];
+        let block_start = before.rfind("\n\n").map_or(0, |i| i + 2);
+        let block = &scaffold[block_start..at + 1];
+        for needle in [
+            "HTTP 400",
+            "all three seats",
+            "openai-compat",
+            "model update",
+        ] {
+            assert!(block.contains(needle), "missing `{needle}` in:\n{block}");
+        }
+        for tag in magi_rs::magi::reasoning::VALID_REASONING_SPELLINGS.split(", ") {
+            assert!(
+                block.contains(tag),
+                "the accepted spelling `{tag}` is not listed:\n{block}"
+            );
+        }
+    }
+
+    /// REQ-EE-4: the trace's comment states the declared residual and that it is off by
+    /// default.
+    #[test]
+    fn the_scaffold_states_the_reasoning_trace_residual() {
+        let scaffold = render_default_magi_toml();
+        let at = scaffold
+            .find("# reasoning_trace = false")
+            .expect("the trace line is shown");
+        let before = &scaffold[..at];
+        let block_start = before.rfind("\n\n").map_or(0, |i| i + 2);
+        let block = &scaffold[block_start..at + 1];
+        for needle in [
+            "cut attempts",
+            "log",
+            "32",
+            "never registered",
+            "off by default",
+        ] {
+            assert!(block.contains(needle), "missing `{needle}` in:\n{block}");
+        }
+    }
+
     #[test]
     fn test_default_constants_are_the_ollama_first_profile() {
         assert_eq!(DEFAULT_PROVIDER, "ollama");

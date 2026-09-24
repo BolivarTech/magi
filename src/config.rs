@@ -2255,6 +2255,28 @@ base_url = "http://embedder-host:11434/v1"
         );
     }
 
+    /// The published example documents every new [magi] key and the spelling's 400 hazard, and
+    /// still parses (the existing example-parse test keeps covering the parse).
+    #[test]
+    fn the_example_documents_the_new_magi_keys_and_the_spelling_hazard() {
+        let example = include_str!("../docs/magi.toml.example").replace('\r', "");
+        for key in [
+            "# reasoning = ",
+            "# max_tokens = ",
+            "# reasoning_trace = ",
+            "# reasoning_spelling = ",
+        ] {
+            assert!(
+                example.contains(key),
+                "docs/magi.toml.example must show `{key}`"
+            );
+        }
+        assert!(
+            example.contains("HTTP 400"),
+            "the spelling hazard is published"
+        );
+    }
+
     /// MAGI S10 gate finding (third pass): the scaffolded example's `balthasar_model` and
     /// `caspar_model` had drifted to older tag names (`kimi-k2.6:cloud`, `glm-5.2:cloud`)
     /// that no longer matched `src/defaults.rs`'s `DEFAULT_MAGI_BALTHASAR`/`DEFAULT_MAGI_CASPAR`
