@@ -4016,22 +4016,37 @@ mod tests {
         );
     }
 
-    /// S-6/S-7 after `/login`: the success arm emits the post-login notices after the rebuild.
+    /// S-6/S-7 after `/login`: the success arm emits the post-login notice list after the
+    /// rebuild.
     ///
     /// MAINTAINERS: this reads `run_tui_ext`'s own SOURCE TEXT — the full post-`/login` TUI
     /// event loop is intractable to drive directly, so this pins that the `/login` success arm
-    /// mentions `post_login_notices` somewhere after it calls `rebuild_consult_trio_after_login`.
-    /// If it fails after a restructuring of that arm, re-anchor the needle — do not delete the
-    /// test.
+    /// mentions the notice field somewhere after it calls `rebuild_consult_trio_after_login`. If
+    /// it fails after a restructuring of that arm, re-anchor the needle — do not delete the test.
+    ///
+    /// **Scoped to `production_source()`, not the whole file.** The needle below is a field
+    /// name this very doc comment could otherwise restate verbatim a few hundred lines down,
+    /// inside this test's own body — `source.find(...)` finds the FIRST occurrence of the
+    /// anchor, which is the function DEFINITION, so a whole-file search would include every test
+    /// after it, this one included, and the assertion would pass by matching its own source
+    /// rather than production's.
+    ///
+    /// **The needle carries a leading `&`, and that is load-bearing.** The destructure at the
+    /// top of `run_tui_ext` also spells out the field's bare name (`post_login_notices,`), and
+    /// that line runs unconditionally, so a bare-name needle is satisfied by the destructure
+    /// alone and never actually reaches the `/login` success arm — the mutation that deletes the
+    /// emission loop leaves it passing. Only `for notice in &post_login_notices` (the emission
+    /// site) carries the `&`.
     #[test]
     fn the_login_rebuild_announces_the_reasoning_notices_of_its_new_kind() {
-        let source = include_str!("mod.rs").replace('\r', "");
+        let source = production_source();
         let rebuild = source
             .find("rebuild_consult_trio_after_login(")
             .expect("the /login arm moved: re-anchor this guard, do not delete it");
         let rest = &source[rebuild..];
+        let needle = format!("&{}_notices", "post_login");
         assert!(
-            rest.contains("post_login_notices"),
+            rest.contains(needle.as_str()),
             "the /login arm must emit the post-login reasoning notices after rebuilding"
         );
     }
