@@ -582,10 +582,23 @@ fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
 /// division below is by the literal `100`, never by `factor` itself, so `factor = 0` is a
 /// well-defined (if degenerate) input that simply yields `needed = 0`.
 fn threshold_from_factor(factor: u64) -> u64 {
-    // `div_ceil`: we need the smallest dividend whose TRUNCATING division still reaches the floor.
-    let needed = AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS
-        .saturating_mul(factor)
-        .div_ceil(100);
+    min_timeout_reaching_ceiling_from_factor(AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS, factor)
+}
+
+/// The single calculation behind both [`threshold_from_factor`] (fixed target: the absolute
+/// floor) and [`min_timeout_deriving_ceiling`] (arbitrary target): the smallest `--timeout`
+/// whose RAW derived ceiling reaches `ceiling_secs`, for an already-computed `factor`.
+///
+/// Kept as ONE function so the two callers cannot drift the way [`attempt_factor`]'s rustdoc
+/// warns two equivalent expressions eventually do — see [`min_timeout_deriving_ceiling`]'s
+/// rustdoc for why the coverage warning needed this generalized rather than duplicated.
+///
+/// `div_ceil`: we need the smallest dividend whose TRUNCATING division
+/// ([`raw_ceiling_from_factor`]) still reaches `ceiling_secs`. `factor` carries no non-zero
+/// precondition: the division below is by the literal `100`, never by `factor` itself, so
+/// `factor = 0` is a well-defined (if degenerate) input that simply yields `needed = 0`.
+fn min_timeout_reaching_ceiling_from_factor(ceiling_secs: u64, factor: u64) -> u64 {
+    let needed = ceiling_secs.saturating_mul(factor).div_ceil(100);
     CLASSIFY_TIMEOUT_SECS.saturating_add(needed)
 }
 
@@ -640,13 +653,10 @@ pub fn min_timeout_deriving_ceiling(
     max_rotations: u32,
     retry_disabled: bool,
 ) -> u64 {
-    let factor = attempt_factor(max_rotations, retry_disabled);
-    // `div_ceil`: the smallest dividend whose TRUNCATING division (`raw_ceiling_from_factor`)
-    // still reaches `ceiling_secs` — the same boundary operator `threshold_from_factor` already
-    // uses at its one fixed target, see that function's rustdoc for the proof this is both
-    // sufficient and minimal.
-    let needed = ceiling_secs.saturating_mul(factor).div_ceil(100);
-    CLASSIFY_TIMEOUT_SECS.saturating_add(needed)
+    min_timeout_reaching_ceiling_from_factor(
+        ceiling_secs,
+        attempt_factor(max_rotations, retry_disabled),
+    )
 }
 
 /// The INVERSE of [`headless_consult_timeout_secs`]: the per-mage ceiling that fits inside an
