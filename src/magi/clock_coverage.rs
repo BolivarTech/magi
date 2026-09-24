@@ -39,7 +39,7 @@
 /// which re-states the value next to its upstream source and additionally pins the resolved
 /// `magi-core` version from `Cargo.lock`, so a pin bump forces re-reading the upstream constant
 /// before this line can be trusted again.
-pub const COVERAGE_REFERENCE_TOK_PER_SEC: u64 = 0;
+pub const COVERAGE_REFERENCE_TOK_PER_SEC: u64 = 55;
 
 /// `tracing` target of the coverage WARN.
 ///
@@ -110,8 +110,35 @@ impl ClockCoverageWarning {
         ceiling: super::ResolvedCeiling,
         lever: CoveringLever,
     ) -> Option<Self> {
-        let _ = (cap_tokens, ceiling, lever);
-        None
+        let client_timeout_secs = super::derive_client_timeout(ceiling.secs()).as_secs();
+        let covered_tokens = client_timeout_secs.saturating_mul(COVERAGE_REFERENCE_TOK_PER_SEC);
+        let cap = u64::from(cap_tokens);
+        if covered_tokens >= cap {
+            return None;
+        }
+        // The client timeout, in seconds, that would deliver `cap_tokens` at the reference
+        // speed — `div_ceil` so a fractional second still counts as needed, never rounded away.
+        let needed_client_timeout_secs = cap.div_ceil(COVERAGE_REFERENCE_TOK_PER_SEC);
+        let covering_ceiling = super::min_ceiling_for_client_timeout(needed_client_timeout_secs);
+        let covering_value_secs = match lever {
+            // `AGENT_TIMEOUT_MIN_SECS` is the config's own validated floor: a ceiling below it
+            // can never be loaded, so recommending one would name a value the operator cannot
+            // actually set (S-9).
+            CoveringLever::AgentTimeoutSecs => covering_ceiling.max(super::AGENT_TIMEOUT_MIN_SECS),
+            CoveringLever::Timeout {
+                max_rotations,
+                retry_disabled,
+            } => {
+                super::min_timeout_deriving_ceiling(covering_ceiling, max_rotations, retry_disabled)
+            }
+        };
+        Some(Self {
+            cap_tokens,
+            client_timeout_secs,
+            covered_tokens,
+            lever,
+            covering_value_secs,
+        })
     }
 
     /// The operator-facing line, naming the measured coverage and the knob that would fix it.
@@ -124,7 +151,24 @@ impl ClockCoverageWarning {
     /// `O(1)`.
     #[must_use]
     pub fn render(&self) -> String {
-        String::new()
+        let lever_line = match self.lever {
+            CoveringLever::AgentTimeoutSecs => format!(
+                "set [magi].agent_timeout_secs to at least {} to cover it",
+                self.covering_value_secs
+            ),
+            CoveringLever::Timeout { .. } => format!(
+                "pass --timeout {} or more to cover it",
+                self.covering_value_secs
+            ),
+        };
+        format!(
+            "magi: at {} tok/s the per-request clock ({}s) covers ~{} of the {}-token output \
+             cap; {lever_line}. The consult proceeds.",
+            COVERAGE_REFERENCE_TOK_PER_SEC,
+            self.client_timeout_secs,
+            self.covered_tokens,
+            self.cap_tokens,
+        )
     }
 }
 

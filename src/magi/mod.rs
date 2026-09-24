@@ -169,6 +169,38 @@ pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
     derived.max(MIN_CLIENT_TIMEOUT)
 }
 
+/// The smallest ceiling whose [`derive_client_timeout`] reaches `target_secs`, DERIVED from the
+/// same fraction — never a re-written `3/10` literal (`clock_coverage.rs`'s coverage warning is
+/// the caller).
+///
+/// # Why this belongs here and not in `clock_coverage.rs`
+///
+/// `CLIENT_TIMEOUT_FRACTION_NUM`/`_DEN` are private to this module; exposing this one inverse
+/// through a `pub(crate)` function keeps the fraction defined in exactly one place, the same
+/// discipline [`derive_ceiling_from_timeout`] already applies to
+/// [`OPERATION_BUDGET_FRACTION_NUM`]/[`CLIENT_TIMEOUT_FRACTION_NUM`] together. It does not floor
+/// at [`MIN_CLIENT_TIMEOUT`] the way `derive_client_timeout` itself does — the caller decides
+/// separately whether the recommended ceiling needs a floor of its own
+/// (`AGENT_TIMEOUT_MIN_SECS`), and folding a DIFFERENT floor in here would answer a question this
+/// function was not asked.
+///
+/// # Arguments
+/// * `target_secs` - the per-request client timeout the returned ceiling must derive at least.
+///
+/// # Returns
+/// The smallest `c` such that `derive_client_timeout(c).as_secs() >= target_secs`, for
+/// `target_secs` above [`MIN_CLIENT_TIMEOUT`]'s floor — below it every ceiling already
+/// qualifies, and this still returns a sufficient (if not minimal) one.
+///
+/// # Complexity
+/// `O(1)`; saturates rather than overflowing.
+#[must_use]
+pub(crate) fn min_ceiling_for_client_timeout(target_secs: u64) -> u64 {
+    target_secs
+        .saturating_mul(CLIENT_TIMEOUT_FRACTION_DEN)
+        .div_ceil(CLIENT_TIMEOUT_FRACTION_NUM)
+}
+
 /// Ceiling for the classification call (REQ-A07c).
 ///
 /// 6 s: it is ONE label, not a generation. A generous ceiling here cancels the benefit of the
@@ -608,8 +640,13 @@ pub fn min_timeout_deriving_ceiling(
     max_rotations: u32,
     retry_disabled: bool,
 ) -> u64 {
-    let _ = (ceiling_secs, max_rotations, retry_disabled);
-    0
+    let factor = attempt_factor(max_rotations, retry_disabled);
+    // `div_ceil`: the smallest dividend whose TRUNCATING division (`raw_ceiling_from_factor`)
+    // still reaches `ceiling_secs` — the same boundary operator `threshold_from_factor` already
+    // uses at its one fixed target, see that function's rustdoc for the proof this is both
+    // sufficient and minimal.
+    let needed = ceiling_secs.saturating_mul(factor).div_ceil(100);
+    CLASSIFY_TIMEOUT_SECS.saturating_add(needed)
 }
 
 /// The INVERSE of [`headless_consult_timeout_secs`]: the per-mage ceiling that fits inside an
