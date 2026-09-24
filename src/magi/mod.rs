@@ -432,6 +432,17 @@ const MIN_RETRY_AFTER_CAP: Duration = Duration::from_secs(1);
 /// `RETRY_AFTER_JITTER` is **referenced, never hand-copied**: a copied constant is drift this
 /// project has already paid for.
 ///
+/// # Honoured waits
+///
+/// The derived budget admits **two** honoured `Retry-After` waits at every ceiling, until the
+/// budget itself saturates (past `u64::MAX / 6`, where it admits only one). This did not change
+/// with the migration to magi-core 4.2.0: magi-rs overrides both `operation_budget` and
+/// `retry_after_cap`, so the crate's own move from one honoured wait to two (900 s against a
+/// 301 s cap, its own defaults) concerns only its built-in defaults, not this derivation. It is
+/// an upper bound in the same sense as the crate's: the second wait is admitted only while the
+/// check before the next attempt still lands under the budget. See
+/// `the_derived_budget_admits_two_retry_after_waits_until_saturation_cuts_it_to_one`.
+///
 /// # Arguments
 /// * `ceiling_secs` - the resolved per-mage ceiling.
 ///
