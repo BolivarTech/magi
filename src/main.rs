@@ -5,6 +5,7 @@
 
 mod agent;
 mod config;
+mod cut_log;
 mod defaults;
 mod headless_runner;
 mod memory;

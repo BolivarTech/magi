@@ -57,6 +57,7 @@ use std::collections::BTreeMap;
 
 use magi_core::provider::{FinishReason, ReasoningControl, ReasoningState};
 use magi_core::reporting::CompletionRecord;
+use magi_core::rotation::AgentRotation;
 use magi_core::schema::AgentName;
 use serde_json::{json, Map, Value};
 
@@ -285,6 +286,64 @@ fn control_label(control: &ReasoningControl) -> Value {
             .as_str()
             .to_string(),
     )
+}
+
+/// Prefix of magi-core's `ProviderError::EmptyCompletion` `Display` (magi-core 4.2.0,
+/// `error.rs:418`). A seat that runs out of rotations on an empty completion carries it inside
+/// its `failed_agents` cause, which is the only place that fact survives for the seat's LAST
+/// attempt: the record itself cannot say the content was empty.
+pub const EMPTY_COMPLETION_MARKER: &str = "empty completion: ";
+
+/// Why an attempt counts as cut (REQ-EE-2, REQ-EE-4, REQ-EE-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutCause {
+    /// The backend reported `finish == length`: the output budget ran out.
+    Length,
+    /// The attempt came back with empty content under any other finish.
+    EmptyContent,
+}
+
+impl CutCause {
+    /// Stable label for the log line: `"length"` or `"empty_content"`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        ""
+    }
+}
+
+/// One cut attempt, located in magi-core's per-seat attempt series.
+#[derive(Debug, Clone, Copy)]
+pub struct CutAttempt<'a> {
+    /// The seat the attempt belongs to.
+    pub seat: AgentName,
+    /// 0-based index into `completions[seat]` — the same position the consult JSON renders.
+    pub index: usize,
+    /// The record itself, borrowed from the report.
+    pub record: &'a CompletionRecord,
+    /// Why it counts as cut. `Length` wins when both hold.
+    pub cause: CutCause,
+}
+
+/// THE cut-attempt predicate, defined once (spec §0: shared by REQ-EE-2, REQ-EE-4, REQ-EE-7).
+///
+/// An attempt is cut when its record says `finish == length`, or when it is the attempt that
+/// came back EMPTY — which the record alone cannot say (magi-core 4.2.0 builds an empty
+/// attempt's record exactly like a successful one), so it is located structurally: the LAST
+/// record of a model's run is the empty one when the hop that left that model has kind
+/// `EmptyCompletion`, or, for the seat's final run, when its `failed_agents` cause contains
+/// [`EMPTY_COMPLETION_MARKER`]. A timed-out attempt (no finish, nothing measured, spec §1
+/// criterion 3) is never a cut.
+///
+/// Returns the cut attempts in `completions`' seat order, then attempt order. `O(records +
+/// hops)`: a trio, once per consult.
+#[must_use]
+pub fn cut_attempts<'a>(
+    completions: &'a BTreeMap<AgentName, Vec<CompletionRecord>>,
+    rotations: &BTreeMap<AgentName, AgentRotation>,
+    failed_agents: &BTreeMap<AgentName, String>,
+) -> Vec<CutAttempt<'a>> {
+    let _ = (completions, rotations, failed_agents);
+    Vec::new()
 }
 
 /// Unit tests for the completion telemetry composition.
@@ -863,5 +922,273 @@ mod tests {
             !finish.as_str().expect("a string").starts_with("Other"),
             "the variant name leaked into a value consumers parse: {finish}"
         );
+    }
+    // ── The cut-attempt predicate (REQ-EE-2, REQ-EE-4, REQ-EE-7) ──────────────────────────────
+
+    /// Builds an [`AgentRotation`] through magi-core's `Deserialize` — the same door
+    /// `rotation_report::tests::rotation` uses.
+    fn rotation(json: Value) -> AgentRotation {
+        serde_json::from_value(json).expect("the fixture must match magi-core's shape")
+    }
+
+    /// A rotation of one or more hops: `model_configured` is `models[0]`, hop k goes to
+    /// `models[k+1]` with kind `kinds[k]` (snake_case tags), `detail: "d"`, lineages `lin-k`.
+    fn rotated(models: &[&str], kinds: &[&str]) -> AgentRotation {
+        let chain: Vec<Value> = kinds
+            .iter()
+            .enumerate()
+            .map(|(k, kind)| {
+                json!({
+                    "from": format!("lin-{k}"),
+                    "to": format!("lin-{}", k + 1),
+                    "model_resolved": models[k + 1],
+                    "kind": kind,
+                    "detail": "d",
+                })
+            })
+            .collect();
+        rotation(json!({
+            "model_configured": models[0],
+            "model_used": models[models.len() - 1],
+            "ran_unmeasured": false,
+            "chain": chain,
+        }))
+    }
+
+    /// A seat that never rotated (`chain: []`) on `model`.
+    fn never_rotated_on(model: &str) -> AgentRotation {
+        rotation(json!({
+            "model_configured": model,
+            "model_used": model,
+            "ran_unmeasured": false,
+            "chain": [],
+        }))
+    }
+
+    /// One attempt served by `model` with the given raw `finish` (a wire string or `Value::Null`),
+    /// `completion_tokens`, and nothing measured about reasoning — a timed-out or failed attempt is
+    /// `attempt_on(model, Value::Null, Value::Null)`, the shape `CompletionRecord::new` produces.
+    fn attempt_on(model: &str, finish: Value, completion_tokens: Value) -> CompletionRecord {
+        record(json!({
+            "model": model,
+            "cap": 16_384,
+            "finish": finish,
+            "completion_tokens": completion_tokens,
+            "prompt_tokens": Value::Null,
+            "reasoning": "NotMeasured",
+        }))
+    }
+
+    /// A `length` finish is a cut even when the seat went on to answer: the budget ran out on
+    /// that attempt, which is the fact REQ-EE-2 logs.
+    #[test]
+    fn a_length_finish_is_a_cut_even_when_the_seat_went_on_to_answer() {
+        let completions = seat(
+            AgentName::Caspar,
+            vec![
+                attempt_on("glm-5.2:cloud", json!("length"), json!(16_384)),
+                attempt_on("glm-5.2:cloud", json!("stop"), json!(900)),
+            ],
+        );
+        let mut rotations = BTreeMap::new();
+        rotations.insert(AgentName::Caspar, never_rotated_on("glm-5.2:cloud"));
+
+        let cuts = cut_attempts(&completions, &rotations, &BTreeMap::new());
+        assert_eq!(cuts.len(), 1, "{cuts:?}");
+        assert_eq!(cuts[0].seat, AgentName::Caspar);
+        assert_eq!(cuts[0].index, 0);
+        assert_eq!(cuts[0].cause, CutCause::Length);
+    }
+
+    /// The empty attempt cannot be read off its record (magi-core builds it like a success),
+    /// so it is located by the hop that left its model: kind `empty_completion` marks the LAST
+    /// record of that model's run.
+    #[test]
+    fn an_empty_completion_hop_marks_the_last_attempt_of_the_model_it_left() {
+        let completions = seat(
+            AgentName::Caspar,
+            vec![
+                attempt_on("down-model", json!("stop"), json!(0)),
+                attempt_on("rescue-model", json!("stop"), json!(900)),
+            ],
+        );
+        let mut rotations = BTreeMap::new();
+        rotations.insert(
+            AgentName::Caspar,
+            rotated(&["down-model", "rescue-model"], &["empty_completion"]),
+        );
+
+        let cuts = cut_attempts(&completions, &rotations, &BTreeMap::new());
+        assert_eq!(cuts.len(), 1, "{cuts:?}");
+        assert_eq!(cuts[0].index, 0);
+        assert_eq!(cuts[0].cause, CutCause::EmptyContent);
+        assert_eq!(cuts[0].record.model, "down-model");
+    }
+
+    /// With the schema retry a model can run twice before it is left; only the attempt that
+    /// CAUSED the hop — the last of the run — came back empty.
+    #[test]
+    fn the_empty_attempt_is_the_last_of_its_model_run_not_the_first() {
+        let completions = seat(
+            AgentName::Melchior,
+            vec![
+                attempt_on("down-model", json!("stop"), json!(40)),
+                attempt_on("down-model", json!("stop"), json!(0)),
+                attempt_on("rescue-model", json!("stop"), json!(900)),
+            ],
+        );
+        let mut rotations = BTreeMap::new();
+        rotations.insert(
+            AgentName::Melchior,
+            rotated(&["down-model", "rescue-model"], &["empty_completion"]),
+        );
+
+        let cuts = cut_attempts(&completions, &rotations, &BTreeMap::new());
+        let indices: Vec<usize> = cuts.iter().map(|c| c.index).collect();
+        assert_eq!(
+            indices,
+            vec![1],
+            "only the attempt that caused the hop: {cuts:?}"
+        );
+    }
+
+    /// A seat that ran out of rotations has no hop for its last model; the empty completion
+    /// survives only inside its `failed_agents` cause, which contains magi-core's `Display`.
+    #[test]
+    fn a_seat_lost_to_an_empty_completion_marks_its_final_attempt() {
+        let completions = seat(
+            AgentName::Caspar,
+            vec![attempt_on("down-model", json!("stop"), json!(0))],
+        );
+        let mut rotations = BTreeMap::new();
+        rotations.insert(AgentName::Caspar, never_rotated_on("down-model"));
+        let mut failed = BTreeMap::new();
+        failed.insert(
+            AgentName::Caspar,
+            format!("no_fitting_candidate: {EMPTY_COMPLETION_MARKER}the model returned no content"),
+        );
+
+        let cuts = cut_attempts(&completions, &rotations, &failed);
+        assert_eq!(cuts.len(), 1, "{cuts:?}");
+        assert_eq!(cuts[0].index, 0);
+        assert_eq!(cuts[0].cause, CutCause::EmptyContent);
+    }
+
+    /// PM-S-1 / spec §1 criterion 3: an attempt the clock killed carries no measurement and is
+    /// its own class. Counting it as a cut would merge the two failures the replays must count
+    /// apart.
+    #[test]
+    fn a_timed_out_attempt_is_its_own_class_and_never_a_cut() {
+        let completions = seat(
+            AgentName::Balthasar,
+            vec![
+                attempt_on("slow-model", Value::Null, Value::Null),
+                attempt_on("rescue-model", json!("stop"), json!(900)),
+            ],
+        );
+        let mut rotations = BTreeMap::new();
+        rotations.insert(
+            AgentName::Balthasar,
+            rotated(&["slow-model", "rescue-model"], &["timeout"]),
+        );
+        let mut failed = BTreeMap::new();
+        failed.insert(
+            AgentName::Balthasar,
+            "timeout: agent exceeded 27s".to_string(),
+        );
+
+        assert!(cut_attempts(&completions, &rotations, &failed).is_empty());
+    }
+
+    /// A schema rotation after a clean stop is not a cut: the model answered, badly.
+    #[test]
+    fn a_schema_rotation_after_a_clean_stop_is_not_a_cut() {
+        let completions = seat(
+            AgentName::Caspar,
+            vec![
+                attempt_on("chatty-model", json!("stop"), json!(700)),
+                attempt_on("chatty-model", json!("stop"), json!(650)),
+                attempt_on("rescue-model", json!("stop"), json!(900)),
+            ],
+        );
+        let mut rotations = BTreeMap::new();
+        rotations.insert(
+            AgentName::Caspar,
+            rotated(&["chatty-model", "rescue-model"], &["schema"]),
+        );
+
+        assert!(cut_attempts(&completions, &rotations, &BTreeMap::new()).is_empty());
+    }
+
+    /// When both hold, `length` names the cause: it is the one the record itself proves.
+    #[test]
+    fn length_names_the_cause_when_the_cut_attempt_was_also_empty() {
+        let completions = seat(
+            AgentName::Caspar,
+            vec![
+                attempt_on("down-model", json!("length"), json!(16_384)),
+                attempt_on("rescue-model", json!("stop"), json!(900)),
+            ],
+        );
+        let mut rotations = BTreeMap::new();
+        rotations.insert(
+            AgentName::Caspar,
+            rotated(&["down-model", "rescue-model"], &["empty_completion"]),
+        );
+
+        let cuts = cut_attempts(&completions, &rotations, &BTreeMap::new());
+        assert_eq!(
+            cuts.len(),
+            1,
+            "one attempt, one entry — never counted twice: {cuts:?}"
+        );
+        assert_eq!(cuts[0].cause, CutCause::Length);
+    }
+
+    /// Empty inputs: no records ⇒ no cuts; a seat present with zero attempts has nothing to
+    /// attribute its failure to, even with the marker in its cause.
+    #[test]
+    fn no_records_means_no_cut_attempts_even_for_a_failed_seat() {
+        assert!(cut_attempts(&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new()).is_empty());
+
+        let completions = seat(AgentName::Melchior, Vec::new());
+        let mut failed = BTreeMap::new();
+        failed.insert(
+            AgentName::Melchior,
+            format!("{EMPTY_COMPLETION_MARKER}the model returned no content"),
+        );
+        assert!(cut_attempts(&completions, &BTreeMap::new(), &failed).is_empty());
+    }
+
+    /// Order: the map's seat order, then magi-core's attempt order — the order the JSON renders.
+    #[test]
+    fn cut_attempts_keep_seat_order_then_attempt_order() {
+        let mut completions = BTreeMap::new();
+        completions.insert(
+            AgentName::Caspar,
+            vec![attempt_on("c", json!("length"), json!(16_384))],
+        );
+        completions.insert(
+            AgentName::Melchior,
+            vec![
+                attempt_on("m", json!("length"), json!(16_384)),
+                attempt_on("m", json!("length"), json!(16_384)),
+            ],
+        );
+
+        let cuts = cut_attempts(&completions, &BTreeMap::new(), &BTreeMap::new());
+        let got: Vec<(AgentName, usize)> = cuts.iter().map(|c| (c.seat, c.index)).collect();
+        let expected: Vec<(AgentName, usize)> = completions
+            .iter()
+            .flat_map(|(seat, records)| (0..records.len()).map(move |i| (*seat, i)))
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    /// The two labels the log line prints.
+    #[test]
+    fn each_cut_cause_has_a_stable_label() {
+        assert_eq!(CutCause::Length.label(), "length");
+        assert_eq!(CutCause::EmptyContent.label(), "empty_content");
     }
 }
