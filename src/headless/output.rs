@@ -1053,4 +1053,43 @@ mod tests {
              behavior, not ordinary CI slowness"
         );
     }
+
+    /// REQ-AUD-1: the exemption is an EXACT match on the whole run. The label alone, and the label
+    /// delimited the way a serialized log line carries it, survive; any run that merely contains it —
+    /// longer on either side, padded with base64 `=`, or in another case — is a different string and is
+    /// masked whole. A prefix, substring or case-insensitive comparison would pass the first half and
+    /// fail the second.
+    ///
+    /// Also pins that an exempted run is consumed WHOLE: declining the match only at its first
+    /// character would let the walker restart one character later, find a 35-character suffix that is
+    /// no label, and mask it — leaving `w[REDACTED]`.
+    #[test]
+    fn only_an_exact_product_label_escapes_the_generic_matcher() {
+        const LABEL: &str = "window_unmeasured_under_strict_guard";
+
+        assert_eq!(
+            redact_secret_patterns(LABEL),
+            LABEL,
+            "the bare label was masked"
+        );
+        let line = format!("{{\"causes\":[\"{LABEL}\"]}}");
+        assert_eq!(
+            redact_secret_patterns(&line),
+            line,
+            "the label inside a serialized line was masked"
+        );
+
+        for run in [
+            format!("{LABEL}_x"),
+            format!("x_{LABEL}"),
+            format!("{LABEL}=="),
+            LABEL.to_ascii_uppercase(),
+        ] {
+            assert_eq!(
+                redact_secret_patterns(&run),
+                REDACTED_PLACEHOLDER,
+                "{run:?} escaped the matcher by resembling a product label"
+            );
+        }
+    }
 }

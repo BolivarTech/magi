@@ -6946,6 +6946,230 @@ mod envelope_audit_guard {
             "a registered secret reached the JSON envelope in the clear: {rendered}"
         );
     }
+
+    /// A `CandidateEligibility` built through magi-core's serde (the only door: the type is
+    /// `#[non_exhaustive]`), from `{"model": model, "causes": causes}`.
+    ///
+    /// # Panics
+    ///
+    /// When the fixture does not match magi-core's shape.
+    fn eligibility_candidate(
+        model: &str,
+        causes: serde_json::Value,
+    ) -> magi_core::rotation::CandidateEligibility {
+        serde_json::from_value(serde_json::json!({ "model": model, "causes": causes }))
+            .expect("the eligibility fixture must match magi-core's CandidateEligibility shape")
+    }
+
+    /// A `CompletionRecord` built through magi-core's serde, with `finish` read through
+    /// `FinishReason::from_wire` (so an unknown word lands in `Other`) and `control` left to
+    /// its serde default.
+    ///
+    /// # Panics
+    ///
+    /// When the fixture does not match magi-core's shape.
+    fn completion_record(finish: &str) -> magi_core::reporting::CompletionRecord {
+        serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "cap": 16384,
+            "finish": finish,
+            "completion_tokens": 1,
+            "prompt_tokens": 1,
+            "reasoning": "NotMeasured",
+        }))
+        .expect("the completion fixture must match magi-core's CompletionRecord shape")
+    }
+
+    /// A `RunOutcome` at the neutral values the other tests of this module use (no
+    /// response, no tool calls, empty transcript, `StopReason::Done`,
+    /// `BudgetTelemetry::default()`, no error), carrying `consult`.
+    fn run_outcome_with_consult(consult: serde_json::Value) -> RunOutcome {
+        use magi_rs::headless::types::{AppliedCaps, Timings, Usage};
+        RunOutcome {
+            response: None,
+            model: "m".to_string(),
+            provider: "p".to_string(),
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            timings: Timings {
+                total_ms: 1,
+                ttfb_ms: None,
+                per_turn_ms: Vec::new(),
+            },
+            stop_reason: StopReason::Done,
+            tool_calls: Vec::new(),
+            transcript: Vec::new(),
+            consult: Some(consult),
+            applied_caps: AppliedCaps {
+                max_tool_calls: 15,
+                max_tool_calls_clamped: false,
+                timeout_secs: None,
+                system_override_applied: false,
+                budget: BudgetTelemetry::default(),
+            },
+            error: None,
+        }
+    }
+
+    /// REQ-AUD-1 (C-4, R7): the product's own label reaches stdout intact, while a base64 run and a
+    /// diceware passphrase of the same length class stay masked.
+    ///
+    /// # Why the three assertions live in ONE test
+    ///
+    /// Each one alone is satisfied by a wrong fix. (1) alone: weaken the generic matcher. (2) and (3)
+    /// alone: leave the defect in place. (1) and (2) together: exempt any pure lowercase run as "an
+    /// identifier" — which is exactly the rule that lets out a passphrase `check_strength` accepts.
+    /// Only an exact match against the product's closed vocabulary satisfies all three.
+    ///
+    /// # Why this shape, and why nothing is registered
+    ///
+    /// All three strings travel the production path: `render_pool_eligibility` composes them (the
+    /// model tags through `redact_foreign_text`, which only knows URLs and leaves all three alone),
+    /// the consult object carries them under its production key, and `AuditedOutcome::new` hands each
+    /// DECODED string leaf to the process auditor. Nothing is registered with the exact pass, so what
+    /// is masked here was masked by the PATTERN pass — the only guard a vault passphrase has, since
+    /// the passphrase is never registered.
+    #[test]
+    fn product_labels_survive_the_envelope_audit_while_secret_shaped_runs_do_not() {
+        use magi_core::schema::AgentName;
+        use magi_rs::logging::auditor::REDACTED;
+        use magi_rs::magi::eligibility_report::render_pool_eligibility;
+
+        const LABEL: &str = "window_unmeasured_under_strict_guard";
+        // base64("this is a test secret value"): 36 characters, the label's own length.
+        const BASE64_RUN: &str = "dGhpcyBpcyBhIHRlc3Qgc2VjcmV0IHZhbHVl";
+        const DICEWARE: [&str; 2] = [
+            "quartz_meadow_lantern_fjord_pickle_orbit",
+            "quartz-meadow-lantern-fjord-pickle-orbit",
+        ];
+
+        // Preconditions: without them the assertions below prove less than they claim.
+        assert_eq!(
+            BASE64_RUN.chars().count(),
+            LABEL.chars().count(),
+            "the secret-shaped run must be as long as the label, or (2) tests a different length class"
+        );
+        for phrase in DICEWARE {
+            assert!(
+                phrase.chars().count() >= 32,
+                "{phrase} is below the generic matcher's floor, so (3) would pass for the wrong reason"
+            );
+            assert!(
+                magi_rs::vault::check_strength(phrase).is_ok(),
+                "{phrase} must be a passphrase the vault accepts, or R7 is not exercised"
+            );
+        }
+
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            AgentName::Caspar,
+            vec![
+                eligibility_candidate("glm-5.2:cloud", serde_json::json!([LABEL])),
+                eligibility_candidate(BASE64_RUN, serde_json::json!([])),
+                eligibility_candidate(DICEWARE[0], serde_json::json!([])),
+                eligibility_candidate(DICEWARE[1], serde_json::json!([])),
+            ],
+        );
+        let consult = serde_json::json!({ "pool_eligibility": render_pool_eligibility(&map) });
+
+        let audited = AuditedOutcome::new(&run_outcome_with_consult(consult));
+        let consult = audited
+            .get()
+            .consult
+            .as_ref()
+            .expect("the consult object survives the mask");
+        let pool = &consult["pool_eligibility"]["caspar"];
+
+        // (1) The product's own label is not a secret and reaches the operator verbatim.
+        assert_eq!(
+            pool[0]["causes"][0], LABEL,
+            "the cause that explains a dead pool was masked: {pool}"
+        );
+        // (2) A secret-shaped run of the same length is still masked, whole.
+        assert_eq!(
+            pool[1]["model"], REDACTED,
+            "a 36-char base64 run reached stdout: {pool}"
+        );
+        // (3) A lowercase diceware passphrase — the shape a character-class exemption would let out —
+        //     is still masked, with either separator.
+        for (offset, phrase) in DICEWARE.iter().enumerate() {
+            assert_eq!(
+                pool[2 + offset]["model"],
+                REDACTED,
+                "the diceware passphrase {phrase:?} reached stdout: {pool}"
+            );
+        }
+    }
+
+    /// REQ-AUD-1, fail-closed (MAGI loop 5): a label magi-rs does not know — here one that reaches the
+    /// JSON through `FinishReason::Other`, the non-exhaustive fallback arm — is never exempted. It is
+    /// masked when it is secret-shaped, even though it LOOKS exactly like one of ours.
+    ///
+    /// # Why this is the discriminating fixture
+    ///
+    /// The unknown label is a pure lowercase identifier of 42 characters. A character-class exemption
+    /// ("a run of `[a-z_]` is an identifier") would let it through; only an exemption keyed to the
+    /// closed vocabulary masks it. So a new upstream label can only ever be OVER-masked — the defect
+    /// this requirement fixes, reappearing loudly at the next pin bump — and never leak through a
+    /// stale rule. `FinishReason::Other` is the one fallback arm production can actually reach: an
+    /// unknown `IneligibilityCause` or `RotationKind` tag fails magi-core's own deserialization.
+    ///
+    /// # Green before the fix, on purpose
+    ///
+    /// Today the matcher masks every run of 32 or more, so this passes against the unfixed tree. It
+    /// guards that the fix does not break the property; its teeth are proven by mutation (a
+    /// character-class exemption, or the label added to the vocabulary, turns it red).
+    #[test]
+    fn an_unknown_upstream_label_is_masked_even_when_it_looks_like_one_of_ours() {
+        use magi_core::provider::FinishReason;
+        use magi_core::schema::AgentName;
+        use magi_rs::logging::auditor::REDACTED;
+        use magi_rs::magi::completion_report::render_completions;
+
+        // Lowercase-identifier shaped, over the matcher's floor, in no vocabulary magi-rs knows.
+        const UNKNOWN: &str = "output_budget_spent_before_the_reply_ended";
+        assert!(
+            UNKNOWN.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "the fixture must have the shape a character-class exemption would accept"
+        );
+        assert!(
+            UNKNOWN.chars().count() >= 32,
+            "below the floor, nothing is tested"
+        );
+
+        let unknown = completion_record(UNKNOWN);
+        assert!(
+            matches!(&unknown.finish, Some(FinishReason::Other(word)) if word == UNKNOWN),
+            "the label must arrive through the fallback arm, whole: {:?}",
+            unknown.finish
+        );
+
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            AgentName::Melchior,
+            vec![unknown, completion_record("length")],
+        );
+        let consult = serde_json::json!({ "completions": render_completions(&map) });
+
+        let audited = AuditedOutcome::new(&run_outcome_with_consult(consult));
+        let consult = audited
+            .get()
+            .consult
+            .as_ref()
+            .expect("the consult object survives the mask");
+        let attempts = &consult["completions"]["melchior"];
+
+        assert_eq!(
+            attempts[0]["finish"], REDACTED,
+            "an unknown upstream label was exempted: {attempts}"
+        );
+        assert_eq!(
+            attempts[1]["finish"], "length",
+            "a known short label must pass, or this path is simply masking everything: {attempts}"
+        );
+    }
 }
 
 #[cfg(test)]
