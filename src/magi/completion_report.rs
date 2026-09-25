@@ -66,8 +66,8 @@ use crate::redact::{foreign_serde_label, redact_foreign_text};
 /// Renders the per-attempt completion telemetry as JSON.
 ///
 /// One key per seat that has records, holding the seat's attempts **in magi-core's order**, one
-/// object per attempt with exactly five keys: `model`, `cap`, `finish`, `completion_tokens` and
-/// `prompt_tokens`.
+/// object per attempt with exactly seven keys: `model`, `cap`, `finish`, `completion_tokens`,
+/// `prompt_tokens`, `reasoning` and `control`.
 ///
 /// # An unreported measurement renders as `null`, never as a word
 ///
@@ -78,13 +78,22 @@ use crate::redact::{foreign_serde_label, redact_foreign_text};
 /// nobody took, which is exactly the confusion that made a scraping-by output cap look healthy
 /// until it started failing.
 ///
-/// # The sixth field, `reasoning`, is DELIBERATELY NOT RENDERED
+/// # `reasoning` and `control`: a state, not a number
 ///
-/// [`CompletionRecord`] also carries `reasoning: ReasoningState`. **Nothing in magi-rs consumes
-/// it**, and the project standard forbids shipping public surface that no existing consumer
-/// reads: a key in this object is a contract a CI consumer may pin, so emitting one speculatively
-/// costs a removal later that a plain addition would not. The day a consumer exists, adding the
-/// key is additive and cheap; that is the trade this omission takes.
+/// [`CompletionRecord`] also carries `reasoning: ReasoningState` and `control:
+/// ReasoningControl`. Both now have a consumer — MAGI-Claude's reasoning-budget instrumentation
+/// (E-E) needs, per attempt, what the caller asked the reasoning channel to do and what that
+/// channel measured, so a cut attempt (`finish: length` with an exhausted budget) can be told
+/// apart from a completion the backend simply spent on tokens that never came back. `reasoning`
+/// is rendered through [`reasoning_value`] as magi-core's own serde form of [`ReasoningState`],
+/// **never flattened to a character or token count**: `"NotMeasured"` (nobody looked),
+/// `{"Measured": {"chars": N, "text": null}}` (the channel was read) and `{"Unsupported": {…}}`
+/// (the backend cannot honour the control) stay distinguishable states, and every state's `text`
+/// is forced to `null` — model text never enters this envelope. `control` is rendered through
+/// [`control_label`] as the kebab-case tag [`ReasoningControl`] serializes (`"default"`,
+/// `"disabled"`, `"enabled"`), so a consumer can tell an honoured `disabled` (a measured zero)
+/// from an ignored one (`Unsupported` with a non-zero count) apart, which a bare number could
+/// not.
 ///
 /// # Arguments
 /// * `completions` - magi-core's per-seat attempt records, exactly as the report carries them.
@@ -98,10 +107,12 @@ use crate::redact::{foreign_serde_label, redact_foreign_text};
 ///
 /// # Complexity
 ///
-/// `O(seats x records)`: plain iteration over every attempt, once. The map is a trio and the
-/// function runs **once per consult**, so the whole traversal is a handful of items on a path that
-/// already spent seconds in HTTP. An index or a precomputed lookup would buy nothing measurable
-/// and would be over-engineering against a workload this small.
+/// `O(seats x records)` for the traversal, plus `O(k)` per attempt for walking the serialized
+/// `reasoning` state (`k` is its own small, fixed-depth JSON structure — a handful of fields at
+/// most). The map is a trio and the function runs **once per consult**, so the whole traversal is
+/// a handful of items on a path that already spent seconds in HTTP. An index or a precomputed
+/// lookup would buy nothing measurable and would be over-engineering against a workload this
+/// small.
 ///
 /// # Examples
 ///
