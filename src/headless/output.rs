@@ -448,16 +448,23 @@ fn is_generic_secret_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-')
 }
 
-/// Attempts to match a `Bearer <token>` token starting at `chars[i]`.
+/// Matches an `Authorization` scheme keyword and the whitespace after it, starting at
+/// `chars[i]`.
 ///
-/// Returns the number of characters consumed by the complete match (keyword + whitespace +
-/// token) if `chars` from `i` literally starts with `"Bearer"` followed by at least one
-/// whitespace character and at least one non-whitespace character.
-fn match_bearer_token(chars: &[char], i: usize) -> Option<usize> {
+/// The keyword is compared case-insensitively ("Bearer"/"bearer"/…): over-redaction is the safe
+/// direction, so a differently-cased scheme still redacts. At least one whitespace character
+/// must follow it.
+///
+/// # Returns
+///
+/// The offset from `i` at which the token begins (keyword + whitespace), else `None`.
+///
+/// # Complexity
+///
+/// `O(k + w)` for a keyword of `k` characters followed by `w` whitespace characters.
+fn match_scheme_keyword(chars: &[char], i: usize, keyword: &str) -> Option<usize> {
     let mut consumed = 0usize;
-    for (offset, kw_char) in BEARER_KEYWORD.chars().enumerate() {
-        // Case-insensitive keyword match ("Bearer"/"bearer"/…) — over-redaction is the safe
-        // direction, so a differently-cased scheme still redacts.
+    for (offset, kw_char) in keyword.chars().enumerate() {
         if !chars.get(i + offset)?.eq_ignore_ascii_case(&kw_char) {
             return None;
         }
@@ -468,17 +475,21 @@ fn match_bearer_token(chars: &[char], i: usize) -> Option<usize> {
     while matches!(chars.get(i + j), Some(c) if c.is_whitespace()) {
         j += 1;
     }
-    if j == ws_start {
-        return None;
-    }
-    let token_start = j;
+    (j > ws_start).then_some(j)
+}
+
+/// Attempts to match a `Bearer <token>` token starting at `chars[i]`.
+///
+/// Returns the number of characters consumed by the complete match (keyword + whitespace +
+/// token) if `chars` from `i` literally starts with `"Bearer"` followed by at least one
+/// whitespace character and at least one non-whitespace character.
+fn match_bearer_token(chars: &[char], i: usize) -> Option<usize> {
+    let token_start = match_scheme_keyword(chars, i, BEARER_KEYWORD)?;
+    let mut j = token_start;
     while matches!(chars.get(i + j), Some(c) if !c.is_whitespace()) {
         j += 1;
     }
-    if j == token_start {
-        return None;
-    }
-    Some(j)
+    (j > token_start).then_some(j)
 }
 
 /// `true` if `c` belongs to the standard base64 alphabet, padding included (`A-Z a-z 0-9 + / =`).
@@ -488,7 +499,7 @@ fn is_base64_standard_char(c: char) -> bool {
 
 /// Attempts to match a `Basic <credential>` token starting at `chars[i]`.
 ///
-/// Same keyword and whitespace rules as [`match_bearer_token`] (case-insensitive keyword, at
+/// Same keyword and whitespace rules as `Bearer` ([`match_scheme_keyword`]: case-insensitive, at
 /// least one whitespace character after it). The token is the maximal run of standard base64
 /// characters that follows, and it is claimed only if it decodes to bytes containing
 /// [`BASIC_CREDENTIAL_SEPARATOR`]: that is what a `Basic` credential is, and it is what tells
@@ -505,22 +516,8 @@ fn is_base64_standard_char(c: char) -> bool {
 /// and whitespace at `i`, and its token run ends at the first non-base64 character, so the runs
 /// scanned by two failed attempts never overlap: over a whole line the attempts cost `O(n)`.
 fn match_basic_credential(chars: &[char], i: usize) -> Option<usize> {
-    let mut consumed = 0usize;
-    for (offset, kw_char) in BASIC_KEYWORD.chars().enumerate() {
-        if !chars.get(i + offset)?.eq_ignore_ascii_case(&kw_char) {
-            return None;
-        }
-        consumed += 1;
-    }
-    let ws_start = consumed;
-    let mut j = ws_start;
-    while matches!(chars.get(i + j), Some(c) if c.is_whitespace()) {
-        j += 1;
-    }
-    if j == ws_start {
-        return None;
-    }
-    let token_start = j;
+    let token_start = match_scheme_keyword(chars, i, BASIC_KEYWORD)?;
+    let mut j = token_start;
     while matches!(chars.get(i + j), Some(c) if is_base64_standard_char(*c)) {
         j += 1;
     }
