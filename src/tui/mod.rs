@@ -814,14 +814,15 @@ fn tui_consult_success_reply(
     cap: usize,
 ) -> crate::tools::consult::Truncated {
     let pieces = tui_consult_success_body(report, kind);
+    let section = crate::tools::consult::completions_section(report);
     match pieces.banner {
         Some(banner) => crate::tools::consult::truncate_report_with_preserved_prefix(
             banner,
             &pieces.annotated,
             cap,
-            "",
+            &section,
         ),
-        None => crate::tools::consult::truncate_report(&pieces.annotated, cap, ""),
+        None => crate::tools::consult::truncate_report(&pieces.annotated, cap, &section),
     }
 }
 

@@ -202,13 +202,30 @@ impl ClockCoverageAnnouncer {
 /// survive the cut", and "the heading survived but nothing after it did" are three distinct
 /// causes this function does not need to tell apart, because all three warrant the same
 /// step-down.
+///
+/// **`completions_section` (REQ-V42-5, D-9):** since magi-core 4.2.0 a `## Completions` row can
+/// print `FinishReason::Other` verbatim, which can embed text that imitates
+/// `a.findings_start`. Declared non-empty, the search for the real heading starts only AFTER
+/// this text within `kept` — never before it. If `kept` does not (or no longer, post-cut)
+/// contain the declared section whole, the heading cannot be told apart from a forgery inside
+/// it, and this returns `false` rather than risk crediting a forged one.
 #[must_use]
-fn kept_has_first_finding(kept: &str) -> bool {
+fn kept_has_first_finding(kept: &str, completions_section: &str) -> bool {
     SECTION_ANCHORS.is_some_and(|a| {
-        kept.find(a.findings_start).is_some_and(|start| {
-            let after = start + a.findings_start.len();
-            kept.get(after..)
-                .is_some_and(|rest| !rest.trim().is_empty())
+        let search_from = if completions_section.is_empty() {
+            0
+        } else {
+            match kept.find(completions_section) {
+                Some(at) => at + completions_section.len(),
+                None => return false,
+            }
+        };
+        kept.get(search_from..).is_some_and(|rest| {
+            rest.find(a.findings_start).is_some_and(|rel| {
+                let after = search_from + rel + a.findings_start.len();
+                kept.get(after..)
+                    .is_some_and(|tail| !tail.trim().is_empty())
+            })
         })
     })
 }
@@ -257,14 +274,32 @@ fn mark(kept: String) -> String {
 /// The mark's budget ([`mark_overhead`]) is deducted HERE, because that is where it is known:
 /// the caller concatenates [`TRUNCATION_MARK`] after this function, so trimming to exactly
 /// `cap` and then concatenating would exceed the cap by `mark_overhead()` bytes.
+///
+/// **`completions_section` (REQ-V42-5, D-9):** since magi-core 4.2.0 the `## Completions`
+/// section can embed backend-controlled text that imitates `anchors.findings_start`/
+/// `findings_end` BEFORE the real ones. Declared non-empty, the findings-region search (both
+/// the `end` cut here and the `kept_has_first_finding` check the caller applies to the result)
+/// starts only AFTER this text, never at `start` directly. Declared but not locatable inside
+/// `report` (past the verdict anchor) means the region cannot be delimited with certainty, so
+/// this returns `None` — the caller steps down rather than trust an anchor that might be forged.
 #[must_use]
-fn keep_verdict_and_first_finding(report: &str, cap: usize) -> Option<String> {
+fn keep_verdict_and_first_finding(
+    report: &str,
+    cap: usize,
+    completions_section: &str,
+) -> Option<String> {
     let anchors = SECTION_ANCHORS?; // no anchors: this level does not apply
     let start = report.find(anchors.verdict_start)?;
+    let search_from = if completions_section.is_empty() {
+        start
+    } else {
+        let at = report.get(start..)?.find(completions_section)?;
+        start + at + completions_section.len()
+    };
     let end = report
-        .get(start..)
+        .get(search_from..)
         .and_then(|s| s.find(anchors.findings_end))
-        .map_or(report.len(), |i| start + i);
+        .map_or(report.len(), |i| search_from + i);
     let slice = report.get(start..end)?;
     if slice.is_empty() {
         return None;
@@ -320,10 +355,6 @@ fn keep_bytes(report: &str, cap: usize) -> Option<String> {
 /// `O(seats x records)` — the same bound as
 /// [`magi_rs::magi::completion_report::render_completions`]: a trio, once per consult.
 #[must_use]
-// Red-phase only: production wiring (`ConsultTool::execute`, `analyze_direct`, the TUI) lands
-// in this task's Green step, so until then the only caller is `#[cfg(test)]` code. Remove once
-// Green wires a production call site.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn completions_section(report: &MagiReport) -> String {
     ReportFormatter::new().format_completions(&report.completions)
 }
@@ -358,15 +389,15 @@ pub(crate) fn completions_section(report: &MagiReport) -> String {
 /// and the guarantee level reached. `report.len() <= cap` returns the report intact with
 /// [`TruncationLevel::None`] — never adds the mark when nothing was truncated.
 #[must_use]
-pub(crate) fn truncate_report(report: &str, cap: usize, _completions_section: &str) -> Truncated {
+pub(crate) fn truncate_report(report: &str, cap: usize, completions_section: &str) -> Truncated {
     if report.len() <= cap {
         return Truncated {
             text: report.to_string(),
             level: TruncationLevel::None,
         };
     }
-    if let Some(kept) = keep_verdict_and_first_finding(report, cap) {
-        if kept_has_first_finding(&kept) {
+    if let Some(kept) = keep_verdict_and_first_finding(report, cap, completions_section) {
+        if kept_has_first_finding(&kept, completions_section) {
             return Truncated {
                 text: mark(kept),
                 level: TruncationLevel::Structural,
@@ -1477,7 +1508,7 @@ impl Tool for ConsultTool {
         // REQ-A11b/SC-A11d: bounds the string that becomes this call's `ToolResult` — the text
         // re-sent on every subsequent turn of the session — with the same truncation-level
         // vocabulary the JSON exposes via `report_truncated`.
-        let truncated = truncate_report(&annotated, self.output_cap, "");
+        let truncated = truncate_report(&annotated, self.output_cap, &completions_section(&report));
         // `classification_attempted: false` is a PROVEN invariant here, not a placeholder (fix
         // round 1, Finding 1). `Tool::execute` is reachable from production through exactly two
         // funnel call sites — `Agent::dispatch_consult_through_gate` and the forced pre-loop

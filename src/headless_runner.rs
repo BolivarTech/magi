@@ -54,8 +54,9 @@ use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CAL
 use crate::config::MagiConfig;
 use crate::task::AbortOnDrop;
 use crate::tools::consult::{
-    annotate_report_text, check_query_size, explain_magi_error, report_to_consult_json,
-    truncate_report, ClockCoverageAnnouncer, RunContext, StructuredVerdicts,
+    annotate_report_text, check_query_size, completions_section, explain_magi_error,
+    report_to_consult_json, truncate_report, ClockCoverageAnnouncer, RunContext,
+    StructuredVerdicts,
 };
 
 /// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
@@ -462,7 +463,7 @@ async fn analyze_direct(
             let truncated = truncate_report(
                 &annotated,
                 runtime.magi_config.effective_tool_result_cap(),
-                "",
+                &completions_section(&report),
             );
             // `resolution` already carries the REAL `classification_attempted`
             // signal from `resolve_mode_guarded` above, unlike `ConsultTool::
