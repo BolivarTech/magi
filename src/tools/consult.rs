@@ -209,6 +209,10 @@ impl ClockCoverageAnnouncer {
 /// this text within `kept` — never before it. If `kept` does not (or no longer, post-cut)
 /// contain the declared section whole, the heading cannot be told apart from a forgery inside
 /// it, and this returns `false` rather than risk crediting a forged one.
+///
+/// # Complexity
+/// O(n) in the length of `kept`: at most two substring searches (the declared section, then the
+/// heading past it) and one trim of the tail. Called once per truncation, on one report.
 #[must_use]
 fn kept_has_first_finding(kept: &str, completions_section: &str) -> bool {
     SECTION_ANCHORS.is_some_and(|a| {
@@ -282,6 +286,10 @@ fn mark(kept: String) -> String {
 /// starts only AFTER this text, never at `start` directly. Declared but not locatable inside
 /// `report` (past the verdict anchor) means the region cannot be delimited with certainty, so
 /// this returns `None` — the caller steps down rather than trust an anchor that might be forged.
+///
+/// # Complexity
+/// O(n) in the length of `report`: a constant number of substring searches (verdict anchor,
+/// declared section, findings end) plus one character-boundary trim. Called once per truncation.
 #[must_use]
 fn keep_verdict_and_first_finding(
     report: &str,
