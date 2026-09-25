@@ -85,12 +85,12 @@ use crate::redact::{foreign_serde_label, redact_foreign_text};
 /// (E-E) needs, per attempt, what the caller asked the reasoning channel to do and what that
 /// channel measured, so a cut attempt (`finish: length` with an exhausted budget) can be told
 /// apart from a completion the backend simply spent on tokens that never came back. `reasoning`
-/// is rendered through [`reasoning_value`] as magi-core's own serde form of [`ReasoningState`],
+/// is rendered through `reasoning_value` as magi-core's own serde form of [`ReasoningState`],
 /// **never flattened to a character or token count**: `"NotMeasured"` (nobody looked),
 /// `{"Measured": {"chars": N, "text": null}}` (the channel was read) and `{"Unsupported": {…}}`
 /// (the backend cannot honour the control) stay distinguishable states, and every state's `text`
 /// is forced to `null` — model text never enters this envelope. `control` is rendered through
-/// [`control_label`] as the kebab-case tag [`ReasoningControl`] serializes (`"default"`,
+/// `control_label` as the kebab-case tag [`ReasoningControl`] serializes (`"default"`,
 /// `"disabled"`, `"enabled"`), so a consumer can tell an honoured `disabled` (a measured zero)
 /// from an ignored one (`Unsupported` with a non-zero count) apart, which a bare number could
 /// not.
