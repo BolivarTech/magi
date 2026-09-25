@@ -5050,21 +5050,23 @@ mod tests {
         App::new(event_tx, response_rx, approval_rx)
     }
 
-    /// The credential a real provider failure puts on the wire, in the shape
-    /// the producer actually composes it.
+    /// The credential a real provider failure can put on the wire, in the
+    /// shape the producer composes it.
     ///
-    /// `connection_error_hint` (`src/agent/provider.rs`) interpolates the
-    /// provider's RESOLVED `base_url` — the one `src/magi/endpoint.rs` built by
-    /// substituting the `[user]`/`[password]` placeholders out of the vault
-    /// (REQ-A16c) — straight into prose, and `OpenAiCompatibleProvider` attaches
-    /// that as `anyhow` context to every connection failure. Driving the guard
-    /// through the producer rather than a hand-written string is the difference
-    /// between pinning the leak and pinning a literal: if that text ever stops
-    /// carrying the endpoint, this stops testing anything and should be deleted
-    /// rather than kept green.
+    /// This used to be `connection_error_hint`'s output, which interpolated the
+    /// provider's RESOLVED `base_url` raw. That hint now redacts its URL at the
+    /// composition point, so it no longer carries a credential and a guard
+    /// built on it could not fail. The path that still can is the provider's
+    /// non-2xx arm in `OpenAiCompatibleProvider::stream_messages`, which
+    /// composes `"OpenAI API Error [{status}]: {body}"` with the body verbatim:
+    /// a proxy or endpoint that echoes the resolved URL (with its vault-resolved
+    /// `userinfo`, REQ-A16c) in its error body puts the credential here. The
+    /// format below is that arm's, with a body such an endpoint returns.
     fn provider_error_carrying_a_credential() -> String {
-        crate::agent::provider::connection_error_hint(
-            "http://smoke:hunter2@ollama.internal:11434/v1",
+        format!(
+            "OpenAI API Error [{}]: {}",
+            reqwest::StatusCode::BAD_GATEWAY,
+            "upstream http://smoke:hunter2@ollama.internal:11434/v1 did not answer"
         )
     }
 
