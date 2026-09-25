@@ -180,7 +180,7 @@ pub async fn distill(
     let prefs = match judge.summarize_preferences(&batch).await {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[distill] summarize_preferences error (retrying next pass): {e}");
+            tracing::warn!("[distill] summarize_preferences error (retrying next pass): {e}");
             return Ok(());
         }
     };
@@ -188,7 +188,7 @@ pub async fn distill(
     for pref in &prefs {
         // Promote each preference; ignore per-item errors (SC-38 still advances).
         if let Err(e) = promote_to_profile(store, clock, cfg, scope, pref).await {
-            eprintln!("[distill] promote_to_profile error (skipping): {e}");
+            tracing::warn!("[distill] promote_to_profile error (skipping): {e}");
         }
     }
 
@@ -254,7 +254,7 @@ pub async fn distill(
                     match judge.contradicts(&older_text, &newer_text).await {
                         Ok(v) => v,
                         Err(e) => {
-                            eprintln!("[distill] contradicts error (skipping pair): {e}");
+                            tracing::warn!("[distill] contradicts error (skipping pair): {e}");
                             continue;
                         }
                     }
@@ -262,7 +262,7 @@ pub async fn distill(
 
                 if is_contradiction {
                     if let Err(e) = store.set_superseded(&older.id, &newer.id).await {
-                        eprintln!("[distill] set_superseded error (skipping): {e}");
+                        tracing::warn!("[distill] set_superseded error (skipping): {e}");
                     }
                 }
             }

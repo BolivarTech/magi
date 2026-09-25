@@ -8,6 +8,7 @@ use crate::agent::messages::{Content, Message, Role};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
+use magi_rs::redact::redact_url;
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration};
 
@@ -663,7 +664,22 @@ pub fn build_openai_provider(
 /// Actionable message when the OpenAI-compatible backend at `base_url` cannot be
 /// reached (RF-8). Interpolates `base_url` (= `DEFAULT_OPENAI_BASE_URL` in the
 /// no-config Ollama default) and points at the Anthropic opt-in escape hatch.
+///
+/// The URL passes through [`redact_url`] before it is interpolated: the
+/// provider holds the RESOLVED `base_url`, whose `[user]`/`[password]`
+/// placeholders were substituted from the vault (REQ-A16c), and this text
+/// reaches every consumer of a connection failure — the transcript, the
+/// headless envelope, the distiller's log line. Redacting here, at the
+/// composition point, covers all of them at once.
+///
+/// # Arguments
+/// * `base_url` - The endpoint that could not be reached, possibly carrying a
+///   credential in its `userinfo`.
+///
+/// # Returns
+/// The hint text, with any `userinfo` of `base_url` replaced by `***`.
 pub fn connection_error_hint(base_url: &str) -> String {
+    let base_url = redact_url(base_url);
     format!(
         "Could not reach the OpenAI-compatible backend at {base_url}. \
          If you use Ollama, make sure it is running; if you point at OpenAI or another \
