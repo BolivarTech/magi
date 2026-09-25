@@ -55,7 +55,7 @@ use crate::config::MagiConfig;
 use crate::task::AbortOnDrop;
 use crate::tools::consult::{
     annotate_report_text, check_query_size, explain_magi_error, report_to_consult_json,
-    truncate_report, RunContext, StructuredVerdicts,
+    truncate_report, ClockCoverageAnnouncer, RunContext, StructuredVerdicts,
 };
 
 /// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
@@ -266,6 +266,10 @@ pub(crate) struct MagiRuntimeParams<'a> {
     /// next to `timeout_secs`, the same override the `run_query` path applies via
     /// [`RunWiring::budget`].
     pub(crate) budget: BudgetTelemetry,
+    /// REQ-EE-5's per-activation clock-coverage announcer (S-9), assessed once for the whole
+    /// run against the SAME ceiling `budget` describes — [`analyze_direct`] announces it before
+    /// launching the analysis.
+    pub(crate) clock_coverage: &'a ClockCoverageAnnouncer,
 }
 
 /// Runs `prompt` directly through the 3-perspective MAGI consensus, off the agent
@@ -1566,6 +1570,85 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .join("\n")
         }
+
+        /// The messages emitted, as a `Vec`, for a test that needs to compare individual
+        /// lines rather than a joined blob (REQ-EE-5's clock-coverage announcement).
+        fn emitted_lines(&self) -> Vec<String> {
+            self.messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    /// A [`ClockCoverageAnnouncer`] that never announces (built over a covered clock — `None`),
+    /// for the many tests in this module that are not about REQ-EE-5 and must not have its
+    /// notice interfere with what they assert on `notice_sink`.
+    fn dummy_clock_coverage() -> ClockCoverageAnnouncer {
+        ClockCoverageAnnouncer::new(None, Arc::new(RecordingNoticeSink::default()))
+    }
+
+    /// The default interactive clock (cap 16 384, ceiling 90) does not cover the cap — a twin of
+    /// `tools::consult::tests::uncovered` (same three-line body over the lib; test modules are
+    /// not shared between files of the bin).
+    fn uncovered() -> magi_rs::magi::clock_coverage::ClockCoverageWarning {
+        magi_rs::magi::clock_coverage::ClockCoverageWarning::assess(
+            16_384,
+            magi_rs::magi::ResolvedCeiling::configured(90),
+            magi_rs::magi::clock_coverage::CoveringLever::AgentTimeoutSecs,
+        )
+        .expect("the default interactive clock does not cover the default cap")
+    }
+
+    /// The same [`MagiRuntimeParams`] every `analyze_direct` test in this module builds
+    /// (fixed classifier, default `magi_config`, obeyed timeout, and this module's own sink and
+    /// auditor doubles), with `clock` as the clock-coverage announcer — the one field a caller
+    /// actually varies for REQ-EE-5's tests.
+    fn runtime_params_for_tests(clock: &ClockCoverageAnnouncer) -> MagiRuntimeParams<'_> {
+        static CFG: std::sync::OnceLock<MagiConfig> = std::sync::OnceLock::new();
+        static SINK: std::sync::OnceLock<RecordingNoticeSink> = std::sync::OnceLock::new();
+        MagiRuntimeParams {
+            kind: ProviderKind::OpenAiCompat,
+            classifier: &NeverClassifier,
+            configured_mode: None,
+            untrusted_content: false,
+            magi_config: CFG.get_or_init(MagiConfig::default),
+            timeout_decision: neutral_timeout_decision(),
+            notice_sink: SINK.get_or_init(RecordingNoticeSink::default),
+            auditor: test_auditor(),
+            structured_verdicts: StructuredVerdicts::Omit,
+            budget: BudgetTelemetry::default(),
+            clock_coverage: clock,
+        }
+    }
+
+    /// S-9, headless `consult`: `analyze_direct` announces before the analysis runs.
+    #[tokio::test]
+    async fn a_headless_consult_announces_the_clock_warning() {
+        assert_eq!(
+            tracing::level_filters::LevelFilter::current(),
+            tracing::level_filters::LevelFilter::OFF,
+            "precondition: no subscriber in this process (run under cargo nextest)"
+        );
+        let fallback = Arc::new(RecordingNoticeSink::default());
+        let announcer = ClockCoverageAnnouncer::new(Some(uncovered()), fallback.clone());
+        let runtime = runtime_params_for_tests(&announcer);
+        let _ = analyze_direct(
+            &canned_magi(),
+            "should we migrate?",
+            &CancellationToken::new(),
+            None,
+            Some(Mode::Analysis),
+            &runtime,
+        )
+        .await;
+        assert!(
+            fallback
+                .emitted_lines()
+                .iter()
+                .any(|l| l == &uncovered().render()),
+            "the headless consult must announce the uncovered clock"
+        );
     }
 
     /// A canned MAGI orchestrator whose three perspectives all approve, over a
@@ -1612,6 +1695,7 @@ mod tests {
         let magi = slow_magi(Duration::from_secs(3_600));
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let runtime = MagiRuntimeParams {
             kind: ProviderKind::OpenAiCompat,
             classifier: &NeverClassifier,
@@ -1623,6 +1707,7 @@ mod tests {
             auditor: test_auditor(),
             structured_verdicts: StructuredVerdicts::Omit,
             budget: BudgetTelemetry::default(),
+            clock_coverage: &clock_coverage,
         };
 
         let cancel = CancellationToken::new();
@@ -3056,6 +3141,7 @@ mod tests {
     async fn test_run_consult_include_reaches_the_emitted_object() {
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3073,6 +3159,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Include,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3095,6 +3182,7 @@ mod tests {
     async fn test_run_consult_direct_runs_three_perspectives_and_populates_consult() {
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3112,6 +3200,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3146,6 +3235,7 @@ mod tests {
         )
         .expect("valid toml");
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3164,6 +3254,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3186,6 +3277,7 @@ mod tests {
         )
         .expect("valid toml");
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3203,6 +3295,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3236,6 +3329,7 @@ mod tests {
         );
         let sink = RecordingNoticeSink::default();
 
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3253,6 +3347,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3296,6 +3391,7 @@ mod tests {
         );
         let sink = RecordingNoticeSink::default();
 
+        let clock_coverage = dummy_clock_coverage();
         let _outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3313,6 +3409,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3389,6 +3486,7 @@ mod tests {
         );
 
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let _outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3406,6 +3504,7 @@ mod tests {
                 auditor: &auditor,
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3449,6 +3548,7 @@ mod tests {
             "test setup: this must NOT trigger the formula check"
         );
         let sink_generous = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3466,6 +3566,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3487,6 +3588,7 @@ mod tests {
             "test setup: no --timeout, no warning"
         );
         let sink_absent = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3504,6 +3606,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3523,6 +3626,7 @@ mod tests {
         let big = "x".repeat(magi_rs::magi::MAX_QUERY_BYTES + 1);
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3540,6 +3644,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3570,6 +3675,7 @@ mod tests {
             .build()
             .unwrap();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3587,6 +3693,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3614,6 +3721,7 @@ mod tests {
     async fn run_consult_reports_the_effective_timeout_in_applied_caps() {
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3631,6 +3739,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: BudgetTelemetry::default(),
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3657,6 +3766,7 @@ mod tests {
         };
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
             canned_magi(),
@@ -3674,6 +3784,7 @@ mod tests {
                 auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Omit,
                 budget: expected,
+                clock_coverage: &clock_coverage,
             },
         )
         .await;
@@ -3714,6 +3825,7 @@ mod tests {
         // statement that creates `fut`.
         let cfg = MagiConfig::default();
         let sink = RecordingNoticeSink::default();
+        let clock_coverage = dummy_clock_coverage();
         let runtime = MagiRuntimeParams {
             kind: ProviderKind::OpenAiCompat,
             classifier: &NeverClassifier,
@@ -3725,6 +3837,7 @@ mod tests {
             auditor: test_auditor(),
             structured_verdicts: StructuredVerdicts::Omit,
             budget: BudgetTelemetry::default(),
+            clock_coverage: &clock_coverage,
         };
 
         {

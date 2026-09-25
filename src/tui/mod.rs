@@ -1779,6 +1779,10 @@ pub struct TuiMagiRuntimeConfig {
     pub max_query_bytes: usize,
     /// Effective output cap (REQ-A11b), applied to the `/consult` reply.
     pub tool_result_cap: usize,
+    /// REQ-EE-5's per-activation clock-coverage announcer (S-9), shared with the auto-routed
+    /// `consult` tool (`register_consult_tool_if_available`) and the post-`/login` rebuild — one
+    /// assessment for the whole session, never re-derived per surface.
+    pub clock_coverage: Arc<crate::tools::consult::ClockCoverageAnnouncer>,
 }
 
 /// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
@@ -2026,6 +2030,7 @@ pub async fn run_tui_ext(
         mut magi_kind,
         max_query_bytes,
         tool_result_cap,
+        clock_coverage,
     } = magi_runtime;
 
     let original_hook = std::panic::take_hook();
@@ -2404,7 +2409,10 @@ pub async fn run_tui_ext(
                                                         )
                                                         .with_kind(magi_kind)
                                                         .with_max_query_bytes(max_query_bytes)
-                                                        .with_output_cap(tool_result_cap),
+                                                        .with_output_cap(tool_result_cap)
+                                                        .with_clock_coverage(Arc::clone(
+                                                            &clock_coverage,
+                                                        )),
                                                     ));
                                                     consult_magi_runner = Some(new_magi);
                                                     // S-6/S-7: a declared reasoning key that
@@ -4058,6 +4066,25 @@ mod tests {
             rest.contains(needle.as_str()),
             "the /login arm must emit the post-login reasoning notices after rebuilding"
         );
+    }
+
+    /// S-9, direct `/consult`: the handler announces the clock-coverage warning BEFORE it
+    /// launches the analysis. A source guard because the arm lives inside `run_tui_ext`'s event
+    /// loop, which no test drives directly.
+    #[test]
+    fn the_direct_consult_announces_the_clock_before_launching_the_analysis() {
+        let source = production_source();
+        let arm = source
+            .find("UiEvent::Consult { query, mode } => {")
+            .expect("the /consult arm moved — re-anchor this guard, do not delete it");
+        let rest = &source[arm..];
+        let announce = rest
+            .find("clock_coverage.announce_activation()")
+            .expect("the /consult arm must announce the clock coverage");
+        let launch = rest
+            .find(".analyze(&mode, &query)")
+            .expect("the /consult arm must launch the analysis");
+        assert!(announce < launch, "announce first, then launch");
     }
 
     /// MS2 gate S7 finding: `UiEvent::Login` used to await

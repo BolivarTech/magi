@@ -1238,6 +1238,10 @@ pub struct ConsultTool {
     /// [`TOOL_RESULT_CAP_BYTES`]; call [`Self::with_output_cap`] to declare an operator-
     /// configured value.
     output_cap: usize,
+    /// REQ-EE-5's per-activation clock-coverage announcer (S-9). `None` until a caller declares
+    /// one via [`Self::with_clock_coverage`] — the ~13 existing test call sites that do not care
+    /// about this feature keep working unchanged, same reasoning as `kind`'s default above.
+    clock_coverage: Option<Arc<ClockCoverageAnnouncer>>,
 }
 
 impl ConsultTool {
@@ -1273,6 +1277,7 @@ impl ConsultTool {
             // `kind`'s default above.
             max_query_bytes: MAX_QUERY_BYTES,
             output_cap: TOOL_RESULT_CAP_BYTES,
+            clock_coverage: None,
         }
     }
 
@@ -1309,6 +1314,14 @@ impl ConsultTool {
     #[must_use]
     pub fn with_output_cap(mut self, cap: usize) -> Self {
         self.output_cap = cap;
+        self
+    }
+
+    /// Declares the announcer for REQ-EE-5's per-activation clock-coverage warning (S-9). Same
+    /// builder shape as [`Self::with_kind`], for the same reason.
+    #[must_use]
+    pub fn with_clock_coverage(mut self, announcer: Arc<ClockCoverageAnnouncer>) -> Self {
+        self.clock_coverage = Some(announcer);
         self
     }
 }
@@ -1551,10 +1564,25 @@ mod tests {
     }
 
     fn magi_all_ok() -> Arc<Magi> {
+        // Two responses per seat, not one: `RoutingMockProvider` hands out one queued response
+        // per call and reports `0 succeeded` once a seat's queue is empty, and
+        // `the_consult_tool_announces_the_clock_warning_at_every_activation` runs TWO successful
+        // consults over the SAME `Magi` to prove the warning fires on every activation. Every
+        // other caller here still uses its own `Magi` exactly once, so the extra queued
+        // response is simply never drawn.
         let provider = RoutingMockProvider::new()
-            .with_agent_responses(AgentName::Melchior, vec![Ok(agent_json("melchior"))])
-            .with_agent_responses(AgentName::Balthasar, vec![Ok(agent_json("balthasar"))])
-            .with_agent_responses(AgentName::Caspar, vec![Ok(agent_json("caspar"))]);
+            .with_agent_responses(
+                AgentName::Melchior,
+                vec![Ok(agent_json("melchior")), Ok(agent_json("melchior"))],
+            )
+            .with_agent_responses(
+                AgentName::Balthasar,
+                vec![Ok(agent_json("balthasar")), Ok(agent_json("balthasar"))],
+            )
+            .with_agent_responses(
+                AgentName::Caspar,
+                vec![Ok(agent_json("caspar")), Ok(agent_json("caspar"))],
+            );
         Arc::new(Magi::new(Arc::new(provider)))
     }
 
@@ -3794,6 +3822,44 @@ mod tests {
         assert!(
             lines.iter().all(|l| l == &uncovered().render()),
             "{lines:?}"
+        );
+    }
+
+    /// S-9, autonomous consult and `query --consult`: the tool announces at EVERY activation,
+    /// and only when the panel actually activates — a query rejected by the size check never
+    /// reaches the trio and says nothing.
+    #[tokio::test]
+    async fn the_consult_tool_announces_the_clock_warning_at_every_activation() {
+        assert_eq!(
+            tracing::level_filters::LevelFilter::current(),
+            tracing::level_filters::LevelFilter::OFF,
+            "precondition: no subscriber in this process (run under cargo nextest)"
+        );
+        let sink = Arc::new(RecordingSink::new());
+        let announcer = Arc::new(ClockCoverageAnnouncer::new(Some(uncovered()), sink.clone()));
+        let tool = ConsultTool::new(magi_all_ok(), true)
+            .with_max_query_bytes(64)
+            .with_clock_coverage(announcer);
+        let cancel = CancellationToken::new();
+        tool.execute(json!({"query": "should we?"}), &cancel)
+            .await
+            .expect("ok");
+        tool.execute(json!({"query": "and now?"}), &cancel)
+            .await
+            .expect("ok");
+        assert_eq!(
+            sink.0.lock().expect("sink lock").len(),
+            2,
+            "one per activation"
+        );
+        let _ = tool
+            .execute(json!({"query": "x".repeat(65)}), &cancel)
+            .await
+            .expect_err("over the cap");
+        assert_eq!(
+            sink.0.lock().expect("sink lock").len(),
+            2,
+            "a rejected query never activates the panel"
         );
     }
 }

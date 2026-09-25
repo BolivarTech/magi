@@ -68,6 +68,7 @@ use magi_rs::headless::resolution::{
 };
 use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
+use magi_rs::magi::clock_coverage::{ClockCoverageWarning, CoveringLever};
 use magi_rs::magi::endpoint::{EndpointTemplate, ResolvedEndpoint, Scope};
 use magi_rs::magi::kind::{ProviderKind, ProviderKindParseError};
 use magi_rs::magi::lineage::LineageError;
@@ -2052,6 +2053,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let (tui_resolved, tui_budget) =
         BudgetTelemetry::derive(None, tui_ceiling, tui_rotations, tui_retry_disabled);
     startup_notices.push(budget_notice(tui_resolved.secs(), None, &tui_budget));
+    // S-9/REQ-EE-5: one assessment for the whole session, shared by the auto-routed `consult`
+    // tool and every post-`/login` rebuild — never re-derived per surface.
+    let tui_clock_coverage_announcer =
+        Arc::new(crate::tools::consult::ClockCoverageAnnouncer::new(
+            tui_clock_coverage(&magi_config),
+            Arc::clone(&tui_notices) as Arc<dyn crate::agent::mode_classifier::NoticeSink>,
+        ));
     let consult_magi: Option<Arc<Magi>> = match build_magi_orchestrator(
         &TrioBuild {
             cfg: &magi_config,
@@ -2142,11 +2150,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     register_consult_tool_if_available(
         &mut agent,
         consult_magi.as_ref(),
-        magi_config.magi().auto_approve,
-        registered_magi_kind(&magi_config, provider_kind),
-        magi_config.magi_endpoint_diverges(),
-        magi_config.effective_max_query_bytes(),
-        magi_config.effective_tool_result_cap(),
+        ConsultToolRegistration {
+            auto_approve: magi_config.magi().auto_approve,
+            kind: registered_magi_kind(&magi_config, provider_kind),
+            magi_endpoint_diverges: magi_config.magi_endpoint_diverges(),
+            max_query_bytes: magi_config.effective_max_query_bytes(),
+            output_cap: magi_config.effective_tool_result_cap(),
+            clock_coverage: Arc::clone(&tui_clock_coverage_announcer),
+        },
     );
 
     // The notices are HANDED OVER rather than announced here. They go to the logging layer,
@@ -2183,6 +2194,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             magi_kind: registered_magi_kind(&magi_config, provider_kind),
             max_query_bytes: magi_config.effective_max_query_bytes(),
             tool_result_cap: magi_config.effective_tool_result_cap(),
+            clock_coverage: tui_clock_coverage_announcer,
         },
         // The chat loop's SELF-ROUTED consults (REQ-A20/A07d) — a different surface from the
         // explicit `/consult` above, which is what `TuiMagiRuntimeConfig` serves.
@@ -4410,6 +4422,37 @@ fn build_magi_orchestrator(
         .map_err(|e| TrioError::Builder(redact_foreign_error(&e)))
 }
 
+/// The `ConsultTool` construction inputs `register_consult_tool_if_available` shares between
+/// the TUI and `magi query` (below), bundled into one struct rather than one more positional
+/// argument: six same-shaped scalars/handles in a row is exactly the transposition hazard
+/// `OpenAiSettings`/`ModeSources` exist to avoid elsewhere in this crate, and it is also what
+/// keeps this function under clippy's argument-count lint without reaching for `#[allow]`.
+struct ConsultToolRegistration {
+    /// Whether the registered tool auto-approves an autonomous invocation.
+    auto_approve: bool,
+    /// The `ProviderKind` under which the trio runs (REQ-A12c): construction-time, via
+    /// `ConsultTool::with_kind`, so `ConsultTool::execute` does not have to resolve it again on
+    /// each call. Determines whether a 401/403 from `MagiReport::failed_agents` is explained as
+    /// keyless configuration — see `tools::consult::keyless_auth_explanation`.
+    kind: ProviderKind,
+    /// `MagiConfig::magi_endpoint_diverges()`, resolved ONCE here (fix round 1, Finding 1) and
+    /// passed to `ConsultTool::with_magi_endpoint_diverges` — same pattern as `kind`, same
+    /// reason: `ConsultTool::execute` does not re-resolve it per call.
+    magi_endpoint_diverges: bool,
+    /// `MagiConfig::effective_max_query_bytes()` (REQ-A11b), passed to
+    /// `ConsultTool::with_max_query_bytes` — it is the same cap applied by the direct headless
+    /// path and the TUI's explicit `/consult` (SC-A11c), resolved here once.
+    max_query_bytes: usize,
+    /// `MagiConfig::effective_tool_result_cap()` (REQ-A11b), passed to
+    /// `ConsultTool::with_output_cap` — bounds the `ToolResult` that re-enters the conversation
+    /// history (TUI auto-routed and `magi query`'s tool loop, the two routes that share this
+    /// call site).
+    output_cap: usize,
+    /// REQ-EE-5's per-activation clock-coverage announcer (S-9), passed to
+    /// `ConsultTool::with_clock_coverage`.
+    clock_coverage: Arc<crate::tools::consult::ClockCoverageAnnouncer>,
+}
+
 /// Registers the `consult` tool on `agent` ONLY IF the trio was built (REQ-A06, SC-A06a).
 ///
 /// Shared between the TUI (`run`) and `magi query` (`run_query_subcommand`, B3): before this
@@ -4419,36 +4462,28 @@ fn build_magi_orchestrator(
 /// **When the trio is not buildable, the tool is NOT registered** — never halfway, and
 /// never with an `execute` that fails on first use: that would waste a turn of the tool loop
 /// (and a model call) to discover something already known at startup, besides inviting the
-/// principal model to route to something that cannot run. `kind` - the `ProviderKind` under
-/// which the trio runs (REQ-A12c): construction-time, via `ConsultTool::with_kind`, so
-/// `ConsultTool::execute` does not have to resolve it again on each call. Determines whether a
-/// 401/403 from `MagiReport::failed_agents` is explained as keyless configuration — see
-/// `tools::consult::keyless_auth_explanation`. `magi_endpoint_diverges` -
-/// `MagiConfig::magi_endpoint_diverges()`, resolved ONCE here (fix round 1, Finding 1) and
-/// passed to `ConsultTool::with_magi_endpoint_diverges` — same pattern as `kind`, same reason:
-/// `ConsultTool::execute` does not re-resolve it per call. `max_query_bytes` -
-/// `MagiConfig::effective_max_query_bytes()` (REQ-A11b), passed to
-/// `ConsultTool::with_max_query_bytes` — it is the same cap applied by the direct headless path
-/// and the TUI's explicit `/consult` (SC-A11c), resolved here once. `output_cap` -
-/// `MagiConfig::effective_tool_result_cap()` (REQ-A11b), passed to
-/// `ConsultTool::with_output_cap` — bounds the `ToolResult` that re-enters the conversation
-/// history (TUI auto-routed and `magi query`'s tool loop, the two routes that share this call
-/// site).
+/// principal model to route to something that cannot run. See [`ConsultToolRegistration`] for
+/// what each of its fields feeds and why.
 fn register_consult_tool_if_available(
     agent: &mut Agent,
     consult_magi: Option<&Arc<Magi>>,
-    auto_approve: bool,
-    kind: ProviderKind,
-    magi_endpoint_diverges: bool,
-    max_query_bytes: usize,
-    output_cap: usize,
+    config: ConsultToolRegistration,
 ) {
+    let ConsultToolRegistration {
+        auto_approve,
+        kind,
+        magi_endpoint_diverges,
+        max_query_bytes,
+        output_cap,
+        clock_coverage,
+    } = config;
     if let Some(magi) = consult_magi {
         agent.register_tool(Box::new(
             crate::tools::consult::ConsultTool::new(magi.clone(), auto_approve)
                 .with_kind(kind)
                 .with_magi_endpoint_diverges(magi_endpoint_diverges)
                 .with_max_query_bytes(max_query_bytes)
+                .with_clock_coverage(clock_coverage)
                 .with_output_cap(output_cap),
         ));
     }
@@ -5559,6 +5594,11 @@ struct HeadlessContext {
     /// `prepare_headless` output instead of a hand-rolled stand-in — see
     /// [`Self::divergence_notice`] above for the precedent that pattern followed.
     budget: BudgetTelemetry,
+    /// REQ-EE-5's per-activation clock-coverage assessment (S-9), evaluated once against this
+    /// run's resolved ceiling (see [`headless_clock_coverage`]) — both dispatchers wrap it in
+    /// their own [`crate::tools::consult::ClockCoverageAnnouncer`] rather than recomputing the
+    /// assessment a second way.
+    clock_coverage: Option<ClockCoverageWarning>,
 }
 
 /// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
@@ -6004,6 +6044,9 @@ async fn prepare_headless(
     trio_notices.push(budget_notice(resolved_ceiling.secs(), h.timeout, &budget));
     trio_notices.extend(floored_ceiling_notice(&budget));
     trio_notices.extend(above_sanity_notice(resolved_ceiling.secs(), &budget));
+    // S-9/REQ-EE-5: the SAME derivation `resolved_ceiling` above already used (see
+    // `headless_clock_coverage`'s own doc) — never a second, competing formula.
+    let clock_coverage = headless_clock_coverage(&magi_config, h.timeout);
     let consult_magi = build_magi_orchestrator(
         &TrioBuild {
             cfg: &magi_config,
@@ -6108,6 +6151,7 @@ async fn prepare_headless(
         env_untrusted_content,
         timeout_decision,
         budget,
+        clock_coverage,
         #[cfg(test)]
         divergence_notice: headless_divergence_notice,
     })
@@ -6293,8 +6337,17 @@ async fn run_query_subcommand(
         memory,
         limits,
         budget,
+        clock_coverage,
         ..
     } = ctx;
+    // S-9/REQ-EE-5: one assessment for the run, wrapped in its own announcer — headless has no
+    // TUI screen sink, so its fallback is a fresh `ProcessNoticeSink` (the same double
+    // `bring_up_headless_logging`'s screen delivery uses).
+    let clock_coverage_announcer = Arc::new(crate::tools::consult::ClockCoverageAnnouncer::new(
+        clock_coverage,
+        Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default())
+            as Arc<dyn crate::agent::mode_classifier::NoticeSink>,
+    ));
 
     // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude) —
     // this dispatcher only converts its `Result` to the `Option` the tool-registration
@@ -6342,11 +6395,14 @@ async fn run_query_subcommand(
     register_consult_tool_if_available(
         &mut agent,
         consult_magi.as_ref(),
-        magi_config.magi().auto_approve,
-        registered_magi_kind(&magi_config, provider_kind),
-        magi_config.magi_endpoint_diverges(),
-        magi_config.effective_max_query_bytes(),
-        magi_config.effective_tool_result_cap(),
+        ConsultToolRegistration {
+            auto_approve: magi_config.magi().auto_approve,
+            kind: registered_magi_kind(&magi_config, provider_kind),
+            magi_endpoint_diverges: magi_config.magi_endpoint_diverges(),
+            max_query_bytes: magi_config.effective_max_query_bytes(),
+            output_cap: magi_config.effective_tool_result_cap(),
+            clock_coverage: clock_coverage_announcer,
+        },
     );
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
@@ -6418,6 +6474,61 @@ fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
             .unwrap_or(magi_rs::magi::AGENT_TIMEOUT_SECS),
         cfg.effective_max_rotations(),
         cfg.magi().retry_disabled.unwrap_or(false),
+    )
+}
+
+/// REQ-EE-5's coverage assessment for the headless path (S-9), evaluated on the SAME ceiling the
+/// trio actually runs under.
+///
+/// **One derivation, not two.** This re-derives the ceiling from `timeout_scale` plus
+/// [`magi_rs::magi::derive_ceiling_from_timeout`] rather than taking a pre-resolved
+/// [`ResolvedCeiling`] — but that derivation is the SAME one [`BudgetTelemetry::derive`] already
+/// performs internally for an explicit `--timeout` (`derive_ceiling_from_timeout` IS
+/// `BudgetTelemetry::derive`'s `Some` branch, see that function's own comment), so the two never
+/// compute a different number for the same inputs. [`prepare_headless`] calls this function
+/// rather than recomputing the ceiling a third way.
+///
+/// # Arguments
+/// * `cfg` - the loaded configuration.
+/// * `timeout` - the operator's raw `--timeout` flag (`h.timeout`), or `None` when absent. `Some`
+///   selects [`CoveringLever::Timeout`] (the trio's mages run at a ceiling DERIVED from it);
+///   `None` selects [`CoveringLever::AgentTimeoutSecs`] (they run at the configured ceiling
+///   verbatim) — the same branch [`BudgetTelemetry::derive`] itself takes.
+///
+/// # Returns
+/// `None` when the effective clock already covers `cfg.effective_max_tokens()`.
+#[must_use]
+fn headless_clock_coverage(cfg: &MagiConfig, timeout: Option<u64>) -> Option<ClockCoverageWarning> {
+    let (configured_ceiling, max_rotations, retry_disabled) = timeout_scale(cfg);
+    let (ceiling, lever) = match timeout {
+        Some(asked) => (
+            magi_rs::magi::derive_ceiling_from_timeout(asked, max_rotations, retry_disabled),
+            CoveringLever::Timeout {
+                max_rotations,
+                retry_disabled,
+            },
+        ),
+        None => (configured_ceiling, CoveringLever::AgentTimeoutSecs),
+    };
+    ClockCoverageWarning::assess(
+        cfg.effective_max_tokens(),
+        ResolvedCeiling::configured(ceiling),
+        lever,
+    )
+}
+
+/// REQ-EE-5's coverage assessment for the TUI (S-9): the ceiling is always `[magi]
+/// .agent_timeout_secs` verbatim — the TUI has no `--timeout` (SC-EB06b).
+///
+/// # Returns
+/// `None` when the configured clock already covers `cfg.effective_max_tokens()`.
+#[must_use]
+fn tui_clock_coverage(cfg: &MagiConfig) -> Option<ClockCoverageWarning> {
+    let (configured_ceiling, _max_rotations, _retry_disabled) = timeout_scale(cfg);
+    ClockCoverageWarning::assess(
+        cfg.effective_max_tokens(),
+        ResolvedCeiling::configured(configured_ceiling),
+        CoveringLever::AgentTimeoutSecs,
     )
 }
 
@@ -6566,6 +6677,7 @@ async fn run_consult_subcommand(
         env_untrusted_content,
         timeout_decision,
         budget,
+        clock_coverage,
         ..
     } = ctx;
 
@@ -6597,6 +6709,12 @@ async fn run_consult_subcommand(
         provider,
         Arc::clone(&notice_sink),
         Arc::clone(&auditor),
+    );
+    // S-9/REQ-EE-5: shares the SAME process-level sink as the mode classifier's own notices —
+    // one stderr output path, not two.
+    let clock_coverage_announcer = crate::tools::consult::ClockCoverageAnnouncer::new(
+        clock_coverage,
+        Arc::clone(&notice_sink),
     );
     // Task 4.1: the trio is built ONCE, in `prepare_headless` (the shared prelude); a
     // forced `magi consult` needs a LIVE trio unconditionally, so an unbuildable one
@@ -6644,6 +6762,7 @@ async fn run_consult_subcommand(
             crate::tools::consult::StructuredVerdicts::Omit
         },
         budget,
+        clock_coverage: &clock_coverage_announcer,
     };
     let outcome = run_consult(resolved, magi, &prompt, timeout, explicit_mode, &runtime).await;
     finish_headless(&h, &outcome, limits.tool_result_cap)
@@ -6816,6 +6935,40 @@ mod envelope_audit_guard {
 
 #[cfg(test)]
 mod tests {
+    /// S-9's inputs on the headless path: the warning is assessed on the ceiling the trio
+    /// really runs under and names `--timeout` only when the operator passed one.
+    #[test]
+    fn the_headless_clock_coverage_is_assessed_on_the_resolved_ceiling() {
+        let cfg = crate::config::MagiConfig::from_toml_str("[magi]\n").expect("valid");
+        let explicit =
+            crate::headless_clock_coverage(&cfg, Some(1_800)).expect("1800 s does not cover");
+        assert!(
+            explicit.render().contains("--timeout 7163"),
+            "{}",
+            explicit.render()
+        );
+        let configured = crate::headless_clock_coverage(&cfg, None).expect("90 s does not cover");
+        assert!(
+            configured.render().contains("[magi].agent_timeout_secs"),
+            "{}",
+            configured.render()
+        );
+        let covering =
+            crate::config::MagiConfig::from_toml_str("[magi]\nmax_tokens = 1000\n").expect("valid");
+        assert_eq!(crate::headless_clock_coverage(&covering, Some(1_800)), None);
+    }
+
+    /// S-9's input on the TUI: the configured ceiling, and the lever is `agent_timeout_secs`.
+    #[test]
+    fn the_tui_clock_coverage_is_assessed_on_the_configured_ceiling() {
+        let default = crate::config::MagiConfig::from_toml_str("[magi]\n").expect("valid");
+        let w = crate::tui_clock_coverage(&default).expect("27 s does not cover 16 384 tokens");
+        assert!(w.render().contains("994"), "{}", w.render());
+        let wide = crate::config::MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 994\n")
+            .expect("valid");
+        assert_eq!(crate::tui_clock_coverage(&wide), None);
+    }
+
     /// R14: production must not hand the logging layer a delivery that throws
     /// screen notices away. Both `init_logging` call sites did exactly that for
     /// as long as the notices were still classified the old way — deliberately,
@@ -16131,16 +16284,25 @@ mod tests {
         #[test]
         fn register_consult_tool_if_available_registers_when_buildable_and_omits_it_otherwise() {
             let magi: Arc<Magi> = Arc::new(Magi::new(Arc::new(RoutingMockProvider::new())));
+            fn dummy_clock_coverage() -> Arc<crate::tools::consult::ClockCoverageAnnouncer> {
+                Arc::new(crate::tools::consult::ClockCoverageAnnouncer::new(
+                    None,
+                    Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
+                ))
+            }
 
             let mut agent_with_trio = Agent::new(Arc::new(StaticProvider));
             register_consult_tool_if_available(
                 &mut agent_with_trio,
                 Some(&magi),
-                false,
-                ProviderKind::Ollama,
-                false,
-                magi_rs::magi::MAX_QUERY_BYTES,
-                magi_rs::magi::TOOL_RESULT_CAP_BYTES,
+                ConsultToolRegistration {
+                    auto_approve: false,
+                    kind: ProviderKind::Ollama,
+                    magi_endpoint_diverges: false,
+                    max_query_bytes: magi_rs::magi::MAX_QUERY_BYTES,
+                    output_cap: magi_rs::magi::TOOL_RESULT_CAP_BYTES,
+                    clock_coverage: dummy_clock_coverage(),
+                },
             );
             assert!(
                 agent_with_trio.has_tool("consult"),
@@ -16151,11 +16313,14 @@ mod tests {
             register_consult_tool_if_available(
                 &mut agent_without_trio,
                 None,
-                false,
-                ProviderKind::Ollama,
-                false,
-                magi_rs::magi::MAX_QUERY_BYTES,
-                magi_rs::magi::TOOL_RESULT_CAP_BYTES,
+                ConsultToolRegistration {
+                    auto_approve: false,
+                    kind: ProviderKind::Ollama,
+                    magi_endpoint_diverges: false,
+                    max_query_bytes: magi_rs::magi::MAX_QUERY_BYTES,
+                    output_cap: magi_rs::magi::TOOL_RESULT_CAP_BYTES,
+                    clock_coverage: dummy_clock_coverage(),
+                },
             );
             assert!(
                 !agent_without_trio.has_tool("consult"),
