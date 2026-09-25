@@ -386,10 +386,26 @@ mod tests {
         assert_eq!(json["melchior"][0]["model"], "kimi-k2.6:cloud");
     }
 
-    /// The consult JSON's key set is a CONTRACT, and `reasoning` is deliberately absent from it:
-    /// nothing consumes it, and a key nobody reads is public surface that costs a removal later.
-    /// This test breaking is a versioned decision, not an accident — but it must break
-    /// deliberately, naming the added key.
+    /// One attempt with the telemetry `attempt("m", json!("length"), json!(16_384))` would carry,
+    /// but with the given `reasoning` (magi-core's serde shape of `ReasoningState`, passed as raw
+    /// JSON so a test can express every variant and a captured `text`) and the given `control`
+    /// tag. Built through `record`, i.e. through magi-core's own `Deserialize`.
+    fn attempt_with(reasoning: Value, control: &str) -> CompletionRecord {
+        record(json!({
+            "model": "m",
+            "cap": 16_384,
+            "finish": "length",
+            "completion_tokens": 16_384,
+            "prompt_tokens": 1_200,
+            "reasoning": reasoning,
+            "control": control,
+        }))
+    }
+
+    /// The consult JSON's key set is a CONTRACT. It grew from five to seven in v0.20.0, and on
+    /// purpose: `reasoning` and `control` now have a consumer (MAGI-Claude, E-E), which is the
+    /// condition the old omission was waiting for. The next change must break this test the
+    /// same way — deliberately, naming the key.
     #[test]
     fn the_attempt_object_carries_exactly_the_declared_keys() {
         let map = seat(
@@ -406,15 +422,245 @@ mod tests {
             vec![
                 "cap",
                 "completion_tokens",
+                "control",
                 "finish",
                 "model",
-                "prompt_tokens"
+                "prompt_tokens",
+                "reasoning"
             ],
             "a key was added or removed without updating the contract"
         );
+    }
+
+    /// S-2, JSON half: a cut reads as a cut, with its cause. The budget ran out
+    /// (`completion_tokens == cap`, `finish: length`) and the reasoning channel says where it
+    /// went. That pair is what tells "the model reasoned the whole budget away" from "the
+    /// daemon spent tokens it did not return".
+    #[test]
+    fn a_cut_attempt_carries_its_measured_reasoning_and_the_control_it_ran_under() {
+        let map = seat(
+            AgentName::Caspar,
+            vec![record(json!({
+                "model": "glm-5.2:cloud",
+                "cap": 16_384,
+                "finish": "length",
+                "completion_tokens": 16_384,
+                "prompt_tokens": 14_000,
+                "reasoning": { "Measured": { "chars": 81_920, "text": null } },
+                "control": "default",
+            }))],
+        );
+
+        let json = render_completions(&map);
+        let entry = &json["caspar"][0];
+        assert_eq!(entry["finish"], "length");
+        assert_eq!(
+            entry["completion_tokens"], entry["cap"],
+            "the cut spent exactly the budget it was given"
+        );
+        assert_eq!(
+            entry["reasoning"],
+            json!({ "Measured": { "chars": 81_920, "text": null } }),
+            "the state is kept as magi-core serializes it, never flattened to a number"
+        );
+        assert_eq!(entry["control"], "default");
+    }
+
+    /// `text` is ALWAYS null in the JSON, even when a trace was captured: model text never
+    /// enters the envelope (spec §0, REQ-EE-1). The count must survive the nulling — a renderer
+    /// that blanked the whole state would pass the no-leak assertion and lose the measurement.
+    ///
+    /// MUTATION (required): stop nulling `text` and this goes red with the canary visible.
+    #[test]
+    fn a_captured_reasoning_trace_never_reaches_the_json() {
+        const TRACE: &str = "the model weighed c4n4ry-tr4ce for a long while";
+        let mut map = BTreeMap::new();
+        map.insert(
+            AgentName::Melchior,
+            vec![attempt_with(
+                json!({ "Measured": { "chars": 48, "text": TRACE } }),
+                "default",
+            )],
+        );
+        map.insert(
+            AgentName::Caspar,
+            vec![attempt_with(
+                json!({ "Unsupported": { "backend": "ollama", "chars": 48, "text": TRACE } }),
+                "disabled",
+            )],
+        );
+
+        let json = render_completions(&map);
+        assert!(json["melchior"][0]["reasoning"]["Measured"]["text"].is_null());
+        assert_eq!(
+            json["melchior"][0]["reasoning"]["Measured"]["chars"], 48,
+            "nulling the text must not blank the measurement"
+        );
+        assert!(json["caspar"][0]["reasoning"]["Unsupported"]["text"].is_null());
+        assert_eq!(json["caspar"][0]["reasoning"]["Unsupported"]["chars"], 48);
+        let rendered = json.to_string();
         assert!(
-            !object.contains_key("reasoning"),
-            "the sixth field stays unrendered until a consumer for it exists"
+            !rendered.contains("c4n4ry-tr4ce"),
+            "model text reached the envelope: {rendered}"
+        );
+    }
+
+    /// S-3: no channel is not zero. `NotMeasured` and a measured zero are different facts —
+    /// "nobody looked" against "somebody looked and the model did not reason" — and a consumer
+    /// deciding whether reasoning ate the budget needs to tell them apart.
+    #[test]
+    fn an_unread_channel_renders_as_not_measured_and_a_measured_zero_as_zero() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            AgentName::Melchior,
+            vec![attempt_with(json!("NotMeasured"), "default")],
+        );
+        map.insert(
+            AgentName::Caspar,
+            vec![attempt_with(
+                json!({ "Measured": { "chars": 0, "text": null } }),
+                "default",
+            )],
+        );
+
+        let json = render_completions(&map);
+        assert_eq!(json["melchior"][0]["reasoning"], json!("NotMeasured"));
+        assert_ne!(
+            json["melchior"][0]["reasoning"],
+            json!({ "Measured": { "chars": 0, "text": null } }),
+            "an unread channel must never read as a measured zero"
+        );
+        assert_eq!(
+            json["caspar"][0]["reasoning"],
+            json!({ "Measured": { "chars": 0, "text": null } }),
+            "the pair: a real zero keeps its shape, so the assertion above is not satisfied by a \
+             renderer that writes NotMeasured for everything"
+        );
+    }
+
+    /// S-4, record half: with `disabled`, a model that honours the switch reads as a measured
+    /// zero and one that ignores it (the `gpt-oss:120b` case) reads as `Unsupported` with the
+    /// count that came back anyway — never as a count that looks like the switch worked.
+    #[test]
+    fn a_disabled_control_reads_as_honoured_or_as_unsupported_never_as_a_count_that_worked() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            AgentName::Melchior,
+            vec![attempt_with(
+                json!({ "Measured": { "chars": 0, "text": null } }),
+                "disabled",
+            )],
+        );
+        map.insert(
+            AgentName::Balthasar,
+            vec![attempt_with(
+                json!({ "Unsupported": { "backend": "ollama", "chars": 40_000, "text": null } }),
+                "disabled",
+            )],
+        );
+
+        let json = render_completions(&map);
+        assert_eq!(json["melchior"][0]["control"], "disabled");
+        assert_eq!(
+            json["melchior"][0]["reasoning"],
+            json!({ "Measured": { "chars": 0, "text": null } })
+        );
+        assert_eq!(json["balthasar"][0]["control"], "disabled");
+        assert_eq!(
+            json["balthasar"][0]["reasoning"],
+            json!({ "Unsupported": { "backend": "ollama", "chars": 40_000, "text": null } })
+        );
+        assert!(
+            json["balthasar"][0]["reasoning"].get("Measured").is_none(),
+            "an ignored switch must not read as a measurement under the control that was asked"
+        );
+    }
+
+    /// An `Unsupported` channel that could not be read keeps its count ABSENT (`null`), which
+    /// magi-core distinguishes from `Some(0)` on purpose (`provider.rs:465-478`).
+    #[test]
+    fn an_unreadable_unsupported_channel_keeps_its_count_absent() {
+        let map = seat(
+            AgentName::Caspar,
+            vec![attempt_with(
+                json!({ "Unsupported": { "backend": "anthropic", "chars": null, "text": null } }),
+                "disabled",
+            )],
+        );
+
+        let json = render_completions(&map);
+        let state = &json["caspar"][0]["reasoning"]["Unsupported"];
+        assert!(state["chars"].is_null(), "unreadable is not zero: {state}");
+        assert_eq!(state["backend"], "anthropic");
+    }
+
+    /// `control` is the kebab-case tag magi-core serializes, for every variant it defines —
+    /// derived, never a hand-written label that drifts.
+    #[test]
+    fn every_control_renders_as_the_kebab_case_tag_magi_core_serializes() {
+        for tag in ["default", "disabled", "enabled"] {
+            let map = seat(
+                AgentName::Melchior,
+                vec![attempt_with(json!("NotMeasured"), tag)],
+            );
+            assert_eq!(
+                render_completions(&map)["melchior"][0]["control"],
+                tag,
+                "{tag} renders wrong"
+            );
+        }
+    }
+
+    /// `backend` is a foreign string (spec §0): redacted at composition, and the name
+    /// survives. The surviving-name assertion is what makes this a guardian and not a no-leak
+    /// check an empty output would also pass.
+    ///
+    /// MUTATION (required): drop the redaction of `backend` and this goes red on the canary.
+    #[test]
+    fn a_credential_embedded_in_a_backend_name_is_redacted_without_losing_the_name() {
+        const CANARY: &str = "c4n4ry-s3cr3t";
+        let map = seat(
+            AgentName::Caspar,
+            vec![attempt_with(
+                json!({ "Unsupported": {
+                    "backend": format!("ollama via http://alice:{CANARY}@host:11434"),
+                    "chars": 7,
+                    "text": null,
+                } }),
+                "disabled",
+            )],
+        );
+
+        let json = render_completions(&map);
+        let rendered = json.to_string();
+        assert!(!rendered.contains(CANARY), "the backend leaked: {rendered}");
+        assert!(
+            json["caspar"][0]["reasoning"]["Unsupported"]["backend"]
+                .as_str()
+                .expect("a string")
+                .starts_with("ollama"),
+            "redaction must remove the credential, not the backend's name: {rendered}"
+        );
+    }
+
+    /// An ordinary backend name reaches the output byte-for-byte.
+    ///
+    /// **This is the test that catches `redact_url` in place of `redact_foreign_text`**:
+    /// `ollama` has no authority to find, so `redact_url` would return `***`.
+    /// MUTATION (required): swap the helper and this goes red while the canary test above
+    /// stays green — keep the pair together, as for `model`.
+    #[test]
+    fn an_ordinary_backend_name_reaches_the_output_unchanged() {
+        let map = seat(
+            AgentName::Balthasar,
+            vec![attempt_with(
+                json!({ "Unsupported": { "backend": "ollama", "chars": 3, "text": null } }),
+                "disabled",
+            )],
+        );
+        assert_eq!(
+            render_completions(&map)["balthasar"][0]["reasoning"]["Unsupported"]["backend"],
+            "ollama"
         );
     }
 
