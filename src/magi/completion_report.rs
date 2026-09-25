@@ -57,7 +57,7 @@ use std::collections::BTreeMap;
 
 use magi_core::provider::{FinishReason, ReasoningControl, ReasoningState};
 use magi_core::reporting::CompletionRecord;
-use magi_core::rotation::AgentRotation;
+use magi_core::rotation::{AgentRotation, RotationEvent, RotationKind};
 use magi_core::schema::AgentName;
 use serde_json::{json, Map, Value};
 
@@ -307,7 +307,10 @@ impl CutCause {
     /// Stable label for the log line: `"length"` or `"empty_content"`.
     #[must_use]
     pub fn label(self) -> &'static str {
-        ""
+        match self {
+            Self::Length => "length",
+            Self::EmptyContent => "empty_content",
+        }
     }
 }
 
@@ -342,8 +345,47 @@ pub fn cut_attempts<'a>(
     rotations: &BTreeMap<AgentName, AgentRotation>,
     failed_agents: &BTreeMap<AgentName, String>,
 ) -> Vec<CutAttempt<'a>> {
-    let _ = (completions, rotations, failed_agents);
-    Vec::new()
+    let mut cuts = Vec::new();
+    for (seat, records) in completions {
+        let hops: &[RotationEvent] = rotations
+            .get(seat)
+            .map_or(&[], |rotation| rotation.chain.as_slice());
+        let lost_empty = failed_agents
+            .get(seat)
+            .is_some_and(|cause| cause.contains(EMPTY_COMPLETION_MARKER));
+        // `run` is the 0-based index of the contiguous run of one model (magi-core never
+        // re-seats a model on the same seat, so each run maps to one hop, in order).
+        let mut run = 0usize;
+        for (index, record) in records.iter().enumerate() {
+            let next = records.get(index + 1);
+            let last_of_run = next.is_none_or(|n| n.model != record.model);
+            let final_run = next.is_none();
+            let cause = if matches!(record.finish, Some(FinishReason::Length)) {
+                Some(CutCause::Length)
+            } else if last_of_run
+                && (hops
+                    .get(run)
+                    .is_some_and(|hop| hop.kind() == RotationKind::EmptyCompletion)
+                    || (final_run && lost_empty))
+            {
+                Some(CutCause::EmptyContent)
+            } else {
+                None
+            };
+            if let Some(cause) = cause {
+                cuts.push(CutAttempt {
+                    seat: *seat,
+                    index,
+                    record,
+                    cause,
+                });
+            }
+            if last_of_run {
+                run += 1;
+            }
+        }
+    }
+    cuts
 }
 
 /// Unit tests for the completion telemetry composition.

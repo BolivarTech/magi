@@ -7,44 +7,63 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+use magi_core::provider::ReasoningState;
 use magi_core::reporting::{CompletionRecord, MagiReport};
 use magi_core::rotation::AgentRotation;
 use magi_core::schema::AgentName;
+use magi_rs::magi::completion_report::{cut_attempts, CutAttempt};
+use magi_rs::redact::{foreign_serde_label, redact_foreign_text};
+use tracing::Level;
+
+use crate::agent::Agent;
 
 /// Tracing target of the cut-attempt WARN line (REQ-EE-2).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CUT_ATTEMPT_TARGET: &str = "magi_rs::consult::cut_attempt";
 /// Tracing target of the reasoning-trace INFO lines (REQ-EE-4). Its own target so an operator
 /// can raise or silence the trace per REQ-L30/L31 without touching the WARN line.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const REASONING_TRACE_TARGET: &str = "magi_rs::consult::reasoning_trace";
 /// Characters kept at EACH end of a long trace (spec §0 named constants; OQ-4, user decision
 /// 2026-09-24). A trace of at most twice this length is written whole.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const TRACE_EXCERPT_CHARS: usize = 4096;
 
+/// What a count reads when the backend did not report it — never `0`, which would assert a
+/// measurement nobody took.
+const UNREPORTED: &str = "unreported";
+
 /// The cut attempts of one consult, ready to log (REQ-EE-2/-4).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CutAttemptLog<'a> {
     /// The cut attempts, in seat order then attempt order.
-    cuts: Vec<magi_rs::magi::completion_report::CutAttempt<'a>>,
+    cuts: Vec<CutAttempt<'a>>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl<'a> CutAttemptLog<'a> {
     /// Locates the cut attempts through [`magi_rs::magi::completion_report::cut_attempts`].
+    ///
+    /// # Arguments
+    /// * `completions` - magi-core's per-seat attempt records.
+    /// * `rotations` - magi-core's per-seat rotation telemetry.
+    /// * `failed_agents` - magi-core's per-seat failure causes.
+    ///
+    /// # Returns
+    /// The log, borrowing the records.
     #[must_use]
     pub(crate) fn from_parts(
         completions: &'a BTreeMap<AgentName, Vec<CompletionRecord>>,
         rotations: &BTreeMap<AgentName, AgentRotation>,
         failed_agents: &BTreeMap<AgentName, String>,
     ) -> Self {
-        let _ = (completions, rotations, failed_agents);
-        Self { cuts: Vec::new() }
+        Self {
+            cuts: cut_attempts(completions, rotations, failed_agents),
+        }
     }
 
     /// `from_parts` over the report's three maps — the form the three consult sites call.
-    #[allow(dead_code)]
+    ///
+    /// # Arguments
+    /// * `report` - the consult's report.
+    ///
+    /// # Returns
+    /// The log, borrowing the report's records.
     #[must_use]
     pub(crate) fn from_report(report: &'a MagiReport) -> Self {
         Self::from_parts(
@@ -54,26 +73,156 @@ impl<'a> CutAttemptLog<'a> {
         )
     }
 
-    /// The WARN texts, one per cut attempt, in order.
+    /// The WARN texts, one per cut attempt, in order. Exact format:
+    /// `cut attempt: seat=<seat> attempt=<index+1> model=<model> cause=<cause> cap=<cap>
+    ///  completion_tokens=<n|unreported> prompt_tokens=<n|unreported> reasoning=<state tag>
+    ///  reasoning_chars=<n|unreported> control=<control tag>` (one line, single spaces).
+    ///
+    /// `model` through `Agent::sanitize_text`, `redact_foreign_text` and [`line_safe`] (a
+    /// backend-reported model name with a newline or an escape must not forge a second log
+    /// line); the state tag is the variant name magi-core's serde writes
+    /// (`NotMeasured`/`Measured`/`Unsupported`); `reasoning_chars` is the state's `chars` when
+    /// present; `control` is magi-core's kebab tag. No trace text, ever.
+    ///
+    /// # Returns
+    /// One line per cut attempt. `O(cuts)`.
     #[must_use]
     pub(crate) fn lines(&self) -> Vec<String> {
-        let _ = &self.cuts;
-        Vec::new()
+        self.cuts.iter().map(cut_line).collect()
     }
 
-    /// Emits the WARN lines and, for cut attempts carrying a trace, the INFO trace lines.
-    pub(crate) fn emit(&self) {}
+    /// Emits one WARN event per line on [`CUT_ATTEMPT_TARGET`] and, for each cut attempt whose
+    /// record carries a trace, INFO events on [`REASONING_TRACE_TARGET`]: one with
+    /// `part=whole`, or two with `part=head` and `part=tail`, each
+    /// `reasoning trace: seat=<seat> attempt=<n> part=<part> text=<excerpt>`, the excerpt
+    /// written through [`line_safe`] so model text never spans or forges log lines.
+    ///
+    /// The trace is present only when magi-core captured it, which it does only with
+    /// `[magi] reasoning_trace = true`: the presence of the text IS the flag.
+    pub(crate) fn emit(&self) {
+        for (cut, line) in self.cuts.iter().zip(self.lines()) {
+            tracing::event!(target: CUT_ATTEMPT_TARGET, Level::WARN, "{line}");
+            let Some(trace) = trace_text(&cut.record.reasoning) else {
+                continue;
+            };
+            let seat = magi_rs::magi::seat_label(cut.seat);
+            let attempt = cut.index + 1;
+            let parts: Vec<(&str, String)> = match TraceExcerpt::from_trace(trace) {
+                TraceExcerpt::Whole(whole) => vec![("whole", whole)],
+                TraceExcerpt::HeadTail { head, tail } => vec![("head", head), ("tail", tail)],
+            };
+            for (part, text) in parts {
+                let text = line_safe(&text);
+                tracing::event!(
+                    target: REASONING_TRACE_TARGET,
+                    Level::INFO,
+                    "reasoning trace: seat={seat} attempt={attempt} part={part} text={text}"
+                );
+            }
+        }
+    }
 }
 
-/// Makes foreign text safe inside ONE log line.
-#[allow(dead_code)]
+/// Composes the WARN line of one cut attempt (see [`CutAttemptLog::lines`]).
+fn cut_line(cut: &CutAttempt<'_>) -> String {
+    let record = cut.record;
+    let model = Agent::sanitize_text(redact_foreign_text(&record.model).as_str());
+    let (state, chars) = reasoning_tag_and_chars(&record.reasoning);
+    let control = foreign_serde_label(&record.control, || format!("{:?}", record.control));
+    format!(
+        "cut attempt: seat={} attempt={} model={} cause={} cap={} completion_tokens={} \
+         prompt_tokens={} reasoning={} reasoning_chars={} control={}",
+        magi_rs::magi::seat_label(cut.seat),
+        cut.index + 1,
+        line_safe(&model),
+        cut.cause.label(),
+        record.cap,
+        count(record.completion_tokens.map(u64::from)),
+        count(record.prompt_tokens.map(u64::from)),
+        line_safe(&state),
+        count(chars.and_then(|c| u64::try_from(c).ok())),
+        line_safe(control.as_str()),
+    )
+}
+
+/// A reported count, or [`UNREPORTED`].
+fn count(value: Option<u64>) -> String {
+    value.map_or_else(|| UNREPORTED.to_string(), |n| n.to_string())
+}
+
+/// The variant tag magi-core's serde writes for `state`, and its `chars` when it has one.
+///
+/// A variant this crate does not know yet takes its tag from magi-core's own serde form (the
+/// single key of the serialized object), never from a label invented here.
+fn reasoning_tag_and_chars(state: &ReasoningState) -> (String, Option<usize>) {
+    match state {
+        ReasoningState::NotMeasured => ("NotMeasured".to_string(), None),
+        ReasoningState::Measured { chars, .. } => ("Measured".to_string(), Some(*chars)),
+        ReasoningState::Unsupported { chars, .. } => ("Unsupported".to_string(), *chars),
+        other => {
+            let tag = match serde_json::to_value(other) {
+                Ok(serde_json::Value::String(tag)) => tag,
+                Ok(serde_json::Value::Object(map)) => {
+                    map.keys().next().cloned().unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            let tag = redact_foreign_text(&Agent::sanitize_text(&tag));
+            (tag.as_str().to_string(), None)
+        }
+    }
+}
+
+/// The captured trace of `state`, borrowed, when magi-core captured one.
+fn trace_text(state: &ReasoningState) -> Option<&str> {
+    match state {
+        ReasoningState::Measured {
+            text: Some(text), ..
+        }
+        | ReasoningState::Unsupported {
+            text: Some(text), ..
+        } => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+/// Makes foreign text safe inside ONE log line: `\n`, `\r` and `\t` become the two-character
+/// escapes `\\n`, `\\r`, `\\t`, and the Unicode line terminators U+0085, U+2028 and U+2029
+/// become `\\u{85}`, `\\u{2028}`, `\\u{2029}` (viewers that honour them would otherwise start a
+/// new line); everything else is unchanged (the caller has already run `Agent::sanitize_text`,
+/// which drops every other control character). `O(n)`.
+///
+/// # Arguments
+/// * `text` - foreign text bound for one log line.
+///
+/// # Returns
+/// `text` borrowed when nothing needs escaping, otherwise an escaped copy.
 #[must_use]
 pub(crate) fn line_safe(text: &str) -> Cow<'_, str> {
-    Cow::Borrowed(text)
+    if !text.chars().any(needs_line_escape) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{85}' => out.push_str("\\u{85}"),
+            '\u{2028}' => out.push_str("\\u{2028}"),
+            '\u{2029}' => out.push_str("\\u{2029}"),
+            other => out.push(other),
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Whether [`line_safe`] must escape `c`.
+fn needs_line_escape(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\t' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
 /// What of a trace reaches the log (REQ-EE-4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TraceExcerpt {
     /// The masked trace fits in `2 * TRACE_EXCERPT_CHARS` characters.
@@ -87,26 +236,83 @@ pub(crate) enum TraceExcerpt {
     },
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl TraceExcerpt {
-    /// Masks the FULL trace, then slices it on character boundaries.
+    /// Masks the FULL trace, then slices it on character boundaries. Masking is
+    /// `Agent::sanitize_text` → `redact_foreign_text` → the process auditor (target
+    /// [`REASONING_TRACE_TARGET`]), all over the whole text, so a secret straddling a cut is
+    /// masked whole instead of split into fragments no matcher sees. Lengths are counted in
+    /// characters of the MASKED text. `O(n)` in the trace.
+    ///
+    /// # Arguments
+    /// * `raw` - the trace exactly as magi-core captured it: untrusted model text.
+    ///
+    /// # Returns
+    /// [`TraceExcerpt::Whole`] for at most `2 * TRACE_EXCERPT_CHARS` masked characters,
+    /// otherwise [`TraceExcerpt::HeadTail`].
     #[must_use]
     pub(crate) fn from_trace(raw: &str) -> Self {
-        let _ = raw;
-        Self::Whole(String::new())
+        let masked = mask_trace(raw);
+        let total = masked.chars().count();
+        if total <= 2 * TRACE_EXCERPT_CHARS {
+            return Self::Whole(masked);
+        }
+        Self::HeadTail {
+            head: masked.chars().take(TRACE_EXCERPT_CHARS).collect(),
+            tail: masked.chars().skip(total - TRACE_EXCERPT_CHARS).collect(),
+        }
     }
 }
 
+/// Runs every masking pass over the whole trace: control characters and escapes, URL
+/// credentials, then the process auditor (pattern pass and exact pass over registered secrets).
+///
+/// The auditor's alarm — the notice that a registered secret was masked — is emitted as a WARN
+/// event on [`REASONING_TRACE_TARGET`], never written to stderr: this runs inside the TUI too,
+/// where stderr would draw over the alternate screen.
+fn mask_trace(raw: &str) -> String {
+    let sanitized = Agent::sanitize_text(raw);
+    let redacted = redact_foreign_text(&sanitized);
+    let auditor = magi_rs::logging::process_auditor();
+    let (audited, alarm) = auditor.audit(
+        redacted.as_str(),
+        REASONING_TRACE_TARGET,
+        None,
+        redacted.as_str().len(),
+    );
+    let mut pending = alarm;
+    while let Some(raised) = pending {
+        let rendered = magi_rs::logging::auditor::render_alarm(&raised);
+        let (audited_alarm, next) =
+            auditor.audit(&rendered, REASONING_TRACE_TARGET, None, rendered.len());
+        let alarm_line = audited_alarm.as_str();
+        tracing::event!(target: REASONING_TRACE_TARGET, Level::WARN, "{alarm_line}");
+        pending = next;
+    }
+    audited.as_str().to_string()
+}
+
 /// Startup notice: `reasoning_trace = true` has no effect when the file filter excludes INFO
-/// for [`REASONING_TRACE_TARGET`] (REQ-EE-4).
-#[cfg_attr(not(test), allow(dead_code))]
+/// for [`REASONING_TRACE_TARGET`] (REQ-EE-4). `None` when the flag is off or INFO passes.
+/// A WARN notice, so it reaches the screen even when the file drops INFO.
+///
+/// # Arguments
+/// * `file_filter` - the file branch's filter.
+/// * `reasoning_trace` - the effective `[magi] reasoning_trace` flag.
+///
+/// # Returns
+/// The notice to collect, or `None`.
 #[must_use]
 pub(crate) fn reasoning_trace_filtered_notice(
     file_filter: &magi_rs::logging::filter::Filter,
     reasoning_trace: bool,
 ) -> Option<magi_rs::notices::Notice> {
-    let _ = (file_filter, reasoning_trace);
-    None
+    (reasoning_trace && file_filter.level_for(REASONING_TRACE_TARGET) < Level::INFO).then(|| {
+        magi_rs::notices::Notice::warn(format!(
+            "[magi] reasoning_trace = true has no effect: the log file filter drops INFO for \
+             {REASONING_TRACE_TARGET}, so no trace excerpt is written; admit it with \
+             {REASONING_TRACE_TARGET}=info"
+        ))
+    })
 }
 
 /// Unit tests for the cut-attempt log, the trace excerpt and the startup notice.

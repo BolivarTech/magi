@@ -1428,6 +1428,8 @@ impl Tool for ConsultTool {
                 }
             },
         };
+        // REQ-EE-2/-4: the cut attempts reach the daily log where the report arrives.
+        crate::cut_log::CutAttemptLog::from_report(&report).emit();
         // The annotation (REQ-A12c) is applied BEFORE truncating — `report_to_consult_json`
         // renders `truncated.text` verbatim, so the annotation step has to happen here, not
         // inside `truncate_report`, or the keyless-auth hint this file already surfaces end-to-

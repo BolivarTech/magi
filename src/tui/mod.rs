@@ -2256,6 +2256,9 @@ pub async fn run_tui_ext(
                     let join = tokio::spawn(async move { magi.analyze(&mode, &query).await }).await;
                     match join {
                         Ok(Ok(report)) => {
+                            // REQ-EE-2/-4: the cut attempts reach the daily log where the
+                            // report arrives.
+                            crate::cut_log::CutAttemptLog::from_report(&report).emit();
                             // REQ-A12c/SC-A12f (fix round 4, finding 2): routed through
                             // the SAME `annotate_report_text` `ConsultTool`/headless use.
                             // REQ-A11b/SC-A11d: bounds the reply the same way the other

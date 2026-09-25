@@ -1804,6 +1804,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                     &cfg.file_filter,
                     Some(magi_rs::logging::SCREEN_LEVEL),
                 ));
+                // REQ-EE-4: collected for the same reason as the notice above.
+                startup_notices.extend(cut_log::reasoning_trace_filtered_notice(
+                    &cfg.file_filter,
+                    magi_config.effective_reasoning_trace(),
+                ));
                 // Retention runs at startup, over what the previous runs left.
                 // Best effort throughout: a directory that cannot be read, or a
                 // delete that fails, is not worth failing a session over.
@@ -6273,6 +6278,15 @@ fn bring_up_headless_logging(
         magi_rs::logging::warn_if_recovery_detection_is_off(
             &cfg.file_filter,
             Some(magi_rs::logging::SCREEN_LEVEL),
+        );
+        // REQ-EE-4: a trace flag the file filter would silently discard is said at startup.
+        magi_rs::notices::emit_notices(
+            cut_log::reasoning_trace_filtered_notice(
+                &cfg.file_filter,
+                magi_config.effective_reasoning_trace(),
+            )
+            .into_iter()
+            .collect(),
         );
         // REQ-L63: on stderr as well as in the envelope, so a CI job can
         // capture it without parsing either the log or the JSON.
