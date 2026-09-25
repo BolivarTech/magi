@@ -1347,4 +1347,33 @@ mod tests {
             );
         }
     }
+
+    /// REQ-AUD-1: only a MAXIMAL run is exempt. When another matcher consumes a key-shaped
+    /// prefix and a product label follows it with no separator, the label is the tail of one
+    /// longer string, not a label standing on its own, so it is masked too (fail-closed).
+    ///
+    /// The `AKIA` matcher consumes exactly twenty characters, so the walker resumes on the first
+    /// character of the label while the character before it is still part of the same run. Only
+    /// the left-boundary check tells the two situations apart.
+    #[test]
+    fn a_label_glued_to_a_matched_key_is_not_exempted() {
+        const LABEL: &str = "window_unmeasured_under_strict_guard";
+        const AKIA_KEY: &str = "AKIAABCDEFGHIJKLMNOP";
+        assert!(
+            PRODUCT_LABELS.contains(&LABEL),
+            "the trailing text must be a real product label, or the exemption is never consulted"
+        );
+        assert_eq!(
+            AKIA_KEY.chars().count(),
+            AKIA_KEY_PREFIX.len() + AKIA_KEY_BODY_LEN,
+            "the key must be exactly what the AKIA matcher consumes"
+        );
+
+        let glued = format!("{AKIA_KEY}{LABEL}");
+        assert_eq!(
+            redact_secret_patterns(&glued),
+            format!("{REDACTED_PLACEHOLDER}{REDACTED_PLACEHOLDER}"),
+            "the label glued to a matched key was exempted: {glued:?}"
+        );
+    }
 }
