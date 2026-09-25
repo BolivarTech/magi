@@ -2409,6 +2409,46 @@ mod tests {
         assert!(hint.contains("provider=\"anthropic\""));
     }
 
+    /// A connection failure against a `base_url` that carries a vault-resolved
+    /// credential (REQ-A16c) renders the endpoint with its `userinfo` redacted.
+    ///
+    /// Driven through the real provider on a refused connection rather than by
+    /// calling [`connection_error_hint`] with a literal: the property is what
+    /// the error a consumer receives says, and that error is composed by
+    /// `stream_messages` out of the hint and the transport's own error. The
+    /// whole `anyhow` chain (`{:#}`) is inspected, so a credential re-entering
+    /// through any layer turns this red, not only through the outer context.
+    #[tokio::test]
+    async fn a_connection_failure_never_renders_the_base_url_credential() {
+        // Bind then drop, so the port is known to be closed: the connection is
+        // refused locally, with no DNS lookup and no remote host involved.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("local address").port();
+        drop(listener);
+        let provider = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: format!("http://alice:s3cr3t-pass@127.0.0.1:{port}/v1"),
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+
+        let Err(err) = provider
+            .stream_messages(&[Message::user("hi")], &[], None)
+            .await
+        else {
+            panic!("a refused connection must surface as an error");
+        };
+        let rendered = format!("{err:#}");
+
+        assert!(
+            !rendered.contains("alice") && !rendered.contains("s3cr3t-pass"),
+            "the connection error rendered the base_url credential: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("***@127.0.0.1:{port}")),
+            "the redacted endpoint must still name its host: {rendered}"
+        );
+    }
+
     // ─── is_retryable_error predicate ────────────────────────────────────────
 
     /// `is_retryable_error` must return `true` for a rate-limit (429) message

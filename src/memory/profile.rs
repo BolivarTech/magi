@@ -858,6 +858,103 @@ mod tests {
         );
     }
 
+    /// Collects the rendered `message` of every event emitted while installed.
+    ///
+    /// The distiller's error arms must reach the operator through `tracing`,
+    /// because only that path runs the process auditor (exact registered
+    /// secrets, `sk-`/`Bearer`, generic runs, URL `userinfo`) and routes
+    /// screen-level events through the TUI's sink instead of raw stderr.
+    struct MessageCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            /// Pulls the `message` field off one event.
+            #[derive(Default)]
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut message = Message::default();
+            event.record(&mut message);
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(message.0);
+            }
+        }
+    }
+
+    /// A judge failure during distillation is reported as a `tracing` event
+    /// carrying the error, never written to raw stderr.
+    ///
+    /// The judge's error text is foreign: in production it is the provider's
+    /// `anyhow` chain, which may carry an endpoint's echoed `Authorization`
+    /// header. On the event path the process auditor masks it; on raw stderr
+    /// nothing does, and with the TUI up the write also lands on the frame.
+    #[tokio::test]
+    async fn a_judge_failure_during_distillation_is_reported_through_tracing() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(MessageCapture(Arc::clone(&seen)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (_tmp, store) = make_test_store();
+        let emb = FakeEmbedder {
+            dim: 8,
+            model: "fake".into(),
+        };
+        let clock = FixedClock::new(1_000);
+        let cfg = MemoryConfig {
+            distill_enabled: true,
+            ..MemoryConfig::default()
+        };
+        insert_episodic(&store, "e1", "some text", vec![], "", 0, 1_000).await;
+        let (spy, _, _) = make_spy(vec![], true /* fail_summarize */, false, false);
+
+        distill(&store, &spy, &emb, &clock, &cfg, "root")
+            .await
+            .expect("a judge failure is non-fatal");
+
+        let messages = seen.lock().map(|s| s.clone()).unwrap_or_default();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("spy: summarize_preferences forced error")),
+            "the judge failure must be emitted as a tracing event; saw {messages:?}"
+        );
+    }
+
+    /// No error arm of the distiller writes raw stderr.
+    ///
+    /// Complements the capture test above, which exercises one arm: the four
+    /// arms (`summarize_preferences`, `promote_to_profile`, `contradicts`,
+    /// `set_superseded`) all carry foreign or storage error text, and a single
+    /// arm reverting to `eprintln!` would bypass the auditor again. The source
+    /// is read with `\r` stripped and the needle escaped, so the check behaves
+    /// the same on a CRLF and an LF checkout.
+    #[test]
+    fn the_distiller_production_code_never_writes_raw_stderr() {
+        let source = include_str!("profile.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("profile.rs has a test module");
+        assert!(
+            !production.contains("eprintln!") && !production.contains("eprint!"),
+            "profile.rs production code writes raw stderr, bypassing the process auditor"
+        );
+    }
+
     // ── CP2-AB ────────────────────────────────────────────────────────────────
 
     /// CP2-AB: when `distill_enabled = false`, `distill` is a no-op and the
