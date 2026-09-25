@@ -1225,7 +1225,8 @@ mod tests {
                 label
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c == '_' || c == '-'),
-                "{label:?} is not a lowercase identifier: a digit, an uppercase letter or one of                  + / = would let a hex- or base64-shaped string be exempted"
+                "{label:?} is not a lowercase identifier: a digit, an uppercase letter or one of \
+                 + / = would let a hex- or base64-shaped string be exempted"
             );
         }
     }
