@@ -66,6 +66,77 @@ const BEARER_KEYWORD: &str = "Bearer";
 /// (REQ-H15c, defense in depth).
 const GENERIC_SECRET_RUN_MIN_LEN: usize = 32;
 
+/// The product's own serialized labels: the closed vocabulary the generic run matcher never
+/// claims (REQ-AUD-1).
+///
+/// # What it is
+///
+/// Every label magi-rs serializes into its output from magi-core's enums, exactly as magi-core's
+/// own serde spells it under the `magi-core = "=4.2.0"` pin: the eight `IneligibilityCause`
+/// tags (`pool_eligibility[..].causes`), the seven `RotationKind` tags (`rotations[..]`), the
+/// three named `FinishReason` values and the three `ReasoningControl` tags (`completions[..]`).
+/// Only `window_unmeasured_under_strict_guard` (36 characters) is long enough to reach the
+/// matcher's [`GENERIC_SECRET_RUN_MIN_LEN`] today; the rest are listed so the set IS the
+/// vocabulary, which is what the derivation guard compares against.
+///
+/// # Why it lives here, and what it therefore reaches
+///
+/// The exemption is applied inside [`secret_pattern_ranges`], the one shared definition of the
+/// pattern walk. Every sink that uses it gets the exemption: the headless JSON envelope on
+/// stdout, the daily log and the lines that reach the screen (all through the logging
+/// auditor's pattern pass), and [`redact_secret_patterns`]. The auditor's EXACT pass is
+/// untouched: a registered secret equal to a label is still masked.
+///
+/// # Why the comparison is exact
+///
+/// A rule by character class ("a run of lowercase letters and separators is an identifier")
+/// would also exempt a diceware passphrase the vault accepts (`check_strength` imposes no
+/// composition rules), which is the leak premortem risk R7 names (correction C-4). So a run is
+/// exempted only when its whole text is, case-sensitively, one of these entries.
+///
+/// # Fail-closed for labels magi-rs does not know
+///
+/// A new upstream label (a variant added after the pin, or anything reaching the output through
+/// `FinishReason::Other`) is not in this list, so it stays masked when it is secret-shaped. The
+/// failure mode is over-masking, visible at the next pin bump, never a leak.
+///
+/// # How it is verified
+///
+/// The list is written out as a constant (no runtime construction of magi-core values in
+/// production) and checked BY DERIVATION: the test
+/// `the_product_label_exemption_is_exactly_the_serialized_vocabulary` serializes every variant
+/// through magi-core's serde and asserts set equality, and
+/// `every_exempted_product_label_is_a_lowercase_identifier` asserts no entry can look like hex
+/// or base64. Re-verify on every magi-core pin bump: a renamed or added label turns the first
+/// guard red.
+const PRODUCT_LABELS: &[&str] = &[
+    // IneligibilityCause (magi-core `rotation.rs`, `snake_case`).
+    "rotation_budget_exhausted",
+    "lineage_held_by_another_mage",
+    "lineage_failed_for_this_mage",
+    "lineage_condemned_run_wide",
+    "model_already_used_by_this_mage",
+    "digest_collision",
+    "window_below_coarse_estimate",
+    "window_unmeasured_under_strict_guard",
+    // RotationKind (magi-core `rotation.rs`, `snake_case`).
+    "transport",
+    "timeout",
+    "schema",
+    "oversized_response",
+    "external_failure",
+    "empty_completion",
+    "response_contract",
+    // FinishReason, named variants only (magi-core `provider.rs`; `Other` is the fallback arm).
+    "stop",
+    "length",
+    "load",
+    // ReasoningControl (magi-core `provider.rs`, `kebab-case`).
+    "default",
+    "disabled",
+    "enabled",
+];
+
 /// Length in characters of an HTTP status code (`"401"`, `"500"`, …).
 const HTTP_STATUS_TOKEN_LEN: usize = 3;
 
@@ -425,14 +496,40 @@ fn match_akia_key(chars: &[char], i: usize) -> Option<usize> {
     (run_len == AKIA_KEY_BODY_LEN).then_some(consumed + run_len)
 }
 
+/// What the pattern walk of [`secret_pattern_ranges`] found at a position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternMatch {
+    /// A match to claim as a possible secret, of this many characters.
+    Secret(usize),
+    /// A run whose whole text is one of [`PRODUCT_LABELS`], of this many characters: consumed
+    /// without being claimed.
+    ProductLabel(usize),
+}
+
 /// Attempts to match a generic hex/base64-like run starting at `chars[i]`, of at least
 /// [`GENERIC_SECRET_RUN_MIN_LEN`] characters.
-fn match_generic_secret_run(chars: &[char], i: usize) -> Option<usize> {
+fn match_generic_secret_run(chars: &[char], i: usize) -> Option<PatternMatch> {
     let mut run_len = 0usize;
     while matches!(chars.get(i + run_len), Some(c) if is_generic_secret_char(*c)) {
         run_len += 1;
     }
-    (run_len >= GENERIC_SECRET_RUN_MIN_LEN).then_some(run_len)
+    if run_len < GENERIC_SECRET_RUN_MIN_LEN {
+        return None;
+    }
+    let starts_the_run = i
+        .checked_sub(1)
+        .and_then(|prev| chars.get(prev))
+        .is_none_or(|c| !is_generic_secret_char(*c));
+    let run = chars.get(i..i + run_len).unwrap_or_default();
+    let is_label = starts_the_run
+        && PRODUCT_LABELS
+            .iter()
+            .any(|label| label.chars().eq(run.iter().copied()));
+    Some(if is_label {
+        PatternMatch::ProductLabel(run_len)
+    } else {
+        PatternMatch::Secret(run_len)
+    })
 }
 
 /// Walks through `raw` in a single pass and redacts any known key-like pattern (`Bearer …`,
@@ -457,7 +554,10 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<usize> {
 /// deriving a threshold from input length) regresses a test, not just a doc comment.
 ///
 /// On a successful match the cursor also jumps over the full match length (`i += consumed`),
-/// so a found secret is not re-scanned either.
+/// so a found secret is not re-scanned either. A run exempted as one of the product's own
+/// labels ([`PRODUCT_LABELS`], REQ-AUD-1) is consumed the same way, in one step, without being
+/// claimed; checking it compares the run against a fixed, constant-size list whose entries are
+/// at most 36 characters, so it adds `O(1)` per claimed-length run and the pass stays `O(n)`.
 ///
 /// Because the bound is `O(n)` regardless of content, this function is safe to run over input
 /// that is **not** small diagnostic text too: `headless::log` reuses it (below, via `pub`) for
@@ -502,9 +602,15 @@ pub fn redact_secret_patterns(raw: &str) -> String {
 /// Ranges are non-overlapping and in ascending order, because the walk consumes
 /// each match before continuing.
 ///
+/// A maximal generic run whose whole text is, case-sensitively, one of [`PRODUCT_LABELS`]
+/// produces no range and is consumed whole, so no suffix of it is examined again (REQ-AUD-1).
+/// Every sink built on this function inherits that exemption.
+///
 /// # Complexity
 ///
-/// `O(n)` over the characters, plus `O(n)` to build the offset table.
+/// `O(n)` over the characters, plus `O(n)` to build the offset table. The label exemption
+/// adds a comparison against a constant-size list, only for runs already long enough to be
+/// claimed, and the run is then consumed, so the bound is unchanged.
 #[must_use]
 pub fn secret_pattern_ranges(raw: &str) -> Vec<std::ops::Range<usize>> {
     let chars: Vec<char> = raw.chars().collect();
@@ -522,19 +628,23 @@ pub fn secret_pattern_ranges(raw: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < chars.len() {
-        if let Some(consumed) = match_bearer_token(&chars, i)
+        let found = match_bearer_token(&chars, i)
             .or_else(|| match_sk_key(&chars, i))
             .or_else(|| match_akia_key(&chars, i))
-            .or_else(|| match_generic_secret_run(&chars, i))
-        {
-            let end = i.saturating_add(consumed).min(chars.len());
-            if let (Some(&from), Some(&to)) = (offsets.get(i), offsets.get(end)) {
-                out.push(from..to);
+            .map(PatternMatch::Secret)
+            .or_else(|| match_generic_secret_run(&chars, i));
+        match found {
+            Some(PatternMatch::Secret(consumed)) => {
+                let end = i.saturating_add(consumed).min(chars.len());
+                if let (Some(&from), Some(&to)) = (offsets.get(i), offsets.get(end)) {
+                    out.push(from..to);
+                }
+                i = i.saturating_add(consumed);
             }
-            i = i.saturating_add(consumed);
-            continue;
+            // Consumed whole, so no suffix of the label is examined again.
+            Some(PatternMatch::ProductLabel(consumed)) => i = i.saturating_add(consumed),
+            None => i += 1,
         }
-        i += 1;
     }
     out
 }
@@ -1052,6 +1162,132 @@ mod tests {
              near-miss-run pattern; this is the signal of a regression to quadratic \
              behavior, not ordinary CI slowness"
         );
+    }
+
+    /// REQ-AUD-1, guard (a) (MAGI loop 2): the exemption list is exactly the product's serialized
+    /// vocabulary — nothing typed by hand can enter it, and no known label can be forgotten.
+    ///
+    /// The right-hand side comes from magi-core's own serde over typed variants, so a passphrase, a
+    /// key or a guessed label added to the list turns this red, and so does a known label left out.
+    #[test]
+    fn the_product_label_exemption_is_exactly_the_serialized_vocabulary() {
+        let listed: std::collections::BTreeSet<String> = PRODUCT_LABELS
+            .iter()
+            .map(|label| (*label).to_string())
+            .collect();
+
+        assert_eq!(
+            listed.len(),
+            PRODUCT_LABELS.len(),
+            "a label is listed twice: {PRODUCT_LABELS:?}"
+        );
+        assert_eq!(
+            listed,
+            derived_product_labels(),
+            "the exemption list drifted from what the product serializes"
+        );
+    }
+
+    /// REQ-AUD-1, guard (b) (MAGI loop 2): every exempted entry is a lowercase identifier — letters and
+    /// separators only, no digit, no uppercase, none of `+ / =` — so no hex- or base64-shaped string can
+    /// ever be exempted, whatever else changes.
+    #[test]
+    fn every_exempted_product_label_is_a_lowercase_identifier() {
+        assert!(
+            !PRODUCT_LABELS.is_empty(),
+            "an empty vocabulary exempts nothing and makes this guard vacuous"
+        );
+        for label in PRODUCT_LABELS {
+            assert!(
+                label.chars().any(|c| c.is_ascii_lowercase()),
+                "{label:?} carries no letter"
+            );
+            assert!(
+                label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c == '-'),
+                "{label:?} is not a lowercase identifier: a digit, an uppercase letter or one of                  + / = would let a hex- or base64-shaped string be exempted"
+            );
+        }
+    }
+
+    /// The labels the product serializes, DERIVED through magi-core's own serde — never typed.
+    ///
+    /// Serializes the six unit `IneligibilityCause` variants by name; the two struct variants
+    /// cannot be built from outside (`#[non_exhaustive]`), so each is DESERIALIZED from a
+    /// minimal magi-core-shaped object and RE-SERIALIZED, and the single key of the result is
+    /// the label (a rename upstream fails the deserialization, loudly). Then all seven
+    /// `RotationKind` variants, `FinishReason::{Stop, Length, Load}` (never `Other`, the
+    /// fallback arm) and the three `ReasoningControl` variants. No string literal stands for a
+    /// unit variant's label.
+    ///
+    /// # Panics
+    ///
+    /// When a value fails to serialize or a struct-variant fixture no longer matches
+    /// magi-core's shape; the message names the type.
+    fn derived_product_labels() -> std::collections::BTreeSet<String> {
+        use magi_core::provider::{FinishReason, ReasoningControl};
+        use magi_core::rotation::{IneligibilityCause, RotationKind};
+
+        fn label_of<T: serde::Serialize>(value: &T, type_name: &str) -> String {
+            match serde_json::to_value(value)
+                .unwrap_or_else(|e| panic!("{type_name} must serialize: {e}"))
+            {
+                serde_json::Value::String(label) => label,
+                serde_json::Value::Object(map) if map.len() == 1 => map
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{type_name} serialized to an empty object")),
+                other => panic!("{type_name} serialized to an unexpected shape: {other}"),
+            }
+        }
+
+        let mut labels = std::collections::BTreeSet::new();
+        for cause in [
+            IneligibilityCause::LineageHeldByAnotherMage,
+            IneligibilityCause::LineageFailedForThisMage,
+            IneligibilityCause::LineageCondemnedRunWide,
+            IneligibilityCause::ModelAlreadyUsedByThisMage,
+            IneligibilityCause::DigestCollision,
+            IneligibilityCause::WindowUnmeasuredUnderStrictGuard,
+        ] {
+            labels.insert(label_of(&cause, "IneligibilityCause"));
+        }
+        for fixture in [
+            serde_json::json!({
+                "rotation_budget_exhausted": { "rotations_done": 0, "max_rotations": 0 }
+            }),
+            serde_json::json!({
+                "window_below_coarse_estimate": { "measured_window": 1, "estimated_need": 2 }
+            }),
+        ] {
+            let cause: IneligibilityCause = serde_json::from_value(fixture)
+                .expect("the IneligibilityCause struct-variant fixture must match magi-core");
+            labels.insert(label_of(&cause, "IneligibilityCause"));
+        }
+        for kind in [
+            RotationKind::Transport,
+            RotationKind::Timeout,
+            RotationKind::Schema,
+            RotationKind::OversizedResponse,
+            RotationKind::ExternalFailure,
+            RotationKind::EmptyCompletion,
+            RotationKind::ResponseContract,
+        ] {
+            labels.insert(label_of(&kind, "RotationKind"));
+        }
+        for finish in [FinishReason::Stop, FinishReason::Length, FinishReason::Load] {
+            labels.insert(label_of(&finish, "FinishReason"));
+        }
+        for control in [
+            ReasoningControl::Default,
+            ReasoningControl::Disabled,
+            ReasoningControl::Enabled,
+        ] {
+            labels.insert(label_of(&control, "ReasoningControl"));
+        }
+        labels
     }
 
     /// REQ-AUD-1: the exemption is an EXACT match on the whole run. The label alone, and the label
