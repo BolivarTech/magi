@@ -3,6 +3,38 @@
 // Date: 2026-09-24
 
 //! Cut-attempt log and bounded reasoning trace (REQ-EE-2, REQ-EE-4).
+//!
+//! # What is logged, and at which level
+//!
+//! Every consult surface (the `consult` tool, headless `magi consult`, the TUI's `/consult`)
+//! hands its report to [`CutAttemptLog`] where the report arrives. For each attempt the shared
+//! predicate ([`magi_rs::magi::completion_report::cut_attempts`]) calls cut — a `length`
+//! finish, or the attempt located as the one that came back empty — the daily log gets one
+//! WARN line on [`CUT_ATTEMPT_TARGET`]. That line carries counts and states only: seat, the
+//! redacted model, the cap, the reported token counts, the reasoning state and its character
+//! count, and the control the attempt was sent with. A seat that burned its budget is worth
+//! reading before the next run, which is why it is a WARN. No model text is ever part of it,
+//! and no token figure is derived from a character count.
+//!
+//! # Why the trace never reaches the screen
+//!
+//! With `[magi] reasoning_trace = true`, magi-core keeps the reasoning trace of each attempt,
+//! and for cut attempts only this module writes a bounded head and tail of it
+//! ([`TRACE_EXCERPT_CHARS`] characters each) on [`REASONING_TRACE_TARGET`] at INFO. INFO is
+//! deliberate: WARN and above also reach the screen (REQ-L19), and the trace is untrusted
+//! model text that must stay out of the terminal, stderr and the consult envelope. It is
+//! masked over the WHOLE text before it is cut — control characters, URL credentials, and the
+//! process auditor's pattern and exact passes — so a secret straddling the cut is masked
+//! whole instead of shipping as two fragments no matcher recognises. When the log's file
+//! filter would discard INFO for the trace target, [`reasoning_trace_filtered_notice`] says so
+//! at startup.
+//!
+//! # The residual, stated
+//!
+//! A credential magi-rs never registered and shorter than the 32-character pattern matcher —
+//! for example one pasted into the prompt — that the model repeats inside a cut attempt's
+//! trace reaches the local log file unmasked. This was accepted on 2026-09-24: the trace is
+//! opt-in, off by default, written only for cut attempts and only to the local file.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
