@@ -868,6 +868,50 @@ mod tests {
         assert!(alarm.is_some(), "an exact live-secret match must alarm");
     }
 
+    /// A short `Basic` credential echoed by an endpoint is masked by shape.
+    ///
+    /// reqwest turns a `base_url`'s `userinfo` into `Authorization: Basic
+    /// base64(user:password)`; an endpoint that echoes that header in an error
+    /// body puts it in a consult's `failed_agents`, the transcript and the log.
+    /// `al:pw12345` encodes to 16 characters, under the generic run threshold,
+    /// and no exact value is registered here: only a `Basic` pattern catches it.
+    #[test]
+    fn a_short_echoed_basic_credential_is_masked_by_the_pattern_pass() {
+        let auditor = Auditor::new();
+        let (audited, _) = auditor.audit(
+            "HTTP 401: {\"echo\":\"Authorization: Basic YWw6cHcxMjM0NQ==\"}",
+            "magi_rs::logging",
+            None,
+            0,
+        );
+        assert!(
+            !audited.as_str().contains("YWw6cHcxMjM0NQ=="),
+            "the Basic credential survived the audit: {}",
+            audited.as_str()
+        );
+        assert!(
+            audited.as_str().contains("HTTP 401"),
+            "the rest of the line stays readable: {}",
+            audited.as_str()
+        );
+    }
+
+    /// The `Basic` pattern claims a credential, not the English word.
+    ///
+    /// A `Basic` credential is `base64(user-id ":" password)` (RFC 7617), so a
+    /// token that does not decode to bytes containing `:` is not one. Prose
+    /// like "Basic idea" (whose second word happens to be valid base64) and
+    /// "Basic setup" must survive: the transcript carries model output, and
+    /// over-masking ordinary words there is a visible regression.
+    #[test]
+    fn the_word_basic_in_prose_is_not_masked() {
+        let auditor = Auditor::new();
+        for prose in ["Basic idea: keep it small", "Basic setup is done"] {
+            let (audited, _) = auditor.audit(prose, "magi_rs::logging", None, 0);
+            assert_eq!(audited.as_str(), prose, "prose was masked");
+        }
+    }
+
     #[test]
     fn the_auditor_never_materialises_a_secret_in_the_clear() {
         let auditor = Auditor::new();

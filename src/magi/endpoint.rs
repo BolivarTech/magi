@@ -435,6 +435,47 @@ mod tests {
         );
     }
 
+    /// Resolving a credential registers the `Basic` header form reqwest sends,
+    /// so the exact pass masks it wherever it appears, prefix or not.
+    ///
+    /// reqwest extracts the `userinfo`, percent-decodes it and sends
+    /// `Authorization: Basic base64("user:password")` (standard alphabet,
+    /// padded). An endpoint echoing that value — with or without the `Basic`
+    /// keyword — must not reach a sink. `al:pw123456` encodes to 16
+    /// characters, below the generic run threshold, so only an exact
+    /// registration covers the bare form. The raw password (8 bytes, exactly
+    /// `MIN_SECRET_BYTES`) is asserted alongside, as the registration this one
+    /// joins.
+    #[test]
+    fn resolving_registers_the_basic_header_form_of_the_credential() {
+        let mut vault =
+            StubVault::with(&[("BASE_URL_USER", "al"), ("BASE_URL_PASSWORD", "pw123456")]);
+        EndpointTemplate::parse("https://[user]:[password]@host/v1", Scope::Root)
+            .expect("parse")
+            .resolve(&mut vault, Scope::Root)
+            .expect("resolve");
+
+        let (audited, _) = crate::logging::process_auditor().audit(
+            "upstream said: YWw6cHcxMjM0NTY= / pw123456",
+            "magi_rs::logging",
+            None,
+            0,
+        );
+        let shown = audited.as_str();
+        assert!(
+            !shown.contains("YWw6cHcxMjM0NTY="),
+            "the Basic form of the resolved credential survived the exact pass: {shown}"
+        );
+        assert!(
+            !shown.contains("pw123456"),
+            "the raw password survived the exact pass: {shown}"
+        );
+        assert!(
+            shown.contains("upstream said"),
+            "the rest of the line stays readable: {shown}"
+        );
+    }
+
     /// SC-A16d: LITERAL credential is an error, and the message does not repeat it.
     #[test]
     fn a_literal_credential_is_a_config_error_that_does_not_echo_it() {

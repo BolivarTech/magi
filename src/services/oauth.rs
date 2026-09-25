@@ -321,6 +321,70 @@ mod tests {
         assert_eq!(token, "mock_access_token");
     }
 
+    /// A failed token exchange whose body echoes the authorization `code` and
+    /// the PKCE `verifier` never carries either into the error text.
+    ///
+    /// The error reaches the transcript, where the pattern pass masks only runs
+    /// of 32 characters or more; a `code` is as long as the server makes it, so
+    /// a 20-character one would pass through. The values are known at the
+    /// composition point, so they are masked there, whatever their length.
+    #[tokio::test]
+    async fn a_failed_token_exchange_never_echoes_the_code_or_the_verifier() {
+        const SHORT_CODE: &str = "c0de-0123456789abcde";
+        let mut server = mockito::Server::new_async().await;
+        let service = OAuthService::with_urls(format!("{}/token", server.url()), String::new());
+        let verifier = service.pkce.verifier.clone();
+        let _m = server
+            .mock("POST", "/token")
+            .with_status(400)
+            .with_body(format!(
+                "invalid_grant: code={SHORT_CODE} verifier={verifier}"
+            ))
+            .create_async()
+            .await;
+
+        let err = service
+            .exchange_code_for_token(SHORT_CODE)
+            .await
+            .expect_err("a 400 must fail the exchange");
+        let text = format!("{err:#}");
+
+        assert!(!text.contains(SHORT_CODE), "the code was echoed: {text}");
+        assert!(!text.contains(&verifier), "the verifier was echoed: {text}");
+        assert!(
+            text.contains("Token exchange failed") && text.contains("invalid_grant"),
+            "the server's reason stays readable: {text}"
+        );
+    }
+
+    /// A failed key mint whose body echoes the OAuth access token never
+    /// carries it into the error text, for the same reason as the code above.
+    #[tokio::test]
+    async fn a_failed_key_mint_never_echoes_the_access_token() {
+        const SHORT_TOKEN: &str = "tok-0123456789abcdef";
+        let mut server = mockito::Server::new_async().await;
+        let service =
+            OAuthService::with_urls(String::new(), format!("{}/create_key", server.url()));
+        let _m = server
+            .mock("POST", "/create_key")
+            .with_status(403)
+            .with_body(format!("forbidden for token {SHORT_TOKEN}"))
+            .create_async()
+            .await;
+
+        let err = service
+            .create_raw_api_key(SHORT_TOKEN)
+            .await
+            .expect_err("a 403 must fail the mint");
+        let text = format!("{err:#}");
+
+        assert!(!text.contains(SHORT_TOKEN), "the token was echoed: {text}");
+        assert!(
+            text.contains("Failed to create API key") && text.contains("forbidden"),
+            "the server's reason stays readable: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn test_api_key_creation() {
         let mut server = mockito::Server::new_async().await;
