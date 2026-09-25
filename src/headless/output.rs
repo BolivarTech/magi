@@ -64,6 +64,10 @@ const BEARER_KEYWORD: &str = "Bearer";
 
 /// Minimum length of a hex/base64-like character run to consider it a possible generic secret
 /// (REQ-H15c, defense in depth).
+///
+/// Every run at or over this length is claimed, except a run whose whole text is exactly one
+/// of the product's own labels ([`PRODUCT_LABELS`], REQ-AUD-1). The threshold itself is not
+/// relaxed for anything.
 const GENERIC_SECRET_RUN_MIN_LEN: usize = 32;
 
 /// The product's own serialized labels: the closed vocabulary the generic run matcher never
@@ -508,6 +512,21 @@ enum PatternMatch {
 
 /// Attempts to match a generic hex/base64-like run starting at `chars[i]`, of at least
 /// [`GENERIC_SECRET_RUN_MIN_LEN`] characters.
+///
+/// # Returns
+///
+/// - `None` when the run starting at `i` is shorter than the threshold.
+/// - [`PatternMatch::ProductLabel`] with the run's length when the run is MAXIMAL (the
+///   character before `i`, if any, is not a run character, so the run is not the tail of a
+///   longer one another matcher consumed) and its whole text equals, case-sensitively, an entry
+///   of [`PRODUCT_LABELS`]. The caller consumes it whole without claiming it (REQ-AUD-1).
+/// - [`PatternMatch::Secret`] with the run's length otherwise: a run that merely contains,
+///   starts with or resembles a label is still claimed whole (fail-closed).
+///
+/// # Complexity
+///
+/// `O(r)` for a run of `r` characters, plus, for a run long enough to be claimed, a comparison
+/// against the constant-size [`PRODUCT_LABELS`] that stops at the first differing character.
 fn match_generic_secret_run(chars: &[char], i: usize) -> Option<PatternMatch> {
     let mut run_len = 0usize;
     while matches!(chars.get(i + run_len), Some(c) if is_generic_secret_char(*c)) {
@@ -555,7 +574,7 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<PatternMatch> {
 ///
 /// On a successful match the cursor also jumps over the full match length (`i += consumed`),
 /// so a found secret is not re-scanned either. A run exempted as one of the product's own
-/// labels ([`PRODUCT_LABELS`], REQ-AUD-1) is consumed the same way, in one step, without being
+/// labels (the private `PRODUCT_LABELS`, REQ-AUD-1) is consumed the same way, in one step, without being
 /// claimed; checking it compares the run against a fixed, constant-size list whose entries are
 /// at most 36 characters, so it adds `O(1)` per claimed-length run and the pass stays `O(n)`.
 ///
@@ -602,7 +621,7 @@ pub fn redact_secret_patterns(raw: &str) -> String {
 /// Ranges are non-overlapping and in ascending order, because the walk consumes
 /// each match before continuing.
 ///
-/// A maximal generic run whose whole text is, case-sensitively, one of [`PRODUCT_LABELS`]
+/// A maximal generic run whose whole text is, case-sensitively, one of `PRODUCT_LABELS`
 /// produces no range and is consumed whole, so no suffix of it is examined again (REQ-AUD-1).
 /// Every sink built on this function inherits that exemption.
 ///
