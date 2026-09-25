@@ -11606,8 +11606,9 @@ mod tests {
     /// report.
     mod trio_construction {
         use super::*;
-        use magi_core::error::ExternalErrorKind;
+        use magi_core::error::{ExternalErrorKind, MagiError};
         use magi_core::provider::{CompletionConfig, ReasoningState};
+        use magi_core::reporting::MagiReport;
         use magi_core::test_support::valid_verdict_for_current_agent;
         use std::time::Instant;
 
@@ -12731,6 +12732,358 @@ mod tests {
                  model   = \"rescue-model\"\nlineage = \"lin-rescue\"\n"
             ))
             .expect("the rotation config must parse")
+        }
+
+        // -----------------------------------------------------------------------
+        // Task 8 (REQ-V42-5 / S-11 / U-3) — `## Completions` inside the region truncation
+        // preserves, and the worst-case size of that section.
+        // -----------------------------------------------------------------------
+
+        /// A native `/api/chat` 200 body: `message.content = content`, `done_reason`,
+        /// `eval_count`, `prompt_eval_count = 1_200`, and `message.thinking` of exactly
+        /// `thinking_chars` characters (the key omitted when 0). The E-E cut is
+        /// `native_body("", "length", DECLARED_COMPLETION_CAP, n)`.
+        fn native_body(
+            content: &str,
+            done_reason: &str,
+            eval_count: u32,
+            thinking_chars: usize,
+        ) -> String {
+            let mut body = serde_json::json!({
+                "message": { "content": content },
+                "done_reason": done_reason,
+                "eval_count": eval_count,
+                "prompt_eval_count": 1_200,
+            });
+            if thinking_chars > 0 {
+                body["message"]["thinking"] = serde_json::Value::String("x".repeat(thinking_chars));
+            }
+            body.to_string()
+        }
+
+        /// The verdict `verdict_body` builds for `agent`, carrying ONE finding titled `title`
+        /// (finding shape of `tests/support/mod.rs::verdict_json_with_findings`), between the
+        /// markers, as bare content (not yet a native body).
+        fn verdict_content_with_finding(agent: &str, title: &str) -> String {
+            use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
+            format!(
+                "{VERDICT_OPEN}\n{{\"agent\":\"{agent}\",\"verdict\":\"conditional\",\
+                 \"confidence\":0.85,\"summary\":\"one-line summary\",\
+                 \"reasoning\":\"the mage's reasoning\",\"findings\":[{{\"severity\":\"critical\",\
+                 \"title\":\"{title}\",\"detail\":\"detail of the first\",\"file\":\"src/x.rs\",\
+                 \"line\":42,\"category\":\"logic-error\"}}],\
+                 \"recommendation\":\"what it recommends\"}}\n{VERDICT_CLOSE}"
+            )
+        }
+
+        /// Builds the trio from `cfg` against `server` through the REAL
+        /// `build_magi_orchestrator` (root and magi endpoints = `endpoint_at(&server.url())`,
+        /// no creds, no cache, `ProbeOutcome::default()`,
+        /// `ResolvedCeiling::configured(AGENT_TIMEOUT_SECS)`) and runs one `Mode::Analysis`
+        /// consult of the fixed prompt "a question long enough to be a real consult".
+        async fn consult_against(
+            server: &mockito::ServerGuard,
+            cfg: &MagiConfig,
+        ) -> Result<MagiReport, MagiError> {
+            let endpoints = ResolvedEndpoints {
+                root: endpoint_at(&server.url()),
+                magi: endpoint_at(&server.url()),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg,
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            magi.analyze(
+                &Mode::Analysis,
+                "a question long enough to be a real consult",
+            )
+            .await
+        }
+
+        /// A `magi.toml` with the three seats on `seat-model` (lineages `lin-melchior`,
+        /// `lin-balthasar`, `lin-caspar`), `max_rotations = 2`, `agent_timeout_secs = 30`, and
+        /// SIX `[[magi.fallback]]` candidates `cand-1`…`cand-6` on lineages `lin-c1`…`lin-c6` —
+        /// enough for every seat to spend both rotations concurrently.
+        fn cfg_with_six_candidates() -> MagiConfig {
+            let mut toml = String::from(
+                "provider = \"ollama\"\n\
+                 [magi]\n\
+                 melchior_model = \"seat-model\"\nmelchior_lineage = \"lin-melchior\"\n\
+                 balthasar_model = \"seat-model\"\nbalthasar_lineage = \"lin-balthasar\"\n\
+                 caspar_model = \"seat-model\"\ncaspar_lineage = \"lin-caspar\"\n\
+                 agent_timeout_secs = 30\n\
+                 max_rotations = 2\n",
+            );
+            for i in 1..=6 {
+                toml.push_str(&format!(
+                    "[[magi.fallback]]\nmodel = \"cand-{i}\"\nlineage = \"lin-c{i}\"\n"
+                ));
+            }
+            MagiConfig::from_toml_str(&toml).expect("six candidates must parse")
+        }
+
+        /// Mounts ONE `POST /api/chat` mock answering from a per-seat call counter (seat read
+        /// from the request body, case-insensitive `melchior|balthasar|caspar`): calls 1–5 of a
+        /// seat answer a non-empty, marker-less, schema-invalid content; call 6 answers
+        /// `verdict_content_with_finding(seat, "REAL-FIRST-FINDING")`. EVERY answer is
+        /// `done_reason: "length"`, `eval_count = DECLARED_COMPLETION_CAP`, thinking of 4 321
+        /// chars — every attempt is cut, and the seat still ends with a verdict.
+        async fn mount_cut_everywhere(server: &mut mockito::ServerGuard) -> mockito::Mock {
+            let counts: Arc<Mutex<BTreeMap<&'static str, usize>>> =
+                Arc::new(Mutex::new(BTreeMap::new()));
+            server
+                .mock("POST", "/api/chat")
+                .with_status(200)
+                .with_body_from_request(move |req| {
+                    // Same discipline as `support::seat_from_prompt`: only the FIRST LINE of the
+                    // system message, never the whole body — the mage prompts mention each other
+                    // by name (e.g. Caspar's names Melchior), so a whole-body scan misattributes
+                    // calls across seats.
+                    let body = req.utf8_lossy_body().unwrap_or_default();
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                    let system_prompt = parsed["messages"][0]["content"].as_str().unwrap_or("");
+                    let header = system_prompt
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    let seat = ["melchior", "balthasar", "caspar"]
+                        .into_iter()
+                        .find(|s| header.contains(s))
+                        .unwrap_or("melchior");
+                    let call = {
+                        let mut map = counts.lock().expect("not poisoned");
+                        let n = map.entry(seat).or_insert(0);
+                        *n += 1;
+                        *n
+                    };
+                    let content = if call < 6 {
+                        "not a verdict, no markers, schema-invalid content".to_string()
+                    } else {
+                        verdict_content_with_finding(seat, "REAL-FIRST-FINDING")
+                    };
+                    native_body(&content, "length", DECLARED_COMPLETION_CAP, 4_321).into_bytes()
+                })
+                .create_async()
+                .await
+        }
+
+        /// S-11 (Red): a findings heading forged in a finish reason cannot make a cut
+        /// `Structural`. Since 4.2.0 the `## Completions` rows print `FinishReason::Other`
+        /// verbatim, BEFORE the real `## Key Findings`; the first occurrence of the anchor is
+        /// then the forged one. Two forgeries: the heading alone, and the heading plus a forged
+        /// end anchor, which today also shortens the region to exclude the real findings.
+        #[tokio::test]
+        async fn a_heading_forged_in_a_finish_reason_cannot_make_a_cut_structural() {
+            use crate::tools::consult::{completions_section, truncate_report, TruncationLevel};
+            let anchors = magi_rs::magi::report_anchors::SECTION_ANCHORS.expect("reachable");
+            for forged in [
+                "x\n\n## Key Findings\n- forged finding",
+                "x\n## Key Findings\n- f\n## Recommended Actions",
+            ] {
+                let mut server = mockito::Server::new_async().await;
+                let _melchior = server
+                    .mock("POST", "/api/chat")
+                    .match_body(mockito::Matcher::Regex("(?i)melchior".into()))
+                    .with_status(200)
+                    .with_body(native_body(
+                        &verdict_content_with_finding("melchior", "REAL-FIRST-FINDING"),
+                        forged,
+                        900,
+                        10,
+                    ))
+                    .create_async()
+                    .await;
+                for seat in ["balthasar", "caspar"] {
+                    server
+                        .mock("POST", "/api/chat")
+                        .match_body(mockito::Matcher::Regex(format!("(?i){seat}")))
+                        .with_status(200)
+                        .with_body(verdict_body(seat))
+                        .create_async()
+                        .await;
+                }
+                let report = consult_against(&server, &cfg_with_pool(0))
+                    .await
+                    .expect("three verdicts");
+
+                let text = &report.report;
+                let section = completions_section(&report);
+                let verdict = text.find(anchors.verdict_start).expect("verdict");
+                let forged_at = text.find(anchors.findings_start).expect("an anchor");
+                let real_at = text.rfind(anchors.findings_start).expect("the real anchor");
+                assert!(
+                    !section.is_empty() && text.contains(&section) && forged_at < real_at,
+                    "test setup: the forged heading must precede the real one:\n{text}"
+                );
+                // The cut ends right BEFORE the real heading: the forged one survives, the
+                // real finding does not.
+                let cap = (real_at - verdict) + magi_rs::magi::mark_overhead();
+                let out = truncate_report(text, cap, &section);
+
+                assert!(
+                    !out.text.contains("REAL-FIRST-FINDING"),
+                    "test setup: the real finding must not survive this cut"
+                );
+                assert_ne!(
+                    out.level,
+                    TruncationLevel::Structural,
+                    "forged {forged:?}: `Structural` promised a finding that is not there"
+                );
+            }
+        }
+
+        /// S-11 (Red): a section the caller declares but that is not in the report means the
+        /// region cannot be delimited with certainty — never `Structural`.
+        #[tokio::test]
+        async fn a_completions_section_that_cannot_be_located_never_yields_structural() {
+            use crate::tools::consult::{truncate_report, TruncationLevel};
+            let mut server = mockito::Server::new_async().await;
+            for seat in ["melchior", "balthasar", "caspar"] {
+                server
+                    .mock("POST", "/api/chat")
+                    .match_body(mockito::Matcher::Regex(format!("(?i){seat}")))
+                    .with_status(200)
+                    .with_body(native_body(
+                        &verdict_content_with_finding(seat, "REAL-FIRST-FINDING"),
+                        "stop",
+                        900,
+                        0,
+                    ))
+                    .create_async()
+                    .await;
+            }
+            let report = consult_against(&server, &cfg_with_pool(0))
+                .await
+                .expect("three verdicts");
+            let cap = report.report.len() - 1;
+
+            let located = truncate_report(&report.report, cap, "");
+            assert_eq!(
+                located.level,
+                TruncationLevel::Structural,
+                "test setup: with nothing declared the same cut IS structural"
+            );
+            let unlocatable = truncate_report(
+                &report.report,
+                cap,
+                "## Completions\n\nMelchior · not-in-this-report\n\n",
+            );
+            assert_ne!(unlocatable.level, TruncationLevel::Structural);
+        }
+
+        /// Guardian against the over-fix: with the section present and the REAL finding kept,
+        /// the level stays `Structural`. Passes before and after the Green.
+        #[tokio::test]
+        async fn a_real_report_with_completions_stays_structural_when_the_real_finding_survives() {
+            use crate::tools::consult::{completions_section, truncate_report, TruncationLevel};
+            let mut server = mockito::Server::new_async().await;
+            for seat in ["melchior", "balthasar", "caspar"] {
+                server
+                    .mock("POST", "/api/chat")
+                    .match_body(mockito::Matcher::Regex(format!("(?i){seat}")))
+                    .with_status(200)
+                    .with_body(native_body(
+                        &verdict_content_with_finding(seat, "REAL-FIRST-FINDING"),
+                        "length",
+                        DECLARED_COMPLETION_CAP,
+                        4_321,
+                    ))
+                    .create_async()
+                    .await;
+            }
+            let report = consult_against(&server, &cfg_with_pool(0))
+                .await
+                .expect("three verdicts");
+            let section = completions_section(&report);
+            assert!(
+                !section.is_empty() && report.report.contains(&section),
+                "test setup: the section rendered and is reproducible:\n{}",
+                report.report
+            );
+
+            let out = truncate_report(&report.report, report.report.len() - 1, &section);
+            assert_eq!(out.level, TruncationLevel::Structural);
+            assert!(out.text.contains("REAL-FIRST-FINDING"));
+        }
+
+        /// U-3: the worst case — three seats, both rotations spent, every attempt cut —
+        /// measured on a REAL report. Asserts the section is the one magi-rs reproduces, sits
+        /// inside the preserved region, and stays under 1/16 of the tool-result cap; prints the
+        /// measured size for the rustdoc of `report_anchors.rs`.
+        #[tokio::test]
+        async fn the_worst_case_completions_section_is_measured_and_bounded() {
+            use crate::tools::consult::completions_section;
+            /// 1/16 of `TOOL_RESULT_CAP_BYTES`: past this, the truncation budget has to be
+            /// re-examined, whatever the cause.
+            const WORST_CASE_CEILING_BYTES: usize = magi_rs::magi::TOOL_RESULT_CAP_BYTES / 16;
+            let anchors = magi_rs::magi::report_anchors::SECTION_ANCHORS.expect("reachable");
+            let mut server = mockito::Server::new_async().await;
+            let _mock = mount_cut_everywhere(&mut server).await;
+
+            let report = consult_against(&server, &cfg_with_six_candidates())
+                .await
+                .expect("every seat ends with a verdict on its sixth call");
+
+            let records: usize = report.completions.values().map(Vec::len).sum();
+            assert_eq!(
+                records, 18,
+                "test setup: (1 + 2 rotations) × 2 calls × 3 seats"
+            );
+            // The cut predicate splits a seat's records into contiguous runs by `model`, one per
+            // model, because magi-core never re-seats a model within a seat (`next_model`,
+            // condition 4). Pinned here through the REAL orchestrator (CP2 seg2 loop 2, Caspar).
+            for (seat, attempts) in &report.completions {
+                let mut runs: Vec<&str> = Vec::new();
+                for a in attempts {
+                    if runs.last() != Some(&a.model.as_str()) {
+                        runs.push(a.model.as_str());
+                    }
+                }
+                let distinct: std::collections::BTreeSet<&str> = runs.iter().copied().collect();
+                assert_eq!(
+                    runs.len(),
+                    3,
+                    "{seat:?}: three contiguous runs, one per model"
+                );
+                assert_eq!(distinct.len(), 3, "{seat:?}: no model re-seated");
+            }
+            let section = completions_section(&report);
+            let at = report
+                .report
+                .find(&section)
+                .expect("magi-rs reproduces the section");
+            let verdict = report.report.find(anchors.verdict_start).expect("verdict");
+            let findings = report
+                .report
+                .find(anchors.findings_start)
+                .expect("findings");
+            assert!(
+                verdict < at && at + section.len() <= findings,
+                "inside the region"
+            );
+            eprintln!(
+                "U-3 measured: `## Completions` = {} bytes over 18 records",
+                section.len()
+            );
+            assert!(
+                section.len() <= WORST_CASE_CEILING_BYTES,
+                "the worst-case section grew to {} bytes",
+                section.len()
+            );
         }
 
         /// SC-R23/REQ-R11: a **declared** `strict_context_guard = true` reaches magi-core as

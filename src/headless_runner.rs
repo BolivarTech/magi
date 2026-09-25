@@ -459,8 +459,11 @@ async fn analyze_direct(
             // REQ-A11b/SC-A11d (the `magi consult` headless direct route): bounds
             // the report the same way the tool-loop route does, with the SAME
             // truncation-level vocabulary surfaced via `report_truncated`.
-            let truncated =
-                truncate_report(&annotated, runtime.magi_config.effective_tool_result_cap());
+            let truncated = truncate_report(
+                &annotated,
+                runtime.magi_config.effective_tool_result_cap(),
+                "",
+            );
             // `resolution` already carries the REAL `classification_attempted`
             // signal from `resolve_mode_guarded` above, unlike `ConsultTool::
             // execute`'s call site, which only has mode+source round-tripped

@@ -13,7 +13,7 @@ use crate::tools::{Tool, ToolError, ToolResult};
 use async_trait::async_trait;
 use magi_core::error::MagiError;
 use magi_core::orchestrator::{Magi, MagiConfig as CoreMagiConfig};
-use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport};
+use magi_core::reporting::{ExtractionFailure, InputSize, MagiReport, ReportFormatter};
 use magi_core::schema::{AgentName, Mode};
 use magi_rs::magi::clock_coverage::ClockCoverageWarning;
 use magi_rs::magi::completion_report::render_completions;
@@ -298,6 +298,36 @@ fn keep_bytes(report: &str, cap: usize) -> Option<String> {
     Some(head_chars(report, budget))
 }
 
+/// The `## Completions` section magi-core rendered into `report.report`, reproduced with the
+/// formatter magi-rs runs under (the default one).
+///
+/// magi-rs never configures a [`magi_core::reporting::ReportConfig`] of its own (no call site
+/// hands one to `ReportFormatter::from_valid_config`), so the DEFAULT formatter's rendering of
+/// `format_completions` is exactly the slice `format_report_with_completions` embedded into
+/// `report.report` — this is the same method, called on the same completions map, that produced
+/// the text sitting in the report. Reproducing it here lets [`truncate_report`] locate the
+/// region without re-implementing magi-core's own section layout (REQ-V42-5).
+///
+/// # Arguments
+/// * `report` - the report whose completion telemetry this reproduces.
+///
+/// # Returns
+/// The exact text magi-core rendered for `## Completions`, or `""` when the section did not
+/// render — magi-core's own conditional (a length cut, a measured reasoning channel, an
+/// `Unsupported` state, or a non-default control anywhere in `report.completions`).
+///
+/// # Complexity
+/// `O(seats x records)` — the same bound as
+/// [`magi_rs::magi::completion_report::render_completions`]: a trio, once per consult.
+#[must_use]
+// Red-phase only: production wiring (`ConsultTool::execute`, `analyze_direct`, the TUI) lands
+// in this task's Green step, so until then the only caller is `#[cfg(test)]` code. Remove once
+// Green wires a production call site.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn completions_section(report: &MagiReport) -> String {
+    ReportFormatter::new().format_completions(&report.completions)
+}
+
 /// Truncates the report to the cap, choosing the highest level the shape allows (REQ-A11b, Task
 /// 6.2 — completes what [`TruncationLevel`] left pending).
 ///
@@ -317,13 +347,18 @@ fn keep_bytes(report: &str, cap: usize) -> Option<String> {
 /// # Parameters
 /// * `report` - the ALREADY-ANNOTATED text (REQ-A12c, [`annotate_report_text`]) that is wants to bound. Callers must annotate BEFORE truncating: this function never sees the keyless-auth hint if the order is reversed.
 /// * `cap` - the effective byte limit (`MagiConfig::effective_tool_result_cap`).
+/// * `completions_section` - exactly `completions_section(&report)` for the report being
+///   truncated, or `""` when there is none. The anchor search for the findings region starts
+///   AFTER this text, because since magi-core 4.2.0 it can carry backend-controlled text that
+///   imitates an anchor. Non-empty but not found after the verdict anchor ⇒ the region cannot
+///   be delimited with certainty and the result is never `Structural`.
 ///
 /// # Returns
 /// The text that survived (with [`TRUNCATION_MARK`] already applied if there was a truncation)
 /// and the guarantee level reached. `report.len() <= cap` returns the report intact with
 /// [`TruncationLevel::None`] — never adds the mark when nothing was truncated.
 #[must_use]
-pub(crate) fn truncate_report(report: &str, cap: usize) -> Truncated {
+pub(crate) fn truncate_report(report: &str, cap: usize, _completions_section: &str) -> Truncated {
     if report.len() <= cap {
         return Truncated {
             text: report.to_string(),
@@ -409,19 +444,21 @@ const PREFIX_SEPARATOR_LEN: usize = 2;
 /// * `prefix` - text that must survive the cut whole; meant for a short, one-line caveat, never the bulk of the reply.
 /// * `report` - the (already-annotated) report text to bound.
 /// * `cap` - the byte budget the combined `prefix + report` output must respect.
+/// * `completions_section` - forwarded to [`truncate_report`] verbatim; see its own rustdoc.
 #[must_use]
 pub(crate) fn truncate_report_with_preserved_prefix(
     prefix: &str,
     report: &str,
     cap: usize,
+    completions_section: &str,
 ) -> Truncated {
     if prefix.is_empty() {
-        return truncate_report(report, cap);
+        return truncate_report(report, cap, completions_section);
     }
     let prefix_reserved = prefix.len() + PREFIX_SEPARATOR_LEN;
     match cap.checked_sub(prefix_reserved) {
         Some(remaining) => {
-            let truncated = truncate_report(report, remaining);
+            let truncated = truncate_report(report, remaining, completions_section);
             Truncated {
                 text: format!("{prefix}\n\n{}", truncated.text),
                 level: truncated.level,
@@ -1440,7 +1477,7 @@ impl Tool for ConsultTool {
         // REQ-A11b/SC-A11d: bounds the string that becomes this call's `ToolResult` — the text
         // re-sent on every subsequent turn of the session — with the same truncation-level
         // vocabulary the JSON exposes via `report_truncated`.
-        let truncated = truncate_report(&annotated, self.output_cap);
+        let truncated = truncate_report(&annotated, self.output_cap, "");
         // `classification_attempted: false` is a PROVEN invariant here, not a placeholder (fix
         // round 1, Finding 1). `Tool::execute` is reachable from production through exactly two
         // funnel call sites — `Agent::dispatch_consult_through_gate` and the forced pre-loop
@@ -2988,7 +3025,7 @@ mod tests {
     #[test]
     fn truncate_report_is_a_no_op_when_the_report_already_fits() {
         let report = "short report";
-        let out = truncate_report(report, TOOL_RESULT_CAP_BYTES);
+        let out = truncate_report(report, TOOL_RESULT_CAP_BYTES, "");
         assert_eq!(out.level, TruncationLevel::None);
         assert_eq!(out.text, report);
         assert!(
@@ -3031,7 +3068,7 @@ mod tests {
             report.len() > TOOL_RESULT_CAP_BYTES,
             "test setup: the fixture must actually exceed the cap"
         );
-        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES, "");
         assert_eq!(out.level, TruncationLevel::Structural);
         assert!(
             out.text.contains(anchors.verdict_start),
@@ -3076,7 +3113,7 @@ mod tests {
             "test setup: the fixture must actually exceed the cap"
         );
 
-        let out = truncate_report(&report, cap);
+        let out = truncate_report(&report, cap, "");
 
         assert_ne!(
             out.level,
@@ -3132,7 +3169,7 @@ mod tests {
             report.len() > TOOL_RESULT_CAP_BYTES,
             "test setup: the fixture must actually exceed the cap"
         );
-        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES, "");
         assert_eq!(
             out.level,
             TruncationLevel::Anchored,
@@ -3191,7 +3228,7 @@ mod tests {
              merely one that got cut off — 'no findings' and 'could not locate' are \
              two different things and this fixture is testing the former"
         );
-        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES, "");
         assert_eq!(out.level, TruncationLevel::Anchored);
         assert!(
             out.text.contains(anchors.verdict_start),
@@ -3224,7 +3261,7 @@ mod tests {
             report.len() > TOOL_RESULT_CAP_BYTES,
             "test setup: the fixture must actually exceed the cap"
         );
-        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES);
+        let out = truncate_report(&report, TOOL_RESULT_CAP_BYTES, "");
         assert_eq!(out.level, TruncationLevel::Bytes);
         assert!(
             out.text.contains(TRUNCATION_MARK),
@@ -3243,7 +3280,7 @@ mod tests {
     fn a_cap_too_small_for_the_mark_returns_the_report_whole_instead_of_a_broken_fragment() {
         let report = "y".repeat(1_000);
         let tiny_cap = 1; // far below `mark_overhead()`
-        let out = truncate_report(&report, tiny_cap);
+        let out = truncate_report(&report, tiny_cap, "");
         assert_eq!(out.level, TruncationLevel::None);
         assert_eq!(
             out.text, report,
@@ -3264,8 +3301,8 @@ mod tests {
     fn preserved_prefix_with_an_empty_prefix_matches_plain_truncate_report() {
         let report = "y".repeat(1_000);
         for cap in [10, 50, TOOL_RESULT_CAP_BYTES] {
-            let expected = truncate_report(&report, cap);
-            let actual = truncate_report_with_preserved_prefix("", &report, cap);
+            let expected = truncate_report(&report, cap, "");
+            let actual = truncate_report_with_preserved_prefix("", &report, cap, "");
             assert_eq!(actual.level, expected.level, "cap={cap}");
             assert_eq!(actual.text, expected.text, "cap={cap}");
         }
@@ -3284,7 +3321,7 @@ mod tests {
             "test setup: the combined text must actually exceed cap"
         );
 
-        let out = truncate_report_with_preserved_prefix(prefix, &report, cap);
+        let out = truncate_report_with_preserved_prefix(prefix, &report, cap, "");
         assert!(out.text.len() <= cap, "{}", out.text.len());
         assert!(
             out.text.starts_with(prefix),
@@ -3306,7 +3343,7 @@ mod tests {
     fn preserved_prefix_is_a_no_op_when_the_combined_text_already_fits() {
         let prefix = "[DEGRADED: fewer than 3 agents responded]";
         let report = "short report";
-        let out = truncate_report_with_preserved_prefix(prefix, report, TOOL_RESULT_CAP_BYTES);
+        let out = truncate_report_with_preserved_prefix(prefix, report, TOOL_RESULT_CAP_BYTES, "");
         assert_eq!(out.level, TruncationLevel::None);
         assert_eq!(out.text, format!("{prefix}\n\n{report}"));
         assert!(!out.text.contains(TRUNCATION_MARK));
@@ -3322,7 +3359,7 @@ mod tests {
         let report = report_with_no_recognizable_structure(TOOL_RESULT_CAP_BYTES);
         let cap = prefix.len() + 2 + mark_overhead();
 
-        let out = truncate_report_with_preserved_prefix(prefix, &report, cap);
+        let out = truncate_report_with_preserved_prefix(prefix, &report, cap, "");
         assert!(out.text.len() <= cap, "{}", out.text.len());
         assert!(out.text.starts_with(prefix));
         assert!(out.text.contains(TRUNCATION_MARK));
@@ -3339,7 +3376,7 @@ mod tests {
         let report = "y".repeat(1_000);
         let cap = prefix.len(); // no room even for the separator, let alone a mark
 
-        let out = truncate_report_with_preserved_prefix(prefix, &report, cap);
+        let out = truncate_report_with_preserved_prefix(prefix, &report, cap, "");
         assert_eq!(out.level, TruncationLevel::None);
         assert_eq!(
             out.text,

@@ -50,7 +50,9 @@ use async_trait::async_trait;
 use magi_core::error::{ExternalErrorKind, ProviderError};
 // `CompletionConfig` lives in `provider`, NOT in `orchestrator`: there it's only imported and
 // is private. The plan had pasted the `orchestrator` path into all three doubles.
-use magi_core::provider::{Completion, CompletionConfig, LlmProvider};
+use magi_core::provider::{
+    Completion, CompletionConfig, CompletionTelemetry, FinishReason, LlmProvider, ReasoningState,
+};
 use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
 
 /// Name the doubles report via `LlmProvider::name`.
@@ -371,6 +373,46 @@ impl LlmProvider for OverlapCountingProvider {
             "{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}",
             verdict_json_with_findings(seat)
         )))
+    }
+
+    fn name(&self) -> &str {
+        DOUBLE_PROVIDER_NAME
+    }
+
+    fn model(&self) -> &str {
+        DOUBLE_MODEL_NAME
+    }
+}
+
+/// [`AdheringTrioProvider`], but every completion also carries the telemetry of a length cut
+/// that still answered: `finish = Length`, `completion_tokens = config.max_tokens`,
+/// `prompt_tokens = 1_200`, `reasoning = Measured { chars: 4_321, text: None }`. Reused by
+/// Task 8's report-anchors guardian, which needs magi-core to actually render `## Completions`
+/// (REQ-V42-5) rather than a report with no completion telemetry at all.
+pub struct ReasoningTrioProvider;
+
+#[async_trait]
+impl LlmProvider for ReasoningTrioProvider {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        _user_prompt: &str,
+        config: &CompletionConfig,
+    ) -> Result<Completion, ProviderError> {
+        let seat = seat_from_prompt(system_prompt);
+        let telemetry = CompletionTelemetry::unmeasured()
+            .with_finish(FinishReason::Length)
+            .with_completion_tokens(config.max_tokens)
+            .with_prompt_tokens(1_200)
+            .with_reasoning(ReasoningState::Measured {
+                chars: 4_321,
+                text: None,
+            });
+        Ok(Completion::new(format!(
+            "{VERDICT_OPEN}\n{}\n{VERDICT_CLOSE}",
+            verdict_json_with_findings(seat)
+        ))
+        .with_telemetry(telemetry))
     }
 
     fn name(&self) -> &str {

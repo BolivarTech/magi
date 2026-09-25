@@ -621,6 +621,38 @@ async fn report_shape_matches_what_the_truncation_design_assumes() {
     }
 }
 
+/// REQ-V42-5 / S-11: re-observes the report against magi-core 4.2.0 WITH the conditional
+/// `## Completions` section, which renders inside the region truncation preserves. The anchors
+/// the truncation design assumes must still be present and in order around it.
+#[tokio::test]
+async fn a_report_with_completions_keeps_the_section_inside_the_preserved_region() {
+    let magi = MagiBuilder::new(Arc::new(support::ReasoningTrioProvider))
+        .build()
+        .expect("the builder accepts a single shared provider");
+    let report = magi
+        .analyze(&Mode::CodeReview, DISPATCHABLE_CONTENT)
+        .await
+        .expect("all three adhere, so there is a report");
+
+    let anchors = SECTION_ANCHORS.expect("the spike concluded that `Structural` is reachable");
+    let at = |needle: &str| {
+        report
+            .report
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in:\n{}", report.report))
+    };
+    let verdict = at(anchors.verdict_start);
+    let completions = at("## Completions");
+    let findings = at(anchors.findings_start);
+    let end = at(anchors.findings_end);
+    assert!(
+        verdict < completions && completions < findings && findings < end,
+        "4.2.0 moved `## Completions` out of verdict → findings → recommended actions: \
+         verdict={verdict} completions={completions} findings={findings} end={end}\n{}",
+        report.report
+    );
+}
+
 /// Defensive cap on what the mock will actually write before giving up.
 ///
 /// The body is meant to look **endless**, but a literally infinite loop turns a failed

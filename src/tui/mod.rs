@@ -819,8 +819,9 @@ fn tui_consult_success_reply(
             banner,
             &pieces.annotated,
             cap,
+            "",
         ),
-        None => crate::tools::consult::truncate_report(&pieces.annotated, cap),
+        None => crate::tools::consult::truncate_report(&pieces.annotated, cap, ""),
     }
 }
 
@@ -880,7 +881,7 @@ fn tui_consult_error_reply(
     cap: usize,
 ) -> crate::tools::consult::Truncated {
     let mut truncated =
-        crate::tools::consult::truncate_report(&tui_consult_error_body(err, kind), cap);
+        crate::tools::consult::truncate_report(&tui_consult_error_body(err, kind), cap, "");
     truncated.text = crate::agent::Agent::sanitize_text(&truncated.text);
     truncated
 }
