@@ -16379,6 +16379,419 @@ mod tests {
                 "the inherited openai-compat trio must announce the unreachable control: {notices:?}"
             );
         }
+
+        // -----------------------------------------------------------------------
+        // Task 9 (REQ-V42-6 / REQ-EE-7 / S-10) — the `EmptyCompletion` reasoning clause
+        // reaches the operator intact, and a rotation caused by a reasoning cut is
+        // identifiable from the consult JSON alone.
+        // -----------------------------------------------------------------------
+
+        /// Thinking characters the E-E cut reports in these fixtures.
+        const CUT_THINKING_CHARS: usize = 4_321;
+
+        /// The consult JSON the headless and tool surfaces emit for `report`:
+        /// `annotate_report_text` under `ProviderKind::Ollama`, `truncate_report` at
+        /// `TOOL_RESULT_CAP_BYTES` with `completions_section(report)`, then
+        /// `report_to_consult_json` with `Mode::Analysis` / `ModeSource::Explicit` /
+        /// `classification_attempted: false`, a `RunContext` of all-`false` and `None`, and
+        /// `StructuredVerdicts::Omit` — the production composition, nothing hand-built.
+        fn consult_json_of(report: &MagiReport) -> serde_json::Value {
+            use crate::tools::consult::{
+                annotate_report_text, completions_section, report_to_consult_json, truncate_report,
+                RunContext, StructuredVerdicts,
+            };
+            use magi_rs::magi::mode::{ModeResolution, ModeSource};
+
+            let annotated = annotate_report_text(report, ProviderKind::Ollama);
+            let section = completions_section(report);
+            let truncated =
+                truncate_report(&annotated, magi_rs::magi::TOOL_RESULT_CAP_BYTES, &section);
+            let res = ModeResolution {
+                mode: Mode::Analysis,
+                source: ModeSource::Explicit,
+                classification_attempted: false,
+            };
+            let ctx = RunContext {
+                endpoint_divergence: false,
+                timeout_below_formula: false,
+                unmeasured_fallback_tokens: None,
+            };
+            report_to_consult_json(report, &truncated, &res, &ctx, StructuredVerdicts::Omit)
+        }
+
+        /// A headless `RunOutcome` carrying `consult: Some(consult)` and otherwise the field
+        /// values of `envelope_audit_guard::a_json_tool_result_survives_the_mask_as_json`, with
+        /// empty `tool_calls`.
+        fn envelope_with_consult(consult: serde_json::Value) -> RunOutcome {
+            use magi_rs::headless::types::{AppliedCaps, Timings, Usage};
+            RunOutcome {
+                response: None,
+                model: "m".to_string(),
+                provider: "p".to_string(),
+                usage: Usage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+                timings: Timings {
+                    total_ms: 1,
+                    ttfb_ms: None,
+                    per_turn_ms: Vec::new(),
+                },
+                stop_reason: StopReason::Done,
+                tool_calls: Vec::new(),
+                transcript: Vec::new(),
+                consult: Some(consult),
+                applied_caps: AppliedCaps {
+                    max_tool_calls: 15,
+                    max_tool_calls_clamped: false,
+                    timeout_secs: None,
+                    system_override_applied: false,
+                    budget: BudgetTelemetry::default(),
+                },
+                error: None,
+            }
+        }
+
+        /// A mock server for `cfg_with_pool(n)`: melchior and balthasar answer `verdict_body`,
+        /// caspar with `rescue-model` answers `verdict_body("caspar")`, and caspar with
+        /// `down-model` answers `native_body("", done_reason, DECLARED_COMPLETION_CAP,
+        /// CUT_THINKING_CHARS)` — the E-E shape: HTTP 200, empty content, the budget spent, a
+        /// measured reasoning channel. Matchers mutually exclusive, as in
+        /// `a_mage_whose_model_fails_rotates_to_the_declared_candidate`.
+        async fn server_with_caspar_cut(done_reason: &str) -> mockito::ServerGuard {
+            use mockito::Matcher;
+            let mut server = mockito::Server::new_async().await;
+
+            let _down = server
+                .mock("POST", "/api/chat")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("down-model".into()),
+                ]))
+                .with_status(200)
+                .with_body(native_body(
+                    "",
+                    done_reason,
+                    DECLARED_COMPLETION_CAP,
+                    CUT_THINKING_CHARS,
+                ))
+                .create_async()
+                .await;
+            let _rescue = server
+                .mock("POST", "/api/chat")
+                .match_body(Matcher::AllOf(vec![
+                    Matcher::Regex("(?i)caspar".into()),
+                    Matcher::Regex("rescue-model".into()),
+                ]))
+                .with_status(200)
+                .with_body(verdict_body("caspar"))
+                .create_async()
+                .await;
+            let _melchior = server
+                .mock("POST", "/api/chat")
+                .match_body(Matcher::Regex("(?i)melchior".into()))
+                .with_status(200)
+                .with_body(verdict_body("melchior"))
+                .create_async()
+                .await;
+            let _balthasar = server
+                .mock("POST", "/api/chat")
+                .match_body(Matcher::Regex("(?i)balthasar".into()))
+                .with_status(200)
+                .with_body(verdict_body("balthasar"))
+                .create_async()
+                .await;
+
+            server
+        }
+
+        /// REQ-EE-7: which model gave each verdict, and why the seat rotated, is readable from
+        /// the consult JSON alone — deterministically, with the existing keys.
+        #[tokio::test]
+        async fn a_rotation_caused_by_a_reasoning_cut_is_identifiable_from_the_consult_json() {
+            let server = server_with_caspar_cut("length").await;
+            let report = consult_against(&server, &cfg_with_pool(2))
+                .await
+                .expect("the consult must complete");
+            let json = consult_json_of(&report);
+
+            let hop = &json["rotations"][0];
+            assert_eq!(hop["agent"], "caspar");
+            assert_eq!(hop["model_configured"], "down-model");
+            assert_eq!(
+                hop["model_used"], "rescue-model",
+                "REQ-R06: who actually answered"
+            );
+            assert_eq!(hop["chain"][0]["cause"], "empty_completion");
+            assert_eq!(hop["chain"][0]["mage_local"], true);
+
+            let cut = &json["completions"]["caspar"][0];
+            assert_eq!(cut["model"], "down-model");
+            assert_eq!(cut["finish"], "length");
+            assert_eq!(cut["completion_tokens"], cut["cap"]);
+            assert_eq!(
+                cut["reasoning"],
+                serde_json::json!({ "Measured": { "chars": CUT_THINKING_CHARS, "text": null } })
+            );
+            assert_eq!(cut["control"], "default");
+            assert_eq!(json["completions"]["caspar"][1]["model"], "rescue-model");
+
+            let cuts = magi_rs::magi::completion_report::cut_attempts(
+                &report.completions,
+                &report.rotations,
+                &report.failed_agents,
+            );
+            let got: Vec<(AgentName, usize)> = cuts.iter().map(|c| (c.seat, c.index)).collect();
+            assert_eq!(
+                got,
+                vec![(AgentName::Caspar, 0)],
+                "the shared predicate agrees"
+            );
+        }
+
+        /// The empty branch of the shared predicate on the REAL path: an empty completion under
+        /// `done_reason: stop` has a record indistinguishable from a success, and the predicate
+        /// still finds it — which pins magi-core facts (b)–(c) of Tarea 7 against the real
+        /// orchestrator rather than a fixture.
+        #[tokio::test]
+        async fn an_empty_stop_rotation_is_identified_as_a_cut_by_the_shared_predicate() {
+            use magi_rs::magi::completion_report::{cut_attempts, CutCause};
+            let server = server_with_caspar_cut("stop").await;
+            let report = consult_against(&server, &cfg_with_pool(2))
+                .await
+                .expect("the consult must complete");
+
+            assert_eq!(
+                consult_json_of(&report)["completions"]["caspar"][0]["finish"],
+                "stop",
+                "test setup: the record alone does not say it was cut"
+            );
+            let cuts = cut_attempts(
+                &report.completions,
+                &report.rotations,
+                &report.failed_agents,
+            );
+            assert_eq!(cuts.len(), 1, "{cuts:?}");
+            assert_eq!((cuts[0].seat, cuts[0].index), (AgentName::Caspar, 0));
+            assert_eq!(cuts[0].cause, CutCause::EmptyContent);
+        }
+
+        /// S-10: the reasoning clause survives the whole pipeline — the rotation `detail` in the
+        /// JSON, the text surface, and the stdout auditor over the envelope — unmasked, while a
+        /// credential in the endpoint does not survive any of them. Each surface is asserted
+        /// NON-TRIVIALLY rendered before its absence of the canary means anything.
+        #[tokio::test]
+        async fn the_reasoning_clause_survives_redaction_and_the_stdout_auditor() {
+            let canary = super::divergence_and_keyless_auth::SEAT_CANARY;
+            let server = server_with_caspar_cut("length").await;
+            let host = server.url().replace("http://", "");
+            let endpoint = || {
+                super::divergence_and_keyless_auth::credentialed_endpoint(&format!(
+                    "http://[user]:[password]@{host}/v1"
+                ))
+            };
+            let endpoints = ResolvedEndpoints {
+                root: endpoint(),
+                magi: endpoint(),
+            };
+            let mut notices = Vec::new();
+            let magi = build_magi_orchestrator(
+                &TrioBuild {
+                    cfg: &cfg_with_pool(2),
+                    principal_kind: ProviderKind::Ollama,
+                    endpoints: &endpoints,
+                    creds: None,
+                    warn_tokens: None,
+                    env_overrides: &MagiEnvModelOverrides::default(),
+                    capability_cache: None,
+                    probe: &ProbeOutcome::default(),
+                    ceiling: ResolvedCeiling::configured(magi_rs::magi::AGENT_TIMEOUT_SECS),
+                },
+                &mut notices,
+            )
+            .expect("ollama is keyless");
+            let report = magi
+                .analyze(
+                    &Mode::Analysis,
+                    "a question long enough to be a real consult",
+                )
+                .await
+                .expect("the consult must complete");
+
+            let clause = format!("The reasoning channel measured {CUT_THINKING_CHARS} characters.");
+            let json = consult_json_of(&report);
+            // Owned, not borrowed from `json`: `json` moves into `envelope_with_consult` below
+            // while `detail` is still needed for the final no-leak sweep.
+            let detail = json["rotations"][0]["chain"][0]["detail"]
+                .as_str()
+                .expect("a detail")
+                .to_string();
+            assert!(detail.starts_with("empty completion: "), "{detail}");
+            assert!(
+                detail.ends_with(&clause),
+                "the clause was lost or cut: {detail}"
+            );
+
+            let annotated =
+                crate::tools::consult::annotate_report_text(&report, ProviderKind::Ollama);
+            assert!(annotated.contains(&clause), "text surface: {annotated}");
+            let audited_text = magi_rs::notices::audited_field(&annotated);
+            assert!(
+                audited_text.contains(&clause),
+                "auditor masked the clause: {audited_text}"
+            );
+
+            let audited = AuditedOutcome::new(&envelope_with_consult(json));
+            let masked = audited.get().consult.as_ref().expect("consult").to_string();
+            assert!(
+                masked.contains(&clause),
+                "stdout auditor masked the clause: {masked}"
+            );
+
+            for surface in [detail.to_string(), annotated, masked] {
+                assert!(
+                    !surface.contains(canary),
+                    "credential reached a surface: {surface}"
+                );
+            }
+        }
+
+        /// REQ-V42-6, `failed_agents`: a seat lost to an empty completion (no rotation left)
+        /// names the clause in its cause, through redaction and the envelope auditor.
+        #[tokio::test]
+        async fn a_seat_lost_to_an_empty_completion_names_the_clause_in_failed_agents() {
+            use magi_rs::magi::completion_report::EMPTY_COMPLETION_MARKER;
+            let server = server_with_caspar_cut("length").await;
+            let report = consult_against(&server, &cfg_with_pool(0))
+                .await
+                .expect("two of three still answer");
+            let clause = format!("The reasoning channel measured {CUT_THINKING_CHARS} characters.");
+
+            let raw = report
+                .failed_agents
+                .get(&AgentName::Caspar)
+                .expect("caspar was lost");
+            assert!(
+                raw.contains(EMPTY_COMPLETION_MARKER),
+                "the marker the shared predicate relies on is what magi-core writes: {raw}"
+            );
+            let json = consult_json_of(&report);
+            let cause = json["failed_agents"]["caspar"].as_str().expect("a cause");
+            assert!(cause.ends_with(&clause), "{cause}");
+            let masked = AuditedOutcome::new(&envelope_with_consult(json))
+                .get()
+                .consult
+                .as_ref()
+                .expect("consult")["failed_agents"]["caspar"]
+                .as_str()
+                .expect("a cause")
+                .to_string();
+            assert!(
+                masked.ends_with(&clause),
+                "stdout auditor masked the clause: {masked}"
+            );
+        }
+
+        /// DECLARED LIMIT of REQ-V42-6's third surface, pinned rather than left implicit: when
+        /// too few seats answer, magi-core 4.2.0 returns `InsufficientAgents`, which carries no
+        /// per-seat cause, so the consult error arm CANNOT carry the clause. What the operator
+        /// gets there is magi-core's own rotation/failure events in the daily log. This test
+        /// goes red the day magi-core starts carrying seat causes in the error — the signal to
+        /// route the clause through this arm too.
+        #[tokio::test]
+        async fn the_consult_error_arm_cannot_carry_a_seat_cause_under_4_2_0() {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("POST", "/api/chat")
+                .with_status(200)
+                .with_body(native_body(
+                    "",
+                    "length",
+                    DECLARED_COMPLETION_CAP,
+                    CUT_THINKING_CHARS,
+                ))
+                .create_async()
+                .await;
+            let err = consult_against(&server, &cfg_with_pool(0))
+                .await
+                .expect_err("every seat came back empty");
+
+            assert!(
+                matches!(err, magi_core::error::MagiError::InsufficientAgents { .. }),
+                "{err}"
+            );
+            let explained = crate::tools::consult::explain_magi_error(&err, ProviderKind::Ollama);
+            assert!(explained.contains("insufficient agents"), "{explained}");
+            assert!(
+                !explained.contains("reasoning channel"),
+                "magi-core now carries seat causes in the error: route the clause through this \
+                 arm and retire this pin: {explained}"
+            );
+        }
+
+        /// REQ-EE-7 / OQ-9: no new field, and nothing ranks a fallback. The consult object,
+        /// a rotation entry and an attempt carry EXACTLY their declared keys on the real path.
+        #[tokio::test]
+        async fn nothing_in_the_consult_json_ranks_a_fallback() {
+            let server = server_with_caspar_cut("length").await;
+            let report = consult_against(&server, &cfg_with_pool(2))
+                .await
+                .expect("the consult must complete");
+            let json = consult_json_of(&report);
+            let keys = |v: &serde_json::Value| {
+                let mut k: Vec<String> =
+                    v.as_object().expect("an object").keys().cloned().collect();
+                k.sort();
+                k
+            };
+
+            assert_eq!(
+                keys(&json),
+                vec![
+                    "completions",
+                    "degraded",
+                    "endpoint_divergence",
+                    "extraction_failures",
+                    "failed_agents",
+                    "input_size",
+                    "mode",
+                    "mode_source",
+                    "pool_eligibility",
+                    "ran_unmeasured",
+                    "report",
+                    "report_truncated",
+                    "rotations",
+                    "timeout_below_formula",
+                ]
+            );
+            assert_eq!(
+                keys(&json["rotations"][0]),
+                vec![
+                    "agent",
+                    "chain",
+                    "model_configured",
+                    "model_used",
+                    "ran_unmeasured"
+                ]
+            );
+            assert_eq!(
+                keys(&json["completions"]["caspar"][0]),
+                vec![
+                    "cap",
+                    "completion_tokens",
+                    "control",
+                    "finish",
+                    "model",
+                    "prompt_tokens",
+                    "reasoning",
+                ]
+            );
+            assert_eq!(
+                report.agents.len(),
+                3,
+                "the fallback's verdict counts like any other"
+            );
+        }
     }
 
     /// SC-V41-01: whether the deprecated magi-core 4.1.0 surface has any reader left in the
