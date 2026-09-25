@@ -9556,6 +9556,44 @@ mod tests {
         assert_eq!(long.passphrase.as_deref(), Some("-x-y-z"));
     }
 
+    /// `-p` consumes the next word even when it looks like a flag: `-p -w`
+    /// makes `-w` the passphrase, and that `-w` never sets the workdir.
+    ///
+    /// This is the declared behaviour (the `-p` help says the word after it is
+    /// always the passphrase), and it fails safe rather than silently doing
+    /// something else:
+    /// - `-p -w init` parses with passphrase `-w` and NO workdir, so `init`
+    ///   runs where it was invoked. On a first run the two-character passphrase
+    ///   is refused by `check_strength`'s floor (12 characters, zxcvbn ≥ 3); on
+    ///   an existing vault it is a retryable `WrongPassphrase`, never a wipe.
+    /// - `-p -w X init` leaves `X` where a subcommand is expected, so clap
+    ///   rejects the line as an unrecognized subcommand naming `X` (a path, not
+    ///   the passphrase) and nothing runs.
+    #[test]
+    fn a_flag_after_p_is_the_passphrase_and_never_sets_the_workdir() {
+        use clap::Parser;
+        let parsed = Args::try_parse_from(["magi-rs", "-p", "-w", "init"])
+            .map_err(|e| e.kind())
+            .expect("`-p -w init` parses");
+        assert_eq!(parsed.passphrase.as_deref(), Some("-w"));
+        match parsed.command {
+            Some(TopCmd::Init(wd)) => assert!(
+                wd.workdir.is_none(),
+                "the `-w` consumed by `-p` must not set the workdir: {:?}",
+                wd.workdir
+            ),
+            other => panic!("expected `init`, got {other:?}"),
+        }
+
+        let err = Args::try_parse_from(["magi-rs", "-p", "-w", "X", "init"])
+            .expect_err("`X` is left where a subcommand is expected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert!(
+            err.to_string().contains("'X'"),
+            "the rejection names the stray word, not the passphrase: {err}"
+        );
+    }
+
     /// `--help` tells the operator a passphrase may begin with `-`.
     #[test]
     fn the_passphrase_help_says_a_value_may_begin_with_a_dash() {
