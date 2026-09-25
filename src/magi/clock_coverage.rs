@@ -9,8 +9,9 @@
 //!
 //! This module is the PURE arithmetic only — deciding whether a clock covers a cap and
 //! rendering the operator-facing line. Emitting it (through `tracing`, the process auditor, and
-//! a surface's [`crate::agent::mode_classifier::NoticeSink`] fallback) is `ConsultTool`'s
-//! `ClockCoverageAnnouncer`, in the bin crate, because `NoticeSink` lives there.
+//! a surface's `NoticeSink` fallback, `crate::agent::mode_classifier::NoticeSink` — a bin-crate
+//! type, so not linkable from this lib module) is `ConsultTool`'s `ClockCoverageAnnouncer`, in
+//! the bin crate, because `NoticeSink` lives there.
 
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
