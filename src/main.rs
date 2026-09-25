@@ -9516,6 +9516,45 @@ mod tests {
         ));
     }
 
+    /// A passphrase that begins with `-` is taken as the value of `-p`, so clap
+    /// never rejects it as an unknown argument and never repeats it on stderr.
+    ///
+    /// Driven through the real `Args` parser with `try_parse_from`: the leak
+    /// was clap's own `error: unexpected argument '--horse-battery-zz' found`,
+    /// which only the real parser produces. The subcommand after the value
+    /// must still parse, and so must the long form with `=`.
+    #[test]
+    fn a_passphrase_beginning_with_a_dash_is_taken_as_the_value_of_p() {
+        use clap::Parser;
+        let parsed = Args::try_parse_from(["magi-rs", "-p", "--horse-battery-zz", "vault", "ls"])
+            .map_err(|e| e.kind())
+            .expect("a dash-leading passphrase must parse as the value of -p");
+        assert_eq!(parsed.passphrase.as_deref(), Some("--horse-battery-zz"));
+        assert!(matches!(
+            parsed.command,
+            Some(TopCmd::Vault {
+                cmd: VaultCmd::Ls,
+                ..
+            })
+        ));
+
+        let long = Args::try_parse_from(["magi-rs", "--passphrase", "-x-y-z", "init"])
+            .map_err(|e| e.kind())
+            .expect("the long form takes a dash-leading value too");
+        assert_eq!(long.passphrase.as_deref(), Some("-x-y-z"));
+    }
+
+    /// `--help` tells the operator a passphrase may begin with `-`.
+    #[test]
+    fn the_passphrase_help_says_a_value_may_begin_with_a_dash() {
+        use clap::CommandFactory;
+        let help = Args::command().render_long_help().to_string();
+        assert!(
+            help.contains("may begin with `-`"),
+            "the -p help does not say a value may begin with a dash:\n{help}"
+        );
+    }
+
     #[test]
     fn test_vault_error_exit_code_assigns_one_or_two_to_every_variant() {
         // Sanity check for the exhaustive match: runtime errors (incl. data
