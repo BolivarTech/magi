@@ -295,7 +295,7 @@ impl EndpointTemplate {
         // hands back a form neither the raw nor the encoded value matches. It
         // is named after the password entry, the half that makes it a secret.
         let basic = basic_credential(user.as_str(), password.as_str());
-        let mut short = crate::logging::register_process_secrets(&[
+        let short = crate::logging::register_process_secrets(&[
             (
                 crate::logging::auditor::SecretName::new(scope.user_entry()),
                 user.as_str(),
@@ -310,8 +310,7 @@ impl EndpointTemplate {
             ),
         ]);
         // The password and its Basic form share a name: warn about it once.
-        short.dedup();
-        for short in short {
+        for short in first_occurrences(short) {
             eprintln!(
                 "warning: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
                 short.as_str()
@@ -326,6 +325,32 @@ impl EndpointTemplate {
         out.push_str(tail);
         Ok(ResolvedEndpoint(out))
     }
+}
+
+/// Keeps the first occurrence of each name, in the order given.
+///
+/// The names come back from the auditor's registration, where the password and its `Basic` form
+/// share one name. Removing only adjacent duplicates would depend on the order of that array, so
+/// the duplicates are dropped by an explicit seen-set instead: the result is the same wherever the
+/// repeats fall, and the warnings keep the order the entries were registered in.
+///
+/// # Arguments
+/// * `names` - The names to filter, possibly repeated.
+///
+/// # Returns
+/// Each distinct name once, at the position of its first occurrence.
+///
+/// # Complexity
+/// `O(k log k)` for `k` names (a `BTreeSet` insert per name; `SecretName` is `Ord`, not `Hash`).
+/// Here `k` is at most three, once per resolved endpoint.
+fn first_occurrences(
+    names: Vec<crate::logging::auditor::SecretName>,
+) -> Vec<crate::logging::auditor::SecretName> {
+    let mut seen = std::collections::BTreeSet::new();
+    names
+        .into_iter()
+        .filter(|name| seen.insert(*name))
+        .collect()
 }
 
 /// The `Authorization: Basic` token an HTTP client sends for this `userinfo`.
