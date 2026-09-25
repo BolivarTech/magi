@@ -1697,22 +1697,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_cancel_arm_stops_an_analysis_that_would_otherwise_run_for_an_hour() {
         let magi = slow_magi(Duration::from_secs(3_600));
-        let cfg = MagiConfig::default();
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
-        let runtime = MagiRuntimeParams {
-            kind: ProviderKind::OpenAiCompat,
-            classifier: &NeverClassifier,
-            configured_mode: None,
-            untrusted_content: false,
-            magi_config: &cfg,
-            timeout_decision: neutral_timeout_decision(),
-            notice_sink: &sink,
-            auditor: test_auditor(),
-            structured_verdicts: StructuredVerdicts::Omit,
-            budget: BudgetTelemetry::default(),
-            clock_coverage: &clock_coverage,
-        };
+        let runtime = runtime_params_for_tests(&clock_coverage);
 
         let cancel = CancellationToken::new();
         // Cancelled BEFORE the call, so the arm is ready on the first poll: no sleep, no
@@ -3143,8 +3129,6 @@ mod tests {
     /// own test rather than being inferred from the parts (S1 gate, Balthasar).
     #[tokio::test]
     async fn test_run_consult_include_reaches_the_emitted_object() {
-        let cfg = MagiConfig::default();
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3153,17 +3137,8 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
                 structured_verdicts: StructuredVerdicts::Include,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3184,8 +3159,6 @@ mod tests {
     /// and no tool calls are recorded (REQ-H21).
     #[tokio::test]
     async fn test_run_consult_direct_runs_three_perspectives_and_populates_consult() {
-        let cfg = MagiConfig::default();
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3193,19 +3166,7 @@ mod tests {
             "should we migrate X to Y?",
             None,
             Some(Mode::Analysis),
-            &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
-            },
+            &runtime_params_for_tests(&clock_coverage),
         )
         .await;
 
@@ -3238,7 +3199,6 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3248,17 +3208,9 @@ mod tests {
             // No explicit mode AND no configured mode: classification runs.
             None,
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
                 classifier: &AlwaysClassifies(Mode::Analysis),
-                configured_mode: None,
-                untrusted_content: false,
                 magi_config: &diverged,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3280,7 +3232,6 @@ mod tests {
             "base_url = \"http://a/v1\"\n[magi]\nbase_url = \"http://b/v1\"\n",
         )
         .expect("valid toml");
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3289,17 +3240,8 @@ mod tests {
             None,
             Some(Mode::Analysis), // explicit: classification is skipped
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
                 magi_config: &diverged,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3317,7 +3259,6 @@ mod tests {
     /// driven through the production `run_consult` entry point.
     #[tokio::test]
     async fn timeout_below_formula_reaches_the_json_from_a_real_run() {
-        let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
         // An `asked` well below `headless_consult_timeout_secs(ceiling)`.
         let decision = magi_rs::magi::resolve_run_timeout(
@@ -3331,7 +3272,6 @@ mod tests {
             decision.below_formula,
             "test setup: this must actually trigger the formula check"
         );
-        let sink = RecordingNoticeSink::default();
 
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
@@ -3341,17 +3281,8 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
                 timeout_decision: decision,
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3380,7 +3311,6 @@ mod tests {
     /// that variant.
     #[tokio::test]
     async fn sc_a04d_warning_reaches_the_notice_sink_from_a_real_run() {
-        let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
         let decision = magi_rs::magi::resolve_run_timeout(
             Some(1),
@@ -3403,17 +3333,9 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3456,7 +3378,6 @@ mod tests {
         /// Named so the guard below can look for it in the clear.
         const PROBE: &str = "MS2_HEADLESS_ALARM_PROBE";
 
-        let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
         let decision = magi_rs::magi::resolve_run_timeout(
             Some(1),
@@ -3498,17 +3419,10 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
                 timeout_decision: decision,
                 notice_sink: &sink,
                 auditor: &auditor,
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3537,7 +3451,6 @@ mod tests {
     /// `decision.warning`) would pass the positive test above too.
     #[tokio::test]
     async fn sc_a04d_warning_stays_silent_at_or_above_the_formula_and_when_absent() {
-        let cfg = MagiConfig::default();
         let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
 
         let generous = magi_rs::magi::resolve_run_timeout(
@@ -3560,17 +3473,9 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
                 timeout_decision: generous,
                 notice_sink: &sink_generous,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3600,17 +3505,9 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
                 timeout_decision: absent,
                 notice_sink: &sink_absent,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3625,11 +3522,10 @@ mod tests {
     /// (exit 2), NOT truncated: `consult`/`response` stay `None` (REQ-H33/SC-A11b).
     #[tokio::test]
     async fn test_run_consult_over_cap_is_input_invalid_not_truncated() {
-        // `MagiConfig::default()` below resolves to `magi_rs::magi::MAX_QUERY_BYTES`
-        // (REQ-A11b's raised cap, SC-A11) — not the retired 8 KiB `MAX_QUERY_LEN`.
+        // `runtime_params_for_tests`'s `magi_config` is `MagiConfig::default()`, which
+        // resolves to `magi_rs::magi::MAX_QUERY_BYTES` (REQ-A11b's raised cap, SC-A11) —
+        // not the retired 8 KiB `MAX_QUERY_LEN`.
         let big = "x".repeat(magi_rs::magi::MAX_QUERY_BYTES + 1);
-        let cfg = MagiConfig::default();
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3637,19 +3533,7 @@ mod tests {
             &big,
             None,
             Some(Mode::Analysis),
-            &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
-            },
+            &runtime_params_for_tests(&clock_coverage),
         )
         .await;
 
@@ -3678,7 +3562,6 @@ mod tests {
             .tool_result_cap_bytes(Some(cap))
             .build()
             .unwrap();
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3687,17 +3570,8 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
                 magi_config: &cfg,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3723,8 +3597,6 @@ mod tests {
     /// static `None` untouched.
     #[tokio::test]
     async fn run_consult_reports_the_effective_timeout_in_applied_caps() {
-        let cfg = MagiConfig::default();
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3732,19 +3604,7 @@ mod tests {
             "should we migrate X to Y?",
             Some(Duration::from_secs(77)),
             Some(Mode::Analysis),
-            &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
-                budget: BudgetTelemetry::default(),
-                clock_coverage: &clock_coverage,
-            },
+            &runtime_params_for_tests(&clock_coverage),
         )
         .await;
 
@@ -3768,8 +3628,6 @@ mod tests {
             max_rotations_effective: 2,
             ceiling_above_sanity: false,
         };
-        let cfg = MagiConfig::default();
-        let sink = RecordingNoticeSink::default();
         let clock_coverage = dummy_clock_coverage();
         let outcome = run_consult(
             resolved_stub(),
@@ -3778,17 +3636,8 @@ mod tests {
             None,
             Some(Mode::Analysis),
             &MagiRuntimeParams {
-                kind: ProviderKind::OpenAiCompat,
-                classifier: &NeverClassifier,
-                configured_mode: None,
-                untrusted_content: false,
-                magi_config: &cfg,
-                timeout_decision: neutral_timeout_decision(),
-                notice_sink: &sink,
-                auditor: test_auditor(),
-                structured_verdicts: StructuredVerdicts::Omit,
                 budget: expected,
-                clock_coverage: &clock_coverage,
+                ..runtime_params_for_tests(&clock_coverage)
             },
         )
         .await;
@@ -3825,24 +3674,10 @@ mod tests {
         let magi = slow_droppy_magi(Duration::from_secs(3_600), entered.clone(), dropped.clone());
         // Named binding (not an inline temporary): `fut` below is driven across
         // several statements before it is ever awaited, so the borrowed
-        // `MagiRuntimeParams` (and the `MagiConfig` it borrows) must outlive the
-        // statement that creates `fut`.
-        let cfg = MagiConfig::default();
-        let sink = RecordingNoticeSink::default();
+        // `MagiRuntimeParams` (and the `ClockCoverageAnnouncer` it borrows) must outlive
+        // the statement that creates `fut`.
         let clock_coverage = dummy_clock_coverage();
-        let runtime = MagiRuntimeParams {
-            kind: ProviderKind::OpenAiCompat,
-            classifier: &NeverClassifier,
-            configured_mode: None,
-            untrusted_content: false,
-            magi_config: &cfg,
-            timeout_decision: neutral_timeout_decision(),
-            notice_sink: &sink,
-            auditor: test_auditor(),
-            structured_verdicts: StructuredVerdicts::Omit,
-            budget: BudgetTelemetry::default(),
-            clock_coverage: &clock_coverage,
-        };
+        let runtime = runtime_params_for_tests(&clock_coverage);
 
         {
             let fut = run_consult(
