@@ -55,13 +55,13 @@
 
 use std::collections::BTreeMap;
 
-use magi_core::provider::FinishReason;
+use magi_core::provider::{FinishReason, ReasoningControl, ReasoningState};
 use magi_core::reporting::CompletionRecord;
 use magi_core::schema::AgentName;
 use serde_json::{json, Map, Value};
 
 use crate::magi::seat_label;
-use crate::redact::redact_foreign_text;
+use crate::redact::{foreign_serde_label, redact_foreign_text};
 
 /// Renders the per-attempt completion telemetry as JSON.
 ///
@@ -131,6 +131,8 @@ pub fn render_completions(completions: &BTreeMap<AgentName, Vec<CompletionRecord
                         "finish": finish_label(record.finish.as_ref()),
                         "completion_tokens": record.completion_tokens,
                         "prompt_tokens": record.prompt_tokens,
+                        "reasoning": reasoning_value(&record.reasoning),
+                        "control": control_label(&record.control),
                     })
                 })
                 .collect();
@@ -181,6 +183,97 @@ fn finish_label(finish: Option<&FinishReason>) -> Value {
                 .to_string(),
         ),
     }
+}
+
+/// Renders a reasoning channel measurement as magi-core's own serde form of it, with the model
+/// text stripped and every embedded string redacted.
+///
+/// # Why the JSON is walked structurally instead of matching on the enum
+///
+/// [`ReasoningState`] is `#[non_exhaustive]`, so a hand-written match here would need a wildcard
+/// — the same trap `finish_label` avoids for [`FinishReason`]. Serializing first and then
+/// transforming the resulting [`Value`] sidesteps it entirely: the walk only ever asks "is this
+/// key named `text`?" and "is this a string?", so it applies unchanged to a future variant this
+/// crate does not know yet, without inventing a label for it.
+///
+/// # Arguments
+/// * `reasoning` - the measurement magi-core recorded for one completion attempt.
+///
+/// # Returns
+///
+/// The serde shape of `reasoning`, with two transformations and only those: every `text` field
+/// becomes [`Value::Null`] (model text never enters the envelope), and every string in the
+/// resulting structure — today only `backend`, plus a unit-variant tag such as `"NotMeasured"`,
+/// which is the identity under redaction — passes through [`redact_foreign_text`]. The
+/// unreachable serialization-failure branch falls back to a redacted form of magi-core's own
+/// `Debug` for [`ReasoningState`], which elides the trace field itself, and never to
+/// [`Value::Null`] — that value is reserved for "no measurement was reported" and must not be
+/// produced by a path that did measure something.
+fn reasoning_value(reasoning: &ReasoningState) -> Value {
+    match serde_json::to_value(reasoning) {
+        Ok(value) => redact_reasoning_json(value),
+        // Unreachable: the derived impl writes plain JSON and cannot fail into `serde_json`.
+        // Handled rather than unwrapped because a panic here would take down a whole report
+        // over one telemetry field. `ReasoningState`'s own `Debug` elides the trace, so this
+        // fallback can never leak model text even though it is not the field-by-field walk
+        // above.
+        _ => Value::String(
+            redact_foreign_text(&format!("{reasoning:?}"))
+                .as_str()
+                .to_string(),
+        ),
+    }
+}
+
+/// Structural transform applied to a serialized [`ReasoningState`]: null every `text` field,
+/// redact every string.
+///
+/// # Arguments
+/// * `value` - the raw [`serde_json::to_value`] output for a [`ReasoningState`].
+///
+/// # Returns
+///
+/// The same shape, recursively: an object keeps its keys with `text` forced to
+/// [`Value::Null`] and every other value walked the same way; a string is redacted with
+/// [`redact_foreign_text`]; every other value passes through unchanged.
+fn redact_reasoning_json(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, val)| {
+                    let val = if key == "text" {
+                        Value::Null
+                    } else {
+                        redact_reasoning_json(val)
+                    };
+                    (key, val)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_reasoning_json).collect()),
+        Value::String(s) => Value::String(redact_foreign_text(&s).as_str().to_string()),
+        other => other,
+    }
+}
+
+/// Stable JSON value for the reasoning control a completion attempt ran under, DERIVED from the
+/// crate exactly as `finish_label` derives a finish reason.
+///
+/// # Arguments
+/// * `control` - the control magi-core recorded as sent for one completion attempt.
+///
+/// # Returns
+///
+/// The kebab-case wire tag (`"default"`, `"disabled"`, `"enabled"`) [`ReasoningControl`]
+/// serializes, via [`foreign_serde_label`] — the same helper `rotation_report::cause_label`
+/// uses — so a future variant this crate does not know yet still renders its own tag rather
+/// than a wildcard label this crate invented.
+fn control_label(control: &ReasoningControl) -> Value {
+    Value::String(
+        foreign_serde_label(control, || format!("{control:?}"))
+            .as_str()
+            .to_string(),
+    )
 }
 
 /// Unit tests for the completion telemetry composition.
