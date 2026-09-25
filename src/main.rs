@@ -180,8 +180,20 @@ struct Args {
     init_config: bool,
 
     /// Master passphrase (precedence: -p > MAGI_PASSPHRASE > interactive
-    /// prompt). Global: also applies to the `vault` subcommand (REQ-V04).
-    #[arg(short = 'p', long, global = true, value_parser = parse_secret_arg)]
+    /// prompt). Global: also applies to the `vault` subcommand (REQ-V04). The
+    /// value may begin with `-`: the word after `-p` is always the passphrase.
+    //
+    // `allow_hyphen_values`: without it clap rejected `-p --horse-battery-zz`
+    // as an unknown argument and REPEATED the passphrase on stderr, a sink no
+    // auditor reaches (threat model F-3). The passphrase has no composition
+    // rules, so a leading dash is a legitimate value, not a mistyped flag.
+    #[arg(
+        short = 'p',
+        long,
+        global = true,
+        allow_hyphen_values = true,
+        value_parser = parse_secret_arg
+    )]
     passphrase: Option<SecretArg>,
 
     #[command(subcommand)]
