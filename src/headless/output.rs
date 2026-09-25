@@ -20,6 +20,9 @@
 
 use std::io::Write;
 
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
+use base64::engine::DecodePaddingMode;
+use base64::Engine as _;
 use serde::Serialize;
 
 use super::types::{
@@ -61,6 +64,25 @@ const AKIA_KEY_BODY_LEN: usize = 16;
 
 /// Keyword of an `Authorization: Bearer …` header/token.
 const BEARER_KEYWORD: &str = "Bearer";
+
+/// Keyword of an `Authorization: Basic …` header (RFC 7617).
+///
+/// reqwest sends this header for any URL that carries `userinfo`, so a `base_url` with a
+/// vault-resolved credential goes out as `Basic base64(user:password)`, and an endpoint that
+/// echoes the header in an error body brings it back into the output.
+const BASIC_KEYWORD: &str = "Basic";
+
+/// The byte every `Basic` credential decodes to at least once: RFC 7617 defines the token as
+/// `base64(user-id ":" password)`. A token that decodes without it is not a credential, which is
+/// what keeps prose such as "Basic idea" out of the matcher.
+const BASIC_CREDENTIAL_SEPARATOR: u8 = b':';
+
+/// Decoder for a `Basic` token: the standard alphabet reqwest encodes with, accepting the token
+/// with or without its `=` padding, so an echo that dropped the padding is still recognised.
+const BASIC_TOKEN_ENGINE: GeneralPurpose = GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
 
 /// Minimum length of a hex/base64-like character run to consider it a possible generic secret
 /// (REQ-H15c, defense in depth).
@@ -459,6 +481,54 @@ fn match_bearer_token(chars: &[char], i: usize) -> Option<usize> {
     Some(j)
 }
 
+/// `true` if `c` belongs to the standard base64 alphabet, padding included (`A-Z a-z 0-9 + / =`).
+fn is_base64_standard_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')
+}
+
+/// Attempts to match a `Basic <credential>` token starting at `chars[i]`.
+///
+/// Same keyword and whitespace rules as [`match_bearer_token`] (case-insensitive keyword, at
+/// least one whitespace character after it). The token is the maximal run of standard base64
+/// characters that follows, and it is claimed only if it decodes to bytes containing
+/// [`BASIC_CREDENTIAL_SEPARATOR`]: that is what a `Basic` credential is, and it is what tells
+/// `Basic YWw6cHcxMjM0NQ==` apart from the word "Basic" in prose. A credential of any length is
+/// claimed, including one far below [`GENERIC_SECRET_RUN_MIN_LEN`].
+///
+/// # Returns
+///
+/// The number of characters consumed (keyword + whitespace + token) on a match, else `None`.
+///
+/// # Complexity
+///
+/// `O(t)` for a token of `t` characters (scan plus decode). A failed attempt needs the keyword
+/// and whitespace at `i`, and its token run ends at the first non-base64 character, so the runs
+/// scanned by two failed attempts never overlap: over a whole line the attempts cost `O(n)`.
+fn match_basic_credential(chars: &[char], i: usize) -> Option<usize> {
+    let mut consumed = 0usize;
+    for (offset, kw_char) in BASIC_KEYWORD.chars().enumerate() {
+        if !chars.get(i + offset)?.eq_ignore_ascii_case(&kw_char) {
+            return None;
+        }
+        consumed += 1;
+    }
+    let ws_start = consumed;
+    let mut j = ws_start;
+    while matches!(chars.get(i + j), Some(c) if c.is_whitespace()) {
+        j += 1;
+    }
+    if j == ws_start {
+        return None;
+    }
+    let token_start = j;
+    while matches!(chars.get(i + j), Some(c) if is_base64_standard_char(*c)) {
+        j += 1;
+    }
+    let token: String = chars.get(i + token_start..i + j)?.iter().collect();
+    let decoded = BASIC_TOKEN_ENGINE.decode(token.as_bytes()).ok()?;
+    decoded.contains(&BASIC_CREDENTIAL_SEPARATOR).then_some(j)
+}
+
 /// Attempts to match an `sk-[A-Za-z0-9-]{16,}` key starting at `chars[i]`.
 ///
 /// Returns the number of characters consumed (`sk-` prefix + body run) if the tail after `sk-`
@@ -552,6 +622,7 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<PatternMatch> {
 }
 
 /// Walks through `raw` in a single pass and redacts any known key-like pattern (`Bearer …`,
+/// `Basic <base64 user:password>`,
 /// `sk-…`, `AKIA…`, long hex/base64-like runs) to `REDACTED_PLACEHOLDER`; the rest of the text
 /// passes through unchanged.
 ///
@@ -573,7 +644,9 @@ fn match_generic_secret_run(chars: &[char], i: usize) -> Option<PatternMatch> {
 /// deriving a threshold from input length) regresses a test, not just a doc comment.
 ///
 /// On a successful match the cursor also jumps over the full match length (`i += consumed`),
-/// so a found secret is not re-scanned either. A run exempted as one of the product's own
+/// so a found secret is not re-scanned either. The `Basic` matcher's failing scan is not capped
+/// by a constant, but it is linear over the whole line for the reason `match_basic_credential`
+/// documents (the token runs of two failed attempts never overlap). A run exempted as one of the product's own
 /// labels (the private `PRODUCT_LABELS`, REQ-AUD-1) is consumed the same way, in one step, without being
 /// claimed; checking it compares the run against a fixed, constant-size list whose entries are
 /// at most 36 characters, so it adds `O(1)` per claimed-length run and the pass stays `O(n)`.
@@ -648,6 +721,7 @@ pub fn secret_pattern_ranges(raw: &str) -> Vec<std::ops::Range<usize>> {
     let mut i = 0usize;
     while i < chars.len() {
         let found = match_bearer_token(&chars, i)
+            .or_else(|| match_basic_credential(&chars, i))
             .or_else(|| match_sk_key(&chars, i))
             .or_else(|| match_akia_key(&chars, i))
             .map(PatternMatch::Secret)

@@ -32,6 +32,36 @@ pub const API_KEY_URL: &str = "https://api.anthropic.com/api/oauth/claude_cli/cr
 /// (audit finding C8).
 pub const OAUTH_CALLBACK_TIMEOUT_SECS: u64 = 600;
 
+/// What replaces a value this flow holds when a server's error body echoes it.
+const ECHOED_VALUE_PLACEHOLDER: &str = "[REDACTED]";
+
+/// Replaces every occurrence of each non-empty `values` entry in `body` with
+/// [`ECHOED_VALUE_PLACEHOLDER`].
+///
+/// A server that fails the token exchange or the key mint may echo the request
+/// it received, and that request carried the authorization `code`, the PKCE
+/// `verifier` or the access token. Their length is the server's choice, so the
+/// shape-based pattern pass downstream (runs of 32 characters or more) cannot be
+/// relied on; the exact values are known here, so they are masked here. Longer
+/// values are replaced first, so a value that contains another is masked whole.
+///
+/// # Arguments
+/// * `body` - The server's error body, verbatim.
+/// * `values` - The secret values in scope for the request; empty ones are ignored.
+///
+/// # Returns
+/// `body` with every occurrence of each value replaced.
+///
+/// # Complexity
+/// `O(k · n)` for `k` values over a body of `n` bytes; `k` is at most two here.
+fn mask_echoed_values(body: &str, values: &[&str]) -> String {
+    let mut ordered: Vec<&str> = values.iter().copied().filter(|v| !v.is_empty()).collect();
+    ordered.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    ordered.into_iter().fold(body.to_string(), |masked, value| {
+        masked.replace(value, ECHOED_VALUE_PLACEHOLDER)
+    })
+}
+
 /// PKCE helper to generate code verifier and challenge.
 pub struct Pkce {
     pub verifier: String,
@@ -134,9 +164,10 @@ impl OAuthService {
             .await?;
 
         if !response.status().is_success() {
+            let body = response.text().await?;
             return Err(anyhow::anyhow!(
                 "Token exchange failed: {}",
-                response.text().await?
+                mask_echoed_values(&body, &[code, self.pkce.verifier.as_str()])
             ));
         }
 
@@ -153,9 +184,10 @@ impl OAuthService {
             .await?;
 
         if !response.status().is_success() {
+            let body = response.text().await?;
             return Err(anyhow::anyhow!(
                 "Failed to create API key: {}",
-                response.text().await?
+                mask_echoed_values(&body, &[access_token])
             ));
         }
 

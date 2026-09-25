@@ -36,6 +36,10 @@
 
 use std::fmt;
 
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine as _;
+use zeroize::Zeroizing;
+
 use crate::redact::{locate_userinfo, redact_url, UserinfoLocation};
 use crate::vault::SecretStore;
 
@@ -285,7 +289,13 @@ impl EndpointTemplate {
         // Registering a `MAGI_BASE_URL_PASSWORD` under `BASE_URL_PASSWORD`
         // masks the value correctly and then names the wrong config key in the
         // alarm -- sending the reader to an entry that is not the one at fault.
-        for short in crate::logging::register_process_secrets(&[
+        // **And the form that actually goes on the wire.** reqwest lifts the
+        // `userinfo` out of the URL and sends `Authorization: Basic
+        // base64(user:password)`, so an endpoint echoing its request headers
+        // hands back a form neither the raw nor the encoded value matches. It
+        // is named after the password entry, the half that makes it a secret.
+        let basic = basic_credential(user.as_str(), password.as_str());
+        let mut short = crate::logging::register_process_secrets(&[
             (
                 crate::logging::auditor::SecretName::new(scope.user_entry()),
                 user.as_str(),
@@ -294,7 +304,14 @@ impl EndpointTemplate {
                 crate::logging::auditor::SecretName::new(scope.password_entry()),
                 password.as_str(),
             ),
-        ]) {
+            (
+                crate::logging::auditor::SecretName::new(scope.password_entry()),
+                basic.as_str(),
+            ),
+        ]);
+        // The password and its Basic form share a name: warn about it once.
+        short.dedup();
+        for short in short {
             eprintln!(
                 "warning: {} is too short to be matched exactly in the log; it is still masked by shape, which is weaker.",
                 short.as_str()
@@ -309,6 +326,31 @@ impl EndpointTemplate {
         out.push_str(tail);
         Ok(ResolvedEndpoint(out))
     }
+}
+
+/// The `Authorization: Basic` token an HTTP client sends for this `userinfo`.
+///
+/// reqwest percent-decodes the `userinfo` it extracts from a URL and encodes `user:password`
+/// with the standard base64 alphabet, padded (RFC 7617). The raw vault values are exactly what
+/// that decoding yields, so encoding them here produces the same bytes the header carries.
+///
+/// # Arguments
+/// * `user` - The resolved user, raw (not percent-encoded).
+/// * `password` - The resolved password, raw.
+///
+/// # Returns
+/// The base64 token, held in a [`Zeroizing`] buffer because it is the credential in another
+/// spelling.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Private helper; illustrative only.
+/// assert_eq!(basic_credential("al", "pw12345").as_str(), "YWw6cHcxMjM0NQ==");
+/// ```
+fn basic_credential(user: &str, password: &str) -> Zeroizing<String> {
+    let plain = Zeroizing::new(format!("{user}:{password}"));
+    Zeroizing::new(BASE64_STANDARD.encode(plain.as_bytes()))
 }
 
 impl fmt::Display for EndpointTemplate {
