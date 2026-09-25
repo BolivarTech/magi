@@ -369,6 +369,10 @@ async fn analyze_direct(
     .map_err(ConsultRunError::UntrustedContentRequiresMode)?;
     let mode = resolution.mode;
 
+    // S-9/REQ-EE-5: announced at THIS activation of the MAGI panel, after the size check and
+    // mode resolution (an invalid query never activates it) and before the analysis launches.
+    runtime.clock_coverage.announce_activation();
+
     let magi = Arc::clone(magi);
     let owned = prompt.to_string();
     let handle = tokio::spawn(async move { magi.analyze(&mode, &owned).await });

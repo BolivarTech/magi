@@ -2246,6 +2246,10 @@ pub async fn run_tui_ext(
                             &resolution,
                         )))
                         .await;
+                    // S-9/REQ-EE-5: announced at THIS activation of the MAGI panel, after the
+                    // size check and mode resolution (a rejected/invalid query never activates
+                    // it) and before the analysis launches.
+                    clock_coverage.announce_activation();
                     // MAGI FIX: joined spawn (awaited inline → serial, no finalize-order
                     // regression) isolates a panic in magi-core's analyze into a recoverable
                     // JoinError so the runner survives (see plan Task 6 iteration-3).

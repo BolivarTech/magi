@@ -1388,6 +1388,11 @@ impl Tool for ConsultTool {
         // copies that could drift apart.
         check_query_size(query, self.max_query_bytes)
             .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        // S-9/REQ-EE-5: announced at THIS activation of the MAGI panel — after the size check
+        // (a rejected query never activates it) and before the analysis launches.
+        if let Some(announcer) = &self.clock_coverage {
+            announcer.announce_activation();
+        }
         let (mode, source) = resolved_mode_and_source(&args);
         let magi = self.magi.clone();
         let q = query.to_string();
