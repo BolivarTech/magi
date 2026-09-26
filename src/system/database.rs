@@ -1805,4 +1805,153 @@ mod tests {
         }
         assert_eq!(total_messages, 2);
     }
+
+    // ── Task 10.3: the strength floor applies to EVERY envelope creation ──────────────────
+    //
+    // `magi init` without a passphrase leaves the DB scaffolded but envelope-less. Before this
+    // fix, the first open of such a DB bootstrapped the envelope with whatever passphrase it
+    // was given — `-p abc vault ls` made "abc" the master secret, bypassing REQ-V17's floor.
+
+    /// A passphrase well below the floor (3 chars, trivially guessable).
+    const WEAK_PASSPHRASE: &str = "abc";
+
+    /// Scaffolds a workspace the way `magi init` does WITHOUT a passphrase (the real
+    /// scaffolder, never the open path under test) and returns its DB path.
+    fn envelope_less_workspace_db() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = crate::system::workspace::init(dir.path()).expect("magi init scaffolds");
+        let db = ws.db_path();
+        (dir, db)
+    }
+
+    /// `(vault_meta rows, total data rows)` read on a raw connection — the never-write oracle.
+    fn meta_and_data_rows(path: &Path) -> (i64, i64) {
+        let conn = Connection::open(path).unwrap();
+        let data = DATA_TABLES.iter().map(|t| row_count(&conn, t)).sum();
+        (row_count(&conn, "vault_meta"), data)
+    }
+
+    #[test]
+    fn a_weak_passphrase_cannot_bootstrap_an_initialized_db_on_the_vault_path() {
+        let (_dir, db) = envelope_less_workspace_db();
+        assert_eq!(
+            meta_and_data_rows(&db),
+            (0, 0),
+            "precondition: init left no envelope"
+        );
+
+        let err = EncryptedSqliteMemory::new_with_vault(
+            db.clone(),
+            Zeroizing::new(WEAK_PASSPHRASE.to_string()),
+            fast_kdf_vault(),
+        )
+        .err()
+        .expect("a weak passphrase must not become the master secret");
+        assert!(
+            matches!(
+                err.downcast_ref::<VaultError>(),
+                Some(VaultError::WeakPassphrase(_))
+            ),
+            "expected WeakPassphrase, got {err:?}"
+        );
+        assert!(
+            !err.to_string().contains(WEAK_PASSPHRASE),
+            "the error must never repeat the passphrase"
+        );
+        assert_eq!(
+            meta_and_data_rows(&db),
+            (0, 0),
+            "a refused bootstrap writes nothing: no envelope, no data"
+        );
+
+        EncryptedSqliteMemory::new_with_vault(
+            db.clone(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+            fast_kdf_vault(),
+        )
+        .expect("the DB stays bootstrappable by a strong passphrase");
+        assert_eq!(meta_and_data_rows(&db).0, 2, "salt + wrapped_dek installed");
+    }
+
+    #[test]
+    fn a_weak_passphrase_cannot_bootstrap_an_initialized_db_on_the_headless_path() {
+        let (_dir, db) = envelope_less_workspace_db();
+
+        let err = EncryptedSqliteMemory::open_with_state_machine_vault(
+            db.clone(),
+            Zeroizing::new(WEAK_PASSPHRASE.to_string()),
+            fast_kdf_vault(),
+        )
+        .err()
+        .expect("a weak passphrase must not become the master secret");
+        assert!(
+            matches!(err, VaultError::WeakPassphrase(_)),
+            "expected WeakPassphrase, got {err:?}"
+        );
+        assert_eq!(
+            meta_and_data_rows(&db),
+            (0, 0),
+            "a refused bootstrap writes nothing"
+        );
+
+        EncryptedSqliteMemory::open_with_state_machine_vault(
+            db,
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+            fast_kdf_vault(),
+        )
+        .expect("the DB stays bootstrappable by a strong passphrase");
+    }
+
+    /// Installs an envelope sealed with `master` straight into `vault_meta`, bypassing the
+    /// open path — the only way to obtain an envelope whose master is below the floor (one
+    /// created before the floor existed at this point, or by a racing winner).
+    fn install_envelope(path: &Path, vault: &CryptoVault, master: &str) -> Zeroizing<Vec<u8>> {
+        let (salt, wrapped, dek) = bootstrap_envelope(vault, master).expect("bootstrap");
+        let conn = Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO vault_meta (key, value) VALUES ('salt', ?1), ('wrapped_dek', ?2)",
+            params![salt, wrapped],
+        )
+        .unwrap();
+        dek
+    }
+
+    #[test]
+    fn an_existing_envelope_under_a_sub_floor_passphrase_still_unlocks() {
+        // Unlock never applies the floor: a passphrase accepted before is accepted as is.
+        let (_dir, db) = envelope_less_workspace_db();
+        install_envelope(&db, &fast_kdf_vault(), WEAK_PASSPHRASE);
+
+        EncryptedSqliteMemory::open_with_state_machine_vault(
+            db.clone(),
+            Zeroizing::new(WEAK_PASSPHRASE.to_string()),
+            fast_kdf_vault(),
+        )
+        .expect("headless unlock of an existing envelope ignores the floor");
+        EncryptedSqliteMemory::new_with_vault(
+            db,
+            Zeroizing::new(WEAK_PASSPHRASE.to_string()),
+            fast_kdf_vault(),
+        )
+        .expect("vault/TUI unlock of an existing envelope ignores the floor");
+    }
+
+    #[test]
+    fn a_bootstrapper_that_finds_a_racing_winner_adopts_it_without_the_floor() {
+        // SC-V51: the reader saw no envelope, and a racing opener installed one before this
+        // opener took the write lock. Adopting the winner's envelope is an UNLOCK, so the
+        // floor must not refuse it — the check belongs to the opener that installs.
+        let (_dir, db) = envelope_less_workspace_db();
+        let vault = fast_kdf_vault();
+        let winner_dek = install_envelope(&db, &vault, WEAK_PASSPHRASE);
+
+        let mut conn = open_connection(&db).unwrap();
+        let adopted = bootstrap_fresh_envelope(&mut conn, &vault, WEAK_PASSPHRASE, &db)
+            .expect("an adopter unlocks the winner's envelope");
+        assert_eq!(
+            adopted.as_slice(),
+            winner_dek.as_slice(),
+            "the adopter must end up with the winner's DEK, never a second one"
+        );
+    }
 }

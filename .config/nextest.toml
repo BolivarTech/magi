@@ -246,9 +246,16 @@
 # **If they ever flake, the answer is membership, not a longer deadline** — that is the
 # lesson the "FOURTH hit" section above paid for twice.
 
+# ## A second INTEGRATION binary pays the KDF (Task 10.3, v0.20.0)
+#
+# `tests/bootstrap_strength_floor.rs` drives the real binary through `init` and two
+# `vault ls` opens; the last one bootstraps an envelope and pays a full Argon2id KDF in a
+# child process. It produces the load, so it joins by binary name, for the same reason
+# `workdir_flag` does: no `test(/…::/)` pattern can reach an integration test.
+
 [test-groups]
 heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
-filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag)'
+filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag) | binary(bootstrap_strength_floor)'
 test-group = "heavy"
