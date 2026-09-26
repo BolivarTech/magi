@@ -1451,4 +1451,169 @@ mod tests {
              they will not know exists. Section was: {section:?}"
         );
     }
+
+    // ── Task 15 (REQ-V42-7 / spec §0.1): scaffold and reference stay in sync ────────────────
+
+    /// Keys declared in the `[magi]` table of `toml_text`, ACTIVE or COMMENTED, in first-seen order,
+    /// deduplicated.
+    ///
+    /// A key line is `^\s*#?\s*([a-z][a-z0-9_]*)\s*=` inside the `[magi]` table. The table opens at
+    /// the line `[magi]` exactly and closes at the next line whose first non-blank character is `[`
+    /// (`[magi.complexity]`, `[[magi.fallback]]`, `[memory]`, ...). A commented table header such as
+    /// `# [memory] — ...` does not close it. Prose comments do not match because the pattern needs an
+    /// identifier immediately followed by `=`.
+    ///
+    /// Complexity: O(lines), once per test.
+    ///
+    /// # Arguments
+    /// * `toml_text` - the file text, already stripped of `\r`.
+    ///
+    /// # Returns
+    /// The key names; empty when there is no `[magi]` table.
+    fn magi_table_keys(toml_text: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut in_magi = false;
+        for line in toml_text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed == "[magi]" {
+                in_magi = true;
+                continue;
+            }
+            if !in_magi {
+                continue;
+            }
+            if trimmed.starts_with('[') {
+                break;
+            }
+            // Strip at most one leading `#` (and the whitespace around it) so both an active
+            // key line and a commented one reduce to the same "identifier = " shape; a line
+            // that is prose (no `=` right after the identifier) never matches at all.
+            let candidate = trimmed.strip_prefix('#').unwrap_or(trimmed).trim_start();
+            let ident_end = candidate
+                .char_indices()
+                .find(|(i, c)| {
+                    if *i == 0 {
+                        !(c.is_ascii_lowercase() || *c == '_')
+                    } else {
+                        !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+                    }
+                })
+                .map_or(candidate.len(), |(i, _)| i);
+            if ident_end == 0 {
+                continue;
+            }
+            let ident = &candidate[..ident_end];
+            let rest = candidate[ident_end..].trim_start();
+            if !rest.starts_with('=') {
+                continue;
+            }
+            if !keys.iter().any(|k| k == ident) {
+                keys.push(ident.to_string());
+            }
+        }
+        keys
+    }
+
+    /// REQ-V42-7 / spec §0.1: every `[magi]` key the scaffold writes, active or commented, is
+    /// documented in `docs/magi.toml.example`, the annotated reference the README tells operators
+    /// to copy.
+    ///
+    /// Derived from `render_default_magi_toml()` rather than from a hand-written list, so a key
+    /// that reaches the scaffold without reaching the reference turns this red, whichever task
+    /// added it. The file is read at run time and `\r` is stripped, so a CRLF checkout and an LF
+    /// one give the same answer.
+    #[test]
+    fn the_example_documents_every_magi_key_the_scaffold_writes() {
+        let example = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable")
+        .replace('\r', "");
+        let scaffold = render_default_magi_toml().replace('\r', "");
+
+        let scaffolded = magi_table_keys(&scaffold);
+        assert!(
+            !scaffolded.is_empty(),
+            "the scaffold's [magi] table yielded no keys, so this check would hold over nothing"
+        );
+        let documented = magi_table_keys(&example);
+        let missing: Vec<&String> = scaffolded
+            .iter()
+            .filter(|key| !documented.contains(key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "docs/magi.toml.example does not document these [magi] keys the scaffold writes: \
+             {missing:?}"
+        );
+    }
+
+    /// The four keys v0.20.0 adds to `[magi]` reach BOTH the scaffold and the reference.
+    ///
+    /// The derived test above cannot see a key that never reached the scaffold in the first place,
+    /// because both of its sides would lack it. This pins the milestone's own four, by name, on
+    /// both sides. `agent_timeout_secs` is not in the list: it already existed, and only its range
+    /// changed.
+    #[test]
+    fn the_v0_20_magi_keys_reach_the_scaffold_and_the_example() {
+        const V0_20_MAGI_KEYS: [&str; 4] = [
+            "reasoning",
+            "reasoning_spelling",
+            "max_tokens",
+            "reasoning_trace",
+        ];
+        let example = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable")
+        .replace('\r', "");
+        let scaffolded = magi_table_keys(&render_default_magi_toml().replace('\r', ""));
+        let documented = magi_table_keys(&example);
+        for key in V0_20_MAGI_KEYS {
+            assert!(
+                scaffolded.iter().any(|k| k == key),
+                "the scaffold's [magi] table does not declare `{key}` (spec §0.1: every new key \
+                 is written commented out with its default) -- the task that added the key owes it"
+            );
+            assert!(
+                documented.iter().any(|k| k == key),
+                "docs/magi.toml.example's [magi] table does not document `{key}`"
+            );
+        }
+    }
+
+    /// The helper reads active and commented keys of `[magi]` only, and stops at the next table.
+    ///
+    /// Test code gets a test here because a helper that answers too little makes both tests above
+    /// vacuous, and one that answers too much, by reading `[[magi.fallback]]` or `[memory]`, makes
+    /// them demand documentation for keys `[magi]` does not have.
+    #[test]
+    fn magi_table_keys_reads_active_and_commented_keys_of_the_magi_table_only() {
+        let text = "provider = \"ollama\"\n\
+                    [magi]\n\
+                    melchior_model = \"a\"\n\
+                    # The failure domain of each model. Declared, never inferred.\n\
+                    # reasoning = \"default\"   # default | disabled | enabled\n\
+                    #reasoning_trace = false\n\
+                    melchior_model = \"again\"\n\
+                    # [memory] - a commented header does not close the table\n\
+                    max_rotations = 2\n\
+                    [magi.complexity]\n\
+                    code_review = 200\n\
+                    [[magi.fallback]]\n\
+                    model = \"x\"\n\
+                    lineage = \"y\"\n";
+        assert_eq!(
+            magi_table_keys(text),
+            vec![
+                "melchior_model".to_string(),
+                "reasoning".to_string(),
+                "reasoning_trace".to_string(),
+                "max_rotations".to_string(),
+            ]
+        );
+        assert!(magi_table_keys("provider = \"ollama\"\n").is_empty());
+    }
 }
