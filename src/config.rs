@@ -1109,13 +1109,23 @@ impl MagiConfig {
         let spelling_raw = self.magi.reasoning_spelling.as_deref();
 
         if trio_kind != ProviderKind::OpenAiCompat {
-            return match spelling_raw {
-                Some(raw) => vec![Notice::warn(format!(
+            let mut notices = Vec::new();
+            let control = self.effective_reasoning();
+            if trio_kind == ProviderKind::Anthropic && control != ReasoningControl::Default {
+                let control_tag = reasoning_control_wire_tag(control);
+                notices.push(Notice::warn(format!(
+                    "notice: `[magi].reasoning = \"{control_tag}\"` will not reach the wire: the \
+                     trio runs on `anthropic`, whose seats send no reasoning switch, so every \
+                     completion record will report the reasoning state as `Unsupported`."
+                )));
+            }
+            if let Some(raw) = spelling_raw {
+                notices.push(Notice::warn(format!(
                     "notice: `[magi].reasoning_spelling = \"{raw}\"` has no effect: the trio \
                      runs on `{trio_kind}`, and a spelling is only sent to `openai-compat` seats."
-                ))],
-                None => Vec::new(),
-            };
+                )));
+            }
+            return notices;
         }
 
         let control = self.effective_reasoning();
