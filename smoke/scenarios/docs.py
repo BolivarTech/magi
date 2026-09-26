@@ -149,6 +149,12 @@ def the_published_documentation_is_still_true(run):
         yield _config_finding(embedded, workspace)
         yield _key_coverage_finding(workspace, documents)
     finally:
+        # Removed here, and the scratch area's own reset is not an argument
+        # against it: --reset-env is a recovery an operator runs, not a
+        # cleanup this scenario is entitled to defer to. One workspace per
+        # run, forever, is the kind of growth nobody notices until a disk
+        # does -- and the harness already refuses that bargain for its own
+        # temporary directories.
         if workspace is not None:
             shutil.rmtree(workspace, ignore_errors=True)
 
