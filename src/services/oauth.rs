@@ -389,6 +389,52 @@ mod tests {
         );
     }
 
+    /// A server that echoes the `code` re-encoded rather than verbatim still
+    /// never carries it into the error text.
+    ///
+    /// The exchange sends a JSON body, so an echo of the request carries the
+    /// code JSON-escaped (`"` becomes `\"`); a server that re-serialises it as
+    /// a form (`application/x-www-form-urlencoded`) carries it percent-encoded,
+    /// with a space as `+`. Both spellings differ from the raw value exactly
+    /// when the code contains a reserved character, which is when a raw-only
+    /// mask misses it. The expected spellings are written out by hand, never
+    /// computed with the helper under test.
+    #[tokio::test]
+    async fn a_failed_token_exchange_never_echoes_an_encoded_code() {
+        const RESERVED_CODE: &str = "c0de/with+reserved chars\"~";
+        const FORM_SPELLING: &str = "c0de%2Fwith%2Breserved+chars%22%7E";
+        const JSON_SPELLING: &str = "c0de/with+reserved chars\\\"~";
+        let mut server = mockito::Server::new_async().await;
+        let service = OAuthService::with_urls(format!("{}/token", server.url()), String::new());
+        let _m = server
+            .mock("POST", "/token")
+            .with_status(400)
+            .with_body(format!(
+                "invalid_grant: code={FORM_SPELLING} request={{\"code\":\"{JSON_SPELLING}\"}}"
+            ))
+            .create_async()
+            .await;
+
+        let err = service
+            .exchange_code_for_token(RESERVED_CODE)
+            .await
+            .expect_err("a 400 must fail the exchange");
+        let text = format!("{err:#}");
+
+        assert!(
+            !text.contains(FORM_SPELLING),
+            "the form-encoded code was echoed: {text}"
+        );
+        assert!(
+            !text.contains(JSON_SPELLING),
+            "the JSON-escaped code was echoed: {text}"
+        );
+        assert!(
+            text.contains("Token exchange failed") && text.contains("invalid_grant"),
+            "the server's reason stays readable: {text}"
+        );
+    }
+
     /// A failed key mint whose body echoes the OAuth access token never
     /// carries it into the error text, for the same reason as the code above.
     #[tokio::test]
