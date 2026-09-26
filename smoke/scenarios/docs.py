@@ -41,7 +41,8 @@ import shutil
 import tempfile
 
 from smoke import runs
-from smoke.docs_check import extract_configs, extract_invocations, published_docs
+from smoke.docs_check import (extract_configs, extract_invocations,
+                              magi_table_keys, names_key, published_docs)
 from smoke.errors import HarnessError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
@@ -132,17 +133,24 @@ def the_published_documentation_is_still_true(run):
 
     invocations = _read_invocations(documents)
     surface = _Surface()
-    root = surface.help_for(())
-    if root is None:
+    root_help = surface.help_for(())
+    if root_help is None:
         for index in (0, 1):
             yield _finding(index, Outcome.CANNOT_TEST,
                            "the product did not answer %s, so its surface "
                            "could not be read" % HELP_FLAG)
     else:
-        yield _subcommand_finding(invocations, _subcommands_in(root))
+        yield _subcommand_finding(invocations, _subcommands_in(root_help))
         yield _flag_finding(invocations, surface)
-    yield _config_finding(documents)
-    yield _finding(3, Outcome.CANNOT_TEST, "not implemented")
+
+    embedded = _read_configs(documents)
+    workspace = _seed_workspace()
+    try:
+        yield _config_finding(embedded, workspace)
+        yield _key_coverage_finding(workspace, documents)
+    finally:
+        if workspace is not None:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 def _read_invocations(documents):
@@ -357,42 +365,102 @@ def _flag_finding(invocations, surface):
     return _finding(1, Outcome.PASS, "")
 
 
-def _config_finding(documents):
+def _config_finding(embedded, root):
     """Assertion 3: every embedded configuration is one the product accepts.
 
     Args:
-        documents: Relative paths, as :func:`published_docs` returns them.
+        embedded: Every embedded configuration, as :func:`_read_configs`
+            returns them.
+        root: The seeded workspace to install them in, or None.
 
     Returns:
         Finding: PASS, FAIL naming every rejected configuration, or
         CANNOT_TEST when no workspace could be scaffolded to install them in.
     """
-    embedded = _read_configs(documents)
     if not embedded:
         return _finding(2, Outcome.PASS, "")
-    root = _seed_workspace()
     if root is None:
         return _finding(
             2, Outcome.CANNOT_TEST,
             "the product's %s did not scaffold a workspace to install the "
             "documented configurations in" % INIT_SUBCOMMAND)
-    try:
-        offenders = []
-        for relative, line, body in embedded:
-            verdict = _install_and_probe(root, body, relative, line)
-            if verdict:
-                offenders.append(verdict)
-    finally:
-        # Removed here, and the scratch area's own reset is not an argument
-        # against it: --reset-env is a recovery an operator runs, not a
-        # cleanup this scenario is entitled to defer to. One workspace per
-        # run, forever, is the kind of growth nobody notices until a disk
-        # does -- and the harness already refuses that bargain for its own
-        # temporary directories.
-        shutil.rmtree(root, ignore_errors=True)
+    offenders = []
+    for relative, line, body in embedded:
+        verdict = _install_and_probe(root, body, relative, line)
+        if verdict:
+            offenders.append(verdict)
     if offenders:
         return _finding(2, Outcome.FAIL, "; ".join(offenders))
     return _finding(2, Outcome.PASS, "")
+
+
+def _guide_texts(documents):
+    """Every published document's own text, the changelog excluded.
+
+    A key named only in ``CHANGELOG.md`` is announced, not documented: the
+    changelog records that something changed, a guide tells an operator how
+    to use it, and assertion 4 asks for the second.
+
+    Complexity: O(total bytes of the documents).
+
+    Args:
+        documents: Relative paths, as :func:`published_docs` returns them.
+
+    Returns:
+        list[str]: The text of every readable document whose name is not
+        :data:`CHANGELOG_NAME`.
+    """
+    root = runs.repo_root()
+    texts = []
+    for relative in documents:
+        if relative.name == CHANGELOG_NAME:
+            continue
+        try:
+            texts.append((root / relative).read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    return texts
+
+
+def _key_coverage_finding(root, documents):
+    """Assertion 4: every key the scaffold writes is named in a published guide.
+
+    Args:
+        root: The seeded workspace to read the scaffold's ``magi.toml`` from,
+            or None.
+        documents: Relative paths, as :func:`published_docs` returns them.
+
+    Returns:
+        Finding: PASS when every ``[magi]`` key -- active or commented -- is
+        named as a whole identifier somewhere outside the changelog;
+        CANNOT_TEST when there is no scaffold to read or its table yielded no
+        keys at all (an empty result here is the harness's own failure to
+        seed, never a legitimate ``[magi]`` table).
+    """
+    if root is None:
+        return _finding(
+            3, Outcome.CANNOT_TEST,
+            "the product's %s did not scaffold a workspace to read a %s "
+            "from" % (INIT_SUBCOMMAND, MAGI_TOML_NAME))
+    try:
+        text = (root / MAGI_DIR_NAME / MAGI_TOML_NAME).read_text(
+            encoding="utf-8")
+    except OSError as exc:
+        return _finding(3, Outcome.CANNOT_TEST,
+                        "the scaffolded %s could not be read: %s"
+                        % (MAGI_TOML_NAME, exc))
+    keys = magi_table_keys(text)
+    if not keys:
+        return _finding(3, Outcome.CANNOT_TEST,
+                        "the scaffold's [magi] table yielded no keys")
+    guides = _guide_texts(documents)
+    missing = [key for key in keys
+               if not any(names_key(body, key) for body in guides)]
+    if missing:
+        return _finding(3, Outcome.FAIL,
+                        "not named in any published guide: %s"
+                        % ", ".join(missing))
+    return _finding(3, Outcome.PASS, "")
 
 
 def _read_configs(documents):

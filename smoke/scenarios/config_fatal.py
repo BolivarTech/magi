@@ -52,6 +52,7 @@ import tempfile
 from smoke import runs
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
+from smoke.scenarios.migration import with_magi_lines
 
 #: The verbatim assertion texts of the spec's section 8, for S11.
 S11_ASSERTIONS = (
@@ -206,11 +207,15 @@ def a_broken_config_cuts_before_running(run):
         root, _with_unknown_field(generated, dead_port), "s11-unknown-field")
     seatless = _run_variant(
         root, _without_lineages(generated), "s11-missing-lineage")
+    unknown_reasoning = _run_variant(
+        root, with_magi_lines(generated,
+                              ('reasoning = "%s"' % UNKNOWN_REASONING,)),
+        "s11-unknown-reasoning")
 
     yield _unknown_field_finding(unknown)
     yield _cuts_early_finding(unknown, dead_port)
     yield _seat_lineage_finding(seatless)
-    yield _s11(3, Outcome.CANNOT_TEST, "not implemented")
+    yield _reasoning_vocabulary_finding(unknown_reasoning)
 
 
 def _seed_workspace():
@@ -408,6 +413,42 @@ def _cuts_early_finding(attempt, dead_port):
                     "(%s), so a request was issued before the configuration "
                     "was rejected" % (dead_port, ", ".join(reached)))
     return _s11(1, Outcome.PASS, "")
+
+
+def _reasoning_vocabulary_finding(attempt):
+    """Judge assertion 4: an unknown ``reasoning`` value is fully named.
+
+    "Fully named" means the refusal names the key, the offending value, AND
+    every accepted value -- not merely that the run was cut. A refusal that
+    names only some of :data:`ACCEPTED_REASONING_VALUES` still leaves the
+    operator guessing at the rest.
+
+    Args:
+        attempt: The variant D capture.
+
+    Returns:
+        Finding: PASS when the product refused at :data:`CONFIG_EXIT_CODE`
+        naming the key, the planted value and every accepted value.
+    """
+    if not attempt.ok:
+        return _s11(3, Outcome.CANNOT_TEST, attempt.failure)
+    if attempt.output.exit_code == 0:
+        return _s11(3, Outcome.FAIL,
+                    "reasoning = %r was accepted" % UNKNOWN_REASONING)
+    if attempt.output.exit_code != CONFIG_EXIT_CODE:
+        return _s11(3, Outcome.FAIL,
+                    "exited %d, expected %d: %s"
+                    % (attempt.output.exit_code, CONFIG_EXIT_CODE,
+                       _excerpt(attempt.output)))
+    raw = attempt.output.raw()
+    missing = [name for name in ("reasoning", UNKNOWN_REASONING,
+                                 *ACCEPTED_REASONING_VALUES)
+               if name.encode("utf-8") not in raw]
+    if missing:
+        return _s11(3, Outcome.FAIL,
+                    "refused but did not name %s: %s"
+                    % (", ".join(missing), _excerpt(attempt.output)))
+    return _s11(3, Outcome.PASS, "")
 
 
 def _seat_lineage_finding(attempt):

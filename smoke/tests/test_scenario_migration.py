@@ -1075,9 +1075,12 @@ class _ReasoningProduct:
             exit_code: The consult's exit code.
             scaffold: The file ``init`` writes.
         """
-        self.states = states or {"melchior": _HONOURED,
-                                 "balthasar": _IGNORED,
-                                 "caspar": _HONOURED}
+        # NOT `states or {...}`: an empty dict is falsy, and `test_no_attempt_
+        # recorded_cannot_test_any` passes `states={}` deliberately to mean
+        # "no seat answered" -- the `or` idiom would silently replace it with
+        # the default trio and defeat that test.
+        self.states = ({"melchior": _HONOURED, "balthasar": _IGNORED,
+                        "caspar": _HONOURED} if states is None else states)
         self.text = text
         self.exit_code = exit_code
         self.scaffold = scaffold

@@ -273,33 +273,78 @@ def extract_configs(text: str) -> list[str]:
     ]
 
 
-def magi_table_keys(text: str) -> list[str]:
-    """Keys of the ``[magi]`` table, active or commented, in first-seen order.
+#: The one table header this module reads keys out of.
+_MAGI_HEADER = re.compile(r"^\s*\[magi\]\s*$")
+#: Any uncommented line opening a table -- ``[magi.complexity]`` and
+#: ``[[magi.fallback]]`` included -- closes the ``[magi]`` table just as surely
+#: as an unrelated one, because TOML has no notion of "still inside" once
+#: another header starts.
+_TABLE_HEADER = re.compile(r"^\s*\[")
+#: A key assignment, active or with its leading ``#`` already stripped.
+_KEY_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
-    Not implemented.
+
+def magi_table_keys(text: str) -> list[str]:
+    """Keys of the ``[magi]`` table, active or commented (``# key = ...``).
+
+    First-seen order, deduplicated. A commented line that merely LOOKS like a
+    table header (``# [memory] - ...``) does not close the table: only an
+    uncommented line starting with ``[`` does, because that is the only line a
+    TOML parser would read as one. Same contract as the Rust test helper of
+    Task 15.
+
+    Complexity: O(lines).
 
     Args:
         text: A ``magi.toml``.
 
     Returns:
-        list[str]: Always empty until implemented.
+        list[str]: The keys, in the order they are first declared.
     """
-    return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            if _MAGI_HEADER.match(line):
+                inside = True
+            continue
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            candidate = stripped[1:].strip()
+        elif _TABLE_HEADER.match(line):
+            break
+        else:
+            candidate = stripped
+        match = _KEY_ASSIGNMENT.match(candidate)
+        if match is None:
+            continue
+        key = match.group(1)
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
 
 
 def names_key(text: str, key: str) -> bool:
     """Whether *text* names *key* as a whole identifier.
 
-    Not implemented.
+    Not preceded or followed by ``[A-Za-z0-9_]``, so a longer identifier that
+    merely starts or ends with *key* (``reasoning_trace``,
+    ``default_max_tokens``) does not count as naming it.
+
+    Complexity: O(len(text)).
 
     Args:
         text: The prose to search.
         key: The identifier to look for.
 
     Returns:
-        bool: Always False until implemented.
+        bool: True when *key* appears as its own identifier somewhere in
+        *text*.
     """
-    return False
+    pattern = r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % re.escape(key)
+    return re.search(pattern, text) is not None
 
 
 def published_docs(repo_root) -> list[pathlib.Path]:
