@@ -255,6 +255,19 @@ class S13KeyCoverageTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, self._outcome_of({
             "README.md": "`melchior_model`, `reasoning_trace`, `max_tokens`."}))
 
+    def test_the_keys_are_read_from_the_scaffold_not_a_documented_config(
+            self) -> None:
+        """Assertion 3 installs every documented ``magi.toml`` over the seed.
+
+        Assertion 4 must read the table ``init`` wrote, not whichever documented
+        configuration assertion 3 left behind: a guide whose last example has
+        no ``[magi]`` table would otherwise report that the scaffold has no
+        keys at all.
+        """
+        self.assertEqual(Outcome.PASS, self._outcome_of({
+            "README.md": "`melchior_model`, `reasoning` and `max_tokens`.\n\n"
+                         "```toml\nprovider = \"ollama\"\n```\n"}))
+
     def test_a_scaffold_that_cannot_be_seeded_cannot_test_it(self) -> None:
         repo = support.scratch_dir(self)
         (repo / "README.md").write_text("x", encoding="utf-8")
