@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.20.0
-# Date: 2026-09-25
+# Version: 0.17.0
+# Date: 2026-08-27
 """Unit tests for the five scenarios the magi-core 4.0.0 and 4.2.0 moves need.
 
 These test the HARNESS. Every product answer here is a double, so what is
