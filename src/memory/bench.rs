@@ -510,7 +510,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         let mem = EncryptedSqliteMemory::new(
             tmp.path().to_path_buf(),
-            zeroize::Zeroizing::new("benchpw".to_string()),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
         )
         .unwrap();
         let store =

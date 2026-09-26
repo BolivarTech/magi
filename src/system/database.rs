@@ -31,6 +31,12 @@ const DATA_TABLES: [&str; 4] = ["sessions", "messages", "knowledge", "memories"]
 /// encrypted rows cannot be read without the DEK and are **never** discarded.
 const DETAIL_DATA_WITHOUT_ENVELOPE: &str = "data present without envelope";
 
+/// A master passphrase that clears the strength floor (`check_strength`), shared by every
+/// test fixture that bootstraps a fresh envelope. A sub-floor fixture would be refused at
+/// bootstrap, so fixtures that only need *a* working store use this one.
+#[cfg(test)]
+pub(crate) const TEST_MASTER_PASSPHRASE: &str = "fixture-lantern-orbit-cascade";
+
 /// Trait defining the behavior of the agent's memory.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
@@ -711,6 +717,14 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use tempfile::NamedTempFile;
 
+    #[test]
+    fn the_shared_fixture_passphrase_clears_the_strength_floor() {
+        magi_rs::vault::check_strength(TEST_MASTER_PASSPHRASE)
+            .expect("the shared fixture must be able to bootstrap an envelope");
+        magi_rs::vault::check_strength(test_master().as_str())
+            .expect("the state-machine fixture must be able to bootstrap an envelope");
+    }
+
     /// Fixed passphrase for the §2.1 state-machine tests.
     fn test_master() -> Zeroizing<String> {
         Zeroizing::new("state-machine-test-master-key".to_string())
@@ -898,7 +912,7 @@ mod tests {
         );
         let memory = EncryptedSqliteMemory::new_with_vault(
             tmp.path().to_path_buf(),
-            Zeroizing::new("pw".to_string()),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
             vault,
         )
         .unwrap();
@@ -1290,8 +1304,11 @@ mod tests {
         let path = tmp.path().to_path_buf();
         let sid;
         {
-            let memory =
-                EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("P".to_string())).unwrap();
+            let memory = EncryptedSqliteMemory::new(
+                path.clone(),
+                Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+            )
+            .unwrap();
             sid = memory.create_session("p").await.unwrap();
             memory
                 .add_message(&sid, &Message::user("persisted"))
@@ -1299,8 +1316,11 @@ mod tests {
                 .unwrap();
         }
         {
-            let memory =
-                EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("P".to_string())).unwrap();
+            let memory = EncryptedSqliteMemory::new(
+                path.clone(),
+                Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+            )
+            .unwrap();
             assert_eq!(
                 memory.get_messages(&sid).await.unwrap(),
                 vec![Message::user("persisted")]
@@ -1331,8 +1351,11 @@ mod tests {
         let path = tmp.path().to_path_buf();
         let sid;
         {
-            let memory =
-                EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("P".to_string())).unwrap();
+            let memory = EncryptedSqliteMemory::new(
+                path.clone(),
+                Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+            )
+            .unwrap();
             sid = memory.create_session("p").await.unwrap();
             memory
                 .add_message(&sid, &Message::user("survives"))
@@ -1360,7 +1383,9 @@ mod tests {
         // REQ-V35, this must NEVER silently discard the data even if correction
         // failed (it would surface as a typed Err instead) — so an `unwrap()`
         // here is the correct, honest assertion of the never-wipe contract.
-        let memory = EncryptedSqliteMemory::new(path, Zeroizing::new("P".to_string())).unwrap();
+        let memory =
+            EncryptedSqliteMemory::new(path, Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()))
+                .unwrap();
         assert_eq!(
             memory.get_messages(&sid).await.unwrap(),
             vec![Message::user("survives")],
@@ -1432,7 +1457,8 @@ mod tests {
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
         let memory = Arc::new(
-            EncryptedSqliteMemory::new(path, Zeroizing::new("stress_pass".to_string())).unwrap(),
+            EncryptedSqliteMemory::new(path, Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()))
+                .unwrap(),
         );
 
         let mut handles = vec![];
@@ -1460,7 +1486,9 @@ mod tests {
         // persistence keeps working instead of failing closed for the session.
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
-        let memory = EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap();
+        let memory =
+            EncryptedSqliteMemory::new(path, Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()))
+                .unwrap();
 
         let conn = memory.conn_for_test().clone();
         let _ = std::thread::spawn(move || {
@@ -1487,8 +1515,10 @@ mod tests {
     async fn test_get_messages_does_not_hold_lock_during_decrypt() {
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
-        let memory =
-            Arc::new(EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap());
+        let memory = Arc::new(
+            EncryptedSqliteMemory::new(path, Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()))
+                .unwrap(),
+        );
         let sid = memory.create_session("p").await.unwrap();
 
         for i in 0..4 {
@@ -1531,8 +1561,10 @@ mod tests {
         // must complete, and the value must round-trip intact.
         let tmp_file = NamedTempFile::new().unwrap();
         let path = tmp_file.path().to_path_buf();
-        let memory =
-            Arc::new(EncryptedSqliteMemory::new(path, Zeroizing::new("pw".to_string())).unwrap());
+        let memory = Arc::new(
+            EncryptedSqliteMemory::new(path, Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()))
+                .unwrap(),
+        );
         memory
             .set_knowledge("api-endpoint", "value-42")
             .await
@@ -1566,7 +1598,7 @@ mod tests {
         let tmp_file = NamedTempFile::new().unwrap();
         let memory = EncryptedSqliteMemory::new(
             tmp_file.path().to_path_buf(),
-            Zeroizing::new("pw".to_string()),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
         )
         .unwrap();
         let sid = memory.create_session("p").await.unwrap();
