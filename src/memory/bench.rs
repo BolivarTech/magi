@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-27
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Benchmark harness for tiered-memory evaluation (T14, D-08, REQ-23'/24'/25').
 //!

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-27
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Public retrieval facade: composite reranker, the **`recall`** entry-point
 //! (D-13 / B1 seam), and lazy re-embedding of pending vectors (CP2-C).

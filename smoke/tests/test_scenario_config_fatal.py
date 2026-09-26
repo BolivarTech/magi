@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.20.0
+# Date: 2026-09-26
 """Unit tests for the S11 scenario's own shape."""
 
 import pathlib

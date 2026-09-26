@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.19.1
-// Date: 2026-09-24
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! End-to-end guardian of the passphrase strength floor on an envelope-less database.
 //!

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-27
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Deterministic memory-strength / decay model and forgetting/eviction passes
 //! (D-07, D-18, D-19, REQ-09, REQ-32, CP2-AD, CP2-Y).

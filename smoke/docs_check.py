@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.20.0
+# Date: 2026-09-26
 """Extraction of invocations and configurations from the published guides.
 
 This module parses text and nothing else. It never runs the product and never

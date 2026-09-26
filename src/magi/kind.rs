@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-08-02
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Provider vocabulary: the three values that name a specific backend (REQ-A01b).
 //!

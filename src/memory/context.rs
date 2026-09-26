@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-27
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Budget-aware context assembler (P3 / REQ-12/13/14/REQ-33, D-10/D-17).
 //!

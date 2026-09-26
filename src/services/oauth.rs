@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! This module implements the OAuth 2.0 flow with PKCE for Anthropic Console.
 

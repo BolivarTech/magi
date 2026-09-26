@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-27
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Preference distiller: promotes durable preferences from episodic memory to a
 //! compact profile, manages hard supersession, and renders the always-injected

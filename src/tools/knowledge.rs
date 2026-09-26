@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! This tool allows the agent to persist technical knowledge about the project in SQLite.
 

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.19.1
-// Date: 2026-09-24
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Vocabulary for `[magi].reasoning` and `[magi].reasoning_spelling` (REQ-EE-3, REQ-V42-4).
 //!

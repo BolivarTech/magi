@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.18.1
-// Date: 2026-09-02
+// Version: 0.20.0
+// Date: 2026-09-26
 
 //! Measurement of context windows and model digest, composed over `ProviderProbe` (REQ-A24).
 //!

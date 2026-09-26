@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.20.0
+# Date: 2026-09-26
 """Tests for the published-documentation extractor.
 
 The extractor is pure parsing: text in, invocations and configuration bodies
