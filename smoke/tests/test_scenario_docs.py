@@ -3,6 +3,7 @@
 # Date: 2026-08-25
 """Unit tests for the S13 scenario's own shape."""
 
+import pathlib
 import unittest
 from unittest import mock
 
@@ -127,9 +128,9 @@ class SurfaceWalkTests(unittest.TestCase):
 
 
 class ScenarioShapeTests(unittest.TestCase):
-    """Three assertions are reported, whatever the environment allows."""
+    """Four assertions are reported, whatever the environment allows."""
 
-    def test_all_three_are_reported_against_a_product_that_answers_nothing(self):
+    def test_every_assertion_is_reported_against_a_product_that_answers_nothing(self):
         """The default double fails every invocation.
 
         A scenario that returned early would drop assertions from the report
@@ -174,6 +175,97 @@ def _help_responder(call: support.Call) -> ProductOutput | None:
     return ProductOutput(stdout=text.encode("utf-8"), stderr=b"", exit_code=0,
                          command=["magi-rs"] + args)
 
+
+
+_S13_SCAFFOLD = ('provider = "ollama"\n[magi]\nmelchior_model = "a"\n'
+                 '# reasoning = "default"\n# max_tokens = 16384\n'
+                 "[[magi.fallback]]\nmodel = \"x\"\nlineage = \"y\"\n")
+
+
+def _docs_responder(call: support.Call):
+    """Answer ``--help`` like the help responder, and ``init`` by scaffolding.
+
+    Args:
+        call: What the fake binary was asked to run.
+
+    Returns:
+        ProductOutput | None: The canned answer.
+    """
+    if call.args[:1] == ("init",) and call.cwd:
+        root = pathlib.Path(call.cwd)
+        (root / ".magi").mkdir(parents=True, exist_ok=True)
+        (root / ".magi" / "magi.toml").write_text(_S13_SCAFFOLD,
+                                                  encoding="utf-8")
+        return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                             command=["magi-rs", "init"])
+    return _help_responder(call)
+
+
+class S13KeyCoverageTests(unittest.TestCase):
+    """Every [magi] key the scaffold writes is named in a published guide."""
+
+    def _outcome_of(self, files: dict) -> Outcome:
+        """The fourth assertion's outcome for a repository holding *files*.
+
+        Named ``_outcome_of`` rather than ``_outcome``: ``unittest.TestCase``
+        sets an instance attribute of that exact name before every test
+        method runs, and a same-named method is shadowed by it -- see the
+        identical note on ``S11ReasoningVocabularyTests._outcome_of``.
+
+        Args:
+            files: Relative path to file contents, seeded into a scratch repo.
+
+        Returns:
+            Outcome: What the fourth assertion concluded.
+        """
+        repo = support.scratch_dir(self)
+        for name, body in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(body, encoding="utf-8")
+        support.install_fake_runs(self, _docs_responder, repo_root=repo)
+        with mock.patch.object(docs, "published_docs",
+                               return_value=[pathlib.Path(n) for n in files]):
+            findings = list(docs.the_published_documentation_is_still_true(
+                None))
+        return {f.assertion: f.outcome for f in findings}[docs.S13_ASSERTIONS[3]]
+
+    def test_the_fourth_text_is_the_declared_one(self) -> None:
+        self.assertEqual("every [magi] key the scaffold writes is named in a "
+                         "published guide", docs.S13_ASSERTIONS[3])
+
+    def test_every_key_named_passes(self) -> None:
+        self.assertEqual(Outcome.PASS, self._outcome_of({
+            "README.md": "`melchior_model`, `reasoning` and `max_tokens`."}))
+
+    def test_a_commented_key_nobody_names_fails(self) -> None:
+        self.assertEqual(Outcome.FAIL, self._outcome_of({
+            "README.md": "`melchior_model` and `reasoning`."}))
+
+    def test_a_key_named_only_in_the_changelog_fails(self) -> None:
+        self.assertEqual(Outcome.FAIL, self._outcome_of({
+            "README.md": "`melchior_model` and `reasoning`.",
+            "CHANGELOG.md": "Added `max_tokens`."}))
+
+    def test_a_key_named_in_a_guide_under_docs_passes(self) -> None:
+        self.assertEqual(Outcome.PASS, self._outcome_of({
+            "README.md": "`melchior_model` and `reasoning`.",
+            "docs/REASONING-BUDGET.md": "`max_tokens` has no upper bound."}))
+
+    def test_a_prefix_does_not_stand_for_the_key(self) -> None:
+        self.assertEqual(Outcome.FAIL, self._outcome_of({
+            "README.md": "`melchior_model`, `reasoning_trace`, `max_tokens`."}))
+
+    def test_a_scaffold_that_cannot_be_seeded_cannot_test_it(self) -> None:
+        repo = support.scratch_dir(self)
+        (repo / "README.md").write_text("x", encoding="utf-8")
+        support.install_fake_runs(self, _help_responder, repo_root=repo)
+        with mock.patch.object(docs, "published_docs",
+                               return_value=[pathlib.Path("README.md")]):
+            findings = list(docs.the_published_documentation_is_still_true(
+                None))
+        outcome = {f.assertion: f.outcome
+                   for f in findings}[docs.S13_ASSERTIONS[3]]
+        self.assertEqual(Outcome.CANNOT_TEST, outcome)
 
 
 class SeedWorkspaceCleanupTests(unittest.TestCase):

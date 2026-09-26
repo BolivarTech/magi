@@ -53,7 +53,11 @@ S13_ASSERTIONS = (
     "subcommand",
     "every flag in those invocations exists in that subcommand's --help",
     "every magi.toml embedded in those docs parses",
+    "every [magi] key the scaffold writes is named in a published guide",
 )
+
+#: A key named only in the changelog is announced, not documented.
+CHANGELOG_NAME = "CHANGELOG.md"
 
 HELP_FLAG = "--help"
 INIT_SUBCOMMAND = "init"
@@ -138,6 +142,7 @@ def the_published_documentation_is_still_true(run):
         yield _subcommand_finding(invocations, _subcommands_in(root))
         yield _flag_finding(invocations, surface)
     yield _config_finding(documents)
+    yield _finding(3, Outcome.CANNOT_TEST, "not implemented")
 
 
 def _read_invocations(documents):

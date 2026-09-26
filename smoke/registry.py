@@ -17,7 +17,7 @@ from smoke.outcome import Finding
 #: certificate renderer, which publishes "N of N scenarios evaluated", and by
 #: the test that asserts the registry actually holds that many. One constant
 #: with two readers is what keeps the headline and the registry from drifting.
-DECLARED_SCENARIO_COUNT = 24
+DECLARED_SCENARIO_COUNT = 26
 
 #: How many ASSERTIONS those scenarios promise between them, per section 8 of
 #: the spec. A separate constant because it answers a separate question, and
@@ -34,7 +34,10 @@ DECLARED_SCENARIO_COUNT = 24
 #: landed, and 71 -> 73 on 2026-08-31 when S24 added its two -- MS2's own
 #: smoke coverage, closing the hole the milestone's plan left (CLAUDE.local.md's
 #: smoke doctrine, not any task).
-DECLARED_ASSERTION_COUNT = 74
+#:
+#: 81 on 2026-09-25: S25 +3, S26 +2, S11 +1, S13 +1 -- MS1 of v0.20.0
+#: (REQ-EE-1/EE-3/EE-5 mechanism, REQ-V42-4 doc).
+DECLARED_ASSERTION_COUNT = 81
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

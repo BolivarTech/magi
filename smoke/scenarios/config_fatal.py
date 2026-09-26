@@ -58,7 +58,14 @@ S11_ASSERTIONS = (
     "an unknown field in magi.toml exits 2 naming the field",
     "it cuts before any backend request is issued",
     "a seat declaring a model without its lineage fails naming all three seats",
+    "an unknown reasoning value exits 2 naming the key and every accepted "
+    "value",
 )
+
+#: A ``[magi] reasoning`` value nobody could mean, and the vocabulary it must
+#: be refused against (mirrored from ``ReasoningControl``'s tags, REQ-EE-3).
+UNKNOWN_REASONING = "smoke-unknown-control"
+ACCEPTED_REASONING_VALUES = ("default", "disabled", "enabled")
 
 #: The verbatim assertion texts of the spec's section 8, for S15.
 S15_ASSERTIONS = (
@@ -203,6 +210,7 @@ def a_broken_config_cuts_before_running(run):
     yield _unknown_field_finding(unknown)
     yield _cuts_early_finding(unknown, dead_port)
     yield _seat_lineage_finding(seatless)
+    yield _s11(3, Outcome.CANNOT_TEST, "not implemented")
 
 
 def _seed_workspace():

@@ -85,7 +85,12 @@ in the ``degraded`` bit, whose meaning this milestone does not touch.
 """
 
 import dataclasses
+import pathlib
+import re
+import shutil
+import tempfile
 
+from smoke import runs
 from smoke.errors import ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
@@ -122,6 +127,19 @@ S22_ASSERTIONS = (
     "all three notions of degradation are derivable from published keys",
     "degraded is false for a three-verdict run",
 )
+S25_ASSERTIONS = (
+    "a consult under reasoning = disabled reports the disabled control on "
+    "every recorded attempt",
+    "under reasoning = disabled no attempt reports a measured reasoning count "
+    "above zero",
+    "no attempt record carries reasoning text, even with the trace opted in",
+)
+S26_ASSERTIONS = (
+    "with no reasoning key declared every recorded attempt reports the "
+    "default control",
+    "every recorded attempt reports its reasoning state in magi-core's own "
+    "shape",
+)
 
 #: The run all three read. See the module docstring for why there is one.
 MIGRATION_RUN = "R4"
@@ -130,8 +148,12 @@ MIGRATION_RUN = "R4"
 #: constant. The maintenance contract is accepted rather than re-litigated: a
 #: cap the product moves turns S20 red and forces a change here, and a check
 #: that adjusted itself to whatever the product reported would detect nothing.
-#: The value is numerically magi-core 4.0.0's own default, which is what bounds
-#: what this scenario can prove -- see the module docstring.
+#: Through magi-core 4.1.0 this value was numerically the crate's own default
+#: too, which is what bounded what this scenario could prove -- see the module
+#: docstring. magi-core 4.2.0 moved its own default to 32768 while this stays
+#: 16384 (v0.20.0 changes no default, REQ-EE-5), so the two are now
+#: distinguishable and the equality half of assertion 2 catches a deleted call
+#: site on its own.
 DECLARED_COMPLETION_CAP = 16384
 
 #: Keys of the consult envelope this module reaches for.
@@ -184,6 +206,137 @@ KNOWN_FINISH_LABELS = ("stop", "length", "load")
 KNOWN_ROTATION_CAUSES = ("transport", "timeout", "schema", "oversized_response",
                          "external_failure", "empty_completion",
                          "response_contract")
+
+#: Keys REQ-EE-1 adds to every completion record: the reasoning channel's
+#: state, and which control the attempt was sent under.
+REASONING_KEY = "reasoning"
+CONTROL_KEY = "control"
+#: The inner member of a ``Measured``/``Unsupported`` state that would carry
+#: model text -- always JSON null as this build publishes it (REQ-EE-1).
+REASONING_TEXT_KEY = "text"
+
+#: ``ReasoningControl``'s kebab-case tags, mirrored from magi-core 4.2.0's
+#: serde (``provider.rs:15-34``). Consumer: ``[magi] reasoning`` (REQ-EE-3).
+KNOWN_CONTROL_TAGS = ("default", "disabled", "enabled")
+DEFAULT_CONTROL = "default"
+DISABLED_CONTROL = "disabled"
+
+#: ``ReasoningState``'s variants at the pin, with the exact inner keys each
+#: tagged variant serializes (externally tagged, ``provider.rs:437-493``).
+#: ``NotMeasured`` carries no inner object at all.
+NOT_MEASURED_STATE = "NotMeasured"
+STATE_INNER_KEYS = {"Measured": ("chars", "text"),
+                    "Unsupported": ("backend", "chars", "text")}
+
+#: S25's own invocation, its prompt, and the label it archives under.
+S25_LABEL = "s25-disabled-consult"
+S25_PROMPT = b"Is a one-line rename worth a full review? Answer briefly.\n"
+#: The two lines S25 installs in the [magi] table of its own scratch magi.toml.
+S25_INSTALLED_LINES = ('reasoning = "disabled"', "reasoning_trace = true")
+
+_INIT_SUBCOMMAND = "init"
+_CONSULT_SUBCOMMAND = "consult"
+_MAGI_DIR_NAME = ".magi"
+_MAGI_TOML_NAME = "magi.toml"
+_INIT_TIMEOUT_S = 120
+#: What the product exits with when it refuses a configuration, mirrored from
+#: ``config_fatal.CONFIG_EXIT_CODE`` (not imported: ``config_fatal`` imports
+#: :func:`with_magi_lines` from here, so the reverse import would be circular).
+_CONFIG_EXIT_CODE = 2
+
+#: The written cause when S25/S26 recorded no completion attempt at all.
+_REASON_NO_ATTEMPTS_S25 = (
+    "the run recorded no completion attempt, so a claim about every attempt "
+    "would hold over an empty collection"
+)
+
+_KEY_TOKEN = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=')
+_TABLE_HEADER_LINE = re.compile(r'^\s*\[')
+_MAGI_HEADER_LINE = re.compile(r'^\s*\[magi\]\s*$')
+
+
+def with_magi_lines(generated: str, lines: tuple[str, ...]) -> str:
+    """Install *lines* in the ``[magi]`` table of *generated*.
+
+    Replaces any ACTIVE line that declares the same key as one of *lines*, in
+    place; installs a line for a key that has no active declaration just
+    before the table closes (before the pool, which TOML requires to come
+    last); leaves every commented line exactly as it is, including one that
+    happens to declare the same key. A key that is a PREFIX of another
+    (``reasoning`` vs. ``reasoning_trace``/``reasoning_spelling``) is matched
+    on the whole identifier, never the prefix.
+
+    Not implemented: returns *generated* unchanged.
+
+    Complexity: O(lines of the file).
+
+    Args:
+        generated: A ``magi.toml`` the product wrote.
+        lines: The lines to install, each ``key = value``.
+
+    Returns:
+        str: The configuration text, with *lines* installed.
+    """
+    return generated
+
+
+def _excerpt(output, limit=600):
+    """Render the beginning of a capture for a finding's detail.
+
+    Args:
+        output: The capture to quote.
+        limit: How many bytes to keep.
+
+    Returns:
+        str: The first *limit* bytes of both streams, decoded leniently.
+    """
+    return output.raw()[:limit].decode("utf-8", errors="replace").strip()
+
+
+def _s25_finding(index, outcome, detail):
+    """Build one of S25's three findings.
+
+    Args:
+        index: Position in :data:`S25_ASSERTIONS`.
+        outcome: What became of it.
+        detail: The cause when the outcome is not PASS.
+
+    Returns:
+        Finding: With no run id -- S25 is standalone.
+    """
+    return Finding(assertion=S25_ASSERTIONS[index], outcome=outcome,
+                   detail=detail, run_id=None)
+
+
+@scenario("S25", assertions=S25_ASSERTIONS, needs_backend=True)
+def a_disabled_reasoning_control_round_trips(run):
+    """Not implemented: report every assertion as not yet evaluated.
+
+    Args:
+        run: Always ``None``; S25 declares no shared run.
+
+    Yields:
+        Finding: One per entry of :data:`S25_ASSERTIONS`, CANNOT_TEST.
+    """
+    for index in range(len(S25_ASSERTIONS)):
+        yield _s25_finding(index, Outcome.CANNOT_TEST, "not implemented")
+
+
+@scenario("S26", assertions=S26_ASSERTIONS, run=MIGRATION_RUN,
+          needs_backend=True)
+def every_attempt_reports_its_reasoning_control_and_state(run):
+    """Not implemented: report every assertion as not yet evaluated.
+
+    Args:
+        run: R4's ``RunResult``, or None.
+
+    Yields:
+        Finding: One per entry of :data:`S26_ASSERTIONS`, CANNOT_TEST.
+    """
+    for index in range(len(S26_ASSERTIONS)):
+        yield _finding(S26_ASSERTIONS, index, Outcome.CANNOT_TEST,
+                       "not implemented")
+
 
 #: Where the per-mage threshold S20 cross-checks is published.
 THRESHOLD_KEY = "floor_activation_threshold_secs"

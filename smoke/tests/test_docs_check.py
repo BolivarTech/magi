@@ -12,7 +12,8 @@ the scenario, where the product can answer it.
 import pathlib
 import unittest
 
-from smoke.docs_check import Invocation, extract_configs, extract_invocations, published_docs
+from smoke.docs_check import (Invocation, extract_configs, extract_invocations,
+                              magi_table_keys, names_key, published_docs)
 
 
 class ExtractInvocationTests(unittest.TestCase):
@@ -174,6 +175,45 @@ class PublishedDocsTests(unittest.TestCase):
         markdown never becomes something the harness checks."""
         for path in published_docs(self.repo_root):
             self.assertFalse(path.as_posix().startswith("smoke/"), path)
+
+
+class MagiTableKeysTests(unittest.TestCase):
+    """Same contract as the Rust helper of Task 15, on the harness side."""
+
+    def test_active_and_commented_keys_of_magi_only(self) -> None:
+        text = ('provider = "ollama"\n[magi]\nmelchior_model = "a"\n'
+                "# The failure domain. Declared, never inferred.\n"
+                '# reasoning = "default"   # default | disabled | enabled\n'
+                "#reasoning_trace = false\n"
+                "# [memory] - a commented header does not close it\n"
+                "max_rotations = 2\n[magi.complexity]\ncode_review = 200\n"
+                '[[magi.fallback]]\nmodel = "x"\nlineage = "y"\n')
+        self.assertEqual(["melchior_model", "reasoning", "reasoning_trace",
+                          "max_rotations"],
+                         magi_table_keys(text))
+
+    def test_a_repeated_key_is_listed_once(self) -> None:
+        self.assertEqual(["max_tokens"], magi_table_keys(
+            "[magi]\n# max_tokens = 16384\nmax_tokens = 1\n"))
+
+    def test_no_magi_table_yields_nothing(self) -> None:
+        self.assertEqual([], magi_table_keys('provider = "x"\n'))
+
+
+class NamesKeyTests(unittest.TestCase):
+    """A key is named only as a whole identifier."""
+
+    def test_the_key_in_backticks_is_named(self) -> None:
+        self.assertTrue(names_key("set `max_tokens` to", "max_tokens"))
+
+    def test_a_longer_identifier_does_not_name_its_prefix(self) -> None:
+        self.assertFalse(names_key("`reasoning_trace` only", "reasoning"))
+
+    def test_a_suffix_inside_another_identifier_is_not_named(self) -> None:
+        self.assertFalse(names_key("default_max_tokens", "max_tokens"))
+
+    def test_absent_is_not_named(self) -> None:
+        self.assertFalse(names_key("nothing here", "reasoning"))
 
 
 class InvocationShapeTests(unittest.TestCase):

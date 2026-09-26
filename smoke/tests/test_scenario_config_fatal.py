@@ -5,6 +5,7 @@
 
 import pathlib
 import unittest
+from unittest import mock
 
 from smoke import runs
 from smoke.outcome import Outcome
@@ -46,17 +47,27 @@ class _FakeProduct:
     """
 
     def __init__(self, seats_named: int = 3,
-                 exit_code: int = 2, reaches_backend: bool = False) -> None:
+                 exit_code: int = 2, reaches_backend: bool = False,
+                 accepts_unknown_reasoning: bool = False,
+                 reasoning_values_named: int = 3) -> None:
         """Create the double.
 
         Args:
             seats_named: How many of the three seats to name.
             exit_code: The code a rejected configuration exits with.
             reaches_backend: Emit a connection failure alongside the refusal.
+            accepts_unknown_reasoning: Whether an unrecognised ``reasoning``
+                value is accepted rather than refused -- the defect assertion
+                4 exists to catch.
+            reasoning_values_named: How many of :data:`ACCEPTED_REASONING_VALUES`
+                the refusal names, so the "all of them" half of assertion 4 can
+                be exercised too.
         """
         self.seats_named = seats_named
         self.exit_code = exit_code
         self.reaches_backend = reaches_backend
+        self.accepts_unknown_reasoning = accepts_unknown_reasoning
+        self.reasoning_values_named = reasoning_values_named
 
     def __call__(self, call: support.Call) -> ProductOutput | None:
         """Answer one invocation.
@@ -103,6 +114,14 @@ class _FakeProduct:
         text = (root / ".magi" / "magi.toml").read_text(encoding="utf-8")
         if config_fatal.UNKNOWN_FIELD in text:
             message = "error: unknown field `%s`" % config_fatal.UNKNOWN_FIELD
+        elif config_fatal.UNKNOWN_REASONING in text:
+            if self.accepts_unknown_reasoning:
+                return _capture(b'{"response":"ok"}', b"", 0)
+            names = ", ".join(config_fatal.ACCEPTED_REASONING_VALUES[
+                :self.reasoning_values_named])
+            message = ("error: [magi].reasoning: unknown value `%s`; expected "
+                       "one of: %s" % (config_fatal.UNKNOWN_REASONING, names))
+            return _capture(b"", message.encode("utf-8"), self.exit_code)
         elif "_lineage" not in text:
             named = config_fatal.SEATS[:self.seats_named]
             message = "error: seats without a lineage: " + ", ".join(named)
@@ -153,9 +172,80 @@ class ConfigFatalScenarioTests(unittest.TestCase):
                 "it cuts before any backend request is issued",
                 "a seat declaring a model without its lineage fails naming all "
                 "three seats",
+                "an unknown reasoning value exits 2 naming the key and every "
+                "accepted value",
             ],
             list(config_fatal.S11_ASSERTIONS),
         )
+
+
+class S11ReasoningVocabularyTests(unittest.TestCase):
+    """S-5: an unknown reasoning value is a configuration error, fully named."""
+
+    def _outcome_of(self, **product) -> Outcome:
+        """The fourth assertion's outcome against a double built from *product*.
+
+        Named ``_outcome_of`` rather than ``_outcome``: ``unittest.TestCase``
+        sets an instance attribute of that exact name (an internal
+        ``_Outcome``) before every test method runs, and a same-named method
+        on the class is shadowed by it -- calling ``self._outcome()`` then
+        raises ``TypeError: '_Outcome' object is not callable`` instead of
+        running this body.
+
+        Args:
+            **product: Keyword arguments for :class:`_FakeProduct`.
+
+        Returns:
+            Outcome: What the fourth assertion concluded.
+        """
+        support.install_fake_runs(self, _FakeProduct(**product))
+        return _outcomes()[config_fatal.S11_ASSERTIONS[3]]
+
+    def test_the_fourth_text_is_the_declared_one(self) -> None:
+        self.assertEqual(
+            "an unknown reasoning value exits 2 naming the key and every "
+            "accepted value", config_fatal.S11_ASSERTIONS[3])
+        self.assertEqual(("default", "disabled", "enabled"),
+                         config_fatal.ACCEPTED_REASONING_VALUES)
+
+    def test_a_named_refusal_at_exit_2_passes(self) -> None:
+        self.assertEqual(Outcome.PASS, self._outcome_of())
+
+    def test_an_accepted_unknown_value_fails(self) -> None:
+        self.assertEqual(Outcome.FAIL,
+                         self._outcome_of(accepts_unknown_reasoning=True))
+
+    def test_a_refusal_naming_only_some_values_fails(self) -> None:
+        self.assertEqual(Outcome.FAIL,
+                         self._outcome_of(reasoning_values_named=2))
+
+    def test_a_named_refusal_at_the_wrong_code_fails(self) -> None:
+        self.assertEqual(Outcome.FAIL, self._outcome_of(exit_code=1))
+
+    def test_the_planted_value_sits_in_the_magi_table(self) -> None:
+        binary = support.install_fake_runs(self, _FakeProduct())
+        seen = []
+
+        original = _FakeProduct._reject
+
+        def spy(product, root):
+            seen.append((root / ".magi" / "magi.toml").read_text(
+                encoding="utf-8"))
+            return original(product, root)
+
+        with mock.patch.object(_FakeProduct, "_reject", spy):
+            _outcomes()
+        planted = [text for text in seen
+                   if config_fatal.UNKNOWN_REASONING in text]
+        self.assertEqual(1, len(planted), binary.calls)
+        after_header = planted[0].split("[magi]", 1)[1]
+        self.assertIn('reasoning = "%s"' % config_fatal.UNKNOWN_REASONING,
+                      after_header.split("\n[", 1)[0])
+
+    def test_a_product_that_answers_nothing_cannot_test_it(self) -> None:
+        support.install_fake_runs(self)
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _outcomes()[config_fatal.S11_ASSERTIONS[3]])
 
 
 class ConfigFatalScenarioBodyTests(unittest.TestCase):

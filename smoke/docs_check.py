@@ -273,6 +273,35 @@ def extract_configs(text: str) -> list[str]:
     ]
 
 
+def magi_table_keys(text: str) -> list[str]:
+    """Keys of the ``[magi]`` table, active or commented, in first-seen order.
+
+    Not implemented.
+
+    Args:
+        text: A ``magi.toml``.
+
+    Returns:
+        list[str]: Always empty until implemented.
+    """
+    return []
+
+
+def names_key(text: str, key: str) -> bool:
+    """Whether *text* names *key* as a whole identifier.
+
+    Not implemented.
+
+    Args:
+        text: The prose to search.
+        key: The identifier to look for.
+
+    Returns:
+        bool: Always False until implemented.
+    """
+    return False
+
+
 def published_docs(repo_root) -> list[pathlib.Path]:
     """Every markdown document that travels inside the published package.
 

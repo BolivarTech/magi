@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
-# Version: 0.17.0
-# Date: 2026-08-27
-"""Unit tests for the three scenarios the magi-core 4.0.0 move needs.
+# Version: 0.20.0
+# Date: 2026-09-25
+"""Unit tests for the five scenarios the magi-core 4.0.0 and 4.2.0 moves need.
 
 These test the HARNESS. Every product answer here is a double, so what is
 under test is the mapping from a published document to an outcome.
@@ -13,31 +13,46 @@ emits on every run. The tests that covered the recipe and its ``CANNOT_TEST``
 reasons are gone with it, and what replaces them is a vacuity guard: the one
 input that can empty assertion 1's collection must report ``CANNOT_TEST`` by
 name rather than a green that iterated nothing.
+
+**S25 and S26 carry the reasoning instrumentation of REQ-EE-1/EE-3 (v0.20.0).**
+``_ATTEMPT`` now carries the two keys ``reasoning`` and ``control`` the way
+magi-core 4.2.0's serde writes them, so the S20/S21/S22 fixtures already
+describe a healthy R4 under the new wire shape.
 """
 
 import copy
 import json
+import pathlib
+import re
 import unittest
+from unittest import mock
 
+from smoke import runs
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
 from smoke.registry import DEFAULT_REGISTRY
 from smoke.runs import RunResult
 from smoke.scenarios import migration  # noqa: F401 - import registers it
+from smoke.tests import support
 
 #: How many bytes the doubles say R4 carried. R4's own payload is a large one,
 #: and the number is the harness's rather than a model's, so nothing here
 #: depends on what a backend chose to do with it.
 PAYLOAD_SENT = 250054
 
-#: One completion attempt, with the exact five keys the product maps by hand
-#: and a cap equal to the declared one.
+#: One completion attempt, with the exact SEVEN keys the product renders: the
+#: five of 0.19.x plus ``reasoning`` and ``control`` (REQ-EE-1). ``reasoning``
+#: is ``ReasoningState`` exactly as magi-core 4.2.0's serde writes it
+#: (externally tagged, ``provider.rs:437-493``), with the trace text null as
+#: the product always publishes it.
 _ATTEMPT = {
     "model": "glm-5.2:cloud",
     "cap": migration.DECLARED_COMPLETION_CAP,
     "finish": "stop",
     "completion_tokens": 900,
     "prompt_tokens": 62513,
+    "reasoning": {"Measured": {"chars": 4120, "text": None}},
+    "control": "default",
 }
 
 #: One rotation hop that names an empty completion, mage-local. The cause is a
@@ -258,9 +273,12 @@ class MigrationScenarioShapeTests(unittest.TestCase):
 
         The maintenance contract is accepted, not re-litigated: moving the
         product's cap turns S20 red and forces a change here. A check that
-        adjusted itself to whatever the product reported would detect nothing,
-        which is exactly the trap this cap sits in -- the declared value IS
-        magi-core's own default.
+        adjusted itself to whatever the product reported would detect
+        nothing. Through magi-core 4.1.0 the declared value was ALSO the
+        crate's own default, numerically -- that coincidence is gone at the
+        4.2.0 pin (the crate's own default moved to 32768), so the equality
+        half of assertion 2 can now tell a declared cap from an inherited one;
+        see ``test_the_crates_own_default_cap_fails_the_second``.
         """
         self.assertEqual(16384, migration.DECLARED_COMPLETION_CAP)
 
@@ -296,10 +314,11 @@ class S20Tests(unittest.TestCase):
         The distinction is for the reader, not for detection: an absent cap
         and a wrong one have different remedies, and a message reading as an
         equality mismatch sends the next person to inspect a value that was
-        never transmitted. What the equality half cannot settle -- a declared
-        cap against an inherited one, since the declared value IS the crate's
-        default -- belongs to the Rust-side wiring trace and is not claimed
-        here.
+        never transmitted. What the equality half could not settle through the
+        4.1.0 pin -- a declared cap against an inherited one, since the two
+        were numerically the same crate default -- is answered by the
+        Rust-side wiring trace, and as of 4.2.0 the equality half can ALSO
+        settle it (see ``test_the_crates_own_default_cap_fails_the_second``).
         """
         bare = {key: value for key, value in _ATTEMPT.items() if key != "cap"}
         document = _document(_envelope_with(completions=_seat_attempts(bare)))
@@ -324,6 +343,15 @@ class S20Tests(unittest.TestCase):
         outcomes = _outcomes("S20", _result(document=document))
         self.assertEqual(Outcome.FAIL, outcomes[migration.S20_ASSERTIONS[1]])
 
+    def test_the_crates_own_default_cap_fails_the_second(self) -> None:
+        """32768 is magi-core 4.2.0's default. A deleted call site transmits
+        it, and since 4.2.0 that is DISTINGUISHABLE from the declared 16384."""
+        document = _document(
+            _envelope_with(completions=_seat_attempts(dict(_ATTEMPT,
+                                                           cap=32768))))
+        outcomes = _outcomes("S20", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S20_ASSERTIONS[1]])
+
     def test_no_attempt_at_all_cannot_test_the_second(self) -> None:
         document = _document(_envelope_with(completions={}))
         outcomes = _outcomes("S20", _result(document=document))
@@ -342,13 +370,28 @@ class S20Tests(unittest.TestCase):
         outcomes = _outcomes("S20", _result(document=document))
         self.assertEqual(Outcome.FAIL, outcomes[migration.S20_ASSERTIONS[2]])
 
-    def test_a_sixth_attempt_key_fails_the_third(self) -> None:
-        """``CompletionRecord`` is ``#[non_exhaustive]`` and ``reasoning`` is
-        deliberately not rendered: an extra key is as much a defect as a
-        missing one, and an "at least five" would see neither."""
+    def test_an_eighth_attempt_key_fails_the_third(self) -> None:
+        """``CompletionRecord`` is ``#[non_exhaustive]``: a field magi-core
+        adds reaches this JSON the moment someone interpolates the record
+        instead of mapping it, and an "at least seven" would see none of it.
+        """
         document = _document(
             _envelope_with(completions=_seat_attempts(
-                dict(_ATTEMPT, reasoning="disabled"))))
+                dict(_ATTEMPT, trace="leaked"))))
+        outcomes = _outcomes("S20", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S20_ASSERTIONS[2]])
+
+    def test_a_record_without_control_fails_the_third(self) -> None:
+        bare = {key: value for key, value in _ATTEMPT.items()
+                if key != "control"}
+        document = _document(_envelope_with(completions=_seat_attempts(bare)))
+        outcomes = _outcomes("S20", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S20_ASSERTIONS[2]])
+
+    def test_a_record_without_reasoning_fails_the_third(self) -> None:
+        bare = {key: value for key, value in _ATTEMPT.items()
+                if key != "reasoning"}
+        document = _document(_envelope_with(completions=_seat_attempts(bare)))
         outcomes = _outcomes("S20", _result(document=document))
         self.assertEqual(Outcome.FAIL, outcomes[migration.S20_ASSERTIONS[2]])
 
@@ -428,6 +471,16 @@ class S20Tests(unittest.TestCase):
         outcomes = _outcomes("S20", None)
         self.assertEqual(list(migration.S20_ASSERTIONS), list(outcomes))
         self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
+
+
+class AttemptKeyTests(unittest.TestCase):
+    """The per-attempt key set is exactly the seven the product renders."""
+
+    def test_the_attempt_keys_are_the_seven_the_product_renders(self) -> None:
+        self.assertEqual(
+            ("model", "cap", "finish", "completion_tokens", "prompt_tokens",
+             "reasoning", "control"),
+            migration.ATTEMPT_KEYS)
 
 
 class S21Tests(unittest.TestCase):
@@ -824,8 +877,463 @@ class S22Tests(unittest.TestCase):
         self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class S26Tests(unittest.TestCase):
+    """R4 declares no reasoning key: every attempt reports default, in shape."""
+
+    def test_it_is_registered_against_the_trio_run(self) -> None:
+        entry = DEFAULT_REGISTRY.get("S26")
+        self.assertEqual(migration.MIGRATION_RUN, entry.run)
+        self.assertTrue(entry.needs_backend)
+        self.assertFalse(entry.inspects_timeouts)
+        self.assertEqual(migration.S26_ASSERTIONS, entry.assertions)
+
+    def test_a_healthy_run_passes_both(self) -> None:
+        self.assertEqual({Outcome.PASS},
+                         set(_outcomes("S26", _result()).values()))
+
+    def test_every_state_variant_passes_the_second(self) -> None:
+        for state in ("NotMeasured",
+                      {"Measured": {"chars": 0, "text": None}},
+                      {"Unsupported": {"backend": "ollama", "chars": 312,
+                                       "text": None}},
+                      {"Unsupported": {"backend": "ollama", "chars": None,
+                                       "text": None}}):
+            with self.subTest(state=state):
+                document = _document(_envelope_with(
+                    completions=_seat_attempts(dict(_ATTEMPT,
+                                                    reasoning=state))))
+                outcomes = _outcomes("S26", _result(document=document))
+                self.assertEqual(Outcome.PASS,
+                                 outcomes[migration.S26_ASSERTIONS[1]])
+
+    def test_a_disabled_control_without_the_key_declared_fails_the_first(self):
+        document = _document(_envelope_with(completions=_seat_attempts(
+            dict(_ATTEMPT, control="disabled"))))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S26_ASSERTIONS[0]])
+
+    def test_an_absent_control_fails_the_first(self) -> None:
+        bare = {key: value for key, value in _ATTEMPT.items() if key != "control"}
+        document = _document(_envelope_with(completions=_seat_attempts(bare)))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S26_ASSERTIONS[0]])
+
+    def test_the_crates_debug_form_of_the_control_fails_the_first(self) -> None:
+        """``Default`` is Rust Debug, not the kebab-case tag the serde writes."""
+        document = _document(_envelope_with(completions=_seat_attempts(
+            dict(_ATTEMPT, control="Default"))))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S26_ASSERTIONS[0]])
+
+    def test_a_flattened_number_fails_the_second(self) -> None:
+        """"The wire had no channel" and "the model did not reason" must stay
+        distinguishable, and a bare count erases the difference (REQ-EE-1)."""
+        document = _document(_envelope_with(completions=_seat_attempts(
+            dict(_ATTEMPT, reasoning=0))))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S26_ASSERTIONS[1]])
+
+    def test_an_unknown_state_tag_fails_the_second(self) -> None:
+        document = _document(_envelope_with(completions=_seat_attempts(
+            dict(_ATTEMPT, reasoning={"Estimated": {"chars": 10,
+                                                    "text": None}}))))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S26_ASSERTIONS[1]])
+
+    def test_an_extra_inner_key_fails_the_second(self) -> None:
+        document = _document(_envelope_with(completions=_seat_attempts(
+            dict(_ATTEMPT, reasoning={"Measured": {"chars": 10, "text": None,
+                                                   "tokens": 2}}))))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S26_ASSERTIONS[1]])
+
+    def test_a_negative_or_boolean_count_fails_the_second(self) -> None:
+        for chars in (-1, True):
+            with self.subTest(chars=chars):
+                document = _document(_envelope_with(
+                    completions=_seat_attempts(dict(
+                        _ATTEMPT, reasoning={"Measured": {"chars": chars,
+                                                          "text": None}}))))
+                outcomes = _outcomes("S26", _result(document=document))
+                self.assertEqual(Outcome.FAIL,
+                                 outcomes[migration.S26_ASSERTIONS[1]])
+
+    def test_a_null_backend_fails_the_second(self) -> None:
+        document = _document(_envelope_with(completions=_seat_attempts(
+            dict(_ATTEMPT, reasoning={"Unsupported": {"backend": None,
+                                                      "chars": 1,
+                                                      "text": None}}))))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S26_ASSERTIONS[1]])
+
+    def test_no_attempt_at_all_cannot_test_either(self) -> None:
+        """An "every attempt" loop over nothing is a green that asserted
+        nothing; S20 already fails that run, so this names it instead."""
+        document = _document(_envelope_with(completions={}))
+        outcomes = _outcomes("S26", _result(document=document))
+        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
+
+    def test_a_provider_error_cannot_test_either(self) -> None:
+        document = _document(error={"kind": "provider", "message": "down"})
+        document["consult"] = None
+        outcomes = _outcomes("S26", _result(document=document, exit_code=1))
+        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
+
+    def test_a_missing_run_reports_both(self) -> None:
+        findings = list(DEFAULT_REGISTRY.get("S26").func(None))
+        self.assertEqual(list(migration.S26_ASSERTIONS),
+                         [finding.assertion for finding in findings])
+        self.assertEqual({Outcome.CANNOT_TEST},
+                         {finding.outcome for finding in findings})
+
+
+class ControlVocabularyTests(unittest.TestCase):
+    """Mirrored from the pin, and moved deliberately when the pin moves."""
+
+    def test_the_control_vocabulary_is_exactly_the_crates_three(self) -> None:
+        self.assertEqual(("default", "disabled", "enabled"),
+                         migration.KNOWN_CONTROL_TAGS)
+
+    def test_the_state_shapes_are_exactly_the_crates_three(self) -> None:
+        self.assertEqual("NotMeasured", migration.NOT_MEASURED_STATE)
+        self.assertEqual({"Measured": ("chars", "text"),
+                          "Unsupported": ("backend", "chars", "text")},
+                         migration.STATE_INNER_KEYS)
+
+
+#: A scaffold shaped like the product's: the [magi] table carries the new keys
+#: COMMENTED (spec §0.1), and the pool comes last, as TOML requires.
+_SCAFFOLD = """provider = "ollama"
+base_url = "http://localhost:11434/v1"
+
+[openai]
+model = "kimi-k2.6:cloud"
+
+[magi]
+melchior_model  = "glm-5.3:cloud"
+balthasar_model = "gpt-oss:120b-cloud"
+caspar_model    = "deepseek-v4-pro:cloud"
+melchior_lineage  = "zhipu"
+balthasar_lineage = "openai"
+caspar_lineage    = "deepseek"
+# reasoning = "default"
+# reasoning_trace = false
+
+[[magi.fallback]]
+model   = "kimi-k2.6:cloud"
+lineage = "moonshot"
+"""
+
+#: What an honoured and an ignored ``disabled`` look like, per magi-core 4.2.0's
+#: resolve_reasoning table: honoured is a real zero, ignored is Unsupported
+#: carrying what came back anyway. The text is null because the double is a
+#: CORRECT product; the failing cases pass their own.
+_HONOURED = {"Measured": {"chars": 0, "text": None}}
+_IGNORED = {"Unsupported": {"backend": "ollama", "chars": 812, "text": None}}
+
+_ACTIVE_LINE = r'^\s*%s\s*=\s*(\S+)'
+
+
+def _magi_table(text: str) -> str:
+    """The text of the [magi] table alone.
+
+    Args:
+        text: A magi.toml.
+
+    Returns:
+        str: The lines between ``[magi]`` and the next table header.
+    """
+    lines, inside = [], False
+    for line in text.splitlines():
+        if line.strip().startswith("["):
+            inside = line.strip() == "[magi]"
+            continue
+        if inside:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+class _ReasoningProduct:
+    """Scaffolds on ``init``; answers ``consult`` from the INSTALLED file.
+
+    Attributes:
+        states: The reasoning state each seat reports, by seat.
+        text: The trace text to leave in every Unsupported state, or None
+            for a correct product.
+        exit_code: What the consult exits with.
+        scaffold: What ``init`` writes.
+    """
+
+    def __init__(self, states=None, text=None, exit_code=0,
+                 scaffold=_SCAFFOLD) -> None:
+        """Create the double.
+
+        Args:
+            states: Per-seat state; defaults to Balthasar ignoring and the
+                others honouring, which is what magi-core measured.
+            text: Trace text to leak into Unsupported states, or None.
+            exit_code: The consult's exit code.
+            scaffold: The file ``init`` writes.
+        """
+        self.states = states or {"melchior": _HONOURED,
+                                 "balthasar": _IGNORED,
+                                 "caspar": _HONOURED}
+        self.text = text
+        self.exit_code = exit_code
+        self.scaffold = scaffold
+        self.consult_cwd = None
+
+    def __call__(self, call: support.Call):
+        """Answer one invocation.
+
+        Args:
+            call: What the fake binary was asked to run.
+
+        Returns:
+            ProductOutput | None: The canned answer, or None for the failed
+            default.
+        """
+        root = pathlib.Path(call.cwd) if call.cwd else None
+        if root is None:
+            return None
+        if call.args[:1] == ("init",):
+            (root / ".magi").mkdir(parents=True, exist_ok=True)
+            (root / ".magi" / "magi.toml").write_text(self.scaffold,
+                                                      encoding="utf-8")
+            return ProductOutput(stdout=b"", stderr=b"", exit_code=0,
+                                 command=["magi-rs", "init"])
+        if call.args[:1] != ("consult",):
+            return None
+        self.consult_cwd = root
+        table = _magi_table((root / ".magi" / "magi.toml").read_text(
+            encoding="utf-8"))
+        declared = re.findall(_ACTIVE_LINE % "reasoning", table, re.M)
+        if len(declared) > 1:
+            return ProductOutput(stdout=b"", exit_code=2,
+                                 stderr=b"error: duplicate key `reasoning`",
+                                 command=["magi-rs", "consult"])
+        control = (declared[0].strip('"') if declared else "default")
+        completions = {}
+        for seat, state in self.states.items():
+            state = copy.deepcopy(state)
+            if self.text is not None and isinstance(state, dict) \
+                    and "Unsupported" in state:
+                state["Unsupported"]["text"] = self.text
+            completions[seat] = [dict(_ATTEMPT, control=control,
+                                      reasoning=state)]
+        document = _document(_envelope_with(completions=completions))
+        return ProductOutput(stdout=json.dumps(document).encode(), stderr=b"",
+                             exit_code=self.exit_code,
+                             command=["magi-rs", "consult"])
+
+
+def _s25(case: unittest.TestCase, product) -> dict:
+    """Run S25 against *product* and index its outcomes by assertion.
+
+    Args:
+        case: The test, for the fakes' cleanup.
+        product: The responder.
+
+    Returns:
+        dict[str, Outcome]: What each assertion concluded.
+    """
+    support.install_fake_runs(case, product)
+    findings = list(DEFAULT_REGISTRY.get("S25").func(None))
+    return {finding.assertion: finding.outcome for finding in findings}
+
+
+class S25Tests(unittest.TestCase):
+    """reasoning = "disabled" round-trips, on the default trio, every run."""
+
+    def test_it_is_registered_standalone_and_needs_the_backend(self) -> None:
+        entry = DEFAULT_REGISTRY.get("S25")
+        self.assertIsNone(entry.run)
+        self.assertTrue(entry.needs_backend)
+        self.assertFalse(entry.needs_ambient)
+        self.assertEqual(migration.S25_ASSERTIONS, entry.assertions)
+
+    def test_a_correct_product_passes_all_three(self) -> None:
+        self.assertEqual({Outcome.PASS},
+                         set(_s25(self, _ReasoningProduct()).values()))
+
+    def test_a_scenario_that_installs_nothing_fails_the_first(self) -> None:
+        """The double echoes what the FILE says. With the key never installed
+        it reports default, which is exactly the defect the first assertion
+        exists to see."""
+        with mock.patch.object(migration, "with_magi_lines",
+                               side_effect=lambda text, lines: text):
+            outcomes = _s25(self, _ReasoningProduct())
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S25_ASSERTIONS[0]])
+
+    def test_the_trace_line_is_installed_beside_the_control(self) -> None:
+        product = _ReasoningProduct()
+        support.install_fake_runs(self, product)
+        with mock.patch.object(migration.shutil, "rmtree"):
+            list(DEFAULT_REGISTRY.get("S25").func(None))
+        table = _magi_table((product.consult_cwd / ".magi" / "magi.toml")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(['"disabled"'],
+                         re.findall(_ACTIVE_LINE % "reasoning", table, re.M))
+        self.assertEqual(["true"],
+                         re.findall(_ACTIVE_LINE % "reasoning_trace", table,
+                                    re.M))
+
+    def test_an_active_scaffold_line_is_replaced_not_duplicated(self) -> None:
+        scaffold = _SCAFFOLD.replace('# reasoning = "default"',
+                                     'reasoning = "default"')
+        outcomes = _s25(self, _ReasoningProduct(scaffold=scaffold))
+        self.assertEqual(Outcome.PASS, outcomes[migration.S25_ASSERTIONS[0]])
+
+    def test_a_measured_count_above_zero_fails_the_second(self) -> None:
+        """Under Disabled magi-core reports an ignored switch as Unsupported;
+        a Measured count above zero reads as though the switch worked."""
+        product = _ReasoningProduct(states={
+            "melchior": {"Measured": {"chars": 5000, "text": None}},
+            "balthasar": _IGNORED, "caspar": _HONOURED})
+        outcomes = _s25(self, product)
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S25_ASSERTIONS[1]])
+
+    def test_every_seat_honouring_still_passes_the_second(self) -> None:
+        product = _ReasoningProduct(states={"melchior": _HONOURED,
+                                            "balthasar": _HONOURED,
+                                            "caspar": _HONOURED})
+        outcomes = _s25(self, product)
+        self.assertEqual(Outcome.PASS, outcomes[migration.S25_ASSERTIONS[1]])
+
+    def test_a_killed_attempt_without_measurement_passes_the_second(self):
+        """An attempt the clock killed carries NotMeasured (spec §1 crit. 3)."""
+        product = _ReasoningProduct(states={"melchior": "NotMeasured",
+                                            "balthasar": _IGNORED,
+                                            "caspar": _HONOURED})
+        outcomes = _s25(self, product)
+        self.assertEqual(Outcome.PASS, outcomes[migration.S25_ASSERTIONS[1]])
+
+    def test_leaked_trace_text_fails_the_third(self) -> None:
+        """Security: model text never enters the envelope (REQ-EE-1/EE-4)."""
+        outcomes = _s25(self, _ReasoningProduct(text="thinking out loud"))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S25_ASSERTIONS[2]])
+
+    def test_an_empty_string_text_fails_the_third(self) -> None:
+        """Null is the contract; an empty string is a value someone chose."""
+        outcomes = _s25(self, _ReasoningProduct(text=""))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S25_ASSERTIONS[2]])
+
+    def test_a_refused_configuration_fails_all_three(self) -> None:
+        """Exit 2 means the product rejected a configuration the spec
+        declares valid: a product verdict, never an environmental one."""
+        outcomes = _s25(self, _ReasoningProduct(exit_code=2))
+        self.assertEqual({Outcome.FAIL}, set(outcomes.values()))
+
+    def test_a_provider_error_cannot_test_any(self) -> None:
+        class _Down(_ReasoningProduct):
+            def __call__(self, call):
+                answer = super().__call__(call)
+                if call.args[:1] != ("consult",) or answer is None:
+                    return answer
+                document = _document(
+                    error={"kind": "provider", "message": "down"})
+                document["consult"] = None
+                return ProductOutput(stdout=json.dumps(document).encode(),
+                                     stderr=b"", exit_code=1,
+                                     command=["magi-rs", "consult"])
+        self.assertEqual({Outcome.CANNOT_TEST},
+                         set(_s25(self, _Down()).values()))
+
+    def test_a_failed_init_cannot_test_any_and_reports_all(self) -> None:
+        support.install_fake_runs(self)  # the default double fails everything
+        findings = list(DEFAULT_REGISTRY.get("S25").func(None))
+        self.assertEqual(list(migration.S25_ASSERTIONS),
+                         [finding.assertion for finding in findings])
+        self.assertEqual({Outcome.CANNOT_TEST},
+                         {finding.outcome for finding in findings})
+
+    def test_no_attempt_recorded_cannot_test_any(self) -> None:
+        outcomes = _s25(self, _ReasoningProduct(states={}))
+        self.assertEqual({Outcome.CANNOT_TEST}, set(outcomes.values()))
+
+    def test_the_consult_carries_the_measured_clock(self) -> None:
+        product = _ReasoningProduct()
+        binary = support.install_fake_runs(self, product)
+        list(DEFAULT_REGISTRY.get("S25").func(None))
+        consult = [call for call in binary.calls
+                   if call.args[:1] == ("consult",)]
+        self.assertEqual(1, len(consult))
+        self.assertIn("--timeout", consult[0].args)
+        self.assertEqual(str(runs.LARGE_CONSULT_TIMEOUT_S),
+                         consult[0].args[consult[0].args.index("--timeout")
+                                         + 1])
+        self.assertEqual(runs.LARGE_CONSULT_CEILING_S, consult[0].timeout)
+        self.assertEqual(support.FAKE_PASSPHRASE,
+                         consult[0].env["MAGI_PASSPHRASE"])
+
+    def test_the_scratch_workspace_is_removed_on_success(self) -> None:
+        scratch = support.scratch_dir(self)
+        support.install_fake_runs(self, _ReasoningProduct())
+        with mock.patch.object(migration.runs, "scratch_root",
+                               return_value=scratch):
+            list(DEFAULT_REGISTRY.get("S25").func(None))
+        self.assertEqual([], sorted(scratch.iterdir()))
+
+    def test_the_scratch_workspace_is_removed_when_the_run_raises(self):
+        scratch = support.scratch_dir(self)
+        support.install_fake_runs(self, _ReasoningProduct())
+        with mock.patch.object(migration.runs, "scratch_root",
+                               return_value=scratch):
+            with mock.patch.object(migration, "with_magi_lines",
+                                   side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    list(DEFAULT_REGISTRY.get("S25").func(None))
+        self.assertEqual([], sorted(scratch.iterdir()))
+
+
+class WithMagiLinesTests(unittest.TestCase):
+    """Installing lines in [magi] replaces, never duplicates, and stays put."""
+
+    def test_lines_land_inside_the_magi_table_before_the_pool(self) -> None:
+        text = migration.with_magi_lines(_SCAFFOLD,
+                                         migration.S25_INSTALLED_LINES)
+        table = _magi_table(text)
+        self.assertEqual(['"disabled"'],
+                         re.findall(_ACTIVE_LINE % "reasoning", table, re.M))
+        self.assertLess(text.index('reasoning = "disabled"'),
+                        text.index("[[magi.fallback]]"))
+
+    def test_a_commented_line_is_left_as_it_is(self) -> None:
+        text = migration.with_magi_lines(_SCAFFOLD,
+                                         migration.S25_INSTALLED_LINES)
+        self.assertIn('# reasoning = "default"', text)
+
+    def test_an_active_line_for_the_same_key_is_replaced(self) -> None:
+        scaffold = _SCAFFOLD.replace('# reasoning = "default"',
+                                     'reasoning = "enabled"')
+        table = _magi_table(migration.with_magi_lines(
+            scaffold, migration.S25_INSTALLED_LINES))
+        self.assertEqual(['"disabled"'],
+                         re.findall(_ACTIVE_LINE % "reasoning", table, re.M))
+
+    def test_a_spelling_line_is_not_read_as_a_reasoning_line(self) -> None:
+        """``reasoning_spelling`` shares the ``reasoning`` prefix and must stay put."""
+        scaffold = _SCAFFOLD.replace(
+            "# reasoning_trace = false",
+            '# reasoning_trace = false\nreasoning_spelling = "effort-none"', 1)
+        before = re.findall(_ACTIVE_LINE % "reasoning_spelling",
+                            _magi_table(scaffold), re.M)
+        self.assertEqual(1, len(before), "test setup: one active spelling line")
+        table = _magi_table(migration.with_magi_lines(
+            scaffold, ('reasoning = "disabled"',)))
+        self.assertEqual(before,
+                         re.findall(_ACTIVE_LINE % "reasoning_spelling", table,
+                                    re.M))
+
+    def test_a_key_that_is_a_prefix_is_not_touched(self) -> None:
+        """``reasoning_trace`` must not be read as a line for ``reasoning``."""
+        scaffold = _SCAFFOLD.replace("# reasoning_trace = false",
+                                     "reasoning_trace = false")
+        table = _magi_table(migration.with_magi_lines(
+            scaffold, ('reasoning = "disabled"',)))
+        self.assertEqual(["false"],
+                         re.findall(_ACTIVE_LINE % "reasoning_trace", table,
+                                    re.M))
 
 
 class VocabularyTests(unittest.TestCase):
@@ -863,3 +1371,7 @@ class VocabularyTests(unittest.TestCase):
              "external_failure", "empty_completion", "response_contract"})
         self.assertEqual(len(migration.KNOWN_ROTATION_CAUSES), 7,
                          "a duplicate would pass the set comparison above")
+
+
+if __name__ == "__main__":
+    unittest.main()
