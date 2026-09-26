@@ -5,7 +5,7 @@
 
 A reasoning model can spend its whole completion budget thinking and hand back nothing: a
 `length` finish with empty content, no verdict, and the tokens are billed anyway. v0.20.0 adds
-four `[magi]` keys and one startup-time warning so a stalled seat is visible and adjustable
+four `[magi]` keys and one warning, checked on every consult, so a stalled seat is visible and adjustable
 instead of a silent, expensive `length` in the consult report. None of this changes which models
 the trio talks to or what a default installation does: every value below is what `magi init`
 already writes, commented out, in `.magi/magi.toml`.
@@ -76,7 +76,8 @@ moved to `32768` in 4.2.0, but magi-rs sets this field explicitly on every reque
 this release sends is unchanged from 0.19.1).
 
 There is no upper bound magi-rs imposes: raise it as far as a seat's own limits allow. Only zero
-or a negative value is rejected at configuration load. A value above what the pinned model
+or a negative value is rejected at configuration load, along with anything above 4294967295
+(`u32::MAX`), the largest number the wire field can carry. A value above what the pinned model
 actually accepts as output comes back as an HTTP 400. As with the spelling hazard above, a 400
 condemns the whole lineage for that run, not just the oversized request.
 
@@ -142,7 +143,9 @@ no reasoning measurement at all (`"NotMeasured"`, with `finish` also `null`): th
 before there was anything to measure. Every attempt that instead finished by exhausting its
 output budget (`finish == "length"`) or came back with empty content also produces one `WARN`
 line in the daily log naming the seat, the model, the cap, the token counts, and the reasoning
-state that attempt measured.
+state that attempt measured. Those lines come from the consult's report, so they are only written
+when the consult produces one: if too few seats answer and the whole consult fails, there is no
+report to read them from, and the log holds only the failure events magi-core itself emits.
 
 ## `agent_timeout_secs`
 
@@ -174,6 +177,10 @@ max_tokens = 16384
 reasoning_trace = false
 agent_timeout_secs = 90
 ```
+
+Writing these out pins `max_tokens` at 16384 and `agent_timeout_secs` at 90. If a later release
+changes either default, a file that spells them out keeps the old values; leave them commented to
+follow the defaults instead.
 
 A faster-terminating profile for an `openai-compat` trio (OpenRouter, a self-hosted
 OpenAI-compatible gateway, and similar). Read the hazard above before adopting it, and verify
