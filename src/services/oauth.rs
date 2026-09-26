@@ -55,11 +55,73 @@ const ECHOED_VALUE_PLACEHOLDER: &str = "[REDACTED]";
 /// # Complexity
 /// `O(k · n)` for `k` values over a body of `n` bytes; `k` is at most two here.
 fn mask_echoed_values(body: &str, values: &[&str]) -> String {
-    let mut ordered: Vec<&str> = values.iter().copied().filter(|v| !v.is_empty()).collect();
+    let mut ordered: Vec<String> = values
+        .iter()
+        .filter(|v| !v.is_empty())
+        .flat_map(|v| echo_spellings(v))
+        .collect();
     ordered.sort_by_key(|v| std::cmp::Reverse(v.len()));
     ordered.into_iter().fold(body.to_string(), |masked, value| {
-        masked.replace(value, ECHOED_VALUE_PLACEHOLDER)
+        masked.replace(&value, ECHOED_VALUE_PLACEHOLDER)
     })
+}
+
+/// The spellings under which a server's error body can echo `value`.
+///
+/// The raw value; its JSON-escaped form, which is how the token exchange's
+/// JSON request carries it; and its `application/x-www-form-urlencoded` form,
+/// which is how a server that re-serialises the request as a form would
+/// carry it. The last two equal the first unless `value` holds a character
+/// the encoding escapes.
+///
+/// # Arguments
+/// * `value` - A non-empty secret value.
+///
+/// # Returns
+/// The three spellings, possibly with duplicates.
+///
+/// # Complexity
+/// `O(n)` in the length of `value`.
+fn echo_spellings(value: &str) -> [String; 3] {
+    let json = serde_json::to_string(value)
+        .ok()
+        .and_then(|quoted| {
+            quoted
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| value.to_string());
+    [value.to_string(), json, form_urlencode(value)]
+}
+
+/// Encodes `value` as `application/x-www-form-urlencoded` does (the WHATWG URL
+/// standard's byte serializer): ASCII alphanumerics and `*-._` stay, a space
+/// becomes `+`, and every other byte becomes `%XX` with uppercase hex.
+///
+/// # Arguments
+/// * `value` - The text to encode.
+///
+/// # Returns
+/// The encoded text.
+///
+/// # Complexity
+/// `O(n)` in the length of `value`.
+fn form_urlencode(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => {
+                out.push(char::from(byte));
+            }
+            b' ' => out.push('+'),
+            other => {
+                let _ = write!(out, "%{other:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// PKCE helper to generate code verifier and challenge.
