@@ -1814,8 +1814,8 @@ pub struct TuiConsultWiring {
     /// S-6/S-7 notices for the trio a successful `/login` rebuild always runs on
     /// (`ProviderKind::Anthropic`): `magi_config.reasoning_wire_notices(ProviderKind::Anthropic)`,
     /// computed once in `main.rs`. The `/login` success arm emits them through the TUI's notice
-    /// sink, so a declared `reasoning_spelling` that becomes inert after the rebuild is SAID,
-    /// not silent (CP2 seg1 loop 2, Caspar).
+    /// sink, so a declared `reasoning_spelling` or non-default `reasoning` control that becomes
+    /// inert after the rebuild is SAID, not silent (CP2 seg1 loop 2, Caspar; Loop 1 round 1).
     pub post_login_notices: Vec<Notice>,
 }
 

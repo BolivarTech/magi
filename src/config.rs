@@ -1088,11 +1088,16 @@ impl MagiConfig {
     /// * `trio_kind` - the trio's already-resolved [`ProviderKind`] (principal env/TOML/default
     ///   inheritance already applied).
     ///
-    /// # The three rules, mirroring magi-core's `reasoning_field` table
+    /// # The rules, mirroring magi-core's `reasoning_field` table
     ///
     /// Only `openai-compat` has a declarable spelling at all, so every S-7 rule below is scoped
-    /// to it; S-6 fires for every OTHER kind.
+    /// to it; S-6 fires for every OTHER kind. `anthropic` adds one rule of its own.
     ///
+    /// 0. **Anthropic** — the control is not `Default` on an `anthropic` trio: magi-core 4.2.0's
+    ///    Claude provider sends no per-request reasoning switch (`providers/claude.rs:317`), so
+    ///    the control reaches nothing and every record reads `Unsupported`. This is also the
+    ///    notice a post-`/login` rebuild announces, since that rebuild always lands on
+    ///    `anthropic`.
     /// 1. **S-6** — a spelling is declared but no seat runs on `openai-compat`: the spelling
     ///    reaches nothing.
     /// 2. **S-7a** — the control is not `Default` and no spelling is declared: nothing goes on
@@ -1102,8 +1107,10 @@ impl MagiConfig {
     /// 4. **S-7c** — a spelling is declared but the control is `Default`: nothing is sent for
     ///    `Default` regardless of spelling, so the declaration has no effect either.
     ///
-    /// These four are mutually exclusive by construction (kind, then whether a spelling is
-    /// declared, then the control), so at most one notice is ever returned.
+    /// Rules 1–4 are mutually exclusive by construction (kind, then whether a spelling is
+    /// declared, then the control). Rule 0 can join rule 1 on an `anthropic` trio that declares
+    /// both a non-default control and a spelling, so at most two notices are returned, one per
+    /// inert key.
     #[must_use]
     pub(crate) fn reasoning_wire_notices(&self, trio_kind: ProviderKind) -> Vec<Notice> {
         let spelling_raw = self.magi.reasoning_spelling.as_deref();
