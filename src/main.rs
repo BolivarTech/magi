@@ -857,6 +857,13 @@ enum MemoryAttachment {
 /// on a prompt that cannot be read (REQ-H25 / REQ-V40's fail-closed spirit,
 /// applied to bootstrap).
 ///
+/// The floor is not ONLY enforced here. A DB file that exists but has no envelope (the state
+/// `magi init` leaves without a passphrase) takes the **present** branch, and its envelope is
+/// created by the store open; that bootstrap enforces [`check_strength`] itself, for every
+/// caller. The early check on the **absent** branch stays because it is not redundant in
+/// behaviour: it rejects a weak `-p` before the DB file is created, and only this branch runs
+/// the interactive double-entry + zero-knowledge-warning flow of [`create_passphrase`].
+///
 /// `passphrase_flag` already folds the `-p` CLI flag and the (scrubbed,
 /// consumed) `MAGI_PASSPHRASE` value together with `-p` winning (REQ-H37): after
 /// the startup env scrub there is no live env var left to read here.
