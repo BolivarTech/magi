@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.20.0] - Unreleased
+
+### Changed
+
+- **magi-core moves from `=4.1.0` to `=4.2.0`.** The wire each trio seat sends is
+  byte-identical to 0.19.1's, output cap included: nothing here changes what a default
+  installation talks to or how.
+- **`agent_timeout_secs` has no upper bound.** Its floor stays 30 seconds. An interactive
+  consult is sized for genuine deliberation, where a reasoning model can legitimately take
+  minutes, rather than for chat-speed responsiveness.
+
+### Added
+
+- **Four new `[magi]` keys** controlling and measuring the trio's reasoning channel:
+  `reasoning` (`default` / `disabled` / `enabled`, whole trio, absent = `default`),
+  `reasoning_spelling` (`openai-compat` seats only, no default), `max_tokens` (absent =
+  `16384`, no upper bound of magi-rs's own), and `reasoning_trace` (opt-in, log-only,
+  off by default). See [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md).
+- **`reasoning` and `control` in every `completions[]` record** of the consult JSON: the
+  reasoning state magi-core measured for that attempt and the control it was sent with.
+  This is an addition to an existing object, so `schema_version` does not change, matching
+  every previous addition to this envelope.
+- **One `WARN` log line per cut completion attempt** (one that finished with `length` or
+  came back with empty content), naming the seat, model, cap, token counts, reasoning
+  state, and control.
+- **A clock-coverage warning at every MAGI panel activation** (TUI `/consult`, an
+  autonomous consult, headless `consult`, `query --consult`): when the effective client
+  timeout cannot plausibly cover `max_tokens` at a 55 tokens/second reference speed, a
+  `WARN` on screen and in the log names the shortfall and the `--timeout` or
+  `agent_timeout_secs` that would cover it. The consult still runs.
+
+### Fixed
+
+- **The stdout auditor no longer masks the product's own status labels** (for example
+  `window_unmeasured_under_strict_guard`) while continuing to mask genuine secrets of the
+  same length and character class, including a diceware-shaped passphrase.
+
+### Security
+
+- **A connection failure no longer echoes an authenticated `base_url`'s credential.** The
+  hint text built from a refused or unreachable connection now redacts the URL the same
+  way every other notice, error, and report already did.
+- **A memory-distillation failure is reported through the audited logging path instead of
+  raw `stderr`**, so it can no longer bypass redaction on its way to the screen.
+- **The output auditor now recognizes and masks an `Authorization: Basic <token>` header**
+  (RFC 7617) echoed inside a server's response body, including the base64 encoding of a
+  `base_url` credential itself.
+- **An OAuth login failure no longer echoes the authorization code, PKCE verifier, or a
+  minted access token** a server sent back in its error response.
+- **`-p`/`--passphrase` accepts a value that begins with `-`.** Previously such a value
+  could be misparsed as another flag; it is now always taken as the passphrase, so it is
+  never echoed back in a parse error.
+- **The passphrase strength floor now applies to every envelope bootstrap, not only the
+  interactive first run.** A `.magi/` directory scaffolded by `magi init` with no
+  passphrase has no envelope yet; that DB's first open under any passphrase, on the
+  vault CLI, `--logout`, or headless `query`/`consult`, is now held to the same
+  `zxcvbn` ≥ 3 / ≥ 12-character floor as the interactive path, closing a way for a weak
+  passphrase to become the master secret unchecked. Unlocking an *existing* envelope is
+  unaffected: opening an already-encrypted DB never re-checks strength.
+
+### Notes / Known behaviour
+
+- **The clock-coverage warning fires on every default consult in this release.** The cap
+  and the clock keep their v0.19.1 values, so the two do not yet agree by default. This
+  release makes that visible for the first time instead of leaving it to surface as an
+  unexplained `length` finish. A later release moves the defaults so the warning goes
+  quiet on an untouched installation.
+- **A `reasoning_spelling` the pinned model rejects returns HTTP 400, and a 400
+  condemns the whole lineage for that run.** Verify the spelling against the model you
+  have pinned, and again after any provider-side update to it.
+- **With `reasoning_trace` enabled, a short credential the model echoes inside a cut
+  attempt's trace can reach the local log unmasked** if magi-rs never had that credential
+  registered to redact by value. The flag defaults to off for this reason.
+
 ## [0.19.1] - 2026-09-17
 
 ### Changed
@@ -1553,6 +1627,7 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
+[0.20.0]: https://github.com/BolivarTech/magi/compare/v0.19.1...v0.20.0
 [Unreleased]: https://github.com/BolivarTech/magi/compare/v0.18.0...HEAD
 [0.18.0]: https://github.com/BolivarTech/magi/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/BolivarTech/magi/compare/v0.16.0...v0.17.0
