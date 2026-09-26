@@ -442,7 +442,7 @@ async fn schema_retry_consumes_two_timeout_windows_per_seat() {
     );
     assert!(
         elapsed < ceiling * 3,
-        "the worst case exceeded 2x the ceiling ({elapsed:?} with ceiling {ceiling:?})",
+        "the worst case exceeded its 3x bound, a 2x worst case plus slack for load \n         ({elapsed:?} with ceiling {ceiling:?})",
     );
 }
 
