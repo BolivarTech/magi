@@ -352,9 +352,9 @@ pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = 20;
 /// order of magnitude.
 ///
 /// **And it survives BECAUSE the scale is derived, not by luck.** With magi-core's shipped
-/// defaults — `operation_budget` is **450 s** as of 4.0.0, not the 600 s this rustdoc claimed
-/// through 3.2.0, against a 300 s client timeout — the budget is a **backstop rather than the
-/// operating limit**: the crate's own `limited_max_retries` cuts a hang at two attempts before the
+/// defaults as of 4.2.0 — `operation_budget` **900 s** against a **600 s** client timeout (was
+/// 450 s / 300 s through 4.1.0) — the budget is a **backstop rather than the operating limit**:
+/// the crate's own `limited_max_retries` cuts a hang at two attempts before the
 /// budget's first check lands. magi-rs does not inherit either arrangement, because it sets
 /// `retry.operation_budget = derive_operation_budget(ceiling)` and, since v0.17.0,
 /// `retry.retry_after_cap = derive_retry_after_cap(ceiling)`. Passing a bare

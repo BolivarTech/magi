@@ -3275,8 +3275,8 @@ fn openai_compat_root(base_url: &str) -> (String, Option<String>) {
 /// accepted and normalised away by the crate, so both spellings converge on the native path.
 ///
 /// **What survives D-A07's reversal is the narrower rule: never `new`.** It delegates to
-/// `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 300 s, and getting it wrong compiles, runs, and
-/// breaks the derived scale silently.
+/// `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 600 s as of magi-core 4.2.0 (300 s through
+/// 4.1.0), and getting it wrong compiles, runs, and breaks the derived scale silently.
 ///
 /// **`ollama` is keyless**: an authenticated `base_url` under this kind does not fail here —
 /// it fails on first use with a 401, which Task 4.4 translates.
@@ -3321,9 +3321,10 @@ fn build_native_provider(
                 notices.push(Notice::info(n));
             }
             // NEVER `new` (REQ-R30): it delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)`
-            // = 300 s, which cannot satisfy `operation_budget + client_timeout <= ceiling`.
-            // Picking the wrong constructor compiles, runs, and breaks the derived scale in
-            // silence — see `the_ollama_seat_honours_the_client_timeout_it_was_given`.
+            // = 600 s as of magi-core 4.2.0 (300 s through 4.1.0), which cannot satisfy
+            // `operation_budget + client_timeout <= ceiling`. Picking the wrong constructor
+            // compiles, runs, and breaks the derived scale in silence — see
+            // `the_ollama_seat_honours_the_client_timeout_it_was_given`.
             Arc::new(OllamaProvider::with_timeout(root, model, client_timeout).map_err(to_seat)?)
         }
         ProviderKind::OpenAiCompat => {
@@ -3837,11 +3838,15 @@ fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice>
     })
 }
 
-/// The completion cap magi-rs DECLARES (REQ-V4-13).
+/// The completion cap magi-rs DECLARES (REQ-V4-13, REQ-EE-5).
 ///
-/// Numerically magi-core 4.0.0's own default, and declared anyway: the value decides whether a
-/// reasoning model can finish, 3.2.0 shipped 4096 while 4.0.0 ships this, and inheriting it means a
-/// future default moves magi-rs with no diff and no failing test.
+/// Was magi-core 4.0.0's own default, numerically; it no longer is. magi-core 4.2.0 moved its
+/// own `CompletionConfig::default().max_tokens` to 32 768, and this constant did NOT move with
+/// it — `magi_completion_config` sets `max_tokens` explicitly on every build, so the wire this
+/// milestone sends stays byte-identical to 0.19.1's (spec §3). `16_384` is now magi-rs's OWN
+/// choice, one that happens to differ from the crate's, kept unchanged through v0.20.0 while
+/// REQ-EE-1's reasoning instrumentation measures which value the E-E pool actually needs;
+/// REQ-EE-6's replays are what move it, in a later release, not this rustdoc.
 const DECLARED_COMPLETION_CAP: u32 = 16_384;
 
 /// The completion configuration for the trio (REQ-V4-12, REQ-V4-13, REQ-EE-3/4/5).
@@ -3852,9 +3857,14 @@ const DECLARED_COMPLETION_CAP: u32 = 16_384;
 /// that, and REQ-V4-14 makes exhaustion name itself through `FinishReason::Length`. Reasoning on
 /// with an exhausted budget yields NO verdict — a blocked gate nobody misses. Reasoning off with
 /// degraded judgment yields a verdict that missed a defect and reads exactly like a good one, and
-/// the trio is a judge. `Disabled` stays available and unmeasured; taking it would trade a loud
-/// failure for a silent one. Same argument for the default cap: too small a budget and a
-/// reasoning model that genuinely needs the room is the one that gets cut, not helped.
+/// the trio is a judge. `Disabled` stays available, and it is no longer unmeasured: magi-core
+/// measured 11 of 12 native-wire families honouring `think: false` (`gpt-oss:120b` does not, and
+/// reports `Unsupported` instead), and this repository's own experiment measured the quality
+/// cost of taking it — 20-48% less defect detection at every cap tried
+/// (`planning/experiments/think-quality-2026-09-23/`). Both measurements point the same way:
+/// taking `Disabled` would trade a loud failure for a silent one. Same argument for the default
+/// cap: too small a budget and a reasoning model that genuinely needs the room is the one that
+/// gets cut, not helped.
 ///
 /// # Arguments
 /// * `cfg` - the loaded, validated `magi.toml`. Every field is resolved through its own
@@ -4263,11 +4273,12 @@ fn build_magi_orchestrator(
                 // `with_timeout`, like every other construction of this type — §7's rule is
                 // "never `new`", full stop (S3 Loop 2, Caspar). The comment here used to argue
                 // `new` was safe because `CachedProbe` wraps every call in its own ceiling, and
-                // that argument is TRUE; it is just the wrong kind of safe. It makes the 300 s
-                // default harmless only for as long as the wrapper stays, so deleting the
-                // wrapper silently restores a timeout two orders of magnitude past the derived
-                // scale. Passing the probe's own ceiling removes the dependency instead of
-                // documenting it: whichever bound fires first, the answer is the same `None`.
+                // that argument is TRUE; it is just the wrong kind of safe. It makes the crate's
+                // default (600 s as of magi-core 4.2.0; 300 s through 4.1.0) harmless only for as
+                // long as the wrapper stays, so deleting the wrapper silently restores a timeout
+                // 120x past this probe's own 5 s ceiling. Passing the probe's own ceiling removes
+                // the dependency instead of documenting it: whichever bound fires first, the
+                // answer is the same `None`.
                 let source: Option<Arc<dyn ProviderProbe>> = if kind.is_probeable() {
                     OllamaProvider::with_timeout(
                         base.as_str(),
@@ -12191,21 +12202,23 @@ mod tests {
         }
 
         /// SC-R48: the client timeout a seat is built with is the one it HONOURS — never the
-        /// crate's 300 s default.
+        /// crate's default (600 s as of magi-core 4.2.0; 300 s through 4.1.0).
         ///
-        /// `OllamaProvider::new` delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 300 s,
-        /// which breaks `operation_budget + client_timeout <= agent_timeout_secs`. Picking the
-        /// wrong constructor COMPILES, RUNS, and breaks the derived scale SILENTLY — the exact
-        /// defect D-A07 existed to prevent, which survives its reversal (D-R12).
+        /// `OllamaProvider::new` delegates to `with_timeout(..., DEFAULT_CLIENT_TIMEOUT)` = 600 s
+        /// as of magi-core 4.2.0 (300 s through 4.1.0), which breaks `operation_budget +
+        /// client_timeout <= agent_timeout_secs`. Picking the wrong constructor COMPILES, RUNS,
+        /// and breaks the derived scale SILENTLY — the exact defect D-A07 existed to prevent,
+        /// which survives its reversal (D-R12).
         ///
         /// Observed through BEHAVIOUR, not through the value: neither `reqwest::Client` nor
         /// `OllamaProvider` exposes its timeout, so a test that re-reads the argument it just
         /// passed would assert nothing. This one points the seat at a socket that never answers
         /// and requires the request to end anyway.
         ///
-        /// The discriminating property is **"not the crate's 300 s"**, not "under 400 ms", so the
-        /// deadline is generous on purpose: that keeps the test meaningful AND immune to load
-        /// (R-R05 — wait on conditions, never on durations).
+        /// The discriminating property is **"not the crate's default"**, not "under 400 ms", so
+        /// the deadline is generous on purpose: that keeps the test meaningful AND immune to load
+        /// (R-R05 — wait on conditions, never on durations). It discriminates even more sharply
+        /// now that the crate's default has doubled to 600 s.
         #[tokio::test]
         async fn the_ollama_seat_honours_the_client_timeout_it_was_given() {
             let (base, _guard) = silent_listener().await;
@@ -12229,7 +12242,8 @@ mod tests {
 
             let ended = outcome.expect(
                 "the request must end by the client timeout the seat was BUILT with; \
-                 hitting this deadline means the 300 s crate default reached the seat",
+                 hitting this deadline means the crate's default (600 s as of 4.2.0) reached \
+                 the seat",
             );
             assert!(
                 ended.is_err(),
@@ -12239,10 +12253,10 @@ mod tests {
 
         /// SC-R48 for the OpenAI-compatible seat, re-asserted across the constructor change
         /// (`with_timeout` → `with_dialect`, magi-core 4.1.0): the DERIVED client timeout is the
-        /// one the seat honours, never `DEFAULT_CLIENT_TIMEOUT` (300 s). Observed through
-        /// behaviour — a socket that never answers — because neither `reqwest::Client` nor the
-        /// provider exposes its timeout. The 30 s deadline is "not the crate's 300 s", not
-        /// "under 400 ms" (R-R05).
+        /// one the seat honours, never `DEFAULT_CLIENT_TIMEOUT` (600 s as of magi-core 4.2.0;
+        /// 300 s through 4.1.0). Observed through behaviour — a socket that never answers —
+        /// because neither `reqwest::Client` nor the provider exposes its timeout. The 30 s
+        /// deadline is "not the crate's default", not "under 400 ms" (R-R05).
         #[tokio::test]
         async fn the_openai_compat_seat_honours_the_client_timeout_it_was_given() {
             let (base, _guard) = silent_listener().await;
@@ -12265,7 +12279,8 @@ mod tests {
             .await;
             let ended = outcome.expect(
                 "the request must end by the client timeout the seat was BUILT with; \
-                 hitting this deadline means the 300 s crate default reached the seat",
+                 hitting this deadline means the crate's default (600 s as of 4.2.0) reached \
+                 the seat",
             );
             assert!(ended.is_err());
         }

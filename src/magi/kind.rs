@@ -57,8 +57,9 @@ pub enum ProviderKind {
     /// wired to that type is what anyone reading the two names together expects.
     ///
     /// **What survives the reversal is narrower and sharper: never build it with `new`.** It
-    /// delegates with the 300 s default, which breaks `operation_budget + client_timeout <=
-    /// ceiling`, and getting it wrong compiles, runs, and breaks the derived scale in silence.
+    /// delegates with `DEFAULT_CLIENT_TIMEOUT` (600 s as of magi-core 4.2.0; 300 s through 4.1.0),
+    /// which breaks `operation_budget + client_timeout <= ceiling` even more than before, and
+    /// getting it wrong compiles, runs, and breaks the derived scale in silence.
     Ollama,
     /// OpenAI, Groq, OpenRouter — any Chat Completions. With token, no probe.
     OpenAiCompat,

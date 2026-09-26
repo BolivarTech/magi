@@ -17,8 +17,9 @@
 //! builds the seat's. Sharing one is possible and was left as a choice for whoever needs it —
 //! but the constructors are not interchangeable, and that is the part to keep straight. Here
 //! `new` is deliberate and safe, because every probe call is wrapped in its own
-//! [`PROBE_TIMEOUT_SECS`] ceiling, so the client's own 300 s never governs. A **seat** must use
-//! `with_timeout` with the derived value, or it breaks the derived scale in silence.
+//! [`PROBE_TIMEOUT_SECS`] ceiling, so the client's own default (600 s as of magi-core 4.2.0;
+//! 300 s through 4.1.0) never governs. A **seat** must use `with_timeout` with the derived
+//! value, or it breaks the derived scale in silence.
 //!
 //! # The body-size cap (REQ-A16b / SC-A16c) — satisfied BY COMPOSITION
 //!
@@ -166,8 +167,8 @@ pub trait ProbeFactory: Send + Sync {
 /// Since REQ-R30 the trio's `ollama` seats complete through their own `OllamaProvider`, built in
 /// `build_native_provider` — a **separate instance**, not this one. `new` is correct *here* and
 /// wrong *there*: every call this factory's result receives is wrapped in its own
-/// [`PROBE_TIMEOUT_SECS`] ceiling, so the client's 300 s default never governs, whereas a seat
-/// has nothing outside it to cut the request short.
+/// [`PROBE_TIMEOUT_SECS`] ceiling, so the client's default (600 s as of magi-core 4.2.0; 300 s
+/// through 4.1.0) never governs, whereas a seat has nothing outside it to cut the request short.
 ///
 /// The `base_url` is passed as-is, with its `/v1` if it has one: `OllamaProvider::new` accepts
 /// both forms (with and without `/v1`) and normalizes internally — probe requests always go

@@ -3048,8 +3048,9 @@ mod tests {
     // by two tests that prove different things (fix round 1 — the original
     // single stalling-socket test only caught a regression SHORTER than its
     // 2s stall, missing exactly the realistic shape: someone re-adding a 30s
-    // or 300s total timeout, the latter being magi-core's `OllamaProvider`
-    // default — which REQ-R30 still forbids from reaching a MAGI seat, and
+    // or a multi-minute total timeout — the latter being magi-core's
+    // `OllamaProvider` default (600 s as of magi-core 4.2.0; 300 s through
+    // 4.1.0) — which REQ-R30 still forbids from reaching a MAGI seat, and
     // which has no business on this path either):
     //   - `the_principal_providers_client_carries_no_total_timeout_marker`
     //     pins the CLIENT'S CONFIGURATION, instantly and for a timeout of any
@@ -3108,9 +3109,10 @@ mod tests {
     fn the_principal_providers_client_carries_no_total_timeout_marker() {
         // SC-A19 fix round 1: the 2s stalling-socket test below only proves
         // the absence of a timeout SHORTER than its stall. A regression that
-        // reintroduces a 30s or 300s total timeout — the latter being
-        // magi-core's `OllamaProvider` default, which REQ-R30 keeps off a
-        // MAGI seat and which has no business here either —
+        // reintroduces a 30s or a multi-minute total timeout — the latter
+        // being magi-core's `OllamaProvider` default (600 s as of magi-core
+        // 4.2.0; 300 s through 4.1.0), which REQ-R30 keeps off a MAGI seat
+        // and which has no business here either —
         // sails straight through it. `reqwest::Client` exposes no public
         // timeout getter, but its `Debug` impl only ever prints
         // `TOTAL_TIMEOUT_DEBUG_MARKER` when a total timeout is actually set
@@ -3155,8 +3157,8 @@ mod tests {
     /// deadline shorter than this turns the stall into a hard `Err`; short
     /// enough not to bloat `cargo nextest`'s wall-clock (this box already
     /// starves under load, see `CLAUDE.local.md`). This constant deliberately
-    /// stays short — widening it to also catch a 30s/300s-shaped regression
-    /// would pay real wall-clock on every suite run forever; that shape is
+    /// stays short — widening it to also catch a 30s/multi-minute-shaped
+    /// regression would pay real wall-clock on every suite run forever; that shape is
     /// instead covered, for free and deterministically, by the sibling
     /// `Debug`-marker test above.
     const NO_TIMEOUT_STALL: Duration = Duration::from_secs(2);
