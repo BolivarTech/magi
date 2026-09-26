@@ -222,500 +222,6 @@ KNOWN_ROTATION_CAUSES = ("transport", "timeout", "schema", "oversized_response",
                          "external_failure", "empty_completion",
                          "response_contract")
 
-#: Keys REQ-EE-1 adds to every completion record: the reasoning channel's
-#: state, and which control the attempt was sent under.
-REASONING_KEY = "reasoning"
-CONTROL_KEY = "control"
-#: The inner member of a ``Measured``/``Unsupported`` state that would carry
-#: model text -- always JSON null as this build publishes it (REQ-EE-1).
-REASONING_TEXT_KEY = "text"
-
-#: ``ReasoningControl``'s kebab-case tags, mirrored from magi-core 4.2.0's
-#: serde (``provider.rs:15-34``). Consumer: ``[magi] reasoning`` (REQ-EE-3).
-KNOWN_CONTROL_TAGS = ("default", "disabled", "enabled")
-DEFAULT_CONTROL = "default"
-DISABLED_CONTROL = "disabled"
-
-#: ``ReasoningState``'s variants at the pin, with the exact inner keys each
-#: tagged variant serializes (externally tagged, ``provider.rs:437-493``).
-#: ``NotMeasured`` carries no inner object at all.
-NOT_MEASURED_STATE = "NotMeasured"
-STATE_INNER_KEYS = {"Measured": ("chars", "text"),
-                    "Unsupported": ("backend", "chars", "text")}
-
-#: S25's own invocation, its prompt, and the label it archives under.
-S25_LABEL = "s25-disabled-consult"
-S25_PROMPT = b"Is a one-line rename worth a full review? Answer briefly.\n"
-#: The two lines S25 installs in the [magi] table of its own scratch magi.toml.
-S25_INSTALLED_LINES = ('reasoning = "disabled"', "reasoning_trace = true")
-
-_INIT_SUBCOMMAND = "init"
-_CONSULT_SUBCOMMAND = "consult"
-_MAGI_DIR_NAME = ".magi"
-_MAGI_TOML_NAME = "magi.toml"
-_INIT_TIMEOUT_S = 120
-#: What the product exits with when it refuses a configuration, mirrored from
-#: ``config_fatal.CONFIG_EXIT_CODE`` (not imported: ``config_fatal`` imports
-#: :func:`with_magi_lines` from here, so the reverse import would be circular).
-_CONFIG_EXIT_CODE = 2
-
-#: The written cause when S25/S26 recorded no completion attempt at all.
-_REASON_NO_ATTEMPTS_S25 = (
-    "the run recorded no completion attempt, so a claim about every attempt "
-    "would hold over an empty collection"
-)
-
-_KEY_TOKEN = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=')
-_TABLE_HEADER_LINE = re.compile(r'^\s*\[')
-_MAGI_HEADER_LINE = re.compile(r'^\s*\[magi\]\s*$')
-
-
-def with_magi_lines(generated: str, lines: tuple[str, ...]) -> str:
-    """Install *lines* in the ``[magi]`` table of *generated*.
-
-    Replaces any ACTIVE line that declares the same key as one of *lines*, in
-    place; installs a line for a key that has no active declaration just
-    before the table closes (before the pool, which TOML requires to come
-    last); leaves every commented line exactly as it is, including one that
-    happens to declare the same key. A key that is a PREFIX of another
-    (``reasoning`` vs. ``reasoning_trace``/``reasoning_spelling``) is matched
-    on the whole identifier, never the prefix.
-
-    Complexity: O(lines of the file).
-
-    Args:
-        generated: A ``magi.toml`` the product wrote.
-        lines: The lines to install, each ``key = value``.
-
-    Returns:
-        str: The configuration text, with *lines* installed.
-    """
-    wanted: dict[str, str] = {}
-    for line in lines:
-        match = _KEY_TOKEN.match(line)
-        if match is not None:
-            wanted[match.group(1)] = line
-    installed: set[str] = set()
-    result: list[str] = []
-    inside = False
-    for line in generated.splitlines():
-        if not inside:
-            result.append(line)
-            if _MAGI_HEADER_LINE.match(line):
-                inside = True
-            continue
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            result.append(line)
-            continue
-        if _TABLE_HEADER_LINE.match(line):
-            result.extend(new_line for key, new_line in wanted.items()
-                         if key not in installed)
-            installed.update(wanted)
-            inside = False
-            result.append(line)
-            continue
-        match = _KEY_TOKEN.match(line)
-        if match is not None and match.group(1) in wanted:
-            key = match.group(1)
-            result.append(wanted[key])
-            installed.add(key)
-            continue
-        result.append(line)
-    if inside:
-        result.extend(new_line for key, new_line in wanted.items()
-                     if key not in installed)
-    return "\n".join(result) + ("\n" if generated.endswith("\n") else "")
-
-
-def _excerpt(output, limit=600):
-    """Render the beginning of a capture for a finding's detail.
-
-    Args:
-        output: The capture to quote.
-        limit: How many bytes to keep.
-
-    Returns:
-        str: The first *limit* bytes of both streams, decoded leniently.
-    """
-    return output.raw()[:limit].decode("utf-8", errors="replace").strip()
-
-
-def _s25_finding(index, outcome, detail):
-    """Build one of S25's three findings.
-
-    Args:
-        index: Position in :data:`S25_ASSERTIONS`.
-        outcome: What became of it.
-        detail: The cause when the outcome is not PASS.
-
-    Returns:
-        Finding: With no run id -- S25 is standalone.
-    """
-    return Finding(assertion=S25_ASSERTIONS[index], outcome=outcome,
-                   detail=detail, run_id=None)
-
-
-def _state_tag(record):
-    """The ``(tag, inner)`` pair of one attempt's reasoning state.
-
-    Args:
-        record: The attempt object, expected to carry :data:`REASONING_KEY`.
-
-    Returns:
-        tuple[str | None, object]: ``(NOT_MEASURED_STATE, None)`` for the
-        string state; ``(tag, inner)`` for a single-key tagged object; and
-        ``(None, state)`` -- the caller's signal that the value has no
-        recognisable shape at all -- for anything else.
-    """
-    state = record.get(REASONING_KEY) if isinstance(record, dict) else None
-    if state == NOT_MEASURED_STATE:
-        return NOT_MEASURED_STATE, None
-    if isinstance(state, dict) and len(state) == 1:
-        ((tag, inner),) = state.items()
-        return tag, inner
-    return None, state
-
-
-def _control_problem(attempts, expected):
-    """Every attempt whose :data:`CONTROL_KEY` differs from *expected*.
-
-    Args:
-        attempts: Every recorded attempt.
-        expected: The control tag every attempt is supposed to carry.
-
-    Returns:
-        list[str]: One message per offender; empty when all agree.
-    """
-    problems = []
-    for item in attempts:
-        if not isinstance(item.record, dict) or CONTROL_KEY not in item.record:
-            problems.append("%s publishes no %s" % (item.label, CONTROL_KEY))
-            continue
-        control = item.record[CONTROL_KEY]
-        if control != expected:
-            problems.append("%s reports %s as %r, expected %r"
-                            % (item.label, CONTROL_KEY, control, expected))
-    return problems
-
-
-def _no_measured_overrun_problems(attempts):
-    """Every attempt reporting a measured reasoning count above zero.
-
-    A state this build does not recognise at all is reported too: it is
-    exactly as untrustworthy a signal of "the switch worked" as a positive
-    count would be.
-
-    Args:
-        attempts: Every recorded attempt.
-
-    Returns:
-        list[str]: One message per offender; empty when none overran.
-    """
-    problems = []
-    for item in attempts:
-        if not isinstance(item.record, dict) or REASONING_KEY not in item.record:
-            problems.append("%s publishes no %s" % (item.label, REASONING_KEY))
-            continue
-        tag, inner = _state_tag(item.record)
-        if tag is None or (tag != NOT_MEASURED_STATE
-                           and tag not in STATE_INNER_KEYS):
-            problems.append(
-                "%s reports %s as %r, which is not a state this build "
-                "recognises" % (item.label, REASONING_KEY,
-                                item.record[REASONING_KEY]))
-            continue
-        if tag != "Measured":
-            continue
-        chars = inner.get("chars") if isinstance(inner, dict) else None
-        if isinstance(chars, int) and not isinstance(chars, bool) and chars > 0:
-            problems.append(
-                "%s reports a measured reasoning count of %d chars while "
-                "reasoning = disabled" % (item.label, chars))
-    return problems
-
-
-def _no_leaked_text_problems(attempts):
-    """Every attempt whose reasoning state carries non-null text.
-
-    The message cites the LENGTH of the leaked text, never its content: the
-    text is the model's, unvalidated, and a finding's detail reaches the
-    report and the certificate.
-
-    Args:
-        attempts: Every recorded attempt.
-
-    Returns:
-        list[str]: One message per offender; empty when none leaked.
-    """
-    problems = []
-    for item in attempts:
-        if not isinstance(item.record, dict) or REASONING_KEY not in item.record:
-            problems.append("%s publishes no %s" % (item.label, REASONING_KEY))
-            continue
-        tag, inner = _state_tag(item.record)
-        if tag is None or tag == NOT_MEASURED_STATE or not isinstance(inner, dict):
-            continue
-        text = inner.get(REASONING_TEXT_KEY)
-        if text is not None:
-            problems.append(
-                "%s.%s.%s carries %d character(s) of model text"
-                % (item.label, tag, REASONING_TEXT_KEY, len(str(text))))
-    return problems
-
-
-def _s25_control_finding(capture, attempts, failure):
-    """Judge assertion 1: every attempt reports the disabled control.
-
-    Args:
-        capture: The consult's reduction.
-        attempts: Every recorded attempt, or None.
-        failure: Why there are none.
-
-    Returns:
-        Finding: PASS when every attempt carries ``control: "disabled"``.
-    """
-    if capture.envelope is None:
-        return _s25_finding(0, capture.outcome, capture.detail)
-    if attempts is None:
-        return _s25_finding(0, Outcome.FAIL, failure)
-    if not attempts:
-        return _s25_finding(0, Outcome.CANNOT_TEST, _REASON_NO_ATTEMPTS_S25)
-    problems = _control_problem(attempts, DISABLED_CONTROL)
-    if problems:
-        return _s25_finding(0, Outcome.FAIL, "; ".join(problems))
-    return _s25_finding(0, Outcome.PASS, "")
-
-
-def _s25_no_overrun_finding(capture, attempts, failure):
-    """Judge assertion 2: no attempt reports a measured count above zero.
-
-    Args:
-        capture: The consult's reduction.
-        attempts: Every recorded attempt, or None.
-        failure: Why there are none.
-
-    Returns:
-        Finding: PASS when no attempt overran under ``Measured``.
-    """
-    if capture.envelope is None:
-        return _s25_finding(1, capture.outcome, capture.detail)
-    if attempts is None:
-        return _s25_finding(1, Outcome.FAIL, failure)
-    if not attempts:
-        return _s25_finding(1, Outcome.CANNOT_TEST, _REASON_NO_ATTEMPTS_S25)
-    problems = _no_measured_overrun_problems(attempts)
-    if problems:
-        return _s25_finding(1, Outcome.FAIL, "; ".join(problems))
-    return _s25_finding(1, Outcome.PASS, "")
-
-
-def _s25_no_leak_finding(capture, attempts, failure):
-    """Judge assertion 3: no attempt record carries reasoning text.
-
-    Args:
-        capture: The consult's reduction.
-        attempts: Every recorded attempt, or None.
-        failure: Why there are none.
-
-    Returns:
-        Finding: PASS when every attempt's reasoning text is null.
-    """
-    if capture.envelope is None:
-        return _s25_finding(2, capture.outcome, capture.detail)
-    if attempts is None:
-        return _s25_finding(2, Outcome.FAIL, failure)
-    if not attempts:
-        return _s25_finding(2, Outcome.CANNOT_TEST, _REASON_NO_ATTEMPTS_S25)
-    problems = _no_leaked_text_problems(attempts)
-    if problems:
-        return _s25_finding(2, Outcome.FAIL, "; ".join(problems))
-    return _s25_finding(2, Outcome.PASS, "")
-
-
-@scenario("S25", assertions=S25_ASSERTIONS, needs_backend=True)
-def a_disabled_reasoning_control_round_trips(run):
-    """Assert ``reasoning = "disabled"`` round-trips on the default trio.
-
-    Standalone (``run=None``): it scaffolds its OWN workspace by cwd, under
-    ``needs_backend=True``, rather than reading a shared run, because the
-    property has to hold on the trio the OPERATOR configured (OQ-8) -- a
-    profile that overrides ``smoke.toml`` never rewrites this scratch
-    ``magi.toml``. ``reasoning_trace = true`` is installed on purpose: without
-    it magi-core never captures text at all, and assertion 3 would be a
-    guardian that cannot fail (see the module's own contract note below).
-
-    Args:
-        run: Always ``None``; S25 declares no shared run.
-
-    Yields:
-        Finding: One per entry of :data:`S25_ASSERTIONS`, in that order.
-    """
-    root = pathlib.Path(
-        tempfile.mkdtemp(prefix="s25-", dir=str(runs.scratch_root())))
-    try:
-        seeded = runs.attempt(
-            [_INIT_SUBCOMMAND], stdin=b"", timeout_s=_INIT_TIMEOUT_S,
-            label="s25-init", cwd=root,
-            env={"MAGI_PASSPHRASE": runs.passphrase()})
-        if not seeded.ok or not (root / _MAGI_DIR_NAME).is_dir():
-            for index in range(len(S25_ASSERTIONS)):
-                yield _s25_finding(
-                    index, Outcome.CANNOT_TEST,
-                    "the product's %s did not scaffold a workspace to "
-                    "configure" % _INIT_SUBCOMMAND)
-            return
-        toml_path = root / _MAGI_DIR_NAME / _MAGI_TOML_NAME
-        generated = toml_path.read_text(encoding="utf-8")
-        toml_path.write_text(with_magi_lines(generated, S25_INSTALLED_LINES),
-                             encoding="utf-8")
-        attempt = runs.attempt(
-            [_CONSULT_SUBCOMMAND, "--output-format", "json",
-             "--timeout", str(runs.LARGE_CONSULT_TIMEOUT_S)],
-            stdin=S25_PROMPT, timeout_s=runs.LARGE_CONSULT_CEILING_S,
-            label=S25_LABEL, cwd=root,
-            env={"MAGI_PASSPHRASE": runs.passphrase()})
-        if not attempt.ok:
-            for index in range(len(S25_ASSERTIONS)):
-                yield _s25_finding(index, Outcome.CANNOT_TEST, attempt.failure)
-            return
-        if attempt.output.exit_code == _CONFIG_EXIT_CODE:
-            detail = ("the product refused a configuration declaring "
-                      "reasoning = disabled: %s" % _excerpt(attempt.output))
-            for index in range(len(S25_ASSERTIONS)):
-                yield _s25_finding(index, Outcome.FAIL, detail)
-            return
-        capture = _capture_of(attempt, S25_LABEL)
-        attempts, failure = _attempts_of(capture.envelope)
-        yield _s25_control_finding(capture, attempts, failure)
-        yield _s25_no_overrun_finding(capture, attempts, failure)
-        yield _s25_no_leak_finding(capture, attempts, failure)
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def _control_default_finding(capture, attempts, failure):
-    """Judge assertion 1: every attempt reports the default control.
-
-    Args:
-        capture: R4's reduction.
-        attempts: Every recorded attempt, or None.
-        failure: Why there are none.
-
-    Returns:
-        Finding: PASS when every attempt carries ``control: "default"``.
-    """
-    if capture.envelope is None:
-        return _finding(S26_ASSERTIONS, 0, capture.outcome, capture.detail)
-    if attempts is None:
-        return _finding(S26_ASSERTIONS, 0, Outcome.FAIL, failure)
-    if not attempts:
-        return _finding(S26_ASSERTIONS, 0, Outcome.CANNOT_TEST,
-                        REASON_NO_ATTEMPTS)
-    problems = _control_problem(attempts, DEFAULT_CONTROL)
-    if problems:
-        return _finding(S26_ASSERTIONS, 0, Outcome.FAIL, "; ".join(problems))
-    return _finding(S26_ASSERTIONS, 0, Outcome.PASS, "")
-
-
-def _reasoning_state_problems(item):
-    """Every way one attempt's reasoning state is not one magi-core could
-    have serialized, mirrored field for field from :data:`STATE_INNER_KEYS`.
-
-    Args:
-        item: The attempt to judge.
-
-    Returns:
-        list[str]: One message per problem; empty when the state is well
-        formed.
-    """
-    record = item.record
-    if not isinstance(record, dict) or REASONING_KEY not in record:
-        return ["%s publishes no %s" % (item.label, REASONING_KEY)]
-    tag, inner = _state_tag(record)
-    if tag == NOT_MEASURED_STATE:
-        return []
-    if tag is None:
-        return ["%s reports %s as %r, which is neither %s nor a single-key "
-                "object" % (item.label, REASONING_KEY, record[REASONING_KEY],
-                           NOT_MEASURED_STATE)]
-    if tag not in STATE_INNER_KEYS:
-        return ["%s reports %s tag %r, which is not one of %s"
-                % (item.label, REASONING_KEY, tag,
-                   ", ".join(sorted(STATE_INNER_KEYS)))]
-    wanted = set(STATE_INNER_KEYS[tag])
-    if not isinstance(inner, dict) or set(inner) != wanted:
-        return ["%s.%s has keys %s, expected exactly %s"
-                % (item.label, tag,
-                   sorted(inner) if isinstance(inner, dict) else inner,
-                   sorted(wanted))]
-    problems = []
-    chars = inner.get("chars")
-    if chars is None:
-        if tag != "Unsupported":
-            problems.append("%s.%s.chars is null, which only Unsupported "
-                            "allows" % (item.label, tag))
-    elif not isinstance(chars, int) or isinstance(chars, bool) or chars < 0:
-        problems.append("%s.%s.chars is %r, expected a non-negative integer"
-                        % (item.label, tag, chars))
-    if tag == "Unsupported" and not isinstance(inner.get("backend"), str):
-        problems.append("%s.%s.backend is %r, expected a string"
-                        % (item.label, tag, inner.get("backend")))
-    if inner.get(REASONING_TEXT_KEY) is not None:
-        problems.append("%s.%s.%s is not null"
-                        % (item.label, tag, REASONING_TEXT_KEY))
-    return problems
-
-
-def _state_shape_finding(capture, attempts, failure):
-    """Judge assertion 2: every attempt's reasoning state is well formed.
-
-    Args:
-        capture: R4's reduction.
-        attempts: Every recorded attempt, or None.
-        failure: Why there are none.
-
-    Returns:
-        Finding: PASS when every attempt's reasoning state matches a shape
-        magi-core's serde could have produced.
-    """
-    if capture.envelope is None:
-        return _finding(S26_ASSERTIONS, 1, capture.outcome, capture.detail)
-    if attempts is None:
-        return _finding(S26_ASSERTIONS, 1, Outcome.FAIL, failure)
-    if not attempts:
-        return _finding(S26_ASSERTIONS, 1, Outcome.CANNOT_TEST,
-                        REASON_NO_ATTEMPTS)
-    problems = []
-    for item in attempts:
-        problems.extend(_reasoning_state_problems(item))
-    if problems:
-        return _finding(S26_ASSERTIONS, 1, Outcome.FAIL, "; ".join(problems))
-    return _finding(S26_ASSERTIONS, 1, Outcome.PASS, "")
-
-
-@scenario("S26", assertions=S26_ASSERTIONS, run=MIGRATION_RUN,
-          needs_backend=True)
-def every_attempt_reports_its_reasoning_control_and_state(run):
-    """Assert R4's attempts report the default control in magi-core's shape.
-
-    R4 declares no ``reasoning`` key, so REQ-EE-3's default applies, and
-    REQ-EE-1's rendering is checked structurally rather than against any one
-    model's behaviour (OQ-9/§6 doctrine: never assert on what the model
-    answered).
-
-    Args:
-        run: R4's ``RunResult``, or None.
-
-    Yields:
-        Finding: One per entry of :data:`S26_ASSERTIONS`, in that order.
-    """
-    capture = _capture_of(run, MIGRATION_RUN)
-    attempts, failure = _attempts_of(capture.envelope)
-    yield _control_default_finding(capture, attempts, failure)
-    yield _state_shape_finding(capture, attempts, failure)
-
-
 #: Where the per-mage threshold S20 cross-checks is published.
 THRESHOLD_KEY = "floor_activation_threshold_secs"
 TIMEOUT_KEY = "timeout_secs"
@@ -1452,3 +958,499 @@ def _degraded_finding(capture):
     return _finding(S22_ASSERTIONS, 2, Outcome.FAIL,
                     "three verdicts came back and %s is %r"
                     % (DEGRADED_KEY, degraded))
+
+
+#: Keys REQ-EE-1 adds to every completion record: the reasoning channel's
+#: state, and which control the attempt was sent under.
+REASONING_KEY = "reasoning"
+CONTROL_KEY = "control"
+#: The inner member of a ``Measured``/``Unsupported`` state that would carry
+#: model text -- always JSON null as this build publishes it (REQ-EE-1).
+REASONING_TEXT_KEY = "text"
+
+#: ``ReasoningControl``'s kebab-case tags, mirrored from magi-core 4.2.0's
+#: serde (``provider.rs:15-34``). Consumer: ``[magi] reasoning`` (REQ-EE-3).
+KNOWN_CONTROL_TAGS = ("default", "disabled", "enabled")
+DEFAULT_CONTROL = "default"
+DISABLED_CONTROL = "disabled"
+
+#: ``ReasoningState``'s variants at the pin, with the exact inner keys each
+#: tagged variant serializes (externally tagged, ``provider.rs:437-493``).
+#: ``NotMeasured`` carries no inner object at all.
+NOT_MEASURED_STATE = "NotMeasured"
+STATE_INNER_KEYS = {"Measured": ("chars", "text"),
+                    "Unsupported": ("backend", "chars", "text")}
+
+#: S25's own invocation, its prompt, and the label it archives under.
+S25_LABEL = "s25-disabled-consult"
+S25_PROMPT = b"Is a one-line rename worth a full review? Answer briefly.\n"
+#: The two lines S25 installs in the [magi] table of its own scratch magi.toml.
+S25_INSTALLED_LINES = ('reasoning = "disabled"', "reasoning_trace = true")
+
+_INIT_SUBCOMMAND = "init"
+_CONSULT_SUBCOMMAND = "consult"
+_MAGI_DIR_NAME = ".magi"
+_MAGI_TOML_NAME = "magi.toml"
+_INIT_TIMEOUT_S = 120
+#: What the product exits with when it refuses a configuration, mirrored from
+#: ``config_fatal.CONFIG_EXIT_CODE`` (not imported: ``config_fatal`` imports
+#: :func:`with_magi_lines` from here, so the reverse import would be circular).
+_CONFIG_EXIT_CODE = 2
+
+#: The written cause when S25/S26 recorded no completion attempt at all.
+_REASON_NO_ATTEMPTS_S25 = (
+    "the run recorded no completion attempt, so a claim about every attempt "
+    "would hold over an empty collection"
+)
+
+_KEY_TOKEN = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=')
+_TABLE_HEADER_LINE = re.compile(r'^\s*\[')
+_MAGI_HEADER_LINE = re.compile(r'^\s*\[magi\]\s*$')
+
+
+def with_magi_lines(generated: str, lines: tuple[str, ...]) -> str:
+    """Install *lines* in the ``[magi]`` table of *generated*.
+
+    Replaces any ACTIVE line that declares the same key as one of *lines*, in
+    place; installs a line for a key that has no active declaration just
+    before the table closes (before the pool, which TOML requires to come
+    last); leaves every commented line exactly as it is, including one that
+    happens to declare the same key. A key that is a PREFIX of another
+    (``reasoning`` vs. ``reasoning_trace``/``reasoning_spelling``) is matched
+    on the whole identifier, never the prefix.
+
+    Complexity: O(lines of the file).
+
+    Args:
+        generated: A ``magi.toml`` the product wrote.
+        lines: The lines to install, each ``key = value``.
+
+    Returns:
+        str: The configuration text, with *lines* installed.
+    """
+    wanted: dict[str, str] = {}
+    for line in lines:
+        match = _KEY_TOKEN.match(line)
+        if match is not None:
+            wanted[match.group(1)] = line
+    installed: set[str] = set()
+    result: list[str] = []
+    inside = False
+    for line in generated.splitlines():
+        if not inside:
+            result.append(line)
+            if _MAGI_HEADER_LINE.match(line):
+                inside = True
+            continue
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            result.append(line)
+            continue
+        if _TABLE_HEADER_LINE.match(line):
+            result.extend(new_line for key, new_line in wanted.items()
+                         if key not in installed)
+            installed.update(wanted)
+            inside = False
+            result.append(line)
+            continue
+        match = _KEY_TOKEN.match(line)
+        if match is not None and match.group(1) in wanted:
+            key = match.group(1)
+            result.append(wanted[key])
+            installed.add(key)
+            continue
+        result.append(line)
+    if inside:
+        result.extend(new_line for key, new_line in wanted.items()
+                     if key not in installed)
+    return "\n".join(result) + ("\n" if generated.endswith("\n") else "")
+
+
+def _excerpt(output, limit=600):
+    """Render the beginning of a capture for a finding's detail.
+
+    Args:
+        output: The capture to quote.
+        limit: How many bytes to keep.
+
+    Returns:
+        str: The first *limit* bytes of both streams, decoded leniently.
+    """
+    return output.raw()[:limit].decode("utf-8", errors="replace").strip()
+
+
+def _s25_finding(index, outcome, detail):
+    """Build one of S25's three findings.
+
+    Args:
+        index: Position in :data:`S25_ASSERTIONS`.
+        outcome: What became of it.
+        detail: The cause when the outcome is not PASS.
+
+    Returns:
+        Finding: With no run id -- S25 is standalone.
+    """
+    return Finding(assertion=S25_ASSERTIONS[index], outcome=outcome,
+                   detail=detail, run_id=None)
+
+
+def _state_tag(record):
+    """The ``(tag, inner)`` pair of one attempt's reasoning state.
+
+    Args:
+        record: The attempt object, expected to carry :data:`REASONING_KEY`.
+
+    Returns:
+        tuple[str | None, object]: ``(NOT_MEASURED_STATE, None)`` for the
+        string state; ``(tag, inner)`` for a single-key tagged object; and
+        ``(None, state)`` -- the caller's signal that the value has no
+        recognisable shape at all -- for anything else.
+    """
+    state = record.get(REASONING_KEY) if isinstance(record, dict) else None
+    if state == NOT_MEASURED_STATE:
+        return NOT_MEASURED_STATE, None
+    if isinstance(state, dict) and len(state) == 1:
+        ((tag, inner),) = state.items()
+        return tag, inner
+    return None, state
+
+
+def _control_problem(attempts, expected):
+    """Every attempt whose :data:`CONTROL_KEY` differs from *expected*.
+
+    Args:
+        attempts: Every recorded attempt.
+        expected: The control tag every attempt is supposed to carry.
+
+    Returns:
+        list[str]: One message per offender; empty when all agree.
+    """
+    problems = []
+    for item in attempts:
+        if not isinstance(item.record, dict) or CONTROL_KEY not in item.record:
+            problems.append("%s publishes no %s" % (item.label, CONTROL_KEY))
+            continue
+        control = item.record[CONTROL_KEY]
+        if control != expected:
+            problems.append("%s reports %s as %r, expected %r"
+                            % (item.label, CONTROL_KEY, control, expected))
+    return problems
+
+
+def _no_measured_overrun_problems(attempts):
+    """Every attempt reporting a measured reasoning count above zero.
+
+    A state this build does not recognise at all is reported too: it is
+    exactly as untrustworthy a signal of "the switch worked" as a positive
+    count would be.
+
+    Args:
+        attempts: Every recorded attempt.
+
+    Returns:
+        list[str]: One message per offender; empty when none overran.
+    """
+    problems = []
+    for item in attempts:
+        if not isinstance(item.record, dict) or REASONING_KEY not in item.record:
+            problems.append("%s publishes no %s" % (item.label, REASONING_KEY))
+            continue
+        tag, inner = _state_tag(item.record)
+        if tag is None or (tag != NOT_MEASURED_STATE
+                           and tag not in STATE_INNER_KEYS):
+            problems.append(
+                "%s reports %s as %r, which is not a state this build "
+                "recognises" % (item.label, REASONING_KEY,
+                                item.record[REASONING_KEY]))
+            continue
+        if tag != "Measured":
+            continue
+        chars = inner.get("chars") if isinstance(inner, dict) else None
+        if isinstance(chars, int) and not isinstance(chars, bool) and chars > 0:
+            problems.append(
+                "%s reports a measured reasoning count of %d chars while "
+                "reasoning = disabled" % (item.label, chars))
+    return problems
+
+
+def _no_leaked_text_problems(attempts):
+    """Every attempt whose reasoning state carries non-null text.
+
+    The message cites the LENGTH of the leaked text, never its content: the
+    text is the model's, unvalidated, and a finding's detail reaches the
+    report and the certificate.
+
+    Args:
+        attempts: Every recorded attempt.
+
+    Returns:
+        list[str]: One message per offender; empty when none leaked.
+    """
+    problems = []
+    for item in attempts:
+        if not isinstance(item.record, dict) or REASONING_KEY not in item.record:
+            problems.append("%s publishes no %s" % (item.label, REASONING_KEY))
+            continue
+        tag, inner = _state_tag(item.record)
+        if tag is None or tag == NOT_MEASURED_STATE or not isinstance(inner, dict):
+            continue
+        text = inner.get(REASONING_TEXT_KEY)
+        if text is not None:
+            problems.append(
+                "%s.%s.%s carries %d character(s) of model text"
+                % (item.label, tag, REASONING_TEXT_KEY, len(str(text))))
+    return problems
+
+
+def _s25_control_finding(capture, attempts, failure):
+    """Judge assertion 1: every attempt reports the disabled control.
+
+    Args:
+        capture: The consult's reduction.
+        attempts: Every recorded attempt, or None.
+        failure: Why there are none.
+
+    Returns:
+        Finding: PASS when every attempt carries ``control: "disabled"``.
+    """
+    if capture.envelope is None:
+        return _s25_finding(0, capture.outcome, capture.detail)
+    if attempts is None:
+        return _s25_finding(0, Outcome.FAIL, failure)
+    if not attempts:
+        return _s25_finding(0, Outcome.CANNOT_TEST, _REASON_NO_ATTEMPTS_S25)
+    problems = _control_problem(attempts, DISABLED_CONTROL)
+    if problems:
+        return _s25_finding(0, Outcome.FAIL, "; ".join(problems))
+    return _s25_finding(0, Outcome.PASS, "")
+
+
+def _s25_no_overrun_finding(capture, attempts, failure):
+    """Judge assertion 2: no attempt reports a measured count above zero.
+
+    Args:
+        capture: The consult's reduction.
+        attempts: Every recorded attempt, or None.
+        failure: Why there are none.
+
+    Returns:
+        Finding: PASS when no attempt overran under ``Measured``.
+    """
+    if capture.envelope is None:
+        return _s25_finding(1, capture.outcome, capture.detail)
+    if attempts is None:
+        return _s25_finding(1, Outcome.FAIL, failure)
+    if not attempts:
+        return _s25_finding(1, Outcome.CANNOT_TEST, _REASON_NO_ATTEMPTS_S25)
+    problems = _no_measured_overrun_problems(attempts)
+    if problems:
+        return _s25_finding(1, Outcome.FAIL, "; ".join(problems))
+    return _s25_finding(1, Outcome.PASS, "")
+
+
+def _s25_no_leak_finding(capture, attempts, failure):
+    """Judge assertion 3: no attempt record carries reasoning text.
+
+    Args:
+        capture: The consult's reduction.
+        attempts: Every recorded attempt, or None.
+        failure: Why there are none.
+
+    Returns:
+        Finding: PASS when every attempt's reasoning text is null.
+    """
+    if capture.envelope is None:
+        return _s25_finding(2, capture.outcome, capture.detail)
+    if attempts is None:
+        return _s25_finding(2, Outcome.FAIL, failure)
+    if not attempts:
+        return _s25_finding(2, Outcome.CANNOT_TEST, _REASON_NO_ATTEMPTS_S25)
+    problems = _no_leaked_text_problems(attempts)
+    if problems:
+        return _s25_finding(2, Outcome.FAIL, "; ".join(problems))
+    return _s25_finding(2, Outcome.PASS, "")
+
+
+@scenario("S25", assertions=S25_ASSERTIONS, needs_backend=True)
+def a_disabled_reasoning_control_round_trips(run):
+    """Assert ``reasoning = "disabled"`` round-trips on the default trio.
+
+    Standalone (``run=None``): it scaffolds its OWN workspace by cwd, under
+    ``needs_backend=True``, rather than reading a shared run, because the
+    property has to hold on the trio the OPERATOR configured (OQ-8) -- a
+    profile that overrides ``smoke.toml`` never rewrites this scratch
+    ``magi.toml``. ``reasoning_trace = true`` is installed on purpose: without
+    it magi-core never captures text at all, and assertion 3 would be a
+    guardian that cannot fail (see the module's own contract note below).
+
+    Args:
+        run: Always ``None``; S25 declares no shared run.
+
+    Yields:
+        Finding: One per entry of :data:`S25_ASSERTIONS`, in that order.
+    """
+    root = pathlib.Path(
+        tempfile.mkdtemp(prefix="s25-", dir=str(runs.scratch_root())))
+    try:
+        seeded = runs.attempt(
+            [_INIT_SUBCOMMAND], stdin=b"", timeout_s=_INIT_TIMEOUT_S,
+            label="s25-init", cwd=root,
+            env={"MAGI_PASSPHRASE": runs.passphrase()})
+        if not seeded.ok or not (root / _MAGI_DIR_NAME).is_dir():
+            for index in range(len(S25_ASSERTIONS)):
+                yield _s25_finding(
+                    index, Outcome.CANNOT_TEST,
+                    "the product's %s did not scaffold a workspace to "
+                    "configure" % _INIT_SUBCOMMAND)
+            return
+        toml_path = root / _MAGI_DIR_NAME / _MAGI_TOML_NAME
+        generated = toml_path.read_text(encoding="utf-8")
+        toml_path.write_text(with_magi_lines(generated, S25_INSTALLED_LINES),
+                             encoding="utf-8")
+        attempt = runs.attempt(
+            [_CONSULT_SUBCOMMAND, "--output-format", "json",
+             "--timeout", str(runs.LARGE_CONSULT_TIMEOUT_S)],
+            stdin=S25_PROMPT, timeout_s=runs.LARGE_CONSULT_CEILING_S,
+            label=S25_LABEL, cwd=root,
+            env={"MAGI_PASSPHRASE": runs.passphrase()})
+        if not attempt.ok:
+            for index in range(len(S25_ASSERTIONS)):
+                yield _s25_finding(index, Outcome.CANNOT_TEST, attempt.failure)
+            return
+        if attempt.output.exit_code == _CONFIG_EXIT_CODE:
+            detail = ("the product refused a configuration declaring "
+                      "reasoning = disabled: %s" % _excerpt(attempt.output))
+            for index in range(len(S25_ASSERTIONS)):
+                yield _s25_finding(index, Outcome.FAIL, detail)
+            return
+        capture = _capture_of(attempt, S25_LABEL)
+        attempts, failure = _attempts_of(capture.envelope)
+        yield _s25_control_finding(capture, attempts, failure)
+        yield _s25_no_overrun_finding(capture, attempts, failure)
+        yield _s25_no_leak_finding(capture, attempts, failure)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _control_default_finding(capture, attempts, failure):
+    """Judge assertion 1: every attempt reports the default control.
+
+    Args:
+        capture: R4's reduction.
+        attempts: Every recorded attempt, or None.
+        failure: Why there are none.
+
+    Returns:
+        Finding: PASS when every attempt carries ``control: "default"``.
+    """
+    if capture.envelope is None:
+        return _finding(S26_ASSERTIONS, 0, capture.outcome, capture.detail)
+    if attempts is None:
+        return _finding(S26_ASSERTIONS, 0, Outcome.FAIL, failure)
+    if not attempts:
+        return _finding(S26_ASSERTIONS, 0, Outcome.CANNOT_TEST,
+                        REASON_NO_ATTEMPTS)
+    problems = _control_problem(attempts, DEFAULT_CONTROL)
+    if problems:
+        return _finding(S26_ASSERTIONS, 0, Outcome.FAIL, "; ".join(problems))
+    return _finding(S26_ASSERTIONS, 0, Outcome.PASS, "")
+
+
+def _reasoning_state_problems(item):
+    """Every way one attempt's reasoning state is not one magi-core could
+    have serialized, mirrored field for field from :data:`STATE_INNER_KEYS`.
+
+    Args:
+        item: The attempt to judge.
+
+    Returns:
+        list[str]: One message per problem; empty when the state is well
+        formed.
+    """
+    record = item.record
+    if not isinstance(record, dict) or REASONING_KEY not in record:
+        return ["%s publishes no %s" % (item.label, REASONING_KEY)]
+    tag, inner = _state_tag(record)
+    if tag == NOT_MEASURED_STATE:
+        return []
+    if tag is None:
+        return ["%s reports %s as %r, which is neither %s nor a single-key "
+                "object" % (item.label, REASONING_KEY, record[REASONING_KEY],
+                           NOT_MEASURED_STATE)]
+    if tag not in STATE_INNER_KEYS:
+        return ["%s reports %s tag %r, which is not one of %s"
+                % (item.label, REASONING_KEY, tag,
+                   ", ".join(sorted(STATE_INNER_KEYS)))]
+    wanted = set(STATE_INNER_KEYS[tag])
+    if not isinstance(inner, dict) or set(inner) != wanted:
+        return ["%s.%s has keys %s, expected exactly %s"
+                % (item.label, tag,
+                   sorted(inner) if isinstance(inner, dict) else inner,
+                   sorted(wanted))]
+    problems = []
+    chars = inner.get("chars")
+    if chars is None:
+        if tag != "Unsupported":
+            problems.append("%s.%s.chars is null, which only Unsupported "
+                            "allows" % (item.label, tag))
+    elif not isinstance(chars, int) or isinstance(chars, bool) or chars < 0:
+        problems.append("%s.%s.chars is %r, expected a non-negative integer"
+                        % (item.label, tag, chars))
+    if tag == "Unsupported" and not isinstance(inner.get("backend"), str):
+        problems.append("%s.%s.backend is %r, expected a string"
+                        % (item.label, tag, inner.get("backend")))
+    if inner.get(REASONING_TEXT_KEY) is not None:
+        problems.append("%s.%s.%s is not null"
+                        % (item.label, tag, REASONING_TEXT_KEY))
+    return problems
+
+
+def _state_shape_finding(capture, attempts, failure):
+    """Judge assertion 2: every attempt's reasoning state is well formed.
+
+    Args:
+        capture: R4's reduction.
+        attempts: Every recorded attempt, or None.
+        failure: Why there are none.
+
+    Returns:
+        Finding: PASS when every attempt's reasoning state matches a shape
+        magi-core's serde could have produced.
+    """
+    if capture.envelope is None:
+        return _finding(S26_ASSERTIONS, 1, capture.outcome, capture.detail)
+    if attempts is None:
+        return _finding(S26_ASSERTIONS, 1, Outcome.FAIL, failure)
+    if not attempts:
+        return _finding(S26_ASSERTIONS, 1, Outcome.CANNOT_TEST,
+                        REASON_NO_ATTEMPTS)
+    problems = []
+    for item in attempts:
+        problems.extend(_reasoning_state_problems(item))
+    if problems:
+        return _finding(S26_ASSERTIONS, 1, Outcome.FAIL, "; ".join(problems))
+    return _finding(S26_ASSERTIONS, 1, Outcome.PASS, "")
+
+
+@scenario("S26", assertions=S26_ASSERTIONS, run=MIGRATION_RUN,
+          needs_backend=True)
+def every_attempt_reports_its_reasoning_control_and_state(run):
+    """Assert R4's attempts report the default control in magi-core's shape.
+
+    R4 declares no ``reasoning`` key, so REQ-EE-3's default applies, and
+    REQ-EE-1's rendering is checked structurally rather than against any one
+    model's behaviour (OQ-9/§6 doctrine: never assert on what the model
+    answered).
+
+    Args:
+        run: R4's ``RunResult``, or None.
+
+    Yields:
+        Finding: One per entry of :data:`S26_ASSERTIONS`, in that order.
+    """
+    capture = _capture_of(run, MIGRATION_RUN)
+    attempts, failure = _attempts_of(capture.envelope)
+    yield _control_default_finding(capture, attempts, failure)
+    yield _state_shape_finding(capture, attempts, failure)
+
+
