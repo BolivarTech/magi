@@ -1899,8 +1899,9 @@ thread_local! {
 /// * `completion` - the SAME completion configuration the startup trio was built with.
 ///
 /// # Errors
-/// [`magi_core::error::ProviderError`] if the Anthropic HTTP client could not be built.
-#[cfg_attr(not(test), allow(clippy::expect_used))]
+/// [`magi_core::error::ProviderError`] if the Anthropic HTTP client could not be built, or —
+/// unreachable in this configuration, as stated above — an `External`/`Other` one if
+/// `MagiBuilder::build()` ever refused it.
 fn rebuild_consult_trio_after_login(
     api_key: String,
     model: String,
@@ -1943,11 +1944,15 @@ fn rebuild_consult_trio_after_login(
             completion.clone()
         })
         .build()
-        .expect(
-            "MagiBuilder::build() cannot fail here: no prompts_dir, no declared primary \
-             lineage (with_agent is never called) and no fallback pool — the same invariant \
-             magi_core::orchestrator::Magi::new documents for its own build().expect(...)",
-        );
+        // Unreachable in this configuration (see the rustdoc above), but mapped rather than
+        // `expect`ed: the function already reports failure through its `Result`, and the
+        // caller redacts whatever it carries before display.
+        .map_err(|e| {
+            magi_core::error::ProviderError::external(
+                format!("could not assemble the consult trio: {e}"),
+                magi_core::error::ExternalErrorKind::Other,
+            )
+        })?;
     Ok(std::sync::Arc::new(magi))
 }
 
