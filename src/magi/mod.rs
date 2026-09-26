@@ -60,7 +60,7 @@ use std::time::Duration;
 /// the ceiling.
 ///
 /// **There is no matching upper bound any more.** Through v0.19.1 this range was
-/// `AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS` (`120`); REQ-TUI-1 (v0.20.0) removed the
+/// `30..=120` seconds. REQ-TUI-1 (v0.20.0) removed the
 /// ceiling: an interactive consult is sized for deliberation, not for chat responsiveness, and
 /// the ceiling was a UX cap on exactly the operation known to need more time. The floor is
 /// unchanged.
@@ -2161,7 +2161,7 @@ mod tests {
     /// `u32::MAX`, and each boundary of the proof's three saturation cases with its neighbours:
     /// (A) `6c <= M`, (B) `6c > M >= 3c`, (C) `3c > M`, where `M = u64::MAX`.
     ///
-    /// Deliberately NOT built from `AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS`: that range
+    /// Deliberately NOT built from the old `30..=120` range: that range
     /// is what REQ-TUI-1 removes, and a sweep bounded by it certifies the bounded range only.
     const UNBOUNDED_SWEEP: [u64; 15] = [
         30,
