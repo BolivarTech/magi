@@ -3632,12 +3632,19 @@ max_input_bytes = 2048
         .expect("valid");
         for kind in [ProviderKind::Ollama, ProviderKind::Anthropic] {
             let notices = cfg.reasoning_wire_notices(kind);
+            // Under Anthropic the non-default control ALSO earns its own notice (the Anthropic
+            // seat sends no reasoning switch at all), so the spelling notice is looked up by
+            // its key rather than assumed to be the only one.
+            let spelling_notices: Vec<&Notice> = notices
+                .iter()
+                .filter(|n| n.text.contains("reasoning_spelling"))
+                .collect();
             assert_eq!(
-                notices.len(),
+                spelling_notices.len(),
                 1,
-                "exactly one notice under {kind}: {notices:?}"
+                "exactly one spelling notice under {kind}: {notices:?}"
             );
-            let n = &notices[0];
+            let n = spelling_notices[0];
             assert_eq!(n.level, tracing::Level::WARN);
             assert!(n.text.contains("reasoning_spelling"), "{}", n.text);
             assert!(n.text.contains("openai-compat"), "{}", n.text);
@@ -3680,6 +3687,72 @@ max_input_bytes = 2048
                 );
             }
         }
+    }
+
+    /// A non-default control on an `anthropic` trio never reaches the wire: magi-core 4.2.0's
+    /// Claude provider sends no per-request reasoning switch (`providers/claude.rs:317`), so
+    /// every record reads `Unsupported`. Spec §0: a key declared where it has no effect is a
+    /// notice, never a quiet no-op (Loop 1 round 1, Important 1).
+    #[test]
+    fn a_control_on_an_anthropic_trio_is_announced_as_unreachable() {
+        for tag in ["disabled", "enabled"] {
+            let cfg = MagiConfig::from_toml_str(&format!(
+                "[magi]
+reasoning = \"{tag}\"
+"
+            ))
+            .expect("valid");
+            let notices = cfg.reasoning_wire_notices(ProviderKind::Anthropic);
+            assert_eq!(notices.len(), 1, "{tag}: {notices:?}");
+            let n = &notices[0];
+            assert_eq!(n.level, tracing::Level::WARN);
+            for needle in ["reasoning", tag, "anthropic", "Unsupported"] {
+                assert!(
+                    n.text.contains(needle),
+                    "{tag}: missing `{needle}` in {}",
+                    n.text
+                );
+            }
+        }
+        let quiet = MagiConfig::from_toml_str(
+            "[magi]
+reasoning = \"default\"
+",
+        )
+        .expect("valid");
+        assert!(
+            quiet
+                .reasoning_wire_notices(ProviderKind::Anthropic)
+                .is_empty(),
+            "the default control asks nothing of the wire: nothing to say"
+        );
+    }
+
+    /// The `/login` rebuild always lands on Anthropic, whatever kind the startup trio ran on, and
+    /// its notice list is `reasoning_wire_notices(ProviderKind::Anthropic)` (pinned by
+    /// `the_tui_wiring_carries_the_anthropic_reasoning_notices` in `main.rs`). An Ollama trio
+    /// whose control was in force at startup therefore loses it mid-session, and the post-login
+    /// list must say so.
+    #[test]
+    fn the_post_login_notices_announce_a_control_the_anthropic_rebuild_drops() {
+        let cfg = MagiConfig::from_toml_str(
+            "[magi]
+kind = \"ollama\"
+reasoning = \"disabled\"
+",
+        )
+        .expect("valid");
+        assert!(
+            cfg.reasoning_wire_notices(ProviderKind::Ollama).is_empty(),
+            "on the startup Ollama trio the control is in force"
+        );
+        let post_login = cfg.reasoning_wire_notices(ProviderKind::Anthropic);
+        assert!(
+            post_login
+                .iter()
+                .any(|n| n.text.contains("anthropic") && n.text.contains("Unsupported")),
+            "the post-login list must carry the Anthropic control notice: {post_login:?}"
+        );
     }
 
     /// S-7, the pairs magi-core cannot put on the wire (its `reasoning_field` table,
