@@ -908,6 +908,38 @@ mod tests {
         assert_eq!(cfg.magi().reasoning_trace, Some(false));
     }
 
+    /// The `max_tokens` comment tells the operator to raise `agent_timeout_secs` before raising
+    /// the cap, so `[magi]` must show that key too — commented, at its default — or the
+    /// instruction points at a key the file never names. Uncommenting it must load and resolve
+    /// to the same default.
+    #[test]
+    fn the_scaffold_shows_the_agent_timeout_key_the_cap_comment_tells_the_operator_to_raise() {
+        let scaffold = render_default_magi_toml();
+        let shown = format!(
+            "# agent_timeout_secs = {}",
+            magi_rs::magi::AGENT_TIMEOUT_SECS
+        );
+        let lines: Vec<&str> = scaffold.lines().collect();
+        let header = lines
+            .iter()
+            .position(|l| l.trim() == "[magi]")
+            .expect("the scaffold declares [magi]");
+        assert!(
+            lines[header + 1..]
+                .iter()
+                .take_while(|l| !l.trim_start().starts_with('['))
+                .any(|l| l.trim_start().starts_with(shown.as_str())),
+            "[magi] must show `{shown}` commented"
+        );
+        let uncommented = scaffold.replace(&shown, &shown["# ".len()..]);
+        let cfg = crate::config::MagiConfig::from_toml_str(&uncommented)
+            .expect("the uncommented scaffold must load");
+        assert_eq!(
+            cfg.magi().agent_timeout_secs,
+            Some(magi_rs::magi::AGENT_TIMEOUT_SECS)
+        );
+    }
+
     /// REQ-V42-4 / PM-S-12: the spelling's comment carries the accepted hazard — a rejected
     /// spelling is HTTP 400 and condemns the lineage for all three seats; verify first, and
     /// again after any provider-side model update.
