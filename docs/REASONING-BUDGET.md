@@ -51,7 +51,9 @@ saying so rather than a silent no-op.
 
 If `reasoning` is set to anything other than `default` on an `openai-compat` trio with no
 spelling declared, magi-rs warns at startup that the control cannot reach the wire, and every
-completion record for that trio will report its reasoning as `Unsupported`.
+completion record for that trio will report its reasoning as `Unsupported`. An `anthropic` trio
+gets the same warning for any control other than `default`, because its seats send no reasoning
+switch at all; that includes the trio a TUI `/login` rebuilds, which always runs on `anthropic`.
 
 **The hazard, stated plainly: a spelling the pinned model rejects returns HTTP 400, and
 magi-core treats a 400 as lineage-condemning; all three seats sharing that lineage are lost for
