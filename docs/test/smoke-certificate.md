@@ -1,16 +1,16 @@
 # Smoke Certificate
 
-- version: 0.19.1
-- commit: 54d8f16
-- date: 2026-09-17 (UTC)
+- version: 0.20.0
+- commit: 0caee8a
+- date: 2026-09-26 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 6083adfba51857af1fa849eaf43808b9a5deb6dc01545076056a21ef699501fa (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 673s
-- rounds needed: 4
-- scope: 24 of 24 scenarios evaluated
+- binary: sha256 9411e7112f592deadb4e1c5b11b4aa598e961dc1e2c32b3f503f6a3f1337b146 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 903s
+- rounds needed: 1
+- scope: 26 of 26 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: 29 active memories, 2936 KB database, 1081 KB archived
-- result: 74 passed, 0 not passed, 74 total
+- environment: active memories not measured, 4734 KB database, 1725 KB archived
+- result: 81 passed, 0 not passed, 81 total
 
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
 [PASS] S1 run=R1 - schema_version is 1
@@ -50,11 +50,13 @@
 [PASS] S11 - an unknown field in magi.toml exits 2 naming the field
 [PASS] S11 - it cuts before any backend request is issued
 [PASS] S11 - a seat declaring a model without its lineage fails naming all three seats
+[PASS] S11 - an unknown reasoning value exits 2 naming the key and every accepted value
 [PASS] S12 - the run adds no entry to git status --porcelain beyond the certificate
 [PASS] S12 - git status --ignored smoke/env/ shows the whole environment on the ignored side
 [PASS] S13 - every magi-rs invocation in the published docs names an existing subcommand
 [PASS] S13 - every flag in those invocations exists in that subcommand's --help
 [PASS] S13 - every magi.toml embedded in those docs parses
+[PASS] S13 - every [magi] key the scaffold writes is named in a published guide
 [PASS] S14 - init -w <dir> scaffolds into <dir> and leaves the current directory untouched
 [PASS] S14 - vault -w <dir> ls and vault ls -w <dir> both parse
 [PASS] S14 - given twice, the innermost wins
@@ -86,4 +88,9 @@
 [PASS] S23 run=R1 - that same run id appears inside a file in the workspace log directory, so the log survived process exit and belongs to this run
 [PASS] S24 run=R1 - the memory-count diagnostic notice never reaches stdout or stderr, the headless run's screen
 [PASS] S24 run=R1 - that same notice is written into the day's log file under the workspace's log directory
+[PASS] S25 - a consult under reasoning = disabled reports the disabled control on every recorded attempt
+[PASS] S25 - under reasoning = disabled no attempt reports a measured reasoning count above zero
+[PASS] S25 - no attempt record carries reasoning text, even with the trace opted in
+[PASS] S26 run=R4 - with no reasoning key declared every recorded attempt reports the default control
+[PASS] S26 run=R4 - every recorded attempt reports its reasoning state in magi-core's own shape
 [OUT_OF_SCOPE] - cross-OS linkage and the published crate (REQ-S26, REQ-S27)
