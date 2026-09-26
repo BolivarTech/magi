@@ -82,7 +82,7 @@ use crate::redact::{foreign_serde_label, redact_foreign_text};
 /// # `reasoning` and `control`: a state, not a number
 ///
 /// [`CompletionRecord`] also carries `reasoning: ReasoningState` and `control:
-/// ReasoningControl`. Both now have a consumer — MAGI-Claude's reasoning-budget instrumentation
+/// ReasoningControl`. Both now have a consumer: MAGI-Claude's reasoning-budget instrumentation
 /// (E-E) needs, per attempt, what the caller asked the reasoning channel to do and what that
 /// channel measured, so a cut attempt (`finish: length` with an exhausted budget) can be told
 /// apart from a completion the backend simply spent on tokens that never came back. `reasoning`
@@ -90,7 +90,7 @@ use crate::redact::{foreign_serde_label, redact_foreign_text};
 /// **never flattened to a character or token count**: `"NotMeasured"` (nobody looked),
 /// `{"Measured": {"chars": N, "text": null}}` (the channel was read) and `{"Unsupported": {…}}`
 /// (the backend cannot honour the control) stay distinguishable states, and every state's `text`
-/// is forced to `null` — model text never enters this envelope. `control` is rendered through
+/// is forced to `null`: model text never enters this envelope. `control` is rendered through
 /// `control_label` as the kebab-case tag [`ReasoningControl`] serializes (`"default"`,
 /// `"disabled"`, `"enabled"`), so a consumer can tell an honoured `disabled` (a measured zero)
 /// from an ignored one (`Unsupported` with a non-zero count) apart, which a bare number could
@@ -109,7 +109,7 @@ use crate::redact::{foreign_serde_label, redact_foreign_text};
 /// # Complexity
 ///
 /// `O(seats x records)` for the traversal, plus `O(k)` per attempt for walking the serialized
-/// `reasoning` state (`k` is its own small, fixed-depth JSON structure — a handful of fields at
+/// `reasoning` state (`k` is its own small, fixed-depth JSON structure, a handful of fields at
 /// most). The map is a trio and the function runs **once per consult**, so the whole traversal is
 /// a handful of items on a path that already spent seconds in HTTP. An index or a precomputed
 /// lookup would buy nothing measurable and would be over-engineering against a workload this
@@ -202,8 +202,8 @@ fn finish_label(finish: Option<&FinishReason>) -> Value {
 ///
 /// # Why the JSON is walked structurally instead of matching on the enum
 ///
-/// [`ReasoningState`] is `#[non_exhaustive]`, so a hand-written match here would need a wildcard
-/// — the same trap `finish_label` avoids for [`FinishReason`]. Serializing first and then
+/// [`ReasoningState`] is `#[non_exhaustive]`, so a hand-written match here would need a wildcard,
+/// the same trap `finish_label` avoids for [`FinishReason`]. Serializing first and then
 /// transforming the resulting [`Value`] sidesteps it entirely: the walk only ever asks "is this
 /// key named `text`?" and "is this a string?", so it applies unchanged to a future variant this
 /// crate does not know yet, without inventing a label for it.
@@ -215,11 +215,11 @@ fn finish_label(finish: Option<&FinishReason>) -> Value {
 ///
 /// The serde shape of `reasoning`, with two transformations and only those: every `text` field
 /// becomes [`Value::Null`] (model text never enters the envelope), and every string in the
-/// resulting structure — today only `backend`, plus a unit-variant tag such as `"NotMeasured"`,
-/// which is the identity under redaction — passes through [`redact_foreign_text`]. The
+/// resulting structure (today only `backend`, plus a unit-variant tag such as `"NotMeasured"`,
+/// which is the identity under redaction) passes through [`redact_foreign_text`]. The
 /// unreachable serialization-failure branch falls back to a redacted form of magi-core's own
 /// `Debug` for [`ReasoningState`], which elides the trace field itself, and never to
-/// [`Value::Null`] — that value is reserved for "no measurement was reported" and must not be
+/// [`Value::Null`]: that value is reserved for "no measurement was reported" and must not be
 /// produced by a path that did measure something.
 fn reasoning_value(reasoning: &ReasoningState) -> Value {
     match serde_json::to_value(reasoning) {
@@ -277,8 +277,8 @@ fn redact_reasoning_json(value: Value) -> Value {
 /// # Returns
 ///
 /// The kebab-case wire tag (`"default"`, `"disabled"`, `"enabled"`) [`ReasoningControl`]
-/// serializes, via [`foreign_serde_label`] — the same helper `rotation_report::cause_label`
-/// uses — so a future variant this crate does not know yet still renders its own tag rather
+/// serializes, via [`foreign_serde_label`] (the same helper `rotation_report::cause_label`
+/// uses), so a future variant this crate does not know yet still renders its own tag rather
 /// than a wildcard label this crate invented.
 fn control_label(control: &ReasoningControl) -> Value {
     Value::String(
@@ -319,7 +319,7 @@ impl CutCause {
 pub struct CutAttempt<'a> {
     /// The seat the attempt belongs to.
     pub seat: AgentName,
-    /// 0-based index into `completions[seat]` — the same position the consult JSON renders.
+    /// 0-based index into `completions[seat]`, the same position the consult JSON renders.
     pub index: usize,
     /// The record itself, borrowed from the report.
     pub record: &'a CompletionRecord,
@@ -330,7 +330,7 @@ pub struct CutAttempt<'a> {
 /// THE cut-attempt predicate, defined once (spec §0: shared by REQ-EE-2, REQ-EE-4, REQ-EE-7).
 ///
 /// An attempt is cut when its record says `finish == length`, or when it is the attempt that
-/// came back EMPTY — which the record alone cannot say (magi-core 4.2.0 builds an empty
+/// came back EMPTY, which the record alone cannot say (magi-core 4.2.0 builds an empty
 /// attempt's record exactly like a successful one), so it is located structurally: the LAST
 /// record of a model's run is the empty one when the hop that left that model has kind
 /// `EmptyCompletion`, or, for the seat's final run, when its `failed_agents` cause contains

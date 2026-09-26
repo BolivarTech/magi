@@ -8,8 +8,8 @@
 //!
 //! Both keys name a value from a type magi-core owns ([`ReasoningControl`], `#[non_exhaustive]`)
 //! or defines but does not serialize ([`ReasoningSpelling`], no `serde` impl at all). Parsing
-//! either from a `magi.toml` string is domain vocabulary — the same class of thing
-//! [`crate::magi::kind::ProviderKind`] already is — not the shape of the TOML struct that carries
+//! either from a `magi.toml` string is domain vocabulary (the same class of thing
+//! [`crate::magi::kind::ProviderKind`] already is), not the shape of the TOML struct that carries
 //! it, which is why it does not live in `config.rs` (bin).
 
 #![deny(missing_docs)]
@@ -56,14 +56,14 @@ pub struct ReasoningVocabularyError {
 /// Parses `[magi].reasoning` through magi-core's own serde (REQ-EE-3, OQ-10).
 ///
 /// **It never trims and never guesses.** `raw` is compared exactly against the three kebab-case
-/// tags [`ReasoningControl`] serializes as (`"default"`, `"disabled"`, `"enabled"`) — padding,
+/// tags [`ReasoningControl`] serializes as (`"default"`, `"disabled"`, `"enabled"`): padding,
 /// case and blankness are all rejected the same way an unknown word is, because `[magi]` keys
 /// have no "blank is absent" rule the way env vars do (a `[magi]` table only exists when the
 /// operator wrote it).
 ///
 /// The deserialization goes through `serde_json` rather than a hand-written `match`, so the set
-/// of accepted values — and the exact wording naming them in [`ReasoningVocabularyError::reason`]
-/// — comes from magi-core's own `Deserialize` impl and can never drift from it one release
+/// of accepted values, and the exact wording naming them in [`ReasoningVocabularyError::reason`],
+/// comes from magi-core's own `Deserialize` impl and can never drift from it one release
 /// behind.
 ///
 /// # Arguments
@@ -84,7 +84,7 @@ pub fn parse_reasoning_control(raw: &str) -> Result<ReasoningControl, ReasoningV
 
 /// Parses `[magi].reasoning_spelling` against [`VALID_REASONING_SPELLINGS`] (REQ-V42-4).
 ///
-/// **magi-rs owns this vocabulary — [`ReasoningSpelling`] has no `serde` impl of its own**, so
+/// **magi-rs owns this vocabulary: [`ReasoningSpelling`] has no `serde` impl of its own**, so
 /// unlike [`parse_reasoning_control`] this is a plain exact match, never a `.trim()`: padding,
 /// case and blankness are all unknown vocabulary.
 ///

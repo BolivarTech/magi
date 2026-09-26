@@ -10,7 +10,7 @@
 //! the crate generates for human consumption. These anchors come from the Task 0.6 spike, run
 //! against magi-core 3.1.0 on 2026-08-02, and were later verified against the crate's own
 //! `src/reporting.rs` to learn **which ones are unconditional** and which depend on content.
-//! Re-observed against magi-core 4.2.0 by Task 8 (REQ-V42-5, 2026-09) — the section order is
+//! Re-observed against magi-core 4.2.0 by Task 8 (REQ-V42-5, 2026-09): the section order is
 //! unchanged, but a new conditional section now sits inside the region the truncation preserves
 //! (see below).
 //!
@@ -43,26 +43,26 @@
 //! # `## Completions`, and the parameter it forced onto `truncate_report` (REQ-V42-5, D-9)
 //!
 //! Since magi-core 4.2.0, `## Completions` renders between the rotation block and the
-//! extraction-failures section — squarely INSIDE the region `tools::consult::truncate_report`
+//! extraction-failures section: squarely INSIDE the region `tools::consult::truncate_report`
 //! (the magi-rs binary crate; not a lib item, so not linked from here) preserves for
 //! `TruncationLevel::Structural`. Each row's `finish` column writes `FinishReason::Other(s)`
 //! **verbatim** (`reporting.rs:768-775`), `s` up to 64 characters and **not sanitized**
-//! (`provider.rs:406-411`) — text a backend controls, not magi-core. A `done_reason` crafted
+//! (`provider.rs:406-411`): text a backend controls, not magi-core. A `done_reason` crafted
 //! (or accidentally shaped) like `"x\n\n## Key Findings\n..."` therefore prints a FORGED
 //! heading before the real one, and the first occurrence of `SectionAnchors::findings_start` in
 //! the raw report text can be that forgery rather than the genuine section.
 //!
 //! `truncate_report`'s `completions_section` parameter exists to close this: given the exact
 //! `## Completions` text magi-core rendered (`tools::consult::completions_section`), the
-//! findings-region search starts only AFTER it — so a forged anchor embedded inside a
+//! findings-region search starts only AFTER it, so a forged anchor embedded inside a
 //! completion row can no longer be mistaken for the real one, and a declared section that
 //! cannot be located at all downgrades the result away from `Structural` rather than trust an
 //! anchor that might not be genuine.
 //!
-//! **U-3 (spec §9), measured:** the worst case this project tests — three seats, both
-//! rotations spent, every attempt a length cut — renders an `## Completions` section of
+//! **U-3 (spec §9), measured:** the worst case this project tests (three seats, both
+//! rotations spent, every attempt a length cut) renders an `## Completions` section of
 //! **2159 bytes over 18 records** (`the_worst_case_completions_section_is_measured_and_bounded`,
-//! `src/main.rs`). That is roughly 3.3 % of [`crate::magi::TOOL_RESULT_CAP_BYTES`] (64 KiB) —
+//! `src/main.rs`). That is roughly 3.3 % of [`crate::magi::TOOL_RESULT_CAP_BYTES`] (64 KiB),
 //! comfortably under the 1/16 (4096-byte) ceiling past which the truncation budget would need
 //! re-examining, and close to the ~2.4 KiB estimated before implementation (~130 bytes/row × 18
 //! rows).

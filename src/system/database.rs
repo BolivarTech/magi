@@ -395,7 +395,7 @@ fn open_existing_envelope(
 /// `BEGIN IMMEDIATE` write lock.
 enum Installed {
     /// A racing opener installed first: its FEC-encoded `(salt, wrapped_dek)`, unwrapped
-    /// after the lock is released (an unlock — no strength floor).
+    /// after the lock is released (an unlock, no strength floor).
     Winner(Vec<u8>, Vec<u8>),
     /// This opener installed its own precomputed envelope; the fresh DEK.
     Mine(Zeroizing<Vec<u8>>),

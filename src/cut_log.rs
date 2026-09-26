@@ -8,8 +8,8 @@
 //!
 //! Every consult surface (the `consult` tool, headless `magi consult`, the TUI's `/consult`)
 //! hands its report to [`CutAttemptLog`] where the report arrives. For each attempt the shared
-//! predicate ([`magi_rs::magi::completion_report::cut_attempts`]) calls cut — a `length`
-//! finish, or the attempt located as the one that came back empty — the daily log gets one
+//! predicate ([`magi_rs::magi::completion_report::cut_attempts`]) calls cut (a `length`
+//! finish, or the attempt located as the one that came back empty), the daily log gets one
 //! WARN line on [`CUT_ATTEMPT_TARGET`]. That line carries counts and states only: seat, the
 //! redacted model, the cap, the reported token counts, the reasoning state and its character
 //! count, and the control the attempt was sent with. A seat that burned its budget is worth
@@ -23,16 +23,16 @@
 //! ([`TRACE_EXCERPT_CHARS`] characters each) on [`REASONING_TRACE_TARGET`] at INFO. INFO is
 //! deliberate: WARN and above also reach the screen (REQ-L19), and the trace is untrusted
 //! model text that must stay out of the terminal, stderr and the consult envelope. It is
-//! masked over the WHOLE text before it is cut — control characters, URL credentials, and the
-//! process auditor's pattern and exact passes — so a secret straddling the cut is masked
+//! masked over the WHOLE text before it is cut: control characters, URL credentials, and the
+//! process auditor's pattern and exact passes, so a secret straddling the cut is masked
 //! whole instead of shipping as two fragments no matcher recognises. When the log's file
 //! filter would discard INFO for the trace target, [`reasoning_trace_filtered_notice`] says so
 //! at startup.
 //!
 //! # The residual, stated
 //!
-//! A credential magi-rs never registered and shorter than the 32-character pattern matcher —
-//! for example one pasted into the prompt — that the model repeats inside a cut attempt's
+//! A credential magi-rs never registered and shorter than the 32-character pattern matcher
+//! (for example, one pasted into the prompt) that the model repeats inside a cut attempt's
 //! trace reaches the local log file unmasked. This was accepted on 2026-09-24: the trace is
 //! opt-in, off by default, written only for cut attempts and only to the local file.
 
@@ -58,7 +58,7 @@ pub(crate) const REASONING_TRACE_TARGET: &str = "magi_rs::consult::reasoning_tra
 /// 2026-09-24). A trace of at most twice this length is written whole.
 pub(crate) const TRACE_EXCERPT_CHARS: usize = 4096;
 
-/// What a count reads when the backend did not report it — never `0`, which would assert a
+/// What a count reads when the backend did not report it: never `0`, which would assert a
 /// measurement nobody took.
 const UNREPORTED: &str = "unreported";
 
@@ -89,7 +89,7 @@ impl<'a> CutAttemptLog<'a> {
         }
     }
 
-    /// `from_parts` over the report's three maps — the form the three consult sites call.
+    /// `from_parts` over the report's three maps, the form the three consult sites call.
     ///
     /// # Arguments
     /// * `report` - the consult's report.
@@ -298,7 +298,7 @@ impl TraceExcerpt {
 /// Runs every masking pass over the whole trace: control characters and escapes, URL
 /// credentials, then the process auditor (pattern pass and exact pass over registered secrets).
 ///
-/// The auditor's alarm — the notice that a registered secret was masked — is emitted as a WARN
+/// The auditor's alarm (the notice that a registered secret was masked) is emitted as a WARN
 /// event on [`REASONING_TRACE_TARGET`], never written to stderr: this runs inside the TUI too,
 /// where stderr would draw over the alternate screen.
 fn mask_trace(raw: &str) -> String {

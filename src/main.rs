@@ -3417,7 +3417,7 @@ struct SeatWiring {
     client_timeout: Duration,
     /// NEW for Task 4 (REQ-V42-4): the `reasoning_spelling` argument this seat was built with,
     /// MEASURED from inside `build_native_provider` itself (`BUILD_NATIVE_PROVIDER_SPELLING_
-    /// TRACE`) — never read back from the caller's own local variable, which stays correct even
+    /// TRACE`): never read back from the caller's own local variable, which stays correct even
     /// when a mutated call site stops passing it. Same discipline `retry_wrapped` above follows.
     reasoning_spelling: Option<ReasoningSpelling>,
 }
@@ -3842,7 +3842,7 @@ fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice>
 ///
 /// Was magi-core 4.0.0's own default, numerically; it no longer is. magi-core 4.2.0 moved its
 /// own `CompletionConfig::default().max_tokens` to 32 768, and this constant did NOT move with
-/// it — `magi_completion_config` sets `max_tokens` explicitly on every build, so the wire this
+/// it: `magi_completion_config` sets `max_tokens` explicitly on every build, so the wire this
 /// milestone sends stays byte-identical to 0.19.1's (spec §3). `16_384` is now magi-rs's OWN
 /// choice, one that happens to differ from the crate's, kept unchanged through v0.20.0 while
 /// REQ-EE-1's reasoning instrumentation measures which value the E-E pool actually needs;
@@ -3860,7 +3860,7 @@ const DECLARED_COMPLETION_CAP: u32 = 16_384;
 /// the trio is a judge. `Disabled` stays available, and it is no longer unmeasured: magi-core
 /// measured 11 of 12 native-wire families honouring `think: false` (`gpt-oss:120b` does not, and
 /// reports `Unsupported` instead), and this repository's own experiment measured the quality
-/// cost of taking it — 20-48% less defect detection at every cap tried
+/// cost of taking it: 20-48% less defect detection at every cap tried
 /// (`planning/experiments/think-quality-2026-09-23/`). Both measurements point the same way:
 /// taking `Disabled` would trade a loud failure for a silent one. Same argument for the default
 /// cap: too small a budget and a reasoning model that genuinely needs the room is the one that
@@ -3868,15 +3868,15 @@ const DECLARED_COMPLETION_CAP: u32 = 16_384;
 ///
 /// # Arguments
 /// * `cfg` - the loaded, validated `magi.toml`. Every field is resolved through its own
-///   `effective_*` accessor and NEVER inherited from `CompletionConfig::default()` — each of the
+///   `effective_*` accessor and NEVER inherited from `CompletionConfig::default()`: each of the
 ///   three lines below overwrites what the crate default would have left in place, so an absent
 ///   key resolves through magi-rs's own accessor rather than the crate's (REQ-EE-1's evidence:
 ///   the crate's own default cap moved to 32 768 in 4.2.0, and MS1 changes no default).
 ///
 /// # Returns
 ///
-/// A `CompletionConfig` built from the crate's `Default` — the type is `#[non_exhaustive]`, so a
-/// struct literal does not compile here — with every field this milestone exposes set explicitly
+/// A `CompletionConfig` built from the crate's `Default` (the type is `#[non_exhaustive]`, so a
+/// struct literal does not compile here) with every field this milestone exposes set explicitly
 /// from `cfg`.
 fn magi_completion_config(cfg: &MagiConfig) -> CompletionConfig {
     let mut completion = CompletionConfig::default();
@@ -4469,18 +4469,18 @@ struct ConsultToolRegistration {
     /// The `ProviderKind` under which the trio runs (REQ-A12c): construction-time, via
     /// `ConsultTool::with_kind`, so `ConsultTool::execute` does not have to resolve it again on
     /// each call. Determines whether a 401/403 from `MagiReport::failed_agents` is explained as
-    /// keyless configuration — see `tools::consult::keyless_auth_explanation`.
+    /// keyless configuration. See `tools::consult::keyless_auth_explanation`.
     kind: ProviderKind,
     /// `MagiConfig::magi_endpoint_diverges()`, resolved ONCE here (fix round 1, Finding 1) and
-    /// passed to `ConsultTool::with_magi_endpoint_diverges` — same pattern as `kind`, same
+    /// passed to `ConsultTool::with_magi_endpoint_diverges`, same pattern as `kind`, same
     /// reason: `ConsultTool::execute` does not re-resolve it per call.
     magi_endpoint_diverges: bool,
     /// `MagiConfig::effective_max_query_bytes()` (REQ-A11b), passed to
-    /// `ConsultTool::with_max_query_bytes` — it is the same cap applied by the direct headless
+    /// `ConsultTool::with_max_query_bytes`: it is the same cap applied by the direct headless
     /// path and the TUI's explicit `/consult` (SC-A11c), resolved here once.
     max_query_bytes: usize,
     /// `MagiConfig::effective_tool_result_cap()` (REQ-A11b), passed to
-    /// `ConsultTool::with_output_cap` — bounds the `ToolResult` that re-enters the conversation
+    /// `ConsultTool::with_output_cap`: bounds the `ToolResult` that re-enters the conversation
     /// history (TUI auto-routed and `magi query`'s tool loop, the two routes that share this
     /// call site).
     output_cap: usize,
@@ -5631,7 +5631,7 @@ struct HeadlessContext {
     /// [`Self::divergence_notice`] above for the precedent that pattern followed.
     budget: BudgetTelemetry,
     /// REQ-EE-5's per-activation clock-coverage assessment (S-9), evaluated once against this
-    /// run's resolved ceiling (see [`headless_clock_coverage`]) — both dispatchers wrap it in
+    /// run's resolved ceiling (see [`headless_clock_coverage`]): both dispatchers wrap it in
     /// their own [`crate::tools::consult::ClockCoverageAnnouncer`] rather than recomputing the
     /// assessment a second way.
     clock_coverage: Option<ClockCoverageWarning>,
@@ -6527,7 +6527,7 @@ fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
 ///
 /// **One derivation, not two.** This re-derives the ceiling from `timeout_scale` plus
 /// [`magi_rs::magi::derive_ceiling_from_timeout`] rather than taking a pre-resolved
-/// [`ResolvedCeiling`] — but that derivation is the SAME one [`BudgetTelemetry::derive`] already
+/// [`ResolvedCeiling`], but that derivation is the SAME one [`BudgetTelemetry::derive`] already
 /// performs internally for an explicit `--timeout` (`derive_ceiling_from_timeout` IS
 /// `BudgetTelemetry::derive`'s `Some` branch, see that function's own comment), so the two never
 /// compute a different number for the same inputs. [`prepare_headless`] calls this function
@@ -6538,7 +6538,7 @@ fn timeout_scale(cfg: &MagiConfig) -> (u64, u32, bool) {
 /// * `timeout` - the operator's raw `--timeout` flag (`h.timeout`), or `None` when absent. `Some`
 ///   selects [`CoveringLever::Timeout`] (the trio's mages run at a ceiling DERIVED from it);
 ///   `None` selects [`CoveringLever::AgentTimeoutSecs`] (they run at the configured ceiling
-///   verbatim) — the same branch [`BudgetTelemetry::derive`] itself takes.
+///   verbatim), the same branch [`BudgetTelemetry::derive`] itself takes.
 ///
 /// # Returns
 /// `None` when the effective clock already covers `cfg.effective_max_tokens()`.
@@ -6563,7 +6563,7 @@ fn headless_clock_coverage(cfg: &MagiConfig, timeout: Option<u64>) -> Option<Clo
 }
 
 /// REQ-EE-5's coverage assessment for the TUI (S-9): the ceiling is always `[magi]
-/// .agent_timeout_secs` verbatim — the TUI has no `--timeout` (SC-EB06b).
+/// .agent_timeout_secs` verbatim. The TUI has no `--timeout` (SC-EB06b).
 ///
 /// # Returns
 /// `None` when the configured clock already covers `cfg.effective_max_tokens()`.

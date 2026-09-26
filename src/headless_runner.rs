@@ -268,7 +268,7 @@ pub(crate) struct MagiRuntimeParams<'a> {
     /// [`RunWiring::budget`].
     pub(crate) budget: BudgetTelemetry,
     /// REQ-EE-5's per-activation clock-coverage announcer (S-9), assessed once for the whole
-    /// run against the SAME ceiling `budget` describes — [`analyze_direct`] announces it before
+    /// run against the SAME ceiling `budget` describes. [`analyze_direct`] announces it before
     /// launching the analysis.
     pub(crate) clock_coverage: &'a ClockCoverageAnnouncer,
 }

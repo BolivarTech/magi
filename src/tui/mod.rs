@@ -1782,7 +1782,7 @@ pub struct TuiMagiRuntimeConfig {
     /// Effective output cap (REQ-A11b), applied to the `/consult` reply.
     pub tool_result_cap: usize,
     /// REQ-EE-5's per-activation clock-coverage announcer (S-9), shared with the auto-routed
-    /// `consult` tool (`register_consult_tool_if_available`) and the post-`/login` rebuild — one
+    /// `consult` tool (`register_consult_tool_if_available`) and the post-`/login` rebuild: one
     /// assessment for the whole session, never re-derived per surface.
     pub clock_coverage: Arc<crate::tools::consult::ClockCoverageAnnouncer>,
 }
@@ -1797,7 +1797,7 @@ pub struct TuiMagiRuntimeConfig {
 /// - `consult_unavailable_message` (Task 4.3, REQ-A06/SC-A06b) — the SAME text already pushed to `startup_notices` when `consult` is `None`. Read only when a `/consult` is issued with no trio available, so a later `/consult` echoes the exact reason the startup notice already gave instead of a second, independently-worded message.
 /// - `magi_auto_approve` — whether the registered `consult` tool auto-approves an autonomous invocation, mirrored into every rebuilt `ConsultTool` after `/login` (I-5).
 /// - `agent_timeout_secs` — `[magi].agent_timeout_secs` as read from config, UNRESOLVED (may be `None`). Fed to [`post_login_agent_timeout_secs`] on every post-`/login` rebuild, which applies the SAME precedence `build_magi_orchestrator` (`main.rs`) already uses at startup. Before this field existed, the rebuild ignored config entirely and hardcoded [`magi_rs::magi::AGENT_TIMEOUT_SECS`] — a configured ceiling silently stopped applying after a `/login` even though it kept being honored everywhere else in the process.
-/// - `completion` (Task 4, D-8) — the SAME `CompletionConfig` the startup trio was built with. Before this field existed, a post-`/login` rebuild called `magi_core::orchestrator::Magi::new` directly, which uses the crate's own default (32 768 tokens, `ReasoningControl::Default` as of magi-core 4.2.0) — so every configured `[magi]` reasoning/cap key, and S-1's byte-identical wire, silently stopped applying the moment a user logged in.
+/// - `completion` (Task 4, D-8) — the SAME `CompletionConfig` the startup trio was built with. Before this field existed, a post-`/login` rebuild called `magi_core::orchestrator::Magi::new` directly, which uses the crate's own default (32 768 tokens, `ReasoningControl::Default` as of magi-core 4.2.0), so every configured `[magi]` reasoning/cap key, and S-1's byte-identical wire, silently stopped applying the moment a user logged in.
 pub struct TuiConsultWiring {
     /// The live orchestrator, or `None` if the trio failed to build.
     pub consult: Option<std::sync::Arc<magi_core::orchestrator::Magi>>,
@@ -1872,23 +1872,23 @@ thread_local! {
 ///
 /// # Why `MagiBuilder`, never `Magi::new`
 ///
-/// `Magi::new` accepts only a provider: every other field — including the per-agent ceiling and
-/// the completion configuration — is left at the crate's own default (a 1 320 s agent timeout,
+/// `Magi::new` accepts only a provider: every other field, including the per-agent ceiling and
+/// the completion configuration, is left at the crate's own default (a 1 320 s agent timeout,
 /// magi-core 4.2.0's 32 768-token cap, `ReasoningControl::Default`). Before this function
 /// existed, the `/login` handler built the rebuilt trio with `Magi::new` directly, so a
-/// configured `[magi].max_tokens`/`reasoning`/`reasoning_trace` — and S-1's byte-identical cap —
+/// configured `[magi].max_tokens`/`reasoning`/`reasoning_trace`, and S-1's byte-identical cap,
 /// silently stopped applying the moment a user logged in (D-8), and the derived retry layers
 /// this function now shares with `build_magi_orchestrator` (`main.rs`) via
 /// `magi_rs::magi::derived_retry_config` were never applied either (CP2 seg1 loops 1 and 4).
 ///
 /// # Single-shared-provider shape, and why `MagiBuilder::build()` cannot fail here
 ///
-/// Like the code this replaces, one `ClaudeProvider` serves all three seats — there is no
+/// Like the code this replaces, one `ClaudeProvider` serves all three seats: there is no
 /// per-agent override on the OAuth-login rebuild. `MagiBuilder::build()` therefore cannot fail
 /// in this configuration: it only errs on `prompts_dir` I/O (never set here), an empty declared
 /// primary lineage (`with_agent` is never called, so `agent_lineages` stays empty), an empty
 /// fallback-pool lineage (no pool is declared), or an invalid `ReportConfig` (left at the
-/// crate's own default) — the same invariant `magi_core::orchestrator::Magi::new`'s own rustdoc
+/// crate's own default), the same invariant `magi_core::orchestrator::Magi::new`'s own rustdoc
 /// documents for its own `MagiBuilder::new(provider).build().expect(...)`.
 ///
 /// # Arguments
@@ -1899,8 +1899,8 @@ thread_local! {
 /// * `completion` - the SAME completion configuration the startup trio was built with.
 ///
 /// # Errors
-/// [`magi_core::error::ProviderError`] if the Anthropic HTTP client could not be built, or —
-/// unreachable in this configuration, as stated above — an `External`/`Other` one if
+/// [`magi_core::error::ProviderError`] if the Anthropic HTTP client could not be built, or
+/// (unreachable in this configuration, as stated above) an `External`/`Other` one if
 /// `MagiBuilder::build()` ever refused it.
 fn rebuild_consult_trio_after_login(
     api_key: String,

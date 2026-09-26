@@ -34,7 +34,7 @@ use serde::Deserialize;
 /// (OQ-10): a hand-written table is a fourth copy of a vocabulary this crate does not own, and a
 /// `#[non_exhaustive]` enum's next variant would silently need a new match arm here that nothing
 /// would catch at compile time. Only used to render text for [`MagiConfig::reasoning_wire_notices`]
-/// (S-7a) — never as a validated value, so an unrepresentable result falls back to `{control:?}`
+/// (S-7a), never as a validated value, so an unrepresentable result falls back to `{control:?}`
 /// rather than panicking.
 fn reasoning_control_wire_tag(control: ReasoningControl) -> String {
     serde_json::to_value(control)
@@ -97,8 +97,8 @@ pub enum ConfigError {
     ///
     /// Through v0.19.1 this was `AgentTimeoutOutOfRange`, a two-sided range: below `min` a
     /// legitimate generation does not fit, above `max` a consult's worst case reached 12
-    /// minutes. REQ-TUI-1 (v0.20.0) removed the upper half — an interactive consult is sized for
-    /// deliberation, not chat responsiveness — leaving only the floor, which the derivation
+    /// minutes. REQ-TUI-1 (v0.20.0) removed the upper half (an interactive consult is sized for
+    /// deliberation, not chat responsiveness), leaving only the floor, which the derivation
     /// still genuinely needs (see [`Self::validate_agent_timeout`]).
     #[error(
         "[magi].agent_timeout_secs = {got} is below the {min}s floor: below it a legitimate \
@@ -717,7 +717,7 @@ pub struct MagiSectionConfig {
     /// Reasoning control for the whole trio; absent ⇒ `ReasoningControl::Default` (REQ-EE-3).
     ///
     /// Consumer: `MagiConfig::effective_reasoning`, and from it `magi_completion_config`, which
-    /// sends it to every one of the trio's three seats — magi-core declined a per-seat override
+    /// sends it to every one of the trio's three seats: magi-core declined a per-seat override
     /// (E-E response §2.2), so one value applies to all three.
     pub reasoning: Option<String>,
     /// Reasoning spelling for `openai-compat` seats; no default (REQ-V42-4).
@@ -725,28 +725,28 @@ pub struct MagiSectionConfig {
     /// Consumer: `MagiConfig::effective_reasoning_spelling`, and from it
     /// `build_native_provider`'s `openai-compat` arm (`with_reasoning_spelling`). Declared while
     /// no seat runs on `openai-compat`, or while `[magi].reasoning` cannot reach the wire without
-    /// it, is announced rather than silently inert — see `MagiConfig::reasoning_wire_notices`.
+    /// it, is announced rather than silently inert. See `MagiConfig::reasoning_wire_notices`.
     ///
     /// **A spelling the pinned model rejects returns HTTP 400, and magi-core treats a 400 as
     /// lineage-condemning: all three seats of that lineage are lost for the run.** Verify the
     /// spelling against the pinned model before declaring it, and again after any provider-side
-    /// model update — a spelling that worked can start failing with no change on the magi-rs
+    /// model update: a spelling that worked can start failing with no change on the magi-rs
     /// side (OQ-5, accepted risk, PM-S-12).
     pub reasoning_spelling: Option<String>,
     /// Output cap per completion, per seat; absent ⇒ `DECLARED_COMPLETION_CAP` (REQ-EE-5).
     ///
     /// Consumer: `magi_completion_config` (Task 4), which sends it as every seat's
-    /// `CompletionConfig::max_tokens`. Billed as completion tokens on every attempt, per seat —
+    /// `CompletionConfig::max_tokens`. Billed as completion tokens on every attempt, per seat:
     /// raising it raises cost and, at roughly 55 tok/s, wall clock. No upper bound of magi-rs's
     /// own (OQ-3): only a non-positive value, or one the wire's 32-bit field cannot carry, is
     /// rejected at load. A value above the pinned model's own output maximum returns HTTP 400
-    /// (PM-S-2) — that ceiling is the model's, and magi-rs has no way to know it in advance.
+    /// (PM-S-2); that ceiling is the model's, and magi-rs has no way to know it in advance.
     pub max_tokens: Option<i64>,
     /// Opt-in bounded reasoning trace in the log for cut attempts; absent ⇒ `false` (REQ-EE-4).
     ///
     /// Consumer: `magi_completion_config` (Task 4), which maps it to
     /// `CompletionConfig::reasoning_trace`. The trace is untrusted model text: it never enters
-    /// the consult envelope, stderr, or the TUI — only the daily log file, at `INFO`, bounded to
+    /// the consult envelope, stderr, or the TUI, only the daily log file, at `INFO`, bounded to
     /// a head and a tail, and only for an attempt that ran out of budget or returned nothing.
     pub reasoning_trace: Option<bool>,
 
@@ -948,7 +948,7 @@ impl MagiConfig {
     ///
     /// **No upper bound, and that is deliberate** (asked by S1 Loop 2, Caspar, noting that
     /// `tool_result_cap_bytes` carries a range). Three reasons, in order: the arithmetic cannot
-    /// overflow — since REQ-TUI-1 (v0.20.0) removed `agent_timeout_secs`'s own ceiling, the
+    /// overflow: since REQ-TUI-1 (v0.20.0) removed `agent_timeout_secs`'s own ceiling, the
     /// argument no longer rests on a bounded product; it rests on `attempt_factor` and
     /// `headless_consult_timeout_secs` (`src/magi/mod.rs`) being **saturating end to end**
     /// (`saturating_mul`/`saturating_add`), so an absurd rotation count clamps the derived
@@ -989,7 +989,7 @@ impl MagiConfig {
     /// Same infallible-by-precondition contract as [`Self::effective_provider`]: by the time this
     /// runs, [`Self::validate_vocabulary`] has already rejected any value
     /// [`magi_rs::magi::reasoning::parse_reasoning_control`] would reject, so the fallback on
-    /// `Err` below is unreachable in practice — never a value this function invents.
+    /// `Err` below is unreachable in practice, never a value this function invents.
     ///
     /// Consumed by [`Self::reasoning_wire_notices`] and, from Task 4, by
     /// `magi_completion_config`.
@@ -1013,11 +1013,11 @@ impl MagiConfig {
     /// The declared `openai-compat` spelling, resolved (absent ⇒ `None`, REQ-V42-4).
     ///
     /// **Unlike every other `effective_*` accessor here, `None` is not "fall back to a built-in
-    /// default" — there is no default spelling.** Absence means magi-rs sends no reasoning field
+    /// default"; there is no default spelling.** Absence means magi-rs sends no reasoning field
     /// at all on the `openai-compat` wire, byte-identical to 0.19.1.
     ///
     /// Consumed by `magi_completion_config` and `build_native_provider`'s `openai-compat` arm
-    /// (`with_reasoning_spelling`) — [`Self::reasoning_wire_notices`] reads the RAW declared
+    /// (`with_reasoning_spelling`). [`Self::reasoning_wire_notices`] reads the RAW declared
     /// spelling separately (needed verbatim for its notice text), never this resolved accessor.
     ///
     /// # Panics
@@ -1041,7 +1041,7 @@ impl MagiConfig {
     /// Same infallible-by-precondition contract as [`Self::effective_reasoning`]:
     /// [`Self::validate_vocabulary`] already runs [`Self::validate_max_tokens`], which rejects
     /// any declared value that is not representable as `u32`, so the `unwrap_or` fallback below
-    /// is never actually taken in practice — the config is trusted to already be valid by the
+    /// is never actually taken in practice: the config is trusted to already be valid by the
     /// time this runs, never re-validated here.
     ///
     /// Consumer: `magi_completion_config` (Task 4), which sends it as every seat's
@@ -1066,8 +1066,8 @@ impl MagiConfig {
     /// REQ-EE-4).
     ///
     /// Consumer: `magi_completion_config` (Task 4), which maps it to
-    /// `CompletionConfig::reasoning_trace`. No range or vocabulary to validate — every `bool` is
-    /// a valid value — so, unlike its neighbours above, this accessor carries no precondition.
+    /// `CompletionConfig::reasoning_trace`. No range or vocabulary to validate (every `bool` is
+    /// a valid value), so, unlike its neighbours above, this accessor carries no precondition.
     #[must_use]
     pub(crate) fn effective_reasoning_trace(&self) -> bool {
         self.magi.reasoning_trace.unwrap_or(false)
@@ -1079,7 +1079,7 @@ impl MagiConfig {
     /// # Why it takes the resolved kind, not `effective_magi_kind()`
     ///
     /// An absent `[magi].kind` inherits the PRINCIPAL's kind, which may come from
-    /// `MAGI_PROVIDER` (env), not from the TOML — `effective_magi_kind()` is TOML-only. Computing
+    /// `MAGI_PROVIDER` (env), not from the TOML. `effective_magi_kind()` is TOML-only. Computing
     /// this from that accessor would stay silent for exactly the trio that inherited its kind
     /// from the environment, which is an ordinary configuration and not a corner case. The
     /// caller (`build_magi_orchestrator`) passes the SAME resolved value it built the trio with.
@@ -1093,19 +1093,19 @@ impl MagiConfig {
     /// Only `openai-compat` has a declarable spelling at all, so every S-7 rule below is scoped
     /// to it; S-6 fires for every OTHER kind. `anthropic` adds one rule of its own.
     ///
-    /// 0. **Anthropic** — the control is not `Default` on an `anthropic` trio: magi-core 4.2.0's
-    ///    Claude provider sends no per-request reasoning switch (`providers/claude.rs:317`), so
-    ///    the control reaches nothing and every record reads `Unsupported`. This is also the
-    ///    notice a post-`/login` rebuild announces, since that rebuild always lands on
-    ///    `anthropic`.
-    /// 1. **S-6** — a spelling is declared but no seat runs on `openai-compat`: the spelling
+    /// 0. **Anthropic**: the control is not `Default` on an `anthropic` trio, and magi-core
+    ///    4.2.0's Claude provider sends no per-request reasoning switch
+    ///    (`providers/claude.rs:317`), so the control reaches nothing and every record reads
+    ///    `Unsupported`. This is also the notice a post-`/login` rebuild announces, since that
+    ///    rebuild always lands on `anthropic`.
+    /// 1. **S-6**: a spelling is declared but no seat runs on `openai-compat`, so the spelling
     ///    reaches nothing.
-    /// 2. **S-7a** — the control is not `Default` and no spelling is declared: nothing goes on
-    ///    the wire for any control without one, so every record reads `Unsupported`.
-    /// 3. **S-7b** — `Enabled` with a spelling that has no "on" position (`EffortNone`,
-    ///    `EffortMinimal`): the wire stays untouched.
-    /// 4. **S-7c** — a spelling is declared but the control is `Default`: nothing is sent for
-    ///    `Default` regardless of spelling, so the declaration has no effect either.
+    /// 2. **S-7a**: the control is not `Default` and no spelling is declared, so nothing goes on
+    ///    the wire for any control without one, and every record reads `Unsupported`.
+    /// 3. **S-7b**: `Enabled` with a spelling that has no "on" position (`EffortNone`,
+    ///    `EffortMinimal`), so the wire stays untouched.
+    /// 4. **S-7c**: a spelling is declared but the control is `Default`, so nothing is sent for
+    ///    `Default` regardless of spelling, and the declaration has no effect either.
     ///
     /// Rules 1–4 are mutually exclusive by construction (kind, then whether a spelling is
     /// declared, then the control). Rule 0 can join rule 1 on an `anthropic` trio that declares
@@ -1417,8 +1417,8 @@ impl MagiConfig {
     ///
     /// # Errors
     /// [`ConfigError::MaxTokensOutOfRange`] when the declared value is not positive, or is
-    /// larger than `u32::MAX` — the type magi-core's `CompletionConfig::max_tokens` field is.
-    /// **Not clamped, rejected** — same criterion as [`Self::validate_agent_timeout`]: a value
+    /// larger than `u32::MAX`, the type magi-core's `CompletionConfig::max_tokens` field is.
+    /// **Not clamped, rejected.** Same criterion as [`Self::validate_agent_timeout`]: a value
     /// this crate cannot represent on the wire is silently truncated by no path here.
     fn validate_max_tokens(&self) -> Result<(), ConfigError> {
         let Some(got) = self.magi.max_tokens else {
@@ -1436,15 +1436,15 @@ impl MagiConfig {
     /// # Errors
     /// [`ConfigError::AgentTimeoutBelowFloor`] with the value, the floor, and the why.
     ///
-    /// **It is not clamped to the floor, it is rejected** — same criterion as the probe window
+    /// **It is not clamped to the floor, it is rejected.** Same criterion as the probe window
     /// (REQ-A16b): clamping turns a value the operator mistyped into a plausible one, and then
     /// the system behaves differently from what the file says.
     /// It exists because without this REQ-A04 would be **breakable from `magi.toml`**: with a
     /// ceiling below the absolute floor of the derivation, the internal floors win and the sum
     /// exceeds the ceiling. "Impossible by construction" is only true if the input is bounded
-    /// below — there is no longer an upper bound to enforce (REQ-TUI-1, v0.20.0): an interactive
-    /// consult is sized for deliberation, not chat responsiveness, and the old ceiling was a UX
-    /// cap on exactly the operation known to need more time.
+    /// below, and there is no longer an upper bound to enforce (REQ-TUI-1, v0.20.0): an
+    /// interactive consult is sized for deliberation, not chat responsiveness, and the old
+    /// ceiling was a UX cap on exactly the operation known to need more time.
     fn validate_agent_timeout(&self) -> Result<(), ConfigError> {
         let Some(secs) = self.magi.agent_timeout_secs else {
             return Ok(()); // absent ⇒ the built-in default, already valid

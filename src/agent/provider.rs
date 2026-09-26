@@ -668,7 +668,7 @@ pub fn build_openai_provider(
 /// The URL passes through [`redact_url`] before it is interpolated: the
 /// provider holds the RESOLVED `base_url`, whose `[user]`/`[password]`
 /// placeholders were substituted from the vault (REQ-A16c), and this text
-/// reaches every consumer of a connection failure — the transcript, the
+/// reaches every consumer of a connection failure: the transcript, the
 /// headless envelope, the distiller's log line. Redacting here, at the
 /// composition point, covers all of them at once.
 ///

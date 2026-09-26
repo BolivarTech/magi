@@ -55,13 +55,13 @@ use std::time::Duration;
 
 /// Floor of the admissible per-mage ceiling range (§4.9 of the spec). `pub`, not private: it is
 /// consumed by `validate_agent_timeout` from `config.rs` (bin) and the invariant sweep from
-/// `tests/` — two distinct crates, so a private one would not compile in either. Below it a
+/// `tests/`, two distinct crates, so a private one would not compile in either. Below it a
 /// legitimate generation does not fit and the two derived timeout layers no longer fit inside
 /// the ceiling.
 ///
 /// **There is no matching upper bound any more.** Through v0.19.1 this range was
 /// `AGENT_TIMEOUT_MIN_SECS..=AGENT_TIMEOUT_MAX_SECS` (`120`); REQ-TUI-1 (v0.20.0) removed the
-/// ceiling — an interactive consult is sized for deliberation, not for chat responsiveness, and
+/// ceiling: an interactive consult is sized for deliberation, not for chat responsiveness, and
 /// the ceiling was a UX cap on exactly the operation known to need more time. The floor is
 /// unchanged.
 pub const AGENT_TIMEOUT_MIN_SECS: u64 = 30;
@@ -128,7 +128,7 @@ pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =
 /// **Caller contract (documented, not type-enforced — MAGI S2 re-gate, Caspar):** the
 /// "impossible to break by construction" claim holds only for
 /// `ceiling_secs >= AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`. `config.rs` upholds that by validating
-/// `[magi].agent_timeout_secs >= AGENT_TIMEOUT_MIN_SECS` before this ever runs — there is no
+/// `[magi].agent_timeout_secs >= AGENT_TIMEOUT_MIN_SECS` before this ever runs; there is no
 /// upper bound to validate since REQ-TUI-1 (v0.20.0). A hypothetical caller outside that
 /// validated path that invokes
 /// this `pub` function directly with a ceiling below the absolute floor gets a `budget +
@@ -170,7 +170,7 @@ pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
 }
 
 /// The smallest ceiling whose [`derive_client_timeout`] reaches `target_secs`, DERIVED from the
-/// same fraction — never a re-written `3/10` literal (`clock_coverage.rs`'s coverage warning is
+/// same fraction, never a re-written `3/10` literal (`clock_coverage.rs`'s coverage warning is
 /// the caller).
 ///
 /// # Why this belongs here and not in `clock_coverage.rs`
@@ -179,7 +179,7 @@ pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
 /// through a `pub(crate)` function keeps the fraction defined in exactly one place, the same
 /// discipline [`derive_ceiling_from_timeout`] already applies to
 /// [`OPERATION_BUDGET_FRACTION_NUM`]/[`CLIENT_TIMEOUT_FRACTION_NUM`] together. It does not floor
-/// at [`MIN_CLIENT_TIMEOUT`] the way `derive_client_timeout` itself does — the caller decides
+/// at [`MIN_CLIENT_TIMEOUT`] the way `derive_client_timeout` itself does: the caller decides
 /// separately whether the recommended ceiling needs a floor of its own
 /// (`AGENT_TIMEOUT_MIN_SECS`), and folding a DIFFERENT floor in here would answer a question this
 /// function was not asked.
@@ -189,7 +189,7 @@ pub fn derive_client_timeout(ceiling_secs: u64) -> Duration {
 ///
 /// # Returns
 /// The smallest `c` such that `derive_client_timeout(c).as_secs() >= target_secs`, for
-/// `target_secs` above [`MIN_CLIENT_TIMEOUT`]'s floor — below it every ceiling already
+/// `target_secs` above [`MIN_CLIENT_TIMEOUT`]'s floor; below it every ceiling already
 /// qualifies, and this still returns a sufficient (if not minimal) one.
 ///
 /// # Complexity
@@ -352,8 +352,8 @@ pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = 20;
 /// order of magnitude.
 ///
 /// **And it survives BECAUSE the scale is derived, not by luck.** With magi-core's shipped
-/// defaults as of 4.2.0 — `operation_budget` **900 s** against a **600 s** client timeout (was
-/// 450 s / 300 s through 4.1.0) — the budget is a **backstop rather than the operating limit**:
+/// defaults as of 4.2.0, `operation_budget` **900 s** against a **600 s** client timeout (was
+/// 450 s / 300 s through 4.1.0), the budget is a **backstop rather than the operating limit**:
 /// the crate's own `limited_max_retries` cuts a hang at two attempts before the
 /// budget's first check lands. magi-rs does not inherit either arrangement, because it sets
 /// `retry.operation_budget = derive_operation_budget(ceiling)` and, since v0.17.0,
@@ -501,11 +501,11 @@ pub fn derive_retry_after_cap(ceiling_secs: u64) -> Duration {
 /// The retry configuration every trio seat is wrapped with, derived from the per-mage ceiling
 /// (REQ-A04).
 ///
-/// # Why this exists — one function, two callers, both derived layers
+/// # Why this exists: one function, two callers, both derived layers
 ///
 /// `build_magi_orchestrator` (startup, `main.rs`) sets `retry.operation_budget` and
 /// `retry.retry_after_cap` from the ceiling; the post-`/login` trio rebuild (`tui/mod.rs`) used
-/// to set NEITHER — it built a bare `RetryConfig::default()` with only `operation_budget`
+/// to set NEITHER: it built a bare `RetryConfig::default()` with only `operation_budget`
 /// patched in, so `retry_after_cap` silently fell back to the crate's own 300 s and REQ-A04's
 /// derived scale no longer held for a session that had logged in. Collecting both derivations
 /// in ONE function, called from BOTH sites, makes that drift structurally impossible: a layer
@@ -590,7 +590,7 @@ fn threshold_from_factor(factor: u64) -> u64 {
 /// whose RAW derived ceiling reaches `ceiling_secs`, for an already-computed `factor`.
 ///
 /// Kept as ONE function so the two callers cannot drift the way [`attempt_factor`]'s rustdoc
-/// warns two equivalent expressions eventually do — see [`min_timeout_deriving_ceiling`]'s
+/// warns two equivalent expressions eventually do. See [`min_timeout_deriving_ceiling`]'s
 /// rustdoc for why the coverage warning needed this generalized rather than duplicated.
 ///
 /// `div_ceil`: we need the smallest dividend whose TRUNCATING division
@@ -624,8 +624,8 @@ pub fn floor_activation_threshold_secs(max_rotations: u32, retry_disabled: bool)
 ///
 /// # Why this generalizes [`floor_activation_threshold_secs`] rather than duplicating it
 ///
-/// [`floor_activation_threshold_secs`] answers this exact question for one fixed target —
-/// [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`] — because that is the only target the derived-timeout
+/// [`floor_activation_threshold_secs`] answers this exact question for one fixed target,
+/// [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`], because that is the only target the derived-timeout
 /// invariant (REQ-A04) itself cares about. The coverage warning needs the SAME inverse at an
 /// arbitrary target: the ceiling a `[magi].max_tokens` cap requires at the reference generation
 /// speed. Both share the identical `div_ceil` arithmetic (see that function's rustdoc for why

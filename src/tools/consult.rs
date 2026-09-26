@@ -87,22 +87,22 @@ pub(crate) fn check_query_size(query: &str, cap: usize) -> Result<(), ConsultInp
 }
 
 /// Announces REQ-EE-5's clock-coverage warning (S-9) at every activation of the MAGI panel, on
-/// every surface — TUI `/consult`, an autonomous consult, headless `consult`/`query --consult`.
+/// every surface: TUI `/consult`, an autonomous consult, headless `consult`/`query --consult`.
 ///
 /// # Why the assessment happens once, at construction, not per activation
 ///
 /// The clock a run's consults execute under is fixed for the run (the effective ceiling does not
 /// change between one activation and the next), so re-deriving it on every call would recompute
-/// an answer that cannot change — the one-knob rule (REQ-A04, §0.1) already forbids a surface
+/// an answer that cannot change: the one-knob rule (REQ-A04, §0.1) already forbids a surface
 /// from re-deriving the ceiling here, and doing the assessment once is the same discipline
 /// applied to this warning specifically.
 pub struct ClockCoverageAnnouncer {
-    /// `None` when the clock already covers the configured cap — [`Self::announce_activation`]
-    /// is then a no-op, by construction: there is no way to build a `Some` for a covered clock
+    /// `None` when the clock already covers the configured cap: [`Self::announce_activation`]
+    /// is then a no-op, by construction. There is no way to build a `Some` for a covered clock
     /// ([`ClockCoverageWarning::assess`] itself returns `None` in that case).
     warning: Option<ClockCoverageWarning>,
     /// Where the line goes when no `tracing` subscriber is installed (a TUI session started
-    /// outside a `.magi/` workspace) — the same "no layer, no file, screen still speaks" shape
+    /// outside a `.magi/` workspace), the same "no layer, no file, screen still speaks" shape
     /// `magi_rs::notices::emit_notices_into`'s fallback already uses.
     fallback: Arc<dyn NoticeSink>,
 }
@@ -122,18 +122,18 @@ impl ClockCoverageAnnouncer {
 
     /// Announces the coverage warning for one MAGI panel activation.
     ///
-    /// One `WARN` per call — **never deduplicated** (`NoticeSink::emit`, never `::once`): each
+    /// One `WARN` per call, **never deduplicated** (`NoticeSink::emit`, never `::once`): each
     /// consult burns real quota and wall clock under the same uncovered clock, so each activation
     /// earns its own line, the same treatment `analyze_direct`'s own per-run notices already get.
     /// Does nothing when [`Self::new`] was built with `None` (the clock already covers the cap).
     ///
     /// With a `tracing` subscriber installed, the line goes out under
-    /// `magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET` and no other field — the installed
+    /// `magi_rs::magi::clock_coverage::CLOCK_COVERAGE_TARGET` and no other field: the installed
     /// layer is what routes it to the daily file and, because `WARN` is at or above the screen
     /// threshold (REQ-L19), to the screen too; carrying no `cause.*` field keeps it from being
     /// counted as a subsystem failure (this is a configuration fact, not a failure). With no
     /// subscriber installed (a TUI session outside a `.magi/` workspace), the line is audited
-    /// exactly like `magi_rs::notices`' own no-layer fallback and handed to the fallback sink —
+    /// exactly like `magi_rs::notices`' own no-layer fallback and handed to the fallback sink,
     /// never raw `eprintln!`.
     ///
     /// # Complexity
@@ -206,7 +206,7 @@ impl ClockCoverageAnnouncer {
 /// **`completions_section` (REQ-V42-5, D-9):** since magi-core 4.2.0 a `## Completions` row can
 /// print `FinishReason::Other` verbatim, which can embed text that imitates
 /// `a.findings_start`. Declared non-empty, the search for the real heading starts only AFTER
-/// this text within `kept` — never before it. If `kept` does not (or no longer, post-cut)
+/// this text within `kept`, never before it. If `kept` does not (or no longer, post-cut)
 /// contain the declared section whole, the heading cannot be told apart from a forgery inside
 /// it, and this returns `false` rather than risk crediting a forged one.
 ///
@@ -285,7 +285,7 @@ fn mark(kept: String) -> String {
 /// the `end` cut here and the `kept_has_first_finding` check the caller applies to the result)
 /// starts only AFTER this text, never at `start` directly. Declared but not locatable inside
 /// `report` (past the verdict anchor) means the region cannot be delimited with certainty, so
-/// this returns `None` — the caller steps down rather than trust an anchor that might be forged.
+/// this returns `None`: the caller steps down rather than trust an anchor that might be forged.
 ///
 /// # Complexity
 /// O(n) in the length of `report`: a constant number of substring searches (verdict anchor,
@@ -347,7 +347,7 @@ fn keep_bytes(report: &str, cap: usize) -> Option<String> {
 /// magi-rs never configures a [`magi_core::reporting::ReportConfig`] of its own (no call site
 /// hands one to `ReportFormatter::from_valid_config`), so the DEFAULT formatter's rendering of
 /// `format_completions` is exactly the slice `format_report_with_completions` embedded into
-/// `report.report` — this is the same method, called on the same completions map, that produced
+/// `report.report`: this is the same method, called on the same completions map, that produced
 /// the text sitting in the report. Reproducing it here lets [`truncate_report`] locate the
 /// region without re-implementing magi-core's own section layout (REQ-V42-5).
 ///
@@ -356,11 +356,11 @@ fn keep_bytes(report: &str, cap: usize) -> Option<String> {
 ///
 /// # Returns
 /// The exact text magi-core rendered for `## Completions`, or `""` when the section did not
-/// render — magi-core's own conditional (a length cut, a measured reasoning channel, an
+/// render: magi-core's own conditional (a length cut, a measured reasoning channel, an
 /// `Unsupported` state, or a non-default control anywhere in `report.completions`).
 ///
 /// # Complexity
-/// `O(seats x records)` — the same bound as
+/// `O(seats x records)`, the same bound as
 /// [`magi_rs::magi::completion_report::render_completions`]: a trio, once per consult.
 #[must_use]
 pub(crate) fn completions_section(report: &MagiReport) -> String {
@@ -1315,8 +1315,8 @@ pub struct ConsultTool {
     /// configured value.
     output_cap: usize,
     /// REQ-EE-5's per-activation clock-coverage announcer (S-9). `None` until a caller declares
-    /// one via [`Self::with_clock_coverage`] — the ~13 existing test call sites that do not care
-    /// about this feature keep working unchanged, same reasoning as `kind`'s default above.
+    /// one via [`Self::with_clock_coverage`], so the ~13 existing test call sites that do not
+    /// care about this feature keep working unchanged, same reasoning as `kind`'s default above.
     clock_coverage: Option<Arc<ClockCoverageAnnouncer>>,
 }
 

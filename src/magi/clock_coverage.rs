@@ -7,9 +7,9 @@
 //! speed, and if not, which existing knob (`[magi].agent_timeout_secs` or `--timeout`) the
 //! operator would need to raise, and to what, to cover it.
 //!
-//! This module is the PURE arithmetic only — deciding whether a clock covers a cap and
+//! This module is the PURE arithmetic only: deciding whether a clock covers a cap and
 //! rendering the operator-facing line. Emitting it (through `tracing`, the process auditor, and
-//! a surface's `NoticeSink` fallback, `crate::agent::mode_classifier::NoticeSink` — a bin-crate
+//! a surface's `NoticeSink` fallback, `crate::agent::mode_classifier::NoticeSink`, a bin-crate
 //! type, so not linkable from this lib module) is `ConsultTool`'s `ClockCoverageAnnouncer`, in
 //! the bin crate, because `NoticeSink` lives there.
 
@@ -33,7 +33,7 @@
 /// Reference generation speed, tokens per second, for REQ-EE-5's coverage check.
 ///
 /// Copied from magi-core 4.2.0's `MIN_MEASURED_TOK_S` (`src/provider.rs:1323`, measured
-/// 2026-09-20 — magi-core's own floor across its measured model families), which is
+/// 2026-09-20, magi-core's own floor across its measured model families), which is
 /// `pub(crate)` and `#[cfg(test)]`: it cannot be imported, so no compile-time coupling to the
 /// upstream value is possible. The debt this leaves is held by
 /// `tests/magi_core_contract.rs::the_reference_speed_is_magi_core_4_2_0s_measured_floor_and_the_pin_is_4_2_0`,
@@ -50,8 +50,8 @@ pub const CLOCK_COVERAGE_TARGET: &str = "magi_rs::magi::clock_coverage";
 
 /// Which setting the warning tells the operator to raise, and under what rotation settings.
 ///
-/// A same-typed `u64` recommendation is ambiguous about which knob it names — the same hazard
-/// `OpenAiSettings`/`ModeSources` exist to avoid elsewhere in this crate — so the lever is named
+/// A same-typed `u64` recommendation is ambiguous about which knob it names (the same hazard
+/// `OpenAiSettings`/`ModeSources` exist to avoid elsewhere in this crate), so the lever is named
 /// explicitly at every call site instead of inferred from context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoveringLever {
@@ -70,7 +70,7 @@ pub enum CoveringLever {
 
 /// A clock that cannot cover the configured output cap at the reference speed (S-9).
 ///
-/// Built only by [`Self::assess`], which returns `None` when the clock already covers the cap —
+/// Built only by [`Self::assess`], which returns `None` when the clock already covers the cap:
 /// there is no way to construct one for a covered clock, so a caller cannot accidentally render
 /// a warning nothing actually found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +152,7 @@ impl ClockCoverageWarning {
     /// The operator-facing line, naming the measured coverage and the knob that would fix it.
     ///
     /// Never mentions `--timeout` for [`CoveringLever::AgentTimeoutSecs`], nor
-    /// `[magi].agent_timeout_secs` for [`CoveringLever::Timeout`] — a surface must not be handed
+    /// `[magi].agent_timeout_secs` for [`CoveringLever::Timeout`]: a surface must not be handed
     /// advice for a knob it does not expose.
     ///
     /// # Complexity
