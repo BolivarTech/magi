@@ -8,7 +8,7 @@ use crate::agent::messages::Message;
 use anyhow::Result;
 use async_trait::async_trait;
 use cryptovault::CryptoVault;
-use magi_rs::vault::{bootstrap_envelope, open_envelope, MaskedDek, VaultError};
+use magi_rs::vault::{bootstrap_envelope, check_strength, open_envelope, MaskedDek, VaultError};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -391,6 +391,16 @@ fn open_existing_envelope(
     open_envelope(vault, password, &salt_fec, wrapped_fec)
 }
 
+/// Which envelope a [`bootstrap_fresh_envelope`] call ended up with, decided under the
+/// `BEGIN IMMEDIATE` write lock.
+enum Installed {
+    /// A racing opener installed first: its FEC-encoded `(salt, wrapped_dek)`, unwrapped
+    /// after the lock is released (an unlock — no strength floor).
+    Winner(Vec<u8>, Vec<u8>),
+    /// This opener installed its own precomputed envelope; the fresh DEK.
+    Mine(Zeroizing<Vec<u8>>),
+}
+
 /// Bootstraps a fresh envelope for a DB that has no `wrapped_dek` row.
 ///
 /// The **never-delete guard** runs first: every [`DATA_TABLES`] entry must exist
@@ -402,9 +412,20 @@ fn open_existing_envelope(
 /// under the lock a racing opener's envelope is **adopted** rather than
 /// double-bootstrapped (SC-V51 / §2.2).
 ///
+/// **Strength floor (REQ-V17).** This is the single point where a master secret is
+/// created for the store, so the floor ([`check_strength`]) is enforced here and covers
+/// every caller by construction: the TUI launch, every `vault` subcommand, `logout`, the
+/// headless `query`/`consult` open and `init`. It applies only to the opener that
+/// INSTALLS its envelope; adopting a racing winner's envelope is an unlock and never
+/// applies it, like opening any existing envelope ([`open_existing_envelope`]). A refused
+/// passphrase writes nothing, so the DB stays envelope-less for a later strong one.
+///
 /// # Errors
 ///
-/// - [`VaultError::DbCorrupt`] on a missing table or data-without-envelope.
+/// - [`VaultError::DbCorrupt`] on a missing table or data-without-envelope (checked
+///   before the floor, so corruption is never masked as a weak passphrase).
+/// - [`VaultError::WeakPassphrase`] if this opener would install an envelope under a
+///   passphrase below the floor; the message never contains the passphrase.
 /// - [`VaultError::WrongPassphrase`] if a concurrent winner's adopted envelope
 ///   does not open under this passphrase.
 /// - [`VaultError::Crypto`] / [`VaultError::Storage`] on a crypto or SQL failure.
@@ -431,11 +452,19 @@ fn bootstrap_fresh_envelope(
         });
     }
 
+    // STRENGTH FLOOR (REQ-V17): the passphrase that would become the master secret must
+    // clear `check_strength`. Evaluated here, before the KDF and before the write lock, but
+    // NOT returned yet: a racing opener may have installed an envelope in the meantime, and
+    // adopting it is an UNLOCK, which never applies the floor (SC-V51). A weak passphrase
+    // therefore skips the precompute and fails only if, under the lock, it would install.
     // Precompute a fresh envelope BEFORE taking the write lock, so the expensive
     // Argon2 KEK derivation never runs while the lock is held (R-V08).
     // `bootstrap_envelope` is pure (no DB side effects), so the work is simply
     // discarded if a racing opener wins the lock below.
-    let (salt_mine, wrapped_mine, dek_mine) = bootstrap_envelope(vault, password)?;
+    let mine = match check_strength(password) {
+        Ok(()) => Ok(bootstrap_envelope(vault, password)?),
+        Err(weak) => Err(weak),
+    };
 
     // Under the write lock, do ONLY cheap SQL: re-check for a racing bootstrap
     // and either install our precomputed envelope or capture the winner's for an
@@ -451,7 +480,7 @@ fn bootstrap_fresh_envelope(
         )
         .optional()
         .map_err(|e| VaultError::Storage(e.to_string()))?;
-    let adopted: Option<(Vec<u8>, Vec<u8>)> = match raced {
+    let adopted = match raced {
         // A racing opener bootstrapped first between our read and the write lock:
         // capture its envelope; unwrap it AFTER releasing the lock so its Argon2
         // derivation is off the hot lock too.
@@ -461,13 +490,15 @@ fn bootstrap_fresh_envelope(
                     r.get(0)
                 })
                 .map_err(|e| VaultError::Storage(e.to_string()))?;
-            Some((salt_fec, wrapped_fec))
+            Installed::Winner(salt_fec, wrapped_fec)
         }
         // No racing envelope: install ours. `INSERT OR REPLACE` tolerates a stale
         // partial `salt` row from a crashed prior bootstrap (crash-safe). This is
         // the ONLY write on this path — there is NO `DELETE` (never-delete
-        // absolute, REQ-H20 / D-H10).
+        // absolute, REQ-H20 / D-H10). A weak passphrase stops here: returning drops
+        // `tx` uncommitted, so nothing is written and the DB stays bootstrappable.
         None => {
+            let (salt_mine, wrapped_mine, dek_mine) = mine?;
             tx.execute(
                 "INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('salt', ?1)",
                 params![salt_mine],
@@ -478,7 +509,7 @@ fn bootstrap_fresh_envelope(
                 params![wrapped_mine],
             )
             .map_err(|e| VaultError::Storage(e.to_string()))?;
-            None
+            Installed::Mine(dek_mine)
         }
     };
     tx.commit()
@@ -487,9 +518,11 @@ fn bootstrap_fresh_envelope(
     match adopted {
         // A racing opener won: unwrap ITS envelope off the lock. A failure here
         // propagates and NEVER deletes.
-        Some((salt_fec, wrapped_fec)) => open_envelope(vault, password, &salt_fec, &wrapped_fec),
+        Installed::Winner(salt_fec, wrapped_fec) => {
+            open_envelope(vault, password, &salt_fec, &wrapped_fec)
+        }
         // We installed our precomputed envelope.
-        None => Ok(dek_mine),
+        Installed::Mine(dek) => Ok(dek),
     }
 }
 
