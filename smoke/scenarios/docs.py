@@ -146,8 +146,12 @@ def the_published_documentation_is_still_true(run):
     embedded = _read_configs(documents)
     workspace = _seed_workspace()
     try:
+        # Assertion 4 reads the scaffold's own magi.toml, which assertion 3
+        # then overwrites with every documented configuration in turn: it has
+        # to be evaluated first, and is still reported in declared order.
+        key_coverage = _key_coverage_finding(workspace, documents)
         yield _config_finding(embedded, workspace)
-        yield _key_coverage_finding(workspace, documents)
+        yield key_coverage
     finally:
         # Removed here, and the scratch area's own reset is not an argument
         # against it: --reset-env is a recovery an operator runs, not a
