@@ -1157,6 +1157,12 @@ mod tests {
                 "render_default_magi_toml() is missing EmbeddingConfig field: {field}"
             );
         }
+        // The sixth field is checked by its commented line: a bare `provider` would be satisfied
+        // by the root `provider = ...` key and could not see the embedding one go missing.
+        assert!(
+            s.contains("# provider = \""),
+            "render_default_magi_toml() is missing EmbeddingConfig field: provider"
+        );
 
         // The commented advanced lines must be inert — TOML parses correctly
         let parsed = crate::config::MagiConfig::from_toml_str(&s)
@@ -1208,21 +1214,32 @@ mod tests {
             "precondition: the file scanned below must be the v0.13.0 example itself"
         );
 
-        // Control 2: the predicates fire on material that SHOULD be caught. Without this, the
-        // two assertions below prove only that some string does not contain some substring.
-        let planted = format!("{s}\napi_key = \"sk-not-a-real-key\"\n");
+        // The two scan predicates, defined ONCE so the control below and the real assertions
+        // run the same code: a control that re-states the planted text instead of calling the
+        // predicate is a tautology, and stays green when the predicate is broken.
+        let names_an_api_key = |text: &str| text.to_lowercase().contains("api_key");
+        let carries_a_key_prefix = |text: &str| text.contains("sk-");
+
+        // Control 2: each predicate fires on material that SHOULD be caught, planted into the
+        // real example — otherwise the assertions below cannot tell a clean file from a scanner
+        // that never fires.
+        let planted_name = format!("{s}\napi_key = \"x\"\n");
+        let planted_prefix = format!("{s}\n# sk-not-a-real-key\n");
         assert!(
-            planted.to_lowercase().contains("api_key") && planted.contains("sk-"),
-            "the scan must detect planted secret material, or it detects nothing at all"
+            names_an_api_key(&planted_name),
+            "the api_key predicate must fire on a planted field, or it detects nothing at all"
+        );
+        assert!(
+            carries_a_key_prefix(&planted_prefix),
+            "the sk- predicate must fire on a planted prefix, or it detects nothing at all"
         );
 
-        let low = s.to_lowercase();
         assert!(
-            !low.contains("api_key"),
+            !names_an_api_key(&s),
             "docs/magi.toml.example must not contain 'api_key'"
         );
         assert!(
-            !s.contains("sk-"),
+            !carries_a_key_prefix(&s),
             "docs/magi.toml.example must not contain 'sk-' key prefix"
         );
     }
