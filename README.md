@@ -125,7 +125,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/login` | Start the OAuth (PKCE) login flow — **best-effort**, may be rate-limited (see Configuration); prefer an API key |
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
-| `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn. Requires a configured LLM provider. |
+| `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn (with a reasoning model this can take minutes; `agent_timeout_secs` has no upper bound as of v0.20.0, see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md)). Requires a configured LLM provider. |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -153,6 +153,7 @@ Some decisions carry genuine trade-offs: architecture choices, "should we X vs Y
 - **Backend.** The trio is built on **`magi-core`'s native providers**, each wrapped in retry and each receiving its own system prompt through the provider's own channel (no more folding it into the user turn). By default the trio runs on the same backend and endpoint already resolved for the main agent — no second config — but `[magi]` can point it at a different `kind` and/or `base_url`. It is unavailable when no seat can be built (e.g. no API key resolved for the configured backend): `/consult` then reports which seat failed and why, and the tool is not registered.
 - **Rotation (v0.13.0).** If a mage's model fails, it **rotates to a declared fallback of a different lineage and still emits a verdict**, instead of taking the whole run down with it. Configure the pool in `[[magi.fallback]]`; `max_rotations = 0` turns it off.
 - **Model capability.** Weak / small local models (e.g. Ollama `phi4-mini`) may fail to emit the strict per-agent JSON the consensus requires; the result is then marked `[DEGRADED: …]` (fewer than three agents responded) and the report names which model failed to adhere and why. A capable model is recommended for reliable consensus.
+- **Reasoning budget (v0.20.0).** A reasoning model can spend its whole output cap thinking and return no verdict. `[magi] reasoning` / `reasoning_spelling` / `max_tokens` / `reasoning_trace` control and measure that channel, and a startup warning names the `--timeout` or `agent_timeout_secs` a consult's cap actually needs; see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md).
 
 ### Reading a verdict that involved a rotation
 
@@ -338,7 +339,7 @@ it is an object with these keys, **all always present**:
 | `failed_agents` | object | per-seat failure cause, redacted, for a mage that produced no verdict |
 | `rotations` | array | one entry per seat **that actually rotated** — from/to lineage, cause, whether that cause was local to the mage or condemned the run (`mage_local`), and the model it ended on. Empty certifies that nobody did; it is a positive statement, not silence. (`magi-core`'s own report carries a row for every seat, rotated or not; this field is the filtered view.) |
 | `ran_unmeasured` | array | seats that ran without a measured context window, so their verdict carries that caveat |
-| `completions` | object | per seat, one record per completion **attempt**: the model, the cap in force, the token counts, and how it finished. `length` means the model ran out of output budget; a genuinely empty answer looks different, and the two want opposite fixes |
+| `completions` | object | per seat, one record per completion **attempt**: the model, the cap in force, the token counts, how it finished, its **reasoning** state, and the reasoning **control** it was sent with (v0.20.0). `length` means the model ran out of output budget; a genuinely empty answer looks different, and the two want opposite fixes. `reasoning` is `"NotMeasured"` / `{"Measured": {...}}` / `{"Unsupported": {...}}` (never a bare number), and its `text` is always `null`; an attempt the client timeout killed before it could finish carries no reasoning measurement. See [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md) |
 | `pool_eligibility` | object | per seat, the fallback candidates it could **not** have rotated into and why. Present even when nothing was rejected — an absent map means the snapshot was never computed, which is a different fact from an empty one |
 
 New fields are added to `consult` without a `schema_version` bump — the same
@@ -479,6 +480,10 @@ For a local Ollama daemon neither is needed: magi-rs falls back to a dummy value
 ### The vault & passphrase (v0.9.0)
 
 The DB and every secret are unlocked by a **user passphrase**, resolved as `-p <passphrase>` > `MAGI_PASSPHRASE` env var > interactive hidden prompt. On first run you create one (double entry; `zxcvbn` score ≥ 3 and ≥ 12 chars enforced, no override). **Zero-knowledge: nothing persisted opens the DB without the passphrase. Forget it and the data is unrecoverable.** `-p`/`MAGI_PASSPHRASE` make headless/CI use and moving the `.db` between machines possible.
+
+**The `-p`/`--passphrase` value may begin with a `-` (v0.20.0).** `magi-rs -p --horse-battery-zz vault ls` takes the whole string after `-p` as the passphrase, so a passphrase that happens to start with a hyphen is never mistaken for another flag and never echoed back in an error.
+
+**The strength floor applies to every envelope bootstrap, not only the interactive first run (v0.20.0).** A `.magi/` scaffolded by `magi init` with no `-p` has no envelope yet (see below); the same `zxcvbn` ≥ 3 / ≥ 12-characters floor that guards the interactive first run now also guards that DB's *first* open under any passphrase, on every path: the vault CLI, `--logout`, and headless `query`/`consult` included. A weak passphrase offered there is rejected (`WeakPassphrase`) rather than silently becoming the master secret, and the DB stays envelope-less until a strong one opens it. This does **not** apply to unlocking an *existing* envelope: opening an already-encrypted DB never re-checks strength.
 
 #### Running `init` without `-p`
 
@@ -685,11 +690,15 @@ subset of what `magi-core`'s builder offers, not the whole surface:
 
 | Key | Purpose |
 |-----|---------|
-| `agent_timeout_secs` | Per-mage ceiling on the TUI path, and the fallback on the headless path when no explicit `--timeout` is given. When `--timeout` is given, headless derives the ceiling from it instead (see [`applied_caps`](#applied_caps) above). Either way, the two internal timeout layers (retry budget, per-request client timeout) are **derived** from the ceiling, not configured separately: no combination of settings can break the relation between them. |
+| `agent_timeout_secs` | Per-mage ceiling on the TUI path, and the fallback on the headless path when no explicit `--timeout` is given. Minimum 30 seconds, **no upper bound as of v0.20.0** (a reasoning model can legitimately need minutes). When `--timeout` is given, headless derives the ceiling from it instead (see [`applied_caps`](#applied_caps) above). Either way, the two internal timeout layers (retry budget, per-request client timeout) are **derived** from the ceiling, not configured separately: no combination of settings can break the relation between them. |
 | `max_query_bytes` | Input cap applied by magi-rs itself, before `magi-core` sees the payload — rejects rather than truncates, since a silently shortened payload would produce a verdict indistinguishable from a legitimate one. Sized for a real review diff (hundreds of KB), not the old 8 KiB limit. |
 | `input_warn_tokens` | Threshold for the oversized-input warning. Left unset, it is **measured** by a startup probe against the smallest context window across the trio (only possible when the trio's `kind` is `ollama`, the only measurable one); declaring it overrides the measurement. |
 | `retry_disabled` | Disables the trio's inherited retry, for a deployment where 2× the per-mage timeout is unacceptable. |
 | `untrusted_content` | See [Mode routing](#mode-routing) above. |
+| `reasoning` (v0.20.0) | `default` \| `disabled` \| `enabled`, whole trio, absent = `default`. See [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). |
+| `reasoning_spelling` (v0.20.0) | Only for `openai-compat` seats; no default. A rejected spelling returns HTTP 400 and condemns the whole lineage for that run; see the guide above before setting it. |
+| `max_tokens` (v0.20.0) | Output cap per completion, per seat; absent = `16384`. No upper bound of magi-rs's own; above the pinned model's own maximum, HTTP 400 condemns the lineage. |
+| `reasoning_trace` (v0.20.0) | Off by default. `true` logs a bounded, redacted head/tail of the reasoning text for cut attempts only, to the log file at `INFO`. |
 
 `tool_result_cap_bytes` (root-level, not under `[magi]`) bounds the consult report that
 enters the conversation history, on all three routes — the TUI, `magi query` and `magi
@@ -908,7 +917,8 @@ unaffected.
 - **Secrets separation.** The passphrase (which unlocks the DEK) and the stored API keys (entries *inside* the vault) are different secrets in different places: rotating a stored API key never requires re-keying the passphrase, and a wrong API key never invalidates the local conversation DB. `magi-rs vault passwd` rotates the passphrase without re-encrypting any record (it re-wraps the same DEK).
 - **Filesystem sandbox.** Every file-touching tool canonicalizes its target and validates it against the workspace root via `PathGuard` (handling Windows `\\?\` verbatim prefixes, null-byte attacks, and lexical normalization).
 - **Shell sandbox.** The `bash` tool enforces a per-binary argument allowlist and bans shell metacharacters to prevent subshell injection on both PowerShell and bash.
-- **No credentials in `magi.toml`.** An authenticated `base_url` carries `[user]`/`[password]` placeholders, not a literal credential — the real value is resolved from the vault in memory at use time and is never written to disk. A URL that does end up with an embedded credential (e.g. copied from an older config) is redacted **by position**, not by content, in every notice, error and report — including a doubly percent-encoded credential and a URL that fails to parse outright (redacted entirely, as the safe failure direction).
+- **No credentials in `magi.toml`.** An authenticated `base_url` carries `[user]`/`[password]` placeholders, not a literal credential — the real value is resolved from the vault in memory at use time and is never written to disk. A URL that does end up with an embedded credential (e.g. copied from an older config) is redacted **by position**, not by content, in every notice, error and report — including a doubly percent-encoded credential and a URL that fails to parse outright (redacted entirely, as the safe failure direction). This now also covers a **connection failure**: the hint that names the endpoint after a refused or unreachable connection redacts the same way (v0.20.0), so a dead backend never echoes its credential back at you.
+- **`Authorization: Basic` credentials are masked too (v0.20.0).** The stdout auditor already masked a `Bearer` token; it now also recognizes a `Basic <base64>` header (including the base64 encoding of a `base_url` credential itself) echoed inside a server's error body, and masks it the same way. A memory-distillation failure is reported through the same audited path rather than raw `stderr`, and an OAuth login failure never echoes the authorization code, PKCE verifier, or minted access token a server sent back.
 
 ---
 
@@ -1060,6 +1070,7 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 - [`docs/OVERVIEW.md`](docs/OVERVIEW.md): what Magi is, the `magi-core` foundation, and the multi-perspective philosophy behind the name.
 - [`docs/TIERED-MEMORY.md`](docs/TIERED-MEMORY.md): full technical reference for the tiered agnostic memory subsystem: RAG pipeline, three pillars, architecture, configuration, benchmark.
 - [`docs/E2E-TESTING.md`](docs/E2E-TESTING.md): hands-on end-to-end testing guide for the tiered memory feature (cross-session recall, preferences, rollback).
+- [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md): the MAGI trio's reasoning controls and output cap: what each `[magi]` key does, what the clock-coverage warning means, and how to read `reasoning`/`control` in a consult report.
 
 ---
 
