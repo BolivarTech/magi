@@ -374,6 +374,10 @@ pub fn render_default_magi_toml() -> String {
         cap = crate::DECLARED_COMPLETION_CAP
     )
     .unwrap();
+    out.push_str(&format!(
+        "# agent_timeout_secs = {}  # per-mage ceiling in seconds; 30 s floor, no upper bound\n",
+        magi_rs::magi::AGENT_TIMEOUT_SECS
+    ));
 
     writeln!(out).unwrap();
     writeln!(
