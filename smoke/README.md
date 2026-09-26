@@ -163,6 +163,14 @@ carried a different prompt from the run it controlled, one detector reading anot
 scenario's fixtures, and a defect in the product itself. None of them would have turned up
 by reading the code.
 
+**S25 adds one trio consult per run (v0.20.0, REQ-EE-3).** It is standalone rather than
+piggybacking on R4, because its property has to hold on the trio the operator actually
+configured, not on a payload this harness invented. Its clock is R4's own measured one
+(`--timeout 1800`, harness ceiling 2160 s), so a seat that runs long abandons typed rather
+than being killed by the harness. Its own wall clock is not estimated here: it is measured
+on the first SMOKE #1 run of this milestone and recorded, with its date, once that number
+exists.
+
 ## Out of scope
 
 ```
@@ -190,20 +198,22 @@ assumes is the exact failure this harness exists to avoid.
 | S8 | REQ-S09 and D-16, the large payload arrives whole |
 | S9 | `src/memory/` and REQ-29: persist, embed, inject, degrade |
 | S10 | `src/redact.rs` and the five leak sites of the v0.12.0 gate |
-| S11 | `config/migrate.rs`, a broken config cuts before running |
+| S11 | `config/migrate.rs`, a broken config cuts before running, and REQ-EE-3's `reasoning` vocabulary is refused by name |
 | S12 | the harness leaves no trace in the tree |
-| S13 | every invocation in the published documentation still exists |
+| S13 | every invocation in the published documentation still exists, and every `[magi]` key the scaffold writes is named in a published guide |
 | S14 | REQ-S32, the doubly declared `-w` still resolves |
 | S15 | `non_blank`, a blank variable is absent and never invalid |
 | S16 | rotating a third-party credential costs no local data |
 | S17 | REQ-EA01 and REQ-EA06, the structured flag exists only where it should |
 | S18 | REQ-EA03, the structured verdict envelope's exact shape: flag presence, flag absence, agents[] keys (7), findings[] keys (6), consensus keys (7 with `dissent`) |
 | S19 | REQ-EA02, the agent's consult cap |
-| S20 | the trio still completes after magi-core 4.0.0 moved it to `POST {base}/api/chat`, carrying the cap magi-rs declared |
+| S20 | the trio still completes after magi-core 4.0.0 moved it to `POST {base}/api/chat`, carrying the cap magi-rs declared, with the seven keys v0.20.0 renders on every attempt |
 | S21 | REQ-V4-14, the shape every run emits: a `finish` this build knows on every attempt, and a rotation report whose hops name a known cause and its locality |
 | S22 | the rotation report is complete: `pool_eligibility` present even when empty, and all three notions of degradation derivable |
 | S23 | REQ-L63, one run id published on stderr and inside the day's log |
 | S24 | SC-L14 and REQ-L19, a clean run's diagnostics reach the day's log and never the screen |
+| S25 | REQ-EE-3 and REQ-EE-1, OQ-8: `reasoning = "disabled"` round-trips on the default trio; no measured count above zero; no trace text in the envelope |
+| S26 | REQ-EE-1: with no key declared every attempt reports `default` and a reasoning state in magi-core's shape |
 
 ## Adding a scenario
 
@@ -305,6 +315,14 @@ surplus. A checkable requirement with no scenario is a declared hole.
   that makes the product act instead of explain, recorded as `DEFER_TO_THE_GUARD`. The
   other two have no equivalent yet, so the gate's colour still depends on model behaviour
   in two places.
+- **S25's third assertion discriminates only when a seat ignores `reasoning = "disabled"`.**
+  It installs `reasoning_trace = true` alongside the control specifically so an ignoring
+  seat returns `Unsupported` *with* text for the product to null out; when every seat in a
+  run honours the switch, the assertion still holds (there is nothing to leak), but that run
+  proves nothing new about the null-out itself -- the unit tests over a constructed record
+  are what keep it a real guardian regardless of which seats answer on any given run. The
+  honoured/ignored split itself is an observation, not a verdict, and lives only in the
+  archived capture under the `s25-disabled-consult` label.
 
 ## What the first four rounds found
 

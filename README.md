@@ -1016,7 +1016,7 @@ The suite above exercises units. It cannot tell you whether the binary you
 ship works, because a mock always answers and a debug build is not the
 artifact anyone installs. The harness under `smoke/` covers that: it builds
 the release binary, points it at a real backend and a real encrypted
-database, and checks 60 assertions across 19 scenarios.
+database, and checks 81 assertions across 26 scenarios.
 
 ```bash
 python -m smoke --init-env    # once: build the persistent test environment
