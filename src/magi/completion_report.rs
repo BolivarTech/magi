@@ -710,6 +710,46 @@ mod tests {
         );
     }
 
+    /// The same guarantee, with the trace built by magi-core's own types and serialized by its
+    /// own `Serialize`. The test above spells the `"text"` key by hand, so a rename on the
+    /// magi-core side (a field rename or a `#[serde(rename)]`) would leave it green while the
+    /// nulling, which matches that key, stopped seeing the trace. Here the key is whatever
+    /// magi-core writes.
+    ///
+    /// MUTATION (required): stop nulling `text` and this goes red with the canary visible.
+    #[test]
+    fn a_trace_serialized_by_magi_core_never_reaches_the_json() {
+        use magi_core::provider::ReasoningState;
+        const TRACE: &str = "the model weighed c4n4ry-m4gic0re for a long while";
+        let measured = ReasoningState::Measured {
+            chars: TRACE.chars().count(),
+            text: Some(TRACE.to_string()),
+        };
+        let unsupported = ReasoningState::Unsupported {
+            backend: "ollama".to_string(),
+            chars: Some(TRACE.chars().count()),
+            text: Some(TRACE.to_string()),
+        };
+        let mut map = BTreeMap::new();
+        for (seat, state) in [
+            (AgentName::Melchior, measured),
+            (AgentName::Caspar, unsupported),
+        ] {
+            let value = serde_json::to_value(&state).expect("magi-core serializes its own state");
+            assert!(
+                value.to_string().contains(TRACE),
+                "precondition: magi-core's serialization carries the trace"
+            );
+            map.insert(seat, vec![attempt_with(value, "default")]);
+        }
+
+        let rendered = render_completions(&map).to_string();
+        assert!(
+            !rendered.contains("c4n4ry-m4gic0re"),
+            "model text reached the envelope: {rendered}"
+        );
+    }
+
     /// S-3: no channel is not zero. `NotMeasured` and a measured zero are different facts —
     /// "nobody looked" against "somebody looked and the model did not reason" — and a consumer
     /// deciding whether reasoning ate the budget needs to tell them apart.
