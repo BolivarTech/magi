@@ -560,10 +560,9 @@ are the same command).
 > the now-retired `"openai"` value through v0.11.0 —
 > `base_url = http://localhost:11434/v1`, model `kimi-k2.6:cloud`, and the MAGI trio
 > `glm-5.3:cloud` / `kimi-k2.6:cloud` / `deepseek-v4-pro:cloud` — Melchior was
-> `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag; Balthasar was
-> `gpt-oss:120b-cloud` through 0.20.0, until measurement (REQ-DEF-1) moved it onto the
-> principal model, which now also holds that seat). Previously the no-config default was
-> Anthropic.
+> `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag. Balthasar was
+> `gpt-oss:120b-cloud` through 0.20.0, until measurement (REQ-DEF-1) moved it onto the principal
+> model, which now also holds that seat). Previously the no-config default was Anthropic.
 
 **To use Anthropic instead**, set `provider = "anthropic"` in `magi.toml` **or**
 `MAGI_PROVIDER=anthropic`. The Anthropic Messages API path (key discovery, model
