@@ -68,10 +68,11 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-embed-text-v2-moe:latest";
 /// **2 — the same value magi-core ships, deliberately not a default of our own** (D-R14). A
 /// divergent default would have to be explained in the CHANGELOG and defended on every upgrade.
 ///
-/// The cost is the worst case it implies: with the 90 s ceiling and retry enabled the derived
-/// headless `--timeout` becomes `2 attempts x 3 models x 90 s` plus slack, i.e. ~654 s. That is
-/// paid **only when something is genuinely hung** — a healthy consult never approaches it — and the
-/// escape valve already shipped: `--timeout 300` with a notice naming the computed minimum.
+/// The cost is the worst case it implies: with the default 2 335 s ceiling and retry enabled the
+/// derived headless `--timeout` becomes `2 attempts x 3 models x 2 335 s` plus slack, i.e.
+/// ~16 818 s (~4.7 h). That is paid **only when something is genuinely hung** — a healthy consult
+/// never approaches it — and the escape valve is the same: an explicit `--timeout` with a notice
+/// naming the computed minimum.
 ///
 /// **`0` is the kill-switch** and must stay reachable: it restores v0.12.0 behaviour exactly.
 pub const DEFAULT_MAX_ROTATIONS: u32 = 2;

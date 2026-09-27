@@ -15511,7 +15511,8 @@ mod tests {
         /// `builder = builder.with_retry_disabled();` ⇒ red at every `retry_disabled = true` row.
         /// NEVER weaken either line to an inequality.
         fn our_headless_wall_clock_agrees_with_the_crates_worst_case_per_seat() {
-            // 90 s is the default; 5 000 s is a ceiling only REQ-TUI-1's unbounded range reaches.
+            // `AGENT_TIMEOUT_SECS` is the default; 5 000 s is a ceiling only REQ-TUI-1's
+            // unbounded range reaches.
             // Both keep `ceiling * attempt_factor` far from u64 overflow.
             for ceiling_secs in [magi_rs::magi::AGENT_TIMEOUT_SECS, 5_000] {
                 for max_rotations in 0u32..=2 {

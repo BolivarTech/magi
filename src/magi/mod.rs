@@ -68,9 +68,16 @@ pub const AGENT_TIMEOUT_MIN_SECS: u64 = 30;
 
 /// Ceiling PER MAGE and PER ATTEMPT (REQ-A04, verified against `orchestrator.rs`).
 ///
-/// 90 s: enough for a legitimate generation from a cloud model with cold-load, and leaves the
-/// worst case per mage (2 attempts) at 180 s. The magi-core default (300) is too high: it makes
-/// the retry chain unreachable.
+/// 2 335 s: derives a 700 s client timeout, the clock basis the user chose on 2026-09-27
+/// (kimi-k2.6's convergence in the think-quality experiment, ~658 s; replay B measured ≤ 531 s
+/// for the slowest seat in one evening slot, PM-S-8); operation budget 1 401 s; worst case per
+/// mage with two attempts, 4 670 s; at `max_rotations = 2` the default headless `--timeout` is
+/// 16 818 s — the ceiling the recommended gate `--timeout 16820` derives.
+///
+/// **Still does not cover the full cap at 55 tok/s** (~38 500 of 65 536): REQ-EE-5's warning
+/// fires on every default consult, and that is the decided behaviour. A TUI `/consult` can
+/// block the session for up to that long and is not cancellable until REQ-TUI-1's backlog item
+/// lands. `agent_timeout_secs = 90` restores v0.20.0's clock exactly.
 pub const AGENT_TIMEOUT_SECS: u64 = 2_335;
 
 /// Numerator/denominator for the fraction of the ceiling given to the total retry budget.
@@ -428,11 +435,11 @@ pub fn headless_consult_timeout_secs(
 ///
 /// *The coherence figure, so nobody has to re-derive it.* With `limited_max_retries = 1` a hang
 /// costs `2 x client_timeout + base_delay`, where `base_delay` is magi-core's `DEFAULT_BASE_DELAY`
-/// of 1 s. At the default 90 s ceiling that is `2 x 27 + 1 = 55 s` against an `operation_budget` of
-/// 54 s whose check fires **before** each attempt: the second attempt starts at ~28 s, is admitted
-/// because 28 < 54, and runs to completion at 55 s — **past** the budget, which is not re-checked
-/// mid-attempt. So "it fits" means *both attempts are admitted and the chain ends inside the
-/// ceiling*, NOT that it stays under the budget.
+/// of 1 s. At a 90 s ceiling (v0.20.0's default) that is `2 x 27 + 1 = 55 s` against an
+/// `operation_budget` of 54 s whose check fires **before** each attempt: the second attempt starts
+/// at ~28 s, is admitted because 28 < 54, and runs to completion at 55 s — **past** the budget,
+/// which is not re-checked mid-attempt. So "it fits" means *both attempts are admitted and the
+/// chain ends inside the ceiling*, NOT that it stays under the budget.
 ///
 /// # Arguments
 /// * `max_rotations` - `[magi].max_rotations`, **resolved** (effective, not the raw `Option`).
@@ -1298,7 +1305,7 @@ mod tests {
     /// blame on the wrong model.
     #[test]
     fn the_multiplier_follows_both_config_keys() {
-        // Defaults: 2 attempts x (1 + 2 rotations) models x 90 s = 540 s dominant.
+        // A 90 s ceiling: 2 attempts x (1 + 2 rotations) models x 90 s = 540 s dominant.
         assert_eq!(
             headless_consult_timeout_secs(90, 2, false),
             CLASSIFY_TIMEOUT_SECS + 540 + 540 * HEADLESS_TIMEOUT_SLACK_PCT / 100
