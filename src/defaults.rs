@@ -27,7 +27,10 @@ pub const DEFAULT_PROVIDER: &str = "ollama";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "http://localhost:11434/v1";
 /// Default principal model on the openai path (RF-3).
 pub const DEFAULT_OPENAI_MODEL: &str = "kimi-k2.6:cloud";
-/// Default MAGI trio (openai path only, RF-4). Lineages: Zhipu / OpenAI / DeepSeek.
+/// Default MAGI trio (openai path only, RF-4). Lineages: Zhipu / Moonshot / DeepSeek.
+///
+/// Balthasar moved off `gpt-oss:120b` (`openai`) onto `kimi-k2.6` (`moonshot`) in v0.21.0
+/// (REQ-DEF-1), confirmed by replay B — see [`DEFAULT_MAGI_BALTHASAR_LINEAGE`].
 pub const DEFAULT_MAGI_MELCHIOR: &str = "glm-5.3:cloud";
 pub const DEFAULT_MAGI_BALTHASAR: &str = "kimi-k2.6:cloud";
 pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
@@ -104,12 +107,14 @@ pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
 /// no-rotation behaviour — the same shape of defect as a setting that is declared and not applied.
 ///
 /// **Five entries, one per cloud lineage no seat holds.** Ollama's cloud catalogue offers eight
-/// vendor families; the trio takes three (`zhipu`, `openai`, `deepseek`) and the pool takes the
-/// other five, so depth here is bounded by the catalogue, not chosen. The ordering is rotation
-/// preference: the principal model leads because it is the one this product exercises most, and
-/// the two candidates the smoke harness lists as excluded for a cheap profile (`mistral-large-3`,
-/// `gemma4`) close the list as last resorts — see
-/// `the_scaffold_pool_leads_with_the_principal_and_keeps_the_unmeasured_mistral_last`.
+/// vendor families; the trio takes three (`zhipu`, `moonshot`, `deepseek`) and the pool takes the
+/// other five, so depth here is bounded by the catalogue, not chosen. The ordering is by measured
+/// strength in the think-quality experiment (`planning/experiments/think-quality-2026-09-23/`:
+/// `minimax-m3` 3.5, `nemotron-3-super` 3.0, `gpt-oss:120b` 2.5 of 5 seeded defects), with
+/// `mistral-large-3` (unmeasured against this product's prompts) and `gemma4` (the smoke
+/// harness's other inherited exclusion) closing the list as last resorts. The principal model
+/// (`DEFAULT_OPENAI_MODEL`) now holds the Balthasar seat, so it cannot also lead the pool — see
+/// `the_scaffold_pool_follows_the_measured_order_and_the_principal_holds_a_seat`.
 ///
 /// **Why `mistral` is in the pool at all.** Through v0.19.0 Melchior was `qwen3.5:397b`
 /// (`alibaba`) and the pool carried `glm-5.2` (`zhipu`). When Ollama retired that Qwen tag with
@@ -1425,12 +1430,13 @@ mod tests {
     /// The scaffolded pool carries **five** candidates, matching the trio configuration this
     /// project ships alongside (`magi-ollama.toml`) rather than a shorter list of its own.
     ///
-    /// The count is the point, and so is what could NOT be copied. That file's five entries
-    /// include `deepseek-v4-pro`/`deepseek` and `gpt-oss`/`openai`, which are foreign to ITS
-    /// trio but are two of THIS project's three seats — model and lineage both. Copying them
-    /// verbatim would have cut each one's coverage from three seats to one and tripped the
-    /// duplicate-model notice twice. The five here are the five labels from that same file that
-    /// no seat of this trio holds.
+    /// The count is the point, and so is what could NOT be copied. `deepseek-v4-pro`/`deepseek`
+    /// is foreign to that file's trio but is one of THIS project's three seats — model and
+    /// lineage both — so it stays excluded from the pool. `gpt-oss`/`openai` returned to the pool
+    /// in v0.21.0 (REQ-DEF-1): the seat that used to hold it (Balthasar) moved to
+    /// `kimi-k2.6`/`moonshot`, freeing that lineage for the pool to cover all three seats again.
+    /// Copying a seat's own lineage into the pool would cut its coverage from three seats to one
+    /// and trip the duplicate-model notice.
     #[test]
     fn the_scaffolded_pool_has_five_candidates() {
         assert_eq!(
