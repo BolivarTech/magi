@@ -2441,6 +2441,25 @@ base_url = "http://embedder-host:11434/v1"
         );
     }
 
+    /// The reference file declares `agent_timeout_secs` ACTIVELY, so whoever copies it pins the
+    /// value written there. It must be the built-in default, or copying the reference silently
+    /// keeps the previous release's clock (v0.20.0's 90 s, which times the reasoning seats out
+    /// on every attempt: replay A).
+    #[test]
+    fn example_toml_agent_timeout_matches_the_builtin_default() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable");
+        let parsed = MagiConfig::from_toml_str(&raw).expect("the example must parse");
+        assert_eq!(
+            parsed.magi.agent_timeout_secs,
+            Some(magi_rs::magi::AGENT_TIMEOUT_SECS),
+            "docs/magi.toml.example's agent_timeout_secs must mirror AGENT_TIMEOUT_SECS"
+        );
+    }
+
     #[test]
     fn test_parses_full_config() {
         // -------------------------------------------------------------------------

@@ -1035,6 +1035,45 @@ mod tests {
         );
     }
 
+    /// The gate `--timeout` the MS2 amendment recommends in `docs/` (2026-09-27): the exact
+    /// value replay B ran with. A test-module constant, not a production one — nothing in the
+    /// product reads it; the docs quote it and these tests hold the docs to it.
+    const RECOMMENDED_GATE_TIMEOUT_SECS: u64 = 16_820;
+
+    /// REQ-TUI-1 [MS2] and the MS2 amendment: the default per-mage ceiling derives a 700 s
+    /// per-request client timeout — the clock basis the user chose on 2026-09-27 (kimi-k2.6's
+    /// convergence in the think-quality experiment, ~658 s; replay B measured ≤ 531 s for the
+    /// slowest seat in one evening slot, PM-S-8) — with the operation budget replay B ran
+    /// under, and it is exactly the ceiling the recommended gate `--timeout` derives, so the
+    /// gate and the TUI are documented with ONE number.
+    ///
+    /// MUTATIONS (required): `AGENT_TIMEOUT_SECS = 2_333` ⇒ red on the client timeout (699 s);
+    /// `AGENT_TIMEOUT_SECS = 2_336` ⇒ red on the gate derivation.
+    #[test]
+    fn the_default_ceiling_covers_the_measured_convergence_and_is_the_gates() {
+        let ceiling = magi_rs::magi::AGENT_TIMEOUT_SECS;
+        assert_eq!(
+            magi_rs::magi::derive_client_timeout(ceiling).as_secs(),
+            700,
+            "the default must derive the 700 s convergence clock"
+        );
+        assert_eq!(
+            magi_rs::magi::derive_operation_budget(ceiling).as_secs(),
+            1_401,
+            "the operation budget replay B ran under"
+        );
+        // `retry_disabled` is `false` unless declared: the default keeps magi-core's retry.
+        assert_eq!(
+            magi_rs::magi::derive_ceiling_from_timeout(
+                RECOMMENDED_GATE_TIMEOUT_SECS,
+                DEFAULT_MAX_ROTATIONS,
+                false
+            ),
+            ceiling,
+            "the recommended gate --timeout must derive exactly the default ceiling"
+        );
+    }
+
     #[test]
     fn test_should_emit_default_notice_only_for_openai_without_file() {
         use magi_rs::magi::kind::ProviderKind;

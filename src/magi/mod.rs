@@ -1349,8 +1349,13 @@ mod tests {
     /// `--timeout 5` wants to cut at 5 seconds, and forcing it to respect the formula would
     /// disobey a clear order. But a value below the minimum guarantees that **no consult with
     /// schema retry completes**, and that is not obvious from the command line.
+    ///
+    /// The last assertion is a WORKED EXAMPLE on a declared 90 s ceiling (minimum 222 s at zero
+    /// rotations), not on the built-in default: since 0.21.0 the default is 2 335 s, whose
+    /// minimum (5 610 s) a 1 000 s request no longer clears.
     #[test]
     fn an_explicit_timeout_below_the_formula_is_obeyed_and_warned_about() {
+        const WORKED_EXAMPLE_CEILING: u64 = 90;
         let asked = 5_u64;
         let decision = resolve_run_timeout(
             Some(asked),
@@ -1389,15 +1394,18 @@ mod tests {
             .is_none(),
             "the default does not warn about itself"
         );
-        assert!(resolve_run_timeout(
-            Some(1_000),
-            AGENT_TIMEOUT_SECS,
-            0,
-            false,
-            TimeoutMeasure::ConfiguredCeiling
-        )
-        .warning
-        .is_none());
+        assert!(
+            resolve_run_timeout(
+                Some(1_000),
+                WORKED_EXAMPLE_CEILING,
+                0,
+                false,
+                TimeoutMeasure::ConfiguredCeiling
+            )
+            .warning
+            .is_none(),
+            "1000 s clears a 90 s ceiling's 222 s minimum"
+        );
     }
 
     /// The fix round 3 regression table, `TimeoutMeasure::DerivesCeiling` half
@@ -1632,6 +1640,11 @@ mod tests {
     /// SC-EB02: a generous `--timeout` unlocks a per-run ceiling above `AGENT_TIMEOUT_SECS`,
     /// the configured default — proving the derived path does not silently fall back to it.
     /// This is the requirement.
+    ///
+    /// Two halves since 0.21.0. The 1800 s worked example (249 s per mage, 149 s per attempt)
+    /// is pinned as arithmetic, because docs and the smoke harness quote it; but 249 s is no
+    /// longer above the 2 335 s default, so the requirement itself is shown with a timeout that
+    /// derives past the default, whatever the default is.
     #[test]
     fn a_generous_timeout_derives_a_ceiling_above_the_configured_maximum() {
         // 2 attempts x 3 models x 1.2 slack = 7.2; (1800 - 6) / 7.2 = 249.16 -> 249
@@ -1640,11 +1653,13 @@ mod tests {
             ceiling, 249,
             "the inverse of the formula that produced 1800"
         );
+        assert_eq!(derive_operation_budget(ceiling).as_secs(), 149);
+
+        let generous = headless_consult_timeout_secs(2 * AGENT_TIMEOUT_SECS, 2, false);
         assert!(
-            ceiling > AGENT_TIMEOUT_SECS,
+            derive_ceiling_from_timeout(generous, 2, false) > AGENT_TIMEOUT_SECS,
             "the derived path is not limited to the configured default"
         );
-        assert_eq!(derive_operation_budget(ceiling).as_secs(), 149);
     }
 
     /// SC-EB04: round-trip, bounded to the range where it is TRUE. The inverse never

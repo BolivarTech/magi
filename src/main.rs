@@ -7241,12 +7241,22 @@ mod tests {
     /// S-9's input on the TUI: the configured ceiling, and the lever is `agent_timeout_secs`.
     /// At the 0.21.0 cap the covering value is 3 974 s: 65 536 tokens at 55 tok/s need a
     /// 1 192 s client timeout, and ⌊0.3 × 3 974⌋ = 1 192 is the first ceiling that gives it.
+    ///
+    /// At the 0.21.0 DEFAULT ceiling (2 335 s ⇒ 700 s per request) the warning still fires,
+    /// and that is the decided behaviour, not a defect (MS2 amendment, consequence 1): the
+    /// default covers measured convergence (~38 500 tokens at 55 tok/s), not the full cap.
     #[test]
     fn the_tui_clock_coverage_is_assessed_on_the_configured_ceiling() {
         let default = crate::config::MagiConfig::from_toml_str("[magi]\n").expect("valid");
         let w = crate::tui_clock_coverage(&default)
             .expect("the default clock does not cover 65 536 tokens at 55 tok/s");
         assert!(w.render().contains("3974"), "{}", w.render());
+        assert!(
+            w.render()
+                .contains("per-request clock (700s) covers ~38500 of the 65536-token"),
+            "the default ceiling must derive the 700 s convergence clock: {}",
+            w.render()
+        );
         let wide = crate::config::MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 3974\n")
             .expect("valid");
         assert_eq!(crate::tui_clock_coverage(&wide), None);
@@ -7255,6 +7265,27 @@ mod tests {
         assert!(
             crate::tui_clock_coverage(&short).is_some(),
             "3974 is the FIRST covering ceiling, not merely a covering one"
+        );
+    }
+
+    /// The MS2 upgrade note, clock half (spec "MS2 release notes"): `agent_timeout_secs = 90`
+    /// gives back v0.20.0's interactive clock exactly — the ceiling every surface reads through
+    /// `timeout_scale`, a 27 s per-request client timeout and a 54 s operation budget. Since
+    /// 0.21.0 the default differs (2 335 s), so a resolver that ignored the key would turn this
+    /// red.
+    ///
+    /// MUTATION (required): make `timeout_scale` return `AGENT_TIMEOUT_SECS` unconditionally ⇒
+    /// red on the ceiling.
+    #[test]
+    fn restoring_agent_timeout_secs_90_gives_back_the_0_20_0_clock() {
+        let cfg = crate::config::MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 90\n")
+            .expect("valid");
+        let (ceiling, _, _) = crate::timeout_scale(&cfg);
+        assert_eq!(ceiling, 90);
+        assert_eq!(magi_rs::magi::derive_client_timeout(ceiling).as_secs(), 27);
+        assert_eq!(
+            magi_rs::magi::derive_operation_budget(ceiling).as_secs(),
+            54
         );
     }
 
@@ -15549,9 +15580,10 @@ mod tests {
             let mut notices = Vec::new();
             let (ceiling, _) =
                 BudgetTelemetry::derive(Some(&TimeoutDecision::obeyed(1800)), 90, 2, false);
-            assert!(
-                ceiling.secs() > magi_rs::magi::AGENT_TIMEOUT_SECS,
-                "precondition"
+            assert_ne!(
+                ceiling.secs(),
+                magi_rs::magi::AGENT_TIMEOUT_SECS,
+                "precondition: the derived ceiling differs from the one `cfg` would give"
             );
 
             let magi = build_magi_orchestrator(
@@ -18219,9 +18251,15 @@ agent_timeout_secs = {CEILING}
         /// the measure was hardcoded to `ConfiguredCeiling`, which warned that 654s were
         /// required — the healthy run demanding 3.3x more than the 193s its derived ceiling
         /// (26s) truly needed.
+        ///
+        /// The example's configured ceiling is DECLARED (`agent_timeout_secs = 90`), not read
+        /// from the built-in default: the 654 s it pins is a property of a 90 s ceiling, and
+        /// since 0.21.0 the default is 2 335 s. A worked example that followed the default would
+        /// silently change its own subject every time the default moves.
         #[test]
         fn an_explicit_timeout_on_the_deriving_route_does_not_overstate_the_requirement() {
-            let cfg = MagiConfig::default();
+            let cfg =
+                MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 90\n").expect("valid");
             let (configured, rotations, retry_disabled) = timeout_scale(&cfg);
             assert_eq!(
                 configured, 90,
@@ -18260,6 +18298,41 @@ agent_timeout_secs = {CEILING}
                 !decision.below_formula,
                 "200s clears the deriving route's own floor-activation threshold; a healthy \
                  run must not be flagged"
+            );
+        }
+
+        /// D-2 (MS2), a decided consequence rather than an accident: at the 0.21.0 default
+        /// ceiling (2 335 s) a worst-case consult needs `headless_consult_timeout_secs(2335, 2,
+        /// false)` = 16 818 s, so the 900 s default deadline of the tool-executing tiers
+        /// (`--auto`, `--full-auto`) sits BELOW it. A consult-capable `magi query` with no
+        /// `--timeout` is therefore obeyed and warned about, and `below_formula` reaches its
+        /// JSON. At v0.20.0's ceiling (90 s ⇒ 654 s) the same run was silent.
+        ///
+        /// MUTATION (required): `AGENT_TIMEOUT_SECS` back to `90` ⇒ red on `below_formula`.
+        #[test]
+        fn the_tier_default_deadline_sits_below_the_formula_at_the_default_ceiling() {
+            let tier_default = magi_rs::headless::limits::FULL_AUTO_TIMEOUT_SECS;
+            let decision = query_timeout_decision(
+                Some(Duration::from_secs(tier_default)),
+                true,
+                &MagiConfig::default(),
+                magi_rs::magi::TimeoutMeasure::ConfiguredCeiling,
+            )
+            .expect("a bounded, consult-capable run is exactly the checked case");
+            assert_eq!(
+                decision.effective_secs, tier_default,
+                "the tier default is obeyed, never raised to the formula"
+            );
+            assert!(
+                decision.below_formula,
+                "900 s cannot hold a worst-case consult at a 2 335 s ceiling"
+            );
+            let warning = decision
+                .warning
+                .expect("a deadline below the formula must say so");
+            assert!(
+                warning.contains("16818"),
+                "the warning names the minimum the default ceiling requires: {warning}"
             );
         }
 
