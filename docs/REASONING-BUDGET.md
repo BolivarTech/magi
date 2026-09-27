@@ -182,8 +182,12 @@ worth stating plainly up front rather than found by surprise later:
 - **A TUI `/consult` can block the whole session for up to about 14010 seconds (~3.9 hours), and
   it cannot be cancelled mid-flight.** The TUI puts no outer wall clock around a consult. Each
   attempt gets up to 2335 seconds, and a seat that rotates through its three models, two attempts
-  each, can chain six of them; the seats run in parallel, so that is the consult's worst case too. Cancelling an in-flight consult is tracked as its own backlog item
-  under REQ-TUI-1 and did not ship with this release.
+  each, can chain six of them; the seats run in parallel, so that is the consult's worst case too.
+  Cancelling an in-flight consult is tracked as its own backlog item under REQ-TUI-1 and did not
+  ship with this release. Until it does, the TUI reads no keys while a consult runs (Ctrl+C
+  included, since the terminal is in raw mode), so the only way out of a stuck one is from outside:
+  close the terminal window, or end the `magi-rs` process from another shell. Lower
+  `agent_timeout_secs` if an interactive session should never wait that long.
 - **`magi consult` with no explicit `--timeout` now runs under a roughly 16818-second (~4.7 hour)
   deadline**, derived from the default ceiling with rotation enabled, in place of the 654 seconds
   v0.20.0 derived. This release documents the change rather than shortening it: pass an explicit
