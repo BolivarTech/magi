@@ -556,13 +556,14 @@ are the same command).
 ### Default backend — Ollama-first (v0.6.0, BREAKING)
 
 > **Breaking change in 0.6.0.** With **no `magi.toml` and no env vars**, Magi now
-> defaults to a local **Ollama** backend (`provider = "ollama"` as of v0.12.0 — it was
-> the now-retired `"openai"` value through v0.11.0 —
-> `base_url = http://localhost:11434/v1`, model `kimi-k2.6:cloud`, and the MAGI trio
-> `glm-5.3:cloud` / `kimi-k2.6:cloud` / `deepseek-v4-pro:cloud` — Melchior was
-> `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag. Balthasar was
+> defaults to a local **Ollama** backend: `provider = "ollama"` (the now-retired `"openai"`
+> value through v0.11.0), `base_url = http://localhost:11434/v1`, model `kimi-k2.6:cloud`, and
+> the MAGI trio `glm-5.3:cloud` / `kimi-k2.6:cloud` / `deepseek-v4-pro:cloud`. Previously the
+> no-config default was Anthropic.
+>
+> Melchior was `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag. Balthasar was
 > `gpt-oss:120b-cloud` through 0.20.0, until measurement (REQ-DEF-1) moved it onto the principal
-> model, which now also holds that seat). Previously the no-config default was Anthropic.
+> model, which now also holds that seat.
 
 **To use Anthropic instead**, set `provider = "anthropic"` in `magi.toml` **or**
 `MAGI_PROVIDER=anthropic`. The Anthropic Messages API path (key discovery, model
