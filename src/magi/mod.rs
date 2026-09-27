@@ -962,7 +962,7 @@ pub fn resolve_run_timeout(
 /// noisy the run is, never what the run does. If real deployments legitimately derive ceilings
 /// above it, raise it — a warning that fires on correct configurations trains operators to ignore
 /// warnings, which costs more than the typo it was meant to catch.
-pub const CEILING_SANITY_SECS: u64 = 600;
+pub const CEILING_SANITY_SECS: u64 = 2_400;
 
 /// A per-mage ceiling that **names where it came from** (REQ-EB01, R-EB03), paired with
 /// [`BudgetTelemetry`] by [`BudgetTelemetry::derive`] so no caller can obtain a ceiling without
@@ -1117,7 +1117,7 @@ impl BudgetTelemetry {
                     retry_disabled,
                 ),
                 max_rotations_effective: max_rotations,
-                ceiling_above_sanity: ceiling > CEILING_SANITY_SECS,
+                ceiling_above_sanity: run.is_some() && ceiling > CEILING_SANITY_SECS,
             },
         )
     }

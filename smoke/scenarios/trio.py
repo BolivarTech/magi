@@ -142,7 +142,7 @@ CONSENSUS_KEYS = ("consensus", "consensus_verdict", "confidence", "score",
 CLASSIFY_TIMEOUT_SECS = 6
 TIMEOUT_SLACK_PCT = 20
 CEILING_FLOOR_SECS = 15
-CEILING_SANITY_SECS = 600
+CEILING_SANITY_SECS = 2400
 
 #: The two derived layers, as the numerator/denominator pairs the product uses,
 #: each with the minimum it is floored at. 6/10 + 3/10 leaves the 10 % margin
