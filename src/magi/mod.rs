@@ -71,13 +71,14 @@ pub const AGENT_TIMEOUT_MIN_SECS: u64 = 30;
 /// 2 335 s: derives a 700 s client timeout, the clock basis the user chose on 2026-09-27
 /// (kimi-k2.6's convergence in the think-quality experiment, ~658 s; replay B measured ≤ 531 s
 /// for the slowest seat in one evening slot, PM-S-8); operation budget 1 401 s; worst case per
-/// mage with two attempts, 4 670 s; at `max_rotations = 2` the default headless `--timeout` is
-/// 16 818 s — the ceiling the recommended gate `--timeout 16820` derives.
+/// mage at `max_rotations = 2` (three models, two attempts each) 14 010 s, which is also a TUI
+/// consult's worst case, since the TUI has no outer wall clock; the default headless `--timeout`
+/// adds the 20 % slack, 16 818 s — the ceiling the recommended gate `--timeout 16820` derives.
 ///
 /// **Still does not cover the full cap at 55 tok/s** (~38 500 of 65 536): REQ-EE-5's warning
 /// fires on every default consult, and that is the decided behaviour. A TUI `/consult` can
-/// block the session for up to that long and is not cancellable until REQ-TUI-1's backlog item
-/// lands. `agent_timeout_secs = 90` restores v0.20.0's clock exactly.
+/// block the session for up to the 14 010 s worst case above and is not cancellable until
+/// REQ-TUI-1's backlog item lands. `agent_timeout_secs = 90` restores v0.20.0's clock exactly.
 pub const AGENT_TIMEOUT_SECS: u64 = 2_335;
 
 /// Numerator/denominator for the fraction of the ceiling given to the total retry budget.

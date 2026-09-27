@@ -110,8 +110,8 @@ does not block, and it never suggests a value the configuration would reject.
 **In v0.21.0, with the shipped defaults, this warning still fires on every consult, and that is
 by design, not oversight.** The default ceiling (`agent_timeout_secs = 2335`) derives a
 700-second per-request client timeout sized to cover the trio's *measured convergence*
-(`glm-5.3` needed up to 56007 tokens in replay B, roughly 38500 tokens' worth of runway at the
-55 tok/s reference speed), not the full 65536-token cap at that reference speed. Covering the
+(`glm-5.3` needed up to 56007 tokens in replay B and produced them well above the 55 tok/s
+reference speed, at which 700 seconds covers only about 38500 tokens), not the full 65536-token cap at that reference speed. Covering the
 cap in full needs `--timeout 28619` on the headless path, or `agent_timeout_secs = 3974` on the
 interactive one: figures [replay B](#measured-defaults-v0210) recorded but did not run, because
 a consult that actually needs the whole cap is rare. The warning carries no cause fields of its
@@ -179,8 +179,10 @@ operation budget: the clock basis [replay B](#measured-defaults-v0210) needed fo
 measured convergence. Raising the default this far carries three consequences, and each is
 worth stating plainly up front rather than found by surprise later:
 
-- **A TUI `/consult` can block the whole session for up to 2335 seconds per mage, and it cannot
-  be cancelled mid-flight.** Cancelling an in-flight consult is tracked as its own backlog item
+- **A TUI `/consult` can block the whole session for up to about 14010 seconds (~3.9 hours), and
+  it cannot be cancelled mid-flight.** The TUI puts no outer wall clock around a consult. Each
+  attempt gets up to 2335 seconds, and a seat that rotates through its three models, two attempts
+  each, can chain six of them; the seats run in parallel, so that is the consult's worst case too. Cancelling an in-flight consult is tracked as its own backlog item
   under REQ-TUI-1 and did not ship with this release.
 - **`magi consult` with no explicit `--timeout` now runs under a roughly 16818-second (~4.7 hour)
   deadline**, derived from the default ceiling with rotation enabled, in place of the 654 seconds
@@ -228,8 +230,9 @@ four timeouts carrying no reasoning measurement. The clock-coverage warning fire
 
 Three of three titular seats reached a verdict, with no rotation, zero `length` cuts, and zero
 timeouts. The clock-coverage warning still fired, naming `--timeout 28619` to cover the full
-65536-token cap at the 55 tok/s reference speed: the run's own 700-second clock covered only the
-roughly 38500 tokens the seats actually used. Wall clock: 531 seconds (the three seats ran in
+65536-token cap at the 55 tok/s reference speed, at which the run's own 700-second clock covers
+only about 38500 tokens. The seats ran faster than that reference, which is how `glm-5.3` fit
+56007 tokens inside the same clock. Wall clock: 531 seconds (the three seats ran in
 parallel; `glm-5.3`, the slowest at 56007 tokens, still finished inside that window).
 
 **What this decided.** The 65536 cap holds, though with little margin: `glm-5.3` used 85% of
@@ -255,7 +258,7 @@ typo such as `--timeout 18000` (typed for an intended `1800`) still derives 2499
 still triggers it.
 
 **What the typo check does not catch.** `ceiling_above_sanity` is narrower than "any suspiciously
-large ceiling," and three gaps are worth knowing before relying on it:
+large ceiling." Two gaps are worth knowing before relying on it, along with one contract change:
 
 - **An explicit `--timeout` whose derived ceiling lands between 601 and 2400 seconds no longer
   warns.** `--timeout 9000` (typed for an intended `900`) derives a 1249-second ceiling, and

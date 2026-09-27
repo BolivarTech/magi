@@ -14,9 +14,8 @@ changes and the **patch** position signals backward-compatible fixes.
 - **The default output cap moves from `16384` to `65536` tokens.** Chosen from replay B of
   REQ-EE-6 (the published v0.20.0 binary, the E-E bundle, measured 2026-09-27 00:21-00:37 UTC):
   the slowest titular seat, `glm-5.3`, needed 56007 tokens, 85% of the cap, to finish without a
-  `length` cut. A pre-release re-verification of the same replay, run against the actual release
-  candidate in its own separate UTC slot, confirms the result still holds before publishing; see
-  `planning/milestones/replays-record.md` for the full measurement.
+  `length` cut. Before publishing, the same replay is repeated against the release candidate in a
+  second UTC slot, and the release goes out only if every seat still returns a verdict.
 - **Balthasar's default model moves from `gpt-oss:120b-cloud` (lineage `openai`) to
   `kimi-k2.6:cloud` (lineage `moonshot`).** The same replay held it as a titular verdict at
   22612 tokens, with room to spare under the new cap; the principal model now also holds the
@@ -49,8 +48,10 @@ The wire each trio seat sends changes in exactly one field this release: the out
   ceiling covers the trio's measured convergence (roughly 38500 of the 65536-token cap at the
   55 tokens/second reference speed), not the full cap; covering the cap in full needs
   `--timeout 28619` on the headless path or `agent_timeout_secs = 3974` on the interactive one.
-- **A TUI `/consult` can now block the session for up to 2335 seconds per mage, and it cannot
-  be cancelled mid-flight.** Cancelling an in-flight consult is tracked separately, under
+- **A TUI `/consult` can now block the session for up to about 14010 seconds (~3.9 hours), and it
+  cannot be cancelled mid-flight.** The TUI has no outer wall clock: each attempt gets up to 2335
+  seconds, and a seat that rotates through its three models, two attempts each, can chain six of
+  them. Cancelling an in-flight consult is tracked separately, under
   REQ-TUI-1's backlog item, and does not ship in this release.
 - **`magi consult` with no explicit `--timeout` now runs under a roughly 16818-second
   (~4.7 hour) deadline**, up from 654 seconds. Pass an explicit `--timeout` for a shorter one.

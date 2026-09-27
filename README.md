@@ -125,7 +125,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/login` | Start the OAuth (PKCE) login flow — **best-effort**, may be rate-limited (see Configuration); prefer an API key |
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
-| `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn — with the default `agent_timeout_secs` (2335, no upper bound as of v0.20.0) this can block for a long time with a slow reasoning model, and it cannot be cancelled mid-flight; see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). Requires a configured LLM provider. |
+| `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn — with the default `agent_timeout_secs` (2335, no upper bound as of v0.20.0) this can block for up to about 14010 s (~3.9 h) if every seat rotates through its pool, and it cannot be cancelled mid-flight; see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). Requires a configured LLM provider. |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -1060,7 +1060,7 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 | Balthasar (Pragmatist) | `kimi-k2.6:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 
-> The MAGI trio deliberately runs three distinct model families (Zhipu / OpenAI / DeepSeek) for genuine
+> The MAGI trio deliberately runs three distinct model families (Zhipu / Moonshot / DeepSeek) for genuine
 > cross-lineage diversity. The `consult` tool (and the `/magi` command) only need these when a
 > multi-perspective analysis is requested.
 
