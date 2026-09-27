@@ -1598,16 +1598,16 @@ mod tests {
         ClockCoverageAnnouncer::new(None, Arc::new(RecordingNoticeSink::default()))
     }
 
-    /// The default interactive clock (cap 16 384, ceiling 90) does not cover the cap — a twin of
-    /// `tools::consult::tests::uncovered` (same three-line body over the lib; test modules are
-    /// not shared between files of the bin).
+    /// v0.20.0's default interactive clock (cap 16 384, ceiling 90) does not cover the cap — a
+    /// twin of `tools::consult::tests::uncovered` (same three-line body over the lib; test
+    /// modules are not shared between files of the bin).
     fn uncovered() -> magi_rs::magi::clock_coverage::ClockCoverageWarning {
         magi_rs::magi::clock_coverage::ClockCoverageWarning::assess(
             16_384,
             magi_rs::magi::ResolvedCeiling::configured(90),
             magi_rs::magi::clock_coverage::CoveringLever::AgentTimeoutSecs,
         )
-        .expect("the default interactive clock does not cover the default cap")
+        .expect("v0.20.0's default clock does not cover its cap")
     }
 
     /// The same [`MagiRuntimeParams`] every `analyze_direct` test in this module builds

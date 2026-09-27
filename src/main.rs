@@ -3838,15 +3838,21 @@ fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice>
     })
 }
 
-/// The completion cap magi-rs DECLARES (REQ-V4-13, REQ-EE-5).
+/// The completion cap magi-rs DECLARES (REQ-V4-13, REQ-EE-5 [MS2 default], OQ-1).
 ///
 /// Was magi-core 4.0.0's own default, numerically; it no longer is. magi-core 4.2.0 moved its
-/// own `CompletionConfig::default().max_tokens` to 32 768, and this constant did NOT move with
-/// it: `magi_completion_config` sets `max_tokens` explicitly on every build, so the wire this
-/// milestone sends stays byte-identical to 0.19.1's (spec §3). `16_384` is now magi-rs's OWN
-/// choice, one that happens to differ from the crate's, kept unchanged through v0.20.0 while
-/// REQ-EE-1's reasoning instrumentation measures which value the E-E pool actually needs;
-/// REQ-EE-6's replays are what move it, in a later release, not this rustdoc.
+/// own `CompletionConfig::default().max_tokens` to 32 768, and this constant does NOT track it:
+/// `magi_completion_config` sets `max_tokens` explicitly on every build, so the wire is exactly
+/// this value regardless of what the crate defaults to. `65_536` is magi-rs's OWN choice,
+/// distinct from the crate's, moved here from `16_384` by REQ-EE-6's replay B (2026-09-27):
+/// glm-5.3 used 56 007 tokens on the E-E bundle, 85% of the previous cap.
+///
+/// Cost and time, stated because this is billed output per seat, per attempt: at 55 tok/s a full
+/// cap takes ~1 192 s. **PM-S-2**: measured only on the 2026-09-23 Ollama cloud pool
+/// (glm-5.3, kimi-k2.6, deepseek-v4-pro — no HTTP 400 at this value); unmeasured for
+/// `mistral-large-3`, for `openai-compat` endpoints and for `kind = "anthropic"`. A model whose
+/// own output maximum is below this value answers the default with HTTP 400 and loses its
+/// lineage for the run — `[magi] max_tokens = 16384` restores the previous value.
 const DECLARED_COMPLETION_CAP: u32 = 65_536;
 
 /// The completion configuration for the trio (REQ-V4-12, REQ-V4-13, REQ-EE-3/4/5).
@@ -3871,7 +3877,7 @@ const DECLARED_COMPLETION_CAP: u32 = 65_536;
 ///   `effective_*` accessor and NEVER inherited from `CompletionConfig::default()`: each of the
 ///   three lines below overwrites what the crate default would have left in place, so an absent
 ///   key resolves through magi-rs's own accessor rather than the crate's (REQ-EE-1's evidence:
-///   the crate's own default cap moved to 32 768 in 4.2.0, and MS1 changes no default).
+///   the crate's own default cap moved to 32 768 in 4.2.0).
 ///
 /// # Returns
 ///

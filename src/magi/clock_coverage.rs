@@ -185,7 +185,7 @@ mod tests {
     use super::*;
     use crate::magi::{derive_ceiling_from_timeout, ResolvedCeiling, AGENT_TIMEOUT_MIN_SECS};
 
-    /// D-1: the default interactive consult (cap 16 384, ceiling 90 ⇒ client 27 s) is NOT
+    /// D-1: v0.20.0's default interactive consult (cap 16 384, ceiling 90 ⇒ client 27 s) is NOT
     /// covered; the warning states the coverage and the `agent_timeout_secs` that would cover
     /// it.
     #[test]

@@ -356,7 +356,7 @@ class S20Tests(unittest.TestCase):
 
     def test_the_crates_own_default_cap_fails_the_second(self) -> None:
         """32768 is magi-core 4.2.0's default. A deleted call site transmits
-        it, and since 4.2.0 that is DISTINGUISHABLE from the declared 16384."""
+        it, and that stays DISTINGUISHABLE from the declared 65536 (v0.21.0)."""
         document = _document(
             _envelope_with(completions=_seat_attempts(dict(_ATTEMPT,
                                                            cap=32768))))

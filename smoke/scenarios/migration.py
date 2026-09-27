@@ -37,8 +37,8 @@ is the per-attempt record the backend's answer produced.
 Through magi-core 4.1.0 the declared cap was numerically the crate's own
 default, so a run whose call site was deleted transmitted the same number and
 this assertion stayed green regardless. magi-core 4.2.0 moved its own default
-to 32768 while magi-rs's declared cap stays 16384 (v0.20.0 changes no default,
-REQ-EE-5), so a deleted call site now transmits a DIFFERENT number and the
+to 32768 while magi-rs's declared cap is 65536 since v0.21.0 (REQ-EE-5, OQ-1),
+so a deleted call site now transmits a DIFFERENT number and the
 equality half catches it on its own -- see
 ``test_the_crates_own_default_cap_fails_the_second``. Distinguishing a
 declared cap from an inherited one is still, independently, a question about
@@ -164,10 +164,10 @@ MIGRATION_RUN = "R4"
 #: that adjusted itself to whatever the product reported would detect nothing.
 #: Through magi-core 4.1.0 this value was numerically the crate's own default
 #: too, which is what bounded what this scenario could prove -- see the module
-#: docstring. magi-core 4.2.0 moved its own default to 32768 while this stays
-#: 16384 (v0.20.0 changes no default, REQ-EE-5), so the two are now
-#: distinguishable and the equality half of assertion 2 catches a deleted call
-#: site on its own.
+#: docstring. magi-core 4.2.0 moved its own default to 32768. v0.21.0 moved
+#: this one to 65536 (REQ-EE-5, OQ-1, confirmed by replay B), still distinct
+#: from the crate's, so the two remain distinguishable and the equality half
+#: of assertion 2 still catches a deleted call site on its own.
 DECLARED_COMPLETION_CAP = 65536
 
 #: Keys of the consult envelope this module reaches for.

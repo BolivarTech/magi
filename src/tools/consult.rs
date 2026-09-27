@@ -3820,16 +3820,16 @@ mod tests {
         }
     }
 
-    /// The default interactive clock (cap 16 384, ceiling 90) does not cover the cap — the same
-    /// fixture `clock_coverage.rs` pins, reused so these tests exercise the SAME warning that
-    /// module already proved arithmetic-correct, rather than a hand-built approximation.
+    /// v0.20.0's default interactive clock (cap 16 384, ceiling 90) does not cover the cap — the
+    /// same fixture `clock_coverage.rs` pins, reused so these tests exercise the SAME warning
+    /// that module already proved arithmetic-correct, rather than a hand-built approximation.
     fn uncovered() -> ClockCoverageWarning {
         ClockCoverageWarning::assess(
             16_384,
             ResolvedCeiling::configured(90),
             CoveringLever::AgentTimeoutSecs,
         )
-        .expect("the default interactive clock does not cover the default cap")
+        .expect("v0.20.0's default clock does not cover its cap")
     }
 
     /// S-9 with a subscriber: EVERY activation is one WARN (no dedup), under its own target, with
