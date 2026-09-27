@@ -95,7 +95,10 @@ max_query_bytes = 262144
 
 # The per-mage timeout ceiling. The two internal timeout layers are DERIVED from this
 # value and are not configurable separately, so no combination can break the relation
-# between them.
+# between them. The default (2335, as of v0.21.0) derives a 700 s per-request client
+# timeout and a 1401 s operation budget — sized to cover the shipped trio's measured
+# convergence, not the full max_tokens cap at the 55 tok/s reference speed. Setting
+# this back to 90 restores v0.20.0's clock exactly.
 agent_timeout_secs = 2335
 
 # Omitted means the threshold is MEASURED by the probe when the endpoint allows it, and

@@ -125,7 +125,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/login` | Start the OAuth (PKCE) login flow — **best-effort**, may be rate-limited (see Configuration); prefer an API key |
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
-| `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn (with a reasoning model this can take minutes; `agent_timeout_secs` has no upper bound as of v0.20.0, see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md)). Requires a configured LLM provider. |
+| `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn — with the default `agent_timeout_secs` (2335, no upper bound as of v0.20.0) this can block for a long time with a slow reasoning model, and it cannot be cancelled mid-flight; see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). Requires a configured LLM provider. |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -401,7 +401,7 @@ cap from a request that was simply honored as asked. It carries nine keys, all a
 | `ceiling_floored` | bool | `true` if the derived ceiling was raised to the 15 s floor. Strictly "raised": a ceiling that lands exactly on the floor was reached, not clamped, and reports `false` |
 | `floor_activation_threshold_secs` | number | the smallest `--timeout` that avoids the floor under this run's rotation settings. This is not "the minimum for the run to succeed": a script that retries at this value can still exhaust its budget against a slow model. When it comes back unreasonably large, the fix is to lower `max_rotations`, not to raise `--timeout` |
 | `max_rotations_effective` | number | the rotation count the budget was computed with, so a caller can weigh that second lever without redoing the arithmetic |
-| `ceiling_above_sanity` | bool | `true` if the derived ceiling exceeded a sanity threshold, which usually means a mistyped `--timeout`. Worth watching in CI, where stderr is unreliable and this flag is the only signal |
+| `ceiling_above_sanity` | bool | `true` only when an explicit `--timeout` derived a ceiling above the sanity threshold (2400 seconds as of v0.21.0, raised from 600 so the recommended gate `--timeout 16820` — which derives 2335 — does not itself trigger it), which usually means a mistyped `--timeout`. Never `true` on the configured/TUI path, however large `agent_timeout_secs` is: there is no `--timeout` to have mistyped. Worth watching in CI, where stderr is unreliable and this flag is the only signal |
 
 The last five are new in v0.15.0 and additive under the same policy as `consult` above, with no
 `schema_version` bump: the tolerate-new-fields rule applies here too.
@@ -559,9 +559,11 @@ are the same command).
 > defaults to a local **Ollama** backend (`provider = "ollama"` as of v0.12.0 — it was
 > the now-retired `"openai"` value through v0.11.0 —
 > `base_url = http://localhost:11434/v1`, model `kimi-k2.6:cloud`, and the MAGI trio
-> `glm-5.3:cloud` / `gpt-oss:120b-cloud` / `deepseek-v4-pro:cloud` — Melchior was
-> `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag). Previously
-> the no-config default was Anthropic.
+> `glm-5.3:cloud` / `kimi-k2.6:cloud` / `deepseek-v4-pro:cloud` — Melchior was
+> `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag; Balthasar was
+> `gpt-oss:120b-cloud` through 0.20.0, until measurement (REQ-DEF-1) moved it onto the
+> principal model, which now also holds that seat). Previously the no-config default was
+> Anthropic.
 
 **To use Anthropic instead**, set `provider = "anthropic"` in `magi.toml` **or**
 `MAGI_PROVIDER=anthropic`. The Anthropic Messages API path (key discovery, model
@@ -690,14 +692,14 @@ subset of what `magi-core`'s builder offers, not the whole surface:
 
 | Key | Purpose |
 |-----|---------|
-| `agent_timeout_secs` | Per-mage ceiling on the TUI path, and the fallback on the headless path when no explicit `--timeout` is given. Minimum 30 seconds, **no upper bound as of v0.20.0** (a reasoning model can legitimately need minutes). When `--timeout` is given, headless derives the ceiling from it instead (see [`applied_caps`](#applied_caps) above). Either way, the two internal timeout layers (retry budget, per-request client timeout) are **derived** from the ceiling, not configured separately: no combination of settings can break the relation between them. |
+| `agent_timeout_secs` | Per-mage ceiling on the TUI path, and the fallback on the headless path when no explicit `--timeout` is given. Minimum 30 seconds, **no upper bound as of v0.20.0** (a reasoning model can legitimately need minutes); **default 2335 as of v0.21.0**, sized to cover the shipped trio's measured convergence, up from 90. That raises `magi consult`'s own no-`--timeout` deadline to roughly 16818 seconds and makes `magi query --auto`/`--full-auto` warn `below_formula` when no `--timeout` is given either — see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). When `--timeout` is given, headless derives the ceiling from it instead (see [`applied_caps`](#applied_caps) above). Either way, the two internal timeout layers (retry budget, per-request client timeout) are **derived** from the ceiling, not configured separately: no combination of settings can break the relation between them. |
 | `max_query_bytes` | Input cap applied by magi-rs itself, before `magi-core` sees the payload — rejects rather than truncates, since a silently shortened payload would produce a verdict indistinguishable from a legitimate one. Sized for a real review diff (hundreds of KB), not the old 8 KiB limit. |
 | `input_warn_tokens` | Threshold for the oversized-input warning. Left unset, it is **measured** by a startup probe against the smallest context window across the trio (only possible when the trio's `kind` is `ollama`, the only measurable one); declaring it overrides the measurement. |
 | `retry_disabled` | Disables the trio's inherited retry, for a deployment where 2× the per-mage timeout is unacceptable. |
 | `untrusted_content` | See [Mode routing](#mode-routing) above. |
 | `reasoning` (v0.20.0) | `default` \| `disabled` \| `enabled`, whole trio, absent = `default`. See [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). |
 | `reasoning_spelling` (v0.20.0) | Only for `openai-compat` seats; no default. A rejected spelling returns HTTP 400 and condemns the whole lineage for that run; see the guide above before setting it. |
-| `max_tokens` (v0.20.0) | Output cap per completion, per seat; absent = `16384`. No upper bound of magi-rs's own; above the pinned model's own maximum, HTTP 400 condemns the lineage. |
+| `max_tokens` (v0.20.0) | Output cap per completion, per seat; absent = `65536` as of v0.21.0 (was `16384`). No upper bound of magi-rs's own; above the pinned model's own maximum, HTTP 400 condemns the lineage. |
 | `reasoning_trace` (v0.20.0) | Off by default. `true` logs a bounded, redacted head/tail of the reasoning text for cut attempts only, to the log file at `INFO`. |
 
 `tool_result_cap_bytes` (root-level, not under `[magi]`) bounds the consult report that
@@ -1056,7 +1058,7 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 | Chat (principal) | `kimi-k2.6:cloud` | `magi-rs` agent — live replies |
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
 | Melchior (Scientist) | `glm-5.3:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
-| Balthasar (Pragmatist) | `gpt-oss:120b-cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
+| Balthasar (Pragmatist) | `kimi-k2.6:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 
 > The MAGI trio deliberately runs three distinct model families (Zhipu / OpenAI / DeepSeek) for genuine

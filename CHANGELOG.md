@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.21.0] - YYYY-MM-DD
+
+### Changed
+
+- **The default output cap moves from `16384` to `65536` tokens.** Chosen from replay B of
+  REQ-EE-6 (the published v0.20.0 binary, the E-E bundle, measured 2026-09-27 00:21-00:37 UTC):
+  the slowest titular seat, `glm-5.3`, needed 56007 tokens, 85% of the cap, to finish without a
+  `length` cut. A pre-release re-verification of the same replay, run against the actual release
+  candidate in its own separate UTC slot, confirms the result still holds before publishing; see
+  `planning/milestones/replays-record.md` for the full measurement.
+- **Balthasar's default model moves from `gpt-oss:120b-cloud` (lineage `openai`) to
+  `kimi-k2.6:cloud` (lineage `moonshot`).** The same replay held it as a titular verdict at
+  22612 tokens, with room to spare under the new cap; the principal model now also holds the
+  Balthasar seat. The scaffold pool changes with it: `kimi-k2.6:cloud` leaves (a seat now holds
+  `moonshot`) and `gpt-oss:120b-cloud` enters with the `openai` lineage that seat freed,
+  reordered by measured strength (`minimax-m3`, `nemotron-3-super`, `gpt-oss:120b`,
+  `mistral-large-3`, `gemma4`).
+- **`agent_timeout_secs`'s default moves from `90` to `2335` seconds.** It derives a
+  700-second per-request client timeout and a 1401-second operation budget, sized to cover the
+  shipped trio's measured convergence rather than chat-speed responsiveness.
+- **`ceiling_above_sanity`'s sanity threshold moves from `600` to `2400` seconds, and it is now
+  evaluated only when `--timeout` was passed explicitly.** At the new 2335-second default
+  ceiling, evaluating it on the configured/TUI path too would have flagged every default `magi
+  consult` as a probable typo. The recommended gate `--timeout 16820` (which derives exactly
+  2335) no longer triggers the warning, while a classic typo such as `--timeout 18000` (typed
+  for an intended `1800`, deriving 2499) still does.
+
+The wire each trio seat sends changes in exactly one field this release: the output cap.
+
+### Notes / Known behaviour
+
+- **The clock-coverage warning still fires on every default consult, by design.** The default
+  ceiling covers the trio's measured convergence (roughly 38500 of the 65536-token cap at the
+  55 tokens/second reference speed), not the full cap; covering the cap in full needs
+  `--timeout 28619` on the headless path or `agent_timeout_secs = 3974` on the interactive one.
+- **A TUI `/consult` can now block the session for up to 2335 seconds per mage, and it cannot
+  be cancelled mid-flight.** Cancelling an in-flight consult is tracked separately, under
+  REQ-TUI-1's backlog item, and does not ship in this release.
+- **`magi consult` with no explicit `--timeout` now runs under a roughly 16818-second
+  (~4.7 hour) deadline**, up from 654 seconds. Pass an explicit `--timeout` for a shorter one.
+- **`magi query --auto`/`--full-auto` with no explicit `--timeout` now warns `below_formula`
+  and publishes it in the JSON**, because their 900-second tier default deadline sits below
+  what the derivation formula requires at the new ceiling. The remedy is an explicit
+  `--timeout` or `[headless] timeout_secs`.
+- **The `65536` default is measured only against the Ollama cloud pool replay B used**
+  (`glm-5.3`, `kimi-k2.6`, `deepseek-v4-pro`, none of which returned an HTTP 400 under it). It
+  is unmeasured for `mistral-large-3`, for `openai-compat` endpoints, and for `kind =
+  "anthropic"`; a model whose own output maximum sits below `65536` answers this default with
+  HTTP 400 and loses its lineage for the run.
+
+### Upgrade note
+
+The default output cap moves `16384` → `65536` and the default interactive ceiling moves `90` →
+`2335`. Set `max_tokens = 16384` and `agent_timeout_secs = 90` under `[magi]` to restore the
+previous values. For a headless review gate, `--timeout 16820` derives exactly the new default
+ceiling; see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md) for the measurement behind
+every number above.
+
 ## [0.20.0] - 2026-09-26
 
 ### Changed
