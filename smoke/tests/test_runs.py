@@ -346,6 +346,15 @@ class DefinitionTableTests(unittest.TestCase):
         and three in S18, all from one under-dimensioned number. The same
         payload against the same backend at --timeout 1800 -- 249s per mage,
         149s per attempt -- completed in 103s with three real verdicts.
+
+        v0.21.0 (PM-S-5) moved the number again: with the shipped 65 536-token
+        output cap and the default trio's reasoning models, --timeout 1800
+        (74s per request) leaves rotation, not the titular trio, to answer.
+        --timeout 16820 -- 2335s per mage, 700s per attempt -- was measured
+        against http://localhost:11434/v1 with the release binary of
+        03f81f4 (planning/milestones/MS2-smoke-measure.md,
+        2026-09-27T08:48:48Z): R4 completed in 283s with three titular
+        verdicts, no HTTP 400 and no context-window rejection.
         """
         argv = list(runs.DEFINITIONS["R4"].argv)
         self.assertIn("--timeout", argv)

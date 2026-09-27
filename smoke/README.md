@@ -141,9 +141,25 @@ decide the total:
 The other six are short queries and consults; nothing measures them individually, and a
 table of invented per-run numbers would be worse than none.
 
+**PM-S-5 re-measured every trio-touching run against the 0.21.0 defaults** (the
+65 536-token cap, the `kimi-k2.6:cloud` Balthasar seat) before SMOKE #1, since the old
+numbers above were taken under the 16 384-token cap and the previous trio:
+
+| Run | What it does | Wall clock (0.21.0 defaults) |
+|-----|--------------|-----------:|
+| R4 | consult, 250 kB payload, structured verdicts, `--timeout 16820` | 283 s |
+| R5 | query with `--consult --auto` | 170 s |
+| R8 | consult, small payload | 67 s |
+
+Measured 2026-09-27, 08:48:48-09:09:47 UTC, against `http://localhost:11434/v1` (local
+daemon, `:cloud` models), release binary of `03f81f4`
+(`planning/milestones/MS2-smoke-measure.md`). Each run's harness timeout carries at
+least double its own measurement, because the cloud endpoint's pace varies by time of
+day (PM-S-8) and a single overnight sample is not a guarantee for a morning one.
+
 **R4 no longer reproduces failure #4, and that is a deliberate trade.** The spec picks
 S7 as the direct reproduction of a `--timeout`-driven ceiling collapse, and 300 was the
-value that collapsed it. At 1800 the arithmetic assertions still check the derived
+value that collapsed it. At 16820 the arithmetic assertions still check the derived
 relation, but `ceiling_floored` is false and the collapse itself is out of reach outside
 a hang. What was bought is a run that can complete at all; what was sold is the
 reproduction. A cheap standalone assertion on a low-`--timeout` run would buy it back
@@ -157,6 +173,18 @@ abandoned after 82 seconds, and eight assertions across four scenarios went red 
 one number. At 1800 the same payload against the same backend finished in 103 seconds
 with three real verdicts.
 
+**v0.21.0 (PM-S-5) moved the number again.** The shipped output cap grew to 65 536
+tokens and Balthasar's default seat became `kimi-k2.6:cloud`, a reasoning model that
+needs up to 700 seconds per request to use it. `--timeout 1800` derives only 74 seconds
+per request, so at the shipped defaults R4 would certify the pool's fallbacks
+recovering the seats rather than the titular trio that actually ships. `--timeout
+16820` derives 700 seconds per request (2335 seconds per mage, the same clock `docs/`
+recommends for a MAGI gate) and was measured against `http://localhost:11434/v1` with
+the release binary of `03f81f4`: R4 finished in 283 seconds with three titular
+verdicts, no HTTP 400 and no context-window rejection. A run that genuinely hangs can
+take up to the harness's own ceiling, 20 184 seconds, 20 % above the product's -- the
+harness never kills the abandonment R4 exists to observe.
+
 **Four rounds were needed to reach the first green**, and what the three red ones found is
 worth more than the green: two guardians that could never have passed, one control that
 carried a different prompt from the run it controlled, one detector reading another
@@ -166,10 +194,10 @@ by reading the code.
 **S25 adds one trio consult per run (v0.20.0, REQ-EE-3).** It is standalone rather than
 piggybacking on R4, because its property has to hold on the trio the operator actually
 configured, not on a payload this harness invented. Its clock is R4's own measured one
-(`--timeout 1800`, harness ceiling 2160 s), so a seat that runs long abandons typed rather
-than being killed by the harness. Its own wall clock is not estimated here: it is measured
-on the first SMOKE #1 run of this milestone and recorded, with its date, once that number
-exists.
+(`--timeout 16820`, harness ceiling 20184 s), so a seat that runs long abandons typed
+rather than being killed by the harness. Its own wall clock is not estimated here: it is
+measured on the first SMOKE #1 run of this milestone and recorded, with its date, once
+that number exists.
 
 ## Out of scope
 
