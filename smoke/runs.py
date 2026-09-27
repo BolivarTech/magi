@@ -506,11 +506,38 @@ _R6_CREDENTIAL = mint_credential()
 #: product's arithmetic rather than padding: the budget is spread over two
 #: attempts of each of three models per mage, so what a healthy run needs is a
 #: small fraction of what a fully rotating one is allowed.
-LARGE_CONSULT_TIMEOUT_S = 1800
+#:
+#: v0.21.0 (PM-S-5) moved it again, for the same reason: the shipped output
+#: cap grew to 65 536 tokens and the default trio seats reasoning models that
+#: need up to 700s per request to use it, so 1800 (74s per request) would
+#: certify the pool's fallbacks recovering the seats, not the trio that
+#: actually ships. 16820 derives 2335s per mage and 700s per attempt -- the
+#: same clock ``docs/`` recommends for a MAGI gate -- and was measured in
+#: ``planning/milestones/MS2-smoke-measure.md`` (2026-09-27T08:48:48Z,
+#: http://localhost:11434/v1, release binary of ``03f81f4``): R4 finished in
+#: 283s with three real verdicts, no HTTP 400 and no context-window rejection.
+LARGE_CONSULT_TIMEOUT_S = 16820
 
 #: The harness's own ceiling for that run, 20 % above the product's. The
 #: comment in the table says why it can never be the smaller of the two.
-LARGE_CONSULT_CEILING_S = 2160
+LARGE_CONSULT_CEILING_S = 20184
+
+#: Seconds each trio-touching run took at the 0.21.0 defaults, MEASURED --
+#: never estimated -- against ``http://localhost:11434/v1`` (local daemon,
+#: ``:cloud`` models) with the release binary of ``03f81f4``, 2026-09-27
+#: 08:48:48-09:09:47 UTC. Copied verbatim (rounded up) from
+#: ``planning/milestones/MS2-smoke-measure.md``: R4 282.296s, R5 169.610s,
+#: R8 66.062s. The key set is exact: it names every run whose
+#: ``needs_trio`` is true, no more and no fewer.
+TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67}
+
+#: The factor a trio run's ``timeout_s`` must clear over its measurement in
+#: :data:`TRIO_RUNS_MEASURED_S`. The cloud endpoint's pace varies by time
+#: slot (PM-S-8) and the measurement above is a single run in one slot -- a
+#: US-morning slot measured slower elsewhere in this project's history --
+#: so the harness timeout carries double that single sample rather than
+#: trusting it at face value.
+MEASURED_WALL_CLOCK_MARGIN = 2
 
 #: The question R3 asks, and the one R2 asks without memory. ONE constant
 #: for both, so the control cannot drift away from the run it controls.
