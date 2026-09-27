@@ -5,6 +5,7 @@
 
 import contextlib
 import io
+import math
 import pathlib
 import unittest
 import urllib.error
@@ -21,6 +22,13 @@ from smoke.product import ProductOutput
 from smoke.registry import Registry, ScenarioEntry
 from smoke.secrets import PlantedSecret
 from smoke.tests import support
+
+#: The product's default max_rotations (``DEFAULT_MAX_ROTATIONS``).
+_DEFAULT_MAX_ROTATIONS = 2
+
+#: The per-request client timeout the product's 0.21.0 default ceiling
+#: (2335 s) derives: the measured-convergence clock (MS2 amendment).
+_PRODUCT_DEFAULT_CLIENT_TIMEOUT_S = 700
 
 
 def _http_post(url: str, credential: bytes) -> tuple[int, bytes]:
@@ -355,6 +363,42 @@ class DefinitionTableTests(unittest.TestCase):
         self.assertEqual(
             {"R7"},
             {run_id for run_id, item in runs.DEFINITIONS.items() if item.rotates})
+
+    def test_the_large_payload_run_gives_each_request_the_products_default_clock(
+            self) -> None:
+        """PM-S-5 (v0.21.0): R4 must let the shipped trio answer. The
+        product's default ceiling (2335 s) gives each request 700 s, the
+        convergence clock its reasoning titulars need. At --timeout 1800 R4
+        derived 74 s per request, and replay A showed what that does: the
+        reasoning titulars end by timeout and only rotation keeps the seats,
+        so the certifying run would certify the pool, not the trio that
+        ships.
+        """
+        from smoke.scenarios import trio
+        factor = trio.attempt_factor(_DEFAULT_MAX_ROTATIONS, False)
+        ceiling = max(trio.raw_ceiling(runs.LARGE_CONSULT_TIMEOUT_S, factor),
+                      trio.CEILING_FLOOR_SECS)
+        self.assertGreaterEqual(trio.client_timeout(ceiling),
+                                _PRODUCT_DEFAULT_CLIENT_TIMEOUT_S)
+
+    def test_every_trio_run_leaves_room_for_its_measured_wall_clock(
+            self) -> None:
+        """PM-S-5 (v0.21.0): each run that touches the trio was MEASURED at
+        the 0.21.0 defaults before SMOKE #1 (record:
+        ``planning/milestones/MS2-smoke-measure.md``), and its harness
+        timeout is at least :data:`runs.MEASURED_WALL_CLOCK_MARGIN` times
+        that measurement. The key set is exact: a trio run added without a
+        measurement, or a measurement kept for a run that no longer touches
+        the trio, is a failure here rather than a guess somewhere else.
+        """
+        trio_runs = {run_id for run_id, item in runs.DEFINITIONS.items()
+                     if item.needs_trio}
+        self.assertEqual(trio_runs, set(runs.TRIO_RUNS_MEASURED_S))
+        for run_id, measured in runs.TRIO_RUNS_MEASURED_S.items():
+            self.assertGreaterEqual(
+                runs.DEFINITIONS[run_id].timeout_s,
+                math.ceil(measured * runs.MEASURED_WALL_CLOCK_MARGIN),
+                run_id)
 
 
 class CarriedPayloadTests(unittest.TestCase):
