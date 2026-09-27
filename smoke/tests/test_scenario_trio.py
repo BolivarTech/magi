@@ -236,12 +236,31 @@ class DerivationTests(unittest.TestCase):
                             trio.floor_activation_threshold(factor),
                         "operation_budget_secs": expected[1],
                         "ceiling_floored": expected[3],
-                        "ceiling_above_sanity": expected[0] > 600}
+                        "ceiling_above_sanity":
+                            expected[0] > trio.CEILING_SANITY_SECS}
                 derived = trio.derive(caps)
                 self.assertIsNotNone(derived)
                 self.assertEqual(expected,
                                  (derived.ceiling, derived.budget,
                                   derived.client, derived.floored))
+
+    def test_the_sanity_bound_mirrors_the_product(self) -> None:
+        """D-1 (b), v0.21.0: the product flags a derived ceiling strictly
+        above 2400 s, chosen so the recommended gate --timeout 16820 (2335 s)
+        is not a typo while 18000 (2499 s, one digit too many on 1800) still
+        is. The mirror has to move with the product, or S7's third assertion
+        reports a disagreement that is the harness's own staleness.
+        """
+        self.assertEqual(2400, trio.CEILING_SANITY_SECS)
+        factor = trio.attempt_factor(2, False)
+        for timeout, flagged in ((16820, False), (17286, False),
+                                 (17294, True), (18000, True)):
+            with self.subTest(timeout=timeout):
+                caps = {"timeout_secs": timeout,
+                        "max_rotations_effective": 2,
+                        "floor_activation_threshold_secs":
+                            trio.floor_activation_threshold(factor)}
+                self.assertIs(flagged, trio.derive(caps).above_sanity)
 
     def test_the_relation_holds_for_every_derivation_in_the_table(self) -> None:
         """REQ-A04: the two inner layers always fit inside the ceiling."""

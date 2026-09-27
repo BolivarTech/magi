@@ -1857,6 +1857,31 @@ mod tests {
         }
     }
 
+    /// D-1 (MS2): `ceiling_above_sanity` reports a probable `--timeout` TYPO, so a run with no
+    /// `--timeout` is never flagged, whatever its configured ceiling. The `None` branch used to
+    /// compare the configured ceiling against `CEILING_SANITY_SECS` too — harmless while no
+    /// default exceeded 600 s, but the 0.21.0 default (2 335 s) would tell every default
+    /// headless run to "check --timeout for an extra digit" nobody typed. The explicit branch
+    /// still flags (`a_ceiling_above_the_sanity_threshold_is_flagged_but_never_clamped`).
+    ///
+    /// MUTATION (required): compare the ceiling on both branches again ⇒ red at every row
+    /// above `CEILING_SANITY_SECS` (5 000 and 86 400 once it is 2 400).
+    #[test]
+    fn without_an_explicit_timeout_nothing_is_flagged_as_a_typo() {
+        for configured in [30_u64, 90, 600, 601, AGENT_TIMEOUT_SECS, 5_000, 86_400] {
+            let (ceiling, t) = BudgetTelemetry::derive(None, configured, 2, false);
+            assert_eq!(
+                ceiling.secs(),
+                configured,
+                "precondition: the configured ceiling"
+            );
+            assert!(
+                !t.ceiling_above_sanity,
+                "configured {configured}s with no --timeout: there is no typo to report"
+            );
+        }
+    }
+
     /// REQ-A04 holds on the `None` path too, for a configured ceiling BELOW the floor.
     ///
     /// `config.rs` validates `agent_timeout_secs >= AGENT_TIMEOUT_MIN_SECS` (no ceiling since
@@ -2116,6 +2141,44 @@ mod tests {
             derive_ceiling_from_timeout(18_000, 2, false),
             "flagged, NOT clamped: an upper bound is exactly what E-B removes"
         );
+    }
+
+    /// D-1 (b), decided by the user on 2026-09-27: `CEILING_SANITY_SECS` is 2 400 s. The two
+    /// facts that chose it, driven through the real derivation at the shipped rotations and
+    /// retry (`max_rotations = 2`, `DEFAULT_MAX_ROTATIONS` in the bin crate; retry on): the
+    /// recommended gate `--timeout 16820` derives 2 335 s and is NOT a typo, while the classic
+    /// typo `--timeout 18000` (one digit too many on 1800) derives 2 499 s and still IS one.
+    /// The comparison is strict (`ceiling > CEILING_SANITY_SECS`): a ceiling of exactly 2 400 s
+    /// is not flagged, 2 401 s is.
+    ///
+    /// MUTATIONS (required): `CEILING_SANITY_SECS = 600` ⇒ red on the gate row and on 2 400;
+    /// `= 2_499` ⇒ red on the typo row and on 2 401; `>=` in place of `>` in
+    /// `BudgetTelemetry::derive` ⇒ red on the 2 400 row.
+    #[test]
+    fn the_sanity_threshold_spares_the_gate_timeout_and_still_catches_the_classic_typo() {
+        for (timeout, ceiling, flagged) in [
+            (16_820_u64, 2_335_u64, false),
+            (17_286, 2_400, false),
+            (17_294, 2_401, true),
+            (18_000, 2_499, true),
+        ] {
+            assert_eq!(
+                derive_ceiling_from_timeout(timeout, 2, false),
+                ceiling,
+                "precondition: --timeout {timeout} derives {ceiling}s"
+            );
+            let (resolved, t) = BudgetTelemetry::derive(
+                Some(&TimeoutDecision::obeyed(timeout)),
+                AGENT_TIMEOUT_SECS,
+                2,
+                false,
+            );
+            assert_eq!(resolved.secs(), ceiling, "flagged or not, never clamped");
+            assert_eq!(
+                t.ceiling_above_sanity, flagged,
+                "--timeout {timeout} (ceiling {ceiling}s) against a {CEILING_SANITY_SECS}s bound"
+            );
+        }
     }
 
     /// REQ-V4-04: the cap is `client_timeout - RETRY_AFTER_JITTER`, which makes

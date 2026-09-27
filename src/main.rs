@@ -11627,9 +11627,9 @@ mod tests {
     #[test]
     fn the_sanity_notice_reaches_the_screen() {
         let n = above_sanity_notice(
-            900,
+            2_499,
             &magi_rs::magi::BudgetTelemetry {
-                operation_budget_secs: 540,
+                operation_budget_secs: 1_499,
                 ceiling_floored: false,
                 floor_activation_threshold_secs: 114,
                 max_rotations_effective: 2,
@@ -11638,7 +11638,7 @@ mod tests {
         )
         .expect("an above-sanity ceiling must produce a notice");
         assert_eq!(n.level, Level::WARN);
-        assert!(n.text.contains("900"));
+        assert!(n.text.contains("2499"));
     }
 
     /// **Row 3** — a configuration decision the user made and that is being honoured stays off
