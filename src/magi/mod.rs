@@ -71,7 +71,7 @@ pub const AGENT_TIMEOUT_MIN_SECS: u64 = 30;
 /// 90 s: enough for a legitimate generation from a cloud model with cold-load, and leaves the
 /// worst case per mage (2 attempts) at 180 s. The magi-core default (300) is too high: it makes
 /// the retry chain unreachable.
-pub const AGENT_TIMEOUT_SECS: u64 = 90;
+pub const AGENT_TIMEOUT_SECS: u64 = 2_335;
 
 /// Numerator/denominator for the fraction of the ceiling given to the total retry budget.
 ///

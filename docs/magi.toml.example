@@ -96,7 +96,7 @@ max_query_bytes = 262144
 # The per-mage timeout ceiling. The two internal timeout layers are DERIVED from this
 # value and are not configurable separately, so no combination can break the relation
 # between them.
-agent_timeout_secs = 90
+agent_timeout_secs = 2335
 
 # Omitted means the threshold is MEASURED by the probe when the endpoint allows it, and
 # otherwise falls back to the built-in default.
