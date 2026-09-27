@@ -259,7 +259,7 @@ large ceiling," and three gaps are worth knowing before relying on it:
 
 - **An explicit `--timeout` whose derived ceiling lands between 601 and 2400 seconds no longer
   warns.** `--timeout 9000` (typed for an intended `900`) derives a 1249-second ceiling, and
-  `--timeout 12000` (for `1200`) derives 1665 seconds — both above the 600-second threshold this
+  `--timeout 12000` (for `1200`) derives 1665 seconds. Both land above the 600-second threshold this
   release retired, both below the 2400-second one that replaced it, so neither prints the "extra
   digit" notice.
 - **A configured `[magi].agent_timeout_secs` set implausibly high never warns at all.**
