@@ -1075,6 +1075,42 @@ mod tests {
         );
     }
 
+    /// REQ-EE-5/REQ-TUI-1 [MS2], documentation half: `docs/REASONING-BUDGET.md` recommends the
+    /// gate `--timeout` the MS2 amendment decided, and its "shipped defaults" fragment and its
+    /// `max_tokens` key line write out the values THIS build ships. The fragment exists to be
+    /// copied; a copy that pins last release's numbers silently undoes the release.
+    ///
+    /// MUTATIONS (required): delete the recommendation sentence ⇒ red on the needle; change
+    /// `DECLARED_COMPLETION_CAP` or `AGENT_TIMEOUT_SECS` without the doc ⇒ red on the fragment.
+    #[test]
+    fn the_budget_doc_recommends_the_gate_timeout_and_writes_out_the_shipped_defaults() {
+        let doc = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/REASONING-BUDGET.md"
+        ))
+        .expect("docs/REASONING-BUDGET.md must be readable")
+        .replace('\r', "");
+        let recommended = format!("--timeout {RECOMMENDED_GATE_TIMEOUT_SECS}");
+        assert!(
+            doc.contains(&recommended),
+            "the doc must recommend `{recommended}` for the gate"
+        );
+        for line in [
+            format!("\n# max_tokens = {}  #", crate::DECLARED_COMPLETION_CAP),
+            format!("\nmax_tokens = {}\n", crate::DECLARED_COMPLETION_CAP),
+            format!(
+                "\nagent_timeout_secs = {}\n",
+                magi_rs::magi::AGENT_TIMEOUT_SECS
+            ),
+        ] {
+            assert!(
+                doc.contains(&line),
+                "the doc must write out the shipped default `{}`",
+                line.trim()
+            );
+        }
+    }
+
     #[test]
     fn test_should_emit_default_notice_only_for_openai_without_file() {
         use magi_rs::magi::kind::ProviderKind;
