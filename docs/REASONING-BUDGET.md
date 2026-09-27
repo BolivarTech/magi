@@ -74,8 +74,8 @@ or not the model used the budget to produce a usable answer). Left absent, magi-
 declared value, `65536` as of v0.21.0 (`DECLARED_COMPLETION_CAP`; magi-core's own crate default
 moved to `32768` in 4.2.0, but magi-rs still sets this field explicitly on every request, so the
 crate default is never inherited). The value comes from replay B of REQ-EE-6: against the E-E
-bundle, the slowest titular seat, `glm-5.3`, used 56007 tokens of reasoning and answer — 85% of
-the cap, tight but enough to finish without a `length` cut.
+bundle, the slowest titular seat, `glm-5.3`, used 56007 tokens of reasoning and answer, 85% of
+the cap. That is tight, but enough to finish without a `length` cut.
 
 There is no upper bound magi-rs imposes: raise it as far as a seat's own limits allow. Only zero
 or a negative value is rejected at configuration load, along with anything above 4294967295
@@ -86,7 +86,7 @@ condemns the whole lineage for that run, not just the oversized request.
 **The 65536 default is measured only against the Ollama cloud pool replay B used on
 2026-09-27: `glm-5.3`, `kimi-k2.6`, and `deepseek-v4-pro` all completed under it with no HTTP
 400.** It is unmeasured for `mistral-large-3`, for any `openai-compat` endpoint, and for
-`kind = "anthropic"` — a model whose own output maximum sits below 65536 answers this default
+`kind = "anthropic"`: a model whose own output maximum sits below 65536 answers this default
 with HTTP 400 and loses its lineage for the run. Check a pinned model's own output limit before
 relying on the default.
 
@@ -107,16 +107,16 @@ and the log, naming what fraction of the cap the clock covers and what `--timeou
 `agent_timeout_secs` would cover it instead. The consult still runs: the warning informs, it
 does not block, and it never suggests a value the configuration would reject.
 
-**In v0.21.0, with the shipped defaults, this warning still fires on every consult — by design,
-not by oversight.** The default ceiling (`agent_timeout_secs = 2335`) derives a 700-second
-per-request client timeout sized to cover the trio's *measured convergence* (`glm-5.3` needed up
-to 56007 tokens in replay B, roughly 38500 tokens' worth of runway at the 55 tok/s reference
-speed), not the full 65536-token cap at that reference speed. Covering the cap in full needs
-`--timeout 28619` on the headless path, or `agent_timeout_secs = 3974` on the interactive one —
-figures [replay B](#measured-defaults-v0210) recorded but did not run, because a consult that
-actually needs the whole cap is rare. The warning carries no cause fields of its own, and it is
-emitted under its own tracing target, so it can be filtered as a class if it becomes noise on an
-installation that has already tuned both knobs.
+**In v0.21.0, with the shipped defaults, this warning still fires on every consult, and that is
+by design, not oversight.** The default ceiling (`agent_timeout_secs = 2335`) derives a
+700-second per-request client timeout sized to cover the trio's *measured convergence*
+(`glm-5.3` needed up to 56007 tokens in replay B, roughly 38500 tokens' worth of runway at the
+55 tok/s reference speed), not the full 65536-token cap at that reference speed. Covering the
+cap in full needs `--timeout 28619` on the headless path, or `agent_timeout_secs = 3974` on the
+interactive one: figures [replay B](#measured-defaults-v0210) recorded but did not run, because
+a consult that actually needs the whole cap is rare. The warning carries no cause fields of its
+own, and it is emitted under its own tracing target, so it can be filtered as a class if it
+becomes noise on an installation that has already tuned both knobs.
 
 ## `reasoning_trace`
 
@@ -175,9 +175,9 @@ from it (the retry budget and the per-request client timeout) still follow the s
 always have; there is still exactly one knob.
 
 The 2335-second default derives a 700-second per-request client timeout and a 1401-second
-operation budget — the clock basis [replay B](#measured-defaults-v0210) needed for the trio's
-measured convergence. Raising the default this far carries three consequences worth stating
-plainly rather than discovering later:
+operation budget: the clock basis [replay B](#measured-defaults-v0210) needed for the trio's
+measured convergence. Raising the default this far carries three consequences, and each is
+worth stating plainly up front rather than found by surprise later:
 
 - **A TUI `/consult` can block the whole session for up to 2335 seconds per mage, and it cannot
   be cancelled mid-flight.** Cancelling an in-flight consult is tracked as its own backlog item
@@ -200,7 +200,7 @@ plainly rather than discovering later:
 The 65536-token cap, the `kimi-k2.6` Balthasar seat, and the 2335-second `agent_timeout_secs`
 default all trace back to two replays run against the published v0.20.0 binary, on the E-E
 bundle, on 2026-09-27 between 00:21 and 00:37 UTC, against `http://localhost:11434/v1` (a local
-daemon, `:cloud` models) — one attempt per replay, no failures that needed a retry.
+daemon, `:cloud` models), one attempt per replay, with no failures that needed a retry.
 
 **Replay A — what v0.20.0 ships** (cap 16384, the v0.20.0 trio, `--timeout 1800`):
 
@@ -228,21 +228,21 @@ four timeouts carrying no reasoning measurement. The clock-coverage warning fire
 
 Three of three titular seats reached a verdict, with no rotation, zero `length` cuts, and zero
 timeouts. The clock-coverage warning still fired, naming `--timeout 28619` to cover the full
-65536-token cap at the 55 tok/s reference speed — the run's own 700-second clock covered only
-the roughly 38500 tokens the seats actually used. Wall clock: 531 seconds (the three seats ran in
+65536-token cap at the 55 tok/s reference speed: the run's own 700-second clock covered only the
+roughly 38500 tokens the seats actually used. Wall clock: 531 seconds (the three seats ran in
 parallel; `glm-5.3`, the slowest at 56007 tokens, still finished inside that window).
 
-**What this decided.** The 65536 cap holds, though with little margin — `glm-5.3` used 85% of
+**What this decided.** The 65536 cap holds, though with little margin: `glm-5.3` used 85% of
 it. `kimi-k2.6` held the Balthasar seat as a titular with room to spare. Every titular's
 reasoning channel ran large under `reasoning = "default"`, so the default behaves like
 `"enabled"` for this pool; none of E-E's original cuts trace to a daemon that spent tokens
 without reasoning to show for it. No 65536-token request produced an HTTP 400 against `glm-5.3`,
 `kimi-k2.6`, or `deepseek-v4-pro`.
 
-**Limits, stated rather than hidden.** Each replay ran once (n = 1), in a single evening slot for
-US-based cloud endpoints; the Ollama cloud pool is known to behave differently across the day, so
-a slower slot could push convergence past what this evidence shows. The full replay evidence,
-including the classification of E-E's original cuts, lives in
+**Limits, laid out rather than glossed over.** Each replay ran once (n = 1), in a single evening
+slot for US-based cloud endpoints; the Ollama cloud pool is known to behave differently across
+the day, so a slower slot could push convergence past what this evidence shows. The full replay
+evidence, including the classification of E-E's original cuts, lives in
 `planning/milestones/replays-record.md`.
 
 ### Recommended `--timeout` for a review gate
@@ -271,9 +271,9 @@ reasoning_trace = false
 agent_timeout_secs = 2335
 ```
 
-Writing these out pins `max_tokens` at 65536 and `agent_timeout_secs` at 2335 — this release's
-values. This release changed both from v0.20.0's (16384 and 90): a file that spells out the old
-numbers restores v0.20.0's behaviour exactly; leave them commented to follow whichever release's
+Writing these out pins `max_tokens` at 65536 and `agent_timeout_secs` at 2335, this release's
+values. Both changed from v0.20.0's (16384 and 90): a file that spells out the old numbers
+restores v0.20.0's behaviour exactly; leave them commented to follow whichever release's
 defaults you are running instead.
 
 A faster-terminating profile for an `openai-compat` trio (OpenRouter, a self-hosted
