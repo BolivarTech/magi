@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.20.0
-// Date: 2026-09-26
+// Version: 0.21.0
+// Date: 2026-09-28
 
 //! REQ-EE-5's per-activation clock-coverage check (S-9): whether the effective per-request
 //! client timeout can deliver `[magi].max_tokens` at magi-core's measured reference generation

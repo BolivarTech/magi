@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.20.0
-# Date: 2026-09-26
+# Version: 0.21.0
+# Date: 2026-09-28
 """S20, S21, S22, S25 and S26 -- the reasoning-and-migration scenarios.
 
 S20, S21 and S22 are the three scenarios the magi-core 4.0.0 move needs. S25

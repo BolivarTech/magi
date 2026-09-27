@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.21.0
+# Date: 2026-09-28
 """The single door between a scenario and the product.
 
 ``run=None`` never meant *leaves the product alone*. Several standalone
