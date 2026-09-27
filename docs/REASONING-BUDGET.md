@@ -109,9 +109,9 @@ does not block, and it never suggests a value the configuration would reject.
 
 **In v0.21.0, with the shipped defaults, this warning still fires on every consult, and that is
 by design, not oversight.** The default ceiling (`agent_timeout_secs = 2335`) derives a
-700-second per-request client timeout sized to cover the trio's *measured convergence*
-(`glm-5.3` needed up to 56007 tokens in replay B and produced them well above the 55 tok/s
-reference speed, at which 700 seconds covers only about 38500 tokens), not the full 65536-token cap at that reference speed. Covering the
+700-second per-request client timeout sized to cover the trio's *measured convergence*, not the
+full 65536-token cap at the 55 tok/s reference speed. At that speed 700 seconds covers only about
+38500 tokens; `glm-5.3` needed up to 56007 in replay B and produced them well above it. Covering the
 cap in full needs `--timeout 28619` on the headless path, or `agent_timeout_secs = 3974` on the
 interactive one: figures [replay B](#measured-defaults-v0210) recorded but did not run, because
 a consult that actually needs the whole cap is rare. The warning carries no cause fields of its

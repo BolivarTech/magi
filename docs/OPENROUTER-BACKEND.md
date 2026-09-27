@@ -78,8 +78,8 @@ magi: per-mage ceiling 40s derived from --timeout 300s (operation budget 24s/att
 
 **Against OpenRouter, prefer omitting `--timeout` entirely,** as long as `agent_timeout_secs` is
 declared the way the study declares it (`120`). Under the 0.21.0 default (`2335`) the same
-derivation yields a ~16818-second deadline, so declare the ceiling you want first. The default headless
-wall clock is already derived from `attempts x (1 + max_rotations) x
+derivation yields a ~16818-second deadline, so declare the ceiling you want first. The default
+headless wall clock is already derived from `attempts x (1 + max_rotations) x
 agent_timeout_secs` plus slack, so it accommodates the full rotation budget. If
 CI demands a hard cap, pass **>= 900 s** and take the warning naming the computed
 minimum.
