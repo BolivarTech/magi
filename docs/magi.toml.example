@@ -48,7 +48,7 @@ model = "claude-sonnet-4-6"
 # ===========================================================================
 [magi]
 melchior_model  = "glm-5.3:cloud"          # Scientist  — theoretical analysis
-balthasar_model = "gpt-oss:120b-cloud"     # Pragmatist — practical trade-offs
+balthasar_model = "kimi-k2.6:cloud"        # Pragmatist — practical trade-offs
 caspar_model    = "deepseek-v4-pro:cloud"  # Critic     — adversarial review
 
 # BREAKING (v0.13.0): a seat that declares a model MUST declare its lineage — the independent
@@ -58,7 +58,7 @@ caspar_model    = "deepseek-v4-pro:cloud"  # Critic     — adversarial review
 # names all three at once. A seat left on the built-in model inherits the built-in lineage and owes
 # nothing.
 melchior_lineage  = "zhipu"
-balthasar_lineage = "openai"
+balthasar_lineage = "moonshot"
 caspar_lineage    = "deepseek"
 
 # When `false`, the agent asks before each autonomous launch. When `true`, it
@@ -215,16 +215,16 @@ max_total_bytes = 536870912
 # lineage covers only that seat, because the other two still hold their own lineage in
 # play while it rotates.
 [[magi.fallback]]
-model   = "kimi-k2.6:cloud"
-lineage = "moonshot"
-
-[[magi.fallback]]
 model   = "minimax-m3:cloud"
 lineage = "minimax"
 
 [[magi.fallback]]
 model   = "nemotron-3-super:cloud"
 lineage = "nvidia"
+
+[[magi.fallback]]
+model   = "gpt-oss:120b-cloud"
+lineage = "openai"
 
 [[magi.fallback]]
 model   = "mistral-large-3:675b-cloud"

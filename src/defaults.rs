@@ -29,7 +29,7 @@ pub const DEFAULT_OPENAI_BASE_URL: &str = "http://localhost:11434/v1";
 pub const DEFAULT_OPENAI_MODEL: &str = "kimi-k2.6:cloud";
 /// Default MAGI trio (openai path only, RF-4). Lineages: Zhipu / OpenAI / DeepSeek.
 pub const DEFAULT_MAGI_MELCHIOR: &str = "glm-5.3:cloud";
-pub const DEFAULT_MAGI_BALTHASAR: &str = "gpt-oss:120b-cloud";
+pub const DEFAULT_MAGI_BALTHASAR: &str = "kimi-k2.6:cloud";
 pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
 /// Lineage of [`DEFAULT_MAGI_MELCHIOR`] — the independent failure domain its model belongs to.
 ///
@@ -45,7 +45,7 @@ pub const DEFAULT_MAGI_CASPAR: &str = "deepseek-v4-pro:cloud";
 /// and what the error suggests cannot drift apart.
 pub const DEFAULT_MAGI_MELCHIOR_LINEAGE: &str = "zhipu";
 /// Lineage of [`DEFAULT_MAGI_BALTHASAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
-pub const DEFAULT_MAGI_BALTHASAR_LINEAGE: &str = "openai";
+pub const DEFAULT_MAGI_BALTHASAR_LINEAGE: &str = "moonshot";
 /// Lineage of [`DEFAULT_MAGI_CASPAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
 pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
@@ -119,9 +119,9 @@ pub const DEFAULT_ENFORCE_DIVERSITY: bool = true;
 /// test `the_scaffold_ships_an_active_pool_with_lineages_no_seat_has` is what turns that rule
 /// into a compile-adjacent check rather than a note.
 pub const DEFAULT_SCAFFOLD_POOL: [(&str, &str); 5] = [
-    ("kimi-k2.6:cloud", "moonshot"),
     ("minimax-m3:cloud", "minimax"),
     ("nemotron-3-super:cloud", "nvidia"),
+    ("gpt-oss:120b-cloud", "openai"),
     ("mistral-large-3:675b-cloud", "mistral"),
     ("gemma4:cloud", "google"),
 ];
