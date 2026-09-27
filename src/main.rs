@@ -3847,7 +3847,7 @@ fn above_sanity_notice(ceiling_secs: u64, b: &BudgetTelemetry) -> Option<Notice>
 /// choice, one that happens to differ from the crate's, kept unchanged through v0.20.0 while
 /// REQ-EE-1's reasoning instrumentation measures which value the E-E pool actually needs;
 /// REQ-EE-6's replays are what move it, in a later release, not this rustdoc.
-const DECLARED_COMPLETION_CAP: u32 = 16_384;
+const DECLARED_COMPLETION_CAP: u32 = 65_536;
 
 /// The completion configuration for the trio (REQ-V4-12, REQ-V4-13, REQ-EE-3/4/5).
 ///

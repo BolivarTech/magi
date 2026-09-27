@@ -168,7 +168,7 @@ MIGRATION_RUN = "R4"
 #: 16384 (v0.20.0 changes no default, REQ-EE-5), so the two are now
 #: distinguishable and the equality half of assertion 2 catches a deleted call
 #: site on its own.
-DECLARED_COMPLETION_CAP = 16384
+DECLARED_COMPLETION_CAP = 65536
 
 #: Keys of the consult envelope this module reaches for.
 COMPLETIONS_KEY = "completions"

@@ -152,7 +152,7 @@ agent_timeout_secs = 90
 # on every attempt. At roughly 55 tok/s a full cap can take minutes; raise
 # agent_timeout_secs (or --timeout on the headless path) before raising this. A
 # value above the pinned model's own output maximum returns HTTP 400.
-# max_tokens = 16384  # tokens; no upper bound of magi-rs's own
+# max_tokens = 65536  # tokens; no upper bound of magi-rs's own
 
 # Opt-in: for cut attempts (finish = length or empty content) the log gets a
 # bounded head and tail of the reasoning trace, file only, off by default. The
