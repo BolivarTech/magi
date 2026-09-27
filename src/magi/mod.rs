@@ -948,20 +948,30 @@ pub fn resolve_run_timeout(
 
 /// Derived ceiling above which a `--timeout` is more likely a typo than an intention.
 ///
-/// 600 s. **Not a cap** — E-B exists to remove the cap, and this value clamps nothing. It marks
-/// the point past which one extra digit is the likelier explanation: `--timeout 18000` typed for
-/// `1800` buys ~1500 s per attempt, so a hung mage burns 25 minutes before giving up while the
-/// operator believes they asked for 149 s. That is the single error this interface cannot
-/// distinguish from a legitimate intention by arithmetic alone, so it is reported and obeyed.
+/// 2 400 s, chosen by the user on 2026-09-27 (D-1 (b), MS2) to make room for the recommended gate
+/// invocation once the shipped trio needed a much larger clock: `--timeout 16820` derives a
+/// 2 335 s ceiling and must NOT read as a typo, while the classic typo `--timeout 18000` (one
+/// digit too many on `1800`) derives 2 499 s and still must. **Not a cap** — E-B exists to remove
+/// the cap, and this value clamps nothing. It marks the point past which one extra digit is the
+/// likelier explanation: `--timeout 18000` typed for `1800` buys ~1500 s per attempt, so a hung
+/// mage burns far longer than intended before giving up. That is the single error this interface
+/// cannot distinguish from a legitimate intention by arithmetic alone, so it is reported and
+/// obeyed.
 ///
-/// **Chosen, not measured** — same honesty as the complexity gate's built-in thresholds. It sits
-/// well above any ceiling a plausible `--timeout` derives (1800 s derives 249) and well below what
-/// a fat-fingered order of magnitude produces.
+/// **Evaluated only against an explicit `--timeout` (D-1 (a), MS2).** With no `--timeout`,
+/// `[magi].agent_timeout_secs` is a configuration decision, not a typo candidate — comparing it
+/// against this bound would have told every default 0.21.0 run (2 335 s) to check `--timeout` for
+/// an extra digit nobody typed. See [`BudgetTelemetry::ceiling_above_sanity`].
+///
+/// **Chosen, not measured** — same honesty as the complexity gate's built-in thresholds, still
+/// true after this move: 600 s was chosen the same way in E-B, and 2 400 s replaces it by the
+/// same reasoning applied to the numbers this milestone made real, not by measurement.
 ///
 /// **Operationally tunable.** It gates a warning and clamps nothing, so moving it changes only how
 /// noisy the run is, never what the run does. If real deployments legitimately derive ceilings
 /// above it, raise it — a warning that fires on correct configurations trains operators to ignore
-/// warnings, which costs more than the typo it was meant to catch.
+/// warnings, which costs more than the typo it was meant to catch. This is not hypothetical: it
+/// is exactly what happened between 600 s and 2 400 s.
 pub const CEILING_SANITY_SECS: u64 = 2_400;
 
 /// A per-mage ceiling that **names where it came from** (REQ-EB01, R-EB03), paired with
@@ -1054,8 +1064,10 @@ pub struct BudgetTelemetry {
     /// The rotation count the formula actually used, so a consumer can evaluate the second lever
     /// (fewer rotations buy a larger budget at the same clock) without guessing our resolution.
     pub max_rotations_effective: u32,
-    /// The derived ceiling exceeded [`CEILING_SANITY_SECS`] — a probable `--timeout` typo. The
-    /// value is **not** clamped.
+    /// The ceiling came from an explicit `--timeout` AND exceeded [`CEILING_SANITY_SECS`] — a
+    /// probable `--timeout` typo (D-1, MS2). `false` on the configured/TUI path (`run: None`)
+    /// regardless of how large `[magi].agent_timeout_secs` is: there is no `--timeout` to have
+    /// mistyped. The value is **not** clamped.
     pub ceiling_above_sanity: bool,
 }
 

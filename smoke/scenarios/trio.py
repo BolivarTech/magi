@@ -138,7 +138,11 @@ CONSENSUS_KEYS = ("consensus", "consensus_verdict", "confidence", "score",
 #: The product's own budget constants, mirrored (see the module docstring).
 #: ``magi/mod.rs``: the classifier's slice of the wall clock, the headless slack
 #: percentage, the ceiling's absolute floor, and the sanity bound above which a
-#: derived ceiling is reported as a probable typo but is NOT clamped.
+#: derived ceiling is reported as a probable typo but is NOT clamped. Since
+#: v0.21.0 (D-1) it is 2400, chosen so the recommended gate ``--timeout 16820``
+#: (2335 s) stays below it while the classic typo ``18000`` (2499 s) stays
+#: above it, and it applies only to a ceiling derived from an explicit
+#: ``--timeout``.
 CLASSIFY_TIMEOUT_SECS = 6
 TIMEOUT_SLACK_PCT = 20
 CEILING_FLOOR_SECS = 15
