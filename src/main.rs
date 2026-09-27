@@ -7205,18 +7205,23 @@ mod envelope_audit_guard {
 #[cfg(test)]
 mod tests {
     /// S-9's inputs on the headless path: the warning is assessed on the ceiling the trio
-    /// really runs under and names `--timeout` only when the operator passed one.
+    /// really runs under and names `--timeout` only when the operator passed one. At the 0.21.0
+    /// cap (65 536) an explicit `--timeout 1800` (74 s per request) covers ~4 070 tokens, and the
+    /// value that would cover the whole cap at 55 tok/s is 28 619 — the figure replay B's WARN
+    /// printed. With no `--timeout` the configured default ceiling does not cover the full cap
+    /// either: it is sized for measured convergence, not for the cap at the reference speed.
     #[test]
     fn the_headless_clock_coverage_is_assessed_on_the_resolved_ceiling() {
         let cfg = crate::config::MagiConfig::from_toml_str("[magi]\n").expect("valid");
         let explicit =
             crate::headless_clock_coverage(&cfg, Some(1_800)).expect("1800 s does not cover");
         assert!(
-            explicit.render().contains("--timeout 7163"),
+            explicit.render().contains("--timeout 28619"),
             "{}",
             explicit.render()
         );
-        let configured = crate::headless_clock_coverage(&cfg, None).expect("90 s does not cover");
+        let configured = crate::headless_clock_coverage(&cfg, None)
+            .expect("the configured default clock does not cover 65 536 tokens at 55 tok/s");
         assert!(
             configured.render().contains("[magi].agent_timeout_secs"),
             "{}",
@@ -7228,14 +7233,23 @@ mod tests {
     }
 
     /// S-9's input on the TUI: the configured ceiling, and the lever is `agent_timeout_secs`.
+    /// At the 0.21.0 cap the covering value is 3 974 s: 65 536 tokens at 55 tok/s need a
+    /// 1 192 s client timeout, and ⌊0.3 × 3 974⌋ = 1 192 is the first ceiling that gives it.
     #[test]
     fn the_tui_clock_coverage_is_assessed_on_the_configured_ceiling() {
         let default = crate::config::MagiConfig::from_toml_str("[magi]\n").expect("valid");
-        let w = crate::tui_clock_coverage(&default).expect("27 s does not cover 16 384 tokens");
-        assert!(w.render().contains("994"), "{}", w.render());
-        let wide = crate::config::MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 994\n")
+        let w = crate::tui_clock_coverage(&default)
+            .expect("the default clock does not cover 65 536 tokens at 55 tok/s");
+        assert!(w.render().contains("3974"), "{}", w.render());
+        let wide = crate::config::MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 3974\n")
             .expect("valid");
         assert_eq!(crate::tui_clock_coverage(&wide), None);
+        let short = crate::config::MagiConfig::from_toml_str("[magi]\nagent_timeout_secs = 3973\n")
+            .expect("valid");
+        assert!(
+            crate::tui_clock_coverage(&short).is_some(),
+            "3974 is the FIRST covering ceiling, not merely a covering one"
+        );
     }
 
     /// R14: production must not hand the logging layer a delivery that throws
@@ -12376,20 +12390,28 @@ mod tests {
         /// default cap and `DECLARED_COMPLETION_CAP` were both 16 384 until magi-core 4.2.0.
         const OPENAI_COMPAT_BODY_AS_OF_4_0_0: &str = "{\"model\":\"any-model\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"max_tokens\":16384,\"temperature\":0.0}";
 
-        /// SC-V41-06 and S-1 (MS1 form): the body the openai-compat seat puts on the wire with
-        /// the PRODUCTION completion configuration — `magi_completion_config(&MagiConfig::default())`,
-        /// what `build_magi_orchestrator` hands the builder with no declared keys — is
-        /// byte-identical to the 0.19.1 body, cap included. `max_tokens` present,
-        /// `max_completion_tokens` absent, and no reasoning field (no `ReasoningSpelling` is
-        /// declared, so magi-core 4.2.0 sends nothing).
+        /// S-1 (MS2 form), compat wire: with the PRODUCTION completion configuration and no
+        /// `[magi]` key declared, the body the openai-compat seat puts on the wire is the 0.19.1
+        /// body with exactly ONE change — `max_tokens` moves from 16 384 to the 0.21.0 default,
+        /// 65 536 (REQ-EE-5, OQ-1). Stated as "the captured baseline with the cap replaced",
+        /// never as a new literal, so the assertion IS the S-1 property: any other byte that
+        /// moves is a wire change nobody decided. The baseline stays the captured 0.19.1 body;
+        /// it is never recaptured.
         ///
-        /// It used to send `CompletionConfig::default()`, so it tested the CRATE's default body
-        /// rather than the seat's: it went red on the 4.2.0 pin only because the crate default
-        /// stopped coinciding with `DECLARED_COMPLETION_CAP`, and moving that constant left it
-        /// green. MUTATION (required): set `DECLARED_COMPLETION_CAP` to any other value and this
-        /// goes red on the identity AND on the `max_tokens` substring.
+        /// MUTATIONS (required): `DECLARED_COMPLETION_CAP` back to `16_384` ⇒ red on the
+        /// identity; `DECLARED_COMPLETION_CAP = 65_537` ⇒ red on the identity AND on the
+        /// `max_tokens` substring.
         #[tokio::test]
-        async fn the_openai_compat_seat_sends_the_same_body_as_4_0_0() {
+        async fn the_openai_compat_seat_sends_the_0_19_1_body_with_only_the_cap_moved() {
+            let expected = OPENAI_COMPAT_BODY_AS_OF_4_0_0.replacen(
+                "\"max_tokens\":16384",
+                "\"max_tokens\":65536",
+                1,
+            );
+            assert_ne!(
+                expected, OPENAI_COMPAT_BODY_AS_OF_4_0_0,
+                "precondition: the captured baseline carries the 0.19.1 cap"
+            );
             let (base, body) = body_recording_listener().await;
             let mut notices = Vec::new();
             let provider = build_native_provider(
@@ -12410,8 +12432,8 @@ mod tests {
                 .split_once("\r\n\r\n")
                 .expect("an HTTP request has a body");
             assert_eq!(
-                wire_body, OPENAI_COMPAT_BODY_AS_OF_4_0_0,
-                "byte-identical to 0.19.1 (and to 4.0.0)"
+                wire_body, expected,
+                "0.19.1's body with only the cap moved (S-1, MS2 form)"
             );
             assert!(
                 wire_body.contains(&format!("\"max_tokens\":{DECLARED_COMPLETION_CAP}")),
@@ -12434,20 +12456,27 @@ mod tests {
         /// prints the body; paste it here; run again.
         const OLLAMA_BODY_AS_OF_0_19_1: &str = "{\"model\":\"any-model\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"stream\":false,\"options\":{\"num_predict\":16384,\"temperature\":0.0}}";
 
-        /// S-1 (MS1 form), native wire: the body the ollama seat puts on `POST /api/chat` with
-        /// `magi_completion_config(&MagiConfig::default())` is byte-identical to 0.19.1's —
-        /// `num_predict` equal to the declared cap, and NO `think` key, which is what
-        /// `ReasoningControl::Default` means on this wire (magi-core `ollama_wire.rs:209`,
-        /// "Default puts nothing at all").
+        /// S-1 (MS2 form), native wire: the body the ollama seat puts on `POST /api/chat` with
+        /// `magi_completion_config(&MagiConfig::default())` is the captured 0.19.1 body with
+        /// exactly ONE change — `num_predict` moves from 16 384 to 65 536 (REQ-EE-5, OQ-1) — and
+        /// still NO `think` key, which is what `ReasoningControl::Default` means on this wire
+        /// (magi-core `ollama_wire.rs:209`, "Default puts nothing at all").
         ///
-        /// Captured under 4.1.0 and asserted under 4.2.0: the baseline surviving the bump is the
-        /// proof that the migration changed nothing on this wire.
-        ///
-        /// MUTATIONS (required): `DECLARED_COMPLETION_CAP` to any other value ⇒ red on the
-        /// identity and on `num_predict`; `cfg.reasoning = ReasoningControl::Enabled` in
-        /// `magi_completion_config` (after the pin) ⇒ red on the identity and on `think`.
+        /// MUTATIONS (required): `DECLARED_COMPLETION_CAP` back to `16_384` ⇒ red on the
+        /// identity; `DECLARED_COMPLETION_CAP = 65_537` ⇒ red on the identity and on
+        /// `num_predict`; `completion.reasoning = ReasoningControl::Enabled` unconditionally in
+        /// `magi_completion_config` ⇒ red on the identity and on `think`.
         #[tokio::test]
-        async fn the_ollama_seat_sends_the_same_body_as_0_19_1() {
+        async fn the_ollama_seat_sends_the_0_19_1_body_with_only_the_cap_moved() {
+            let expected = OLLAMA_BODY_AS_OF_0_19_1.replacen(
+                "\"num_predict\":16384",
+                "\"num_predict\":65536",
+                1,
+            );
+            assert_ne!(
+                expected, OLLAMA_BODY_AS_OF_0_19_1,
+                "precondition: the captured baseline carries the 0.19.1 cap"
+            );
             let (base, body) = body_recording_listener().await;
             let mut notices = Vec::new();
             let provider = build_native_provider(
@@ -12472,8 +12501,8 @@ mod tests {
                 "precondition: the native wire, not the compat one: {head}"
             );
             assert_eq!(
-                wire_body, OLLAMA_BODY_AS_OF_0_19_1,
-                "byte-identical to 0.19.1"
+                wire_body, expected,
+                "0.19.1's body with only the cap moved (S-1, MS2 form)"
             );
             assert!(
                 wire_body.contains(&format!("\"num_predict\":{DECLARED_COMPLETION_CAP}")),
@@ -12509,8 +12538,8 @@ mod tests {
                     false,
                 ),
                 (
-                    "max_tokens = 65536\n",
-                    65_536,
+                    "max_tokens = 16384\n",
+                    16_384,
                     ReasoningControl::Default,
                     false,
                 ),
@@ -12530,11 +12559,73 @@ mod tests {
             }
         }
 
-        /// S-1 (MS1 form): with none of the new keys, BOTH seat kinds send 0.19.1's body byte
-        /// for byte, cap included — under magi-core 4.2.0, whose own default cap is 32 768.
+        /// S-1 (MS2 form): with none of the new keys, BOTH capturable seat kinds send 0.19.1's
+        /// body with only the cap moved to 65 536 — one field, one value, nothing else. The
+        /// expectation is DERIVED from the captured baselines, so a second byte that moved would
+        /// be caught without anyone having to notice it in a new literal.
         #[tokio::test]
-        async fn with_no_new_keys_both_seat_kinds_send_the_0_19_1_body() {
+        async fn with_no_new_keys_both_seat_kinds_differ_from_0_19_1_only_in_the_cap() {
             let cfg = MagiConfig::from_toml_str("[magi]\n").expect("valid");
+            let cases = [
+                (
+                    ProviderKind::Ollama,
+                    OLLAMA_BODY_AS_OF_0_19_1,
+                    "num_predict",
+                ),
+                (
+                    ProviderKind::OpenAiCompat,
+                    OPENAI_COMPAT_BODY_AS_OF_4_0_0,
+                    "max_tokens",
+                ),
+            ];
+            for (kind, baseline, field) in cases {
+                let expected = baseline.replacen(
+                    &format!("\"{field}\":16384"),
+                    &format!("\"{field}\":65536"),
+                    1,
+                );
+                assert_ne!(
+                    expected, baseline,
+                    "precondition ({kind}): the captured baseline carries the 0.19.1 cap"
+                );
+                let (base, request) = body_recording_listener().await;
+                let mut notices = Vec::new();
+                let provider = build_native_provider(
+                    kind,
+                    &endpoint_at(&base),
+                    "any-model",
+                    Some(&creds()),
+                    Duration::from_secs(10),
+                    cfg.effective_reasoning_spelling(),
+                    &mut notices,
+                )
+                .expect("builds");
+                let _ = provider
+                    .complete("s", "u", &magi_completion_config(&cfg))
+                    .await;
+                let raw = request.await.expect("the listener task must finish");
+                let (_, wire_body) = raw
+                    .split_once("\r\n\r\n")
+                    .expect("an HTTP request has a body");
+                assert_eq!(
+                    wire_body, expected,
+                    "{kind}: 0.19.1's body with only the cap moved"
+                );
+            }
+        }
+
+        /// The MS2 upgrade note as a contract (spec "MS2 release notes"): `max_tokens = 16384` in
+        /// `[magi]` restores 0.19.1's wire byte for byte on BOTH capturable seat kinds. Since
+        /// 0.21.0 the configured value DIFFERS from the default, so this is also the test that a
+        /// configured cap reaches the wire: a key the resolver ignored would send 65 536 and turn
+        /// this red. It replaces `the_configured_cap_reaches_the_native_wire`, which configured
+        /// 65 536 — a value the 0.21.0 default makes indistinguishable from an ignored key.
+        ///
+        /// MUTATION (required): make `MagiConfig::effective_max_tokens` return
+        /// `DECLARED_COMPLETION_CAP` unconditionally ⇒ red on both kinds.
+        #[tokio::test]
+        async fn restoring_max_tokens_16384_sends_the_0_19_1_body_on_both_seat_kinds() {
+            let cfg = MagiConfig::from_toml_str("[magi]\nmax_tokens = 16384\n").expect("valid");
             let cases = [
                 (ProviderKind::Ollama, OLLAMA_BODY_AS_OF_0_19_1),
                 (ProviderKind::OpenAiCompat, OPENAI_COMPAT_BODY_AS_OF_4_0_0),
@@ -12559,32 +12650,11 @@ mod tests {
                 let (_, wire_body) = raw
                     .split_once("\r\n\r\n")
                     .expect("an HTTP request has a body");
-                assert_eq!(wire_body, expected, "{kind}: byte-identical to 0.19.1");
+                assert_eq!(
+                    wire_body, expected,
+                    "{kind}: max_tokens = 16384 must give back 0.19.1's body"
+                );
             }
-        }
-
-        /// REQ-EE-5: a configured cap is the one on the native wire (`num_predict`).
-        #[tokio::test]
-        async fn the_configured_cap_reaches_the_native_wire() {
-            let cfg = MagiConfig::from_toml_str("[magi]\nmax_tokens = 65536\n").expect("valid");
-            let (base, request) = body_recording_listener().await;
-            let mut notices = Vec::new();
-            let provider = build_native_provider(
-                ProviderKind::Ollama,
-                &endpoint_at(&base),
-                "any-model",
-                None,
-                Duration::from_secs(10),
-                None,
-                &mut notices,
-            )
-            .expect("ollama is keyless");
-            let _ = provider
-                .complete("s", "u", &magi_completion_config(&cfg))
-                .await;
-            let raw = request.await.expect("the listener task must finish");
-            assert!(raw.contains("\"num_predict\":65536"), "{raw}");
-            assert!(!raw.contains("\"num_predict\":16384"), "{raw}");
         }
 
         /// magi-core's capture of a model that HONOURS `think: false`
@@ -12991,33 +13061,27 @@ mod tests {
             );
         }
 
-        /// S-1 (MS1 form) for every seat, and the ONLY form of it for the anthropic seat:
+        /// S-1 (MS2 form) for every seat, and the ONLY form of it for the anthropic seat:
         /// `ClaudeProvider` posts to a fixed `https://api.anthropic.com/v1/messages` (magi-core
         /// `providers/claude.rs:17`), so no local listener can capture its body. What magi-rs
-        /// controls on that wire is this configuration, so this is pinned field by field at
-        /// the values 0.19.1 sent with NO `[magi]` keys declared — including `temperature`,
-        /// which no `[magi]` key exposes and which it inherits from the crate's `Default`, and
-        /// which a future crate default could move with no diff here.
+        /// controls on that wire is this configuration, so it is pinned field by field at the
+        /// values 0.21.0 sends with NO `[magi]` keys declared — including `temperature`, which
+        /// no `[magi]` key exposes and which it inherits from the crate's `Default`.
         ///
-        /// The cap is the LITERAL 16 384, not `DECLARED_COMPLETION_CAP`, on purpose: MS1
-        /// changes no default (spec §2), and a test comparing the constant to itself would
-        /// pass whatever the constant became. MS2 moves this literal deliberately.
+        /// The cap is the LITERAL 65 536, not `DECLARED_COMPLETION_CAP`, on purpose: a test
+        /// comparing the constant to itself would pass whatever the constant became. It moved
+        /// here from 16 384 deliberately (REQ-EE-5 [MS2], OQ-1; MS2 amendment, replay B).
         ///
-        /// Kept alongside the table test in
-        /// `the_completion_config_carries_the_configured_reasoning_keys` (Task 4) rather than
-        /// subsumed by it: that table does not assert `temperature`, and this is the only test
-        /// pinning the MS1-literal cap against a hand-typed number instead of the constant.
-        ///
-        /// MUTATIONS (required): `DECLARED_COMPLETION_CAP = 16_385` ⇒ red on the cap;
-        /// setting `reasoning_trace` unconditionally to `true` in `magi_completion_config` ⇒
-        /// red on the trace flag.
+        /// MUTATIONS (required): `DECLARED_COMPLETION_CAP = 65_537` ⇒ red on the cap; setting
+        /// `reasoning_trace` unconditionally to `true` in `magi_completion_config` ⇒ red on the
+        /// trace flag.
         #[test]
-        fn the_completion_config_is_the_one_0_19_1_sent() {
+        fn the_completion_config_is_the_one_0_21_0_sends() {
             let cfg = MagiConfig::from_toml_str("[magi]\n").expect("valid");
             let completion = magi_completion_config(&cfg);
             assert_eq!(
-                completion.max_tokens, 16_384,
-                "MS1 changes no default: the cap stays 16 384"
+                completion.max_tokens, 65_536,
+                "MS2 moves the default cap to 65 536 (REQ-EE-5, OQ-1)"
             );
             assert_eq!(
                 completion.temperature.to_bits(),

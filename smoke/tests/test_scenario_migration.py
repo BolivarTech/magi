@@ -274,13 +274,24 @@ class MigrationScenarioShapeTests(unittest.TestCase):
         The maintenance contract is accepted, not re-litigated: moving the
         product's cap turns S20 red and forces a change here. A check that
         adjusted itself to whatever the product reported would detect
-        nothing. Through magi-core 4.1.0 the declared value was ALSO the
-        crate's own default, numerically -- that coincidence is gone at the
-        4.2.0 pin (the crate's own default moved to 32768), so the equality
-        half of assertion 2 can now tell a declared cap from an inherited one;
-        see ``test_the_crates_own_default_cap_fails_the_second``.
+        nothing. v0.21.0 moved the cap 16384 -> 65536 (REQ-EE-5, OQ-1,
+        confirmed by replay B); it still differs from magi-core 4.2.0's own
+        default (32768), so the equality half of assertion 2 still tells a
+        declared cap from an inherited one; see
+        ``test_the_crates_own_default_cap_fails_the_second``.
         """
-        self.assertEqual(16384, migration.DECLARED_COMPLETION_CAP)
+        self.assertEqual(65536, migration.DECLARED_COMPLETION_CAP)
+
+    def test_the_previous_releases_cap_fails_the_second(self) -> None:
+        """16384 is what v0.20.0 transmitted. A binary that still sends it
+        -- a stale build, or a default that did not move -- must fail the
+        cap assertion, not pass it: the certifying run certifies what ships.
+        """
+        document = _document(
+            _envelope_with(completions=_seat_attempts(dict(_ATTEMPT,
+                                                           cap=16384))))
+        outcomes = _outcomes("S20", _result(document=document))
+        self.assertEqual(Outcome.FAIL, outcomes[migration.S20_ASSERTIONS[1]])
 
 
 class S20Tests(unittest.TestCase):

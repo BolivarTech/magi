@@ -2421,6 +2421,26 @@ base_url = "http://embedder-host:11434/v1"
         );
     }
 
+    /// The reference file shows the built-in cap on its commented `max_tokens` line, the value
+    /// an operator gets by leaving the key out. A cap that moved without its example is the
+    /// drift `example_toml_magi_models_match_the_builtin_defaults` exists for, one key further:
+    /// the file parses either way, so parsing proves nothing about the number.
+    #[test]
+    fn example_toml_shows_the_builtin_completion_cap() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/magi.toml.example"
+        ))
+        .expect("docs/magi.toml.example must be readable")
+        .replace('\r', "");
+        let line = format!("\n# max_tokens = {}  #", crate::DECLARED_COMPLETION_CAP);
+        assert!(
+            raw.contains(&line),
+            "docs/magi.toml.example must show `# max_tokens = {}` (DECLARED_COMPLETION_CAP)",
+            crate::DECLARED_COMPLETION_CAP
+        );
+    }
+
     #[test]
     fn test_parses_full_config() {
         // -------------------------------------------------------------------------
