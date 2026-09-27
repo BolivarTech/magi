@@ -33,6 +33,13 @@ changes and the **patch** position signals backward-compatible fixes.
   consult` as a probable typo. The recommended gate `--timeout 16820` (which derives exactly
   2335) no longer triggers the warning, while a classic typo such as `--timeout 18000` (typed
   for an intended `1800`, deriving 2499) still does.
+- **Two blind spots follow from that change.** An explicit `--timeout` whose derived ceiling
+  lands between 601 and 2400 seconds no longer warns: `--timeout 9000` (typed for `900`)
+  derives 1249 seconds, and `--timeout 12000` (for `1200`) derives 1665 seconds, both silently
+  accepted. A configured `[magi].agent_timeout_secs` set implausibly high, such as `23350`
+  typed for `2335`, never warns either, because the check only ever measures an explicit
+  `--timeout`; the value is visible only in `magi.toml` and is obeyed with no upper bound
+  (REQ-TUI-1).
 
 The wire each trio seat sends changes in exactly one field this release: the output cap.
 

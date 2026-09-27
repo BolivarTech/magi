@@ -254,6 +254,24 @@ overrides. It also sits below the sanity threshold this release raised `CEILING_
 typo such as `--timeout 18000` (typed for an intended `1800`) still derives 2499 seconds and
 still triggers it.
 
+**What the typo check does not catch.** `ceiling_above_sanity` is narrower than "any suspiciously
+large ceiling," and three gaps are worth knowing before relying on it:
+
+- **An explicit `--timeout` whose derived ceiling lands between 601 and 2400 seconds no longer
+  warns.** `--timeout 9000` (typed for an intended `900`) derives a 1249-second ceiling, and
+  `--timeout 12000` (for `1200`) derives 1665 seconds — both above the 600-second threshold this
+  release retired, both below the 2400-second one that replaced it, so neither prints the "extra
+  digit" notice.
+- **A configured `[magi].agent_timeout_secs` set implausibly high never warns at all.**
+  `23350` typed for an intended `2335` triggers nothing: `ceiling_above_sanity` only evaluates on
+  the headless path when an explicit `--timeout` was passed, and the configured/TUI path has no
+  equivalent check. The value is visible only by reading it back out of `magi.toml`, and REQ-TUI-1's
+  no-upper-bound rule means there is no cap to stop it from being obeyed as given.
+- **`applied_caps.ceiling_above_sanity` changes meaning for anything that parses the headless
+  JSON.** As of v0.21.0 it is `true` only when both hold at once: an explicit `--timeout` was
+  passed, and the ceiling it derives exceeds 2400 seconds (raised from 600). A consumer written
+  against the old semantics should be updated.
+
 ---
 
 ## Two starting points
