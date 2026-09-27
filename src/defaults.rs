@@ -959,7 +959,9 @@ mod tests {
         // Melchior moved off qwen3.5:397b when Ollama retired it from its cloud (2026-09-25);
         // glm-5.3 is the substitute Ollama itself names for that tag.
         assert_eq!(DEFAULT_MAGI_MELCHIOR, "glm-5.3:cloud");
-        assert_eq!(DEFAULT_MAGI_BALTHASAR, "gpt-oss:120b-cloud");
+        // REQ-DEF-1 (v0.21.0): Balthasar moved off gpt-oss:120b, confirmed by replay B
+        // (titular verdict, 22 612 tokens; `planning/milestones/replays-record.md`).
+        assert_eq!(DEFAULT_MAGI_BALTHASAR, "kimi-k2.6:cloud");
         assert_eq!(DEFAULT_MAGI_CASPAR, "deepseek-v4-pro:cloud");
         assert_eq!(DEFAULT_ANTHROPIC_MODEL, "claude-sonnet-4-6");
     }
@@ -969,7 +971,7 @@ mod tests {
     #[test]
     fn the_default_seats_declare_three_distinct_lineages_matching_their_models() {
         assert_eq!(DEFAULT_MAGI_MELCHIOR_LINEAGE, "zhipu");
-        assert_eq!(DEFAULT_MAGI_BALTHASAR_LINEAGE, "openai");
+        assert_eq!(DEFAULT_MAGI_BALTHASAR_LINEAGE, "moonshot");
         assert_eq!(DEFAULT_MAGI_CASPAR_LINEAGE, "deepseek");
         let mut lineages = vec![
             DEFAULT_MAGI_MELCHIOR_LINEAGE,
@@ -985,22 +987,46 @@ mod tests {
         );
     }
 
-    /// The pool's order is rotation PREFERENCE, so the head is what every first rotation tries.
-    /// The principal model is the one this product exercises most, so it leads; `mistral-large-3`
-    /// is unmeasured against this product's prompts and inherits an exclusion from the smoke
-    /// harness ("invalid JSON, and never reasons"), so it sits at the tail as a last resort, not
-    /// ahead of candidates known to answer.
+    /// REQ-DEF-1 (v0.21.0): the scaffold pool, in rotation-preference order, is exactly the one
+    /// the spec fixes — minimax-m3 → nemotron-3-super → gpt-oss:120b → mistral-large-3 →
+    /// gemma4. The order is by measured strength in the think-quality experiment
+    /// (`planning/experiments/think-quality-2026-09-23/`: 3.5, 3.0 and 2.5 of 5 seeded
+    /// defects), with `mistral-large-3` (unmeasured against this product's prompts) and
+    /// `gemma4` (the smoke harness's other inherited exclusion) closing it as last resorts.
+    /// `gpt-oss:120b` enters with the `openai` lineage the Balthasar seat freed, and
+    /// `kimi-k2.6` leaves because a seat now holds `moonshot`.
+    ///
+    /// **The v0.19.1 invariant "the pool leads with the principal" is RETIRED deliberately.**
+    /// The principal model (`DEFAULT_OPENAI_MODEL`) now holds the Balthasar seat, so it cannot
+    /// also be a pool entry: a pool entry in a seat's lineage covers one seat, not three
+    /// (`the_scaffold_ships_an_active_pool_with_lineages_no_seat_has`). One tag as principal
+    /// AND seat is ordinary configuration.
+    ///
+    /// MUTATIONS (required): swap any two pool entries ⇒ red on the order; put
+    /// `("kimi-k2.6:cloud", "moonshot")` back at the head ⇒ red on the order and on the
+    /// principal check.
     #[test]
-    fn the_scaffold_pool_leads_with_the_principal_and_keeps_the_unmeasured_mistral_last() {
-        assert_eq!(DEFAULT_SCAFFOLD_POOL[0].0, DEFAULT_OPENAI_MODEL);
-        let mistral = DEFAULT_SCAFFOLD_POOL
-            .iter()
-            .position(|(_, lineage)| *lineage == "mistral")
-            .expect("the pool must still carry the mistral lineage — it is the only free one");
+    fn the_scaffold_pool_follows_the_measured_order_and_the_principal_holds_a_seat() {
         assert_eq!(
-            mistral,
-            DEFAULT_SCAFFOLD_POOL.len() - 2,
-            "mistral is a last resort: only gemma4, the other inherited exclusion, may follow it"
+            DEFAULT_SCAFFOLD_POOL,
+            [
+                ("minimax-m3:cloud", "minimax"),
+                ("nemotron-3-super:cloud", "nvidia"),
+                ("gpt-oss:120b-cloud", "openai"),
+                ("mistral-large-3:675b-cloud", "mistral"),
+                ("gemma4:cloud", "google"),
+            ],
+            "REQ-DEF-1 fixes the pool and its order"
+        );
+        assert_eq!(
+            DEFAULT_MAGI_BALTHASAR, DEFAULT_OPENAI_MODEL,
+            "the principal model also holds a seat (REQ-DEF-1)"
+        );
+        assert!(
+            DEFAULT_SCAFFOLD_POOL
+                .iter()
+                .all(|(model, _)| *model != DEFAULT_OPENAI_MODEL),
+            "a seated model is never also a pool entry"
         );
     }
 
