@@ -1987,4 +1987,22 @@ mod tests {
             "the adopter must end up with the winner's DEK, never a second one"
         );
     }
+
+    /// Oldest bundled SQLite engine this release certifies: 3.53.2, the one
+    /// `libsqlite3-sys 0.38.2` (pulled by `rusqlite 0.40.2`) compiles in.
+    /// Encoded as `sqlite3_libversion_number()` does (X * 1_000_000 + Y * 1_000 + Z).
+    const MIN_BUNDLED_SQLITE_VERSION_NUMBER: i32 = 3_053_002;
+
+    #[test]
+    fn the_bundled_sqlite_engine_is_at_least_the_certified_release() {
+        // `version_number()` and `version()` both report the SQLite ENGINE
+        // (`sqlite3_libversion_number()` / `sqlite3_libversion()`), not the
+        // `rusqlite` crate version.
+        let linked = rusqlite::version_number();
+        assert!(
+            linked >= MIN_BUNDLED_SQLITE_VERSION_NUMBER,
+            "bundled SQLite {} ({linked}) is older than the certified {MIN_BUNDLED_SQLITE_VERSION_NUMBER}",
+            rusqlite::version()
+        );
+    }
 }
