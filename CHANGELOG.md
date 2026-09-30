@@ -19,11 +19,9 @@ changes and the **patch** position signals backward-compatible fixes.
   It may open, but nothing guarantees or tests it, and there is no migration. A failure on
   such a file is not a defect.
 - **Before first use, delete or move aside the old database together with its `-wal` and
-  `-shm` files**, in every place it lives:
-  - `<dir>/.magi-rs-memory.db` for the TUI;
-  - `.magi/.magi-rs-memory.db` in each workspace (`magi init`), including the workspace the MAGI
-    plugin's gate uses.
-  Keep `magi.toml` and `logs/`: only the database files go.
+  `-shm` files**: `.magi/.magi-rs-memory.db` in each workspace (`magi init`), including the
+  workspace the MAGI plugin's gate uses. The TUI, `vault` and the headless commands all read
+  this one file. Keep `magi.toml` and `logs/`: only the database files go.
 - **What is lost with it:** conversation history, knowledge, the tiered memories, the
   model-capability cache, and **every vault secret**: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `BASE_URL_USER` / `BASE_URL_PASSWORD` and their `MAGI_` / `EMBEDDING_` variants.
