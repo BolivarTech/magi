@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.22.0] - YYYY-MM-DD
+
+### Changed
+
+- **The bundled SQLite engine moves from 3.45.0 to 3.53.2** (`rusqlite` 0.31 → 0.40.2).
+
+### Breaking: databases from 0.21.0 and earlier are unsupported
+
+- A `.magi-rs-memory.db` written by magi-rs 0.21.0 or earlier is **not supported** by 0.22.0.
+  It may open, but nothing guarantees or tests it, and there is no migration. A failure on
+  such a file is not a defect.
+- **Before first use, delete or move aside the old database together with its `-wal` and
+  `-shm` files**, in every place it lives:
+  - `<dir>/.magi-rs-memory.db` for the TUI;
+  - `.magi/.magi-rs-memory.db` in each workspace (`magi init`), including the workspace the MAGI
+    plugin's gate uses.
+  Keep `magi.toml` and `logs/`: only the database files go.
+- **What is lost with it:** conversation history, knowledge, the tiered memories, the
+  model-capability cache, and **every vault secret**: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `BASE_URL_USER` / `BASE_URL_PASSWORD` and their `MAGI_` / `EMBEDDING_` variants.
+- **How to recover:** the first run after the reset creates a new database and needs a
+  passphrase that meets the strength floor: at least 12 characters and a zxcvbn score of at
+  least 3. On a terminal you are prompted for it; otherwise it is taken from `-p` /
+  `MAGI_PASSPHRASE`. Re-enter each secret with `magi-rs vault set <NAME>`, or use `/login` in
+  the TUI for `ANTHROPIC_API_KEY`.
+
 ## [0.21.0] - 2026-09-28
 
 ### Changed
@@ -1693,7 +1719,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/BolivarTech/magi/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/BolivarTech/magi/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/BolivarTech/magi/compare/v0.19.1...v0.20.0
 [0.19.1]: https://github.com/BolivarTech/magi/compare/v0.19.0...v0.19.1
