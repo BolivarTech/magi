@@ -66,11 +66,11 @@ memory: 0 active, 0 archived, 0 pending re-embed (~0 KB index)
 ```
 
 If Ollama is unreachable, a **startup notice** reports graceful degradation (the memory subsystem
-is skipped, text-only persistence continues) — the app still runs.
+is skipped, text-only persistence continues); the app still runs.
 
 ## 4. Headline test — cross-session recall (selective)
 
-**Session A** — plant facts/preferences:
+**Session A**: plant facts/preferences:
 
 ```
 > Remember I prefer Rust over Python for systems programming.
@@ -81,7 +81,7 @@ is skipped, text-only persistence continues) — the app still runs.
 Exit with `/exit` → this fires `on_session_close` → **distillation** (recurring preferences are
 promoted to the always-injected profile).
 
-**Session B** — restart the app:
+**Session B**: restart the app:
 
 ```powershell
 cargo run --release
@@ -93,7 +93,7 @@ The diagnostics line now shows `memory: N active` (N > 0). Ask:
 > Which language do I prefer for systems programming?
 ```
 
-✅ **Expected:** it answers "Rust", recalled from Session A — **without** loading the full history
+✅ **Expected:** it answers "Rust", recalled from Session A, **without** loading the full history
 (retrieved via the preference profile + budgeted semantic recall). This is the behavior that beats
 the `load_all` baseline.
 
@@ -114,7 +114,7 @@ arm). Deterministic: fixed seed, a deterministic embedder (no network).
 Select-String -Path .magi/.magi-rs-memory.db -Pattern "Rust" -SimpleMatch
 ```
 
-✅ **Expected:** no matches — text *and* embeddings are encrypted via `CryptoVault`
+✅ **Expected:** no matches: text *and* embeddings are encrypted via `CryptoVault`
 (Argon2id → AES-256-GCM-SIV → Reed-Solomon). The in-RAM ANN index is never persisted in clear.
 
 ## 7. Graceful degradation (REQ-29)
@@ -145,7 +145,7 @@ $env:MAGI_PASSPHRASE = "…"
 "Remember I prefer Rust over Python for systems programming." | magi-rs query --output-format json
 ```
 
-Section 4's cross-session recall is the same test from here — plant in one invocation, ask in the
+Section 4's cross-session recall is the same test from here: plant in one invocation, ask in the
 next, and read the answer out of the JSON:
 
 ```powershell
@@ -154,7 +154,7 @@ next, and read the answer out of the JSON:
 
 Four flags carry most of the weight. `-w <dir>` names the directory the `.magi/` walk-up starts
 from, so a script does not depend on where it was launched. `--no-memory` makes the invocation
-stateless — nothing is persisted, which is what a control arm needs. `--timeout <seconds>` bounds
+stateless: nothing is persisted, which is what a control arm needs. `--timeout <seconds>` bounds
 the wall clock. `--auto` approves the registered tools without prompting, since there is nobody
 there to prompt; the hard barriers stay in place.
 
@@ -163,7 +163,7 @@ there to prompt; the hard barriers stay in place.
 ```
 
 `magi-rs consult` puts the prompt in front of the MAGI trio instead of the agent. Adding
-`--structured-verdicts` — which needs `--output-format json`, and says so if you leave it out —
+`--structured-verdicts` (which needs `--output-format json`, and says so if you leave it out)
 puts the `agents` and `consensus` blocks in the answer, so a script reads each seat's verdict
 instead of only the prose. The exit code is part of the contract: 0 when the run completed, 2
 when the input or the configuration was rejected.

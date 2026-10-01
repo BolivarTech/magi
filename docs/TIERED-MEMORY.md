@@ -9,7 +9,7 @@
 ## What it is
 
 Before this feature, `magi-rs` stored every conversation turn in an encrypted
-SQLite file and loaded **the entire history into every prompt** (`load_all` mode —
+SQLite file and loaded **the entire history into every prompt** (`load_all` mode:
 still available as the benchmark control). Context grew with history: an O(N)
 expansion with no principled bound.
 
@@ -33,8 +33,8 @@ Three pillars govern behaviour (detailed below):
 ## It IS a RAG — why embeddings alone are not enough
 
 A common question when seeing vector embeddings in a memory system: *"Is this RAG,
-or just a store?"* The answer: this feature **implements a full RAG pipeline** —
-the three steps of Retrieval-Augmented Generation — end to end.
+or just a store?"* The answer: this feature **implements a full RAG pipeline**:
+the three steps of Retrieval-Augmented Generation, end to end.
 
 RAG is three chained steps, and the tiered memory covers each one:
 
@@ -56,16 +56,16 @@ store vectors in the clear and break the privacy guarantee.
 **Agentic-memory RAG, not document RAG.** Plain document RAG retrieves from a
 static corpus and injects. This system goes further:
 
-- **Forgetting / decay** — obsolete memories lose strength and are evicted (P2).
-- **Supersession** — when a fact is updated or contradicted, the old record is
+- **Forgetting / decay**: obsolete memories lose strength and are evicted (P2).
+- **Supersession**: when a fact is updated or contradicted, the old record is
   demoted immediately (reranker soft-supersession) and eventually marked superseded
   by the off-hot-path distiller (hard supersession).
-- **Salience + recency** — the reranker weights similarity, wall-clock recency, and
+- **Salience + recency**: the reranker weights similarity, wall-clock recency, and
   a per-record salience score; access reinforcement boosts frequently-recalled items
   (bounded to prevent domination).
-- **Always-injected preference profile** — a compact distilled profile of durable
+- **Always-injected preference profile**: a compact distilled profile of durable
   user preferences is included in every context, not just when retrieved by query.
-- **Bounded context growth** — the assembler enforces a hard token cap; the context
+- **Bounded context growth**: the assembler enforces a hard token cap; the context
   never grows with history depth.
 
 ---
@@ -78,7 +78,7 @@ static corpus and injects. This system goes further:
 `EmbeddingProvider` generates a vector. Both the text and the vector are encrypted
 by `CryptoVault` before touching the disk. Salience is assigned **at write time**
 by a deterministic heuristic (function of `kind`, salience markers, and structural
-signals) — the LLM is never in the write hot path. Preferences (`kind=preference`)
+signals); the LLM is never in the write hot path. Preferences (`kind=preference`)
 receive the protected floor (`preference_salience = 1.0`).
 
 **Read / index.** At session start, the encrypted vectors are loaded, decrypted, and
@@ -87,7 +87,7 @@ an in-RAM index is built. The default index is a brute-force exact cosine
 large corpora.
 
 **Provider agnosticism.** The `EmbeddingProvider` trait is implemented by
-`OpenAiCompatibleEmbedder` — the same `base_url` / `api_key` pattern as the chat
+`OpenAiCompatibleEmbedder`, the same `base_url` / `api_key` pattern as the chat
 provider. Pointing `[embedding].base_url` at Ollama (default), OpenAI, Qwen Cloud,
 or any compatible endpoint requires **no code change**. Asymmetric task prefixes
 (`query_prefix` / `document_prefix`) are applied automatically; they default to the
@@ -131,7 +131,7 @@ reinforcement  = min(access_count, access_saturation_cap)
 salience       = memory.salience                               # [0, 1]
 ```
 
-All time-dependent quantities use an **injected `Clock`** abstraction — no
+All time-dependent quantities use an **injected `Clock`** abstraction, with no
 `SystemTime::now()` inside the decay logic. This makes decay deterministic under a
 fixed clock (benchmark / test) while using the real clock in production.
 
@@ -140,7 +140,7 @@ The access saturation cap (`access_saturation_cap = 50`) bounds the reinforcemen
 contribution so a heavily-used memory cannot dominate the ranking indefinitely.
 
 **Eviction policy.** Memories with `strength < forget_strength_threshold` are
-eligible for eviction — **except** preferences and any memory with
+eligible for eviction, **except** preferences and any memory with
 `salience >= protect_salience_threshold`. Eviction semantics are controlled by
 `evicted_retention_days`:
 
@@ -185,7 +185,7 @@ priority order:
 
 If the current turn alone exceeds the budget, it is **truncated with an explicit
 notice** (`notices` field on `AssembledContext`), preserving system + profile. An
-error is returned only when even system + profile cannot fit — which signals a
+error is returned only when even system + profile cannot fit, which signals a
 misconfigured budget.
 
 **Bounded growth.** The assembled context per turn is always `<= budget_after_margin`
@@ -193,7 +193,7 @@ regardless of how many sessions or turns are stored. History depth has zero effe
 context size.
 
 **`mode = "load_all"` (v0.6.0 control).** With `memory.mode = "load_all"`, the
-agent loads the full `messages` table into context every turn — exactly the pre-tiered
+agent loads the full `messages` table into context every turn, exactly the pre-tiered
 behaviour. This is the benchmark control arm; it is not removed.
 
 ---
@@ -263,7 +263,7 @@ document_prefix = "search_document: "
 
 **API keys never in `magi.toml`.** The embedding provider key is read from the
 `OPENAI_API_KEY` environment variable only. For a local Ollama server, set it to
-the dummy `"ollama"` (or leave it unset — the fallback applies). Real cloud
+the dummy `"ollama"` (or leave it unset: the fallback applies). Real cloud
 providers will 401 loudly if the key is absent or invalid.
 
 `[memory]` and `[embedding]` use `deny_unknown_fields`: a typo or an `api_key`
@@ -311,7 +311,7 @@ The salt and the wrapped data key are the only things the file carries about the
 neither opens it. Forgetting the passphrase means the data is gone; that is the point of the
 design, not a gap in it.
 
-The **ANN index lives only in RAM** — vectors are decrypted to memory at session
+The **ANN index lives only in RAM**: vectors are decrypted to memory at session
 start and the in-RAM index is rebuilt. Nothing in the SQLite file ever contains a
 vector or memory text in clear.
 
@@ -379,7 +379,7 @@ DROP TABLE memories;
 ```
 
 This removes only tiered-memory records. The `sessions`, `messages`, and `knowledge`
-tables are unaffected — conversation history and project knowledge are preserved.
+tables are unaffected: conversation history and project knowledge are preserved.
 
 ---
 

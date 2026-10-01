@@ -1,7 +1,7 @@
 # OpenRouter as a Magi backend
 
-> How to run `magi-rs` — the agent, its tool loop, the MAGI trio and the memory
-> embedder — against [OpenRouter](https://openrouter.ai/), and the four traps
+> How to run `magi-rs` (the agent, its tool loop, the MAGI trio and the memory
+> embedder) against [OpenRouter](https://openrouter.ai/), and the four traps
 > this backend sets that the Ollama-first defaults do not prepare you for.
 
 **Status: verified working.** On 2026-08-22, `magi-rs` v0.15.0 was exercised
@@ -11,7 +11,7 @@ tracked as [`magi.toml.openrouter.example`](magi.toml.openrouter.example).
 
 OpenRouter is an aggregator: one OpenAI-shaped endpoint that routes to hundreds
 of models from dozens of vendors. That makes it a natural fit for the MAGI trio,
-which needs three models from **three independent failure domains** — normally
+which needs three models from **three independent failure domains**, normally
 the hardest part of the configuration to satisfy from a single account.
 
 ---
@@ -32,7 +32,7 @@ Copy-Item docs\magi.toml.openrouter.example .magi\magi.toml
 
 `provider = "openai-compat"` and `base_url = "https://openrouter.ai/api/v1"` are
 all that selects the backend. `OPENAI_API_KEY` resolves **env > vault**, so an
-exported variable wins over a stored one — convenient for a short-lived key.
+exported variable wins over a stored one, which is convenient for a short-lived key.
 
 ---
 
@@ -46,7 +46,7 @@ error message that names its own cause, which is why they are written down.
 `magi-rs init` writes `[embedding].model = "nomic-embed-text-v2-moe:latest"`, an
 Ollama tag. Against OpenRouter it returns **HTTP 400 `Model does not exist`**,
 and the memory subsystem degrades to text-only persistence without failing the
-run — so recall quietly stops working while the agent still answers.
+run, so recall quietly stops working while the agent still answers.
 
 Change it. See [Embeddings](#embeddings) for the working set.
 
@@ -64,7 +64,7 @@ counter-intuitive: passing a **larger** wall clock than you need still yields a
 | `consult --timeout 180` | **24 s** — derived | 14 s/attempt |
 
 At a 24 s budget the study's first trio run came back **degraded**: two mages
-exhausted the budget and rotated, and the third — Balthasar — then found the
+exhausted the budget and rotated, and the third, Balthasar, then found the
 fallback pool already consumed by the other two and failed with
 `no_fitting_candidate`. A degraded run approves no gate regardless of its
 verdict.
@@ -96,7 +96,7 @@ HTTP 404  No endpoints available matching your guardrail restrictions and data p
 The model exists and is listed in the catalogue; the account's privacy policy
 excludes every provider currently serving it. During the study
 `qwen/qwen3.7-flash` failed this way while `qwen/qwen3-30b-a3b-instruct-2507`
-succeeded — so it is **per-model**, not per-vendor, and cannot be predicted from
+succeeded, so it is **per-model**, not per-vendor, and cannot be predicted from
 the model id. Widen the policy at the linked settings page, or pick another
 model.
 
@@ -116,7 +116,7 @@ return HTTP 429 immediately rather than queueing:
   "retry_after_seconds":5}}}
 ```
 
-This is independent of the account's own tier — the study's key reported
+This is independent of the account's own tier: the study's key reported
 `is_free_tier: false` and still hit it on the first call. Since a consult fires
 three concurrent requests, the free tier is where it is least likely to work.
 The paid models in the tracked example cost fractions of a cent per consult; use
@@ -126,7 +126,7 @@ them.
 
 ## Embeddings
 
-**OpenRouter serves `/embeddings`** — worth stating plainly, because the
+**OpenRouter serves `/embeddings`**, which is worth stating plainly, because the
 aggregator's own catalogue suggests otherwise.
 
 The trap is discovery, not availability: **embedding models are absent from the
@@ -147,14 +147,14 @@ advance. This table is that list, probed directly:
 
 Prices were obtained by measuring account spend across a fixed batch, not read
 from a published table. `gemini-embedding-001` measured **$0.000000** over ~5.9k
-tokens — which may be a genuine zero, promotional pricing, or simply below the
+tokens, which may be a genuine zero, promotional pricing, or simply below the
 sixth decimal the usage endpoint reports. It is not recommended on that basis
 alone, and it emits a 3072-dimension vector: three times the on-disk index of
 `bge-m3`, for storage `magi-rs` pays on every record.
 
 `baai/bge-m3` is the recommendation on three grounds: 75x cheaper than
-`text-embedding-3-small`, the smallest vector in the working set — which is also
-the smallest SQLite index — and multilingual, which matters for a store that
+`text-embedding-3-small`, the smallest vector in the working set, which is also
+the smallest SQLite index, and multilingual, which matters for a store that
 retains whatever language the conversation used.
 
 Leave `dim = 0` to autodetect the width from the first response.
@@ -194,7 +194,7 @@ token but slow per call is a poor seat and a fine fallback.
 **A seat must honour the marker protocol.** Each mage is required to emit its
 verdict between `<MAGI_VERDICT>` and `</MAGI_VERDICT>`, each alone on its own
 line. A model that ignores this fails extraction and burns a rotation without
-contributing a verdict — the same cost as being unreachable, but harder to
+contributing a verdict, the same cost as being unreachable, but harder to
 diagnose because the call itself succeeded.
 
 Measured on an identical code-review payload:
@@ -218,7 +218,7 @@ extraction twice in a row during the study, and a model that cannot be extracted
 from is worse than one that is merely slow.
 
 **Lineage is declared, never inferred.** OpenRouter's `vendor/model` id looks
-like a lineage but is not one — the lineage is *your* declaration of an
+like a lineage but is not one: the lineage is *your* declaration of an
 independent failure domain, and the same two models may legitimately be one
 domain for one operator and two for another. Ensure no fallback shares a lineage
 with a seat, so any rotation preserves the three-way diversity that is the whole
@@ -248,7 +248,7 @@ Three consequences follow:
   `magi-core` only when at least one candidate has a measured window; enabling it
   with nothing measured would reject every candidate and switch rotation off
   entirely. The decline is announced.
-- Lineage diversity is still enforced **declaratively** — three distinct labels
+- Lineage diversity is still enforced **declaratively**: three distinct labels
   are checked and a violation is a load error. Only the empirical corroboration
   against weights digests is unavailable, and that path warns rather than blocks.
 
@@ -296,7 +296,7 @@ rather than omitted, because the failure is the useful part.
 
 ## See also
 
-- [`magi.toml.openrouter.example`](magi.toml.openrouter.example) — the verified configuration
-- [`magi.toml.example`](magi.toml.example) — every key documented, against the Ollama default
-- [`TIERED-MEMORY.md`](TIERED-MEMORY.md) — what the embedder feeds
-- [`E2E-TESTING.md`](E2E-TESTING.md) — exercising the running application
+- [`magi.toml.openrouter.example`](magi.toml.openrouter.example): the verified configuration
+- [`magi.toml.example`](magi.toml.example): every key documented, against the Ollama default
+- [`TIERED-MEMORY.md`](TIERED-MEMORY.md): what the embedder feeds
+- [`E2E-TESTING.md`](E2E-TESTING.md): exercising the running application
