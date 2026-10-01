@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.20.0
-// Date: 2026-09-26
+// Version: 0.22.0
+// Date: 2026-10-01
 
 //! This module provides a persistent memory system based on SQLite with encryption.
 
