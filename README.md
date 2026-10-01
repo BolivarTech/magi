@@ -431,6 +431,13 @@ the working directory (`-w`/cwd) to the nearest ancestor, `.git`-style.
 > line: run **`magi init`**, then re-add secrets with **`magi vault set <NAME>`**
 > (e.g. `ANTHROPIC_API_KEY`). Prior conversation history is not carried over.
 
+> **BREAKING (v0.22.0):** the bundled SQLite engine moved from 3.45.0 to 3.53.2, and a
+> `.magi-rs-memory.db` written by 0.21.0 or earlier is **not supported**. Before first use,
+> delete or move aside `.magi/.magi-rs-memory.db` with its `-wal` and `-shm` files (keep
+> `magi.toml` and `logs/`), then set a new passphrase and re-add secrets with
+> **`magi vault set <NAME>`**. History, knowledge, memories and every vault secret are lost;
+> the [CHANGELOG](CHANGELOG.md) has the full list.
+
 ### Exit codes
 
 | Code | Meaning |
