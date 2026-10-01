@@ -435,7 +435,7 @@ the working directory (`-w`/cwd) to the nearest ancestor, `.git`-style.
 > `.magi-rs-memory.db` written by 0.21.0 or earlier is **not supported**. Before first use,
 > delete or move aside `.magi/.magi-rs-memory.db` with its `-wal` and `-shm` files (keep
 > `magi.toml` and `logs/`), then set a new passphrase and re-add secrets with
-> **`magi vault set <NAME>`**. History, knowledge, memories and every vault secret are lost;
+> **`magi-rs vault set <NAME>`**. History, knowledge, memories and every vault secret are lost;
 > the [CHANGELOG](CHANGELOG.md) has the full list.
 
 ### Exit codes
