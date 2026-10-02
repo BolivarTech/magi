@@ -9,6 +9,7 @@ import unittest
 from smoke.config import ModelProfile, Seat
 from smoke.env import Environment, _apply_profile
 from smoke.errors import PreflightError
+from smoke.scenarios import decide
 from smoke.registry import (DECLARED_ASSERTION_COUNT, DECLARED_SCENARIO_COUNT,
                             DEFAULT_REGISTRY)
 from smoke.tests import support
@@ -52,6 +53,38 @@ class DecisionProfileRewriteTests(unittest.TestCase):
         self.assertEqual("nimble", doc["decision"]["model"])
         self.assertEqual(["tev1", "tev1:0.8b"],
                          [f["model"] for f in doc["decision"]["fallback"]])
+
+
+class FallbackHeaderSpellingTests(unittest.TestCase):
+    """Header detection follows TOML, not one literal spelling."""
+
+    _SPACED = (
+        '[decision]\nmodel = "nimble"\n\n'
+        '[[ decision.fallback ]]\nmodel = "tev1"\n\n'
+        '[magi]\nmelchior_model = "m"\n'
+    )
+    _COMMENTED = (
+        '[decision]\nmodel = "nimble"\n'
+        '# [[decision.fallback]]\n# model = "tev1"\n\n'
+        '[magi]\nmelchior_model = "m"\n# [[decision.fallback]]\nkept = 1\n'
+    )
+
+    def test_a_spaced_fallback_header_is_dropped_by_the_profile(self) -> None:
+        doc = tomllib.loads(_apply_profile(self._SPACED, _profile("cheap")))
+        self.assertNotIn("fallback", doc["decision"])
+        self.assertEqual("a", doc["magi"]["melchior_model"])
+
+    def test_a_spaced_fallback_header_is_dropped_by_without_decision(self) -> None:
+        doc = tomllib.loads(decide._without_decision(self._SPACED))
+        self.assertNotIn("decision", doc)
+        self.assertEqual("m", doc["magi"]["melchior_model"])
+
+    def test_a_commented_header_is_not_a_header(self) -> None:
+        rewritten = _apply_profile(self._COMMENTED, _profile("cheap"))
+        self.assertIn("# [[decision.fallback]]", rewritten)
+        self.assertIn('# model = "tev1"', rewritten)
+        stripped = tomllib.loads(decide._without_decision(self._COMMENTED))
+        self.assertEqual(1, stripped["magi"]["kept"])
 
 
 class DecisionProfileLoadTests(unittest.TestCase):
