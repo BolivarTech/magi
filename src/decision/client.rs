@@ -188,12 +188,18 @@ impl SystemOneClient {
                         Some("invalid response: the body is larger than the read cap".into()),
                     ));
                 }
-                parse_response(&bytes, request.questions()).map_err(|reason| Failure {
-                    usage: salvage_usage(&bytes),
-                    ..Failure::new(
-                        Cause::InvalidResponse,
-                        Some(format!("invalid response: {reason}")),
-                    )
+                parse_response(&bytes, request.questions()).map_err(|reason| {
+                    let mut detail = format!("invalid response: {reason}");
+                    // A body that is not JSON at all is typically a web page answered by a
+                    // base_url without the provider's API prefix: diagnose it like a 404.
+                    if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+                        detail.push_str("; ");
+                        detail.push_str(&not_found_hint(&self.url_display));
+                    }
+                    Failure {
+                        usage: salvage_usage(&bytes),
+                        ..Failure::new(Cause::InvalidResponse, Some(detail))
+                    }
                 })
             }
             300..=399 => Err(Failure::http(
