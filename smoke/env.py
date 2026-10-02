@@ -72,6 +72,28 @@ PROFILE_SEATS = ("melchior", "balthasar", "caspar")
 #: in the product), so the profile drops the fallbacks instead of repeating it.
 DECISION_MODEL_KEY = ("decision", "model")
 DECISION_FALLBACK_HEADER = "[[decision.fallback]]"
+DECISION_HEADER = "[decision]"
+
+
+def table_header(line: str) -> "str | None":
+    """Return the whitespace-free spelling of a TOML table header line.
+
+    TOML allows blanks inside the brackets (``[[ decision.fallback ]]``), and a
+    commented line (``# [[decision.fallback]]``) is not a header at all. Both
+    the profile rewrite and the scenario that strips ``[decision]`` decide where
+    a block starts and ends, so they share this one reading.
+
+    Args:
+        line: One line of a ``magi.toml``.
+
+    Returns:
+        The header with every blank removed (``[[decision.fallback]]``), or
+        None when the line is not a table header.
+    """
+    stripped = line.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        return "".join(stripped.split())
+    return None
 
 
 #: The product's startup diagnostics line. The active-memory count cannot be
@@ -610,10 +632,11 @@ def _apply_profile(text: str, profile: ModelProfile) -> str:
     lines = []
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
+        header = table_header(line)
+        if header is not None:
             # A table header ends any block being dropped; one more fallback
             # header starts the next.
-            dropping = drop_fallbacks and stripped == DECISION_FALLBACK_HEADER
+            dropping = drop_fallbacks and header == DECISION_FALLBACK_HEADER
             if dropping:
                 continue
             table = stripped[1:-1].strip()

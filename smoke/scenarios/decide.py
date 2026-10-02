@@ -45,6 +45,8 @@ import time
 import tomllib
 
 from smoke import runs
+from smoke.env import (DECISION_FALLBACK_HEADER, DECISION_HEADER,
+                       table_header)
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
 from smoke.secrets import PlantedSecret, find_secret, mint_credential
@@ -929,8 +931,7 @@ _NO_TARGET_DETAIL = (
 _NO_SEED_DETAIL = "the product's init did not scaffold a scratch workspace"
 _NO_INSTALL_DETAIL = "the scratch workspace's magi.toml could not be written"
 
-_TABLE_HEADER = "["
-_DECISION_HEADERS = ("[decision]", "[[decision.fallback]]")
+_DECISION_HEADERS = (DECISION_HEADER, DECISION_FALLBACK_HEADER)
 
 
 def _hosted_key():
@@ -1007,9 +1008,9 @@ def _without_decision(text):
     kept = []
     dropping = False
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(_TABLE_HEADER) and stripped.endswith("]"):
-            dropping = stripped in _DECISION_HEADERS
+        header = table_header(line)
+        if header is not None:
+            dropping = header in _DECISION_HEADERS
         if not dropping:
             kept.append(line)
     return "\n".join(kept) + "\n"
