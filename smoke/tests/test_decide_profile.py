@@ -7,7 +7,7 @@ import tomllib
 import unittest
 
 from smoke.config import ModelProfile, Seat
-from smoke.env import Environment, _apply_profile
+from smoke.env import Environment, _apply_profile, table_header
 from smoke.errors import PreflightError
 from smoke.scenarios import decide
 from smoke.registry import (DECLARED_ASSERTION_COUNT, DECLARED_SCENARIO_COUNT,
@@ -142,6 +142,19 @@ class DecideRegistryTests(unittest.TestCase):
     def test_the_declared_totals_include_them(self) -> None:
         self.assertEqual(36, DECLARED_SCENARIO_COUNT)
         self.assertEqual(109, DECLARED_ASSERTION_COUNT)
+
+
+class TableHeaderTests(unittest.TestCase):
+    """The shared header reading ignores blanks and trailing comments."""
+
+    def test_an_inline_comment_after_a_header_is_ignored(self) -> None:
+        self.assertEqual("[[decision.fallback]]",
+                         table_header("[[decision.fallback]]  # tuned"))
+        self.assertEqual("[decision]", table_header("[ decision ] # note"))
+
+    def test_a_commented_or_plain_line_is_not_a_header(self) -> None:
+        self.assertIsNone(table_header("# [[decision.fallback]]"))
+        self.assertIsNone(table_header('model = "x" # [a]'))
 
 
 if __name__ == "__main__":
