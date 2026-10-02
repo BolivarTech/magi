@@ -83,16 +83,102 @@ pub enum DecisionConfigError {
 impl DecisionSection {
     /// Checks the section's values.
     ///
+    /// Runs in O(m) time where m is the number of models (primary + fallbacks),
+    /// because each model is inspected a constant number of times.
+    ///
+    /// Models are compared after `trim`, so ` m ` and `m` count as the same
+    /// model: the server sees one name, and a repeated model would make a
+    /// fallback retry the very thing that just failed.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when every rule holds.
+    ///
     /// # Errors
     ///
     /// Returns the first violated rule as a [`DecisionConfigError`].
     pub fn validate(&self) -> Result<(), DecisionConfigError> {
-        todo!()
+        const PRIMARY_POSITION: &str = "[decision].model";
+        const FALLBACK_POSITION_PREFIX: &str = "[[decision.fallback]] #";
+        const MIN_CONFIDENCE: f64 = 0.0;
+        const MAX_CONFIDENCE: f64 = 1.0;
+
+        let primary = self.model.trim();
+        if primary.is_empty() {
+            return Err(DecisionConfigError::BlankModel {
+                position: PRIMARY_POSITION.into(),
+            });
+        }
+
+        for (idx, fb) in self.fallback.iter().enumerate() {
+            if fb.model.trim().is_empty() {
+                return Err(DecisionConfigError::BlankModel {
+                    position: format!("{}{}", FALLBACK_POSITION_PREFIX, idx + 1),
+                });
+            }
+        }
+
+        if self.timeout_secs == Some(0) {
+            return Err(DecisionConfigError::TimeoutBelowOne);
+        }
+
+        if let Some(KeepAlive::Text(ref t)) = self.keep_alive {
+            if t.trim().is_empty() {
+                return Err(DecisionConfigError::BlankKeepAlive);
+            }
+        }
+
+        let confidence_specs = std::iter::once((&self.model, self.min_confidence)).chain(
+            self.fallback
+                .iter()
+                .map(|fb| (&fb.model, fb.min_confidence)),
+        );
+        for (model, min_confidence) in confidence_specs {
+            if let Some(v) = min_confidence {
+                let trimmed = model.trim();
+                // `nan` parses from TOML and compares false with everything, so a bare
+                // range check would accept it: finiteness is tested explicitly.
+                if !v.is_finite() || !(MIN_CONFIDENCE..=MAX_CONFIDENCE).contains(&v) {
+                    return Err(DecisionConfigError::MinConfidenceOutOfRange {
+                        model: trimmed.into(),
+                    });
+                }
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let chain_models = std::iter::once(self.model.as_str())
+            .chain(self.fallback.iter().map(|fb| fb.model.as_str()));
+        for model in chain_models {
+            let trimmed = model.trim();
+            if !seen.insert(trimmed) {
+                return Err(DecisionConfigError::DuplicateModel {
+                    model: trimmed.into(),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// The chain: the primary model first, then the fallbacks in order.
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`ModelSpec`] values preserving the declaration order.
     pub fn chain(&self) -> Vec<ModelSpec> {
-        todo!()
+        let mut chain = Vec::with_capacity(1 + self.fallback.len());
+        chain.push(ModelSpec {
+            model: self.model.clone(),
+            min_confidence: self.min_confidence,
+        });
+        for fb in &self.fallback {
+            chain.push(ModelSpec {
+                model: fb.model.clone(),
+                min_confidence: fb.min_confidence,
+            });
+        }
+        chain
     }
 }
 

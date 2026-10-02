@@ -36,17 +36,52 @@ pub enum Cause {
 impl Cause {
     /// Whether the chain rotates to the next model after this cause.
     pub fn rotates(self) -> bool {
-        todo!()
+        match self {
+            Cause::Unauthorized | Cause::Rejected => false,
+            Cause::ModelNotFound
+            | Cause::AccountPolicy
+            | Cause::NotFound
+            | Cause::RateLimited
+            | Cause::Http5xx
+            | Cause::Redirected
+            | Cause::Transport
+            | Cause::Timeout
+            | Cause::InvalidResponse => true,
+        }
     }
 
     /// Whether this cause belongs to the transport class (REQ-D13).
     pub fn is_transport_class(self) -> bool {
-        todo!()
+        match self {
+            Cause::Transport
+            | Cause::Timeout
+            | Cause::Http5xx
+            | Cause::RateLimited
+            | Cause::Redirected => true,
+            Cause::Unauthorized
+            | Cause::Rejected
+            | Cause::ModelNotFound
+            | Cause::AccountPolicy
+            | Cause::NotFound
+            | Cause::InvalidResponse => false,
+        }
     }
 
     /// The serialized token of this cause.
     pub fn as_str(self) -> &'static str {
-        todo!()
+        match self {
+            Cause::Unauthorized => "unauthorized",
+            Cause::Rejected => "rejected",
+            Cause::ModelNotFound => "model_not_found",
+            Cause::AccountPolicy => "account_policy",
+            Cause::NotFound => "not_found",
+            Cause::RateLimited => "rate_limited",
+            Cause::Http5xx => "http_5xx",
+            Cause::Redirected => "redirected",
+            Cause::Transport => "transport",
+            Cause::Timeout => "timeout",
+            Cause::InvalidResponse => "invalid_response",
+        }
     }
 }
 
@@ -63,8 +98,17 @@ pub struct Usage {
 
 impl Usage {
     /// Adds `other` into `self`; `cost` stays `None` only if neither side has one.
-    pub fn add(&mut self, _other: &Usage) {
-        todo!()
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The usage to add into this value.
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cost = match (self.cost, other.cost) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
     }
 }
 
@@ -200,20 +244,62 @@ pub enum DecisionError {
 
 impl std::fmt::Debug for DecisionError {
     /// Prints the variant and its non-textual facts; never provider text (REQ-D11).
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecisionError::InvalidInput { .. } => f.write_str("InvalidInput"),
+            DecisionError::Rejected { status, trace, .. } => f
+                .debug_struct("Rejected")
+                .field("status", status)
+                .field("attempts", &trace.attempts.len())
+                .finish(),
+            DecisionError::Unauthorized { status, trace, .. } => f
+                .debug_struct("Unauthorized")
+                .field("status", status)
+                .field("attempts", &trace.attempts.len())
+                .finish(),
+            DecisionError::MissingVaultEntry { entry } => f
+                .debug_struct("MissingVaultEntry")
+                .field("entry", entry)
+                .finish(),
+            DecisionError::ModelUnavailable { model, trace, .. } => f
+                .debug_struct("ModelUnavailable")
+                .field("model", model)
+                .field("attempts", &trace.attempts.len())
+                .finish(),
+            DecisionError::ChainExhausted { trace } => f
+                .debug_struct("ChainExhausted")
+                .field("attempts", &trace.attempts.len())
+                .finish(),
+            DecisionError::ClientUnavailable { .. } => f.write_str("ClientUnavailable"),
+        }
     }
 }
 
 impl DecisionError {
     /// The `error.kind` this error maps to.
     pub fn kind(&self) -> ErrorKind {
-        todo!()
+        match self {
+            DecisionError::InvalidInput { .. } => ErrorKind::InvalidInput,
+            DecisionError::Rejected { .. } => ErrorKind::InvalidInput,
+            DecisionError::Unauthorized { .. } => ErrorKind::MissingKey,
+            DecisionError::MissingVaultEntry { .. } => ErrorKind::MissingKey,
+            DecisionError::ModelUnavailable { .. } => ErrorKind::ModelUnavailable,
+            DecisionError::ChainExhausted { .. } => ErrorKind::DecisionUnavailable,
+            DecisionError::ClientUnavailable { .. } => ErrorKind::DecisionUnavailable,
+        }
     }
 
     /// The attempt trace, when any model was called.
     pub fn trace(&self) -> Option<&Trace> {
-        todo!()
+        match self {
+            DecisionError::Rejected { trace, .. } => Some(trace),
+            DecisionError::Unauthorized { trace, .. } => Some(trace),
+            DecisionError::ModelUnavailable { trace, .. } => Some(trace),
+            DecisionError::ChainExhausted { trace } => Some(trace),
+            DecisionError::InvalidInput { .. }
+            | DecisionError::MissingVaultEntry { .. }
+            | DecisionError::ClientUnavailable { .. } => None,
+        }
     }
 }
 
