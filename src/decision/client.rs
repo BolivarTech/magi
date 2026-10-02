@@ -822,4 +822,331 @@ mod tests {
             }
         }
     }
+
+    fn spec(model: &str, min: Option<f64>) -> ModelSpec {
+        ModelSpec {
+            model: model.to_string(),
+            min_confidence: min,
+        }
+    }
+
+    fn noul_body(model: &str, noul: f64, input_tokens: u64, cost: Option<f64>) -> String {
+        let mut usage = json!({"input_tokens": input_tokens, "output_tokens": 1});
+        if let Some(c) = cost {
+            usage["cost"] = json!(c);
+        }
+        json!({"model": model, "answers": {"today": {"type": "noul", "noul": noul}}, "usage": usage}).to_string()
+    }
+
+    async fn mock_model(
+        server: &mut mockito::ServerGuard,
+        model: &str,
+        status: usize,
+        body: String,
+    ) -> mockito::Mock {
+        server
+            .mock("POST", "/v1/systemone")
+            .match_body(Matcher::PartialJson(json!({"model": model})))
+            .with_status(status)
+            .with_body(body)
+            .create_async()
+            .await
+    }
+
+    fn outcomes(trace: &crate::decision::error::Trace) -> Vec<String> {
+        trace
+            .attempts
+            .iter()
+            .map(|a| {
+                format!(
+                    "{}:{}",
+                    a.model,
+                    match &a.outcome {
+                        AttemptOutcome::Answered => "answered".to_string(),
+                        AttemptOutcome::Failed { cause, .. } => cause.as_str().to_string(),
+                        AttemptOutcome::LowConfidence { .. } => "low_confidence".to_string(),
+                    }
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_first_model_that_answers_wins_and_every_hop_is_recorded() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 404, OLLAMA_MISSING_MODEL.to_string()).await;
+        mock_model(&mut server, "b", 500, String::new()).await;
+        mock_model(&mut server, "c", 200, noul_body("c", 0.9, 5, None)).await;
+        let d = decide(settings(&server.url(), &["a", "b", "c"]), &request())
+            .await
+            .expect("c answers");
+        assert_eq!(d.model, "c");
+        assert_eq!(
+            outcomes(&d.trace),
+            vec!["a:model_not_found", "b:http_5xx", "c:answered"]
+        );
+    }
+
+    #[tokio::test]
+    async fn caller_and_credential_errors_stop_the_chain() {
+        for (status, is_rejected) in [(400usize, true), (401, false)] {
+            let mut server = mockito::Server::new_async().await;
+            mock_model(&mut server, "a", status, "{}".to_string()).await;
+            let never = server
+                .mock("POST", "/v1/systemone")
+                .match_body(Matcher::PartialJson(json!({"model": "b"})))
+                .expect(0)
+                .create_async()
+                .await;
+            let r = decide(settings(&server.url(), &["a", "b"]), &request()).await;
+            assert_eq!(
+                matches!(r, Err(DecisionError::Rejected { .. })),
+                is_rejected,
+                "{r:?}"
+            );
+            assert_eq!(
+                matches!(r, Err(DecisionError::Unauthorized { .. })),
+                !is_rejected,
+                "{r:?}"
+            );
+            never.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_low_confidence_answer_rotates_and_keeps_its_answers_in_the_attempt() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 200, noul_body("a", 0.6, 3, None)).await; // confidence 0.2
+        mock_model(&mut server, "b", 200, noul_body("b", 0.95, 4, None)).await;
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", Some(0.9)), spec("b", None)];
+        let d = decide(s, &request()).await.expect("b answers");
+        assert_eq!(d.model, "b");
+        match &d.trace.attempts[0].outcome {
+            AttemptOutcome::LowConfidence {
+                confidence,
+                min_confidence,
+                answers,
+            } => {
+                assert!((confidence - 0.2).abs() < 1e-9);
+                assert!((min_confidence - 0.9).abs() < 1e-9);
+                assert!(answers.contains_key("today"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_question_must_reach_the_threshold_and_the_attempt_reports_the_lowest() {
+        let questions: Questions = serde_json::from_value(json!({
+            "pick": {"type": "choice", "criteria": {"x": "x", "y": "y"}},
+            "level": {"type": "score", "criteria": ["low", "high"]}}))
+        .expect("q");
+        let req = DecisionRequest::new(json!("s"), questions).expect("valid");
+        let body = json!({"model": "a", "answers": {
+            "pick": {"type": "choice", "choice": "x", "probabilities": {"x": 0.99, "y": 0.01}},
+            "level": {"type": "score", "score": 0.55, "legend": {"0": "low", "1": "high"},
+                      "probabilities": {"0": 0.45, "1": 0.55}}}})
+        .to_string();
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 200, body).await;
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", Some(0.5))];
+        match decide(s, &req).await {
+            Err(DecisionError::ChainExhausted { trace }) => match &trace.attempts[0].outcome {
+                AttemptOutcome::LowConfidence { confidence, .. } => {
+                    assert!((confidence - 0.1).abs() < 1e-9)
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// REQ-D20 guardian (mutation-verified): an exhausted chain is an error, never the best rejected answer.
+    #[tokio::test]
+    async fn an_exhausted_chain_never_returns_a_rejected_answer() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 200, noul_body("a", 0.7, 1, None)).await;
+        mock_model(&mut server, "b", 200, noul_body("b", 0.6, 1, None)).await;
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", Some(0.9)), spec("b", Some(0.9))];
+        match decide(s, &request()).await {
+            Err(DecisionError::ChainExhausted { trace }) => {
+                assert_eq!(
+                    outcomes(&trace),
+                    vec!["a:low_confidence", "b:low_confidence"]
+                );
+            }
+            other => panic!("an exhausted chain must be an error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_model_chain_that_fails_is_exhausted() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 503, String::new()).await;
+        let r = decide(settings(&server.url(), &["a"]), &request()).await;
+        assert!(
+            matches!(&r, Err(DecisionError::ChainExhausted { trace }) if trace.attempts.len() == 1),
+            "{r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_declared_model_is_tried_alone_with_its_own_threshold() {
+        let mut server = mockito::Server::new_async().await;
+        let never = server
+            .mock("POST", "/v1/systemone")
+            .match_body(Matcher::PartialJson(json!({"model": "a"})))
+            .expect(0)
+            .create_async()
+            .await;
+        mock_model(&mut server, "b", 200, noul_body("b", 0.6, 1, None)).await; // 0.2 < 0.9
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", None), spec("b", Some(0.9))];
+        let r = decide(s, &request().with_model("b")).await;
+        assert!(
+            matches!(&r, Err(DecisionError::ModelUnavailable { model, trace }) if model == "b" && trace.attempts.len() == 1),
+            "{r:?}"
+        );
+        never.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_explicit_undeclared_model_has_no_threshold() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "zzz", 200, noul_body("zzz", 0.51, 1, None)).await;
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", Some(0.99))];
+        let d = decide(s, &request().with_model("zzz"))
+            .await
+            .expect("no threshold applies");
+        assert_eq!(d.model, "zzz");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_model_that_fails_is_model_unavailable() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "b", 404, OLLAMA_MISSING_MODEL.to_string()).await;
+        let r = decide(
+            settings(&server.url(), &["a", "b"]),
+            &request().with_model("b"),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(DecisionError::ModelUnavailable { .. })),
+            "{r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn usage_is_the_sum_of_every_attempt_that_reported_it() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 200, noul_body("a", 0.6, 10, Some(0.1))).await;
+        mock_model(&mut server, "b", 200, noul_body("b", 0.95, 5, Some(0.2))).await;
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", Some(0.9)), spec("b", None)];
+        let d = decide(s, &request()).await.expect("b answers");
+        assert_eq!(d.trace.usage.input_tokens, 15);
+        assert_eq!(d.trace.usage.output_tokens, 2);
+        assert!((d.trace.usage.cost.unwrap_or_default() - 0.3).abs() < 1e-9);
+    }
+
+    /// CP2 MS1 r4 (Caspar): a failed attempt whose body reports usage is counted too (REQ-D10 `usage`).
+    #[tokio::test]
+    async fn a_failed_attempt_that_reports_usage_is_counted() {
+        let mut server = mockito::Server::new_async().await;
+        let invalid = r#"{"model":"a","answers":{},"usage":{"input_tokens":7,"output_tokens":0}}"#;
+        mock_model(&mut server, "a", 200, invalid.to_string()).await;
+        mock_model(&mut server, "b", 200, noul_body("b", 0.95, 5, None)).await;
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", None), spec("b", None)];
+        let d = decide(s, &request()).await.expect("b answers");
+        assert_eq!(d.trace.attempts.len(), 2);
+        assert_eq!(
+            d.trace.usage.input_tokens, 12,
+            "7 from the invalid response + 5 from the answer"
+        );
+    }
+
+    /// REQ-D17: one event per attempt and one closing event; never the state, the key or provider text.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_decision_is_logged_without_state_keys_or_provider_text() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if let Ok(mut lines) = self.0.lock() {
+                    lines.push(crate::logging::render::render_event(event));
+                }
+            }
+        }
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(Capture(Arc::clone(&lines))),
+        );
+
+        let state_marker = "STATE-MARKER-7f3a9c";
+        let provider_marker = "PROVIDER-TEXT-2b8d";
+        let mut server = mockito::Server::new_async().await;
+        mock_model(
+            &mut server,
+            "alpha",
+            404,
+            format!("{{\"error\":\"{provider_marker}\"}}"),
+        )
+        .await;
+        mock_model(&mut server, "beta", 200, noul_body("beta", 0.9, 7, None)).await;
+        let base = server.url().replace("http://", "http://alice:s3cr3t@");
+        let mut s = settings(&base, &["alpha", "beta"]);
+        s.api_key = Some(zeroize::Zeroizing::new(
+            "sk-planted-key-0123456789".to_string(),
+        ));
+        let questions: Questions = serde_json::from_value(
+            json!({"today": {"type": "noul", "instructions": "Is it today?"}}),
+        )
+        .expect("q");
+        let req = DecisionRequest::new(json!({"note": state_marker}), questions).expect("valid");
+        decide(s, &req).await.expect("beta answers");
+
+        let all = lines.lock().expect("lines").join("\n");
+        for needle in ["alpha", "beta", "not_found", "answered", "input_tokens"] {
+            assert!(
+                all.contains(needle),
+                "{needle} missing from the run log:\n{all}"
+            );
+        }
+        for leak in [state_marker, provider_marker, "s3cr3t", "sk-planted-key"] {
+            assert!(
+                !all.contains(leak),
+                "{leak} leaked into the run log:\n{all}"
+            );
+        }
+        assert!(
+            lines.lock().expect("lines").len() >= 3,
+            "two attempts and a closing event"
+        );
+    }
+
+    /// Carried from T1: the explicit model is sent trimmed, and its declared threshold still applies.
+    #[tokio::test]
+    async fn an_explicit_model_is_sent_trimmed() {
+        let mut server = mockito::Server::new_async().await;
+        let m = mock_model(&mut server, "b", 200, noul_body("b", 0.6, 1, None)).await; // 0.2 < 0.9
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("b", Some(0.9))];
+        let r = decide(s, &request().with_model("  b 	")).await;
+        assert!(
+            matches!(&r, Err(DecisionError::ModelUnavailable { model, .. }) if model == "b"),
+            "{r:?}"
+        );
+        m.assert_async().await;
+    }
 }
