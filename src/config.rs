@@ -4999,6 +4999,23 @@ model = \"nimble\"
     }
 
     #[test]
+    fn an_unparseable_decision_base_url_names_the_config_file_and_no_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_toml(
+            &dir,
+            "[decision]
+model = \"m\"
+base_url = \"nope nope\"
+",
+        );
+        let msg = MagiConfig::load(&path).expect_err("not a URL").to_string();
+        assert!(
+            msg.contains(&path.display().to_string()) && !msg.contains("nope nope"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn the_decision_base_url_inherits_the_root_and_is_validated_at_load() {
         let dir = tempfile::tempdir().expect("tempdir");
         // CP2 MS1 r4 (Caspar): a blank base_url is absent, not invalid (the repo's non_blank rule).
