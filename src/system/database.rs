@@ -2005,4 +2005,42 @@ mod tests {
             rusqlite::version()
         );
     }
+
+    /// REQ-D25: a database written by v0.22.0 opens with this build and keeps its records and vault entries.
+    /// Green on purpose (the schema does not change); its power is proven by mutation.
+    #[tokio::test]
+    async fn a_v0_22_0_database_opens_and_keeps_its_records_and_vault_entries() {
+        use magi_rs::vault::SecretStore;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join(".magi-rs-memory.db");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/v0.22.0/magi-rs-memory.db"),
+            &db,
+        )
+        .expect("copy fixture");
+        let store = EncryptedSqliteMemory::new(
+            db,
+            zeroize::Zeroizing::new("correct horse battery staple".into()),
+        )
+        .expect("the v0.22.0 database opens");
+        let session_id: String = {
+            let conn = store.shared_conn();
+            let guard = conn.lock().unwrap_or_else(|p| p.into_inner());
+            guard
+                .query_row("SELECT id FROM sessions LIMIT 1", [], |r| r.get(0))
+                .expect("the fixture has a session")
+        };
+        let messages = store
+            .get_messages(&session_id)
+            .await
+            .expect("messages decrypt");
+        assert!(!messages.is_empty(), "the fixture's conversation survives");
+        let mut vault = magi_rs::vault::wire(store.shared_conn(), store.data_key().expect("dek"))
+            .expect("vault");
+        assert_eq!(
+            vault.get("TOY_SECRET").expect("entry").as_str(),
+            "toy-secret-value"
+        );
+    }
 }
