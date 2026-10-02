@@ -847,6 +847,14 @@ mod tests {
     }
 
     #[test]
+    fn with_model_trims_and_treats_a_blank_model_as_absent() {
+        let questions: Questions = serde_json::from_value(noul()).expect("map");
+        let base = DecisionRequest::new(json!("s"), questions).expect("valid");
+        assert_eq!(base.clone().with_model("   ").model(), None);
+        assert_eq!(base.with_model(" tev1 ").model(), Some("tev1"));
+    }
+
+    #[test]
     fn the_wire_body_carries_model_state_questions_and_keep_alive_only_when_declared() {
         let req = parse(json!({"state": "s", "questions": noul()})).expect("valid");
         let body = req.wire_body("nimble", None);
