@@ -21,11 +21,11 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ### Added
 
-- **`magi decide`**: asks a closed question of a small decision model (System One protocol) and prints, as one JSON object, the chosen option and the probability of every option. Three question types: `choice`, `noul` (a yes/no probability) and `score`. Flags: `-i`, `-o`, `-q` (a reusable question file), `-w`, `--no-memory` and `--timeout`. Exit codes are `0` (decided), `1` (no decision) and `2` (invalid input or key). See `docs/decide.md`.
+- **`magi-rs decide`**: asks a closed question of a small decision model (System One protocol) and prints, as one JSON object, the chosen option and the probability of every option. Three question types: `choice`, `noul` (a yes/no probability) and `score`. Flags: `-i`, `-o`, `-q` (a reusable question file), `-w`, `--no-memory` and `--timeout`. Exit codes are `0` (decided), `1` (no decision) and `2` (invalid input or key). See `docs/decide.md`.
 - **`[decision]` in `magi.toml`**: `base_url` (defaults to the root `base_url`), `model`, `timeout_secs` (120), `keep_alive`, `auto_approve`, an optional per-model `min_confidence`, and ordered `[[decision.fallback]]` models on the same endpoint. `magi init` writes it with `nimble`, `tev1` and `tev1:0.8b` on local Ollama, and an OpenRouter example in comments.
 - **`DECISION_API_KEY`**, from the environment or the vault, plus `DECISION_BASE_URL_USER` and `DECISION_BASE_URL_PASSWORD` for credentials in the URL. Without `DECISION_API_KEY`, the main model's key is used only when `[decision]` has the same origin; a key is never sent to another host.
 - Only `confidence` (computed by magi-rs, the same formula for every question type) decides. `provider_confidence` is the provider's own figure and is informational.
-- Ollama 0.35 or later is needed, with `ollama pull nimble`, `ollama pull tev1` and `ollama pull tev1:0.8b`. Without them `magi decide` returns an error that names the missing model.
+- Ollama 0.35 or later is needed, with `ollama pull nimble`, `ollama pull tev1` and `ollama pull tev1:0.8b`. Without them `magi-rs decide` returns an error that names the missing model.
 
 ## [0.22.0] - 2026-10-01
 
