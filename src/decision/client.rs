@@ -329,19 +329,19 @@ impl DecisionClient for SystemOneClient {
                         usage: Usage::default(),
                     });
                     let status = failure.status.unwrap_or_default();
-                    match failure.cause {
-                        Cause::Unauthorized => {
-                            return Err(DecisionError::Unauthorized { status, trace })
-                        }
-                        Cause::Rejected => {
-                            return Err(DecisionError::Rejected {
-                                status,
-                                provider_message: failure.provider_message,
-                                trace,
-                            })
-                        }
-                        _ => {}
+                    if failure.cause.rotates() {
+                        continue;
                     }
+                    // The only causes that do not rotate end the call with their own error.
+                    return Err(if failure.cause == Cause::Unauthorized {
+                        DecisionError::Unauthorized { status, trace }
+                    } else {
+                        DecisionError::Rejected {
+                            status,
+                            provider_message: failure.provider_message,
+                            trace,
+                        }
+                    });
                 }
             }
         }
