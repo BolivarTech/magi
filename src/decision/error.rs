@@ -63,13 +63,8 @@ pub struct Usage {
 
 impl Usage {
     /// Adds `other` into `self`; `cost` stays `None` only if neither side has one.
-    pub fn add(&mut self, other: &Usage) {
-        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.cost = match (self.cost, other.cost) {
-            (Some(a), Some(b)) => Some(a + b),
-            (a, b) => a.or(b),
-        };
+    pub fn add(&mut self, _other: &Usage) {
+        todo!()
     }
 }
 
@@ -205,34 +200,8 @@ pub enum DecisionError {
 
 impl std::fmt::Debug for DecisionError {
     /// Prints the variant and its non-textual facts; never provider text (REQ-D11).
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidInput { .. } => f.write_str("InvalidInput"),
-            Self::Rejected { status, trace, .. } => f
-                .debug_struct("Rejected")
-                .field("status", status)
-                .field("attempts", &trace.attempts.len())
-                .finish(),
-            Self::Unauthorized { status, trace } => f
-                .debug_struct("Unauthorized")
-                .field("status", status)
-                .field("attempts", &trace.attempts.len())
-                .finish(),
-            Self::MissingVaultEntry { entry } => f
-                .debug_struct("MissingVaultEntry")
-                .field("entry", entry)
-                .finish(),
-            Self::ModelUnavailable { model, trace } => f
-                .debug_struct("ModelUnavailable")
-                .field("model", model)
-                .field("attempts", &trace.attempts.len())
-                .finish(),
-            Self::ChainExhausted { trace } => f
-                .debug_struct("ChainExhausted")
-                .field("attempts", &trace.attempts.len())
-                .finish(),
-            Self::ClientUnavailable { .. } => f.write_str("ClientUnavailable"),
-        }
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
     }
 }
 
@@ -245,5 +214,275 @@ impl DecisionError {
     /// The attempt trace, when any model was called.
     pub fn trace(&self) -> Option<&Trace> {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [Cause; 11] = [
+        Cause::Unauthorized,
+        Cause::Rejected,
+        Cause::ModelNotFound,
+        Cause::AccountPolicy,
+        Cause::NotFound,
+        Cause::RateLimited,
+        Cause::Http5xx,
+        Cause::Redirected,
+        Cause::Transport,
+        Cause::Timeout,
+        Cause::InvalidResponse,
+    ];
+
+    #[test]
+    fn only_caller_and_credential_errors_do_not_rotate() {
+        for c in ALL {
+            let expected = !matches!(c, Cause::Unauthorized | Cause::Rejected);
+            assert_eq!(c.rotates(), expected, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn the_transport_class_is_the_closed_set_of_req_d13() {
+        for c in ALL {
+            let expected = matches!(
+                c,
+                Cause::Transport
+                    | Cause::Timeout
+                    | Cause::Http5xx
+                    | Cause::RateLimited
+                    | Cause::Redirected
+            );
+            assert_eq!(c.is_transport_class(), expected, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn as_str_matches_the_serialized_token() {
+        for c in ALL {
+            assert_eq!(
+                serde_json::to_value(c).expect("ser"),
+                serde_json::json!(c.as_str())
+            );
+        }
+        assert_eq!(Cause::Http5xx.as_str(), "http_5xx");
+        assert_eq!(Cause::ModelNotFound.as_str(), "model_not_found");
+    }
+
+    #[test]
+    fn usage_adds_tokens_and_cost_is_none_only_when_nobody_reported_it() {
+        let mut u = Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cost: None,
+        };
+        u.add(&Usage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cost: None,
+        });
+        assert_eq!(
+            u,
+            Usage {
+                input_tokens: 11,
+                output_tokens: 22,
+                cost: None
+            }
+        );
+        u.add(&Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: Some(0.25),
+        });
+        assert_eq!(u.cost, Some(0.25));
+        u.add(&Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: Some(0.5),
+        });
+        assert_eq!(u.cost, Some(0.75));
+    }
+
+    #[test]
+    fn every_error_maps_to_its_kind_and_carries_a_trace_when_a_model_was_called() {
+        let t = Trace::default();
+        let cases: [(DecisionError, ErrorKind, bool); 7] = [
+            (
+                DecisionError::InvalidInput { reason: "r".into() },
+                ErrorKind::InvalidInput,
+                false,
+            ),
+            (
+                DecisionError::Rejected {
+                    status: 413,
+                    provider_message: "m".into(),
+                    trace: t.clone(),
+                },
+                ErrorKind::InvalidInput,
+                true,
+            ),
+            (
+                DecisionError::Unauthorized {
+                    status: 401,
+                    trace: t.clone(),
+                },
+                ErrorKind::MissingKey,
+                true,
+            ),
+            (
+                DecisionError::MissingVaultEntry {
+                    entry: "DECISION_BASE_URL_USER",
+                },
+                ErrorKind::MissingKey,
+                false,
+            ),
+            (
+                DecisionError::ModelUnavailable {
+                    model: "m".into(),
+                    trace: t.clone(),
+                },
+                ErrorKind::ModelUnavailable,
+                true,
+            ),
+            (
+                DecisionError::ChainExhausted { trace: t.clone() },
+                ErrorKind::DecisionUnavailable,
+                true,
+            ),
+            (
+                DecisionError::ClientUnavailable { reason: "r".into() },
+                ErrorKind::DecisionUnavailable,
+                false,
+            ),
+        ];
+        for (e, kind, has_trace) in cases {
+            assert_eq!(e.kind(), kind, "{e:?}");
+            assert_eq!(e.trace().is_some(), has_trace, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn the_unauthorized_message_names_the_key_and_the_vault_command() {
+        let msg = DecisionError::Unauthorized {
+            status: 403,
+            trace: Trace::default(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("DECISION_API_KEY") && msg.contains("magi-rs vault set DECISION_API_KEY"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn an_attempt_serializes_flat_with_its_outcome_and_without_usage() {
+        let a = Attempt {
+            model: "tev1".into(),
+            outcome: AttemptOutcome::Failed {
+                cause: Cause::Timeout,
+                detail: None,
+            },
+            usage: Usage {
+                input_tokens: 9,
+                output_tokens: 9,
+                cost: None,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&a).expect("ser"),
+            serde_json::json!({"model": "tev1", "outcome": "failed", "cause": "timeout"})
+        );
+    }
+
+    /// CP2 MS1 r2 (Melchior): the rejected answers of a low-confidence hop travel with their numbers.
+    #[test]
+    fn a_low_confidence_attempt_serializes_its_numbers_and_answers() {
+        let mut answers = std::collections::BTreeMap::new();
+        answers.insert(
+            "q".to_string(),
+            Answer::Noul {
+                noul: 0.6,
+                confidence: 0.2,
+            },
+        );
+        let a = Attempt {
+            model: "tev1".into(),
+            outcome: AttemptOutcome::LowConfidence {
+                confidence: 0.2,
+                min_confidence: 0.5,
+                answers,
+            },
+            usage: Usage::default(),
+        };
+        assert_eq!(
+            serde_json::to_value(&a).expect("ser"),
+            serde_json::json!({"model": "tev1", "outcome": "low_confidence", "confidence": 0.2,
+                               "min_confidence": 0.5,
+                               "answers": {"q": {"type": "noul", "noul": 0.6, "confidence": 0.2}}})
+        );
+    }
+
+    /// CP2 MS1 r2 (Caspar): `{:?}` of a rejection never shows what the provider wrote (REQ-D11).
+    #[test]
+    fn the_debug_of_a_rejection_never_shows_the_provider_text() {
+        let e = DecisionError::Rejected {
+            status: 413,
+            provider_message: "PROVIDER-TEXT-31c7 Bearer sk-x".into(),
+            trace: Trace::default(),
+        };
+        let shown = format!("{e:?}");
+        assert!(
+            shown.contains("Rejected") && shown.contains("413"),
+            "{shown}"
+        );
+        assert!(!shown.contains("PROVIDER-TEXT-31c7"), "{shown}");
+
+        // CP2 MS1 r3 (Caspar): nor the trace's provider-sourced text (detail, rejected answers, legend).
+        let mut answers = std::collections::BTreeMap::new();
+        answers.insert(
+            "u".to_string(),
+            Answer::Score {
+                score: 1.0,
+                legend: [("0".to_string(), "LEGEND-TEXT-8b2e".to_string())]
+                    .into_iter()
+                    .collect(),
+                probabilities: [("0".to_string(), 1.0)].into_iter().collect(),
+                confidence: 1.0,
+                provider_confidence: None,
+            },
+        );
+        let e = DecisionError::ChainExhausted {
+            trace: Trace {
+                attempts: vec![
+                    Attempt {
+                        model: "a".into(),
+                        usage: Usage::default(),
+                        outcome: AttemptOutcome::Failed {
+                            cause: Cause::NotFound,
+                            detail: Some("DETAIL-TEXT-4c1a".into()),
+                        },
+                    },
+                    Attempt {
+                        model: "b".into(),
+                        usage: Usage::default(),
+                        outcome: AttemptOutcome::LowConfidence {
+                            confidence: 0.1,
+                            min_confidence: 0.5,
+                            answers,
+                        },
+                    },
+                ],
+                usage: Usage::default(),
+            },
+        };
+        let shown = format!("{e:?}");
+        assert!(
+            shown.contains("ChainExhausted") && shown.contains('2'),
+            "{shown}"
+        );
+        for leak in ["LEGEND-TEXT-8b2e", "DETAIL-TEXT-4c1a"] {
+            assert!(!shown.contains(leak), "{leak} in {shown}");
+        }
     }
 }

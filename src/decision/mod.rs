@@ -20,6 +20,6 @@ pub mod endpoint;
 pub mod error;
 pub mod protocol;
 
-pub use config::KeepAlive;
+pub use config::{DecisionConfigError, DecisionFallback, DecisionSection, KeepAlive, ModelSpec};
 pub use error::{Attempt, AttemptOutcome, Cause, Decision, DecisionError, ErrorKind, Trace, Usage};
 pub use protocol::{Answer, DecisionRequest, NoulCriteria, Question, Questions};
