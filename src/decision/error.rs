@@ -35,6 +35,10 @@ pub enum Cause {
 
 impl Cause {
     /// Whether the chain rotates to the next model after this cause.
+    ///
+    /// # Returns
+    /// `false` for the two causes every model of the endpoint would repeat
+    /// (`unauthorized`, `rejected`), `true` otherwise.
     pub fn rotates(self) -> bool {
         match self {
             Cause::Unauthorized | Cause::Rejected => false,
@@ -51,6 +55,10 @@ impl Cause {
     }
 
     /// Whether this cause belongs to the transport class (REQ-D13).
+    ///
+    /// # Returns
+    /// `true` when the endpoint itself failed to answer (transport, timeout, 5xx,
+    /// rate limit, redirect), as opposed to a model or request problem.
     pub fn is_transport_class(self) -> bool {
         match self {
             Cause::Transport
@@ -68,6 +76,9 @@ impl Cause {
     }
 
     /// The serialized token of this cause.
+    ///
+    /// # Returns
+    /// The `cause` value of the envelope, from a closed set.
     pub fn as_str(self) -> &'static str {
         match self {
             Cause::Unauthorized => "unauthorized",
@@ -277,6 +288,9 @@ impl std::fmt::Debug for DecisionError {
 
 impl DecisionError {
     /// The `error.kind` this error maps to.
+    ///
+    /// # Returns
+    /// The closed-set kind of the envelope's `error` object.
     pub fn kind(&self) -> ErrorKind {
         match self {
             DecisionError::InvalidInput { .. } => ErrorKind::InvalidInput,
@@ -290,6 +304,9 @@ impl DecisionError {
     }
 
     /// The attempt trace, when any model was called.
+    ///
+    /// # Returns
+    /// The trace, or `None` for errors raised before a model was called.
     pub fn trace(&self) -> Option<&Trace> {
         match self {
             DecisionError::Rejected { trace, .. } => Some(trace),

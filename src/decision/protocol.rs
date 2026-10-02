@@ -166,6 +166,12 @@ impl DecisionRequest {
     }
 
     /// Replaces the titular model for this request only.
+    ///
+    /// # Arguments
+    /// * `model` - model name; surrounding whitespace is trimmed.
+    ///
+    /// # Returns
+    /// The request with the explicit model set.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         let model: String = model.into();
         self.model = Some(model.trim().to_owned());
@@ -173,27 +179,45 @@ impl DecisionRequest {
     }
 
     /// Sets the per-attempt timeout for this request only.
+    ///
+    /// # Arguments
+    /// * `timeout` - timeout of each attempt of the chain.
+    ///
+    /// # Returns
+    /// The request with the timeout override set.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
 
     /// The state, as given.
+    ///
+    /// # Returns
+    /// A borrow of the state, forwarded to the provider verbatim.
     pub fn state(&self) -> &Value {
         &self.state
     }
 
     /// The questions.
+    ///
+    /// # Returns
+    /// A borrow of the validated question map.
     pub fn questions(&self) -> &Questions {
         &self.questions
     }
 
     /// The explicit model, if any.
+    ///
+    /// # Returns
+    /// The model that replaces the titular one, or `None`.
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
     }
 
     /// The per-attempt timeout override, if any.
+    ///
+    /// # Returns
+    /// The override, or `None` to use the configured timeout.
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
@@ -239,6 +263,15 @@ impl DecisionRequest {
 /// # Errors
 /// [`DecisionError::InvalidInput`] naming the problem; no value of the state
 /// or of an option is quoted.
+///
+/// # Examples
+/// ```
+/// use magi_rs::decision::protocol::parse_decide_input;
+///
+/// let input = br#"{"state": "a ticket", "questions": {"q": {"type": "noul"}}}"#;
+/// let request = parse_decide_input(input, None).unwrap();
+/// assert!(request.model().is_none());
+/// ```
 pub fn parse_decide_input(
     input: &[u8],
     questions_file: Option<&[u8]>,
@@ -316,6 +349,9 @@ pub enum Answer {
 
 impl Answer {
     /// Magi's confidence for this answer.
+    ///
+    /// # Returns
+    /// The confidence in [0, 1] computed by [`magi_confidence`], never the provider's.
     pub fn confidence(&self) -> f64 {
         match self {
             Self::Noul { confidence, .. }
@@ -336,6 +372,20 @@ pub const PROBABILITY_SUM_TOLERANCE: f64 = 0.01;
 /// tolerance allows.
 ///
 /// Complexity: O(n).
+///
+/// # Arguments
+/// * `probabilities` - the probabilities of the options or levels of one question.
+///
+/// # Returns
+/// The confidence in [0, 1].
+///
+/// # Examples
+/// ```
+/// use magi_rs::decision::protocol::magi_confidence;
+///
+/// assert_eq!(magi_confidence(&[1.0, 0.0]), 1.0);
+/// assert_eq!(magi_confidence(&[0.5, 0.5]), 0.0);
+/// ```
 pub fn magi_confidence(probabilities: &[f64]) -> f64 {
     if probabilities.len() < MIN_CHOICES {
         return 0.0;
@@ -543,6 +593,12 @@ pub(crate) fn salvage_usage(body: &[u8]) -> Usage {
 /// Lowest Magi confidence across the answers (1 when there are none).
 ///
 /// Complexity: O(answers).
+///
+/// # Arguments
+/// * `answers` - the answers of one attempt, by question name.
+///
+/// # Returns
+/// The smallest [`Answer::confidence`], or 1.0 for an empty map.
 pub fn lowest_confidence(answers: &BTreeMap<String, Answer>) -> f64 {
     answers.values().map(Answer::confidence).fold(1.0, f64::min)
 }

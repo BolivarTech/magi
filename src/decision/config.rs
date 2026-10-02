@@ -12,6 +12,23 @@ pub enum KeepAlive {
 }
 
 /// The `[decision]` section as written in `magi.toml` (REQ-D01, REQ-D21).
+///
+/// # Examples
+/// ```
+/// use magi_rs::decision::config::DecisionSection;
+///
+/// let section: DecisionSection = toml::from_str(
+///     r#"
+///     model = "nimble"
+///     [[fallback]]
+///     model = "tev1"
+///     "#,
+/// )
+/// .unwrap();
+/// section.validate().unwrap();
+/// let models: Vec<_> = section.chain().into_iter().map(|m| m.model).collect();
+/// assert_eq!(models, ["nimble", "tev1"]);
+/// ```
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecisionSection {

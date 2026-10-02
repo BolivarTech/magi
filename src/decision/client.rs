@@ -159,6 +159,9 @@ impl SystemOneClient {
     }
 
     /// The `base_url`, redacted.
+    ///
+    /// # Returns
+    /// The endpoint as shown to users: credentials replaced, never a key.
     pub fn endpoint_display(&self) -> String {
         redact_url(&self.settings.base_url)
     }
