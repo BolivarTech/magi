@@ -4679,4 +4679,185 @@ api_key = \"sk-x\"
             "the rejected value is not echoed: {err}"
         );
     }
+
+    fn write_toml(dir: &tempfile::TempDir, text: &str) -> std::path::PathBuf {
+        let path = dir.path().join("magi.toml");
+        std::fs::write(&path, text).expect("write magi.toml");
+        path
+    }
+
+    /// S6: a v0.22.0 file is refused with the whole upgrade procedure.
+    #[test]
+    fn a_toml_without_decision_fails_load_with_the_guided_procedure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_toml(
+            &dir,
+            "provider = \"ollama\"
+",
+        );
+        let msg = MagiConfig::load(&path)
+            .expect_err("a v0.22.0 toml")
+            .to_string();
+        for needle in [
+            "[decision]",
+            "mv .magi",
+            "magi-rs init",
+            ".magi-rs-memory.db",
+            "passphrase",
+            "0.22.0",
+        ] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "names the file: {msg}"
+        );
+    }
+
+    /// S19: empty, whitespace-only and comment-only files are refused offering both ways out.
+    #[test]
+    fn an_empty_or_comment_only_toml_fails_load_offering_both_ways_out() {
+        for text in [
+            "",
+            "   
+	
+",
+            "# only a comment
+# and another
+",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let msg = MagiConfig::load(&write_toml(&dir, text))
+                .expect_err("declares nothing")
+                .to_string();
+            assert!(
+                msg.contains("Delete") && msg.contains("magi-rs init"),
+                "{text:?}: {msg}"
+            );
+            assert!(
+                !msg.contains("[decision] section"),
+                "the empty case has its own message: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_toml_still_loads_the_built_in_defaults_silently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (cfg, notices) =
+            MagiConfig::load(&dir.path().join("magi.toml")).expect("absent = defaults");
+        assert_eq!(cfg, MagiConfig::default());
+        assert!(notices.is_empty());
+    }
+
+    /// D-P3: syntax and literal credentials are reported as today, before the missing section.
+    #[test]
+    fn syntax_errors_and_literal_credentials_are_reported_before_the_missing_section() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let msg = MagiConfig::load(&write_toml(
+            &dir,
+            "provdier = \"x\"
+",
+        ))
+        .expect_err("typo")
+        .to_string();
+        assert!(
+            msg.contains("provdier") && !msg.contains("[decision] section"),
+            "{msg}"
+        );
+        let msg = MagiConfig::load(&write_toml(
+            &dir,
+            "base_url = \"https://alice:s3cr3t@host/v1\"
+",
+        ))
+        .expect_err("literal credential")
+        .to_string();
+        assert!(
+            msg.contains("BASE_URL_USER") && !msg.contains("[decision] section"),
+            "{msg}"
+        );
+        assert!(!msg.contains("s3cr3t"), "{msg}");
+    }
+
+    #[test]
+    fn a_current_toml_with_only_the_decision_section_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        MagiConfig::load(&write_toml(
+            &dir,
+            "[decision]
+model = \"nimble\"
+",
+        ))
+        .expect("current generation");
+    }
+
+    #[test]
+    fn the_decision_base_url_inherits_the_root_and_is_validated_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // CP2 MS1 r4 (Caspar): a blank base_url is absent, not invalid (the repo's non_blank rule).
+        MagiConfig::load(&write_toml(
+            &dir,
+            "[decision]
+model = \"m\"
+base_url = \"   \"
+",
+        ))
+        .expect("a blank [decision].base_url inherits the root");
+        let (cfg, _) = MagiConfig::load(&write_toml(
+            &dir,
+            "base_url = \"http://lan:11434/v1\"
+[decision]
+model = \"m\"
+",
+        ))
+        .expect("valid");
+        // [DR-C8] the effective_decision_base_url() assertion is written in GREEN (declared exception §0.3):
+        // the symbol does not exist in Red, and a stub in the bin would be dead_code. Green adds:
+        // assert_eq!(cfg.effective_decision_base_url().expect("template").as_str(), "http://lan:11434/v1");
+        let _ = cfg;
+        let msg = MagiConfig::load(&write_toml(
+            &dir,
+            "[decision]
+model = \"m\"
+base_url = \"https://alice:s3cr3t@host\"
+",
+        ))
+        .expect_err("literal credential")
+        .to_string();
+        assert!(
+            msg.contains("DECISION_BASE_URL_USER") && !msg.contains("s3cr3t"),
+            "{msg}"
+        );
+        let msg = MagiConfig::load(&write_toml(
+            &dir,
+            "[decision]
+model = \"m\"
+base_url = \"nope nope\"
+",
+        ))
+        .expect_err("not a URL")
+        .to_string();
+        assert!(
+            msg.contains("[decision].base_url") && !msg.contains("nope nope"),
+            "{msg}"
+        );
+    }
+
+    /// Carry item 2 (CP2 MS1 r1): the placeholders survive the load-time URL check. This rests on the url
+    /// crate accepting `[` `]` in userinfo; the first line pins it, so a crate update that tightens the parser
+    /// turns this test red instead of turning every placeholder URL into a load error. Passes in Red by design
+    /// (declared in §0.3); its red: a stricter `url`, or `load` without the `Url::parse`.
+    #[test]
+    fn the_load_time_url_check_accepts_the_placeholders() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(reqwest::Url::parse("https://[user]:[password]@host/v1").is_ok());
+        MagiConfig::load(&write_toml(
+            &dir,
+            "[decision]
+model = \"m\"
+base_url = \"https://[user]:[password]@host/v1\"
+",
+        ))
+        .expect("placeholders parse");
+    }
 }
