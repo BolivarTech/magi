@@ -36,10 +36,10 @@ use std::path::{Component, Path, PathBuf};
 use magi_rs::headless::HeadlessError;
 
 /// Name of the unified state directory searched for during the walk-up.
-const MAGI_DIR_NAME: &str = ".magi";
+pub(crate) const MAGI_DIR_NAME: &str = ".magi";
 
 /// Name of the encrypted database file inside `.magi/`.
-const DB_FILE_NAME: &str = ".magi-rs-memory.db";
+pub(crate) const DB_FILE_NAME: &str = ".magi-rs-memory.db";
 
 /// Name of the configuration file inside `.magi/`.
 const CONFIG_FILE_NAME: &str = "magi.toml";

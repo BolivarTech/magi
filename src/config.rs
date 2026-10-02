@@ -159,7 +159,44 @@ pub enum ConfigError {
         /// The largest value the 32-bit wire field can carry (`u32::MAX`).
         max: u32,
     },
+
+    /// The file is present but declares nothing: it is empty or holds only whitespace and
+    /// comments (REQ-D02). A present file makes the operator believe it is being read.
+    #[error(
+        "{} is present but declares nothing (it is empty or holds only comments). Delete it to          run with the built-in defaults, or generate a current one with `magi-rs init` after          moving the old {}/ directory aside.",
+        .config_path.display(),
+        crate::system::workspace::MAGI_DIR_NAME
+    )]
+    EmptyConfig {
+        /// The `magi.toml` that declares nothing.
+        config_path: std::path::PathBuf,
+    },
+
+    /// The file has no `[decision]` section: it was written by magi-rs
+    /// [`LAST_VERSION_WITHOUT_DECISION`] or earlier (REQ-D02, REQ-D25).
+    #[error(
+        "{} has no [decision] section: it was written by magi-rs {} or earlier. To upgrade:          1) back up the whole state directory (`mv {dir} {dir}.bak-0.22`) and check that the          backup holds {} and its -wal/-shm files; 2) run `magi-rs init`; 3) copy your own          magi.toml settings into the new file and, to keep history, memories and vault secrets,          restore that database. They live ONLY in it: without it and its original passphrase          they are lost.",
+        .config_path.display(),
+        LAST_VERSION_WITHOUT_DECISION,
+        .db_path.display(),
+        dir = crate::system::workspace::MAGI_DIR_NAME
+    )]
+    MissingDecisionSection {
+        /// The `magi.toml` without the section.
+        config_path: std::path::PathBuf,
+        /// The encrypted database next to it, which the upgrade must preserve.
+        db_path: std::path::PathBuf,
+    },
+
+    /// `[decision].base_url` (or the root URL it inherits) is not a valid URL. The text never
+    /// repeats the value (REQ-D05).
+    #[error("[decision].base_url is not a valid URL (scheme://host/...)")]
+    DecisionBaseUrl,
 }
+
+/// The last magi-rs version whose scaffold wrote a `magi.toml` without `[decision]`. A
+/// historical fact, so it does not move with version bumps.
+pub const LAST_VERSION_WITHOUT_DECISION: &str = "0.22.0";
 
 impl From<ProviderKindParseError> for ConfigError {
     fn from(e: ProviderKindParseError) -> Self {
@@ -1720,6 +1757,19 @@ impl MagiConfig {
         )
     }
 
+    /// Decision endpoint: override of `[decision].base_url` (blank is absent), or inheritance
+    /// from the system (REQ-D01).
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::effective_base_url`].
+    pub fn effective_decision_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
+        self.override_or_inherit_base_url(
+            self.decision.as_ref().and_then(|d| d.base_url.as_deref()),
+            magi_rs::magi::endpoint::Scope::Decision,
+        )
+    }
+
     /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
     /// `Workspace::config_path()` (REQ-A22b).
     ///
@@ -1775,6 +1825,11 @@ impl MagiConfig {
         // malformed template and observe the error at the RESOLUTION point, not at parse time —
         // moving it there would break them. Endpoint validation lives at the production
         // boundary, `load()`.
+        // REQ-D02, in the D-P3 order: empty file, then syntax/vocabulary (`from_toml_str`), then
+        // the four endpoint templates, and only then the missing `[decision]` section, so a typo
+        // or a literal credential is reported before the upgrade message.
+        let table = raw.parse::<toml::Table>().ok();
+        reject_empty(table.as_ref(), path)?;
         let cfg = Self::from_toml_str(&raw).map_err(|e| attach_path(e, path))?;
 
         // Notices from REQ-A12b/A12c: every resolution that does not come from what was written
@@ -1785,6 +1840,16 @@ impl MagiConfig {
         cfg.effective_base_url()?;
         cfg.effective_magi_base_url()?;
         cfg.effective_embedding_base_url()?;
+        // D-P4: the placeholders `[user]:[password]` parse as userinfo, so the template itself
+        // can be checked here without resolving any secret.
+        match cfg.effective_decision_base_url() {
+            Ok(t) if reqwest::Url::parse(t.as_str()).is_ok() => {}
+            Ok(_) | Err(EndpointError::Unparseable) => return Err(ConfigError::DecisionBaseUrl),
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(table) = &table {
+            require_decision_section(table, path)?;
+        }
 
         let notices = cfg.resolution_notices();
         Ok((cfg, notices))
@@ -1894,6 +1959,39 @@ impl MagiConfig {
 /// Prefixes a [`ConfigError::Parse`] with the path of the offending file; the other variants
 /// are already self-contained (they name the field, the value, or the range) and do not need
 /// the path to be actionable.
+/// Refuses a file that parses as an empty table: empty, whitespace-only or comment-only
+/// (REQ-D02). A file that does not parse (`None`) passes: the syntax error is `from_toml_str`'s
+/// to report.
+///
+/// # Errors
+///
+/// [`ConfigError::EmptyConfig`] when `table` is `Some` and has no keys.
+fn reject_empty(table: Option<&toml::Table>, config_path: &Path) -> Result<(), ConfigError> {
+    match table {
+        Some(t) if t.is_empty() => Err(ConfigError::EmptyConfig {
+            config_path: config_path.to_path_buf(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Refuses a parsed file without a `[decision]` table: it was written by
+/// [`LAST_VERSION_WITHOUT_DECISION`] or earlier (REQ-D02). Works on the table `load` already
+/// parsed, so the file is not read twice.
+///
+/// # Errors
+///
+/// [`ConfigError::MissingDecisionSection`] when the key `decision` is absent.
+fn require_decision_section(table: &toml::Table, config_path: &Path) -> Result<(), ConfigError> {
+    if table.contains_key("decision") {
+        return Ok(());
+    }
+    Err(ConfigError::MissingDecisionSection {
+        config_path: config_path.to_path_buf(),
+        db_path: config_path.with_file_name(crate::system::workspace::DB_FILE_NAME),
+    })
+}
+
 fn attach_path(e: ConfigError, path: &Path) -> ConfigError {
     match e {
         ConfigError::Parse(msg) => ConfigError::Parse(format!("{}: {msg}", path.display())),
@@ -2535,7 +2633,14 @@ base_url = "http://embedder-host:11434/v1"
         // normalize onto.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("magi.toml");
-        std::fs::write(&path, "provider = \"anthropic\"").unwrap();
+        std::fs::write(
+            &path,
+            "provider = \"anthropic\"
+[decision]
+model = \"nimble\"
+",
+        )
+        .unwrap();
         let (c, _notices) = MagiConfig::load(&path).unwrap();
         assert_eq!(c.provider.as_deref(), Some("anthropic"));
     }
@@ -4181,9 +4286,15 @@ reasoning = \"disabled\"
         // one the embedder path (`attach_persistent_memory`) already covered by degrading to a
         // notice + plain-text memory (which SC-A16d forbids).
         std::fs::write(&path, "   \n").unwrap();
-        let (cfg, notices) = MagiConfig::load(&path).expect("en blanco: default silencioso");
-        assert_eq!(cfg, MagiConfig::default());
-        assert!(notices.is_empty());
+        // PM-C1 row 2 (REQ-D02 revokes SC-A21f): a blank file is no longer "defaults"; it is
+        // refused offering both ways out.
+        let err = MagiConfig::load(&path)
+            .expect_err("en blanco: error guiado")
+            .to_string();
+        assert!(
+            err.contains("Delete") && err.contains("magi-rs init"),
+            "{err}"
+        );
 
         std::fs::write(&path, "provdier = \"x\"").unwrap();
         let err = MagiConfig::load(&path).expect_err("present and broken: FATAL");
@@ -4266,18 +4377,26 @@ reasoning = \"disabled\"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("magi.toml");
 
-        std::fs::write(&path, "provider = \"\"\n").unwrap();
+        std::fs::write(&path, "provider = \"\"\n[decision]\nmodel = \"nimble\"\n").unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(notices.iter().any(|n| n.text.contains("provider")));
 
-        std::fs::write(&path, "base_url = \"http://lan:11434/v1\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "base_url = \"http://lan:11434/v1\"\n[decision]\nmodel = \"nimble\"\n",
+        )
+        .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
             notices.iter().any(|n| n.text.contains("embedder")),
             "the embedder inherits a NON-default base_url: it must be said"
         );
 
-        std::fs::write(&path, "base_url = \"http://localhost:11434/v1\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "base_url = \"http://localhost:11434/v1\"\n[decision]\nmodel = \"nimble\"\n",
+        )
+        .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         assert!(
             !notices.iter().any(|n| n.text.contains("embedder")),
@@ -4303,7 +4422,11 @@ reasoning = \"disabled\"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("magi.toml");
 
-        std::fs::write(&path, "base_url = \"https://api.example.com/v1\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "base_url = \"https://api.example.com/v1\"\n[decision]\nmodel = \"nimble\"\n",
+        )
+        .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         let cloud = notices
             .iter()
@@ -4316,7 +4439,11 @@ reasoning = \"disabled\"
         );
 
         // Non-default, so the notice fires — and local, so it is not a warning.
-        std::fs::write(&path, "base_url = \"http://127.0.0.1:11435/v1\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "base_url = \"http://127.0.0.1:11435/v1\"\n[decision]\nmodel = \"nimble\"\n",
+        )
+        .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         let local = notices
             .iter()
@@ -4341,7 +4468,11 @@ reasoning = \"disabled\"
         let path = dir.path().join("magi.toml");
 
         // (a) declared explicitly — the user thinks it is used.
-        std::fs::write(&path, "provider = \"anthropic\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "provider = \"anthropic\"\n[decision]\nmodel = \"nimble\"\n",
+        )
+        .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         let defaulted = notices
             .iter()
@@ -4357,7 +4488,7 @@ reasoning = \"disabled\"
         // And the same case one level down, in the trio.
         std::fs::write(
             &path,
-            "provider = \"anthropic\"\nbase_url = \"http://x/v1\"\n",
+            "provider = \"anthropic\"\nbase_url = \"http://x/v1\"\n[decision]\nmodel = \"nimble\"\n",
         )
         .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
@@ -4370,7 +4501,7 @@ reasoning = \"disabled\"
         // Without Anthropic there is nothing to warn about.
         std::fs::write(
             &path,
-            "[magi]\nkind = \"anthropic\"\nbase_url = \"http://x/v1\"\n",
+            "[magi]\nkind = \"anthropic\"\nbase_url = \"http://x/v1\"\n[decision]\nmodel = \"nimble\"\n",
         )
         .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
@@ -4383,7 +4514,11 @@ reasoning = \"disabled\"
         // Needle must match production's actual casing ("NOT used", line ~1902 above) — the
         // lowercase "not used" this assertion used before never matches, so it was vacuously
         // true regardless of whether the code was correct.
-        std::fs::write(&path, "provider = \"ollama\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "provider = \"ollama\"\n[decision]\nmodel = \"nimble\"\n",
+        )
+        .unwrap();
         let (_, notices) = MagiConfig::load(&path).unwrap();
         // m2 (fix round 2, coordinator, 2026-08-03): a failed `effective_base_url()` must NOT
         // silence the Anthropic inconsistency notices that follow it.
@@ -4811,10 +4946,13 @@ model = \"m\"
 ",
         ))
         .expect("valid");
-        // [DR-C8] the effective_decision_base_url() assertion is written in GREEN (declared exception §0.3):
-        // the symbol does not exist in Red, and a stub in the bin would be dead_code. Green adds:
-        // assert_eq!(cfg.effective_decision_base_url().expect("template").as_str(), "http://lan:11434/v1");
-        let _ = cfg;
+        // [DR-C8] written in Green (declared exception): the symbol did not exist in Red.
+        assert_eq!(
+            cfg.effective_decision_base_url()
+                .expect("template")
+                .as_str(),
+            "http://lan:11434/v1"
+        );
         let msg = MagiConfig::load(&write_toml(
             &dir,
             "[decision]

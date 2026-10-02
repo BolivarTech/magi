@@ -1237,6 +1237,45 @@ fn run_vault_diagnose(workspace_root: &std::path::Path, names: bool) -> i32 {
     }
 }
 
+/// Exit code for a `magi.toml` the generation check refuses (invalid input).
+const EXIT_CONFIG_REFUSED: i32 = 2;
+
+/// Refuses an old or empty `magi.toml` before any entry point opens the database (REQ-D02).
+///
+/// Runs the same ordered validation as [`MagiConfig::load`], so a syntax error, an unknown field
+/// or a literal credential is reported before the missing `[decision]` section. A discovery
+/// error, an absent workspace and an absent `magi.toml` all pass: the caller reports the first
+/// as it always has, and the other two mean built-in defaults.
+///
+/// # Arguments
+///
+/// * `root` - Directory the `.magi/` walk-up starts from.
+///
+/// # Errors
+///
+/// The [`ConfigError`] `MagiConfig::load` reports for an existing `magi.toml`.
+fn preflight_config_generation(root: &Path) -> Result<(), crate::config::ConfigError> {
+    match crate::system::workspace::discover(root) {
+        Ok(Some(ws)) => MagiConfig::load(&ws.config_path()).map(|_| ()),
+        Ok(None) | Err(_) => Ok(()),
+    }
+}
+
+/// Runs [`preflight_config_generation`], reporting a refusal on stderr.
+///
+/// # Returns
+///
+/// `Some(exit code)` when the run must stop, `None` when it may go on.
+fn refuse_unusable_config(root: &Path) -> Option<i32> {
+    match preflight_config_generation(root) {
+        Ok(()) => None,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            Some(EXIT_CONFIG_REFUSED)
+        }
+    }
+}
+
 /// Runs `magi-rs --logout`: opens the vault and removes `ANTHROPIC_API_KEY`
 /// (the CLI analogue of SC-V36/SC-V37). An absent DB, or an absent key, is
 /// reported as "no stored session" rather than an error. Returns the
@@ -1585,6 +1624,15 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // Read BEFORE `args.command.take()` below empties `args.command` — after
     // that point `mode_of_consult()` would always answer `None` (REQ-A07c).
     let explicit_consult_mode = args.mode_of_consult();
+
+    // REQ-D02: `vault`, the TUI and `--logout` reach the database without `prepare_headless`,
+    // so the generation check runs here. `init` creates the file; `query`/`consult` check it in
+    // `prepare_headless`. `--help`/`--version` were resolved by clap above.
+    if matches!(args.command, None | Some(TopCmd::Vault { .. })) {
+        if let Some(code) = refuse_unusable_config(&workspace_root) {
+            return Ok(exit_code(code));
+        }
+    }
 
     match args.command.take() {
         // REQ-H32: intercepted BEFORE `run_vault_subcommand` so a diagnose
@@ -5740,6 +5788,10 @@ async fn prepare_headless(
             return Err(headless_error_exit_code(&e));
         }
     };
+    // REQ-D02: an old or empty `magi.toml` is refused before the database is opened.
+    if let Some(code) = refuse_unusable_config(&workdir) {
+        return Err(code);
+    }
     // A run that requires persistent state fails clearly without a `.magi/`
     // (REQ-H17); a stateless `--no-memory` run may proceed env-only.
     if workspace.is_none() && !h.no_memory {
@@ -10812,7 +10864,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = dunce::canonicalize(tmp.path()).unwrap();
         crate::system::workspace::init(&cwd).expect("init .magi/");
-        std::fs::write(cwd.join(".magi/magi.toml"), "provider = \"anthropic\"\n").unwrap();
+        std::fs::write(
+            cwd.join(".magi/magi.toml"),
+            "provider = \"anthropic\"
+[decision]
+model = \"nimble\"
+",
+        )
+        .unwrap();
         (tmp, cwd)
     }
 
@@ -17729,7 +17788,9 @@ mod tests {
                             cwd.join(".magi/magi.toml"),
                             "base_url = \"http://a:11434/v1\"\n\
                              [magi]\n\
-                             base_url = \"http://b:11434/v1\"\n",
+                             base_url = \"http://b:11434/v1\"\n\
+                             [decision]\n\
+                             model = \"nimble\"\n",
                         )
                         .unwrap();
                         let input = write_envelope(&cwd, "env.json", r#"{"prompt":"hi"}"#);
