@@ -127,14 +127,11 @@ pub fn render_envelope_masked(
         endpoint: mask(endpoint_display),
         answers: result.as_ref().ok().map(|d| mask_answers(&d.answers, mask)),
         chain: trace
-            .map(|t| chain_values(t, audience))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| mask_value(entry, mask))
-            .collect(),
+            .map(|t| chain_values(t, audience, mask))
+            .unwrap_or_default(),
         error: result.as_ref().err().map(|e| ErrorBody {
             kind: e.kind(),
-            message: mask(&cap_chars(&error_message(e, audience), MESSAGE_CAP_CHARS)),
+            message: cap_chars(&mask(&error_message(e, audience)), MESSAGE_CAP_CHARS),
         }),
         usage: trace.map(|t| t.usage).unwrap_or_default(),
         timings: Timings { total_ms },
@@ -205,7 +202,7 @@ fn mask_answers(
 
 /// Serializes the attempts; the agent never sees rejected answers (REQ-D16)
 /// and every `detail` is capped (REQ-D10).
-fn chain_values(trace: &Trace, audience: Audience) -> Vec<Value> {
+fn chain_values(trace: &Trace, audience: Audience, mask: &dyn Fn(&str) -> String) -> Vec<Value> {
     let mut values = serde_json::to_value(&trace.attempts)
         .ok()
         .and_then(|v| match v {
@@ -214,6 +211,8 @@ fn chain_values(trace: &Trace, audience: Audience) -> Vec<Value> {
         })
         .unwrap_or_default();
     for entry in &mut values {
+        // Mask first, cap after: a secret straddling the cap must not leave a prefix behind.
+        *entry = mask_value(entry.take(), mask);
         let Some(object) = entry.as_object_mut() else {
             continue;
         };
