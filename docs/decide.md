@@ -1,6 +1,6 @@
-# Typed decisions: `magi decide`
+# Typed decisions: `magi-rs decide`
 
-`magi decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated, so a decision usually comes back in well under a second once the model is loaded.
+`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated, so a decision usually comes back in well under a second once the model is loaded.
 
 The models speak the System One protocol: you send a `state` (text or JSON) and a set of questions, and each question has one of three types.
 
@@ -39,7 +39,7 @@ ollama pull tev1
 ollama pull tev1:0.8b
 ```
 
-Without them, `magi decide` fails with an error that names the missing model, and the chain moves on to the next one. Fallbacks always live on the same endpoint as `[decision]`; there is no `base_url` per fallback.
+Without them, `magi-rs decide` fails with an error that names the missing model, and the chain moves on to the next one. Fallbacks always live on the same endpoint as `[decision]`; there is no `base_url` per fallback.
 
 ## Configuration
 
@@ -78,15 +78,15 @@ The key is read once, at startup, after the vault is opened. It is chosen in thi
 2. The main model's key, only when `[decision]` points at the same origin as the main model: same scheme, host and effective port. The path and any credentials in the URL do not count.
 3. No authentication header.
 
-A key is never sent to a different host. Because the test is on the origin, a gateway that routes several services by URL path counts as one origin, and it would receive the main model's key. If that is not what you want, set `DECISION_API_KEY`, which takes precedence. A missing key is not a load error; if the endpoint needs one, it answers 401 or 403 and `magi decide` reports `missing_key`.
+A key is never sent to a different host. Because the test is on the origin, a gateway that routes several services by URL path counts as one origin, and it would receive the main model's key. If that is not what you want, set `DECISION_API_KEY`, which takes precedence. A missing key is not a load error; if the endpoint needs one, it answers 401 or 403 and `magi-rs decide` reports `missing_key`.
 
-Credentials in the URL itself work as in the other sections: write `[user]` and `[password]` placeholders in `base_url` and store the values with `magi-rs vault set DECISION_BASE_URL_USER` and `magi-rs vault set DECISION_BASE_URL_PASSWORD`. A literal credential in the URL is a load error. If one of the two entries is missing, `magi decide` stops before calling any model and names the entry.
+Credentials in the URL itself work as in the other sections: write `[user]` and `[password]` placeholders in `base_url` and store the values with `magi-rs vault set DECISION_BASE_URL_USER` and `magi-rs vault set DECISION_BASE_URL_PASSWORD`. A literal credential in the URL is a load error. If one of the two entries is missing, `magi-rs decide` stops before calling any model and names the entry.
 
 Keys never go in `magi.toml`.
 
 ## Input
 
-`magi decide` reads one JSON request from `-i FILE` or, without it, from standard input:
+`magi-rs decide` reads one JSON request from `-i FILE` or, without it, from standard input:
 
 ```json
 {
@@ -205,7 +205,7 @@ Failures before any model is called (an old `magi.toml`, a wrong passphrase, an 
 
 ## What leaves your machine
 
-`magi decide` sends the whole `state` you give it, the questions and the model name to the endpoint in `[decision]`. With the default local Ollama nothing leaves the machine. With a hosted provider, that data goes to it, in the same way that prompts go to your main model's provider. The `state` is not written to the log or repeated in the output.
+`magi-rs decide` sends the whole `state` you give it, the questions and the model name to the endpoint in `[decision]`. With the default local Ollama nothing leaves the machine. With a hosted provider, that data goes to it, in the same way that prompts go to your main model's provider. The `state` is not written to the log or repeated in the output.
 
 ## Costs
 

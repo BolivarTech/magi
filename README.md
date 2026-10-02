@@ -406,15 +406,15 @@ cap from a request that was simply honored as asked. It carries nine keys, all a
 The last five are new in v0.15.0 and additive under the same policy as `consult` above, with no
 `schema_version` bump: the tolerate-new-fields rule applies here too.
 
-### Typed decisions: `magi decide`
+### Typed decisions: `magi-rs decide`
 
-`magi decide` puts a closed question to a small decision model and returns the chosen option with the probability of every option. It is one forward pass with no generated text, so it usually answers in well under a second once the model is loaded. It does not use your main model and works without one. The full guide, including providers, limits and costs, is [`docs/decide.md`](docs/decide.md).
+`magi-rs decide` puts a closed question to a small decision model and returns the chosen option with the probability of every option. It is one forward pass with no generated text, so it usually answers in well under a second once the model is loaded. It does not use your main model and works without one. The full guide, including providers, limits and costs, is [`docs/decide.md`](docs/decide.md).
 
 ```bash
-cat request.json | magi decide                              # request on stdin, result on stdout
-magi decide -i request.json -o result.json                  # files instead
-magi decide -i state.json -q questions.json                 # reuse one set of questions
-cat state.json | magi decide --no-memory -q questions.json  # no vault, no passphrase
+cat request.json | magi-rs decide                              # request on stdin, result on stdout
+magi-rs decide -i request.json -o result.json                  # files instead
+magi-rs decide -i state.json -q questions.json                 # reuse one set of questions
+cat state.json | magi-rs decide --no-memory -q questions.json  # no vault, no passphrase
 ```
 
 | Flag | Meaning |
@@ -1167,7 +1167,7 @@ crate, so a relative one would dangle for anyone reading this on crates.io.
 | Vault passphrase | For persistence | Chosen on first run (or supplied via `-p`/`MAGI_PASSPHRASE`). Without one available the session runs ephemeral (the on-disk DB is left untouched) |
 | [Ollama](https://ollama.com/) (default backend) | For live replies (default) | running daemon + a chat model (e.g. `kimi-k2.6:cloud`); run `ollama signin` for `:cloud` tags. Any OpenAI-compatible endpoint works by pointing `base_url` elsewhere |
 | Embedding model | For tiered memory (`selective`, the default) | `ollama pull nomic-embed-text-v2-moe:latest`; without it memory degrades gracefully to text-only persistence |
-| Ollama 0.35 or later, and the decision models | For `magi decide` | `ollama pull nimble`, `ollama pull tev1`, `ollama pull tev1:0.8b`; without them `magi decide` returns an error that names the missing model |
+| Ollama 0.35 or later, and the decision models | For `magi-rs decide` | `ollama pull nimble`, `ollama pull tev1`, `ollama pull tev1:0.8b`; without them `magi-rs decide` returns an error that names the missing model |
 | Anthropic API key | Optional (opt-in) | only with `provider = "anthropic"`; via env var, the vault, or `/login` |
 
 ### Default models (Ollama)
@@ -1180,8 +1180,8 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 |------|---------------|---------|
 | Chat (principal) | `kimi-k2.6:cloud` | `magi-rs` agent — live replies |
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
-| Decision (primary) | `nimble` | `magi decide` — `ollama pull nimble` (Ollama 0.35 or later) |
-| Decision (fallbacks) | `tev1`, `tev1:0.8b` | `magi decide` — `ollama pull tev1` and `ollama pull tev1:0.8b`; tried in that order when the primary fails |
+| Decision (primary) | `nimble` | `magi-rs decide` — `ollama pull nimble` (Ollama 0.35 or later) |
+| Decision (fallbacks) | `tev1`, `tev1:0.8b` | `magi-rs decide` — `ollama pull tev1` and `ollama pull tev1:0.8b`; tried in that order when the primary fails |
 | Melchior (Scientist) | `glm-5.3:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Balthasar (Pragmatist) | `kimi-k2.6:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
@@ -1197,7 +1197,7 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 - [`docs/OVERVIEW.md`](docs/OVERVIEW.md): what Magi is, the `magi-core` foundation, and the multi-perspective philosophy behind the name.
 - [`docs/TIERED-MEMORY.md`](docs/TIERED-MEMORY.md): full technical reference for the tiered agnostic memory subsystem: RAG pipeline, three pillars, architecture, configuration, benchmark.
 - [`docs/E2E-TESTING.md`](docs/E2E-TESTING.md): hands-on end-to-end testing guide for the tiered memory feature (cross-session recall, preferences, rollback).
-- [`docs/decide.md`](docs/decide.md): `magi decide` in full: providers and models, limits, keys, thresholds, the output fields and the error and cause sets.
+- [`docs/decide.md`](docs/decide.md): `magi-rs decide` in full: providers and models, limits, keys, thresholds, the output fields and the error and cause sets.
 - [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md): the MAGI trio's reasoning controls and output cap: what each `[magi]` key does, what the clock-coverage warning means, and how to read `reasoning`/`control` in a consult report.
 
 ---
