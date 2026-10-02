@@ -261,6 +261,7 @@ mod tests {
     #[test]
     fn the_not_found_hint_names_the_url_and_both_causes() {
         let hint = not_found_hint("https://openrouter.ai/v1/systemone");
+        assert!(!hint.contains("  ") && !hint.contains('\n'), "{hint}");
         assert!(
             hint.contains("https://openrouter.ai/v1/systemone"),
             "{hint}"
