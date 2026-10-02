@@ -314,3 +314,41 @@ class SeedWorkspaceCleanupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class S13FragmentTests(unittest.TestCase):
+    """A documented toml block is a fragment; the product wants a whole file."""
+
+    def _installed(self, *bodies: str) -> list[str]:
+        """The texts the check hands to the product for ``bodies``."""
+        seen: list[str] = []
+
+        def record(root, body, relative, index):
+            seen.append(body)
+            return ""
+
+        embedded = [(pathlib.Path("README.md"), n, b)
+                    for n, b in enumerate(bodies, 1)]
+        with mock.patch.object(docs, "_install_and_probe", record):
+            finding = docs._config_finding(embedded, pathlib.Path("."))
+        self.assertEqual(finding.outcome, Outcome.PASS)
+        return seen
+
+    def test_a_fragment_without_decision_gets_the_default_section(self) -> None:
+        """The fragment is still judged on its own keys, plus a valid section."""
+        (body,) = self._installed("[memory]\nmode = \"selective\"\n")
+        self.assertIn("[memory]", body)
+        self.assertIn("[decision]", body)
+        self.assertIn("model = ", body)
+
+    def test_a_fragment_with_its_own_decision_is_left_alone(self) -> None:
+        """No second section is appended to one that declares it."""
+        text = "[decision]\nmodel = \"tev1\"\n"
+        (body,) = self._installed(text)
+        self.assertEqual(body, text)
+
+    def test_an_invalid_fragment_is_not_repaired(self) -> None:
+        """Broken syntax reaches the product untouched, so it is still caught."""
+        text = "[memory\nmode = \n"
+        (body,) = self._installed(text)
+        self.assertEqual(body, text)
