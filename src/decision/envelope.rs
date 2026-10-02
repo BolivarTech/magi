@@ -8,7 +8,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::decision::client::KEEP_ALIVE_HINT;
-use crate::decision::error::{AttemptOutcome, Cause, Decision, DecisionError, Trace, Usage};
+use crate::decision::endpoint::NOT_FOUND_HINT_MARKER;
+use crate::decision::error::{AttemptOutcome, Decision, DecisionError, Trace, Usage};
 use crate::decision::protocol::Answer;
 use crate::headless::output::redact_secret_patterns;
 use crate::redact::redact_foreign_text;
@@ -246,33 +247,28 @@ fn error_message(error: &DecisionError, audience: Audience) -> String {
     } = error
     {
         let detail = last_detail(error);
+        let magi_text = || detail.map_or_else(|| error.to_string(), str::to_string);
         return match audience {
             Audience::User => {
                 let redacted =
                     redact_secret_patterns(redact_foreign_text(provider_message).as_str());
-                if detail.is_some_and(|d| d.contains(KEEP_ALIVE_HINT)) {
+                if redacted.trim().is_empty() {
+                    // An empty provider body says nothing: fall back to what Magi knows.
+                    magi_text()
+                } else if detail.is_some_and(|d| d.contains(KEEP_ALIVE_HINT)) {
                     format!("{redacted}{KEEP_ALIVE_HINT}")
                 } else {
                     redacted
                 }
             }
-            Audience::Agent => detail.map_or_else(|| error.to_string(), str::to_string),
+            Audience::Agent => magi_text(),
         };
     }
     let base = error.to_string();
-    match (last_attempt(error), last_detail(error)) {
-        (Some(attempt), Some(detail))
-            if matches!(
-                attempt.outcome,
-                AttemptOutcome::Failed {
-                    cause: Cause::NotFound,
-                    ..
-                }
-            ) =>
-        {
-            format!("{base}; {detail}")
-        }
-        _ => base,
+    // The prefix hint goes first so the message cap never cuts the tried URL or the hint.
+    match last_detail(error).and_then(|d| d.split_once(NOT_FOUND_HINT_MARKER)) {
+        Some((_, rest)) => format!("{NOT_FOUND_HINT_MARKER}{rest}; {base}"),
+        None => base,
     }
 }
 
