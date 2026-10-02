@@ -167,7 +167,8 @@ impl DecisionRequest {
 
     /// Replaces the titular model for this request only.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
+        let model: String = model.into();
+        self.model = Some(model.trim().to_owned());
         self
     }
 
@@ -526,6 +527,17 @@ pub(crate) fn parse_response(body: &[u8], questions: &Questions) -> Result<Parse
         answers: parsed,
         usage,
     })
+}
+
+/// Consumption reported by a response that failed validation, so a spent attempt is still
+/// counted (REQ-D10 `usage`). A body that is not JSON or has no usable `usage` counts as zero.
+///
+/// Complexity: O(body).
+pub(crate) fn salvage_usage(body: &[u8]) -> Usage {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|root| read_usage(root.get("usage")).ok())
+        .unwrap_or_default()
 }
 
 /// Lowest Magi confidence across the answers (1 when there are none).

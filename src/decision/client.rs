@@ -6,9 +6,11 @@ use crate::decision::endpoint::{not_found_hint, systemone_url};
 use crate::decision::error::{
     Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace, Usage,
 };
-use crate::decision::protocol::{parse_response, DecisionRequest, ParsedResponse};
+use crate::decision::protocol::{
+    lowest_confidence, parse_response, salvage_usage, DecisionRequest, ParsedResponse,
+};
 use crate::redact::{redact_foreign_error, redact_foreign_text, redact_url};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Tracing target of every decision log entry.
 pub const DECISION_LOG_TARGET: &str = "magi_rs::decision";
@@ -76,6 +78,8 @@ struct Failure {
     status: Option<u16>,
     /// Redacted, capped provider body; only a rejection relays it.
     provider_message: String,
+    /// Consumption the provider reported in a body that was otherwise unusable.
+    usage: Usage,
 }
 
 impl Failure {
@@ -85,6 +89,7 @@ impl Failure {
             detail,
             status: None,
             provider_message: String::new(),
+            usage: Usage::default(),
         }
     }
 
@@ -182,8 +187,9 @@ impl SystemOneClient {
                         Some("invalid response: the body is larger than the read cap".into()),
                     ));
                 }
-                parse_response(&bytes, request.questions()).map_err(|reason| {
-                    Failure::new(
+                parse_response(&bytes, request.questions()).map_err(|reason| Failure {
+                    usage: salvage_usage(&bytes),
+                    ..Failure::new(
                         Cause::InvalidResponse,
                         Some(format!("invalid response: {reason}")),
                     )
@@ -300,52 +306,150 @@ async fn read_capped(
     Ok((bytes, false))
 }
 
+/// Milliseconds since `since`, saturating.
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+impl SystemOneClient {
+    /// The models to try: the explicit one alone (with the threshold of the declared model of that
+    /// name, if any) or the whole configured chain.
+    fn plan(&self, request: &DecisionRequest) -> Vec<ModelSpec> {
+        match request.model() {
+            Some(model) => vec![ModelSpec {
+                model: model.to_owned(),
+                min_confidence: self
+                    .settings
+                    .chain
+                    .iter()
+                    .find(|spec| spec.model == model)
+                    .and_then(|spec| spec.min_confidence),
+            }],
+            None => self.settings.chain.clone(),
+        }
+    }
+
+    /// One run-log event for an attempt; never the state, the key or provider text (REQ-D17).
+    fn log_attempt(&self, attempt: &Attempt, latency_ms: u64) {
+        let (outcome, cause) = match &attempt.outcome {
+            AttemptOutcome::Answered => ("answered", None),
+            AttemptOutcome::Failed { cause, .. } => ("failed", Some(cause.as_str())),
+            AttemptOutcome::LowConfidence { .. } => ("low_confidence", None),
+        };
+        let endpoint = self.endpoint_display();
+        tracing::event!(
+            target: DECISION_LOG_TARGET,
+            tracing::Level::INFO,
+            model = attempt.model.as_str(),
+            outcome = outcome,
+            cause = cause,
+            endpoint = endpoint.as_str(),
+            latency_ms = latency_ms,
+            input_tokens = attempt.usage.input_tokens,
+            output_tokens = attempt.usage.output_tokens,
+            "decision attempt"
+        );
+    }
+
+    /// The closing run-log event of one call.
+    fn log_close(&self, answered_by: Option<&str>, trace: &Trace, started: Instant) {
+        tracing::event!(
+            target: DECISION_LOG_TARGET,
+            tracing::Level::INFO,
+            model = answered_by.unwrap_or("none"),
+            attempts = trace.attempts.len(),
+            input_tokens = trace.usage.input_tokens,
+            output_tokens = trace.usage.output_tokens,
+            total_ms = elapsed_ms(started),
+            endpoint = self.endpoint_display().as_str(),
+            "decision finished"
+        );
+    }
+
+    /// Records one attempt in the trace, the usage sum and the run log.
+    fn record(&self, trace: &mut Trace, attempt: Attempt, latency_ms: u64) {
+        trace.usage.add(&attempt.usage);
+        self.log_attempt(&attempt, latency_ms);
+        trace.attempts.push(attempt);
+    }
+}
+
 #[async_trait::async_trait]
 impl DecisionClient for SystemOneClient {
+    /// Walks the chain in order (or tries only the explicit model). An answer whose lowest
+    /// confidence is under that model's `min_confidence` is recorded and the chain rotates; a
+    /// rejected answer is never returned (REQ-D20).
+    ///
+    /// Complexity: O(m) attempts for m models.
     async fn decide(&self, request: &DecisionRequest) -> Result<Decision, DecisionError> {
+        let started = Instant::now();
         let mut trace = Trace::default();
-        for spec in &self.settings.chain {
-            match self.attempt(&spec.model, request).await {
+        for spec in self.plan(request) {
+            let attempt_started = Instant::now();
+            let result = self.attempt(&spec.model, request).await;
+            let latency_ms = elapsed_ms(attempt_started);
+            match result {
                 Ok(parsed) => {
-                    trace.usage.add(&parsed.usage);
-                    trace.attempts.push(Attempt {
+                    let lowest = lowest_confidence(&parsed.answers);
+                    let below = spec.min_confidence.filter(|min| lowest < *min);
+                    let outcome = match below {
+                        Some(min_confidence) => AttemptOutcome::LowConfidence {
+                            confidence: lowest,
+                            min_confidence,
+                            answers: parsed.answers.clone(),
+                        },
+                        None => AttemptOutcome::Answered,
+                    };
+                    let attempt = Attempt {
                         model: spec.model.clone(),
-                        outcome: AttemptOutcome::Answered,
+                        outcome,
                         usage: parsed.usage,
-                    });
-                    return Ok(Decision {
-                        model: spec.model.clone(),
-                        answers: parsed.answers,
-                        trace,
-                    });
+                    };
+                    self.record(&mut trace, attempt, latency_ms);
+                    if below.is_none() {
+                        self.log_close(Some(&spec.model), &trace, started);
+                        return Ok(Decision {
+                            model: spec.model,
+                            answers: parsed.answers,
+                            trace,
+                        });
+                    }
                 }
                 Err(failure) => {
-                    trace.attempts.push(Attempt {
+                    let attempt = Attempt {
                         model: spec.model.clone(),
                         outcome: AttemptOutcome::Failed {
                             cause: failure.cause,
                             detail: failure.detail,
                         },
-                        usage: Usage::default(),
-                    });
-                    let status = failure.status.unwrap_or_default();
-                    if failure.cause.rotates() {
-                        continue;
+                        usage: failure.usage,
+                    };
+                    self.record(&mut trace, attempt, latency_ms);
+                    if !failure.cause.rotates() {
+                        // The only causes that do not rotate end the call with their own error.
+                        self.log_close(None, &trace, started);
+                        let status = failure.status.unwrap_or_default();
+                        return Err(if failure.cause == Cause::Unauthorized {
+                            DecisionError::Unauthorized { status, trace }
+                        } else {
+                            DecisionError::Rejected {
+                                status,
+                                provider_message: failure.provider_message,
+                                trace,
+                            }
+                        });
                     }
-                    // The only causes that do not rotate end the call with their own error.
-                    return Err(if failure.cause == Cause::Unauthorized {
-                        DecisionError::Unauthorized { status, trace }
-                    } else {
-                        DecisionError::Rejected {
-                            status,
-                            provider_message: failure.provider_message,
-                            trace,
-                        }
-                    });
                 }
             }
         }
-        Err(DecisionError::ChainExhausted { trace })
+        self.log_close(None, &trace, started);
+        Err(match request.model() {
+            Some(model) => DecisionError::ModelUnavailable {
+                model: model.to_owned(),
+                trace,
+            },
+            None => DecisionError::ChainExhausted { trace },
+        })
     }
 }
 
