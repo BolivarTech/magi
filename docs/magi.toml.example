@@ -44,6 +44,50 @@ model = "kimi-k2.6:cloud"
 model = "claude-sonnet-4-6"
 
 # ===========================================================================
+# [decision] — typed decisions from System One models (`magi decide`)
+# ===========================================================================
+[decision]
+# Endpoint of the System One decision models. Optional: absent = the root `base_url`.
+# The protocol path is derived from it: a base_url ending in /v1 gets /systemone, any other gets /v1/systemone.
+base_url     = "http://localhost:11434"
+# Primary decision model. Required in this section.
+model        = "nimble"
+# Per-attempt timeout in seconds (covers a local cold load). Optional, default 120.
+timeout_secs = 120
+# Ollama only. Optional: absent = not sent (server default). "10m", "2h", or -1 (keep loaded).
+# keep_alive = "10m"
+# Approval of the agent's `decide` tool. Optional, default true.
+auto_approve = true
+# Below this confidence the answer is discarded and the next model in the chain is tried. When the
+# chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
+# Optional, per model; commented out = no threshold. The value below was calibrated on the maintainer's
+# own prompts and may not fit your data or use case: measure on yours before uncommenting it.
+# min_confidence = <value from the calibration>
+
+# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
+[[decision.fallback]]
+model = "tev1"
+# min_confidence = <value from the calibration>
+
+[[decision.fallback]]
+model = "tev1:0.8b"
+# min_confidence = <value from the calibration>
+
+# --- Example: OpenRouter (hosted). Needs the decision key (see docs/decide.md) in the environment or
+# --- in the vault (`magi-rs vault set`). The key never goes in this file.
+# --- Comment out the [decision] section above before uncommenting this one: a file holds one.
+# [decision]
+# base_url     = "https://openrouter.ai/api/v1"
+# model        = "typesafe/jev-1.13"
+# timeout_secs = 30
+#
+# [[decision.fallback]]
+# model = "togethercomputer/tev1-4b-experimental"
+#
+# [[decision.fallback]]
+# model = "upstage/solar-decide"
+
+# ===========================================================================
 # [magi] — the council of three perspectives
 # ===========================================================================
 [magi]

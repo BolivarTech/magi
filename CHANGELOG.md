@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [Unreleased]
+
+### Breaking: `magi.toml` needs a `[decision]` section
+
+- A `.magi/magi.toml` that has no `[decision]` section no longer loads, and neither does one that is empty or holds only comments. No command runs (TUI, `query`, `consult`, `vault`, `decide`) until the file is fixed, and the error says so before the database is opened. With no `magi.toml` at all, the built-in defaults still apply, and they now include `[decision]`.
+- **To upgrade a workspace:**
+  1. Move the whole `.magi/` directory aside (`mv .magi .magi.bak-0.22`) and check that the backup holds `.magi-rs-memory.db` and, if they existed, its `-wal` and `-shm` files.
+  2. Run `magi-rs init`. It creates a fresh `.magi/` and writes the new `[decision]` section.
+  3. Copy your own settings from the old `magi.toml` into the new one. To keep history, memories and vault secrets, restore the database files from the backup as well. The 0.22.0 database opens unchanged.
+- **Conversation history, memories and every vault secret (API keys included) live only in that database.** If you do not restore it, they are lost, and without the original passphrase they cannot be recovered.
+- This applies to every existing workspace, including the one the MAGI plugin's gate uses.
+
+### Added
+
+- **`magi decide`**: asks a closed question of a small decision model (System One protocol) and prints, as one JSON object, the chosen option and the probability of every option. Three question types: `choice`, `noul` (a yes/no probability) and `score`. Flags: `-i`, `-o`, `-q` (a reusable question file), `-w`, `--no-memory` and `--timeout`. Exit codes are `0` (decided), `1` (no decision) and `2` (invalid input or key). See `docs/decide.md`.
+- **`[decision]` in `magi.toml`**: `base_url` (defaults to the root `base_url`), `model`, `timeout_secs` (120), `keep_alive`, `auto_approve`, an optional per-model `min_confidence`, and ordered `[[decision.fallback]]` models on the same endpoint. `magi init` writes it with `nimble`, `tev1` and `tev1:0.8b` on local Ollama, and an OpenRouter example in comments.
+- **`DECISION_API_KEY`**, from the environment or the vault, plus `DECISION_BASE_URL_USER` and `DECISION_BASE_URL_PASSWORD` for credentials in the URL. Without `DECISION_API_KEY`, the main model's key is used only when `[decision]` has the same origin; a key is never sent to another host.
+- Only `confidence` (computed by magi-rs, the same formula for every question type) decides. `provider_confidence` is the provider's own figure and is informational.
+- Ollama 0.35 or later is needed, with `ollama pull nimble`, `ollama pull tev1` and `ollama pull tev1:0.8b`. Without them `magi decide` returns an error that names the missing model.
+
 ## [0.22.0] - 2026-10-01
 
 ### Changed

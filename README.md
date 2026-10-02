@@ -256,7 +256,7 @@ magi vault diagnose
 and `--untrusted-content` (see [Mode routing](#mode-routing)); the JSON envelope
 carries the same two as fields.
 
-**`-w` / `--workdir` works on all four subcommands** (v0.13.1; it was `query` and
+**`-w` / `--workdir` works on all five subcommands** (v0.13.1; it was `query` and
 `consult` only before). It is the base for the `.magi/` walk-up, and on the headless
 pair it is also the file-tool sandbox root:
 
@@ -266,7 +266,7 @@ magi vault ls -w /srv/project       # and -w may also precede: magi vault -w /sr
 magi query -w /srv/project -i q.txt
 ```
 
-**On all four subcommands**, a `-w` that is not an existing directory is rejected
+**On all five subcommands**, a `-w` that is not an existing directory is rejected
 up front with **exit code 2**, naming the path, and it is never created. The check
 runs before the workspace walk-up, the vault and the input read, so a mistyped path
 fails as a mistyped path rather than as a missing workspace.
@@ -405,6 +405,121 @@ cap from a request that was simply honored as asked. It carries nine keys, all a
 
 The last five are new in v0.15.0 and additive under the same policy as `consult` above, with no
 `schema_version` bump: the tolerate-new-fields rule applies here too.
+
+### Typed decisions: `magi decide`
+
+`magi decide` puts a closed question to a small decision model and returns the chosen option with the probability of every option. It is one forward pass with no generated text, so it usually answers in well under a second once the model is loaded. It does not use your main model and works without one. The full guide, including providers, limits and costs, is [`docs/decide.md`](docs/decide.md).
+
+```bash
+cat request.json | magi decide                              # request on stdin, result on stdout
+magi decide -i request.json -o result.json                  # files instead
+magi decide -i state.json -q questions.json                 # reuse one set of questions
+cat state.json | magi decide --no-memory -q questions.json  # no vault, no passphrase
+```
+
+| Flag | Meaning |
+|---|---|
+| `-i`, `--input FILE` | Read the request from a file instead of standard input |
+| `-o`, `--output FILE` | Write the result to a file (atomically) instead of standard output |
+| `-q`, `--questions FILE` | A file holding only the question map; the input then carries only `state` and, optionally, `model` |
+| `-w`, `--workdir DIR` | Where to look for `.magi/`, as for the other subcommands |
+| `--no-memory` | Do not open the encrypted database; keys come from the environment only |
+| `--timeout SECONDS` | Wait this long for each model, instead of `[decision].timeout_secs` |
+
+The input is always JSON. A request has a `state` (string, object or array, forwarded as it is), a map of `questions`, and optionally a `model` that replaces the primary model for that run, with no fallbacks. A question is a `choice` (options in `criteria`, at least 2), a `noul` (a yes/no probability) or a `score` (a list of levels in `criteria`, at least 2). Unknown fields are rejected before any model is called. Four example inputs follow. The first has one question of each type:
+
+```json
+{"state": {"ticket": "I was charged twice this month. Please refund the extra payment."},
+ "questions": {
+   "team": {"type": "choice", "instructions": "Which team should handle this ticket?",
+            "criteria": {"billing": "Payments, invoices and refunds",
+                         "technical": "Bugs, errors and integrations",
+                         "other": "Anything else"}},
+   "refund": {"type": "noul", "instructions": "Does the customer explicitly ask for a refund?"},
+   "urgency": {"type": "score", "instructions": "How urgent is this ticket?",
+               "criteria": ["Routine", "Soon", "Urgent"]}}}
+```
+
+The second names a model, so only that model is tried:
+
+```json
+{"model": "tev1:0.8b",
+ "state": "Summarize why SQLite WAL mode improves concurrent reads.",
+ "questions": {"mode": {"type": "choice", "instructions": "Which review lens fits this request?",
+   "criteria": {"code-review": "Find defects in concrete source code or a diff",
+                "design": "Evaluate an architecture, API or design proposal",
+                "analysis": "A general question or analysis that is neither"}}}}
+```
+
+The third is a `-q` file: only the question map.
+
+```json
+{"next_action": {"type": "choice",
+   "instructions": "Which action should the robot take next to reach the goal safely?",
+   "criteria": {"forward": "Move forward", "turn_left": "Turn left in place",
+                "turn_right": "Turn right in place", "stop": "Stop and hold position",
+                "ask_operator": "Stop and request operator help"}},
+ "obstacle_ahead": {"type": "noul", "instructions": "Is there an obstacle within the robot's forward path?",
+   "criteria": {"true": "An object is closer than the safety distance", "false": "The path is clear"}}}
+```
+
+The fourth is the input that goes with it, and carries only the state:
+
+```json
+{"state": {"goal": {"x": 4.0, "y": 1.5}, "pose": {"x": 2.1, "y": 1.4, "heading_deg": 3},
+           "front_distance_m": 0.35, "safety_distance_m": 0.5, "battery_pct": 81}}
+```
+
+Sending `questions` both in `-q` and in the input is an error.
+
+The result is one JSON object:
+
+```json
+{"schema_version": 1, "run_id": "18832-4f0a9c2e1b7d3a55", "model": "nimble",
+ "endpoint": "http://localhost:11434",
+ "answers": {
+   "team": {"type": "choice", "choice": "billing",
+            "probabilities": {"billing": 0.990, "technical": 0.001, "other": 0.009},
+            "confidence": 0.986, "provider_confidence": 0.948},
+   "refund": {"type": "noul", "noul": 0.824, "confidence": 0.648},
+   "urgency": {"type": "score", "score": 1.011,
+               "legend": {"0": "Routine", "1": "Soon", "2": "Urgent"},
+               "probabilities": {"0": 0.361, "1": 0.268, "2": 0.372},
+               "confidence": 0.058, "provider_confidence": 0.009}},
+ "chain": [{"model": "nimble", "outcome": "answered"}],
+ "usage": {"input_tokens": 526, "output_tokens": 3, "cost": null},
+ "timings": {"total_ms": 412}}
+```
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | Layout version, currently `1`; always the first key |
+| `run_id` | Identifier of the run |
+| `model` | The model that answered; `null` if none did |
+| `endpoint` | The `[decision]` `base_url`, credentials masked |
+| `answers` | One entry per question; present only when a decision was made |
+| `chain` | Each attempt in order: `outcome` is `answered`, `failed` (with `cause`, sometimes `detail`) or `low_confidence` (with its `confidence`, the `min_confidence` it missed and the rejected `answers`) |
+| `error` | `kind` and `message`; present only on failure |
+| `usage` | `input_tokens`, `output_tokens` and `cost`, summed over all attempts; `cost` is `null` when no provider reported one |
+| `timings` | `total_ms` for the whole run |
+
+**Only `confidence` (Magi's) decides; `provider_confidence` is informational.** `confidence` is computed by magi-rs from the returned probabilities, with one formula for every question type: `(n * p_max - 1) / (n - 1)`, clamped to 0 to 1, where `n` is the number of options or levels and `p_max` the largest probability (for `noul`, `n` is 2 and it reduces to `|2 * noul - 1|`). `provider_confidence` is what the model reported, renamed; each model computes it differently, and `noul` answers have none. Magi never decides with it. `score` is in level units (0 to 2 with three levels), with `probabilities` keyed by level index and a `legend` naming the levels.
+
+A rejected `low_confidence` answer appears only inside `chain`, never in the top-level `answers`.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | a decision was made |
+| `1` | no decision: no model of the chain answered, or the model you named failed |
+| `2` | caller error: invalid input, or a missing or refused key |
+
+`error.kind` is one of `invalid_input`, `missing_key`, `model_unavailable` or `decision_unavailable`. A failed attempt's `cause` is one of `unauthorized`, `rejected`, `model_not_found`, `account_policy`, `not_found`, `rate_limited`, `http_5xx`, `redirected`, `transport`, `timeout` or `invalid_response`; the guide says which of them rotate to the next model.
+
+**Configuration** lives in the `[decision]` section of `.magi/magi.toml` (`docs/magi.toml.example` has the commented block, and `magi init` writes it). The primary model and `[[decision.fallback]]` entries must share one endpoint. A `base_url` ending in `/v1` gets `/systemone` appended; any other gets `/v1/systemone`. Use the provider's real API base: `http://localhost:11434` for Ollama and `https://openrouter.ai/api/v1` for OpenRouter. A 404 means either that the prefix is missing or that the server does not implement the protocol (Ollama before 0.35), and the attempt's `detail` names the exact URL that was tried.
+
+**Keys.** Set `DECISION_API_KEY` in the environment or with `magi-rs vault set DECISION_API_KEY`. Without it, the main model's key is used only if `[decision]` points at the same origin (scheme, host and port; the path does not count, so a gateway that routes by path shares the key, and `DECISION_API_KEY` is the way to stop that). Otherwise no key is sent, and a key is never sent to a different host. The key is read once at startup, after the vault is opened. Local Ollama needs none. For credentials in the URL, write `[user]` and `[password]` placeholders in `base_url` and store the values as `DECISION_BASE_URL_USER` and `DECISION_BASE_URL_PASSWORD`.
+
+> **Upgrading:** a `magi.toml` without a `[decision]` section, or an empty one, no longer loads. See the [CHANGELOG](CHANGELOG.md) for the steps.
 
 ### Authorization tiers
 
@@ -1052,6 +1167,7 @@ crate, so a relative one would dangle for anyone reading this on crates.io.
 | Vault passphrase | For persistence | Chosen on first run (or supplied via `-p`/`MAGI_PASSPHRASE`). Without one available the session runs ephemeral (the on-disk DB is left untouched) |
 | [Ollama](https://ollama.com/) (default backend) | For live replies (default) | running daemon + a chat model (e.g. `kimi-k2.6:cloud`); run `ollama signin` for `:cloud` tags. Any OpenAI-compatible endpoint works by pointing `base_url` elsewhere |
 | Embedding model | For tiered memory (`selective`, the default) | `ollama pull nomic-embed-text-v2-moe:latest`; without it memory degrades gracefully to text-only persistence |
+| Ollama 0.35 or later, and the decision models | For `magi decide` | `ollama pull nimble`, `ollama pull tev1`, `ollama pull tev1:0.8b`; without them `magi decide` returns an error that names the missing model |
 | Anthropic API key | Optional (opt-in) | only with `provider = "anthropic"`; via env var, the vault, or `/login` |
 
 ### Default models (Ollama)
@@ -1064,6 +1180,8 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 |------|---------------|---------|
 | Chat (principal) | `kimi-k2.6:cloud` | `magi-rs` agent — live replies |
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
+| Decision (primary) | `nimble` | `magi decide` — `ollama pull nimble` (Ollama 0.35 or later) |
+| Decision (fallbacks) | `tev1`, `tev1:0.8b` | `magi decide` — `ollama pull tev1` and `ollama pull tev1:0.8b`; tried in that order when the primary fails |
 | Melchior (Scientist) | `glm-5.3:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Balthasar (Pragmatist) | `kimi-k2.6:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
@@ -1079,6 +1197,7 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 - [`docs/OVERVIEW.md`](docs/OVERVIEW.md): what Magi is, the `magi-core` foundation, and the multi-perspective philosophy behind the name.
 - [`docs/TIERED-MEMORY.md`](docs/TIERED-MEMORY.md): full technical reference for the tiered agnostic memory subsystem: RAG pipeline, three pillars, architecture, configuration, benchmark.
 - [`docs/E2E-TESTING.md`](docs/E2E-TESTING.md): hands-on end-to-end testing guide for the tiered memory feature (cross-session recall, preferences, rollback).
+- [`docs/decide.md`](docs/decide.md): `magi decide` in full: providers and models, limits, keys, thresholds, the output fields and the error and cause sets.
 - [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md): the MAGI trio's reasoning controls and output cap: what each `[magi]` key does, what the clock-coverage warning means, and how to read `reasoning`/`control` in a consult report.
 
 ---
