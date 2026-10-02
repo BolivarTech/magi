@@ -192,6 +192,28 @@ class OrderingTests(unittest.TestCase):
                           RunLock(directory / ".lock")).run(False, None)
         self.assertEqual(["lock", "normalize"], order)
 
+    def test_the_toml_is_migrated_before_any_product_command_touches_it(
+            self) -> None:
+        """A 0.22-era environment has no ``[decision]`` and the product refuses
+        to start on it, ``vault ls`` included. Normalising after step 6 left
+        such an environment unmigratable: the listing cut first, forever.
+        """
+        order: list[str] = []
+        directory = support.scratch_dir(self)
+        config = _resolvable_config(self)
+        env = mock.Mock(spec=Environment)
+        env.exists.return_value = True
+        env.declared_base_url.return_value = None
+        env.normalize_magi_toml.side_effect = lambda profile: order.append("normalize")
+        with mock.patch.object(
+                Preflight, "_restore_rotation_if_left_over",
+                side_effect=lambda: order.append("vault")):
+            with mock.patch.object(RunLock, "acquire"):
+                with mock.patch.object(RunLock, "release"):
+                    Preflight(config, env, _quiet_binary(),
+                              RunLock(directory / ".lock")).run(False, None)
+        self.assertEqual(["normalize", "vault"], order)
+
     def test_the_binary_is_settled_before_the_vault_is_listed(self) -> None:
         """Step 6 asks the PRODUCT, so it cannot run before the product exists.
 
