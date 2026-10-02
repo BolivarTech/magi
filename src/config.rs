@@ -1876,8 +1876,8 @@ impl MagiConfig {
         // D-P4: the placeholders `[user]:[password]` parse as userinfo, so the template itself
         // can be checked here without resolving any secret.
         match cfg.effective_decision_base_url() {
-            Ok(_) => {}
-            Err(EndpointError::Unparseable) => {
+            Ok(t) if reqwest::Url::parse(t.as_str()).is_ok() => {}
+            Ok(_) | Err(EndpointError::Unparseable) => {
                 return Err(ConfigError::DecisionBaseUrl {
                     config_path: path.to_path_buf(),
                 })
