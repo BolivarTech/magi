@@ -75,7 +75,7 @@ impl Scope {
             Self::Root => "BASE_URL_USER",
             Self::Magi => "MAGI_BASE_URL_USER",
             Self::Embedding => "EMBEDDING_BASE_URL_USER",
-            Self::Decision => "",
+            Self::Decision => "DECISION_BASE_URL_USER",
         }
     }
 
@@ -86,7 +86,7 @@ impl Scope {
             Self::Root => "BASE_URL_PASSWORD",
             Self::Magi => "MAGI_BASE_URL_PASSWORD",
             Self::Embedding => "EMBEDDING_BASE_URL_PASSWORD",
-            Self::Decision => "",
+            Self::Decision => "DECISION_BASE_URL_PASSWORD",
         }
     }
 }

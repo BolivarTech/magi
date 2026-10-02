@@ -1,19 +1,69 @@
 //! System One URL derivation, same-origin comparison and API key selection
 //! (REQ-D03, REQ-D04).
 
+use reqwest::Url;
+
+/// Path segment that marks a `base_url` already carrying the API version.
+const API_VERSION_SUFFIX: &str = "/v1";
+
+/// Route of the System One protocol, appended to a base that ends in `/v1`.
+const SYSTEMONE_ROUTE: &str = "/systemone";
+
+/// Where Magi tells the operator an OpenRouter-style base URL should point.
+const OPENROUTER_BASE_URL_EXAMPLE: &str = "https://openrouter.ai/api/v1";
+
 /// Builds the System One URL from a configured `base_url`.
+///
+/// Surrounding whitespace and every trailing `/` are dropped; a base that
+/// ends in `/v1` gets `/systemone`, any other gets `/v1/systemone`. The
+/// provider is never detected.
+///
+/// Complexity: O(n) in the length of `base_url`.
 ///
 /// # Arguments
 /// * `base_url` - the configured endpoint, with or without `/v1`.
 ///
 /// # Returns
 /// The full protocol URL.
+///
+/// # Examples
+/// ```
+/// use magi_rs::decision::endpoint::systemone_url;
+/// assert_eq!(systemone_url("http://localhost:11434"), "http://localhost:11434/v1/systemone");
+/// ```
 pub fn systemone_url(base_url: &str) -> String {
-    let _ = base_url;
-    todo!()
+    let base = base_url.trim().trim_end_matches('/');
+    if base.ends_with(API_VERSION_SUFFIX) {
+        format!("{base}{SYSTEMONE_ROUTE}")
+    } else {
+        format!("{base}{API_VERSION_SUFFIX}{SYSTEMONE_ROUTE}")
+    }
+}
+
+/// Reduces a URL to its origin: scheme, host (no trailing dot) and port.
+///
+/// Returns `None` when the URL does not parse or has no host.
+fn origin_of(raw: &str) -> Option<(String, String, u16)> {
+    let url = Url::parse(raw).ok()?;
+    let host = url.host_str()?.trim_end_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    Some((
+        url.scheme().to_string(),
+        host.to_string(),
+        url.port_or_known_default()?,
+    ))
 }
 
 /// Tells whether two URLs share scheme, host and effective port.
+///
+/// Both are parsed with the WHATWG parser (host lower-cased, IDN already in
+/// punycode); path, query and userinfo do not count. A URL that does not
+/// parse, or has no host, never matches anything. Textual comparison is
+/// never used: it is what `http://localhost:11434@evil.com` defeats.
+///
+/// Complexity: O(n) in the combined length of the inputs.
 ///
 /// # Arguments
 /// * `a`, `b` - the URLs to compare.
@@ -21,11 +71,25 @@ pub fn systemone_url(base_url: &str) -> String {
 /// # Returns
 /// `true` only when both parse and have the same origin.
 pub fn same_origin(a: &str, b: &str) -> bool {
-    let _ = (a, b);
-    todo!()
+    match (origin_of(a), origin_of(b)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Keeps a key only when it is not blank.
+fn non_blank(key: Option<&str>) -> Option<&str> {
+    key.filter(|k| !k.trim().is_empty())
 }
 
 /// Picks the API key to send to the decision endpoint.
+///
+/// A non-blank `decision_key` wins. Otherwise the principal key is
+/// inherited only when both endpoints share an origin, so a key never
+/// reaches a host that is not its own. Blank keys count as absent.
+///
+/// The key is resolved once, when the client is built: a vault change made
+/// by another process is not seen until the next start.
 ///
 /// # Arguments
 /// * `decision_key` - the dedicated decision key, if any.
@@ -41,13 +105,12 @@ pub fn select_api_key(
     principal_base_url: &str,
     decision_base_url: &str,
 ) -> Option<String> {
-    let _ = (
-        decision_key,
-        principal_key,
-        principal_base_url,
-        decision_base_url,
-    );
-    todo!()
+    if let Some(key) = non_blank(decision_key) {
+        return Some(key.to_string());
+    }
+    non_blank(principal_key)
+        .filter(|_| same_origin(principal_base_url, decision_base_url))
+        .map(str::to_string)
 }
 
 /// Diagnostic for a 404 on the System One route.
@@ -56,10 +119,11 @@ pub fn select_api_key(
 /// * `tried_url_redacted` - the URL that was tried, already redacted.
 ///
 /// # Returns
-/// A message naming both probable causes.
+/// A message naming the URL and both probable causes.
 pub fn not_found_hint(tried_url_redacted: &str) -> String {
-    let _ = tried_url_redacted;
-    todo!()
+    format!(
+        "the endpoint returned 404 for {tried_url_redacted}; check that base_url includes the          provider's API prefix (OpenRouter: {OPENROUTER_BASE_URL_EXAMPLE}) and that the server          supports System One (Ollama 0.35 or later)"
+    )
 }
 
 #[cfg(test)]
