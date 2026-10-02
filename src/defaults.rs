@@ -280,7 +280,7 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(
         out,
-        "# The protocol path is derived from it: a base_url ending in /v1 gets /systemone,          any other gets /v1/systemone."
+        "# The protocol path is derived from it: a base_url ending in /v1 gets /systemone, any other gets /v1/systemone."
     )
     .unwrap();
     writeln!(out, "base_url     = \"http://localhost:11434\"").unwrap();
@@ -1908,6 +1908,10 @@ mod tests {
                 continue;
             }
             if let Some((_, after_first_word)) = prose.split_once(' ') {
+                // A commented-out `key     = value` line keeps its column alignment on purpose.
+                if after_first_word.trim_start().starts_with('=') {
+                    continue;
+                }
                 assert!(
                     !after_first_word.contains("   "),
                     "a comment has a run of spaces: {line}"
