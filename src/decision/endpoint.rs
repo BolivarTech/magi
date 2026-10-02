@@ -122,7 +122,13 @@ pub fn select_api_key(
 /// A message naming the URL and both probable causes.
 pub fn not_found_hint(tried_url_redacted: &str) -> String {
     format!(
-        "the endpoint returned 404 for {tried_url_redacted}; check that base_url includes the          provider's API prefix (OpenRouter: {OPENROUTER_BASE_URL_EXAMPLE}) and that the server          supports System One (Ollama 0.35 or later)"
+        concat!(
+        "the endpoint returned 404 for {tried_url_redacted}; check that base_url includes the ",
+        "provider's API prefix (OpenRouter: {OPENROUTER_BASE_URL_EXAMPLE}) and that the server ",
+        "supports System One (Ollama 0.35 or later)"
+        ),
+        tried_url_redacted = tried_url_redacted,
+        OPENROUTER_BASE_URL_EXAMPLE = OPENROUTER_BASE_URL_EXAMPLE
     )
 }
 
