@@ -163,7 +163,7 @@ pub enum ConfigError {
     /// The file is present but declares nothing: it is empty or holds only whitespace and
     /// comments (REQ-D02). A present file makes the operator believe it is being read.
     #[error(
-        "{} is present but declares nothing (it is empty or holds only comments). Delete it to          run with the built-in defaults, or generate a current one with `magi-rs init` after          moving the old {}/ directory aside.",
+ "{} is present but declares nothing (it is empty or holds only comments). Delete it to run with the built-in defaults, or generate a current one with `magi-rs init` after moving the old {}/ directory aside.",
         .config_path.display(),
         crate::system::workspace::MAGI_DIR_NAME
     )]
@@ -175,7 +175,7 @@ pub enum ConfigError {
     /// The file has no `[decision]` section: it was written by magi-rs
     /// [`LAST_VERSION_WITHOUT_DECISION`] or earlier (REQ-D02, REQ-D25).
     #[error(
-        "{} has no [decision] section: it was written by magi-rs {} or earlier. To upgrade:          1) back up the whole state directory (`mv {dir} {dir}.bak-0.22`) and check that the          backup holds {} and its -wal/-shm files; 2) run `magi-rs init`; 3) copy your own          magi.toml settings into the new file and, to keep history, memories and vault secrets,          restore that database. They live ONLY in it: without it and its original passphrase          they are lost.",
+ "{} has no [decision] section: it was written by magi-rs {} or earlier. To upgrade: 1) back up the whole state directory (`mv {dir} {dir}.bak-0.22`) and check that the backup holds {} and its -wal/-shm files; 2) run `magi-rs init`; 3) copy your own magi.toml settings into the new file and, to keep history, memories and vault secrets, restore that database. They live ONLY in it: without it and its original passphrase they are lost.",
         .config_path.display(),
         LAST_VERSION_WITHOUT_DECISION,
         .db_path.display(),
