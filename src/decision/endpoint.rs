@@ -113,7 +113,7 @@ pub fn select_api_key(
         .map(str::to_string)
 }
 
-/// Diagnostic for a 404 on the System One route.
+/// Diagnostic for a System One route that did not answer as one (a 404, or a body that is not JSON).
 ///
 /// # Arguments
 /// * `tried_url_redacted` - the URL that was tried, already redacted.
@@ -123,7 +123,7 @@ pub fn select_api_key(
 pub fn not_found_hint(tried_url_redacted: &str) -> String {
     format!(
         concat!(
-        "the endpoint returned 404 for {tried_url_redacted}; check that base_url includes the ",
+        "no System One endpoint answered at {tried_url_redacted}; check that base_url includes the ",
         "provider's API prefix (OpenRouter: {OPENROUTER_BASE_URL_EXAMPLE}) and that the server ",
         "supports System One (Ollama 0.35 or later)"
         ),
