@@ -312,8 +312,13 @@ class Preflight:
         # other way round, a tree with no build reaches step 6 first and its
         # cut blames the vault and the passphrase for a missing binary.
         self._settle_binary(certifying)
-        self._restore_rotation_if_left_over()
+        # The toml BEFORE any product command touches the environment: an
+        # environment written by an older release has no [decision] section,
+        # and the product refuses to start on it -- vault ls included -- so
+        # listing first made such an environment impossible to migrate. Only
+        # the configuration is rewritten; the database is never touched.
         self.env.normalize_magi_toml(profile)
+        self._restore_rotation_if_left_over()
         self._require_one_endpoint()
         backend = self._probe_backend()
         # Step 8 runs only when the backend answered, which is why the probe
