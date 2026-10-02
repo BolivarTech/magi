@@ -102,7 +102,8 @@ impl Failure {
 }
 
 /// Appended to a 400/422 detail when `keep_alive` was sent (REQ-D01).
-const KEEP_ALIVE_HINT: &str = "; keep_alive was sent and providers other than Ollama may reject it";
+pub(crate) const KEEP_ALIVE_HINT: &str =
+    "; keep_alive was sent and providers other than Ollama may reject it";
 
 /// HTTP implementation of [`DecisionClient`].
 ///

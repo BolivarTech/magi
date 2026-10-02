@@ -4,7 +4,14 @@
 //! agent's `decide` tool: the audience decides how much provider text the
 //! output may carry.
 
-use crate::decision::error::{Decision, DecisionError};
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::decision::client::KEEP_ALIVE_HINT;
+use crate::decision::error::{AttemptOutcome, Cause, Decision, DecisionError, Trace, Usage};
+use crate::decision::protocol::Answer;
+use crate::headless::output::redact_secret_patterns;
+use crate::redact::redact_foreign_text;
 
 /// Version of the envelope layout (REQ-D10); first key of every envelope.
 pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
@@ -21,7 +28,46 @@ pub enum Audience {
     Agent,
 }
 
+/// Key of the optional list of rejected answers inside a chain entry.
+const ANSWERS_KEY: &str = "answers";
+
+/// Key of the free text Magi generates for an attempt.
+const DETAIL_KEY: &str = "detail";
+
+/// Physical layout of the envelope (REQ-D10): field order is key order.
+#[derive(Serialize)]
+struct Envelope<'a> {
+    schema_version: u32,
+    run_id: &'a str,
+    model: Option<&'a str>,
+    endpoint: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answers: Option<&'a std::collections::BTreeMap<String, Answer>>,
+    chain: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorBody>,
+    usage: Usage,
+    timings: Timings,
+}
+
+/// `error` object of a failed envelope.
+#[derive(Serialize)]
+struct ErrorBody {
+    kind: crate::decision::error::ErrorKind,
+    message: String,
+}
+
+/// `timings` object of the envelope.
+#[derive(Serialize)]
+struct Timings {
+    total_ms: u64,
+}
+
 /// Renders the envelope as JSON text with `schema_version` as the first key.
+///
+/// Provider text reaches the output only through `error.message` of a
+/// rejection shown to [`Audience::User`], and only redacted and capped
+/// (REQ-D11). Complexity: O(attempts x answers) in the size of the trace.
 ///
 /// # Arguments
 /// * `result` - Outcome of the decision.
@@ -32,15 +78,110 @@ pub enum Audience {
 /// # Returns
 /// The envelope as one JSON object.
 pub fn render_envelope(
-    _result: &Result<Decision, DecisionError>,
-    _endpoint_display: &str,
-    _total_ms: u64,
-    _audience: Audience,
+    result: &Result<Decision, DecisionError>,
+    endpoint_display: &str,
+    total_ms: u64,
+    audience: Audience,
 ) -> String {
-    todo!()
+    let trace = match result {
+        Ok(decision) => Some(&decision.trace),
+        Err(error) => error.trace(),
+    };
+    let envelope = Envelope {
+        schema_version: ENVELOPE_SCHEMA_VERSION,
+        run_id: crate::logging::run_id(),
+        model: result.as_ref().ok().map(|d| d.model.as_str()),
+        endpoint: endpoint_display,
+        answers: result.as_ref().ok().map(|d| &d.answers),
+        chain: trace.map(|t| chain_values(t, audience)).unwrap_or_default(),
+        error: result.as_ref().err().map(|e| ErrorBody {
+            kind: e.kind(),
+            message: cap_chars(&error_message(e, audience), MESSAGE_CAP_CHARS),
+        }),
+        usage: trace.map(|t| t.usage).unwrap_or_default(),
+        timings: Timings { total_ms },
+    };
+    serde_json::to_string(&envelope)
+        .unwrap_or_else(|_| format!("{{\"schema_version\":{ENVELOPE_SCHEMA_VERSION}}}"))
+}
+
+/// Serializes the attempts; the agent never sees rejected answers (REQ-D16)
+/// and every `detail` is capped (REQ-D10).
+fn chain_values(trace: &Trace, audience: Audience) -> Vec<Value> {
+    let mut values = serde_json::to_value(&trace.attempts)
+        .ok()
+        .and_then(|v| match v {
+            Value::Array(items) => Some(items),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for entry in &mut values {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        if audience == Audience::Agent {
+            object.remove(ANSWERS_KEY);
+        }
+        if let Some(Value::String(detail)) = object.get_mut(DETAIL_KEY) {
+            *detail = cap_chars(detail, MESSAGE_CAP_CHARS);
+        }
+    }
+    values
+}
+
+/// Last attempt of the trace, when any model was called.
+fn last_attempt(error: &DecisionError) -> Option<&crate::decision::error::Attempt> {
+    error.trace().and_then(|t| t.attempts.last())
+}
+
+/// `detail` of the last attempt when it failed with one.
+fn last_detail(error: &DecisionError) -> Option<&str> {
+    match last_attempt(error).map(|a| &a.outcome) {
+        Some(AttemptOutcome::Failed { detail, .. }) => detail.as_deref(),
+        _ => None,
+    }
+}
+
+/// Builds `error.message` per audience (REQ-D10/D11), before the cap.
+fn error_message(error: &DecisionError, audience: Audience) -> String {
+    if let DecisionError::Rejected {
+        provider_message, ..
+    } = error
+    {
+        let detail = last_detail(error);
+        return match audience {
+            Audience::User => {
+                let redacted =
+                    redact_secret_patterns(redact_foreign_text(provider_message).as_str());
+                if detail.is_some_and(|d| d.contains(KEEP_ALIVE_HINT)) {
+                    format!("{redacted}{KEEP_ALIVE_HINT}")
+                } else {
+                    redacted
+                }
+            }
+            Audience::Agent => detail.map_or_else(|| error.to_string(), str::to_string),
+        };
+    }
+    let base = error.to_string();
+    match (last_attempt(error), last_detail(error)) {
+        (Some(attempt), Some(detail))
+            if matches!(
+                attempt.outcome,
+                AttemptOutcome::Failed {
+                    cause: Cause::NotFound,
+                    ..
+                }
+            ) =>
+        {
+            format!("{base}; {detail}")
+        }
+        _ => base,
+    }
 }
 
 /// Keeps at most `cap` characters of `text`, never splitting a character.
+///
+/// Complexity: O(cap).
 ///
 /// # Arguments
 /// * `text` - Text to cap.
@@ -48,8 +189,8 @@ pub fn render_envelope(
 ///
 /// # Returns
 /// The capped text.
-pub fn cap_chars(_text: &str, _cap: usize) -> String {
-    todo!()
+pub fn cap_chars(text: &str, cap: usize) -> String {
+    text.chars().take(cap).collect()
 }
 
 #[cfg(test)]

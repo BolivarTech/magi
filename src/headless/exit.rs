@@ -86,8 +86,13 @@ fn exit_code_for_error(err: &HeadlessError) -> i32 {
 ///
 /// # Returns
 /// The process exit code.
-pub fn decide_exit_code(_kind: Option<crate::decision::ErrorKind>) -> i32 {
-    -1
+pub fn decide_exit_code(kind: Option<crate::decision::ErrorKind>) -> i32 {
+    use crate::decision::ErrorKind;
+    match kind {
+        None => EXIT_OK,
+        Some(ErrorKind::InvalidInput | ErrorKind::MissingKey) => EXIT_MISUSE,
+        Some(ErrorKind::ModelUnavailable | ErrorKind::DecisionUnavailable) => EXIT_RUNTIME,
+    }
 }
 
 #[cfg(test)]
