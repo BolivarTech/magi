@@ -59,7 +59,11 @@ use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::{Dialect, OpenAiCompatibleProvider, ReasoningSpelling};
 use magi_core::rotation::{FallbackPool, Lineage as CoreLineage, ProviderProbe};
 use magi_core::schema::{AgentName, Mode};
-use magi_rs::headless::exit::exit_code as headless_exit_code;
+use magi_rs::decision::envelope::{render_envelope, Audience};
+use magi_rs::decision::{
+    Decision, DecisionClient, DecisionError, DecisionRequest, DecisionSettings, SystemOneClient,
+};
+use magi_rs::headless::exit::{decide_exit_code, exit_code as headless_exit_code};
 use magi_rs::headless::input::{parse_input, read_input_bounded, InputFormat};
 use magi_rs::headless::limits::{HeadlessLimits, NORMAL_MAX_TOOL_CALLS};
 use magi_rs::headless::output::{write_json, write_text};
@@ -313,7 +317,7 @@ impl CliMode {
 /// (REQ-H03/H04/H05/H07/H08/H12/H36). `--consult` is only meaningful for
 /// `query` (`consult` already forces the multi-perspective pass); on `consult`
 /// it is inert.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Default)]
 struct HeadlessArgs {
     /// Read the prompt/envelope from a file; omitted ⇒ stdin (REQ-H03).
     #[arg(short = 'i', long)]
@@ -574,6 +578,41 @@ enum TopCmd {
 
     /// Force a MAGI multi-perspective analysis over the prompt (REQ-H02/H21).
     Consult(ConsultArgs),
+
+    /// Ask the decision models a typed question and print the answer as JSON.
+    ///
+    /// Reads a request (a state plus questions with closed options) from a file or standard
+    /// input and prints one JSON result with the chosen option, its probabilities and the
+    /// model that answered. The decision models listed in the configuration are tried in
+    /// order until one answers. No language model is involved.
+    Decide(DecideArgs),
+}
+
+/// Arguments of the decide subcommand.
+// Third declaration of -w in this CLI, after WorkdirArgs and HeadlessArgs. It is not global,
+// for the reasons given on WorkdirArgs; rename it in all three places or in none.
+#[derive(clap::Args, Debug)]
+struct DecideArgs {
+    /// Read the request from this file; without it, read standard input.
+    #[arg(short = 'i', long)]
+    input: Option<PathBuf>,
+    /// Write the result to this file; without it, print it on standard output.
+    #[arg(short = 'o', long)]
+    output: Option<PathBuf>,
+    /// Read the questions from this file. The input then carries only the state and,
+    /// optionally, a model name, so the same questions can be reused with changing states.
+    #[arg(short = 'q', long)]
+    questions: Option<PathBuf>,
+    /// Working directory where the state directory is looked for (default: the current
+    /// directory).
+    #[arg(short = 'w', long)]
+    workdir: Option<PathBuf>,
+    /// Do not open the encrypted database: keys come from the environment only.
+    #[arg(long)]
+    no_memory: bool,
+    /// Seconds to wait for each model, replacing the configured value for this run.
+    #[arg(long)]
+    timeout: Option<u64>,
 }
 
 /// `consult`'s arguments: everything `query` takes, plus what only `consult` can mean (REQ-EA01).
@@ -774,6 +813,9 @@ const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// Environment variable name holding the OpenAI-compatible API key (REQ-H37).
 const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
 
+/// Environment variable and vault entry holding the decision endpoint key (REQ-D04).
+const DECISION_KEY_ENV: &str = "DECISION_API_KEY";
+
 /// Warning emitted at startup when loose legacy state files sit in the working
 /// directory but no `.magi/` exists (REQ-H17/H31). The pre-headless layout is no
 /// longer read or migrated — the user must run `magi init` to adopt the unified
@@ -799,12 +841,14 @@ struct ConsumedSecrets {
     anthropic_key: Option<String>,
     /// The OpenAI-compatible API key (`OPENAI_API_KEY`), if it was set.
     openai_key: Option<String>,
+    /// The decision endpoint key (`DECISION_API_KEY`), if it was set (REQ-D04).
+    decision_key: Option<String>,
 }
 
-/// Reads the three secret env vars into a [`ConsumedSecrets`], then removes all
-/// three from the process environment (REQ-H37).
+/// Reads the four secret env vars into a [`ConsumedSecrets`], then removes all
+/// four from the process environment (REQ-H37).
 ///
-/// The removal is **symmetric** — passphrase *and* both API keys — so that a
+/// The removal is **symmetric** — passphrase *and* every API key — so that a
 /// later in-workspace interpreter (`python`/`node`) cannot exfiltrate them by
 /// reading `/proc/<pid>/environ`.
 ///
@@ -821,13 +865,16 @@ fn read_then_scrub_secret_env() -> ConsumedSecrets {
     let passphrase = env::var(PASSPHRASE_ENV).ok().map(Zeroizing::new);
     let anthropic_key = env::var(ANTHROPIC_KEY_ENV).ok();
     let openai_key = env::var(OPENAI_KEY_ENV).ok();
+    let decision_key = env::var(DECISION_KEY_ENV).ok();
     env::remove_var(PASSPHRASE_ENV);
     env::remove_var(ANTHROPIC_KEY_ENV);
     env::remove_var(OPENAI_KEY_ENV);
+    env::remove_var(DECISION_KEY_ENV);
     ConsumedSecrets {
         passphrase,
         anthropic_key,
         openai_key,
+        decision_key,
     }
 }
 
@@ -1571,10 +1618,12 @@ fn main() -> ExitCode {
 /// Propagates any fatal I/O, configuration, or TUI error (mapped to
 /// [`ExitCode::FAILURE`] by [`bootstrap_headless`]).
 async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
+    let decide_secrets = DecideSecrets::from_consumed(&secrets);
     let ConsumedSecrets {
         passphrase: env_passphrase,
         anthropic_key,
         openai_key,
+        ..
     } = secrets;
 
     let mut args = Args::parse();
@@ -1679,6 +1728,11 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                     openai_key,
                 )
                 .await,
+            ));
+        }
+        Some(TopCmd::Decide(d)) => {
+            return Ok(exit_code(
+                run_decide_subcommand(d, passphrase_flag, &workspace_root, decide_secrets).await,
             ));
         }
         // No subcommand ⇒ fall through to the TUI launch below.
@@ -6871,6 +6925,426 @@ async fn run_consult_subcommand(
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
+/// Keys the decide subcommand may use, captured from the environment before it was scrubbed
+/// (REQ-D04).
+///
+/// Built only by [`Self::from_consumed`], so every surface that needs the decision key reads
+/// it from the same place.
+struct DecideSecrets {
+    /// The decision endpoint key (`DECISION_API_KEY`), if it was set.
+    decision_key: Option<String>,
+    /// The OpenAI-compatible key (`OPENAI_API_KEY`), the principal's key when it is not
+    /// Anthropic.
+    openai_key: Option<String>,
+}
+
+impl DecideSecrets {
+    /// Copies the two keys decide can use out of the consumed environment.
+    ///
+    /// # Arguments
+    /// * `consumed` - The secrets read and scrubbed at startup.
+    ///
+    /// # Returns
+    /// The keys, with no further resolution: blank values are filtered where they are used.
+    fn from_consumed(consumed: &ConsumedSecrets) -> Self {
+        Self {
+            decision_key: consumed.decision_key.clone(),
+            openai_key: consumed.openai_key.clone(),
+        }
+    }
+}
+
+/// The opened encrypted store of a headless run and the vault wired over it.
+type OpenedVault = (Option<EncryptedSqliteMemory>, Option<SharedSecretStore>);
+
+/// Opens the vault of a headless run: only when a database exists and a passphrase is
+/// available; with persistence requested and no passphrase the run fails closed (REQ-H19,
+/// REQ-H25); with `--no-memory` and no passphrase it goes on without a vault.
+///
+/// # Arguments
+/// * `workspace` - The discovered state directory, if any.
+/// * `passphrase_flag` - The folded `-p` and consumed `MAGI_PASSPHRASE`.
+/// * `no_memory` - Whether the run is stateless.
+///
+/// # Returns
+/// The opened store and the vault over it; both `None` when no vault was opened.
+///
+/// # Errors
+/// The process exit code, after the failure was reported on stderr.
+fn open_headless_vault(
+    workspace: Option<&Workspace>,
+    mut passphrase_flag: Option<Zeroizing<String>>,
+    no_memory: bool,
+) -> Result<OpenedVault, i32> {
+    let db_path = workspace.map(Workspace::db_path).filter(|p| p.exists());
+    let memory = if let Some(db) = &db_path {
+        if let Some(pass) = passphrase_flag.take() {
+            match open_headless_memory(db, pass) {
+                Ok(m) => m,
+                Err(e) => {
+                    magi_rs::notices::eprint_audited(&format!("error: {e}"));
+                    return Err(headless_error_exit_code(&e));
+                }
+            }
+        } else if !no_memory {
+            let e = HeadlessError::PassphraseUnavailable;
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return Err(headless_error_exit_code(&e));
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    // Wire the vault over the opened store (env > vault secret resolution).
+    let secret_store: Option<SharedSecretStore> = memory.as_ref().and_then(|store| {
+        let dek = store.data_key().ok()?;
+        let vstore = wire(store.shared_conn(), dek).ok()?;
+        Some(Arc::new(Mutex::new(vstore)) as SharedSecretStore)
+    });
+    Ok((memory, secret_store))
+}
+
+/// Resolves the `[decision]` endpoint template against the vault (REQ-D05).
+///
+/// # Arguments
+/// * `template` - The configured `base_url`, possibly with `[user]:[password]` placeholders.
+/// * `secret_store` - The open vault, if any.
+///
+/// # Returns
+/// The endpoint with the credentials substituted in memory.
+///
+/// # Errors
+/// [`DecisionError::MissingVaultEntry`] naming the entry a placeholder needs when the vault
+/// is closed or lacks it; [`DecisionError::ClientUnavailable`] for any other template fault.
+fn resolve_decision_endpoint(
+    template: &EndpointTemplate,
+    secret_store: Option<&SharedSecretStore>,
+) -> Result<ResolvedEndpoint, DecisionError> {
+    let resolution = match secret_store {
+        Some(ss) => {
+            let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
+            template.resolve(&mut *guard, Scope::Decision)
+        }
+        None => template.resolve(&mut NoVaultInScope, Scope::Decision),
+    };
+    resolution.map_err(|e| match e {
+        magi_rs::magi::endpoint::EndpointError::MissingVaultEntry { entry } => {
+            DecisionError::MissingVaultEntry { entry }
+        }
+        other => DecisionError::ClientUnavailable {
+            reason: redact_foreign_error(&other).to_string(),
+        },
+    })
+}
+
+/// The key stored for the decision endpoint: the consumed `DECISION_API_KEY`, else the vault
+/// entry of the same name. A blank value is absent (REQ-A12).
+///
+/// # Arguments
+/// * `keys` - The keys captured at startup.
+/// * `secret_store` - The open vault, if any.
+///
+/// # Returns
+/// The trimmed key, or `None`.
+fn decision_api_key(
+    keys: &DecideSecrets,
+    secret_store: Option<&SharedSecretStore>,
+) -> Option<String> {
+    if let Some(key) = non_blank(keys.decision_key.as_deref()) {
+        return Some(key.to_string());
+    }
+    let ss = secret_store?;
+    let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
+    let stored = guard.get(DECISION_KEY_ENV).ok()?;
+    non_blank(Some(stored.as_str())).map(str::to_string)
+}
+
+/// The principal provider's key and resolved endpoint, when its key may be offered to the
+/// decision endpoint at all (REQ-D04).
+///
+/// An Anthropic principal never lends its key: its endpoint is never the decision one. A
+/// principal whose endpoint cannot be resolved lends nothing, because without the endpoint the
+/// same-origin rule cannot be applied.
+///
+/// # Arguments
+/// * `config` - The loaded configuration.
+/// * `secret_store` - The open vault, if any.
+/// * `keys` - The keys captured at startup.
+///
+/// # Returns
+/// `(key, endpoint)` of the principal, or `None`.
+fn principal_key_and_endpoint(
+    config: &MagiConfig,
+    secret_store: Option<&SharedSecretStore>,
+    keys: &DecideSecrets,
+) -> Option<(String, String)> {
+    let kind =
+        resolve_effective_provider_kind(config, env::var("MAGI_PROVIDER").ok().as_deref()).ok()?;
+    if matches!(kind, ProviderKind::Anthropic) {
+        return None;
+    }
+    let key = resolve_openai_key(keys.openai_key.as_deref(), secret_store)?;
+    let endpoint = resolve_effective_principal_endpoint(
+        config,
+        env::var("OPENAI_BASE_URL").ok().as_deref(),
+        secret_store,
+    )
+    .ok()?;
+    Some((key, endpoint.as_str().to_string()))
+}
+
+/// Builds the decision client once (REQ-D00, D04, D05).
+///
+/// The key is resolved here, so a `vault set DECISION_API_KEY` from another process is not seen
+/// until the process restarts.
+///
+/// # Arguments
+/// * `config` - The loaded configuration.
+/// * `secret_store` - The open vault, if any.
+/// * `keys` - The keys captured at startup.
+///
+/// # Returns
+/// A client over the effective `[decision]` chain.
+///
+/// # Errors
+/// [`DecisionError::MissingVaultEntry`] when a placeholder needs an absent vault entry;
+/// [`DecisionError::ClientUnavailable`] when the endpoint or the HTTP client is unusable.
+fn build_decision_client(
+    config: &MagiConfig,
+    secret_store: Option<&SharedSecretStore>,
+    keys: &DecideSecrets,
+) -> Result<SystemOneClient, DecisionError> {
+    let template =
+        config
+            .effective_decision_base_url()
+            .map_err(|e| DecisionError::ClientUnavailable {
+                reason: redact_foreign_error(&e).to_string(),
+            })?;
+    let base_url = resolve_decision_endpoint(&template, secret_store)?;
+    let principal = principal_key_and_endpoint(config, secret_store, keys);
+    let api_key = magi_rs::decision::endpoint::select_api_key(
+        decision_api_key(keys, secret_store).as_deref(),
+        principal.as_ref().map(|(key, _)| key.as_str()),
+        principal.as_ref().map_or("", |(_, url)| url.as_str()),
+        base_url.as_str(),
+    );
+    let decision = config.effective_decision();
+    SystemOneClient::new(DecisionSettings {
+        base_url: base_url.as_str().to_string(),
+        api_key: api_key.map(Zeroizing::new),
+        chain: decision.chain(),
+        timeout: Duration::from_secs(
+            decision
+                .timeout_secs
+                .unwrap_or(crate::defaults::DEFAULT_DECISION_TIMEOUT_SECS),
+        ),
+        keep_alive: decision.keep_alive,
+    })
+}
+
+/// Validates the request of a decide run (REQ-D22, REQ-D23).
+///
+/// # Arguments
+/// * `input` - The bytes of `-i` or standard input.
+/// * `questions` - The bytes of `-q`, if given.
+/// * `timeout_secs` - The `--timeout` value, if given.
+///
+/// # Returns
+/// The request, with the per-attempt timeout set when one was given.
+///
+/// # Errors
+/// [`DecisionError::InvalidInput`] for a timeout below one second or an invalid request.
+fn build_decide_request(
+    input: &[u8],
+    questions: Option<&[u8]>,
+    timeout_secs: Option<u64>,
+) -> Result<DecisionRequest, DecisionError> {
+    if timeout_secs == Some(0) {
+        return Err(DecisionError::InvalidInput {
+            reason: "--timeout must be at least 1".to_string(),
+        });
+    }
+    let request = magi_rs::decision::protocol::parse_decide_input(input, questions)?;
+    Ok(match timeout_secs {
+        Some(secs) => request.with_timeout(Duration::from_secs(secs)),
+        None => request,
+    })
+}
+
+/// Runs one decision from its raw input: validate, build the client, ask.
+///
+/// # Arguments
+/// * `input` / `questions` - The bytes of the request and of `-q`.
+/// * `timeout_secs` - The `--timeout` value, if given.
+/// * `config` - The loaded configuration.
+/// * `secret_store` - The open vault, if any.
+/// * `keys` - The keys captured at startup.
+///
+/// # Returns
+/// The outcome, and the redacted endpoint to show beside it.
+async fn decide_once(
+    input: &[u8],
+    questions: Option<&[u8]>,
+    timeout_secs: Option<u64>,
+    config: &MagiConfig,
+    secret_store: Option<&SharedSecretStore>,
+    keys: &DecideSecrets,
+) -> (Result<Decision, DecisionError>, String) {
+    // The template carries placeholders, never a secret; redacting it is the second layer.
+    let configured_endpoint = config
+        .effective_decision_base_url()
+        .map(|t| redact_url(t.as_str()))
+        .unwrap_or_default();
+    let request = match build_decide_request(input, questions, timeout_secs) {
+        Ok(r) => r,
+        Err(e) => return (Err(e), configured_endpoint),
+    };
+    let client = match build_decision_client(config, secret_store, keys) {
+        Ok(c) => c,
+        Err(e) => return (Err(e), configured_endpoint),
+    };
+    let endpoint = client.endpoint_display();
+    (client.decide(&request).await, endpoint)
+}
+
+/// Writes the decide envelope to `-o` (atomically) or to standard output.
+///
+/// # Arguments
+/// * `output` - The `-o` path, if given.
+/// * `envelope` - The rendered envelope.
+///
+/// # Errors
+/// The [`HeadlessError`] of the write, as `query` reports it.
+fn emit_decide_envelope(output: Option<&Path>, envelope: &str) -> Result<(), HeadlessError> {
+    let text = format!("{envelope}\n");
+    match output {
+        Some(path) => write_output_atomic(path, text.as_bytes(), false),
+        None => {
+            let mut out = std::io::stdout().lock();
+            out.write_all(text.as_bytes())
+                .and_then(|()| out.flush())
+                .map_err(|e| HeadlessError::Io(e.to_string()))
+        }
+    }
+}
+
+/// Reads a bounded input file or standard input, reporting a failure the way `query` does.
+///
+/// # Returns
+/// The bytes, or the process exit code after the failure was reported on stderr.
+fn read_decide_source(path: Option<&Path>, max_input_bytes: usize) -> Result<Vec<u8>, i32> {
+    read_headless_input(path, max_input_bytes).map_err(|e| {
+        magi_rs::notices::eprint_audited(&format!("error: {e}"));
+        headless_error_exit_code(&e)
+    })
+}
+
+/// Runs `magi decide`: opens the workspace and the vault like `query`, validates the request,
+/// walks the decision chain and prints the envelope (REQ-D22).
+///
+/// # Arguments
+/// * `args` - The parsed subcommand arguments.
+/// * `passphrase_flag` - The folded `-p` and consumed `MAGI_PASSPHRASE`.
+/// * `cwd` - The directory the workspace is looked for from when `-w` is absent.
+/// * `secrets` - The keys captured before the environment was scrubbed.
+///
+/// # Returns
+/// The process exit code: 0 a decision, 2 an invalid request or a missing key, 1 no decision.
+async fn run_decide_subcommand(
+    args: DecideArgs,
+    passphrase_flag: Option<Zeroizing<String>>,
+    cwd: &Path,
+    secrets: DecideSecrets,
+) -> i32 {
+    let started = std::time::Instant::now();
+    let workdir = match resolve_workspace_root(args.workdir.clone(), cwd) {
+        Ok(root) => root,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return headless_error_exit_code(&e);
+        }
+    };
+    let workspace = match crate::system::workspace::discover(&workdir) {
+        Ok(ws) => ws,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return headless_error_exit_code(&e);
+        }
+    };
+    // REQ-D02: an old or empty `magi.toml` is refused before the database is opened.
+    if let Some(code) = refuse_unusable_config(&workdir) {
+        return code;
+    }
+    if workspace.is_none() && !args.no_memory {
+        magi_rs::notices::eprint_audited(
+            "error: no .magi/ state directory found in this directory or any \
+             parent; run `magi init` to create one",
+        );
+        return 1;
+    }
+    let (_memory, secret_store) =
+        match open_headless_vault(workspace.as_ref(), passphrase_flag, args.no_memory) {
+            Ok(opened) => opened,
+            Err(code) => return code,
+        };
+    let (magi_config, cfg_notices) = match workspace.as_ref() {
+        Some(ws) => match MagiConfig::load(&ws.config_path()) {
+            Ok(v) => v,
+            Err(e) => {
+                magi_rs::notices::eprint_audited(&format!("error: {e}"));
+                return 2;
+            }
+        },
+        None => (MagiConfig::default(), Vec::new()),
+    };
+    // Same split as `prepare_headless`: the screen half now, the file half once a log exists.
+    let (cfg_screen, cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
+    emit_notices(cfg_screen);
+    // decide has no log flags; the configuration and the environment decide the log.
+    let logging = match workspace.as_ref() {
+        Some(ws) => bring_up_headless_logging(&HeadlessArgs::default(), &magi_config, ws, "decide"),
+        None => Ok(()),
+    };
+    emit_notices(cfg_file);
+    if let Err(code) = logging {
+        return code;
+    }
+    let limits = resolve_headless_limits(
+        magi_config.headless(),
+        magi_config.effective_tool_result_cap(),
+    );
+    let input = match read_decide_source(args.input.as_deref(), limits.max_input_bytes) {
+        Ok(bytes) => bytes,
+        Err(code) => return code,
+    };
+    let questions = match args.questions.as_deref() {
+        Some(path) => match read_decide_source(Some(path), limits.max_input_bytes) {
+            Ok(bytes) => Some(bytes),
+            Err(code) => return code,
+        },
+        None => None,
+    };
+    let (result, endpoint) = decide_once(
+        &input,
+        questions.as_deref(),
+        args.timeout,
+        &magi_config,
+        secret_store.as_ref(),
+        &secrets,
+    )
+    .await;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let envelope = render_envelope(&result, &endpoint, elapsed_ms, Audience::User);
+    match emit_decide_envelope(args.output.as_deref(), &envelope) {
+        Ok(()) => decide_exit_code(result.as_ref().err().map(DecisionError::kind)),
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            headless_error_exit_code(&e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod envelope_audit_guard {
     use super::*;
@@ -9756,6 +10230,19 @@ mod tests {
         for e in &exit_two {
             assert_eq!(vault_error_exit_code(e), 2, "{e}");
         }
+    }
+
+    #[test]
+    fn decision_secrets_come_from_the_consumed_env_and_only_from_it() {
+        let consumed = ConsumedSecrets {
+            passphrase: None,
+            anthropic_key: Some("anthropic-key".into()),
+            openai_key: Some("prin-key".into()),
+            decision_key: Some("dec-key".into()),
+        };
+        let keys = DecideSecrets::from_consumed(&consumed);
+        assert_eq!(keys.decision_key.as_deref(), Some("dec-key"));
+        assert_eq!(keys.openai_key.as_deref(), Some("prin-key"));
     }
 
     #[test]

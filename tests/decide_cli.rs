@@ -204,7 +204,7 @@ fn an_unwritable_output_path_fails_like_query() {
     // [PM-MS1-C1] exit 2 and an empty stdout are also what clap gives for an unknown subcommand, so
     // without this line the test passes in Red with no `decide` at all.
     assert!(
-        err.contains("I/O error"),
+        err.contains("output parent directory does not exist"),
         "the failure is the output write, not argument parsing: {err}"
     );
 }

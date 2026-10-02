@@ -61,6 +61,39 @@ pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 2] = ["tev1", "tev1:0.8b"];
 pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
 /// Whether the agent's `decide` tool runs without asking (REQ-D16).
 pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
+
+/// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
+/// (REQ-D02, REQ-D06, REQ-D21).
+///
+/// `base_url` stays `None`: absent means "inherit the root `base_url`". The fallbacks carry no
+/// `min_confidence`: no threshold is active by default (REQ-D24).
+///
+/// # Returns
+/// A valid [`magi_rs::decision::DecisionSection`] naming [`DEFAULT_DECISION_MODEL`] and the
+/// models of [`DEFAULT_DECISION_FALLBACK_MODELS`] in order.
+///
+/// # Examples
+/// ```ignore
+/// let chain = default_decision_section().chain();
+/// assert_eq!(chain.len(), 3);
+/// ```
+pub fn default_decision_section() -> magi_rs::decision::DecisionSection {
+    magi_rs::decision::DecisionSection {
+        base_url: None,
+        model: DEFAULT_DECISION_MODEL.to_string(),
+        timeout_secs: Some(DEFAULT_DECISION_TIMEOUT_SECS),
+        keep_alive: None,
+        auto_approve: Some(DEFAULT_DECISION_AUTO_APPROVE),
+        min_confidence: None,
+        fallback: DEFAULT_DECISION_FALLBACK_MODELS
+            .iter()
+            .map(|model| magi_rs::decision::DecisionFallback {
+                model: (*model).to_string(),
+                min_confidence: None,
+            })
+            .collect(),
+    }
+}
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Default embedding model (Ollama-first, local). Single source of truth — also
@@ -322,9 +355,9 @@ pub fn render_default_magi_toml() -> String {
         "# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
 ",
     ));
-    for model in DEFAULT_DECISION_FALLBACK_MODELS {
+    for fallback in default_decision_section().fallback {
         writeln!(out, "[[decision.fallback]]").unwrap();
-        writeln!(out, "model = \"{model}\"").unwrap();
+        writeln!(out, "model = \"{}\"", fallback.model).unwrap();
         writeln!(out, "# min_confidence = <value from the calibration>").unwrap();
         writeln!(out).unwrap();
     }
@@ -1830,6 +1863,23 @@ mod tests {
             ]
         );
         assert!(magi_table_keys("provider = \"ollama\"\n").is_empty());
+    }
+
+    #[test]
+    fn the_default_decision_section_is_the_scaffold_chain() {
+        let d = default_decision_section();
+        assert_eq!(d.model, "nimble");
+        assert_eq!(
+            d.fallback
+                .iter()
+                .map(|f| f.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tev1", "tev1:0.8b"]
+        );
+        assert_eq!(d.timeout_secs, Some(DEFAULT_DECISION_TIMEOUT_SECS));
+        assert_eq!(d.auto_approve, Some(DEFAULT_DECISION_AUTO_APPROVE));
+        assert_eq!(d.base_url, None, "absent = inherit the root base_url");
+        assert_eq!(d.validate(), Ok(()));
     }
 
     fn scaffold_decision() -> toml::Table {

@@ -1770,6 +1770,30 @@ impl MagiConfig {
         )
     }
 
+    /// The `[decision]` section as the run uses it (REQ-D02, REQ-D21).
+    ///
+    /// No section (no `magi.toml`) resolves to the built-in chain. A declared section is used
+    /// as written, with only the optional scalars `timeout_secs` and `auto_approve` completed
+    /// from `defaults.rs`; its fallbacks are never completed, so a section that declares none
+    /// has none.
+    ///
+    /// # Returns
+    /// An owned section whose `timeout_secs` and `auto_approve` are `Some`.
+    #[must_use]
+    pub fn effective_decision(&self) -> magi_rs::decision::DecisionSection {
+        let mut section = match &self.decision {
+            Some(declared) => declared.clone(),
+            None => return crate::defaults::default_decision_section(),
+        };
+        section
+            .timeout_secs
+            .get_or_insert(crate::defaults::DEFAULT_DECISION_TIMEOUT_SECS);
+        section
+            .auto_approve
+            .get_or_insert(crate::defaults::DEFAULT_DECISION_AUTO_APPROVE);
+        section
+    }
+
     /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
     /// `Workspace::config_path()` (REQ-A22b).
     ///
@@ -4843,6 +4867,33 @@ api_key = \"sk-x\"
     }
 
     /// S6: a v0.22.0 file is refused with the whole upgrade procedure.
+    #[test]
+    fn an_absent_decision_section_resolves_to_the_default_chain() {
+        let d = MagiConfig::default().effective_decision();
+        assert_eq!(d.model, "nimble");
+        assert_eq!(d.fallback.len(), 2);
+        assert_eq!(d.timeout_secs, Some(120));
+        assert_eq!(d.auto_approve, Some(true));
+    }
+
+    #[test]
+    fn a_declared_section_is_used_as_written_and_only_optional_scalars_get_defaults() {
+        let c = MagiConfig::from_toml_str(
+            "[decision]
+model = \"x\"
+",
+        )
+        .expect("valid");
+        let d = c.effective_decision();
+        assert_eq!(d.model, "x");
+        assert!(
+            d.fallback.is_empty(),
+            "a declared section without fallbacks has none (REQ-D21)"
+        );
+        assert_eq!(d.timeout_secs, Some(120));
+        assert_eq!(d.auto_approve, Some(true));
+    }
+
     #[test]
     fn a_toml_without_decision_fails_load_with_the_guided_procedure() {
         let dir = tempfile::tempdir().expect("tempdir");
