@@ -1896,4 +1896,23 @@ mod tests {
         assert!(text.contains("magi-rs vault set DECISION_API_KEY"));
         assert!(text.contains("typesafe/jev-1.13"));
     }
+
+    #[test]
+    fn no_scaffold_comment_carries_a_run_of_spaces_inside_its_prose() {
+        for line in render_default_magi_toml().lines() {
+            // Prose comments open with `# `; the aligned provider table opens with `#   `.
+            let Some(prose) = line.trim_start().strip_prefix("# ") else {
+                continue;
+            };
+            if prose.starts_with(' ') {
+                continue;
+            }
+            if let Some((_, after_first_word)) = prose.split_once(' ') {
+                assert!(
+                    !after_first_word.contains("   "),
+                    "a comment has a run of spaces: {line}"
+                );
+            }
+        }
+    }
 }
