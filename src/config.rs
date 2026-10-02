@@ -1773,9 +1773,11 @@ impl MagiConfig {
     /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
     /// `Workspace::config_path()` (REQ-A22b).
     ///
-    /// An **absent** file returns the built-in defaults, `Ok`, with no notices. An **empty or
-    /// whitespace-only** file too: every root field is optional, so an empty TOML is a valid
-    /// TOML that declares zero things (SC-A21f).
+    /// An **absent** file returns the built-in defaults, `Ok`, with no notices (the defaults
+    /// include `[decision]`). A **present** file that is empty, whitespace- or comment-only, or
+    /// that has no `[decision]` section is a guided load error (REQ-D02): it either declares
+    /// nothing while the operator believes it is read, or it was written by a version
+    /// without `[decision]`.
     ///
     /// **Behavior change from v0.11.0 (REQ-A23).** There a broken file
     ///
@@ -1788,6 +1790,7 @@ impl MagiConfig {
     /// # Errors
     ///
     /// - [`ConfigError::NeedsMigration`] if the file brings v0.11.0 patterns.
+    /// - [`ConfigError::EmptyConfig`] / [`ConfigError::MissingDecisionSection`] / [`ConfigError::DecisionBaseUrl`] per REQ-D02 and the `[decision]` URL check.
     /// - [`ConfigError::Parse`] if it exists and does not parse, or could not be read.
     /// - [`ConfigError::UnknownProviderKind`] / [`ConfigError::UnknownMode`] if `provider`, `[magi].kind` or `[magi].default_mode` bring a present but unrecognized value.
     /// - [`ConfigError::AgentTimeoutBelowFloor`] / [`ConfigError::MaxTokensOutOfRange`] / [`ConfigError::OutputCapTooSmall`] if those numbers fall outside their range.
@@ -1956,12 +1959,18 @@ impl MagiConfig {
     }
 }
 
-/// Prefixes a [`ConfigError::Parse`] with the path of the offending file; the other variants
-/// are already self-contained (they name the field, the value, or the range) and do not need
-/// the path to be actionable.
 /// Refuses a file that parses as an empty table: empty, whitespace-only or comment-only
-/// (REQ-D02). A file that does not parse (`None`) passes: the syntax error is `from_toml_str`'s
-/// to report.
+/// (REQ-D02). A file that does not parse passes: the syntax error is `from_toml_str`'s to
+/// report.
+///
+/// # Arguments
+///
+/// * `table` - The file parsed as TOML, or `None` if it does not parse.
+/// * `config_path` - The file's path, named in the error.
+///
+/// # Returns
+///
+/// `Ok(())` unless the file is a valid but empty table.
 ///
 /// # Errors
 ///
@@ -1979,6 +1988,15 @@ fn reject_empty(table: Option<&toml::Table>, config_path: &Path) -> Result<(), C
 /// [`LAST_VERSION_WITHOUT_DECISION`] or earlier (REQ-D02). Works on the table `load` already
 /// parsed, so the file is not read twice.
 ///
+/// # Arguments
+///
+/// * `table` - The parsed, non-empty `magi.toml`.
+/// * `config_path` - The file's path; the database path in the error is derived from it.
+///
+/// # Returns
+///
+/// `Ok(())` when the `decision` key is present.
+///
 /// # Errors
 ///
 /// [`ConfigError::MissingDecisionSection`] when the key `decision` is absent.
@@ -1992,6 +2010,9 @@ fn require_decision_section(table: &toml::Table, config_path: &Path) -> Result<(
     })
 }
 
+/// Prefixes a [`ConfigError::Parse`] with the path of the offending file; the other variants
+/// are already self-contained (they name the field, the value, or the range) and do not need
+/// the path to be actionable.
 fn attach_path(e: ConfigError, path: &Path) -> ConfigError {
     match e {
         ConfigError::Parse(msg) => ConfigError::Parse(format!("{}: {msg}", path.display())),
