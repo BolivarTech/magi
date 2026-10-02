@@ -761,6 +761,24 @@ mod tests {
         assert!(r.is_ok(), "{r:?}");
     }
 
+    /// The cap must bite on a body that would otherwise decide: a valid answer padded past it.
+    #[tokio::test]
+    async fn a_valid_200_padded_past_the_cap_is_an_invalid_response() {
+        let mut server = mockito::Server::new_async().await;
+        let body = format!("{OK_BODY}{}", " ".repeat(RESPONSE_BODY_CAP));
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+        assert_eq!(
+            first_failure(&r).map(|(c, _)| c),
+            Some(Cause::InvalidResponse)
+        );
+    }
+
     /// Review Focus 3: a 200 bigger than `RESPONSE_BODY_CAP` is not read whole and does not decide.
     #[tokio::test]
     async fn a_huge_non_json_200_is_an_invalid_response() {
