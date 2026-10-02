@@ -168,13 +168,16 @@ impl DecisionRequest {
     /// Replaces the titular model for this request only.
     ///
     /// # Arguments
-    /// * `model` - model name; surrounding whitespace is trimmed.
+    /// * `model` - model name; surrounding whitespace is trimmed and a blank
+    ///   name leaves the request without an explicit model.
     ///
     /// # Returns
-    /// The request with the explicit model set.
+    /// The request with the explicit model set, or unchanged-in-effect
+    /// (no explicit model) when the name is blank.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         let model: String = model.into();
-        self.model = Some(model.trim().to_owned());
+        let trimmed = model.trim();
+        self.model = (!trimmed.is_empty()).then(|| trimmed.to_owned());
         self
     }
 
