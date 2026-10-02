@@ -79,7 +79,8 @@ def table_header(line: str) -> "str | None":
     """Return the whitespace-free spelling of a TOML table header line.
 
     TOML allows blanks inside the brackets (``[[ decision.fallback ]]``), and a
-    commented line (``# [[decision.fallback]]``) is not a header at all. Both
+    commented line (``# [[decision.fallback]]``) is not a header at all, while a
+    trailing comment (``[[decision.fallback]]  # tuned``) is ignored. Both
     the profile rewrite and the scenario that strips ``[decision]`` decide where
     a block starts and ends, so they share this one reading.
 
@@ -90,7 +91,8 @@ def table_header(line: str) -> "str | None":
         The header with every blank removed (``[[decision.fallback]]``), or
         None when the line is not a table header.
     """
-    stripped = line.strip()
+    # A header holds no ``#``; anything after one is an inline comment.
+    stripped = line.split("#", 1)[0].strip()
     if stripped.startswith("[") and stripped.endswith("]"):
         return "".join(stripped.split())
     return None
