@@ -268,6 +268,9 @@ mod tests {
     fn the_not_found_hint_names_the_url_and_both_causes() {
         let hint = not_found_hint("https://openrouter.ai/v1/systemone");
         assert!(!hint.contains("  ") && !hint.contains('\n'), "{hint}");
+        // SMOKE #1: OpenRouter answers a prefix-less path with a non-JSON 200, not a 404, so the
+        // hint must not claim a status it may not have seen.
+        assert!(!hint.contains("404"), "{hint}");
         assert!(
             hint.contains("https://openrouter.ai/v1/systemone"),
             "{hint}"
