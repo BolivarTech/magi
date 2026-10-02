@@ -63,6 +63,8 @@ pub enum Scope {
     Magi,
     /// `[embedding].base_url` ⇒ `EMBEDDING_BASE_URL_*`.
     Embedding,
+    /// `[decision].base_url` ⇒ `DECISION_BASE_URL_*`.
+    Decision,
 }
 
 impl Scope {
@@ -73,6 +75,7 @@ impl Scope {
             Self::Root => "BASE_URL_USER",
             Self::Magi => "MAGI_BASE_URL_USER",
             Self::Embedding => "EMBEDDING_BASE_URL_USER",
+            Self::Decision => "",
         }
     }
 
@@ -83,6 +86,7 @@ impl Scope {
             Self::Root => "BASE_URL_PASSWORD",
             Self::Magi => "MAGI_BASE_URL_PASSWORD",
             Self::Embedding => "EMBEDDING_BASE_URL_PASSWORD",
+            Self::Decision => "",
         }
     }
 }
@@ -763,5 +767,26 @@ mod tests {
                 "{scope:?}: expected {expected_password} in {msg}"
             );
         }
+    }
+
+    #[test]
+    fn the_decision_scope_names_its_own_vault_entries() {
+        assert_eq!(Scope::Decision.user_entry(), "DECISION_BASE_URL_USER");
+        assert_eq!(
+            Scope::Decision.password_entry(),
+            "DECISION_BASE_URL_PASSWORD"
+        );
+    }
+
+    #[test]
+    fn a_literal_credential_in_a_decision_base_url_names_the_decision_entries() {
+        let err = EndpointTemplate::parse("https://alice:s3cr3t@host/v1", Scope::Decision)
+            .expect_err("literal credential");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DECISION_BASE_URL_USER") && msg.contains("DECISION_BASE_URL_PASSWORD"),
+            "{msg}"
+        );
+        assert!(!msg.contains("s3cr3t") && !msg.contains("alice"), "{msg}");
     }
 }
