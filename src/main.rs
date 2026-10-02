@@ -9139,8 +9139,32 @@ mod tests {
             code_lines_only(production)
                 .matches("register_process_secrets")
                 .count(),
-            2,
+            // TUI, query/consult (`prepare_headless`) and decide (`run_decide_subcommand`).
+            3,
             "expected exactly one arming per surface"
+        );
+    }
+
+    /// The decide surface arms the auditor with the decision key it resolved: without it the
+    /// exact pass never sees that key, and a provider that echoes it back is masked by shape
+    /// alone.
+    #[test]
+    fn the_decide_surface_arms_the_auditor_with_the_decision_key() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once(FIRST_TEST_MODULE)
+            .expect("this file has a test module");
+        let start = production
+            .find("async fn run_decide_subcommand(")
+            .expect("run_decide_subcommand is gone; fix this guard's anchor");
+        let body = code_lines_only(production.get(start..).unwrap_or(""));
+        assert!(
+            body.contains("register_process_secrets"),
+            "decide resolves credentials and never arms the auditor"
+        );
+        assert!(
+            body.contains("decision_api_key("),
+            "decide arms the auditor without the decision key it resolved"
         );
     }
 

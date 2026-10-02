@@ -645,3 +645,36 @@ fn a_blank_decision_key_is_absent() {
     assert_eq!(code, EXIT_OK, "{err}");
     m.assert();
 }
+
+/// A registered secret that matches no pattern is masked by the exact pass wherever the provider
+/// echoes it: here inside a rejection message that reaches the user envelope.
+#[test]
+fn a_registered_secret_echoed_by_the_provider_is_masked_in_the_envelope() {
+    let toy_secret = "toysecret-9f3a1c7e5b2d4a60";
+    let mut server = mockito::Server::new();
+    server
+        .mock("POST", "/v1/systemone")
+        .with_status(422)
+        .with_body(format!(
+            "{{\"error\":\"rejected, saw {toy_secret} in the request\"}}"
+        ))
+        .create();
+    let ws = workspace(&decision_toml(&server.url(), ""));
+    let (code, out, err) = decide(&ws, &[], INPUT, &[("DECISION_API_KEY", toy_secret)]);
+    assert_eq!(code, EXIT_MISUSE, "{err}");
+    let v = envelope(&out);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("rejected"));
+    for (where_, text) in [
+        ("stdout", &out),
+        ("stderr", &err),
+        ("run log", &run_log(&ws)),
+    ] {
+        assert!(
+            !text.contains(toy_secret),
+            "{where_} leaked the registered secret"
+        );
+    }
+}
