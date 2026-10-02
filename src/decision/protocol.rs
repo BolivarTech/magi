@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::decision::config::KeepAlive;
-use crate::decision::error::DecisionError;
+use crate::decision::error::{DecisionError, Usage};
 
 /// Questions of a request, keyed by name; the map order is the wire order.
 pub type Questions = BTreeMap<String, Question>;
@@ -324,6 +324,40 @@ impl Answer {
     }
 }
 
+/// Largest deviation from 1 the probabilities of one question may have
+/// (REQ-D07); measured against the providers' rounding (E9).
+pub const PROBABILITY_SUM_TOLERANCE: f64 = 0.01;
+
+/// Magi confidence of a distribution: `clamp((n * p_max - 1) / (n - 1), 0, 1)`.
+///
+/// Complexity: O(n).
+pub fn magi_confidence(_probabilities: &[f64]) -> f64 {
+    todo!()
+}
+
+/// A validated System One response.
+#[derive(Debug)]
+pub struct ParsedResponse {
+    /// One answer per question sent.
+    pub answers: BTreeMap<String, Answer>,
+    /// Tokens (and cost) the provider reported.
+    pub usage: Usage,
+}
+
+/// Tolerant read plus strict validation of the fields Magi uses (REQ-D07).
+///
+/// # Errors
+/// A reason naming the question and the class of problem; it never quotes a
+/// value returned by the provider.
+pub fn parse_response(_body: &[u8], _questions: &Questions) -> Result<ParsedResponse, String> {
+    todo!()
+}
+
+/// Lowest Magi confidence across the answers.
+pub fn lowest_confidence(_answers: &BTreeMap<String, Answer>) -> f64 {
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,5 +652,366 @@ mod tests {
         let req =
             parse(json!({"model": " tev1 ", "state": "s", "questions": noul()})).expect("valid");
         assert_eq!(req.model(), Some("tev1"));
+    }
+
+    fn three_questions() -> Questions {
+        serde_json::from_value(json!({
+            "team": {"type": "choice", "criteria": {"billing": "b", "technical": "t", "other": "o"}},
+            "today": {"type": "noul", "instructions": "Is it today?"},
+            "urgency": {"type": "score", "criteria": ["Routine", "Soon", "Urgent"]}
+        }))
+        .expect("questions")
+    }
+
+    /// Values measured with `nimble` on 2026-10-01 (spec REQ-D10 example).
+    const NIMBLE_BODY: &str = r#"{"model":"nimble","answers":{
+        "team":{"type":"choice","choice":"billing","confidence":0.948,
+                "probabilities":{"billing":0.990,"technical":0.001,"other":0.009}},
+        "today":{"type":"noul","noul":0.824},
+        "urgency":{"type":"score","score":1.011,"confidence":0.009,
+                   "legend":{"0":"Routine","1":"Soon","2":"Urgent"},
+                   "probabilities":{"0":0.361,"1":0.268,"2":0.372}}},
+        "usage":{"input_tokens":526,"output_tokens":3}}"#;
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    fn body_with(answers: serde_json::Value) -> Vec<u8> {
+        json!({"model": "m", "answers": answers, "usage": {"input_tokens": 1, "output_tokens": 1}})
+            .to_string()
+            .into_bytes()
+    }
+
+    #[test]
+    fn a_valid_response_yields_one_answer_per_question_with_magi_confidence() {
+        let parsed = parse_response(NIMBLE_BODY.as_bytes(), &three_questions()).expect("valid");
+        match parsed.answers.get("team") {
+            Some(Answer::Choice {
+                choice,
+                confidence,
+                provider_confidence,
+                probabilities,
+            }) => {
+                assert_eq!(choice, "billing");
+                assert!(close(*confidence, (3.0 * 0.990 - 1.0) / 2.0));
+                assert_eq!(*provider_confidence, Some(0.948));
+                assert_eq!(probabilities.len(), 3);
+            }
+            other => panic!("team: {other:?}"),
+        }
+        match parsed.answers.get("today") {
+            Some(Answer::Noul { noul, confidence }) => {
+                assert!(close(*noul, 0.824));
+                assert!(close(*confidence, (2.0f64 * 0.824 - 1.0).abs()));
+            }
+            other => panic!("today: {other:?}"),
+        }
+        match parsed.answers.get("urgency") {
+            Some(Answer::Score {
+                score,
+                legend,
+                confidence,
+                provider_confidence,
+                ..
+            }) => {
+                assert!(close(*score, 1.011));
+                assert_eq!(legend.get("2").map(String::as_str), Some("Urgent"));
+                assert!(close(*confidence, (3.0 * 0.372 - 1.0) / 2.0));
+                assert_eq!(*provider_confidence, Some(0.009));
+            }
+            other => panic!("urgency: {other:?}"),
+        }
+        assert_eq!(
+            parsed.usage,
+            Usage {
+                input_tokens: 526,
+                output_tokens: 3,
+                cost: None
+            }
+        );
+    }
+
+    /// PM-C3: an OpenRouter response plus an invented field still parses; cost is read.
+    #[test]
+    fn unknown_fields_in_the_response_are_ignored_and_cost_is_read() {
+        let body = json!({"id": "gen-1", "provider": "TypeSafe", "model": "typesafe/jev-1.13",
+            "invented": {"x": 1},
+            "answers": {"today": {"type": "noul", "noul": 0.9, "extra": true}},
+            "usage": {"input_tokens": 10, "output_tokens": 1, "cost": 0.00002}});
+        let qs: Questions = serde_json::from_value(json!({"today": {"type": "noul"}})).expect("q");
+        let parsed = parse_response(body.to_string().as_bytes(), &qs).expect("tolerant read");
+        assert_eq!(parsed.usage.cost, Some(0.00002));
+    }
+
+    #[test]
+    fn an_absent_usage_counts_as_zero() {
+        let qs: Questions = serde_json::from_value(json!({"today": {"type": "noul"}})).expect("q");
+        let body = json!({"model": "m", "answers": {"today": {"type": "noul", "noul": 0.5}}});
+        let parsed = parse_response(body.to_string().as_bytes(), &qs).expect("valid");
+        assert_eq!(parsed.usage, Usage::default());
+    }
+
+    #[test]
+    fn a_choice_outside_the_sent_options_is_invalid_and_the_reason_does_not_quote_it() {
+        let planted = "sk-planted-option-0123456789abcdef";
+        let answers = json!({"team": {"type": "choice", "choice": planted,
+            "probabilities": {"billing": 0.5, "technical": 0.3, "other": 0.2}}});
+        let qs: Questions = serde_json::from_value(json!({"team": {"type": "choice",
+            "criteria": {"billing": "b", "technical": "t", "other": "o"}}}))
+        .expect("q");
+        let r = parse_response(&body_with(answers), &qs).expect_err("invalid");
+        assert!(r.contains("team"), "{r}");
+        assert!(
+            !r.contains(planted),
+            "a reason never quotes a provider value: {r}"
+        );
+    }
+
+    #[test]
+    fn probability_keys_must_match_the_options_or_level_indices() {
+        let qs = three_questions();
+        let bad_choice = json!({
+            "team": {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.9, "nope": 0.1}},
+            "today": {"type": "noul", "noul": 0.5},
+            "urgency": {"type": "score", "score": 1.0, "legend": {}, "probabilities": {"0": 0.2, "1": 0.6, "2": 0.2}}});
+        assert!(parse_response(&body_with(bad_choice), &qs).is_err());
+        let bad_score = json!({
+            "team": {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.8, "technical": 0.1, "other": 0.1}},
+            "today": {"type": "noul", "noul": 0.5},
+            "urgency": {"type": "score", "score": 1.0, "legend": {},
+                        "probabilities": {"Routine": 0.2, "Soon": 0.6, "Urgent": 0.2}}});
+        assert!(parse_response(&body_with(bad_score), &qs).is_err());
+    }
+
+    #[test]
+    fn numeric_violations_are_invalid_responses() {
+        let qs: Questions = serde_json::from_value(json!({"today": {"type": "noul"},
+            "pick": {"type": "choice", "criteria": {"a": "a", "b": "b"}}}))
+        .expect("q");
+        let mk = |noul: serde_json::Value, pa: serde_json::Value, pb: serde_json::Value| {
+            json!({"today": {"type": "noul", "noul": noul},
+                   "pick": {"type": "choice", "choice": "a", "probabilities": {"a": pa, "b": pb}}})
+        };
+        assert!(
+            parse_response(&body_with(mk(json!(1.2), json!(0.5), json!(0.5))), &qs).is_err(),
+            "noul > 1"
+        );
+        assert!(
+            parse_response(&body_with(mk(json!(-0.1), json!(0.5), json!(0.5))), &qs).is_err(),
+            "noul < 0"
+        );
+        assert!(
+            parse_response(&body_with(mk(json!(0.5), json!(-0.2), json!(1.2))), &qs).is_err(),
+            "p < 0"
+        );
+        assert!(
+            parse_response(&body_with(mk(json!(0.5), json!(0.5), json!(0.3))), &qs).is_err(),
+            "sum 0.8"
+        );
+        assert!(
+            parse_response(&body_with(mk(json!(0.5), json!(0.6), json!(0.405))), &qs).is_ok(),
+            "sum 1.005"
+        );
+        let nan = br#"{"model":"m","answers":{"today":{"type":"noul","noul":NaN}}}"#;
+        assert!(
+            parse_response(nan, &qs).is_err(),
+            "NaN is not JSON and never reaches a decision"
+        );
+    }
+
+    /// CP2 MS1 r3 (Caspar): structural violations and the score's own probability sum are invalid too.
+    #[test]
+    fn structural_violations_are_invalid_responses() {
+        let qs = three_questions();
+        assert!(parse_response(b"", &qs).is_err(), "empty body");
+        assert!(
+            parse_response(b"[]", &qs).is_err(),
+            "top level is not an object"
+        );
+        assert!(
+            parse_response(br#"{"model":"m","answers":[]}"#, &qs).is_err(),
+            "answers as an array"
+        );
+        let team = json!({"type": "choice", "choice": "billing",
+            "probabilities": {"billing": 0.8, "technical": 0.1, "other": 0.1}});
+        let legend = json!({"0": "Routine", "1": "Soon", "2": "Urgent"});
+        let missing = json!({"team": team, "today": {"type": "noul", "noul": 0.5}});
+        assert!(
+            parse_response(&body_with(missing), &qs).is_err(),
+            "a sent question without an answer"
+        );
+        let score_sum = json!({"team": team, "today": {"type": "noul", "noul": 0.5},
+            "urgency": {"type": "score", "score": 1.0, "legend": legend,
+                        "probabilities": {"0": 0.5, "1": 0.5, "2": 0.5}}});
+        assert!(
+            parse_response(&body_with(score_sum), &qs).is_err(),
+            "score probabilities sum 1.5"
+        );
+    }
+
+    /// Carry item 6: the upper bound is the binding one; the lower bound is tested too.
+    #[test]
+    fn a_score_is_checked_against_its_tolerant_range_then_clamped() {
+        let qs: Questions = serde_json::from_value(json!({"urgency": {"type": "score",
+            "criteria": ["Routine", "Soon", "Urgent"]}}))
+        .expect("q");
+        let mk = |score: f64| {
+            json!({"urgency": {"type": "score", "score": score, "legend": {},
+            "probabilities": {"0": 0.0, "1": 0.0, "2": 1.0}}})
+        };
+        let parsed = parse_response(&body_with(mk(2.015)), &qs).expect("within 2 * 1.01");
+        assert!(
+            matches!(parsed.answers.get("urgency"), Some(Answer::Score { score, .. }) if close(*score, 2.0))
+        );
+        assert!(
+            parse_response(&body_with(mk(2.05)), &qs).is_err(),
+            "above (n-1)(1+tol)"
+        );
+        let parsed = parse_response(&body_with(mk(-0.01)), &qs).expect("within -tol(n-1)");
+        assert!(
+            matches!(parsed.answers.get("urgency"), Some(Answer::Score { score, .. }) if close(*score, 0.0))
+        );
+        assert!(
+            parse_response(&body_with(mk(-0.03)), &qs).is_err(),
+            "below -tol(n-1)"
+        );
+    }
+
+    #[test]
+    fn the_legend_comes_from_the_sent_levels_not_from_the_provider() {
+        let qs: Questions = serde_json::from_value(json!({"urgency": {"type": "score",
+            "criteria": ["Routine", "Urgent"]}}))
+        .expect("q");
+        let answers = json!({"urgency": {"type": "score", "score": 1.0,
+            "legend": {"0": "sk-planted-legend-0123456789abcdef", "1": "x"},
+            "probabilities": {"0": 0.1, "1": 0.9}}});
+        let parsed = parse_response(&body_with(answers), &qs).expect("valid");
+        match parsed.answers.get("urgency") {
+            Some(Answer::Score { legend, .. }) => {
+                assert_eq!(legend.get("0").map(String::as_str), Some("Routine"));
+                assert_eq!(legend.get("1").map(String::as_str), Some("Urgent"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_answer_an_unasked_one_or_a_wrong_type_is_invalid() {
+        let qs: Questions = serde_json::from_value(json!({"today": {"type": "noul"}})).expect("q");
+        assert!(
+            parse_response(&body_with(json!({})), &qs).is_err(),
+            "missing"
+        );
+        assert!(
+            parse_response(
+                &body_with(json!({"today": {"type": "noul", "noul": 0.5},
+            "other": {"type": "noul", "noul": 0.5}})),
+                &qs
+            )
+            .is_err(),
+            "unasked"
+        );
+        assert!(
+            parse_response(
+                &body_with(json!({"today": {"type": "choice", "choice": "a",
+            "probabilities": {"a": 1.0}}})),
+                &qs
+            )
+            .is_err(),
+            "wrong type"
+        );
+    }
+
+    #[test]
+    fn a_choice_without_provider_confidence_omits_it_in_the_output() {
+        let qs: Questions = serde_json::from_value(json!({"pick": {"type": "choice",
+            "criteria": {"a": "a", "b": "b"}}}))
+        .expect("q");
+        let parsed = parse_response(
+            &body_with(json!({"pick": {"type": "choice", "choice": "a",
+            "probabilities": {"a": 0.8, "b": 0.2}}})),
+            &qs,
+        )
+        .expect("valid");
+        let out = serde_json::to_value(parsed.answers.get("pick").expect("pick")).expect("ser");
+        assert!(out.get("provider_confidence").is_none(), "{out}");
+        assert_eq!(out["type"], "choice");
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_invalid() {
+        assert!(parse_response(b"<html>502</html>", &three_questions()).is_err());
+    }
+
+    #[test]
+    fn magi_confidence_follows_the_formula_and_is_clamped_to_zero_one() {
+        assert!(close(magi_confidence(&[0.5, 0.5]), 0.0));
+        assert!(close(magi_confidence(&[1.0, 0.0]), 1.0));
+        assert!(close(magi_confidence(&[0.7, 0.2, 0.1]), 0.55));
+        assert!(close(magi_confidence(&[0.824, 0.176]), 0.648));
+        // p_max just under 1/n (allowed by the sum tolerance) never goes negative.
+        assert!(close(magi_confidence(&[0.332, 0.331, 0.332]), 0.0));
+    }
+
+    /// Carry item 7 lives in MS2 (`noul >= 0.5` counts as yes); here: exactly 0.5 has zero confidence.
+    #[test]
+    fn a_noul_of_exactly_one_half_has_zero_confidence() {
+        let qs: Questions = serde_json::from_value(json!({"today": {"type": "noul"}})).expect("q");
+        let parsed = parse_response(
+            &body_with(json!({"today": {"type": "noul", "noul": 0.5}})),
+            &qs,
+        )
+        .expect("valid");
+        assert!(close(
+            parsed
+                .answers
+                .get("today")
+                .map(Answer::confidence)
+                .unwrap_or(1.0),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn lowest_confidence_is_the_minimum_across_answers() {
+        let parsed = parse_response(NIMBLE_BODY.as_bytes(), &three_questions()).expect("valid");
+        assert!(close(
+            lowest_confidence(&parsed.answers),
+            (3.0 * 0.372 - 1.0) / 2.0
+        ));
+    }
+
+    #[test]
+    fn usage_add_sums_tokens_and_keeps_cost_none_only_if_neither_has_one() {
+        let mut a = Usage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cost: None,
+        };
+        a.add(&Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+            cost: None,
+        });
+        assert_eq!(
+            a,
+            Usage {
+                input_tokens: 4,
+                output_tokens: 6,
+                cost: None
+            }
+        );
+        a.add(&Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: Some(0.5),
+        });
+        a.add(&Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: Some(0.25),
+        });
+        assert_eq!(a.cost, Some(0.75));
     }
 }
