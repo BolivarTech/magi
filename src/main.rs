@@ -5804,7 +5804,7 @@ async fn prepare_headless(
     // guess (a workspace directory named `query`) or risk echoing a `-p`
     // passphrase into the log.
     command: &str,
-    mut passphrase_flag: Option<Zeroizing<String>>,
+    passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
     anthropic_key: Option<String>,
     openai_key: Option<String>,
@@ -5856,39 +5856,11 @@ async fn prepare_headless(
         return Err(1);
     }
 
-    // Open the vault only when a DB exists AND a passphrase is available
-    // (REQ-H19). If persistence is requested but no passphrase can unlock the
-    // existing DB, fail closed (REQ-H25) rather than silently dropping it.
-    let db_path = workspace
-        .as_ref()
-        .map(Workspace::db_path)
-        .filter(|p| p.exists());
-    let memory = if let Some(db) = &db_path {
-        if let Some(pass) = passphrase_flag.take() {
-            match open_headless_memory(db, pass) {
-                Ok(m) => m,
-                Err(e) => {
-                    magi_rs::notices::eprint_audited(&format!("error: {e}"));
-                    return Err(headless_error_exit_code(&e));
-                }
-            }
-        } else if !h.no_memory {
-            let e = HeadlessError::PassphraseUnavailable;
-            magi_rs::notices::eprint_audited(&format!("error: {e}"));
-            return Err(headless_error_exit_code(&e));
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Wire the vault over the opened store (env > vault secret resolution).
-    let secret_store: Option<SharedSecretStore> = memory.as_ref().and_then(|store| {
-        let dek = store.data_key().ok()?;
-        let vstore = wire(store.shared_conn(), dek).ok()?;
-        Some(Arc::new(Mutex::new(vstore)) as SharedSecretStore)
-    });
+    // Open the vault only when a DB exists AND a passphrase is available (REQ-H19); with
+    // persistence requested and no passphrase the run fails closed (REQ-H25). Shared with
+    // `magi decide`.
+    let (memory, secret_store) =
+        open_headless_vault(workspace.as_ref(), passphrase_flag, h.no_memory)?;
 
     // Config lives in `.magi/magi.toml`; absent ⇒ built-in defaults. Task 1.4/REQ-A23:
     // `load` is fallible now — a present-but-broken magi.toml (bad parse, unknown
