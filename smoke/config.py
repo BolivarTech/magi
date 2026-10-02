@@ -262,17 +262,23 @@ class ModelProfile:
     Attributes:
         model: The main agent's model.
         trio: Exactly :data:`TRIO_SIZE` seats, each a :class:`Seat`.
+        decision: The ONE System One model the ``decide`` command runs, or
+            ``None`` to leave ``[decision]`` as the product wrote it. One name
+            and not a chain: a chain repeating the same model is a load error
+            in the product, and one model for three places is not a chain.
     """
 
-    def __init__(self, model, trio):
+    def __init__(self, model, trio, decision=None):
         """Store the profile.
 
         Args:
             model: The main agent's model.
             trio: The three seats.
+            decision: The cheap decision model, or ``None``.
         """
         self.model = model
         self.trio = trio
+        self.decision = decision
 
     @classmethod
     def load(cls, path):
@@ -321,4 +327,11 @@ class ModelProfile:
                     "like a declaration." % (position, path.name)
                 )
             seats.append(Seat(model=entry["model"], lineage=entry["lineage"]))
-        return cls(model=section.get("model"), trio=seats)
+        decision = section.get("decision")
+        if decision is not None and (not isinstance(decision, str)
+                                     or not decision.strip()):
+            raise PreflightError(
+                "[profile.cheap].decision in %s must be one non-blank model "
+                "name" % path.name
+            )
+        return cls(model=section.get("model"), trio=seats, decision=decision)

@@ -39,6 +39,7 @@ import pathlib
 import re
 import shutil
 import tempfile
+import tomllib
 
 from smoke import runs
 from smoke.docs_check import (extract_configs, extract_invocations,
@@ -55,7 +56,22 @@ S13_ASSERTIONS = (
     "every flag in those invocations exists in that subcommand's --help",
     "every magi.toml embedded in those docs parses",
     "every [magi] key the scaffold writes is named in a published guide",
+    "the documented decide flags exist",
+    "the [decision] example in docs/magi.toml.example parses",
 )
+
+#: The ``decide`` subcommand and the flags the published documentation tells a
+#: reader to use with it. Long spellings: ``-i`` and friends are shorthand the
+#: same help line carries, so one of them can never be present without the
+#: other.
+DECIDE_SUBCOMMAND = "decide"
+DECIDE_FLAGS = ("--input", "--output", "--questions", "--timeout",
+                "--no-memory")
+
+#: The annotated example of the whole configuration, and the section whose
+#: presence makes it an example of ``decide`` and not of something else.
+EXAMPLE_CONFIG = pathlib.Path("docs") / "magi.toml.example"
+DECISION_TABLE = "decision"
 
 #: A key named only in the changelog is announced, not documented.
 CHANGELOG_NAME = "CHANGELOG.md"
@@ -120,7 +136,7 @@ def the_published_documentation_is_still_true(run):
 
     Yields:
         Finding: One per entry of :data:`S13_ASSERTIONS`, in that order. Always
-        three, whatever went wrong: a scenario that stops early erases the
+        six, whatever went wrong: a scenario that stops early erases the
         assertions it never reached from the report.
     """
     try:
@@ -135,13 +151,15 @@ def the_published_documentation_is_still_true(run):
     surface = _Surface()
     root_help = surface.help_for(())
     if root_help is None:
+        unread = ("the product did not answer %s, so its surface could not "
+                  "be read" % HELP_FLAG)
         for index in (0, 1):
-            yield _finding(index, Outcome.CANNOT_TEST,
-                           "the product did not answer %s, so its surface "
-                           "could not be read" % HELP_FLAG)
+            yield _finding(index, Outcome.CANNOT_TEST, unread)
+        decide_finding = _finding(4, Outcome.CANNOT_TEST, unread)
     else:
         yield _subcommand_finding(invocations, _subcommands_in(root_help))
         yield _flag_finding(invocations, surface)
+        decide_finding = _decide_flags_finding(invocations, surface)
 
     embedded = _read_configs(documents)
     workspace = _seed_workspace()
@@ -152,6 +170,8 @@ def the_published_documentation_is_still_true(run):
         key_coverage = _key_coverage_finding(workspace, documents)
         yield _config_finding(embedded, workspace)
         yield key_coverage
+        yield decide_finding
+        yield _example_finding(workspace)
     finally:
         # Removed here, and the scratch area's own reset is not an argument
         # against it: --reset-env is a recovery an operator runs, not a
@@ -375,6 +395,86 @@ def _flag_finding(invocations, surface):
     return _finding(1, Outcome.PASS, "")
 
 
+def _decide_flags_finding(invocations, surface):
+    """Assertion 5: ``decide`` exists, carries its flags, and is documented.
+
+    Three things have to hold together. The product lists ``decide`` and its
+    help carries every flag in :data:`DECIDE_FLAGS`; and at least one published
+    document shows a ``decide`` invocation. The flags those invocations pass
+    are already judged by the second assertion, so this one only refuses the
+    two ways "documented" can be empty: a command the documents never mention,
+    or flags the command lost.
+
+    Args:
+        invocations: Pairs of document and invocation.
+        surface: The product's cached account of itself.
+
+    Returns:
+        Finding: PASS, or FAIL naming what is missing.
+    """
+    text = surface.help_for((DECIDE_SUBCOMMAND,))
+    if text is None:
+        return _finding(4, Outcome.FAIL,
+                        "the product does not answer %s for %s"
+                        % (HELP_FLAG, DECIDE_SUBCOMMAND))
+    available = _flags_in(text)
+    missing = [flag for flag in DECIDE_FLAGS if flag not in available]
+    documented = any(item.subcommand == DECIDE_SUBCOMMAND
+                     for _, item in invocations)
+    problems = []
+    if missing:
+        problems.append("%s does not carry %s"
+                        % (DECIDE_SUBCOMMAND, ", ".join(missing)))
+    if not documented:
+        problems.append("no published document shows a %s invocation"
+                        % DECIDE_SUBCOMMAND)
+    if problems:
+        return _finding(4, Outcome.FAIL, "; ".join(problems))
+    return _finding(4, Outcome.PASS, "")
+
+
+def _example_finding(root):
+    """Assertion 6: the annotated example carries a ``[decision]`` the product loads.
+
+    The example is a file, not a fenced block, so the extraction behind the
+    third assertion never sees it. It is installed like any documented
+    configuration and judged the same way, by the invalid-input exit code
+    alone, and it must also parse as TOML and declare ``[decision]``: an
+    example without it would load only because the product refuses nothing
+    about an old file here, which is not what this assertion promises.
+
+    Args:
+        root: The seeded workspace to install it in, or None.
+
+    Returns:
+        Finding: PASS, FAIL naming why, or CANNOT_TEST without a workspace.
+    """
+    if root is None:
+        return _finding(
+            5, Outcome.CANNOT_TEST,
+            "the product's %s did not scaffold a workspace to install the "
+            "example in" % INIT_SUBCOMMAND)
+    try:
+        body = (runs.repo_root() / EXAMPLE_CONFIG).read_text(encoding="utf-8")
+    except OSError as exc:
+        return _finding(5, Outcome.FAIL,
+                        "%s could not be read: %s"
+                        % (EXAMPLE_CONFIG.as_posix(), exc))
+    try:
+        declared = tomllib.loads(body)
+    except tomllib.TOMLDecodeError:
+        return _finding(5, Outcome.FAIL,
+                        "%s is not valid TOML" % EXAMPLE_CONFIG.as_posix())
+    if not isinstance(declared.get(DECISION_TABLE), dict):
+        return _finding(5, Outcome.FAIL,
+                        "%s declares no [%s] section"
+                        % (EXAMPLE_CONFIG.as_posix(), DECISION_TABLE))
+    verdict = _install_and_probe(root, body, EXAMPLE_CONFIG, 1)
+    if verdict:
+        return _finding(5, Outcome.FAIL, verdict)
+    return _finding(5, Outcome.PASS, "")
+
+
 def _config_finding(embedded, root):
     """Assertion 3: every embedded configuration is one the product accepts.
 
@@ -585,7 +685,7 @@ def _first_line(stream: bytes) -> str:
 
 
 def _finding(index: int, outcome: Outcome, detail: str) -> Finding:
-    """Build one of S13's three findings.
+    """Build one of S13's six findings.
 
     Args:
         index: Which entry of :data:`S13_ASSERTIONS` this is.

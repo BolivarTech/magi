@@ -29,3 +29,4 @@ from smoke.scenarios import redaction  # noqa: F401
 from smoke.scenarios import migration  # noqa: F401
 from smoke.scenarios import logging  # noqa: F401
 from smoke.scenarios import screen_policy  # noqa: F401
+from smoke.scenarios import decide  # noqa: F401

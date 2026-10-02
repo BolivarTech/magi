@@ -122,6 +122,12 @@ exclusions below as a starting point:
 | `nemotron-3-nano:30b-cloud` | truncates its verdict JSON about one run in three |
 | `mistral-large-3:675b-cloud` | invalid JSON, and never reasons |
 
+`[profile.cheap]` may also carry `decision = "<one model>"`, the System One model `magi decide`
+runs. The harness writes it into `[decision].model` and deletes every
+`[[decision.fallback]]` block: the product refuses a chain that repeats a model, and one model is
+not a chain. Without the key the section stays as `magi init` wrote it. No expected reds are
+declared for it yet; when a run produces a deterministic one, its cause goes in this section.
+
 When a profile is finally declared, its expected reds belong here with the written cause
 of each. A deterministic red with a reason beside it can be audited. An intermittent one
 gets rationalised until somebody deletes the assertion.
@@ -199,6 +205,48 @@ rather than being killed by the harness. Its own wall clock is not estimated her
 measured on the first SMOKE #1 run of this milestone and recorded, with its date, once
 that number exists.
 
+### The decide scenarios (v0.23.0)
+
+D1 to D10 add 26 assertions, and S13 gains two (the documented `decide` flags exist; the
+`[decision]` example in `docs/magi.toml.example` parses). The harness now promises 36
+scenarios and 109 assertions.
+
+**Keys.** D2 and D4 call OpenRouter and read the key from `DECISION_API_KEY` in the harness's own
+environment, at run time. Nothing is read from a file in the repository, and the value is declared
+as planted so the archive scrubs it. Without a key they report `CANNOT_TEST`, never `PASS`; D5 and
+D7 need the network only to reach the host and report `CANNOT_TEST` when it is unreachable. Every
+other invocation blanks `DECISION_API_KEY`, so an exported key never travels to a local daemon.
+
+**What they run on.** D1 uses the persistent environment's own `magi.toml`, the file the preflight
+normalised, so it is the scenario that proves the cheap profile left a loadable `[decision]`. D3,
+D4, D5, D7, D8 and D10 seed a scratch workspace with `magi init` and rewrite only its `[decision]`
+section. D3 puts a model that cannot exist (`ABSENT_DECISION_MODEL`) in front of the real one; the
+preflight never asks for it because it reads the environment's toml, not the scratch one.
+
+**The slow endpoint (D10).** The `--timeout` assertion points `[decision].base_url` at a listener
+the harness runs that accepts a connection and never answers. It is not a model mock: it says
+nothing. The toml says 120 seconds, the flag says one, and the attempt has to end as a `timeout`
+inside ten.
+
+| Id | What it protects |
+|----|------------------|
+| D1 | one question of each type against local Ollama, Magi's confidence, model and usage named |
+| D2 | the same against OpenRouter, with a numeric cost and a legend for every score level |
+| D3 | an absent primary rotates to the declared fallback and is recorded as `model_not_found` |
+| D4 | an account-policy refusal rotates, is named `account_policy`, and repeats no provider text |
+| D5 | a hosted endpoint without a key is `missing_key`, exit 2, and `vault ls` still runs |
+| D6 | a v0.22.0 `magi.toml` and an empty one are refused with the way out named |
+| D7 | a dead endpoint is `decision_unavailable` with no answers; a missing API prefix names the URL tried |
+| D8 | a threshold nothing reaches ends the chain, every hop reported as `low_confidence` |
+| D9 | a planted credential reaches no stdout, no stderr and no run log |
+| D10 | `-q` conflicts, `-o`, `--timeout` and an explicit `model` behave |
+
+**Observations without a verdict**, to record from the archived runs and not to assert: D1's
+latency per model (a fixed floor of about two seconds against `localhost` is the IPv6 signature of
+assumption A4), the time `decide` takes without `--no-memory` and with a passphrase (Argon2 per
+invocation), and the body OpenRouter returns for an unknown model, which belongs in the product's
+404 markers if it is new.
+
 ## Out of scope
 
 ```
@@ -242,6 +290,8 @@ assumes is the exact failure this harness exists to avoid.
 | S24 | SC-L14 and REQ-L19, a clean run's diagnostics reach the day's log and never the screen |
 | S25 | REQ-EE-3 and REQ-EE-1, OQ-8: `reasoning = "disabled"` round-trips on the default trio; no measured count above zero; no trace text in the envelope |
 | S26 | REQ-EE-1: with no key declared every attempt reports `default` and a reasoning state in magi-core's shape |
+
+The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above.
 
 ## Adding a scenario
 

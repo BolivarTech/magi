@@ -67,6 +67,12 @@ PROFILE_MODEL_KEY = ("openai", "model")
 #: one and leaving the other is not a smaller change: it is a broken file.
 PROFILE_SEATS = ("melchior", "balthasar", "caspar")
 
+#: Where the cheap profile's decision model goes, and the header of the blocks
+#: it removes: one model cannot fill a chain (a repeated model is a load error
+#: in the product), so the profile drops the fallbacks instead of repeating it.
+DECISION_MODEL_KEY = ("decision", "model")
+DECISION_FALLBACK_HEADER = "[[decision.fallback]]"
+
 
 #: The product's startup diagnostics line. The active-memory count cannot be
 #: read off the filesystem -- the database is encrypted -- so the product's own
@@ -344,15 +350,16 @@ class Environment:
                       active_memories=None)
 
     #: Where a model name can appear in the product's configuration: the
-    #: main agent under ``[openai]``, and the embedder under ``[embedding]``.
-    #: The three ``[magi]`` seats are read separately because their keys carry
-    #: the seat name.
-    MODEL_TABLES = ("openai", "embedding")
+    #: main agent under ``[openai]``, the embedder under ``[embedding]`` and
+    #: the decision primary under ``[decision]``. The three ``[magi]`` seats
+    #: are read separately because their keys carry the seat name.
+    MODEL_TABLES = ("openai", "embedding", "decision")
 
     def declared_models(self):
         """Every model this environment asks the product to reach.
 
-        ``[[fallback]]`` entries are deliberately EXCLUDED. A missing fallback
+        ``[[fallback]]`` and ``[[decision.fallback]]`` entries are deliberately
+        EXCLUDED. A missing fallback
         degrades a rotation rather than stopping a run, and the product already
         reports one as unmeasured instead of refusing; requiring them to exist
         would cut a run over a spare nobody has reached for.
@@ -569,6 +576,10 @@ def _apply_profile(text: str, profile: ModelProfile) -> str:
     generated file keeps every other key -- including each seat's lineage --
     exactly as the product wrote it.
 
+    With ``profile.decision`` set, ``[decision].model`` is replaced and every
+    ``[[decision.fallback]]`` block is removed, from its header to the next
+    table header. Commented lines outside those blocks are left alone.
+
     Each seat's model and lineage are rewritten **together**. The profile
     declares both because the operator declares both: a lineage is a
     user-chosen failure domain, never inferred from a model name. Rewriting the
@@ -587,17 +598,28 @@ def _apply_profile(text: str, profile: ModelProfile) -> str:
         The rewritten configuration.
     """
     replacements = {PROFILE_MODEL_KEY: profile.model}
+    if profile.decision is not None:
+        replacements[DECISION_MODEL_KEY] = profile.decision
     for seat_name, seat in zip(PROFILE_SEATS, profile.trio):
         replacements[("magi", "%s_model" % seat_name)] = seat.model
         replacements[("magi", "%s_lineage" % seat_name)] = seat.lineage
 
+    drop_fallbacks = profile.decision is not None
+    dropping = False
     table = ""
     lines = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
+            # A table header ends any block being dropped; one more fallback
+            # header starts the next.
+            dropping = drop_fallbacks and stripped == DECISION_FALLBACK_HEADER
+            if dropping:
+                continue
             table = stripped[1:-1].strip()
             lines.append(line)
+            continue
+        if dropping:
             continue
         key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
         replacement = replacements.get((table, key))

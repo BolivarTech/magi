@@ -78,6 +78,13 @@ trio = [
   { model = "qwen3.5:cloud",           lineage = "<declare>" },
   { model = "deepseek-v4-flash:cloud", lineage = "<declare>" },
 ]
+# The ONE System One model `magi decide` runs under this profile. The harness
+# replaces [decision].model with it and deletes every [[decision.fallback]]
+# block: a chain repeating one model is a load error in the product, and one
+# model is not a chain. The scenarios that need several models (D3, D8) write
+# their own [decision] and do not depend on this. Omit the key to leave the
+# product's own [decision] chain untouched.
+decision = "tev1:0.8b"
 # Expected reds under this profile, each with its cause written:
 #   (filled in after the first measurement - a deterministic red with a
 #    written cause is auditable; an intermittent one gets rationalised)
