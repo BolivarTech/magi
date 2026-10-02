@@ -191,6 +191,19 @@ mod tests {
     }
 
     #[test]
+    fn the_chain_names_models_without_surrounding_whitespace() {
+        let s = section(
+            "model = \" nimble \"
+[[fallback]]
+model = \"tev1\t\"
+",
+        )
+        .expect("parses");
+        let names: Vec<String> = s.chain().into_iter().map(|m| m.model).collect();
+        assert_eq!(names, vec!["nimble".to_string(), "tev1".to_string()]);
+    }
+
+    #[test]
     fn a_minimal_section_needs_only_the_model_and_has_no_fallbacks() {
         let s = section("model = \"nimble\"").expect("parses");
         assert_eq!(s.model, "nimble");

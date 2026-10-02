@@ -15,11 +15,13 @@
     )
 )]
 
+pub mod client;
 pub mod config;
 pub mod endpoint;
 pub mod error;
 pub mod protocol;
 
+pub use client::{DecisionClient, DecisionSettings, SystemOneClient};
 pub use config::{DecisionConfigError, DecisionFallback, DecisionSection, KeepAlive, ModelSpec};
 pub use error::{Attempt, AttemptOutcome, Cause, Decision, DecisionError, ErrorKind, Trace, Usage};
 pub use protocol::{Answer, DecisionRequest, NoulCriteria, Question, Questions};
