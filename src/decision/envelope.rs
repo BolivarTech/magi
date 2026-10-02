@@ -78,6 +78,10 @@ struct Timings {
 ///
 /// # Returns
 /// The envelope as one JSON object.
+///
+/// Test-only: production output must go through [`render_envelope_masked`] so the process
+/// auditor's exact pass always runs; this identity-mask variant exists for the unit tests.
+#[cfg(test)]
 pub fn render_envelope(
     result: &Result<Decision, DecisionError>,
     endpoint_display: &str,
@@ -93,7 +97,7 @@ pub fn render_envelope(
     )
 }
 
-/// [`render_envelope`] with every text field passed through `mask` first.
+/// Renders the envelope with every text field passed through `mask` first.
 ///
 /// The mask runs on each string of the envelope (model, endpoint, `error.message`, every string
 /// and key inside `chain` and `answers`), never on the serialized text: masking JSON as a whole
