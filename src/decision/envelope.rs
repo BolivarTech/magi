@@ -363,6 +363,71 @@ mod tests {
         assert_eq!(parse(&text)["endpoint"], "http://***.example");
     }
 
+    fn rejection(message: &str) -> Result<Decision, DecisionError> {
+        Err(DecisionError::Rejected {
+            status: 422,
+            provider_message: message.to_string(),
+            trace: Trace {
+                attempts: vec![attempt(
+                    "nimble",
+                    AttemptOutcome::Failed {
+                        cause: Cause::Rejected,
+                        detail: None,
+                    },
+                )],
+                usage: Usage::default(),
+            },
+        })
+    }
+
+    #[test]
+    fn a_secret_straddling_the_cap_is_masked_before_it_is_cut() {
+        let secret = "toysecret-9f3a1c7e5b2d4a60";
+        let padding = "a ".repeat((MESSAGE_CAP_CHARS - 10) / 2);
+        let result = rejection(&format!("{padding}{secret} tail"));
+        let mask = |s: &str| s.replace(secret, "***");
+        let text = render_envelope_masked(&result, "http://h", 1, Audience::User, &mask);
+        assert!(
+            !text.contains("toysecre"),
+            "a prefix of the secret survived the cut: {text}"
+        );
+    }
+
+    #[test]
+    fn a_secret_straddling_the_cap_of_a_detail_is_masked_before_it_is_cut() {
+        let secret = "toysecret-9f3a1c7e5b2d4a60";
+        let padding = "a ".repeat((MESSAGE_CAP_CHARS - 10) / 2);
+        let result = Err(DecisionError::ChainExhausted {
+            trace: Trace {
+                attempts: vec![attempt(
+                    "nimble",
+                    AttemptOutcome::Failed {
+                        cause: Cause::NotFound,
+                        detail: Some(format!("{padding}{secret} tail")),
+                    },
+                )],
+                usage: Usage::default(),
+            },
+        });
+        let mask = |s: &str| s.replace(secret, "***");
+        let text = render_envelope_masked(&result, "http://h", 1, Audience::User, &mask);
+        assert!(
+            !text.contains("toysecre"),
+            "a prefix of the secret survived the cut: {text}"
+        );
+    }
+
+    /// Guards the pattern redaction of `error_message` on its own: the identity mask means no
+    /// exact pass can shadow it.
+    #[test]
+    fn the_redaction_layer_alone_hides_a_pattern_shaped_key_in_a_rejection() {
+        let key = "sk-ant-api03-toy0123456789abcdefghij"; // allow-secret-scan
+        let result = rejection(&format!("rejected, saw {key} in the request"));
+        let text = render_envelope(&result, "http://h", 1, Audience::User);
+        assert!(!text.contains(key), "{text}");
+        assert!(text.contains("rejected"), "{text}");
+    }
+
     #[test]
     fn schema_version_is_the_first_physical_key_followed_by_run_id() {
         let text = render_envelope(&ok(), "http://localhost:11434", 412, Audience::User);
