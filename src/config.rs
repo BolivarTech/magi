@@ -4644,4 +4644,28 @@ max_rotation = 2
             "the error must name the key: {err}"
         );
     }
+
+    #[test]
+    fn an_invalid_decision_section_is_a_parse_time_error() {
+        let err = MagiConfig::from_toml_str(
+            "[decision]
+model = \"nimble\"
+[[decision.fallback]]
+model = \"nimble\"
+",
+        )
+        .expect_err("repeated model");
+        assert!(err.to_string().contains("nimble"), "{err}");
+        let err = MagiConfig::from_toml_str(
+            "[decision]
+model = \"m\"
+api_key = \"sk-x\"
+",
+        )
+        .expect_err("api_key is never accepted");
+        assert!(
+            !err.to_string().contains("sk-x"),
+            "the rejected value is not echoed: {err}"
+        );
+    }
 }

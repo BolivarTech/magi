@@ -1732,4 +1732,69 @@ mod tests {
         );
         assert!(magi_table_keys("provider = \"ollama\"\n").is_empty());
     }
+
+    fn scaffold_decision() -> toml::Table {
+        let text = render_default_magi_toml();
+        let table: toml::Table = toml::from_str(&text).expect("the scaffold parses");
+        table
+            .get("decision")
+            .and_then(toml::Value::as_table)
+            .cloned()
+            .expect("the scaffold declares an ACTIVE [decision] section (REQ-D06)")
+    }
+
+    #[test]
+    fn the_scaffold_declares_the_default_decision_chain_active() {
+        let d = scaffold_decision();
+        assert_eq!(d.get("model").and_then(toml::Value::as_str), Some("nimble"));
+        assert_eq!(
+            d.get("timeout_secs").and_then(toml::Value::as_integer),
+            Some(120)
+        );
+        assert_eq!(
+            d.get("auto_approve").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            d.get("keep_alive").is_none(),
+            "keep_alive stays commented (REQ-D01)"
+        );
+        assert!(
+            d.get("min_confidence").is_none(),
+            "thresholds stay commented (REQ-D24)"
+        );
+        let fallbacks: Vec<&str> = d
+            .get("fallback")
+            .and_then(toml::Value::as_array)
+            .expect("fallbacks")
+            .iter()
+            .filter_map(|f| f.get("model").and_then(toml::Value::as_str))
+            .collect();
+        assert_eq!(fallbacks, vec!["tev1", "tev1:0.8b"]);
+        let section: magi_rs::decision::DecisionSection = d
+            .try_into()
+            .expect("the scaffold section deserializes into the lib type");
+        assert_eq!(section.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_scaffold_keeps_thresholds_and_the_openrouter_example_commented() {
+        let text = render_default_magi_toml();
+        for line in text
+            .lines()
+            .filter(|l| l.contains("min_confidence") || l.contains("openrouter"))
+        {
+            assert!(
+                line.trim_start().starts_with('#'),
+                "must be commented: {line}"
+            );
+        }
+        assert!(
+            text.contains("may not fit your data"),
+            "the calibration warning is in the file"
+        );
+        assert!(text.contains("https://openrouter.ai/api/v1"));
+        assert!(text.contains("magi-rs vault set DECISION_API_KEY"));
+        assert!(text.contains("typesafe/jev-1.13"));
+    }
 }
