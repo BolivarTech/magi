@@ -330,9 +330,18 @@ pub const PROBABILITY_SUM_TOLERANCE: f64 = 0.01;
 
 /// Magi confidence of a distribution: `clamp((n * p_max - 1) / (n - 1), 0, 1)`.
 ///
+/// A distribution of fewer than two entries carries no doubt to measure and
+/// returns 0. The clamp absorbs a `p_max` just under `1 / n`, which the sum
+/// tolerance allows.
+///
 /// Complexity: O(n).
-pub fn magi_confidence(_probabilities: &[f64]) -> f64 {
-    todo!()
+pub fn magi_confidence(probabilities: &[f64]) -> f64 {
+    if probabilities.len() < MIN_CHOICES {
+        return 0.0;
+    }
+    let n = probabilities.len() as f64;
+    let p_max = probabilities.iter().copied().fold(0.0_f64, f64::max);
+    ((n * p_max - 1.0) / (n - 1.0)).clamp(0.0, 1.0)
 }
 
 /// A validated System One response.
@@ -344,18 +353,186 @@ pub struct ParsedResponse {
     pub usage: Usage,
 }
 
+/// A finite number in `[0, 1]`; `None` for anything else.
+fn unit_number(value: &Value) -> Option<f64> {
+    value.as_f64().filter(|v| (0.0..=1.0).contains(v))
+}
+
+/// Reads a probability map whose keys must be exactly `keys`.
+///
+/// Complexity: O(keys log keys).
+fn read_probabilities(
+    raw: Option<&Value>,
+    keys: &[&str],
+) -> Result<BTreeMap<String, f64>, &'static str> {
+    let Some(Value::Object(map)) = raw else {
+        return Err("`probabilities` is missing or not an object");
+    };
+    if map.len() != keys.len() {
+        return Err("`probabilities` keys do not match the question");
+    }
+    let mut out = BTreeMap::new();
+    for key in keys {
+        let value = map
+            .get(*key)
+            .ok_or("`probabilities` keys do not match the question")?;
+        let p = unit_number(value).ok_or("a probability is not a number in [0, 1]")?;
+        out.insert((*key).to_owned(), p);
+    }
+    if (out.values().sum::<f64>() - 1.0).abs() > PROBABILITY_SUM_TOLERANCE {
+        return Err("`probabilities` do not sum to 1");
+    }
+    Ok(out)
+}
+
+/// The confidence the provider reported, if it sent a number.
+fn reported_confidence(raw: &Value) -> Option<f64> {
+    raw.get("confidence").and_then(Value::as_f64)
+}
+
+/// Validates the answer to one question against the question sent.
+///
+/// Complexity: O(options log options).
+fn read_answer(question: &Question, raw: &Value) -> Result<Answer, &'static str> {
+    const TYPE_MISMATCH: &str = "the answer type does not match the question";
+    let kind = raw.get("type").and_then(Value::as_str);
+    match question {
+        Question::Noul { .. } => {
+            if kind != Some("noul") {
+                return Err(TYPE_MISMATCH);
+            }
+            let noul = raw
+                .get("noul")
+                .and_then(unit_number)
+                .ok_or("`noul` is not a number in [0, 1]")?;
+            Ok(Answer::Noul {
+                noul,
+                confidence: magi_confidence(&[noul, 1.0 - noul]),
+            })
+        }
+        Question::Choice { criteria, .. } => {
+            if kind != Some("choice") {
+                return Err(TYPE_MISMATCH);
+            }
+            let options: Vec<&str> = criteria
+                .iter()
+                .flat_map(|c| c.keys().map(String::as_str))
+                .collect();
+            let probabilities = read_probabilities(raw.get("probabilities"), &options)?;
+            let choice = raw
+                .get("choice")
+                .and_then(Value::as_str)
+                .filter(|c| options.contains(c))
+                .ok_or("`choice` is not one of the options sent")?;
+            let values: Vec<f64> = probabilities.values().copied().collect();
+            Ok(Answer::Choice {
+                choice: choice.to_owned(),
+                confidence: magi_confidence(&values),
+                provider_confidence: reported_confidence(raw),
+                probabilities,
+            })
+        }
+        Question::Score { criteria, .. } => {
+            if kind != Some("score") {
+                return Err(TYPE_MISMATCH);
+            }
+            let levels = criteria.as_deref().unwrap_or_default();
+            let indices: Vec<String> = (0..levels.len()).map(|i| i.to_string()).collect();
+            let keys: Vec<&str> = indices.iter().map(String::as_str).collect();
+            let probabilities = read_probabilities(raw.get("probabilities"), &keys)?;
+            let top = levels.len().saturating_sub(1) as f64;
+            let score = raw
+                .get("score")
+                .and_then(Value::as_f64)
+                .filter(|s| {
+                    *s >= -PROBABILITY_SUM_TOLERANCE * top
+                        && *s <= top * (1.0 + PROBABILITY_SUM_TOLERANCE)
+                })
+                .ok_or("`score` is outside the range of the levels")?
+                .clamp(0.0, top);
+            let values: Vec<f64> = probabilities.values().copied().collect();
+            let legend = indices
+                .iter()
+                .cloned()
+                .zip(levels.iter().cloned())
+                .collect();
+            Ok(Answer::Score {
+                score,
+                legend,
+                confidence: magi_confidence(&values),
+                provider_confidence: reported_confidence(raw),
+                probabilities,
+            })
+        }
+    }
+}
+
+/// Reads `usage`; absent counts as zero, a malformed one is invalid.
+fn read_usage(raw: Option<&Value>) -> Result<Usage, &'static str> {
+    const MALFORMED: &str = "`usage` is malformed";
+    let Some(raw) = raw else {
+        return Ok(Usage::default());
+    };
+    let tokens = |field: &str| match raw.get(field) {
+        None => Ok(0),
+        Some(v) => v.as_u64().ok_or(MALFORMED),
+    };
+    let cost = match raw.get("cost") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_f64().ok_or(MALFORMED)?),
+    };
+    Ok(Usage {
+        input_tokens: tokens("input_tokens")?,
+        output_tokens: tokens("output_tokens")?,
+        cost,
+    })
+}
+
 /// Tolerant read plus strict validation of the fields Magi uses (REQ-D07).
+///
+/// Fields Magi does not use (`id`, `provider`, invented ones, the provider's
+/// `legend`) are ignored. Every question sent needs exactly one answer of its
+/// type; `confidence` is Magi's, the provider's goes to `provider_confidence`.
+///
+/// Complexity: O(questions x options log options).
+///
+/// # Arguments
+/// * `body` - raw response body.
+/// * `questions` - the questions that were sent.
 ///
 /// # Errors
 /// A reason naming the question and the class of problem; it never quotes a
 /// value returned by the provider.
-pub fn parse_response(_body: &[u8], _questions: &Questions) -> Result<ParsedResponse, String> {
-    todo!()
+pub fn parse_response(body: &[u8], questions: &Questions) -> Result<ParsedResponse, String> {
+    let root: Value = serde_json::from_slice(body)
+        .map_err(|_| "the response body is not valid JSON".to_owned())?;
+    let Some(Value::Object(answers)) = root.get("answers") else {
+        return Err("the response has no `answers` object".to_owned());
+    };
+    if answers.keys().any(|name| !questions.contains_key(name)) {
+        return Err("the response answers a question that was not sent".to_owned());
+    }
+    let mut parsed = BTreeMap::new();
+    for (name, question) in questions {
+        let raw = answers
+            .get(name)
+            .ok_or_else(|| format!("question \"{name}\": no answer"))?;
+        let answer = read_answer(question, raw)
+            .map_err(|problem| format!("question \"{name}\": {problem}"))?;
+        parsed.insert(name.clone(), answer);
+    }
+    let usage = read_usage(root.get("usage")).map_err(str::to_owned)?;
+    Ok(ParsedResponse {
+        answers: parsed,
+        usage,
+    })
 }
 
-/// Lowest Magi confidence across the answers.
-pub fn lowest_confidence(_answers: &BTreeMap<String, Answer>) -> f64 {
-    todo!()
+/// Lowest Magi confidence across the answers (1 when there are none).
+///
+/// Complexity: O(answers).
+pub fn lowest_confidence(answers: &BTreeMap<String, Answer>) -> f64 {
+    answers.values().map(Answer::confidence).fold(1.0, f64::min)
 }
 
 #[cfg(test)]

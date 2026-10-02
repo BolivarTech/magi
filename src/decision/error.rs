@@ -63,8 +63,13 @@ pub struct Usage {
 
 impl Usage {
     /// Adds `other` into `self`; `cost` stays `None` only if neither side has one.
-    pub fn add(&mut self, _other: &Usage) {
-        todo!()
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cost = match (self.cost, other.cost) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
     }
 }
 
