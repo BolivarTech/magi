@@ -82,6 +82,10 @@ QUERY_SUBCOMMAND = "query"
 MAGI_DIR_NAME = ".magi"
 MAGI_TOML_NAME = "magi.toml"
 
+#: What a documented fragment lacks to be a whole file: the product refuses a
+#: ``magi.toml`` with no ``[decision]``, and a fence usually shows one section.
+DEFAULT_DECISION_BLOCK = "[%s]\nmodel = 'nimble'\n" % DECISION_TABLE
+
 #: What the product exits with when it refuses its input, configuration
 #: included (README, REQ-H23). It is the ONLY signal assertion 3 reads: a
 #: configuration the product accepted and then failed to act on -- an
@@ -475,6 +479,28 @@ def _example_finding(root):
     return _finding(5, Outcome.PASS, "")
 
 
+def _as_whole_file(body):
+    """Complete a documented fragment with the default ``[decision]`` section.
+
+    A fragment that already declares ``[decision]``, or that is not valid
+    TOML, is returned unchanged: the first is whole, and the second must reach
+    the product broken so the check still catches it.
+
+    Args:
+        body: The fenced configuration text.
+
+    Returns:
+        str: The text to install as ``magi.toml``.
+    """
+    try:
+        declared = tomllib.loads(body)
+    except tomllib.TOMLDecodeError:
+        return body
+    if DECISION_TABLE in declared:
+        return body
+    return body.rstrip("\n") + "\n\n" + DEFAULT_DECISION_BLOCK
+
+
 def _config_finding(embedded, root):
     """Assertion 3: every embedded configuration is one the product accepts.
 
@@ -496,7 +522,7 @@ def _config_finding(embedded, root):
             "documented configurations in" % INIT_SUBCOMMAND)
     offenders = []
     for relative, line, body in embedded:
-        verdict = _install_and_probe(root, body, relative, line)
+        verdict = _install_and_probe(root, _as_whole_file(body), relative, line)
         if verdict:
             offenders.append(verdict)
     if offenders:
