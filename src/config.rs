@@ -5026,6 +5026,22 @@ base_url = \"nope nope\"
     }
 
     #[test]
+    fn a_decision_base_url_without_a_host_is_a_load_error() {
+        // MAGI gate loop 2: the load-time URL parse is the gate that catches what the placeholder
+        // template accepts but no client could use; removing it moved the failure to runtime.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = MagiConfig::load(&write_toml(
+            &dir,
+            "[decision]
+model = \"m\"
+base_url = \"http://\"
+",
+        ))
+        .expect_err("a base_url with no host must not load");
+        assert!(err.to_string().contains("[decision].base_url"), "{err}");
+    }
+
+    #[test]
     fn the_decision_base_url_inherits_the_root_and_is_validated_at_load() {
         let dir = tempfile::tempdir().expect("tempdir");
         // CP2 MS1 r4 (Caspar): a blank base_url is absent, not invalid (the repo's non_blank rule).
