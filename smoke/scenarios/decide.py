@@ -98,6 +98,8 @@ KIND_INVALID_INPUT = "invalid_input"
 CAUSE_MODEL_NOT_FOUND = "model_not_found"
 CAUSE_ACCOUNT_POLICY = "account_policy"
 CAUSE_NOT_FOUND = "not_found"
+CAUSE_INVALID_RESPONSE = "invalid_response"
+PREFIX_HINT_NEEDLE = "API prefix"
 CAUSE_TRANSPORT = "transport"
 CAUSE_TIMEOUT = "timeout"
 OUTCOME_ANSWERED = "answered"
@@ -597,7 +599,10 @@ def _prefix_finding(attempt):
                         "the host was not reachable from here, so the 404 "
                         "that carries the diagnosis never happened")
     text = json.dumps(envelope)
-    ok = cause == CAUSE_NOT_FOUND and NO_PREFIX_TRIED_URL in text
+    # A real OpenRouter answers the prefix-less path with a non-JSON 200, so the cause may be
+    # invalid_response; what the scenario guards is that the URL and the prefix hint are named.
+    ok = (cause in (CAUSE_NOT_FOUND, CAUSE_INVALID_RESPONSE) and NO_PREFIX_TRIED_URL in text
+          and PREFIX_HINT_NEEDLE in text)
     return _finding(D7_ASSERTIONS, 1, "" if ok else (
         "first hop cause %r; the tried URL %s %s the output"
         % (cause, NO_PREFIX_TRIED_URL,

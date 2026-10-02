@@ -270,9 +270,11 @@ class _FakeDecide:
         if hosted and not self.reachable_hosted:
             return {"model": model, "outcome": "failed", "cause": "transport"}
         if base_url == "https://openrouter.ai":
-            return {"model": model, "outcome": "failed", "cause": "not_found",
-                    "detail": "the endpoint returned 404 for "
-                    "https://openrouter.ai/v1/systemone; check the prefix"}
+            # What a real OpenRouter does: a non-JSON 200 for the prefix-less path.
+            return {"model": model, "outcome": "failed", "cause": "invalid_response",
+                    "detail": "invalid response: the response body is not valid JSON; no "
+                    "System One endpoint answered at https://openrouter.ai/v1/systemone; "
+                    "check that base_url includes the provider's API prefix"}
         if "127.0.0.1" in base_url and model == "smoke-echo-model":
             return {"model": model, "outcome": "failed",
                     "cause": "unauthorized", "stop": "key"}
