@@ -51,6 +51,10 @@ fn reasoning_control_wire_tag(control: ReasoningControl) -> String {
 /// lib cannot know a type from the bin).
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The `[decision]` section is invalid (REQ-D01, REQ-D21).
+    #[error("{0}")]
+    Decision(#[from] magi_rs::decision::DecisionConfigError),
+
     /// The declared lineages do not satisfy `enforce_diversity` (REQ-R29).
     ///
     /// A load error and not a notice because the evidence is **declarative**: three distinct seat
@@ -306,6 +310,10 @@ pub struct MagiConfig {
     /// `[logging]` section — see [`LoggingSection`].
     #[serde(default)]
     logging: LoggingSection,
+    /// `[decision]` section — see [`magi_rs::decision::DecisionSection`]. Absent here is not an
+    /// error at parse time: the load-time check for a missing section is a separate step.
+    #[serde(default)]
+    decision: Option<magi_rs::decision::DecisionSection>,
 }
 
 /// The `[logging]` section of `magi.toml`.
@@ -1290,6 +1298,9 @@ impl MagiConfig {
         self.validate_agent_timeout()?;
         self.validate_output_cap()?;
         self.validate_diversity_rules()?;
+        if let Some(decision) = &self.decision {
+            decision.validate()?;
+        }
         Ok(())
     }
 

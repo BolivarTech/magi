@@ -51,6 +51,16 @@ pub const DEFAULT_MAGI_MELCHIOR_LINEAGE: &str = "zhipu";
 pub const DEFAULT_MAGI_BALTHASAR_LINEAGE: &str = "moonshot";
 /// Lineage of [`DEFAULT_MAGI_CASPAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
 pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
+
+/// Primary decision model written by the scaffold and applied when no `[decision]` is declared
+/// (REQ-D06, REQ-D21).
+pub const DEFAULT_DECISION_MODEL: &str = "nimble";
+/// Ordered fallbacks of the default decision chain, on the same endpoint as the primary.
+pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 2] = ["tev1", "tev1:0.8b"];
+/// Per-attempt timeout in seconds; sized to cover a local cold model load (REQ-D21).
+pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
+/// Whether the agent's `decide` tool runs without asking (REQ-D16).
+pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Default embedding model (Ollama-first, local). Single source of truth — also
@@ -259,6 +269,95 @@ pub fn render_default_magi_toml() -> String {
     writeln!(out, "[anthropic]").unwrap();
     writeln!(out, "model = \"{}\"", DEFAULT_ANTHROPIC_MODEL).unwrap();
     writeln!(out).unwrap();
+
+    // ── [decision] (REQ-D06, REQ-D21) ────────────────────────────────────────
+    // Goes BEFORE `[magi]`: the `[[magi.fallback]]` pool must stay the last thing in the file.
+    writeln!(out, "[decision]").unwrap();
+    writeln!(
+        out,
+        "# Endpoint of the System One decision models. Optional: absent = the root `base_url`."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# The protocol path is derived from it: a base_url ending in /v1 gets /systemone,          any other gets /v1/systemone."
+    )
+    .unwrap();
+    writeln!(out, "base_url     = \"http://localhost:11434\"").unwrap();
+    writeln!(out, "# Primary decision model. Required in this section.").unwrap();
+    writeln!(out, "model        = \"{}\"", DEFAULT_DECISION_MODEL).unwrap();
+    writeln!(
+        out,
+        "# Per-attempt timeout in seconds (covers a local cold load). Optional, default {}.",
+        DEFAULT_DECISION_TIMEOUT_SECS
+    )
+    .unwrap();
+    writeln!(out, "timeout_secs = {}", DEFAULT_DECISION_TIMEOUT_SECS).unwrap();
+    writeln!(
+        out,
+        "# Ollama only. Optional: absent = not sent (server default). \"10m\", \"2h\", or -1 (keep loaded)."
+    )
+    .unwrap();
+    writeln!(out, "# keep_alive = \"10m\"").unwrap();
+    writeln!(
+        out,
+        "# Approval of the agent's `decide` tool. Optional, default {}.",
+        DEFAULT_DECISION_AUTO_APPROVE
+    )
+    .unwrap();
+    writeln!(out, "auto_approve = {}", DEFAULT_DECISION_AUTO_APPROVE).unwrap();
+    out.push_str(concat!(
+        "# Below this confidence the answer is discarded and the next model in the chain is tried. When the
+",
+        "# chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
+",
+        "# Optional, per model; commented out = no threshold. The value below was calibrated on the maintainer's
+",
+        "# own prompts and may not fit your data or use case: measure on yours before uncommenting it.
+",
+        "# min_confidence = <value from the calibration>
+",
+        "
+",
+        "# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
+",
+    ));
+    for model in DEFAULT_DECISION_FALLBACK_MODELS {
+        writeln!(out, "[[decision.fallback]]").unwrap();
+        writeln!(out, "model = \"{model}\"").unwrap();
+        writeln!(out, "# min_confidence = <value from the calibration>").unwrap();
+        writeln!(out).unwrap();
+    }
+    out.push_str(concat!(
+        "# --- Example: OpenRouter (hosted). Needs DECISION_API_KEY in the environment or
+",
+        "# --- `magi-rs vault set DECISION_API_KEY`. The key never goes in this file.
+",
+        "# --- Comment out the [decision] section above before uncommenting this one: a file holds one.
+",
+        "# [decision]
+",
+        "# base_url     = \"https://openrouter.ai/api/v1\"
+",
+        "# model        = \"typesafe/jev-1.13\"
+",
+        "# timeout_secs = 30
+",
+        "#
+",
+        "# [[decision.fallback]]
+",
+        "# model = \"togethercomputer/tev1-4b-experimental\"
+",
+        "#
+",
+        "# [[decision.fallback]]
+",
+        "# model = \"upstage/solar-decide\"
+",
+        "
+",
+    ));
 
     // ── [magi] ───────────────────────────────────────────────────────────────
     writeln!(out, "[magi]").unwrap();
