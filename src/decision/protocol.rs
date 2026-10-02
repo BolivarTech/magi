@@ -56,19 +56,95 @@ pub struct NoulCriteria {
     pub no: Option<String>,
 }
 
+/// Field of the input holding the state.
+const STATE_FIELD: &str = "state";
+/// Field of the input holding the questions.
+const QUESTIONS_FIELD: &str = "questions";
+/// Field of the input holding the explicit model.
+const MODEL_FIELD: &str = "model";
+/// Field of the wire body holding the keep-alive duration.
+const KEEP_ALIVE_FIELD: &str = "keep_alive";
+/// Minimum options of a `choice` and levels of a `score` (REQ-D07): one
+/// possibility is not a decision.
+const MIN_CHOICES: usize = 2;
+/// Fields the input of `magi decide` may carry (REQ-D23).
+const INPUT_FIELDS: [&str; 3] = [STATE_FIELD, QUESTIONS_FIELD, MODEL_FIELD];
+
+/// Builds the error every validation failure of this module returns.
+fn invalid(reason: impl Into<String>) -> DecisionError {
+    DecisionError::InvalidInput {
+        reason: reason.into(),
+    }
+}
+
+/// The problem of one question, if any; never quotes a value of the question.
+fn question_problem(question: &Question) -> Option<&'static str> {
+    match question {
+        Question::Noul { .. } => None,
+        Question::Choice { criteria, .. } => match criteria {
+            None => Some("`criteria` is required"),
+            Some(c) if c.len() < MIN_CHOICES => Some("needs at least 2 options"),
+            Some(_) => None,
+        },
+        Question::Score { criteria, .. } => match criteria {
+            None => Some("`criteria` is required"),
+            Some(c) if c.len() < MIN_CHOICES => Some("needs at least 2 levels"),
+            Some(_) => None,
+        },
+    }
+}
+
+/// Validates the state shape and every question (REQ-D07, REQ-D23).
+///
+/// Complexity: O(questions).
+fn validate(state: &Value, questions: &Questions) -> Result<(), DecisionError> {
+    if !matches!(state, Value::String(_) | Value::Object(_) | Value::Array(_)) {
+        return Err(invalid("`state` must be a string, object or array"));
+    }
+    if questions.is_empty() {
+        return Err(invalid("at least one question is required"));
+    }
+    for (name, question) in questions {
+        if name.is_empty() {
+            return Err(invalid("question \"\": the name must not be blank"));
+        }
+        if let Some(problem) = question_problem(question) {
+            return Err(invalid(format!("question \"{name}\": {problem}")));
+        }
+    }
+    Ok(())
+}
+
+/// Reads the `questions` map, naming the question that fails to parse.
+///
+/// Complexity: O(size of the map).
+fn parse_questions(value: Value) -> Result<Questions, DecisionError> {
+    let Value::Object(map) = value else {
+        return Err(invalid("`questions` must be a JSON object"));
+    };
+    map.into_iter()
+        .map(
+            |(name, raw)| match serde_json::from_value::<Question>(raw) {
+                Ok(question) => Ok((name, question)),
+                Err(e) => Err(invalid(format!("question \"{name}\": {e}"))),
+            },
+        )
+        .collect()
+}
+
 /// A validated request: state, questions and per-invocation overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRequest {
-    _state: Value,
-    _questions: Questions,
-    _model: Option<String>,
-    _timeout: Option<Duration>,
+    state: Value,
+    questions: Questions,
+    model: Option<String>,
+    timeout: Option<Duration>,
 }
 
 impl DecisionRequest {
     /// Validates the state shape and the questions (REQ-D07, REQ-D23).
     ///
-    /// Complexity: O(questions x options).
+    /// Complexity: O(questions).
     ///
     /// # Arguments
     /// * `state` - a string, object or array, forwarded verbatim.
@@ -79,62 +155,123 @@ impl DecisionRequest {
     ///
     /// # Errors
     /// [`DecisionError::InvalidInput`] naming the problem.
-    pub fn new(_state: Value, _questions: Questions) -> Result<Self, DecisionError> {
-        todo!()
+    pub fn new(state: Value, questions: Questions) -> Result<Self, DecisionError> {
+        validate(&state, &questions)?;
+        Ok(Self {
+            state,
+            questions,
+            model: None,
+            timeout: None,
+        })
     }
 
     /// Replaces the titular model for this request only.
-    pub fn with_model(self, _model: impl Into<String>) -> Self {
-        todo!()
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 
     /// Sets the per-attempt timeout for this request only.
-    pub fn with_timeout(self, _timeout: Duration) -> Self {
-        todo!()
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 
     /// The state, as given.
     pub fn state(&self) -> &Value {
-        todo!()
+        &self.state
     }
 
     /// The questions.
     pub fn questions(&self) -> &Questions {
-        todo!()
+        &self.questions
     }
 
     /// The explicit model, if any.
     pub fn model(&self) -> Option<&str> {
-        todo!()
+        self.model.as_deref()
     }
 
     /// The per-attempt timeout override, if any.
     pub fn timeout(&self) -> Option<Duration> {
-        todo!()
+        self.timeout
     }
 
     /// The JSON body sent to the provider for `model`; `keep_alive` only when declared.
-    pub fn wire_body(&self, _model: &str, _keep_alive: Option<&KeepAlive>) -> Value {
-        todo!()
+    ///
+    /// # Arguments
+    /// * `model` - the model of this attempt.
+    /// * `keep_alive` - sent verbatim when `Some`, omitted otherwise (REQ-D01).
+    ///
+    /// # Returns
+    /// The request body (System One protocol).
+    pub fn wire_body(&self, model: &str, keep_alive: Option<&KeepAlive>) -> Value {
+        let mut body = serde_json::Map::new();
+        body.insert(MODEL_FIELD.into(), Value::String(model.to_owned()));
+        body.insert(STATE_FIELD.into(), self.state.clone());
+        body.insert(
+            QUESTIONS_FIELD.into(),
+            serde_json::to_value(&self.questions).unwrap_or_default(),
+        );
+        if let Some(keep_alive) = keep_alive {
+            body.insert(
+                KEEP_ALIVE_FIELD.into(),
+                serde_json::to_value(keep_alive).unwrap_or_default(),
+            );
+        }
+        Value::Object(body)
     }
 }
 
 /// Parses and validates the input of `magi decide` (REQ-D22, REQ-D23).
 ///
+/// Complexity: O(input size).
+///
 /// # Arguments
 /// * `input` - contents of `-i` or stdin.
-/// * `questions_file` - contents of `-q`, when given.
+/// * `questions_file` - contents of `-q`, when given; then the input must not
+///   carry `questions`.
 ///
 /// # Returns
-/// The validated request.
+/// The validated request, with the explicit `model` (trimmed) if the input has one.
 ///
 /// # Errors
-/// [`DecisionError::InvalidInput`] naming the problem.
+/// [`DecisionError::InvalidInput`] naming the problem; no value of the state
+/// or of an option is quoted.
 pub fn parse_decide_input(
-    _input: &[u8],
-    _questions_file: Option<&[u8]>,
+    input: &[u8],
+    questions_file: Option<&[u8]>,
 ) -> Result<DecisionRequest, DecisionError> {
-    todo!()
+    let Value::Object(mut fields) =
+        serde_json::from_slice(input).map_err(|_| invalid("the input is not valid JSON"))?
+    else {
+        return Err(invalid("the input must be a JSON object"));
+    };
+    if let Some(unknown) = fields.keys().find(|k| !INPUT_FIELDS.contains(&k.as_str())) {
+        return Err(invalid(format!("unknown field `{unknown}`")));
+    }
+    let model = match fields.remove(MODEL_FIELD) {
+        None => None,
+        Some(Value::String(m)) if !m.trim().is_empty() => Some(m.trim().to_owned()),
+        Some(_) => return Err(invalid("`model` must be a non-blank string")),
+    };
+    let state = fields
+        .remove(STATE_FIELD)
+        .ok_or_else(|| invalid("missing field `state`"))?;
+    let questions = match (fields.remove(QUESTIONS_FIELD), questions_file) {
+        (Some(_), Some(_)) => {
+            return Err(invalid(
+                "`questions` is given in both the input and the questions file",
+            ))
+        }
+        (Some(value), None) => value,
+        (None, Some(bytes)) => serde_json::from_slice(bytes)
+            .map_err(|_| invalid("the questions file is not valid JSON"))?,
+        (None, None) => return Err(invalid("missing field `questions`")),
+    };
+    let mut request = DecisionRequest::new(state, parse_questions(questions)?)?;
+    request.model = model;
+    Ok(request)
 }
 
 /// One answer, as Magi reports it (REQ-D10); `confidence` is always Magi's.
@@ -179,7 +316,11 @@ pub enum Answer {
 impl Answer {
     /// Magi's confidence for this answer.
     pub fn confidence(&self) -> f64 {
-        todo!()
+        match self {
+            Self::Noul { confidence, .. }
+            | Self::Choice { confidence, .. }
+            | Self::Score { confidence, .. } => *confidence,
+        }
     }
 }
 
