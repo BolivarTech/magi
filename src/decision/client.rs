@@ -171,10 +171,10 @@ impl SystemOneClient {
         &self,
         model: &str,
         request: &DecisionRequest,
+        body: &serde_json::Value,
     ) -> Result<ParsedResponse, Failure> {
-        let body = request.wire_body(model, self.settings.keep_alive.as_ref());
         let timeout = request.timeout().unwrap_or(self.settings.timeout);
-        let mut builder = self.http.post(&self.url).timeout(timeout).json(&body);
+        let mut builder = self.http.post(&self.url).timeout(timeout).json(body);
         if let Some(key) = &self.settings.api_key {
             builder = builder.bearer_auth(key.as_str());
         }
@@ -396,7 +396,9 @@ impl DecisionClient for SystemOneClient {
         let mut trace = Trace::default();
         for spec in self.plan(request) {
             let attempt_started = Instant::now();
-            let result = self.attempt(&spec.model, request).await;
+            // A serialization failure ends the call as an explicit error: no empty body is sent.
+            let body = request.wire_body(&spec.model, self.settings.keep_alive.as_ref())?;
+            let result = self.attempt(&spec.model, request, &body).await;
             let latency_ms = elapsed_ms(attempt_started);
             match result {
                 Ok(parsed) => {

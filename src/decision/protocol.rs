@@ -227,27 +227,42 @@ impl DecisionRequest {
 
     /// The JSON body sent to the provider for `model`; `keep_alive` only when declared.
     ///
+    /// Serializing the validated questions and the keep-alive value cannot fail in practice
+    /// (plain maps, strings and numbers), so no unit test can trigger the error arm; it exists
+    /// so a future type change surfaces as an error instead of an empty body on the wire.
+    ///
     /// # Arguments
     /// * `model` - the model of this attempt.
     /// * `keep_alive` - sent verbatim when `Some`, omitted otherwise (REQ-D01).
     ///
     /// # Returns
     /// The request body (System One protocol).
-    pub(crate) fn wire_body(&self, model: &str, keep_alive: Option<&KeepAlive>) -> Value {
+    ///
+    /// # Errors
+    /// [`DecisionError::InvalidInput`] if a part of the request cannot be serialized.
+    pub(crate) fn wire_body(
+        &self,
+        model: &str,
+        keep_alive: Option<&KeepAlive>,
+    ) -> Result<Value, DecisionError> {
         let mut body = serde_json::Map::new();
         body.insert(MODEL_FIELD.into(), Value::String(model.to_owned()));
         body.insert(STATE_FIELD.into(), self.state.clone());
         body.insert(
             QUESTIONS_FIELD.into(),
-            serde_json::to_value(&self.questions).unwrap_or_default(),
+            serde_json::to_value(&self.questions).map_err(|_| DecisionError::InvalidInput {
+                reason: "the questions could not be serialized".into(),
+            })?,
         );
         if let Some(keep_alive) = keep_alive {
             body.insert(
                 KEEP_ALIVE_FIELD.into(),
-                serde_json::to_value(keep_alive).unwrap_or_default(),
+                serde_json::to_value(keep_alive).map_err(|_| DecisionError::InvalidInput {
+                    reason: "keep_alive could not be serialized".into(),
+                })?,
             );
         }
-        Value::Object(body)
+        Ok(Value::Object(body))
     }
 }
 
@@ -860,7 +875,7 @@ mod tests {
     #[test]
     fn the_wire_body_carries_model_state_questions_and_keep_alive_only_when_declared() {
         let req = parse(json!({"state": "s", "questions": noul()})).expect("valid");
-        let body = req.wire_body("nimble", None);
+        let body = req.wire_body("nimble", None).unwrap();
         assert_eq!(body["model"], "nimble");
         assert_eq!(body["state"], "s");
         assert_eq!(body["questions"]["triage"]["type"], "noul");
@@ -873,9 +888,13 @@ mod tests {
             body.get("keep_alive").is_none(),
             "absent keep_alive is not sent (REQ-D01)"
         );
-        let body = req.wire_body("nimble", Some(&KeepAlive::Text("10m".into())));
+        let body = req
+            .wire_body("nimble", Some(&KeepAlive::Text("10m".into())))
+            .unwrap();
         assert_eq!(body["keep_alive"], "10m");
-        let body = req.wire_body("nimble", Some(&KeepAlive::Seconds(-1)));
+        let body = req
+            .wire_body("nimble", Some(&KeepAlive::Seconds(-1)))
+            .unwrap();
         assert_eq!(body["keep_alive"], -1);
     }
 
