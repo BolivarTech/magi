@@ -188,10 +188,16 @@ pub enum ConfigError {
         db_path: std::path::PathBuf,
     },
 
-    /// `[decision].base_url` (or the root URL it inherits) is not a valid URL. The text never
-    /// repeats the value (REQ-D05).
-    #[error("[decision].base_url is not a valid URL (scheme://host/...)")]
-    DecisionBaseUrl,
+    /// `[decision].base_url` (or the root URL it inherits) is not a valid URL. The text names
+    /// the file and never repeats the value (REQ-D05).
+    #[error(
+        "{}: [decision].base_url is not a valid URL (scheme://host/...)",
+        config_path.display()
+    )]
+    DecisionBaseUrl {
+        /// The `magi.toml` that declares the URL.
+        config_path: std::path::PathBuf,
+    },
 }
 
 /// The last magi-rs version whose scaffold wrote a `magi.toml` without `[decision]`. A
@@ -1871,7 +1877,11 @@ impl MagiConfig {
         // can be checked here without resolving any secret.
         match cfg.effective_decision_base_url() {
             Ok(t) if reqwest::Url::parse(t.as_str()).is_ok() => {}
-            Ok(_) | Err(EndpointError::Unparseable) => return Err(ConfigError::DecisionBaseUrl),
+            Ok(_) | Err(EndpointError::Unparseable) => {
+                return Err(ConfigError::DecisionBaseUrl {
+                    config_path: path.to_path_buf(),
+                })
+            }
             Err(e) => return Err(e.into()),
         }
         if let Some(table) = &table {
