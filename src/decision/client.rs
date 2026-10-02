@@ -805,6 +805,42 @@ mod tests {
         assert!(!detail.unwrap_or_default().contains(planted));
     }
 
+    /// A missing API prefix can answer 200 with a web page: the attempt still carries the hint.
+    #[tokio::test]
+    async fn a_200_with_a_non_json_body_carries_the_prefix_hint_with_the_tried_url() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(200)
+            .with_body("<html><body>Welcome</body></html>")
+            .create_async()
+            .await;
+        let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+        let (cause, detail) = first_failure(&r).expect("failed");
+        assert_eq!(cause, Cause::InvalidResponse);
+        let detail = detail.unwrap_or_default();
+        assert!(
+            detail.contains(&format!("{}/v1/systemone", server.url())),
+            "{detail}"
+        );
+        assert!(detail.contains("base_url"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn a_200_with_json_failing_the_schema_does_not_carry_the_prefix_hint() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(200)
+            .with_body(json!({"model": "m", "answers": {}}).to_string())
+            .create_async()
+            .await;
+        let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+        let (cause, detail) = first_failure(&r).expect("failed");
+        assert_eq!(cause, Cause::InvalidResponse);
+        assert!(!detail.unwrap_or_default().contains("base_url"));
+    }
+
     #[test]
     fn neither_the_settings_debug_nor_the_endpoint_display_leak_a_secret() {
         let mut s = settings("https://alice:s3cr3t@host/api/v1", &["nimble"]);
