@@ -687,6 +687,76 @@ mod tests {
         }
     }
 
+    /// S20: an `invalid_response` whose detail carries the hint (non-JSON 200) shows it to the user.
+    #[test]
+    fn the_hint_of_an_invalid_response_reaches_the_error_message() {
+        let url = "https://openrouter.ai/v1/systemone";
+        let detail = format!(
+            "invalid response: body is not JSON; {}",
+            crate::decision::endpoint::not_found_hint(url)
+        );
+        let r: Result<Decision, DecisionError> = Err(DecisionError::ChainExhausted {
+            trace: Trace {
+                attempts: vec![attempt(
+                    "m",
+                    AttemptOutcome::Failed {
+                        cause: Cause::InvalidResponse,
+                        detail: Some(detail),
+                    },
+                )],
+                usage: Usage::default(),
+            },
+        });
+        let v = parse(&render_envelope(&r, "e", 1, Audience::User));
+        let msg = v["error"]["message"].as_str().expect("message");
+        assert!(msg.contains(url) && msg.contains("API prefix"), "{msg}");
+    }
+
+    /// The cap never cuts the URL or the hint, even with a long base URL.
+    #[test]
+    fn the_hint_survives_the_message_cap_with_a_long_url() {
+        let url = format!("https://{}.example.com/v1/systemone", "h".repeat(60));
+        let r: Result<Decision, DecisionError> = Err(DecisionError::ChainExhausted {
+            trace: Trace {
+                attempts: vec![attempt(
+                    "m",
+                    AttemptOutcome::Failed {
+                        cause: Cause::NotFound,
+                        detail: Some(crate::decision::endpoint::not_found_hint(&url)),
+                    },
+                )],
+                usage: Usage::default(),
+            },
+        });
+        let v = parse(&render_envelope(&r, "e", 1, Audience::User));
+        let msg = v["error"]["message"].as_str().expect("message");
+        assert!(msg.contains(&url), "{msg}");
+        assert!(msg.contains("(Ollama 0.35 or later)"), "{msg}");
+        assert!(msg.chars().count() <= MESSAGE_CAP_CHARS);
+    }
+
+    /// A rejection whose provider body is blank still tells the user what happened.
+    #[test]
+    fn a_rejection_with_an_empty_body_falls_back_to_the_magi_detail() {
+        let r: Result<Decision, DecisionError> = Err(DecisionError::Rejected {
+            status: 422,
+            provider_message: "   ".into(),
+            trace: Trace {
+                attempts: vec![attempt(
+                    "m",
+                    AttemptOutcome::Failed {
+                        cause: Cause::Rejected,
+                        detail: Some("provider rejected the request as invalid (HTTP 422)".into()),
+                    },
+                )],
+                usage: Usage::default(),
+            },
+        });
+        let v = parse(&render_envelope(&r, "e", 1, Audience::User));
+        let msg = v["error"]["message"].as_str().expect("message");
+        assert!(msg.contains("HTTP 422"), "{msg}");
+    }
+
     #[test]
     fn errors_without_a_model_call_have_an_empty_chain_and_zero_usage() {
         for e in [

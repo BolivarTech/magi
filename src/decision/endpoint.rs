@@ -123,14 +123,18 @@ pub fn select_api_key(
 pub fn not_found_hint(tried_url_redacted: &str) -> String {
     format!(
         concat!(
-        "no System One endpoint answered at {tried_url_redacted}; check that base_url includes the ",
-        "provider's API prefix (OpenRouter: {OPENROUTER_BASE_URL_EXAMPLE}) and that the server ",
-        "supports System One (Ollama 0.35 or later)"
+            "{marker}{tried_url_redacted}; check that base_url includes the ",
+            "provider's API prefix (OpenRouter: {OPENROUTER_BASE_URL_EXAMPLE}) and that the server ",
+            "supports System One (Ollama 0.35 or later)"
         ),
+        marker = NOT_FOUND_HINT_MARKER,
         tried_url_redacted = tried_url_redacted,
         OPENROUTER_BASE_URL_EXAMPLE = OPENROUTER_BASE_URL_EXAMPLE
     )
 }
+
+/// Start of every [`not_found_hint`]; lets the envelope find the hint inside an attempt's detail.
+pub const NOT_FOUND_HINT_MARKER: &str = "no System One endpoint answered at ";
 
 #[cfg(test)]
 mod tests {

@@ -443,6 +443,33 @@ fn a_missing_api_prefix_is_diagnosed_with_the_tried_url() {
     );
 }
 
+/// S20, the case real providers produce: a prefix-less base_url answers 200 with a web page, and the
+/// user's `error.message` still names the tried URL and the prefix hint.
+#[test]
+fn a_non_json_200_names_the_tried_url_and_the_prefix_hint_in_the_message() {
+    let mut server = mockito::Server::new();
+    server
+        .mock("POST", "/v1/systemone")
+        .with_status(200)
+        .with_header("content-type", "text/html")
+        .with_body("<html><body>welcome</body></html>")
+        .create();
+    let ws = workspace(&format!(
+        "provider = \"ollama\"\n[decision]\nmodel = \"nimble\"\nbase_url = \"{}\"\n",
+        server.url()
+    ));
+    let (code, out, err) = decide(&ws, &[], INPUT, &[]);
+    assert_eq!(code, EXIT_RUNTIME, "{err}");
+    let msg = envelope(&out)["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        msg.contains(&format!("{}/v1/systemone", server.url())) && msg.contains("API prefix"),
+        "{msg}"
+    );
+}
+
 /// S22 for the CLI (mutation-verified): foreign secrets never reach stdout, stderr or the run log, and the
 /// state never reaches the run log.
 #[test]
