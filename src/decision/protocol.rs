@@ -205,7 +205,7 @@ impl DecisionRequest {
     ///
     /// # Returns
     /// The request body (System One protocol).
-    pub fn wire_body(&self, model: &str, keep_alive: Option<&KeepAlive>) -> Value {
+    pub(crate) fn wire_body(&self, model: &str, keep_alive: Option<&KeepAlive>) -> Value {
         let mut body = serde_json::Map::new();
         body.insert(MODEL_FIELD.into(), Value::String(model.to_owned()));
         body.insert(STATE_FIELD.into(), self.state.clone());
@@ -346,7 +346,7 @@ pub fn magi_confidence(probabilities: &[f64]) -> f64 {
 
 /// A validated System One response.
 #[derive(Debug)]
-pub struct ParsedResponse {
+pub(crate) struct ParsedResponse {
     /// One answer per question sent.
     pub answers: BTreeMap<String, Answer>,
     /// Tokens (and cost) the provider reported.
@@ -503,7 +503,7 @@ fn read_usage(raw: Option<&Value>) -> Result<Usage, &'static str> {
 /// # Errors
 /// A reason naming the question and the class of problem; it never quotes a
 /// value returned by the provider.
-pub fn parse_response(body: &[u8], questions: &Questions) -> Result<ParsedResponse, String> {
+pub(crate) fn parse_response(body: &[u8], questions: &Questions) -> Result<ParsedResponse, String> {
     let root: Value = serde_json::from_slice(body)
         .map_err(|_| "the response body is not valid JSON".to_owned())?;
     let Some(Value::Object(answers)) = root.get("answers") else {

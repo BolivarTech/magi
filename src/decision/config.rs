@@ -169,12 +169,12 @@ impl DecisionSection {
     pub fn chain(&self) -> Vec<ModelSpec> {
         let mut chain = Vec::with_capacity(1 + self.fallback.len());
         chain.push(ModelSpec {
-            model: self.model.clone(),
+            model: self.model.trim().to_owned(),
             min_confidence: self.min_confidence,
         });
         for fb in &self.fallback {
             chain.push(ModelSpec {
-                model: fb.model.clone(),
+                model: fb.model.trim().to_owned(),
                 min_confidence: fb.min_confidence,
             });
         }
