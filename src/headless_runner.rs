@@ -556,7 +556,7 @@ fn consult_error_outcome(
 /// # Complexity
 ///
 /// The auditor's, over `text`.
-fn audited_payload(text: &str) -> String {
+pub(crate) fn audited_payload(text: &str) -> String {
     /// This surface's own target. Sharing one would share `Auditor::alarm`'s
     /// `(secret, target)` latch and let another surface's alarm suppress this
     /// one's (MS2 gate, integration pass, Caspar).

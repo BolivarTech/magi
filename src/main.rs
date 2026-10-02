@@ -59,7 +59,7 @@ use magi_core::providers::ollama::OllamaProvider;
 use magi_core::providers::openai_compat::{Dialect, OpenAiCompatibleProvider, ReasoningSpelling};
 use magi_core::rotation::{FallbackPool, Lineage as CoreLineage, ProviderProbe};
 use magi_core::schema::{AgentName, Mode};
-use magi_rs::decision::envelope::{render_envelope, Audience};
+use magi_rs::decision::envelope::{render_envelope_masked, Audience};
 use magi_rs::decision::{
     Decision, DecisionClient, DecisionError, DecisionRequest, DecisionSettings, SystemOneClient,
 };
@@ -6908,6 +6908,9 @@ struct DecideSecrets {
     /// The OpenAI-compatible key (`OPENAI_API_KEY`), the principal's key when it is not
     /// Anthropic.
     openai_key: Option<String>,
+    /// The Anthropic key (`ANTHROPIC_API_KEY`). Never sent by decide; kept so the auditor can
+    /// mask it if anything echoes it.
+    anthropic_key: Option<String>,
 }
 
 impl DecideSecrets {
@@ -6922,8 +6925,32 @@ impl DecideSecrets {
         Self {
             decision_key: consumed.decision_key.clone(),
             openai_key: consumed.openai_key.clone(),
+            anthropic_key: consumed.anthropic_key.clone(),
         }
     }
+}
+
+/// The credentials the decide surface registers with the process auditor: the Anthropic and
+/// OpenAI keys the run holds, plus the decision key (REQ-D04, REQ-D11).
+///
+/// # Arguments
+/// * `anthropic` / `openai` / `decision` - The resolved keys; blank values are skipped.
+///
+/// # Returns
+/// The `(name, value)` pairs to register, in that order.
+fn decide_secrets_to_arm<'a>(
+    anthropic: Option<&'a str>,
+    openai: Option<&'a str>,
+    decision: Option<&'a str>,
+) -> Vec<(magi_rs::logging::auditor::SecretName, &'a str)> {
+    let mut out = secrets_to_arm(anthropic, openai);
+    if let Some(key) = non_blank(decision) {
+        out.push((
+            magi_rs::logging::auditor::SecretName::new(DECISION_KEY_ENV),
+            key,
+        ));
+    }
+    out
 }
 
 /// The opened encrypted store of a headless run and the vault wired over it.
@@ -7270,8 +7297,19 @@ async fn run_decide_subcommand(
         },
         None => (MagiConfig::default(), Vec::new()),
     };
+    // Arm the auditor's exact pass with every credential this run holds, before anything is
+    // logged or printed. The vault-resolved endpoint credentials are registered where they are
+    // resolved.
+    let decision_key = decision_api_key(&secrets, secret_store.as_ref());
+    let openai_key = resolve_openai_key(secrets.openai_key.as_deref(), secret_store.as_ref());
+    let short_secrets = magi_rs::logging::register_process_secrets(&decide_secrets_to_arm(
+        secrets.anthropic_key.as_deref(),
+        openai_key.as_deref(),
+        decision_key.as_deref(),
+    ));
     // Same split as `prepare_headless`: the screen half now, the file half once a log exists.
-    let (cfg_screen, cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
+    let (cfg_screen, mut cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
+    cfg_file.extend(short_secrets.into_iter().map(short_secret_notice));
     emit_notices(cfg_screen);
     // decide has no log flags; the configuration and the environment decide the log.
     let logging = match workspace.as_ref() {
@@ -7307,7 +7345,14 @@ async fn run_decide_subcommand(
     )
     .await;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let envelope = render_envelope(&result, &endpoint, elapsed_ms, Audience::User);
+    // Field by field through the auditor's exact pass, never over the serialized text.
+    let envelope = render_envelope_masked(
+        &result,
+        &endpoint,
+        elapsed_ms,
+        Audience::User,
+        &crate::headless_runner::audited_payload,
+    );
     match emit_decide_envelope(args.output.as_deref(), &envelope) {
         Ok(()) => decide_exit_code(result.as_ref().err().map(DecisionError::kind)),
         Err(e) => {
@@ -10239,6 +10284,18 @@ mod tests {
         let keys = DecideSecrets::from_consumed(&consumed);
         assert_eq!(keys.decision_key.as_deref(), Some("dec-key"));
         assert_eq!(keys.openai_key.as_deref(), Some("prin-key"));
+    }
+
+    #[test]
+    fn the_decide_surface_arms_the_decision_key_beside_the_other_keys() {
+        let armed = decide_secrets_to_arm(Some("a-key"), Some("o-key"), Some("d-key"));
+        let names: Vec<&str> = armed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DECISION_API_KEY"]
+        );
+        assert_eq!(armed[2].1, "d-key");
+        assert!(decide_secrets_to_arm(None, None, Some("  ")).is_empty());
     }
 
     #[test]

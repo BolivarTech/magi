@@ -39,10 +39,10 @@ const DETAIL_KEY: &str = "detail";
 struct Envelope<'a> {
     schema_version: u32,
     run_id: &'a str,
-    model: Option<&'a str>,
-    endpoint: &'a str,
+    model: Option<String>,
+    endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    answers: Option<&'a std::collections::BTreeMap<String, Answer>>,
+    answers: Option<std::collections::BTreeMap<String, Answer>>,
     chain: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ErrorBody>,
@@ -83,6 +83,39 @@ pub fn render_envelope(
     total_ms: u64,
     audience: Audience,
 ) -> String {
+    render_envelope_masked(
+        result,
+        endpoint_display,
+        total_ms,
+        audience,
+        &str::to_string,
+    )
+}
+
+/// [`render_envelope`] with every text field passed through `mask` first.
+///
+/// The mask runs on each string of the envelope (model, endpoint, `error.message`, every string
+/// and key inside `chain` and `answers`), never on the serialized text: masking JSON as a whole
+/// can orphan a backslash and stop it parsing. `schema_version` stays the first key.
+///
+/// Complexity: O(attempts x answers) in the size of the trace, times the mask's own cost.
+///
+/// # Arguments
+/// * `result` - Outcome of the decision.
+/// * `endpoint_display` - Redacted `base_url` of `[decision]`.
+/// * `total_ms` - Wall time of the whole invocation.
+/// * `audience` - Who reads the output.
+/// * `mask` - Maps a text field to its masked form (the process auditor in production).
+///
+/// # Returns
+/// The envelope as one JSON object.
+pub fn render_envelope_masked(
+    result: &Result<Decision, DecisionError>,
+    endpoint_display: &str,
+    total_ms: u64,
+    audience: Audience,
+    mask: &dyn Fn(&str) -> String,
+) -> String {
     let trace = match result {
         Ok(decision) => Some(&decision.trace),
         Err(error) => error.trace(),
@@ -90,19 +123,84 @@ pub fn render_envelope(
     let envelope = Envelope {
         schema_version: ENVELOPE_SCHEMA_VERSION,
         run_id: crate::logging::run_id(),
-        model: result.as_ref().ok().map(|d| d.model.as_str()),
-        endpoint: endpoint_display,
-        answers: result.as_ref().ok().map(|d| &d.answers),
-        chain: trace.map(|t| chain_values(t, audience)).unwrap_or_default(),
+        model: result.as_ref().ok().map(|d| mask(&d.model)),
+        endpoint: mask(endpoint_display),
+        answers: result.as_ref().ok().map(|d| mask_answers(&d.answers, mask)),
+        chain: trace
+            .map(|t| chain_values(t, audience))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| mask_value(entry, mask))
+            .collect(),
         error: result.as_ref().err().map(|e| ErrorBody {
             kind: e.kind(),
-            message: cap_chars(&error_message(e, audience), MESSAGE_CAP_CHARS),
+            message: mask(&cap_chars(&error_message(e, audience), MESSAGE_CAP_CHARS)),
         }),
         usage: trace.map(|t| t.usage).unwrap_or_default(),
         timings: Timings { total_ms },
     };
     serde_json::to_string(&envelope)
         .unwrap_or_else(|_| format!("{{\"schema_version\":{ENVELOPE_SCHEMA_VERSION}}}"))
+}
+
+/// Masks every string and object key of a JSON tree, in place of the serialized text.
+fn mask_value(value: Value, mask: &dyn Fn(&str) -> String) -> Value {
+    match value {
+        Value::String(text) => Value::String(mask(&text)),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(|v| mask_value(v, mask)).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, v)| (mask(&key), mask_value(v, mask)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Masks the provider-supplied text of the answers: question names, chosen options, option
+/// names and legend entries.
+fn mask_answers(
+    answers: &std::collections::BTreeMap<String, Answer>,
+    mask: &dyn Fn(&str) -> String,
+) -> std::collections::BTreeMap<String, Answer> {
+    let masked_map = |map: &std::collections::BTreeMap<String, f64>| {
+        map.iter().map(|(k, v)| (mask(k), *v)).collect()
+    };
+    answers
+        .iter()
+        .map(|(name, answer)| {
+            let masked = match answer {
+                Answer::Noul { .. } => answer.clone(),
+                Answer::Choice {
+                    choice,
+                    probabilities,
+                    confidence,
+                    provider_confidence,
+                } => Answer::Choice {
+                    choice: mask(choice),
+                    probabilities: masked_map(probabilities),
+                    confidence: *confidence,
+                    provider_confidence: *provider_confidence,
+                },
+                Answer::Score {
+                    score,
+                    legend,
+                    probabilities,
+                    confidence,
+                    provider_confidence,
+                } => Answer::Score {
+                    score: *score,
+                    legend: legend.iter().map(|(k, v)| (mask(k), mask(v))).collect(),
+                    probabilities: masked_map(probabilities),
+                    confidence: *confidence,
+                    provider_confidence: *provider_confidence,
+                },
+            };
+            (mask(name), masked)
+        })
+        .collect()
 }
 
 /// Serializes the attempts; the agent never sees rejected answers (REQ-D16)
@@ -240,6 +338,29 @@ mod tests {
 
     fn parse(text: &str) -> Value {
         serde_json::from_str(text).expect("the envelope is one JSON object")
+    }
+
+    #[test]
+    fn the_mask_reaches_every_text_field_and_leaves_valid_json_in_order() {
+        let failed = Err(DecisionError::ChainExhausted {
+            trace: Trace {
+                attempts: vec![attempt(
+                    "nimble",
+                    AttemptOutcome::Failed {
+                        cause: Cause::NotFound,
+                        detail: Some("saw SECRET at \"x\"".into()),
+                    },
+                )],
+                usage: Usage::default(),
+            },
+        });
+        let mask = |s: &str| s.replace("SECRET", "***");
+        let text =
+            render_envelope_masked(&failed, "http://SECRET.example", 1, Audience::User, &mask);
+        assert!(!text.contains("SECRET"), "{text}");
+        assert!(text.starts_with("{\"schema_version\":1,"), "{text}");
+        assert_eq!(parse(&text)["chain"][0]["detail"], "saw *** at \"x\"");
+        assert_eq!(parse(&text)["endpoint"], "http://***.example");
     }
 
     #[test]
