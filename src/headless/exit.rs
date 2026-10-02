@@ -79,12 +79,45 @@ fn exit_code_for_error(err: &HeadlessError) -> i32 {
     }
 }
 
+/// Exit code of a `magi decide` run (REQ-D22): 0 a decision, 2 caller error, 1 no decision.
+///
+/// # Arguments
+/// * `kind` - Error kind of the decision, `None` when a decision was made.
+///
+/// # Returns
+/// The process exit code.
+pub fn decide_exit_code(_kind: Option<crate::decision::ErrorKind>) -> i32 {
+    -1
+}
+
 #[cfg(test)]
 mod tests {
     use super::{exit_code, EXIT_MISUSE, EXIT_OK, EXIT_RUNTIME, EXIT_TIER_DENIED};
     use crate::headless::types::StopReason;
     use crate::headless::HeadlessError;
     use crate::vault::VaultError;
+
+    #[test]
+    fn the_decide_exit_codes_follow_req_d22() {
+        use crate::decision::ErrorKind;
+        assert_eq!(super::decide_exit_code(None), EXIT_OK);
+        assert_eq!(
+            super::decide_exit_code(Some(ErrorKind::InvalidInput)),
+            EXIT_MISUSE
+        );
+        assert_eq!(
+            super::decide_exit_code(Some(ErrorKind::MissingKey)),
+            EXIT_MISUSE
+        );
+        assert_eq!(
+            super::decide_exit_code(Some(ErrorKind::ModelUnavailable)),
+            EXIT_RUNTIME
+        );
+        assert_eq!(
+            super::decide_exit_code(Some(ErrorKind::DecisionUnavailable)),
+            EXIT_RUNTIME
+        );
+    }
 
     /// Success with no error, no denial ⇒ 0.
     #[test]

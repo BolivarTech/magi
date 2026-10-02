@@ -18,6 +18,7 @@
 pub mod client;
 pub mod config;
 pub mod endpoint;
+pub mod envelope;
 pub mod error;
 pub mod protocol;
 
