@@ -7861,6 +7861,40 @@ mod tests {
     /// CP2 MS2 r1 (S22/REQ-D11): provider-sourced text in the table (legend names) is sanitized and
     /// redacted before it reaches the screen. Mutation-verified (T8 Paso 4).
     #[test]
+    fn the_table_never_shows_credentials_inside_a_provider_url() {
+        // Mutation g2 of T8: the URL-credential layer (redact_foreign_text) needs its own guard,
+        // because the secret-pattern layer alone hides an sk- key but not a URL password.
+        use magi_rs::decision::Answer;
+        let password = "hunter2-plain-pass";
+        let mut answers = std::collections::BTreeMap::new();
+        answers.insert(
+            "route".to_string(),
+            Answer::Score {
+                score: 0.0,
+                legend: std::collections::BTreeMap::from([
+                    (
+                        "0".to_string(),
+                        format!("https://user:{password}@example.com/v1"),
+                    ),
+                    ("1".to_string(), "Other".to_string()),
+                ]),
+                probabilities: std::collections::BTreeMap::from([
+                    ("0".to_string(), 1.0),
+                    ("1".to_string(), 0.0),
+                ]),
+                confidence: 1.0,
+                provider_confidence: None,
+            },
+        );
+        let t = super::render_decision_table(&Ok(magi_rs::decision::Decision {
+            model: "nimble".into(),
+            answers,
+            trace: Default::default(),
+        }));
+        assert!(!t.contains(password), "{t}");
+    }
+
+    #[test]
     fn the_table_never_shows_provider_secrets_or_control_characters() {
         use magi_rs::decision::Answer;
         let planted = "sk-ant-api03-planted0123456789abcdefghij"; // allow-secret-scan
