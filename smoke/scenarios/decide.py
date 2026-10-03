@@ -708,11 +708,13 @@ def a_planted_credential_reaches_no_channel(run):
                             attempt.failure)
             return
         if attempt.output.exit_code == EXIT_DECIDED:
-            yield from _all(D9_ASSERTIONS, Outcome.CANNOT_TEST,
-                            "the backend answered 401 and decide still "
-                            "exited 0, so the error path was never walked")
-            return
-        yield _leak_finding(0, attempt.output.stdout, secret, "stdout")
+            # The backend refused and the product still reported a decision:
+            # that is the product's defect, not a reason to skip the checks.
+            yield _finding(D9_ASSERTIONS, 0,
+                           "the backend answered 401 and decide still "
+                           "exited 0, so the error path was never walked")
+        else:
+            yield _leak_finding(0, attempt.output.stdout, secret, "stdout")
         yield _leak_finding(1, attempt.output.stderr, secret, "stderr")
         log = _read_logs(root)
         if log is None:
