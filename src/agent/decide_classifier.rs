@@ -113,7 +113,7 @@ impl DecideModeClassifier {
 ///
 /// # Returns
 /// The detail, or `None` when the error has no failed attempt with one.
-fn last_attempt_detail(error: &DecisionError) -> Option<&str> {
+pub(crate) fn last_attempt_detail(error: &DecisionError) -> Option<&str> {
     match error.trace()?.attempts.last().map(|a| &a.outcome) {
         Some(AttemptOutcome::Failed { detail, .. }) => detail.as_deref(),
         _ => None,
