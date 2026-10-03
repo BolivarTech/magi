@@ -122,11 +122,13 @@ class _FakeDecide:
         ignores_timeout_flag: Whether ``--timeout`` is ignored.
         ignores_explicit_model: Whether ``model`` in the input is ignored.
         reachable_hosted: Whether OpenRouter answers at all.
+        exits_zero_on_refusal: Whether a 401 still exits 0.
     """
 
     def __init__(self, key_leak=False, ignores_chain=False,
                  ignores_timeout_flag=False, ignores_explicit_model=False,
-                 reachable_hosted=True, writes_logs=True):
+                 reachable_hosted=True, writes_logs=True,
+                 exits_zero_on_refusal=False):
         """Create the double.
 
         Args:
@@ -136,6 +138,7 @@ class _FakeDecide:
             ignores_explicit_model: Ignore ``model`` in the input.
             reachable_hosted: Whether OpenRouter is reachable.
             writes_logs: Whether a run log is written.
+            exits_zero_on_refusal: Exit 0 although the backend refused.
         """
         self.key_leak = key_leak
         self.ignores_chain = ignores_chain
@@ -143,6 +146,7 @@ class _FakeDecide:
         self.ignores_explicit_model = ignores_explicit_model
         self.reachable_hosted = reachable_hosted
         self.writes_logs = writes_logs
+        self.exits_zero_on_refusal = exits_zero_on_refusal
 
     def __call__(self, call):
         """Answer one invocation.
@@ -238,7 +242,8 @@ class _FakeDecide:
             body = _envelope(None, hops, error={
                 "kind": "missing_key",
                 "message": "set DECISION_API_KEY in the environment"})
-            return _capture(body, stderr, 2)
+            return _capture(body, stderr,
+                            0 if self.exits_zero_on_refusal else 2)
         for hop in hops:
             hop.pop("stop", None)
         if last["outcome"] == "answered":
@@ -425,6 +430,16 @@ class DefectTests(unittest.TestCase):
     def test_a_clean_stdout_still_passes_d9_when_stderr_leaks(self) -> None:
         finding = self._finding_of("D9", 0, _FakeDecide(key_leak=True))
         self.assertEqual(Outcome.PASS, finding.outcome)
+
+    def test_exit_zero_on_a_401_fails_d9_stdout_and_still_checks_leaks(self) -> None:
+        product = _FakeDecide(exits_zero_on_refusal=True, key_leak=True)
+        run = _run(self, product)
+        findings = run("D9")
+        declared = decide.D9_ASSERTIONS
+        self.assertEqual(Outcome.FAIL, findings[declared[0]].outcome)
+        self.assertIn("exited 0", findings[declared[0]].detail)
+        self.assertEqual(Outcome.FAIL, findings[declared[1]].outcome)
+        self.assertEqual(Outcome.PASS, findings[declared[2]].outcome)
 
     def test_a_product_that_writes_no_log_cannot_test_d9(self) -> None:
         finding = self._finding_of("D9", 2, _FakeDecide(writes_logs=False))

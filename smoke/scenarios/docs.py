@@ -66,7 +66,7 @@ S13_ASSERTIONS = (
 #: other.
 DECIDE_SUBCOMMAND = "decide"
 DECIDE_FLAGS = ("--input", "--output", "--questions", "--timeout",
-                "--no-memory")
+                "--no-memory", "--workdir")
 
 #: The annotated example of the whole configuration, and the section whose
 #: presence makes it an example of ``decide`` and not of something else.
