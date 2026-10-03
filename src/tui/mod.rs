@@ -7143,4 +7143,20 @@ mod tests {
             "readable content must survive sanitization: {notice}"
         );
     }
+
+    /// The help lists /decide (CRLF-safe source guard: the help lines are inline literals).
+    #[test]
+    fn the_help_lists_decide() {
+        let src = include_str!("mod.rs").replace('\r', "");
+        // [DR2-C3] search only the production part: the needle below also appears in THIS test's own source,
+        // so searching the whole file matched itself and the guard could never fail.
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            production.contains("\"  /decide "),
+            "the /help arm must document /decide"
+        );
+    }
 }
