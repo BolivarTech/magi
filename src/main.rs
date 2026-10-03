@@ -2212,6 +2212,8 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
     let tui_distill_decision = tui_decision.clone();
     let tui_distill_endpoint = tui_decision_endpoint.clone();
+    let tui_tool_decision = tui_decision.clone();
+    let tui_tool_endpoint = tui_decision_endpoint.clone();
     let tui_mode_classifier = tui_mode_classifier_wiring(
         provider.clone(),
         Arc::clone(&tui_notices),
@@ -2291,6 +2293,15 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             output_cap: magi_config.effective_tool_result_cap(),
             clock_coverage: Arc::clone(&tui_clock_coverage_announcer),
         },
+    );
+    register_decide_tool_if_available(
+        &mut agent,
+        tui_tool_decision,
+        magi_config
+            .effective_decision()
+            .auto_approve
+            .unwrap_or(crate::defaults::DEFAULT_DECISION_AUTO_APPROVE),
+        tui_tool_endpoint,
     );
 
     // The notices are HANDED OVER rather than announced here. They go to the logging layer,
@@ -4639,6 +4650,32 @@ fn register_consult_tool_if_available(
     }
 }
 
+/// Registers the `decide` tool on `agent` ONLY IF the decision client was built (REQ-D16).
+///
+/// Shared between the TUI (`run`) and `magi query` (`run_query_subcommand`), like
+/// [`register_consult_tool_if_available`]. An unbuildable client leaves the tool out: the agent
+/// is never offered a tool that cannot run.
+///
+/// # Arguments
+/// * `agent` - The agent to extend.
+/// * `client` - The shared decision client, if it could be built.
+/// * `auto_approve` - `[decision].auto_approve`.
+/// * `endpoint` - The redacted decision endpoint shown in the tool result.
+fn register_decide_tool_if_available(
+    agent: &mut Agent,
+    client: Option<Arc<dyn magi_rs::decision::DecisionClient>>,
+    auto_approve: bool,
+    endpoint: String,
+) {
+    if let Some(client) = client {
+        agent.register_tool(Box::new(crate::tools::decide::DecideTool::new(
+            client,
+            auto_approve,
+            endpoint,
+        )));
+    }
+}
+
 /// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.
 ///
 /// **A bound, not a budget.** The sink lives for the whole process, and the TUI — the surface
@@ -6516,10 +6553,10 @@ async fn run_query_subcommand(
     let mut agent = Agent::new(provider);
     // Same client builder as the TUI and `magi decide` (REQ-D13): the distiller asks `decide`
     // before the LLM judge.
-    if let (Some(client), endpoint, _) =
-        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets)
-    {
-        agent.set_decision_client(client, endpoint);
+    let (query_decision, query_decision_endpoint, _) =
+        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
+    if let Some(client) = query_decision.clone() {
+        agent.set_decision_client(client, query_decision_endpoint.clone());
     }
 
     // Persistence unless `--no-memory` (REQ-H18): notices go to stderr.
@@ -6561,6 +6598,15 @@ async fn run_query_subcommand(
             output_cap: magi_config.effective_tool_result_cap(),
             clock_coverage: clock_coverage_announcer,
         },
+    );
+    register_decide_tool_if_available(
+        &mut agent,
+        query_decision,
+        magi_config
+            .effective_decision()
+            .auto_approve
+            .unwrap_or(crate::defaults::DEFAULT_DECISION_AUTO_APPROVE),
+        query_decision_endpoint,
     );
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
@@ -20590,5 +20636,14 @@ agent_timeout_secs = {CEILING}
                 crate::defaults::DEFAULT_ANTHROPIC_MODEL
             );
         }
+    }
+    #[test]
+    fn decide_is_registered_only_when_its_client_exists() {
+        let mut with = Agent::new(Arc::new(StaticProvider));
+        register_decide_tool_if_available(&mut with, Some(Arc::new(FixedDesign)), true, "e".into());
+        assert!(with.has_tool("decide"));
+        let mut without = Agent::new(Arc::new(StaticProvider));
+        register_decide_tool_if_available(&mut without, None, true, "e".into());
+        assert!(!without.has_tool("decide"));
     }
 }

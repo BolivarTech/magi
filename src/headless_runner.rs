@@ -4165,4 +4165,115 @@ mod tests {
             "the forced consult must be bounded by the deadline, not run to completion"
         );
     }
+    /// S21 (mutation-verified): `tool_calls[]` never stores a decide call's state.
+    #[test]
+    fn the_run_record_omits_the_state_of_a_decide_call() {
+        let tracker = RunTracker {
+            policy: Policy::new(Tier::Default, 15, None),
+            state: Mutex::new(TrackerState::default()),
+        };
+        let input = serde_json::json!({"state": {"note": "STATE-MARKER-0b7e"}, "questions": {"q": {"type": "noul"}}});
+        tracker.on_tool_call("call-1", "decide", &input, "{}", true, 3);
+        let calls = with_state(&tracker.state, |s| s.calls.clone());
+        assert_eq!(calls[0].1.input["state"], "<omitted>");
+        assert_eq!(calls[0].1.input["questions"], input["questions"]);
+        tracker.on_tool_call("call-2", "view", &input, "{}", true, 3);
+        let calls = with_state(&tracker.state, |s| s.calls.clone());
+        assert_eq!(
+            calls[1].1.input, input,
+            "other tools are recorded unchanged"
+        );
+    }
+
+    /// S11/S16/S21 wiring (user, 2026-10-01): when the model asks for `decide` in `magi query`'s default tier,
+    /// the tool runs against the decision endpoint, its result goes back to the agent, and `tool_calls[]`
+    /// records the call with its questions and with the state omitted. The model's CHOICE of tool is not
+    /// tested here (it belongs to the model; SMOKE D11 observes it); everything after that choice is.
+    #[tokio::test]
+    async fn a_decide_call_in_query_runs_the_tool_and_is_recorded_without_the_state() {
+        let mut server = mockito::Server::new_async().await;
+        let endpoint = server
+            .mock("POST", "/v1/systemone")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({"state": {"note": "STATE-MARKER-5d1e"}})))
+            .with_status(200)
+            .with_body(
+                r#"{"model":"nimble","answers":{"kind":{"type":"choice","choice":"bug","probabilities":{"bug":0.9,"feature":0.05,"question":0.05}}},"usage":{"input_tokens":5,"output_tokens":1}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let questions = serde_json::json!({"kind": {"type": "choice",
+            "instructions": "Is this issue a bug, a feature or a question?",
+            "criteria": {"bug": "Broken behaviour", "feature": "New capability", "question": "Asks for help"}}});
+        let input =
+            serde_json::json!({"state": {"note": "STATE-MARKER-5d1e"}, "questions": questions});
+        let provider = ScriptedProvider::new(vec![
+            Turn::Tool {
+                id: "d1".into(),
+                name: "decide".into(),
+                input: input.clone(),
+            },
+            Turn::Text("It is a bug.".to_string()),
+        ]);
+        let mut agent = Agent::new(provider);
+        let client = magi_rs::decision::SystemOneClient::new(magi_rs::decision::DecisionSettings {
+            base_url: server.url(),
+            api_key: None,
+            chain: vec![magi_rs::decision::ModelSpec {
+                model: "nimble".into(),
+                min_confidence: None,
+            }],
+            timeout: Duration::from_secs(10),
+            keep_alive: None,
+        })
+        .expect("client");
+        agent.register_tool(Box::new(crate::tools::decide::DecideTool::new(
+            Arc::new(client),
+            true,
+            server.url(),
+        )));
+
+        let policy = Policy::new(Tier::Default, 15, None);
+        let outcome = run_query(
+            resolved_stub(),
+            policy,
+            &mut agent,
+            "classify this issue",
+            &wiring(None),
+        )
+        .await;
+
+        endpoint.assert_async().await;
+        assert_eq!(outcome.stop_reason, StopReason::Done, "{:?}", outcome.error);
+        assert_eq!(outcome.response.as_deref(), Some("It is a bug."));
+        let call = outcome
+            .tool_calls
+            .iter()
+            .find(|t| t.name == "decide")
+            .expect("decide was recorded");
+        assert!(
+            call.ok,
+            "the default tier approved and ran it: {}",
+            call.result
+        );
+        assert_eq!(
+            call.input["state"],
+            serde_json::json!("<omitted>"),
+            "REQ-D19: the state is not stored"
+        );
+        assert_eq!(
+            call.input["questions"], questions,
+            "the questions are stored exactly"
+        );
+        assert!(
+            call.result.contains("\"choice\":\"bug\"") && call.result.contains("nimble"),
+            "{}",
+            call.result
+        );
+        assert!(
+            !call.result.contains("STATE-MARKER-5d1e"),
+            "{}",
+            call.result
+        );
+    }
 }

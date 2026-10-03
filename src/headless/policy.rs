@@ -356,4 +356,9 @@ mod tests {
             fuzz_policy_entrypoint(case);
         }
     }
+    /// REQ-D19: the default tier approves `decide` without flags, like the TUI's `auto_approve = true`.
+    #[test]
+    fn the_default_tier_approves_decide() {
+        assert!(Policy::new(Tier::Default, 15, None).approves("decide"));
+    }
 }

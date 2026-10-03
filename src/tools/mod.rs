@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 pub mod bash;
 pub mod consult;
+pub mod decide;
 pub mod grep;
 pub mod knowledge;
 pub mod ls;
