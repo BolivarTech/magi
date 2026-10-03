@@ -1948,6 +1948,45 @@ mod tests {
     }
 
     #[test]
+    fn the_scaffold_activates_the_calibrated_threshold_on_every_chain_entry() {
+        let d = scaffold_decision();
+        assert_eq!(
+            d.get("min_confidence").and_then(toml::Value::as_float),
+            Some(0.7),
+            "the primary carries an active threshold"
+        );
+        let fallbacks = d
+            .get("fallback")
+            .and_then(toml::Value::as_array)
+            .expect("fallbacks");
+        assert_eq!(fallbacks.len(), 1);
+        for entry in fallbacks {
+            assert_eq!(
+                entry.get("min_confidence").and_then(toml::Value::as_float),
+                Some(0.7),
+                "every fallback carries the same active threshold"
+            );
+        }
+        let models: Vec<&str> = fallbacks
+            .iter()
+            .filter_map(|f| f.get("model").and_then(toml::Value::as_str))
+            .collect();
+        assert_eq!(models, vec!["tev1"], "the chain is nimble -> tev1");
+        assert!(
+            render_default_magi_toml().contains("commenting it out disables"),
+            "the file says how to switch the threshold off"
+        );
+    }
+
+    #[test]
+    fn the_built_in_defaults_hide_no_threshold_in_code() {
+        let d = default_decision_section();
+        assert_eq!(d.min_confidence, None);
+        assert!(d.fallback.iter().all(|f| f.min_confidence.is_none()));
+        assert_eq!(d.fallback.len(), 1);
+    }
+
+    #[test]
     fn no_scaffold_comment_carries_a_run_of_spaces_inside_its_prose() {
         for line in render_default_magi_toml().lines() {
             // Prose comments open with `# `; the aligned provider table opens with `#   `.
