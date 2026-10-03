@@ -136,9 +136,9 @@ With a threshold set, a model whose answer falls below it is skipped and the nex
 
 Some models return slightly different numbers when the same request is repeated. A threshold set very close to a model's usual value can therefore accept in one call and rotate in the next, so leave a margin.
 
-`magi init` writes `min_confidence = 0.7` on `nimble` and on `tev1`, active. The 0.7 comes from the maintainer's calibration on his own prompts, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
+`magi init` writes `min_confidence = 0.7` on `nimble` and on `tev1`, active. The 0.7 comes from the maintainer's calibration on the maintainer's own prompts, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
 
-For the record, the calibration (500 labelled mode prompts, warm Ollama) gave `nimble` 73% accuracy against 72% for the main model. Its answers with confidence 0.7 to 0.9 were right 89% of the time and those above 0.9 were right 99%, while answers under 0.5 were right 42% of the time. `tev1:0.8b` was dropped from the default chain: on the contradiction check it answered "yes" to 98% of the pairs that did not contradict. The raw prompt sets are internal and are not published.
+`tev1:0.8b` is not in the default chain: in the calibration it answered "yes" to almost every contradiction check, including pairs that did not contradict, and a wrong "yes" retires a memory that is still true.
 
 ## From the TUI and from the agent
 
