@@ -1,0 +1,385 @@
+//! Contradiction judge answered by `decide` first and by the LLM judge second (REQ-D13).
+//!
+//! Lives in the **bin** next to [`crate::memory::judge::LlmDistillJudge`], which it wraps as its
+//! fallback. One instance lives ONE distillation pass: a transport-class failure trips a cut
+//! that sends the rest of that pass straight to the LLM judge.
+
+#![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::string_slice
+    )
+)]
+
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use magi_rs::decision::DecisionClient;
+
+use crate::memory::error::MemoryError;
+use crate::memory::profile::DistillJudge;
+use crate::memory::store::Memory;
+
+/// [`DistillJudge`] that asks `decide` whether a newer memory contradicts an older one and
+/// falls back to the LLM judge when `decide` cannot answer (REQ-D13).
+///
+/// A `noul` at or above [`magi_rs::decision::internal::NOUL_YES_THRESHOLD`] is a "yes". A rejected low-confidence answer is
+/// never read: the chain is exhausted and the LLM judge decides. Preference summaries are
+/// generative and always go to the LLM judge.
+pub struct DecideContradictionJudge {
+    /// Decision client, or `None` when it could not be built.
+    _client: Option<Arc<dyn DecisionClient>>,
+    /// LLM judge used when `decide` cannot answer, and for every summary.
+    _fallback: Box<dyn DistillJudge>,
+    /// Redacted endpoint shown in the run log.
+    _endpoint: String,
+    /// Set once a transport-class failure is seen: the rest of the pass skips `decide`.
+    _tripped: AtomicBool,
+}
+
+impl DecideContradictionJudge {
+    /// Builds a judge for one distillation pass.
+    ///
+    /// # Arguments
+    /// * `client` - The decision client, if one could be built.
+    /// * `fallback` - The LLM judge to use when `decide` cannot answer.
+    /// * `endpoint` - The redacted decision endpoint, for the run log.
+    ///
+    /// # Returns
+    /// The judge, with the per-pass cut not yet tripped.
+    pub fn new(
+        client: Option<Arc<dyn DecisionClient>>,
+        fallback: Box<dyn DistillJudge>,
+        endpoint: String,
+    ) -> Self {
+        Self {
+            _client: client,
+            _fallback: fallback,
+            _endpoint: endpoint,
+            _tripped: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl DistillJudge for DecideContradictionJudge {
+    async fn summarize_preferences(
+        &self,
+        _episodic: &[Memory],
+    ) -> Result<Vec<String>, MemoryError> {
+        todo!()
+    }
+
+    async fn contradicts(&self, _older: &str, _newer: &str) -> Result<bool, MemoryError> {
+        todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::error::MemoryError;
+    use crate::memory::profile::DistillJudge;
+    use crate::memory::store::Memory;
+    use async_trait::async_trait;
+    use magi_rs::decision::error::{
+        Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace, Usage,
+    };
+    use magi_rs::decision::{Answer, DecisionClient, DecisionRequest};
+    use serde_json::json;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct Scripted {
+        replies: Mutex<VecDeque<Result<Decision, DecisionError>>>,
+        calls: AtomicUsize,
+        seen: Mutex<Vec<DecisionRequest>>,
+    }
+    impl Scripted {
+        fn new(replies: Vec<Result<Decision, DecisionError>>) -> Arc<Self> {
+            Arc::new(Self {
+                replies: Mutex::new(replies.into()),
+                calls: AtomicUsize::new(0),
+                seen: Mutex::new(vec![]),
+            })
+        }
+    }
+    #[async_trait]
+    impl DecisionClient for Scripted {
+        async fn decide(&self, r: &DecisionRequest) -> Result<Decision, DecisionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().expect("seen").push(r.clone());
+            self.replies
+                .lock()
+                .expect("replies")
+                .pop_front()
+                .expect("a scripted reply per call")
+        }
+    }
+
+    struct LlmJudge {
+        verdict: bool,
+        contradicts_calls: AtomicUsize,
+        summarize_calls: AtomicUsize,
+    }
+    impl LlmJudge {
+        fn new(verdict: bool) -> Arc<Self> {
+            Arc::new(Self {
+                verdict,
+                contradicts_calls: AtomicUsize::new(0),
+                summarize_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+    #[async_trait]
+    impl DistillJudge for Arc<LlmJudge> {
+        async fn summarize_preferences(&self, _e: &[Memory]) -> Result<Vec<String>, MemoryError> {
+            self.summarize_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec!["pref".into()])
+        }
+        async fn contradicts(&self, _a: &str, _b: &str) -> Result<bool, MemoryError> {
+            self.contradicts_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.verdict)
+        }
+    }
+
+    fn noul(v: f64, attempts: Vec<Attempt>) -> Result<Decision, DecisionError> {
+        let mut answers = BTreeMap::new();
+        answers.insert(
+            "contradicts".to_string(),
+            Answer::Noul {
+                noul: v,
+                confidence: (2.0 * v - 1.0).abs(),
+            },
+        );
+        Ok(Decision {
+            model: "nimble".into(),
+            answers,
+            trace: Trace {
+                attempts,
+                usage: Usage::default(),
+            },
+        })
+    }
+
+    fn failed(model: &str, cause: Cause) -> Attempt {
+        Attempt {
+            model: model.into(),
+            outcome: AttemptOutcome::Failed {
+                cause,
+                detail: None,
+            },
+            usage: Usage::default(),
+        }
+    }
+
+    fn low(model: &str, rejected_noul: f64) -> Attempt {
+        let mut answers = BTreeMap::new();
+        answers.insert(
+            "contradicts".to_string(),
+            Answer::Noul {
+                noul: rejected_noul,
+                confidence: 0.2,
+            },
+        );
+        Attempt {
+            model: model.into(),
+            outcome: AttemptOutcome::LowConfidence {
+                confidence: 0.2,
+                min_confidence: 0.9,
+                answers,
+            },
+            usage: Usage::default(),
+        }
+    }
+
+    fn exhausted(attempts: Vec<Attempt>) -> Result<Decision, DecisionError> {
+        Err(DecisionError::ChainExhausted {
+            trace: Trace {
+                attempts,
+                usage: Usage::default(),
+            },
+        })
+    }
+
+    fn judge(client: Option<Arc<Scripted>>, llm: Arc<LlmJudge>) -> DecideContradictionJudge {
+        DecideContradictionJudge::new(
+            client.map(|c| c as Arc<dyn DecisionClient>),
+            Box::new(llm),
+            "e".into(),
+        )
+    }
+
+    /// Carry item 7: exactly one half is yes.
+    #[tokio::test]
+    async fn a_noul_at_or_above_one_half_is_yes() {
+        for (v, expected) in [(0.5, true), (0.49, false), (0.9, true), (0.1, false)] {
+            let llm = LlmJudge::new(!expected);
+            let j = judge(Some(Scripted::new(vec![noul(v, vec![])])), Arc::clone(&llm));
+            assert_eq!(
+                j.contradicts("old", "new").await.expect("ok"),
+                expected,
+                "noul {v}"
+            );
+            assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_request_puts_the_older_memory_as_a_and_the_newer_as_b() {
+        let client = Scripted::new(vec![noul(0.9, vec![])]);
+        let j = judge(Some(Arc::clone(&client)), LlmJudge::new(false));
+        j.contradicts("weekly cap 50 %", "weekly cap 70 %")
+            .await
+            .expect("ok");
+        assert_eq!(
+            client.seen.lock().expect("seen")[0].state(),
+            &json!({"A": "weekly cap 50 %", "B": "weekly cap 70 %"})
+        );
+    }
+
+    #[tokio::test]
+    async fn summarize_preferences_stays_on_the_llm() {
+        let llm = LlmJudge::new(false);
+        let client = Scripted::new(vec![]);
+        let j = judge(Some(Arc::clone(&client)), Arc::clone(&llm));
+        assert_eq!(
+            j.summarize_preferences(&[]).await.expect("ok"),
+            vec!["pref".to_string()]
+        );
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// S14.
+    #[tokio::test]
+    async fn a_failed_decision_is_answered_by_the_llm_judge() {
+        let llm = LlmJudge::new(true);
+        let j = judge(
+            Some(Scripted::new(vec![exhausted(vec![failed(
+                "nimble",
+                Cause::ModelNotFound,
+            )])])),
+            Arc::clone(&llm),
+        );
+        assert!(j.contradicts("a", "b").await.expect("ok"));
+        assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// S18 (mutation-verified): a supersede never comes from a rejected low-confidence answer.
+    #[tokio::test]
+    async fn a_low_confidence_chain_never_marks_a_supersede_from_decide() {
+        let llm = LlmJudge::new(false);
+        let j = judge(
+            Some(Scripted::new(vec![exhausted(vec![
+                low("nimble", 0.8),
+                low("tev1", 0.8),
+            ])])),
+            Arc::clone(&llm),
+        );
+        assert!(
+            !j.contradicts("a", "b").await.expect("ok"),
+            "the LLM judge decides; the rejected 0.8 does not"
+        );
+        assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// REQ-D13 cut (mutation-verified): a transport-class failure cuts the rest of the pass.
+    #[tokio::test]
+    async fn a_transport_failure_cuts_decide_for_the_rest_of_the_pass() {
+        let client = Scripted::new(vec![exhausted(vec![failed("nimble", Cause::Timeout)])]);
+        let llm = LlmJudge::new(false);
+        let j = judge(Some(Arc::clone(&client)), Arc::clone(&llm));
+        j.contradicts("a1", "b1").await.expect("ok");
+        j.contradicts("a2", "b2").await.expect("ok");
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            1,
+            "the second pair never reaches decide"
+        );
+        assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_mixed_chain_keeps_its_answer_and_still_cuts() {
+        let client = Scripted::new(vec![noul(
+            0.9,
+            vec![
+                failed("nimble", Cause::Timeout),
+                Attempt {
+                    model: "tev1".into(),
+                    outcome: AttemptOutcome::Answered,
+                    usage: Usage::default(),
+                },
+            ],
+        )]);
+        let llm = LlmJudge::new(false);
+        let j = judge(Some(Arc::clone(&client)), Arc::clone(&llm));
+        assert!(
+            j.contradicts("a1", "b1").await.expect("ok"),
+            "the answering fallback counts"
+        );
+        j.contradicts("a2", "b2").await.expect("ok");
+        assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_not_found_chain_does_not_cut() {
+        // CP2 MS2 r1 (Caspar): `not_found` is not transport-class, so the endpoint answered: no cut.
+        let client = Scripted::new(vec![
+            exhausted(vec![failed("nimble", Cause::NotFound)]),
+            noul(0.9, vec![]),
+        ]);
+        let j = judge(Some(Arc::clone(&client)), LlmJudge::new(false));
+        for i in 0..2 {
+            j.contradicts(&format!("a{i}"), &format!("b{i}"))
+                .await
+                .expect("ok");
+        }
+        assert_eq!(client.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_low_confidence_or_missing_model_chain_does_not_cut() {
+        let client = Scripted::new(vec![
+            exhausted(vec![low("nimble", 0.8)]),
+            exhausted(vec![failed("tev1", Cause::ModelNotFound)]),
+            noul(0.9, vec![]),
+        ]);
+        let j = judge(Some(Arc::clone(&client)), LlmJudge::new(false));
+        for i in 0..3 {
+            j.contradicts(&format!("a{i}"), &format!("b{i}"))
+                .await
+                .expect("ok");
+        }
+        assert_eq!(client.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn the_next_pass_tries_decide_again() {
+        let client = Scripted::new(vec![
+            exhausted(vec![failed("nimble", Cause::Transport)]),
+            noul(0.9, vec![]),
+        ]);
+        let first = judge(Some(Arc::clone(&client)), LlmJudge::new(false));
+        first.contradicts("a", "b").await.expect("ok");
+        let second = judge(Some(Arc::clone(&client)), LlmJudge::new(false));
+        assert!(second.contradicts("a", "b").await.expect("ok"));
+        assert_eq!(client.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn without_a_client_the_llm_judge_answers() {
+        let llm = LlmJudge::new(true);
+        let j = judge(None, Arc::clone(&llm));
+        assert!(j.contradicts("a", "b").await.expect("ok"));
+        assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 1);
+    }
+}

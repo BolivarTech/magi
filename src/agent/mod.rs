@@ -15,6 +15,7 @@ use crate::memory::clock::Clock;
 use crate::memory::config::MemoryConfig;
 use crate::memory::context::assemble_selective;
 use crate::memory::decay::purge_expired_archives;
+use crate::memory::decide_judge::DecideContradictionJudge;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
 use crate::memory::judge::LlmDistillJudge;
@@ -28,6 +29,7 @@ use crate::tools::Tool;
 use anyhow::Result;
 use futures::StreamExt;
 use magi_core::schema::Mode;
+use magi_rs::decision::DecisionClient;
 use magi_rs::magi::gate::{evaluate, GateTelemetry, GateThresholds, GateVerdict, NoGateTelemetry};
 use magi_rs::magi::mode::{
     agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig, ModeSources,
@@ -483,6 +485,8 @@ pub struct Agent {
     /// `None` ⇒ legacy `load_all` behavior; all 188 pre-existing tests rely on
     /// this path being byte-identical to the original implementation.
     memory_subsystem: Option<MemorySubsystem>,
+    /// Decision client and its redacted endpoint, when `decide` could be built (REQ-D13).
+    decision: Option<(Arc<dyn DecisionClient>, String)>,
 }
 
 impl Agent {
@@ -496,6 +500,27 @@ impl Agent {
             session_id: None,
             approval_tx: None,
             memory_subsystem: None,
+            decision: None,
+        }
+    }
+
+    /// Attaches the decision client the contradiction judge asks before the LLM (REQ-D13).
+    ///
+    /// # Arguments
+    /// * `client` - The shared decision client.
+    /// * `endpoint` - The redacted decision endpoint, for the run log.
+    pub fn set_decision_client(&mut self, client: Arc<dyn DecisionClient>, endpoint: String) {
+        self.decision = Some((client, endpoint));
+    }
+
+    /// The decision client and endpoint a new distillation judge starts from.
+    ///
+    /// # Returns
+    /// The client (or `None` when none was attached) and the endpoint to log.
+    fn decision_parts(&self) -> (Option<Arc<dyn DecisionClient>>, String) {
+        match &self.decision {
+            Some((client, endpoint)) => (Some(Arc::clone(client)), endpoint.clone()),
+            None => (None, String::new()),
         }
     }
 
@@ -710,7 +735,12 @@ impl Agent {
         if !sub.cfg.distill_on_session_close || !sub.cfg.distill_enabled {
             return Ok(());
         }
-        let judge = LlmDistillJudge::new(self.provider.clone());
+        let (decision, endpoint) = self.decision_parts();
+        let judge = DecideContradictionJudge::new(
+            decision,
+            Box::new(LlmDistillJudge::new(self.provider.clone())),
+            endpoint,
+        );
         let _ = distill(
             &*sub.store,
             &judge,
@@ -906,7 +936,12 @@ impl Agent {
                 false
             };
             if should_distill {
-                let judge = LlmDistillJudge::new(self.provider.clone());
+                let (decision, endpoint) = self.decision_parts();
+                let judge = DecideContradictionJudge::new(
+                    decision,
+                    Box::new(LlmDistillJudge::new(self.provider.clone())),
+                    endpoint,
+                );
                 if let Err(e) = distill(&*store, &judge, &*embedder, &*clock, &cfg, &scope).await {
                     // Non-fatal — route through chunk_tx so the notice renders inside
                     // the ratatui frame instead of corrupting it via raw stderr.
@@ -4891,6 +4926,25 @@ mod tests {
             "headless must see the mark exactly once in the text it actually returns to the \
              caller — not zero (invisible veto) and not doubled (the two channels are supposed \
              to be mutually exclusive per consumer)"
+        );
+    }
+
+    /// Both distillation sites go through `DecideContradictionJudge`; the LLM judge only appears as its fallback.
+    #[test]
+    fn both_distillation_sites_use_the_decide_judge() {
+        let src = include_str!("mod.rs").replace('\r', "");
+        // [DR2-C4] split at the test MODULE: the first `#[cfg(test)]` of agent/mod.rs is a `use` on line 41
+        // (it cut the production part to 40 lines and both counts were 0, in Red and in Green).
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        let wrapped = production.matches("DecideContradictionJudge::new(").count();
+        let bare = production.matches("LlmDistillJudge::new(").count();
+        assert_eq!(wrapped, 2, "on_session_close and the turn cadence");
+        assert_eq!(
+            bare, wrapped,
+            "every LLM judge is the fallback of a decide judge"
         );
     }
 }

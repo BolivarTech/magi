@@ -1705,14 +1705,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         }
         Some(TopCmd::Query(h)) => {
             return Ok(exit_code(
-                run_query_subcommand(
-                    h,
-                    passphrase_flag,
-                    &workspace_root,
-                    anthropic_key,
-                    openai_key,
-                )
-                .await,
+                run_query_subcommand(h, passphrase_flag, &workspace_root, decide_secrets).await,
             ));
         }
         Some(TopCmd::Consult(c)) => {
@@ -2217,6 +2210,8 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // from `DecideSecrets::from_consumed`, the same path `magi decide` uses (PM-MS2-C3).
     let (tui_decision, tui_decision_endpoint, tui_decision_reason) =
         decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
+    let tui_distill_decision = tui_decision.clone();
+    let tui_distill_endpoint = tui_decision_endpoint.clone();
     let tui_mode_classifier = tui_mode_classifier_wiring(
         provider.clone(),
         Arc::clone(&tui_notices),
@@ -2238,6 +2233,9 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     );
 
     let mut agent = Agent::new(provider);
+    if let Some(client) = tui_distill_decision {
+        agent.set_decision_client(client, tui_distill_endpoint);
+    }
 
     match memory_store {
         Some(concrete_store) => {
@@ -6461,11 +6459,17 @@ async fn run_query_subcommand(
     h: HeadlessArgs,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
-    anthropic_key: Option<String>,
-    openai_key: Option<String>,
+    decide_secrets: DecideSecrets,
 ) -> i32 {
-    let ctx = match prepare_headless(&h, "query", passphrase_flag, cwd, anthropic_key, openai_key)
-        .await
+    let ctx = match prepare_headless(
+        &h,
+        "query",
+        passphrase_flag,
+        cwd,
+        decide_secrets.anthropic_key.clone(),
+        decide_secrets.openai_key.clone(),
+    )
+    .await
     {
         Ok(c) => c,
         Err(code) => return code,
@@ -6510,6 +6514,13 @@ async fn run_query_subcommand(
     };
 
     let mut agent = Agent::new(provider);
+    // Same client builder as the TUI and `magi decide` (REQ-D13): the distiller asks `decide`
+    // before the LLM judge.
+    if let (Some(client), endpoint, _) =
+        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets)
+    {
+        agent.set_decision_client(client, endpoint);
+    }
 
     // Persistence unless `--no-memory` (REQ-H18): notices go to stderr.
     if !h.no_memory {
@@ -11917,7 +11928,12 @@ model = \"nimble\"
             h.no_memory = true; // stateless ⇒ env-only, no passphrase needed
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let code = rt.block_on(run_query_subcommand(h, None, &cwd, None, None));
+            let code = rt.block_on(run_query_subcommand(
+                h,
+                None,
+                &cwd,
+                test_decide_secrets(None),
+            ));
             assert_eq!(code, 0, "a static-provider query must succeed");
             let body = std::fs::read_to_string(&out).unwrap();
             assert!(!body.is_empty(), "the response must be written to -o");
@@ -11941,7 +11957,12 @@ model = \"nimble\"
             h.output_format = Some(CliOutputFormat::Json);
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let code = rt.block_on(run_query_subcommand(h, None, &cwd, None, None));
+            let code = rt.block_on(run_query_subcommand(
+                h,
+                None,
+                &cwd,
+                test_decide_secrets(None),
+            ));
             assert_eq!(code, 0);
             let v: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
@@ -11970,7 +11991,12 @@ model = \"nimble\"
             h.no_clobber = true;
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let code = rt.block_on(run_query_subcommand(h, None, &cwd, None, None));
+            let code = rt.block_on(run_query_subcommand(
+                h,
+                None,
+                &cwd,
+                test_decide_secrets(None),
+            ));
             assert_eq!(code, 2, "--no-clobber on an existing -o file ⇒ exit 2");
             assert_eq!(
                 std::fs::read(&out).unwrap(),
