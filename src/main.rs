@@ -2216,22 +2216,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // The decision client is built ONCE here and shared with the mode classifier; its keys come
     // from `DecideSecrets::from_consumed`, the same path `magi decide` uses (PM-MS2-C3).
     let (tui_decision, tui_decision_endpoint) =
-        match build_decision_client(&magi_config, secret_store.as_ref(), &decide_secrets) {
-            Ok(client) => {
-                let endpoint = client.endpoint_display();
-                (
-                    Some(Arc::new(client) as Arc<dyn magi_rs::decision::DecisionClient>),
-                    endpoint,
-                )
-            }
-            Err(_) => (
-                None,
-                magi_config
-                    .effective_decision_base_url()
-                    .map(|t| redact_url(t.as_str()))
-                    .unwrap_or_default(),
-            ),
-        };
+        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
     let tui_mode_classifier = tui_mode_classifier_wiring(
         provider.clone(),
         Arc::clone(&tui_notices),
@@ -6872,22 +6857,7 @@ async fn run_consult_subcommand(
     // Same key path as `magi decide` (PM-MS2-C3): a hosted endpoint answers 401 otherwise and
     // every inference silently falls back.
     let (decision, decision_endpoint) =
-        match build_decision_client(&magi_config, secret_store.as_ref(), &decide_secrets) {
-            Ok(client) => {
-                let endpoint = client.endpoint_display();
-                (
-                    Some(Arc::new(client) as Arc<dyn magi_rs::decision::DecisionClient>),
-                    endpoint,
-                )
-            }
-            Err(_) => (
-                None,
-                magi_config
-                    .effective_decision_base_url()
-                    .map(|t| redact_url(t.as_str()))
-                    .unwrap_or_default(),
-            ),
-        };
+        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
     let classifier = crate::agent::decide_classifier::DecideModeClassifier::new(
         decision,
         llm_classifier,
@@ -7194,6 +7164,42 @@ fn build_decision_client(
         ),
         keep_alive: decision.keep_alive,
     })
+}
+
+/// Builds the decision client the internal surfaces share, never failing the run.
+///
+/// An unbuildable client is an absent one: the internal decisions then fall back to the LLM and
+/// log it (REQ-D12). Every internal surface builds its client here, with keys from
+/// [`DecideSecrets::from_consumed`], so none can forget the decision key.
+///
+/// # Arguments
+/// * `config` - The loaded configuration.
+/// * `secret_store` - The open vault, if any.
+/// * `keys` - The keys captured at startup.
+///
+/// # Returns
+/// The client (or `None`) and the redacted endpoint to show in the run log.
+fn decision_client_for(
+    config: &MagiConfig,
+    secret_store: Option<&SharedSecretStore>,
+    keys: &DecideSecrets,
+) -> (Option<Arc<dyn magi_rs::decision::DecisionClient>>, String) {
+    match build_decision_client(config, secret_store, keys) {
+        Ok(client) => {
+            let endpoint = client.endpoint_display();
+            (
+                Some(Arc::new(client) as Arc<dyn magi_rs::decision::DecisionClient>),
+                endpoint,
+            )
+        }
+        Err(_) => (
+            None,
+            config
+                .effective_decision_base_url()
+                .map(|t| redact_url(t.as_str()))
+                .unwrap_or_default(),
+        ),
+    }
 }
 
 /// Validates the request of a decide run (REQ-D22, REQ-D23).
