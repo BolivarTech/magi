@@ -1724,8 +1724,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                     explicit_consult_mode,
                     passphrase_flag,
                     &workspace_root,
-                    anthropic_key,
-                    openai_key,
+                    decide_secrets,
                 )
                 .await,
             ));
@@ -2214,8 +2213,31 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // `run_consult_subcommand`'s own classifier construction. REQ-A07d: the TUI's
     // explicit `/consult` needs the same `resolve_mode_guarded` classifier/config
     // pair the direct headless `magi consult` path already has.
-    let tui_mode_classifier =
-        tui_mode_classifier_wiring(provider.clone(), Arc::clone(&tui_notices));
+    // The decision client is built ONCE here and shared with the mode classifier; its keys come
+    // from `DecideSecrets::from_consumed`, the same path `magi decide` uses (PM-MS2-C3).
+    let (tui_decision, tui_decision_endpoint) =
+        match build_decision_client(&magi_config, secret_store.as_ref(), &decide_secrets) {
+            Ok(client) => {
+                let endpoint = client.endpoint_display();
+                (
+                    Some(Arc::new(client) as Arc<dyn magi_rs::decision::DecisionClient>),
+                    endpoint,
+                )
+            }
+            Err(_) => (
+                None,
+                magi_config
+                    .effective_decision_base_url()
+                    .map(|t| redact_url(t.as_str()))
+                    .unwrap_or_default(),
+            ),
+        };
+    let tui_mode_classifier = tui_mode_classifier_wiring(
+        provider.clone(),
+        Arc::clone(&tui_notices),
+        tui_decision,
+        tui_decision_endpoint,
+    );
     let tui_classifier_notices = tui_notices;
     let tui_default_mode = magi_config.effective_default_mode();
     let tui_untrusted_content = magi_config.magi().untrusted_content.unwrap_or(false);
@@ -4800,14 +4822,19 @@ impl AutonomousRunConfig {
 /// # Parameters
 /// * `provider` - the principal provider; the classification is one label, so it is paid at the principal's price and never at the trio's.
 /// * `notices` - the session's one sink, already handed to the logging layer.
+/// * `decision` - the decision client built once at startup, if it could be built.
+/// * `endpoint` - the redacted decision endpoint, for the run log.
 ///
 /// # Returns
-/// The classifier for `TuiMagiRuntimeConfig::mode_classifier`.
+/// The classifier for `TuiMagiRuntimeConfig::mode_classifier`: `decide` first, the principal
+/// provider as its fallback.
 fn tui_mode_classifier_wiring(
     provider: Arc<dyn Provider>,
     notices: Arc<crate::tui::TuiNoticeSink>,
+    decision: Option<Arc<dyn magi_rs::decision::DecisionClient>>,
+    endpoint: String,
 ) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
-    let classifier: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
+    let llm: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
             Arc::clone(&notices) as Arc<dyn crate::agent::mode_classifier::NoticeSink>,
@@ -4815,7 +4842,9 @@ fn tui_mode_classifier_wiring(
             // with the registered secrets or it redacts with nothing.
             std::sync::Arc::clone(magi_rs::logging::process_auditor()),
         ));
-    classifier
+    Arc::new(crate::agent::decide_classifier::DecideModeClassifier::new(
+        decision, llm, endpoint,
+    ))
 }
 
 /// Builds the pair (startup notice, `/consult` message) for the TUI when the trio is not
@@ -6766,8 +6795,7 @@ async fn run_consult_subcommand(
     explicit_mode: Option<Mode>,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
-    anthropic_key: Option<String>,
-    openai_key: Option<String>,
+    decide_secrets: DecideSecrets,
 ) -> i32 {
     // REQ-EA06, BEFORE `prepare_headless`: the flag only has somewhere to put its output in the
     // JSON object, so under text output it is operator misuse — exit 2, named, nothing written.
@@ -6786,8 +6814,8 @@ async fn run_consult_subcommand(
         "consult",
         passphrase_flag,
         cwd,
-        anthropic_key,
-        openai_key,
+        decide_secrets.anthropic_key.clone(),
+        decide_secrets.openai_key.clone(),
     )
     .await
     {
@@ -6807,6 +6835,7 @@ async fn run_consult_subcommand(
         timeout_decision,
         budget,
         clock_coverage,
+        secret_store,
         ..
     } = ctx;
 
@@ -6834,10 +6863,35 @@ async fn run_consult_subcommand(
     // directly beneath that sentence, which is how the rule ended up describing
     // something the code did not do.
     let auditor = std::sync::Arc::clone(magi_rs::logging::process_auditor());
-    let classifier = crate::agent::mode_classifier::ProviderClassifier::new(
-        provider,
-        Arc::clone(&notice_sink),
-        Arc::clone(&auditor),
+    let llm_classifier: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
+        Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
+            provider,
+            Arc::clone(&notice_sink),
+            Arc::clone(&auditor),
+        ));
+    // Same key path as `magi decide` (PM-MS2-C3): a hosted endpoint answers 401 otherwise and
+    // every inference silently falls back.
+    let (decision, decision_endpoint) =
+        match build_decision_client(&magi_config, secret_store.as_ref(), &decide_secrets) {
+            Ok(client) => {
+                let endpoint = client.endpoint_display();
+                (
+                    Some(Arc::new(client) as Arc<dyn magi_rs::decision::DecisionClient>),
+                    endpoint,
+                )
+            }
+            Err(_) => (
+                None,
+                magi_config
+                    .effective_decision_base_url()
+                    .map(|t| redact_url(t.as_str()))
+                    .unwrap_or_default(),
+            ),
+        };
+    let classifier = crate::agent::decide_classifier::DecideModeClassifier::new(
+        decision,
+        llm_classifier,
+        decision_endpoint,
     );
     // S-9/REQ-EE-5: shares the SAME process-level sink as the mode classifier's own notices —
     // one stderr output path, not two.
@@ -11941,8 +11995,7 @@ model = \"nimble\"
                 None,
                 None,
                 &cwd,
-                Some("sk-ant-test-fake-key".to_string()),
-                None,
+                test_decide_secrets(Some("sk-ant-test-fake-key")),
             ));
             assert_eq!(
                 code, 2,
@@ -11987,7 +12040,12 @@ model = \"nimble\"
 
             let rt = tokio::runtime::Runtime::new().unwrap();
             let code = rt.block_on(run_consult_subcommand(
-                h, true, None, None, &cwd, None, None,
+                h,
+                true,
+                None,
+                None,
+                &cwd,
+                test_decide_secrets(None),
             ));
 
             assert_eq!(
@@ -18180,7 +18238,12 @@ model = \"nimble\"
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let code = rt.block_on(run_consult_subcommand(
-                        h, false, None, None, &cwd, None, None,
+                        h,
+                        false,
+                        None,
+                        None,
+                        &cwd,
+                        test_decide_secrets(None),
                     ));
 
                     assert_ne!(
@@ -18976,6 +19039,84 @@ agent_timeout_secs = {CEILING}
     /// no `--mode` under the default scaffold — the very path inference exists to serve — wrote
     /// raw text over the ratatui frame. The fix is a sink, not a hardcoded destination: the
     /// same classifier runs headless, where stderr IS correct.
+    // src/main.rs — mod tests (wiring)
+    /// S7 through the real TUI wiring: decide answers, the principal provider is never asked.
+    #[tokio::test]
+    async fn the_tui_wiring_infers_the_mode_through_decide_first() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decision: Arc<dyn magi_rs::decision::DecisionClient> = Arc::new(FixedDesign);
+        let classifier = tui_mode_classifier_wiring(
+            Arc::new(NeverAsked(Arc::clone(&asked))),
+            Arc::new(crate::tui::TuiNoticeSink::new()),
+            Some(decision),
+            "http://localhost:11434".into(),
+        );
+        assert_eq!(
+            classifier.classify("evaluate this architecture").await,
+            Some(Mode::Design)
+        );
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the principal provider was asked"
+        );
+    }
+
+    /// Test double: counts and refuses every call to the principal provider.
+    struct NeverAsked(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl crate::agent::provider::Provider for NeverAsked {
+        async fn stream_messages(
+            &self,
+            _messages: &[crate::agent::messages::Message],
+            _tools: &[Box<dyn crate::tools::Tool>],
+            _system: Option<&str>,
+        ) -> anyhow::Result<
+            futures::stream::BoxStream<
+                'static,
+                anyhow::Result<crate::agent::provider::ResponseChunk>,
+            >,
+        > {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("the principal provider must not be asked"))
+        }
+    }
+
+    /// Test double: always chooses `design`.
+    struct FixedDesign;
+    #[async_trait::async_trait]
+    impl magi_rs::decision::DecisionClient for FixedDesign {
+        async fn decide(
+            &self,
+            _r: &magi_rs::decision::DecisionRequest,
+        ) -> Result<magi_rs::decision::Decision, magi_rs::decision::DecisionError> {
+            let mut answers = std::collections::BTreeMap::new();
+            answers.insert(
+                "mode".to_string(),
+                magi_rs::decision::Answer::Choice {
+                    choice: "design".into(),
+                    probabilities: std::collections::BTreeMap::from([("design".to_string(), 0.9)]),
+                    confidence: 0.85,
+                    provider_confidence: None,
+                },
+            );
+            Ok(magi_rs::decision::Decision {
+                model: "nimble".into(),
+                answers,
+                trace: Default::default(),
+            })
+        }
+    }
+
+    /// Keys of a consult test run: the given Anthropic key and no decision or OpenAI key.
+    fn test_decide_secrets(anthropic_key: Option<&str>) -> DecideSecrets {
+        DecideSecrets {
+            decision_key: None,
+            openai_key: None,
+            anthropic_key: anthropic_key.map(str::to_string),
+        }
+    }
+
     mod tui_classifier_notices {
         use super::*;
         use crate::agent::mode_classifier::NoticeSink;
@@ -18987,8 +19128,12 @@ agent_timeout_secs = {CEILING}
         #[tokio::test]
         async fn the_tui_classifier_emits_its_notices_through_the_attached_channel() {
             let notices = Arc::new(crate::tui::TuiNoticeSink::new());
-            let classifier =
-                tui_mode_classifier_wiring(Arc::new(StaticProvider), Arc::clone(&notices));
+            let classifier = tui_mode_classifier_wiring(
+                Arc::new(StaticProvider),
+                Arc::clone(&notices),
+                None,
+                String::new(),
+            );
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             notices.attach(tx);
 

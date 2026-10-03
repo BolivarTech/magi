@@ -4,6 +4,7 @@
 
 //! The Agent orchestrator coordinates between the Provider and the Tools.
 
+pub mod decide_classifier;
 pub mod messages;
 pub mod mode_classifier;
 pub mod provider;
