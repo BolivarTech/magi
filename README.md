@@ -126,6 +126,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/logout` | Clear stored API keys |
 | `/clear` | Clear the on-screen conversation |
 | `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn — with the default `agent_timeout_secs` (2335, no upper bound as of v0.20.0) this can block for up to about 14010 s (~3.9 h) if every seat rotates through its pool, and it cannot be cancelled mid-flight; see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). Requires a configured LLM provider. |
+| `/decide <request>` | Put typed questions to the decision models and show the answer as a table (question, chosen option, confidence, answering model). Four forms: `/decide {json}` (a whole request pasted on the line), `/decide -i request.json`, `/decide -q questions.json <text>` (the text becomes the `state`), and `/decide -i state.json -q questions.json`. See [Typed decisions](#typed-decisions-magi-rs-decide) |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -140,6 +141,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `bash` | Run a shell command — **strict allowlist** |
 | `project_knowledge` | Persist project facts to encrypted memory |
 | `consult` | Run a MAGI 3-perspective consensus on a hard decision (via `magi-core`) |
+| `decide` | Ask the decision models a closed question (choose, yes/no, score) and get probabilities back. Needs no approval by default |
 
 The `bash` allowlist is: `ls git npm cargo rg cat echo pwd grep mkdir touch find rm diff node python pytest` (with `cargo` restricted to `test` / `build` / `check`), plus a hard ban on the shell metacharacters `` | & ; > < ` $ ( ) { } \ ``.
 
@@ -443,7 +445,7 @@ The input is always JSON. A request has a `state` (string, object or array, forw
 The second names a model, so only that model is tried:
 
 ```json
-{"model": "tev1:0.8b",
+{"model": "tev1",
  "state": "Summarize why SQLite WAL mode improves concurrent reads.",
  "questions": {"mode": {"type": "choice", "instructions": "Which review lens fits this request?",
    "criteria": {"code-review": "Find defects in concrete source code or a diff",
@@ -518,6 +520,14 @@ A rejected `low_confidence` answer appears only inside `chain`, never in the top
 **Configuration** lives in the `[decision]` section of `.magi/magi.toml` (`docs/magi.toml.example` has the commented block, and `magi init` writes it). The primary model and `[[decision.fallback]]` entries must share one endpoint. A `base_url` ending in `/v1` gets `/systemone` appended; any other gets `/v1/systemone`. Use the provider's real API base: `http://localhost:11434` for Ollama and `https://openrouter.ai/api/v1` for OpenRouter. A 404, or an answer that is not JSON, means either that the prefix is missing or that the server does not implement the protocol (Ollama before 0.35), and the attempt's `detail` names the exact URL that was tried.
 
 **Keys.** Set `DECISION_API_KEY` in the environment or with `magi-rs vault set DECISION_API_KEY`. Without it, the main model's key is used only if `[decision]` points at the same origin (scheme, host and port; the path does not count, so a gateway that routes by path shares the key, and `DECISION_API_KEY` is the way to stop that). Otherwise no key is sent, and a key is never sent to a different host. The key is read once at startup, after the vault is opened. Local Ollama needs none. For credentials in the URL, write `[user]` and `[password]` placeholders in `base_url` and store the values as `DECISION_BASE_URL_USER` and `DECISION_BASE_URL_PASSWORD`.
+
+**The confidence threshold.** `magi init` writes `min_confidence = 0.7` on the primary model and on `tev1`. An answer whose confidence falls below it is dropped and the next model in the chain gets the question. The 0.7 comes from the maintainer's own calibration, run on his prompts, and it may not suit your data. To switch it off, comment the lines out: the top option is then always taken. A workspace with no `magi.toml` at all uses the built-in defaults, which set no threshold. Calibration summary: on a set of 500 labelled mode prompts, `nimble` picked the right mode 73% of the time against 72% for the main model, and its answers above 0.7 confidence were right 89% to 99% of the time, while those below 0.5 were right 42% of the time. Warm p95 latency was under 2 s for both Ollama models.
+
+**In the TUI and from the agent.** `/decide` runs a request from the chat (see the commands table) and shows a table, not the raw JSON. The agent can also call the `decide` tool on its own when a task is a closed choice, a yes/no question or a score against a rubric. It does not need approval unless you set `auto_approve = false`, and `magi query` allows it at its default tier. You see the agent's answer in plain language; the full result, with probabilities, the model that answered and the chain, is kept in `tool_calls[]` of the `magi query` output. There the `state` is replaced by `"<omitted>"`, and the text a provider returns with an error is left out too. If `decide` fails, the agent is told so and does not substitute an answer of its own.
+
+**Internal decisions.** Two choices that used to cost a main-model call now go to the decision models first: inferring the mode of a consult, and judging whether a new memory contradicts an older one. If the chain cannot answer (endpoint down, timeout, invalid answer, or every model under its threshold), the main model answers instead and nothing is shown in the TUI or on the terminal. Each fallback is written to the run log, one entry per occurrence, with its cause: the attempt causes above, plus `too_large`, `low_confidence`, `client_unavailable` and `skipped_after_failure`. During one memory-distillation pass, if an attempt fails at the transport level, the remaining pairs of that pass go straight to the main model; the next pass tries `decide` again. Mode inference sends at most `MODE_STATE_LIMIT_BYTES` (19 000 bytes) of the consult; larger content goes straight to the main model without calling `decide`. An explicit call is different: `magi-rs decide`, `/decide` and the tool report their errors and never fall back to the main model, because it could only invent the probabilities.
+
+**What leaves your machine.** Mode inference sends the consult content (up to that limit), the contradiction check sends pairs of memories as they are stored, unredacted, which is what the main model already received, and the tool sends the `state` the agent builds. The default endpoint is local Ollama. With a hosted one, that text goes there. `[memory].distill_enabled = false` turns off both memory judges.
 
 > **Upgrading:** a `magi.toml` without a `[decision]` section, or an empty one, no longer loads. See the [CHANGELOG](CHANGELOG.md) for the steps.
 
@@ -1167,7 +1177,7 @@ crate, so a relative one would dangle for anyone reading this on crates.io.
 | Vault passphrase | For persistence | Chosen on first run (or supplied via `-p`/`MAGI_PASSPHRASE`). Without one available the session runs ephemeral (the on-disk DB is left untouched) |
 | [Ollama](https://ollama.com/) (default backend) | For live replies (default) | running daemon + a chat model (e.g. `kimi-k2.6:cloud`); run `ollama signin` for `:cloud` tags. Any OpenAI-compatible endpoint works by pointing `base_url` elsewhere |
 | Embedding model | For tiered memory (`selective`, the default) | `ollama pull nomic-embed-text-v2-moe:latest`; without it memory degrades gracefully to text-only persistence |
-| Ollama 0.35 or later, and the decision models | For `magi-rs decide` | `ollama pull nimble`, `ollama pull tev1`, `ollama pull tev1:0.8b`; without them `magi-rs decide` returns an error that names the missing model |
+| Ollama 0.35 or later, and the decision models | For `magi-rs decide` | `ollama pull nimble` and `ollama pull tev1`; without them `magi-rs decide` returns an error that names the missing model, and the internal decisions fall back to the main model |
 | Anthropic API key | Optional (opt-in) | only with `provider = "anthropic"`; via env var, the vault, or `/login` |
 
 ### Default models (Ollama)
@@ -1181,7 +1191,7 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 | Chat (principal) | `kimi-k2.6:cloud` | `magi-rs` agent — live replies |
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
 | Decision (primary) | `nimble` | `magi-rs decide` — `ollama pull nimble` (Ollama 0.35 or later) |
-| Decision (fallbacks) | `tev1`, `tev1:0.8b` | `magi-rs decide` — `ollama pull tev1` and `ollama pull tev1:0.8b`; tried in that order when the primary fails |
+| Decision (fallback) | `tev1` | `magi-rs decide` — `ollama pull tev1`; tried when the primary fails or misses its threshold |
 | Melchior (Scientist) | `glm-5.3:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Balthasar (Pragmatist) | `kimi-k2.6:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |

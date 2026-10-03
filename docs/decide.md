@@ -25,8 +25,7 @@ Models used by the scaffold that `magi init` writes:
 | Model | Provider | Role |
 |---|---|---|
 | `nimble` | Ollama | primary |
-| `tev1` | Ollama | first fallback (4B) |
-| `tev1:0.8b` | Ollama | second fallback, smallest and fastest to load |
+| `tev1` | Ollama | fallback (4B) |
 | `typesafe/jev-1.13` | OpenRouter | primary in the commented example |
 | `togethercomputer/tev1-4b-experimental` | OpenRouter | fallback in the example |
 | `upstage/solar-decide` | OpenRouter | fallback in the example |
@@ -36,7 +35,6 @@ The Ollama models have to be pulled once:
 ```bash
 ollama pull nimble
 ollama pull tev1
-ollama pull tev1:0.8b
 ```
 
 Without them, `magi-rs decide` fails with an error that names the missing model, and the chain moves on to the next one. Fallbacks always live on the same endpoint as `[decision]`; there is no `base_url` per fallback.
@@ -123,7 +121,7 @@ A rejected request (HTTP 400, 413 or 422) is reported as `invalid_input` and the
 
 ## Timeouts
 
-`timeout_secs` applies to each attempt, so with three models in the chain a dead endpoint can cost three timeouts. The default of 120 seconds is generous on purpose: a cold local load takes from a few seconds to well over a minute depending on the model and how busy the machine is. `--timeout SECONDS` replaces it for one run. Set `keep_alive` if you have a machine dedicated to these models and want them to stay loaded.
+`timeout_secs` applies to each attempt, so with several models in the chain a dead endpoint can cost three timeouts. The default of 120 seconds is generous on purpose: a cold local load takes from a few seconds to well over a minute depending on the model and how busy the machine is. `--timeout SECONDS` replaces it for one run. Set `keep_alive` if you have a machine dedicated to these models and want them to stay loaded.
 
 ## Confidence and thresholds
 
@@ -138,7 +136,25 @@ With a threshold set, a model whose answer falls below it is skipped and the nex
 
 Some models return slightly different numbers when the same request is repeated. A threshold set very close to a model's usual value can therefore accept in one call and rotate in the next, so leave a margin.
 
-The values in the scaffold are commented out on purpose. They were measured on the maintainer's own prompts, which may not look like yours. Measure on your data before turning one on.
+`magi init` writes `min_confidence = 0.7` on `nimble` and on `tev1`, active. The 0.7 comes from the maintainer's calibration on his own prompts, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
+
+For the record, the calibration (500 labelled mode prompts, warm Ollama) gave `nimble` 73% accuracy against 72% for the main model. Its answers with confidence 0.7 to 0.9 were right 89% of the time and those above 0.9 were right 99%, while answers under 0.5 were right 42% of the time. `tev1:0.8b` was dropped from the default chain: on the contradiction check it answered "yes" to 98% of the pairs that did not contradict. The raw prompt sets are internal and are not published.
+
+## From the TUI and from the agent
+
+`/decide` takes the same request as the command line, in four forms: a whole request pasted on the line (`/decide {...}`), `/decide -i request.json`, `/decide -q questions.json some text` (the text becomes a text `state`), and `/decide -i state.json -q questions.json`. The result is a table with the question, the chosen option (or the level name for a `score`, yes/no for a `noul`), Magi's `confidence` and the model that answered. Errors show their `kind`, the message and the chain of attempts.
+
+The agent has a `decide` tool as well, and uses it when a task is a closed choice, a yes/no question or a score against a rubric. It is not meant for generating text or for design and code reviews; that is what the agent itself and `consult` are for. It runs without asking unless you set `auto_approve = false`, and `magi query` allows it at the default tier. The agent reports the result in plain language. The full result stays in `tool_calls[]` of the `magi query` output, with the `state` replaced by `"<omitted>"` and without the rejected answers of `low_confidence` attempts or any text the provider returned with an error. When `decide` fails, the agent is told, and it does not make up an answer.
+
+## Internal decisions
+
+Two choices that used to cost a main-model call go to the decision models first: inferring the mode of a consult, and checking whether a new memory contradicts an older one.
+
+- If the chain cannot answer (endpoint down, timeout, invalid answer, or every model under its threshold), the main model answers instead. Nothing is shown in the TUI or on the terminal.
+- Each fallback is logged, one entry per occurrence, never merged, with its cause: one of the attempt causes below, or `too_large`, `low_confidence`, `client_unavailable` or `skipped_after_failure`.
+- In one memory-distillation pass, once an attempt fails at the transport level, the remaining pairs of that pass go straight to the main model. The next pass tries `decide` again.
+- Mode inference sends at most `MODE_STATE_LIMIT_BYTES` (19 000 bytes) of the consult. Larger content goes straight to the main model without calling `decide`, and the content is never truncated.
+- Explicit calls (`magi-rs decide`, `/decide`, the tool) never fall back to the main model. It could only invent the probabilities.
 
 ## Output
 
@@ -205,7 +221,14 @@ Failures before any model is called (an old `magi.toml`, a wrong passphrase, an 
 
 ## What leaves your machine
 
-`magi-rs decide` sends the whole `state` you give it, the questions and the model name to the endpoint in `[decision]`. With the default local Ollama nothing leaves the machine. With a hosted provider, that data goes to it, in the same way that prompts go to your main model's provider. The `state` is not written to the log or repeated in the output.
+Every use of `decide` sends text to the endpoint in `[decision]`:
+
+- `magi-rs decide` and `/decide` send the `state` you give, the questions and the model name.
+- Mode inference sends the content of the consult, up to `MODE_STATE_LIMIT_BYTES`.
+- The contradiction check sends pairs of memories exactly as stored, without redaction. The main model already received them the same way.
+- The `decide` tool sends the `state` the agent builds.
+
+With the default local Ollama nothing leaves the machine. With a hosted provider, that text goes to it, as prompts go to your main model's provider. The `state` is not written to the log or repeated in the output. Setting `[memory].distill_enabled = false` turns off both memory judges.
 
 ## Costs
 
