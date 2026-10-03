@@ -56,7 +56,10 @@ pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 /// (REQ-D06, REQ-D21).
 pub const DEFAULT_DECISION_MODEL: &str = "nimble";
 /// Ordered fallbacks of the default decision chain, on the same endpoint as the primary.
-pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 2] = ["tev1", "tev1:0.8b"];
+pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 1] = ["tev1"];
+/// Confidence threshold the scaffold writes, active, on every chain entry (REQ-D24). It comes from
+/// the maintainer's calibration; the built-in defaults of [`default_decision_section`] carry none.
+pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.7;
 /// Per-attempt timeout in seconds; sized to cover a local cold model load (REQ-D21).
 pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
 /// Whether the agent's `decide` tool runs without asking (REQ-D16).
@@ -65,8 +68,9 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
 /// (REQ-D02, REQ-D06, REQ-D21).
 ///
-/// `base_url` stays `None`: absent means "inherit the root `base_url`". The fallbacks carry no
-/// `min_confidence`: no threshold is active by default (REQ-D24).
+/// `base_url` stays `None`: absent means "inherit the root `base_url`". Neither the primary nor the
+/// fallbacks carry a `min_confidence`: no threshold hides in code (REQ-D24); the scaffold is where
+/// one is written.
 ///
 /// # Returns
 /// A valid [`magi_rs::decision::DecisionSection`] naming [`DEFAULT_DECISION_MODEL`] and the
@@ -75,7 +79,7 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// # Examples
 /// ```ignore
 /// let chain = default_decision_section().chain();
-/// assert_eq!(chain.len(), 3);
+/// assert_eq!(chain.len(), 2);
 /// ```
 pub fn default_decision_section() -> magi_rs::decision::DecisionSection {
     magi_rs::decision::DecisionSection {
@@ -344,12 +348,15 @@ pub fn render_default_magi_toml() -> String {
 ",
         "# chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
 ",
-        "# Optional, per model; commented out = no threshold. The value below was calibrated on the maintainer's
+        "# Optional, per model; commenting it out disables the threshold (the top option is always taken).
 ",
-        "# own prompts and may not fit your data or use case: measure on yours before uncommenting it.
+        "# The value below comes from the maintainer's own calibration and may not fit your data or use
 ",
-        "# min_confidence = <value from the calibration>
+        "# case: measure on yours before relying on it.
 ",
+    ));
+    writeln!(out, "min_confidence = {}", SCAFFOLD_DECISION_MIN_CONFIDENCE).unwrap();
+    out.push_str(concat!(
         "
 ",
         "# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
@@ -358,7 +365,7 @@ pub fn render_default_magi_toml() -> String {
     for fallback in default_decision_section().fallback {
         writeln!(out, "[[decision.fallback]]").unwrap();
         writeln!(out, "model = \"{}\"", fallback.model).unwrap();
-        writeln!(out, "# min_confidence = <value from the calibration>").unwrap();
+        writeln!(out, "min_confidence = {}", SCAFFOLD_DECISION_MIN_CONFIDENCE).unwrap();
         writeln!(out).unwrap();
     }
     out.push_str(concat!(
@@ -1874,7 +1881,7 @@ mod tests {
                 .iter()
                 .map(|f| f.model.as_str())
                 .collect::<Vec<_>>(),
-            vec!["tev1", "tev1:0.8b"]
+            vec!["tev1"]
         );
         assert_eq!(d.timeout_secs, Some(DEFAULT_DECISION_TIMEOUT_SECS));
         assert_eq!(d.auto_approve, Some(DEFAULT_DECISION_AUTO_APPROVE));
@@ -1909,8 +1916,8 @@ mod tests {
             "keep_alive stays commented (REQ-D01)"
         );
         assert!(
-            d.get("min_confidence").is_none(),
-            "thresholds stay commented (REQ-D24)"
+            d.get("min_confidence").is_some(),
+            "the calibrated threshold is active in the scaffold (REQ-D24)"
         );
         let fallbacks: Vec<&str> = d
             .get("fallback")
@@ -1919,7 +1926,7 @@ mod tests {
             .iter()
             .filter_map(|f| f.get("model").and_then(toml::Value::as_str))
             .collect();
-        assert_eq!(fallbacks, vec!["tev1", "tev1:0.8b"]);
+        assert_eq!(fallbacks, vec!["tev1"]);
         let section: magi_rs::decision::DecisionSection = d
             .try_into()
             .expect("the scaffold section deserializes into the lib type");
@@ -1927,12 +1934,9 @@ mod tests {
     }
 
     #[test]
-    fn the_scaffold_keeps_thresholds_and_the_openrouter_example_commented() {
+    fn the_scaffold_keeps_the_openrouter_example_commented() {
         let text = render_default_magi_toml();
-        for line in text
-            .lines()
-            .filter(|l| l.contains("min_confidence") || l.contains("openrouter"))
-        {
+        for line in text.lines().filter(|l| l.contains("openrouter")) {
             assert!(
                 line.trim_start().starts_with('#'),
                 "must be commented: {line}"

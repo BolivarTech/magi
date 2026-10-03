@@ -60,18 +60,15 @@ timeout_secs = 120
 auto_approve = true
 # Below this confidence the answer is discarded and the next model in the chain is tried. When the
 # chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
-# Optional, per model; commented out = no threshold. The value below was calibrated on the maintainer's
-# own prompts and may not fit your data or use case: measure on yours before uncommenting it.
-# min_confidence = <value from the calibration>
+# Optional, per model; commenting it out disables the threshold (the top option is always taken).
+# The value below comes from the maintainer's own calibration and may not fit your data or use
+# case: measure on yours before relying on it.
+min_confidence = 0.7
 
 # Ordered fallbacks on the SAME endpoint, tried after the primary fails.
 [[decision.fallback]]
 model = "tev1"
-# min_confidence = <value from the calibration>
-
-[[decision.fallback]]
-model = "tev1:0.8b"
-# min_confidence = <value from the calibration>
+min_confidence = 0.7
 
 # --- Example: OpenRouter (hosted). Needs the decision key (see docs/decide.md) in the environment or
 # --- in the vault (`magi-rs vault set`). The key never goes in this file.
