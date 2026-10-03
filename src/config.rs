@@ -4881,7 +4881,7 @@ api_key = \"sk-x\"
     fn an_absent_decision_section_resolves_to_the_default_chain() {
         let d = MagiConfig::default().effective_decision();
         assert_eq!(d.model, "nimble");
-        assert_eq!(d.fallback.len(), 2);
+        assert_eq!(d.fallback.len(), 1);
         assert_eq!(d.timeout_secs, Some(120));
         assert_eq!(d.auto_approve, Some(true));
     }
