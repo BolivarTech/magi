@@ -1,0 +1,17 @@
+{
+  "mode": {
+    "state": {"request": "<the consult content>"},
+    "questions": {"mode": {"type": "choice",
+      "instructions": "Which review lens fits this request?",
+      "criteria": {"code-review": "Find defects in concrete source code or a diff",
+                   "design": "Evaluate an architecture, API or design proposal",
+                   "analysis": "A general question or analysis that is neither"}}}
+  },
+  "contradicts": {
+    "state": {"A": "<older memory>", "B": "<newer memory>"},
+    "questions": {"contradicts": {"type": "noul",
+      "instructions": "Does statement B contradict statement A, or replace it with a different value, about the same subject?",
+      "criteria": {"true": "B contradicts A or replaces it with a different value",
+                   "false": "B agrees with A, adds to it, or is about something else"}}}
+  }
+}
