@@ -72,6 +72,7 @@ DECIDE_FLAGS = ("--input", "--output", "--questions", "--timeout",
 #: presence makes it an example of ``decide`` and not of something else.
 EXAMPLE_CONFIG = pathlib.Path("docs") / "magi.toml.example"
 DECISION_TABLE = "decision"
+MAGI_TABLE = "magi"
 
 #: A key named only in the changelog is announced, not documented.
 CHANGELOG_NAME = "CHANGELOG.md"
@@ -479,12 +480,31 @@ def _example_finding(root):
     return _finding(5, Outcome.PASS, "")
 
 
+def _is_full_file(declared):
+    """Whether parsed TOML is a whole ``magi.toml`` rather than a fragment.
+
+    A whole file declares a root-level key (anything before the first table
+    header parses to a non-table value) or a ``[magi]`` table.
+
+    Args:
+        declared: The parsed configuration.
+
+    Returns:
+        bool: True for a whole file.
+    """
+    if MAGI_TABLE in declared:
+        return True
+    return any(not isinstance(value, dict) for value in declared.values())
+
+
 def _as_whole_file(body):
     """Complete a documented fragment with the default ``[decision]`` section.
 
-    A fragment that already declares ``[decision]``, or that is not valid
-    TOML, is returned unchanged: the first is whole, and the second must reach
-    the product broken so the check still catches it.
+    A block that already declares ``[decision]``, that is not valid TOML, or
+    that is itself a whole file (see :func:`_is_full_file`) is returned
+    unchanged: the first is whole, the second must reach the product broken so
+    the check still catches it, and the third is judged as written, so a whole
+    example that lacks ``[decision]`` is reported.
 
     Args:
         body: The fenced configuration text.
@@ -496,7 +516,7 @@ def _as_whole_file(body):
         declared = tomllib.loads(body)
     except tomllib.TOMLDecodeError:
         return body
-    if DECISION_TABLE in declared:
+    if DECISION_TABLE in declared or _is_full_file(declared):
         return body
     return body.rstrip("\n") + "\n\n" + DEFAULT_DECISION_BLOCK
 
