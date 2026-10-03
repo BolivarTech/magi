@@ -47,6 +47,8 @@ pub struct DecideModeClassifier {
     fallback: Arc<dyn ModeClassifier>,
     /// Redacted endpoint shown in the run log.
     endpoint: String,
+    /// Why the client could not be built, as Magi worded it (already redacted).
+    unavailable_reason: Option<String>,
 }
 
 impl DecideModeClassifier {
@@ -68,6 +70,7 @@ impl DecideModeClassifier {
             client,
             fallback,
             endpoint,
+            unavailable_reason: None,
         }
     }
 
@@ -78,7 +81,8 @@ impl DecideModeClassifier {
     ///
     /// # Returns
     /// The classifier, with the reason attached.
-    pub fn with_unavailable_reason(self, _reason: Option<String>) -> Self {
+    pub fn with_unavailable_reason(mut self, reason: Option<String>) -> Self {
+        self.unavailable_reason = reason;
         self
     }
 
@@ -135,7 +139,11 @@ impl ModeClassifier for DecideModeClassifier {
     async fn classify(&self, content: &str) -> Option<Mode> {
         let Some(client) = self.client.as_ref() else {
             return self
-                .fall_back(content, FallbackCause::ClientUnavailable, None)
+                .fall_back(
+                    content,
+                    FallbackCause::ClientUnavailable,
+                    self.unavailable_reason.as_deref(),
+                )
                 .await;
         };
         let state = json!({ STATE_REQUEST_FIELD: content });
