@@ -1287,6 +1287,64 @@ mod tests {
         );
     }
 
+    /// REQ-D24: a low-confidence hop is logged with the model, its confidence and its threshold.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_low_confidence_hop_is_logged_with_its_confidence_and_threshold() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if let Ok(mut lines) = self.0.lock() {
+                    lines.push(crate::logging::render::render_event(event));
+                }
+            }
+        }
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(Capture(Arc::clone(&lines))),
+        );
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 200, noul_body("a", 0.75, 3, None)).await; // confidence 0.5
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", Some(0.9))];
+        let _ = decide(s, &request()).await;
+
+        let all = lines.lock().expect("lines").join("\n");
+        let attempt = all
+            .lines()
+            .find(|l| l.contains("low_confidence"))
+            .unwrap_or_else(|| panic!("no low_confidence event:\n{all}"));
+        assert!(attempt.contains(" confidence=0.5"), "{attempt}");
+        assert!(attempt.contains(" min_confidence=0.9"), "{attempt}");
+    }
+
+    /// REQ-D10: a failed attempt whose JSON body carries `usage` still counts toward the total.
+    #[tokio::test]
+    async fn usage_in_a_failed_attempt_body_is_counted() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(
+            &mut server,
+            "a",
+            500,
+            json!({"error": "boom", "usage": {"input_tokens": 4, "output_tokens": 0}}).to_string(),
+        )
+        .await;
+        mock_model(&mut server, "b", 200, noul_body("b", 0.9, 5, None)).await;
+        let mut s = settings(&server.url(), &[]);
+        s.chain = vec![spec("a", None), spec("b", None)];
+        let d = decide(s, &request()).await.expect("b answers");
+        assert_eq!(
+            d.trace.usage.input_tokens, 9,
+            "4 from the 500 body + 5 from the answer"
+        );
+    }
+
     /// Carried from T1: the explicit model is sent trimmed, and its declared threshold still applies.
     #[tokio::test]
     async fn an_explicit_model_is_sent_trimmed() {
