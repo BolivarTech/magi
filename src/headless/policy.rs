@@ -20,7 +20,7 @@ use super::limits::{FULL_AUTO_MAX_TOOL_CALLS, NORMAL_MAX_TOOL_CALLS};
 /// READ-ONLY tool names — single source of truth for the set (REQ-H06, DRY). Verified against
 /// the real registry in `main.rs` (`ListTool`/ `FileReadTool`/`GrepTool`, whose `Tool::name()`
 /// returns exactly these three literals — see `src/tools/{ls,read,grep}.rs`).
-pub const READ_ONLY_TOOLS: &[&str] = &["ls", "view", "grep"];
+pub const READ_ONLY_TOOLS: &[&str] = &["ls", "view", "grep", "decide"];
 
 /// Names of tools that mutate state or run additional processes/LLMs — approved only in
 /// `Auto`/`FullAuto` (REQ-H07). Verified against the real registry in `main.rs`
@@ -229,6 +229,7 @@ mod tests {
         "bash",
         "consult",
         "project_knowledge",
+        "decide",
     ];
 
     /// The per-tier approval matrix is exhaustive over the known tools and fail-closed over any

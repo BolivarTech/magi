@@ -4,19 +4,57 @@
 
 use crate::tools::{Tool, ToolError};
 use async_trait::async_trait;
-use magi_rs::decision::DecisionClient;
-use serde_json::Value;
+use magi_rs::decision::envelope::{render_envelope_masked, Audience};
+use magi_rs::decision::{Decision, DecisionClient, DecisionError, DecisionRequest, Questions};
+use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+/// The tool name the model sees and the headless tier lists key on.
+const TOOL_NAME: &str = "decide";
+/// Input field carrying what the decision is about.
+const STATE_FIELD: &str = "state";
+/// Input field carrying the questions.
+const QUESTIONS_FIELD: &str = "questions";
+/// Result of a cancelled call.
+const CANCELLED_MESSAGE: &str = "decide cancelled";
+
+/// What the agent reads to choose the tool (REQ-D19). Part of the product text.
+const DESCRIPTION: &str = concat!(
+    "Get a typed decision with probabilities from a small decision model, in one fast call and ",
+    "without generating any text. Use it to pick one option out of a closed set (`choice`), ",
+    "answer a yes/no question (`noul`), or score something against a rubric (`score`). Do NOT ",
+    "use it to write text, explain or reason (that is your job), nor for design or code ",
+    "reviews (use `consult`).\n",
+    "Input: `state` (a string, object or array describing the situation) and `questions` (a ",
+    "map from a name to a question). Every `choice` and `score` needs `criteria` with at least ",
+    "two options or levels, and may take `instructions`. Minimal examples: ",
+    r#"{"type":"choice","instructions":"Is this a bug or a feature?","#,
+    r#""criteria":{"bug":"a defect","feature":"a request"}}; "#,
+    r#"{"type":"noul","instructions":"Does the user ask for a refund?"}; "#,
+    r#"{"type":"score","instructions":"How urgent is it?","#,
+    r#""criteria":["Routine","Soon","Urgent"]}."#,
+    "\n",
+    "Each answer carries `confidence`, computed by this tool. If you cite a confidence, cite ",
+    "the `confidence` this tool returned and do not turn it into certainty. If the tool fails, ",
+    "say that it failed; never invent a decision."
+);
+
 /// The `decide` tool.
+///
+/// # Examples
+/// ```ignore
+/// let tool = DecideTool::new(client, true, "http://localhost:11434".into());
+/// assert_eq!(tool.name(), "decide");
+/// ```
 pub struct DecideTool {
     /// The shared decision client.
-    _client: Arc<dyn DecisionClient>,
+    client: Arc<dyn DecisionClient>,
     /// Whether an invocation needs no approval.
-    _auto_approve: bool,
+    auto_approve: bool,
     /// The redacted decision endpoint shown in the envelope.
-    _endpoint: String,
+    endpoint: String,
 }
 
 impl DecideTool {
@@ -31,38 +69,124 @@ impl DecideTool {
     /// The tool.
     pub fn new(client: Arc<dyn DecisionClient>, auto_approve: bool, endpoint: String) -> Self {
         Self {
-            _client: client,
-            _auto_approve: auto_approve,
-            _endpoint: endpoint,
+            client,
+            auto_approve,
+            endpoint,
         }
     }
+
+    /// Renders the envelope for the agent through the process auditor's exact pass.
+    ///
+    /// # Arguments
+    /// * `result` - The outcome of the decision.
+    /// * `started` - When the call began.
+    ///
+    /// # Returns
+    /// The envelope as JSON text.
+    fn render(&self, result: &Result<Decision, DecisionError>, started: Instant) -> String {
+        let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        render_envelope_masked(
+            result,
+            &self.endpoint,
+            total_ms,
+            Audience::Agent,
+            &crate::headless_runner::audited_payload,
+        )
+    }
+}
+
+/// Builds the request from the tool arguments: exactly `state` and `questions`.
+///
+/// # Arguments
+/// * `args` - The arguments the model supplied.
+///
+/// # Returns
+/// The validated request.
+///
+/// # Errors
+/// [`ToolError::InvalidArguments`] for a non-object, an unknown or missing field, or a request
+/// the protocol rejects.
+fn request_from(args: Value) -> Result<DecisionRequest, ToolError> {
+    let Value::Object(mut fields) = args else {
+        return Err(ToolError::InvalidArguments(
+            "the arguments must be a JSON object".to_string(),
+        ));
+    };
+    if let Some(unknown) = fields
+        .keys()
+        .find(|k| k.as_str() != STATE_FIELD && k.as_str() != QUESTIONS_FIELD)
+    {
+        return Err(ToolError::InvalidArguments(format!(
+            "unknown field `{unknown}`"
+        )));
+    }
+    let state = fields
+        .remove(STATE_FIELD)
+        .ok_or_else(|| ToolError::InvalidArguments("missing field `state`".to_string()))?;
+    let questions = fields
+        .remove(QUESTIONS_FIELD)
+        .ok_or_else(|| ToolError::InvalidArguments("missing field `questions`".to_string()))?;
+    let questions: Questions = serde_json::from_value(questions)
+        .map_err(|e| ToolError::InvalidArguments(format!("invalid `questions`: {e}")))?;
+    DecisionRequest::new(state, questions).map_err(|e| ToolError::InvalidArguments(e.to_string()))
 }
 
 #[async_trait]
 impl Tool for DecideTool {
     /// The tool name.
     fn name(&self) -> &str {
-        todo!()
+        TOOL_NAME
     }
 
     /// What the agent reads to choose the tool.
     fn description(&self) -> &str {
-        todo!()
+        DESCRIPTION
     }
 
-    /// The input schema.
+    /// The input schema: `state` and `questions`, both required.
     fn input_schema(&self) -> Value {
-        todo!()
+        json!({
+            "type": "object",
+            "properties": {
+                STATE_FIELD: {
+                    "type": ["string", "object", "array"],
+                    "description": "The situation the questions are about."
+                },
+                QUESTIONS_FIELD: {
+                    "type": "object",
+                    "description": "Map from a question name to a choice, noul or score question."
+                }
+            },
+            "required": [STATE_FIELD, QUESTIONS_FIELD],
+            "additionalProperties": false
+        })
     }
 
-    /// Runs one decision.
-    async fn execute(&self, _args: Value, _cancel: &CancellationToken) -> Result<Value, ToolError> {
-        todo!()
+    /// Runs one decision and returns the envelope for the agent.
+    ///
+    /// # Errors
+    /// [`ToolError::InvalidArguments`] before any call; [`ToolError::ExecutionError`] carrying
+    /// the failure envelope, or the cancellation message.
+    async fn execute(&self, args: Value, cancel: &CancellationToken) -> Result<Value, ToolError> {
+        let request = request_from(args)?;
+        let started = Instant::now();
+        let result = tokio::select! {
+            () = cancel.cancelled() => {
+                return Err(ToolError::ExecutionError(CANCELLED_MESSAGE.to_string()));
+            }
+            result = self.client.decide(&request) => result,
+        };
+        let envelope = self.render(&result, started);
+        match result {
+            Ok(_) => serde_json::from_str(&envelope)
+                .map_err(|e| ToolError::ExecutionError(format!("unreadable envelope: {e}"))),
+            Err(_) => Err(ToolError::ExecutionError(envelope)),
+        }
     }
 
     /// Whether an invocation needs approval.
     fn requires_approval(&self) -> bool {
-        todo!()
+        !self.auto_approve
     }
 }
 

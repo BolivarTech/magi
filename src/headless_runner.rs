@@ -718,7 +718,7 @@ impl RunObserver for RunTracker {
     ) {
         let record = ToolCallRecord {
             name: name.to_string(),
-            input: input.clone(),
+            input: magi_rs::decision::internal::tool_call_record_input(name, input),
             result: result.to_string(),
             ms,
             ok,
@@ -2864,6 +2864,19 @@ mod tests {
             }
         }
 
+        /// Never called: only `Tool::name()` is read from the `DecideTool` built on it.
+        struct UnusedDecisionClient;
+
+        #[async_trait::async_trait]
+        impl magi_rs::decision::DecisionClient for UnusedDecisionClient {
+            async fn decide(
+                &self,
+                _request: &magi_rs::decision::DecisionRequest,
+            ) -> Result<magi_rs::decision::Decision, magi_rs::decision::DecisionError> {
+                unimplemented!("not exercised by this test")
+            }
+        }
+
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
         let fs: Arc<dyn FileSystem> = Arc::new(RealFileSystem);
@@ -2876,6 +2889,11 @@ mod tests {
             Box::new(BashTool::new(root.clone()).expect("BashTool")),
             Box::new(ConsultTool::new(canned_magi(), false)),
             Box::new(ProjectFactTool::new(Arc::new(UnusedMemoryStore))),
+            Box::new(crate::tools::decide::DecideTool::new(
+                Arc::new(UnusedDecisionClient),
+                true,
+                String::new(),
+            )),
         ];
         let mut real_names: Vec<&str> = real_tools.iter().map(|t| t.name()).collect();
         real_names.sort_unstable();
