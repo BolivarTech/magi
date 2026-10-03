@@ -30,6 +30,12 @@ changes and the **patch** position signals backward-compatible fixes.
 - If you use the MAGI plugin's gate, its `.magi/` needs the same upgrade steps as any other workspace once the plugin pins this version.
 - Ollama 0.35 or later is needed, with `ollama pull nimble` and `ollama pull tev1`. Without them `magi-rs decide` returns an error that names the missing model.
 
+### Changed
+
+- **Help screens and messages no longer carry internal identifiers.** Every `--help` screen, every message the program prints and the published documentation read in plain terms: no requirement or decision codes, no raw Markdown marks, no notes for maintainers. `vault passwd --help` now says what the command does not protect against, and `vault set --help` lists every vault entry the product reads and what each one is for.
+- **Startup warnings in the terminal interface show only the message.** The timestamp, level, run id and source module are kept in the log file and left off the screen.
+- **One warning about memory leaving the machine, not two.** When the embedder inherits a non-local `base_url` from the root, a single warning says so and, if the memory distiller is on, says it sends batches to the same endpoint. Declaring `[embedding].base_url` is your own decision and silences it. Inheriting a local endpoint still produces only a log entry.
+
 ## [0.22.0] - 2026-10-01
 
 ### Changed
