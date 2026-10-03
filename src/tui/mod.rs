@@ -23,6 +23,8 @@ use magi_core::error::MagiError;
 use magi_core::provider::CompletionConfig;
 use magi_core::reporting::MagiReport;
 use magi_core::schema::Mode;
+use magi_rs::decision::protocol::parse_decide_input;
+use magi_rs::decision::{Answer, Decision, DecisionClient, DecisionError, DecisionRequest};
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{
     normalize_label, resolve_mode_guarded, ModeClassifier, ModeError, ModeResolution, ModeSources,
@@ -39,6 +41,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -1295,6 +1298,463 @@ fn consult_panic_notice(join_err: &tokio::task::JoinError) -> String {
     crate::agent::Agent::sanitize_text(&format!("[consult] analyze panicked: {join_err}"))
 }
 
+/// The `/decide` usage line shown for a malformed command.
+const DECIDE_USAGE: &str = concat!(
+    "Usage: /decide {request json} | /decide -i <request file> | ",
+    "/decide -q <questions file> <text> | ",
+    "/decide -i <request file> -q <questions file>"
+);
+
+/// A parsed `/decide` command (REQ-D15): where the request and the questions come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TuiDecideCommand {
+    /// The full request, pasted after the command.
+    Request(String),
+    /// The full request, in a file.
+    RequestFile(PathBuf),
+    /// A questions file plus the text that becomes the `state` (always a text state).
+    QuestionsAndText {
+        /// The file holding only the questions map.
+        questions: PathBuf,
+        /// The `state`, taken verbatim as text.
+        text: String,
+    },
+    /// A request file (state and optional model) plus a questions file.
+    RequestFileAndQuestions {
+        /// The file holding the `state` and the optional `model`.
+        request: PathBuf,
+        /// The file holding only the questions map.
+        questions: PathBuf,
+    },
+}
+
+/// Why a line did not parse as a `/decide` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TuiDecideParseError {
+    /// The line is not a `/decide` command at all.
+    NotADecideCommand,
+    /// The command has no valid shape.
+    Usage,
+    /// A flag was given without its value.
+    MissingFlagValue(&'static str),
+    /// The flag is not one `/decide` accepts.
+    UnsupportedFlag(String),
+}
+
+/// Flag naming the request file of `/decide`.
+const DECIDE_FLAG_REQUEST: &str = "-i";
+/// Flag naming the questions file of `/decide`.
+const DECIDE_FLAG_QUESTIONS: &str = "-q";
+
+/// Splits the first whitespace-delimited token off `text`.
+///
+/// Complexity: O(len of the token).
+///
+/// # Arguments
+/// * `text` - The text to split; leading whitespace is skipped.
+///
+/// # Returns
+/// The token and what follows it (without the separating whitespace character), or `None`
+/// when `text` holds no token.
+fn next_token(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.split_once(char::is_whitespace).unwrap_or((text, "")))
+}
+
+/// Reads the value of `flag` from the front of `rest`.
+///
+/// # Arguments
+/// * `flag` - The flag whose value is read.
+/// * `rest` - The text after the flag.
+///
+/// # Returns
+/// The value as a path (the token as typed, no slash interpretation) and what follows it.
+///
+/// # Errors
+/// [`TuiDecideParseError::MissingFlagValue`] when `rest` holds no token.
+fn flag_value<'a>(
+    flag: &'static str,
+    rest: &'a str,
+) -> Result<(PathBuf, &'a str), TuiDecideParseError> {
+    let (value, after) = next_token(rest).ok_or(TuiDecideParseError::MissingFlagValue(flag))?;
+    Ok((PathBuf::from(value), after))
+}
+
+/// Finishes a command that names both files: nothing may follow the second value.
+///
+/// # Arguments
+/// * `request` - The request file.
+/// * `questions` - The questions file.
+/// * `tail` - What follows the second value.
+///
+/// # Returns
+/// The two-file command.
+///
+/// # Errors
+/// [`TuiDecideParseError::Usage`] when `tail` is not blank.
+fn both_files(
+    request: PathBuf,
+    questions: PathBuf,
+    tail: &str,
+) -> Result<TuiDecideCommand, TuiDecideParseError> {
+    if tail.trim().is_empty() {
+        Ok(TuiDecideCommand::RequestFileAndQuestions { request, questions })
+    } else {
+        Err(TuiDecideParseError::Usage)
+    }
+}
+
+/// Parses a trimmed input line as a `/decide` command (REQ-D15).
+///
+/// Four shapes: `/decide {json}`, `/decide -i <file>`, `/decide -q <file> <text>` and
+/// `/decide -i <file> -q <file>` (either order). With `-q` the text is always a text state.
+/// A path is the token after its flag, as typed.
+///
+/// Complexity: O(len of the line).
+///
+/// # Arguments
+/// * `trimmed` - The input line, already trimmed.
+///
+/// # Returns
+/// The parsed command.
+///
+/// # Errors
+/// [`TuiDecideParseError`] naming why the line is not a valid `/decide` command.
+pub(crate) fn parse_tui_decide(trimmed: &str) -> Result<TuiDecideCommand, TuiDecideParseError> {
+    let rest = trimmed
+        .strip_prefix("/decide")
+        .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+        .ok_or(TuiDecideParseError::NotADecideCommand)?
+        .trim_start();
+    if rest.starts_with('{') {
+        return Ok(TuiDecideCommand::Request(rest.to_string()));
+    }
+    let (first, after) = next_token(rest).ok_or(TuiDecideParseError::Usage)?;
+    match first {
+        DECIDE_FLAG_REQUEST => {
+            let (request, after) = flag_value(DECIDE_FLAG_REQUEST, after)?;
+            match next_token(after) {
+                Some((DECIDE_FLAG_QUESTIONS, tail)) => {
+                    let (questions, tail) = flag_value(DECIDE_FLAG_QUESTIONS, tail)?;
+                    both_files(request, questions, tail)
+                }
+                None => Ok(TuiDecideCommand::RequestFile(request)),
+                Some(_) => Err(TuiDecideParseError::Usage),
+            }
+        }
+        DECIDE_FLAG_QUESTIONS => {
+            let (questions, after) = flag_value(DECIDE_FLAG_QUESTIONS, after)?;
+            match next_token(after) {
+                Some((DECIDE_FLAG_REQUEST, tail)) => {
+                    let (request, tail) = flag_value(DECIDE_FLAG_REQUEST, tail)?;
+                    both_files(request, questions, tail)
+                }
+                Some(_) => Ok(TuiDecideCommand::QuestionsAndText {
+                    questions,
+                    text: after.trim().to_string(),
+                }),
+                None => Err(TuiDecideParseError::Usage),
+            }
+        }
+        flag if flag.starts_with('-') => {
+            Err(TuiDecideParseError::UnsupportedFlag(flag.to_string()))
+        }
+        _ => Err(TuiDecideParseError::Usage),
+    }
+}
+
+/// The transcript line for a `/decide` line that did not parse.
+///
+/// # Arguments
+/// * `error` - Why the line did not parse.
+///
+/// # Returns
+/// The text to push to the transcript.
+fn decide_parse_error_message(error: &TuiDecideParseError) -> String {
+    match error {
+        TuiDecideParseError::NotADecideCommand | TuiDecideParseError::Usage => {
+            DECIDE_USAGE.to_string()
+        }
+        TuiDecideParseError::MissingFlagValue(flag) => {
+            format!("System: {flag} needs a file path. {DECIDE_USAGE}")
+        }
+        TuiDecideParseError::UnsupportedFlag(flag) => {
+            format!("System: unsupported flag {flag:?} for /decide. {DECIDE_USAGE}")
+        }
+    }
+}
+
+/// Reads `path` through the injected reader.
+///
+/// # Arguments
+/// * `read` - The injected file reader.
+/// * `path` - The file to read.
+///
+/// # Returns
+/// The file's bytes.
+///
+/// # Errors
+/// [`DecisionError::InvalidInput`] naming the path (the OS error text is not repeated).
+fn read_decide_file(
+    read: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+    path: &Path,
+) -> Result<Vec<u8>, DecisionError> {
+    read(path).map_err(|_| DecisionError::InvalidInput {
+        reason: format!("could not read {}", path.display()),
+    })
+}
+
+/// Builds the validated request of a `/decide` command (REQ-D15, REQ-D23).
+///
+/// # Arguments
+/// * `cmd` - The parsed command.
+/// * `read` - The injected file reader, so tests do not touch the disk.
+///
+/// # Returns
+/// The request.
+///
+/// # Errors
+/// [`DecisionError::InvalidInput`] for an unreadable file or an invalid request.
+pub(crate) fn tui_decide_request(
+    cmd: &TuiDecideCommand,
+    read: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<DecisionRequest, DecisionError> {
+    match cmd {
+        TuiDecideCommand::Request(text) => parse_decide_input(text.as_bytes(), None),
+        TuiDecideCommand::RequestFile(path) => {
+            parse_decide_input(&read_decide_file(read, path)?, None)
+        }
+        TuiDecideCommand::QuestionsAndText { questions, text } => {
+            let questions = read_decide_file(read, questions)?;
+            let state = serde_json::json!({ "state": text }).to_string();
+            parse_decide_input(state.as_bytes(), Some(&questions))
+        }
+        TuiDecideCommand::RequestFileAndQuestions { request, questions } => {
+            let request = read_decide_file(read, request)?;
+            let questions = read_decide_file(read, questions)?;
+            parse_decide_input(&request, Some(&questions))
+        }
+    }
+}
+
+/// Runs a `/decide` command and renders the reply (REQ-D15, REQ-D20).
+///
+/// A failure is reported as an error and never replaced by an LLM answer.
+///
+/// # Arguments
+/// * `cmd` - The parsed command.
+/// * `client` - The session's decision client, if one could be built.
+/// * `read` - The injected file reader (`Sync`: the future lives inside `tokio::spawn`).
+///
+/// # Returns
+/// [`AgentResponse::Text`] with the table, or [`AgentResponse::Error`] with the error table.
+pub(crate) async fn tui_decide_reply(
+    cmd: &TuiDecideCommand,
+    client: Option<&dyn DecisionClient>,
+    read: &(dyn Fn(&Path) -> std::io::Result<Vec<u8>> + Sync),
+) -> AgentResponse {
+    let Some(client) = client else {
+        let unavailable = DecisionError::ClientUnavailable {
+            reason: "the decision endpoint or its credentials are not set up; see the run log"
+                .to_string(),
+        };
+        return AgentResponse::Error(render_decision_table(&Err(unavailable)));
+    };
+    let result = match tui_decide_request(cmd, read) {
+        Ok(request) => client.decide(&request).await,
+        Err(e) => Err(e),
+    };
+    let table = render_decision_table(&result);
+    match result {
+        Ok(_) => AgentResponse::Text(table),
+        Err(_) => AgentResponse::Error(table),
+    }
+}
+
+/// Masks a provider-sourced string: URL credentials first, then secret-shaped tokens.
+///
+/// # Arguments
+/// * `text` - Text that came from the provider.
+///
+/// # Returns
+/// The text with secrets masked.
+fn mask_foreign(text: &str) -> String {
+    magi_rs::headless::output::redact_secret_patterns(
+        magi_rs::redact::redact_foreign_text(text).as_str(),
+    )
+}
+
+/// The decimals shown for probabilities and confidences in the table.
+const DECISION_TABLE_DECIMALS: usize = 2;
+
+/// One table row for an answer.
+///
+/// # Arguments
+/// * `name` - The question name.
+/// * `answer` - Its answer.
+///
+/// # Returns
+/// The unmasked row text; the caller masks it.
+fn answer_row(name: &str, answer: &Answer) -> String {
+    let d = DECISION_TABLE_DECIMALS;
+    match answer {
+        Answer::Choice {
+            choice, confidence, ..
+        } => format!("{name}: {choice} (confidence {confidence:.d$})"),
+        Answer::Noul { noul, confidence } => {
+            let verdict = if *noul >= magi_rs::decision::internal::NOUL_YES_THRESHOLD {
+                "yes"
+            } else {
+                "no"
+            };
+            format!("{name}: {verdict} (probability {noul:.d$}, confidence {confidence:.d$})")
+        }
+        Answer::Score {
+            score,
+            legend,
+            probabilities,
+            confidence,
+            ..
+        } => {
+            let top = probabilities
+                .iter()
+                .fold(None::<(&String, f64)>, |best, (level, p)| match best {
+                    Some((_, bp)) if bp >= *p => best,
+                    _ => Some((level, *p)),
+                })
+                .map(|(level, _)| level);
+            let level = top.map_or("?", |l| legend.get(l).unwrap_or(l).as_str());
+            format!("{name}: {level} (score {score:.d$}, confidence {confidence:.d$})")
+        }
+    }
+}
+
+/// Renders a decision result as a readable table for the transcript (REQ-D15).
+///
+/// One row per question and the model that answered; an error shows its `kind`, its message
+/// (user audience) and every hop as `model: cause`. Provider-sourced text is masked first and
+/// the whole table is stripped of control characters (REQ-D11).
+///
+/// Complexity: O(questions + attempts) in the size of the result.
+///
+/// # Arguments
+/// * `result` - The outcome of the decision.
+///
+/// # Returns
+/// The table text.
+pub(crate) fn render_decision_table(result: &Result<Decision, DecisionError>) -> String {
+    let table = match result {
+        Ok(decision) => {
+            let mut lines = vec![format!("Decision from {}", mask_foreign(&decision.model))];
+            lines.extend(
+                decision
+                    .answers
+                    .iter()
+                    .map(|(name, answer)| mask_foreign(&answer_row(name, answer))),
+            );
+            lines.join("\n")
+        }
+        Err(error) => render_decision_error(result, error),
+    };
+    crate::agent::Agent::sanitize_text(&table)
+}
+
+/// Reads a string member of a JSON object, empty when absent.
+///
+/// # Arguments
+/// * `value` - The JSON object.
+/// * `key` - The member name.
+///
+/// # Returns
+/// The member's text, or an empty string.
+fn json_text(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// One `model: cause` line of the error table.
+///
+/// # Arguments
+/// * `hop` - One element of the envelope's `chain`.
+///
+/// # Returns
+/// The line for that attempt.
+fn hop_line(hop: &serde_json::Value) -> String {
+    let model = json_text(hop, "model");
+    match json_text(hop, "outcome").as_str() {
+        "failed" => {
+            let detail = json_text(hop, "detail");
+            let cause = json_text(hop, "cause");
+            if detail.is_empty() {
+                format!("  {model}: {cause}")
+            } else {
+                format!("  {model}: {cause} ({detail})")
+            }
+        }
+        "low_confidence" => {
+            let number = |key: &str| {
+                hop.get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or_default()
+            };
+            format!(
+                "  {model}: low_confidence {:.d$} < {:.d$}",
+                number("confidence"),
+                number("min_confidence"),
+                d = DECISION_TABLE_DECIMALS
+            )
+        }
+        other => format!("  {model}: {other}"),
+    }
+}
+
+/// The error half of [`render_decision_table`], built from the same envelope the CLI prints.
+///
+/// # Arguments
+/// * `result` - The failed outcome (rendered through the envelope).
+/// * `error` - The same failure, for the kind.
+///
+/// # Returns
+/// `kind: message` followed by one line per hop.
+fn render_decision_error(
+    result: &Result<Decision, DecisionError>,
+    error: &DecisionError,
+) -> String {
+    let envelope: serde_json::Value =
+        serde_json::from_str(&magi_rs::decision::envelope::render_envelope_masked(
+            result,
+            "",
+            0,
+            magi_rs::decision::envelope::Audience::User,
+            &mask_foreign,
+        ))
+        .unwrap_or_default();
+    let kind = serde_json::to_value(error.kind())
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let message = envelope
+        .get("error")
+        .map(|e| json_text(e, "message"))
+        .unwrap_or_default();
+    let mut lines = vec![format!("Decision failed: {kind}: {message}")];
+    lines.extend(
+        envelope
+            .get("chain")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(hop_line),
+    );
+    lines.join("\n")
+}
+
 /// Braille spinner frames for the "thinking" activity indicator.
 pub(crate) const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -1349,6 +1809,8 @@ pub enum UiEvent {
         query: String,
         mode: Option<Mode>,
     },
+    /// A typed decision from a System One model (REQ-D15).
+    Decide(TuiDecideCommand),
     Quit,
 }
 
@@ -1785,6 +2247,8 @@ pub struct TuiMagiRuntimeConfig {
     /// `consult` tool (`register_consult_tool_if_available`) and the post-`/login` rebuild: one
     /// assessment for the whole session, never re-derived per surface.
     pub clock_coverage: Arc<crate::tools::consult::ClockCoverageAnnouncer>,
+    /// The session's decision client for `/decide` (REQ-D15), `None` when it could not be built.
+    pub decision_client: Option<Arc<dyn DecisionClient>>,
 }
 
 /// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
@@ -2038,6 +2502,7 @@ pub async fn run_tui_ext(
         max_query_bytes,
         tool_result_cap,
         clock_coverage,
+        decision_client,
     } = magi_runtime;
 
     let original_hook = std::panic::take_hook();
@@ -2326,6 +2791,12 @@ pub async fn run_tui_ext(
                                 .await;
                         }
                     }
+                }
+                UiEvent::Decide(cmd) => {
+                    let reply =
+                        tui_decide_reply(&cmd, decision_client.as_deref(), &|p| std::fs::read(p))
+                            .await;
+                    let _ = response_tx.send(reply).await;
                 }
                 UiEvent::Login => {
                     let oauth = crate::services::oauth::OAuthService::new();
@@ -3149,6 +3620,18 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             continue;
                                         }
                                     }
+                                    match parse_tui_decide(trimmed) {
+                                        Ok(cmd) => {
+                                            app.push_message(format!("User: {trimmed}"));
+                                            let _ = app.event_tx.send(UiEvent::Decide(cmd)).await;
+                                            continue;
+                                        }
+                                        Err(TuiDecideParseError::NotADecideCommand) => {}
+                                        Err(e) => {
+                                            app.push_message(decide_parse_error_message(&e));
+                                            continue;
+                                        }
+                                    }
                                     if parse_toggle_show_thinking(trimmed) {
                                         let verbose = app.toggle_show_thinking();
                                         let mode = if verbose {
@@ -3200,6 +3683,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             );
                                             app.push_message(
                                                 "  /consult <q>    - Force MAGI multi-perspective analysis (3 model calls)"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /decide <json>  - Typed decision with probabilities (or -i <file>, -q <file> <text>)"
                                                     .to_string(),
                                             );
                                             app.push_message(
@@ -7141,6 +7628,280 @@ mod tests {
         assert!(
             notice.contains("malicious") && notice.contains("escape") && notice.contains("payload"),
             "readable content must survive sanitization: {notice}"
+        );
+    }
+
+    fn fs_with(
+        files: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&Path) -> std::io::Result<Vec<u8>> {
+        move |p: &Path| {
+            files
+                .iter()
+                .find(|(name, _)| Path::new(name) == p)
+                .map(|(_, body)| body.as_bytes().to_vec())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+        }
+    }
+
+    const Q_FILE: &str = r#"{"kind":{"type":"choice","instructions":"Classify","criteria":{"bug":"a defect","feature":"a request"}}}"#;
+
+    #[test]
+    fn the_four_decide_forms_parse_to_their_commands() {
+        assert_eq!(
+            super::parse_tui_decide(r#"/decide {"state":"x","questions":{}}"#),
+            Ok(super::TuiDecideCommand::Request(
+                r#"{"state":"x","questions":{}}"#.into()
+            ))
+        );
+        assert_eq!(
+            super::parse_tui_decide("/decide -i req.json"),
+            Ok(super::TuiDecideCommand::RequestFile("req.json".into()))
+        );
+        assert_eq!(
+            super::parse_tui_decide("/decide -q q.json is this a bug?"),
+            Ok(super::TuiDecideCommand::QuestionsAndText {
+                questions: "q.json".into(),
+                text: "is this a bug?".into()
+            })
+        );
+        assert_eq!(
+            super::parse_tui_decide("/decide -i r.json -q q.json"),
+            Ok(super::TuiDecideCommand::RequestFileAndQuestions {
+                request: "r.json".into(),
+                questions: "q.json".into()
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_decide_commands_are_rejected_with_their_reason() {
+        assert_eq!(
+            super::parse_tui_decide("/decide"),
+            Err(super::TuiDecideParseError::Usage)
+        );
+        assert_eq!(
+            super::parse_tui_decide("/decide -q q.json"),
+            Err(super::TuiDecideParseError::Usage)
+        );
+        assert_eq!(
+            super::parse_tui_decide("/decide -q"),
+            Err(super::TuiDecideParseError::MissingFlagValue("-q"))
+        );
+        assert_eq!(
+            super::parse_tui_decide("/decide -z x"),
+            Err(super::TuiDecideParseError::UnsupportedFlag("-z".into()))
+        );
+        assert_eq!(
+            super::parse_tui_decide("/decidex"),
+            Err(super::TuiDecideParseError::NotADecideCommand)
+        );
+    }
+
+    /// RF3: a Windows path is the token after its flag, backslashes untouched.
+    #[test]
+    fn a_windows_path_is_taken_verbatim() {
+        assert_eq!(
+            super::parse_tui_decide(r"/decide -i C:\tmp\req.json"),
+            Ok(super::TuiDecideCommand::RequestFile(
+                r"C:\tmp\req.json".into()
+            ))
+        );
+    }
+
+    /// With -q the text is always a text state, even when it looks like JSON.
+    #[test]
+    fn with_questions_the_text_is_a_text_state_even_if_it_looks_like_json() {
+        let cmd = super::parse_tui_decide(r#"/decide -q q.json {"looks":"json"}"#).expect("parses");
+        let req = super::tui_decide_request(&cmd, &fs_with(&[("q.json", Q_FILE)])).expect("valid");
+        assert_eq!(req.state(), &serde_json::json!(r#"{"looks":"json"}"#));
+    }
+
+    /// S25: -q with a request that also carries questions is an error.
+    #[test]
+    fn questions_in_both_the_request_file_and_the_questions_file_are_rejected() {
+        let cmd = super::TuiDecideCommand::RequestFileAndQuestions {
+            request: "r.json".into(),
+            questions: "q.json".into(),
+        };
+        let files: &'static [(&str, &str)] = &[
+            (
+                "r.json",
+                r#"{"state":"x","questions":{"k":{"type":"noul"}}}"#,
+            ),
+            ("q.json", Q_FILE),
+        ];
+        assert!(matches!(
+            super::tui_decide_request(&cmd, &fs_with(files)),
+            Err(magi_rs::decision::DecisionError::InvalidInput { .. })
+        ));
+    }
+
+    /// RF5: a full request passed as the questions file is rejected, naming `state`.
+    #[test]
+    fn a_full_request_passed_as_a_questions_file_is_rejected() {
+        let cmd = super::TuiDecideCommand::QuestionsAndText {
+            questions: "q.json".into(),
+            text: "x".into(),
+        };
+        // The map is read in key order, so a file that also carried `questions` would be
+        // reported under that key first; `state` alone makes the culprit the one named.
+        let files: &'static [(&str, &str)] = &[("q.json", r#"{"state":"x"}"#)];
+        match super::tui_decide_request(&cmd, &fs_with(files)) {
+            Err(magi_rs::decision::DecisionError::InvalidInput { reason }) => {
+                assert!(reason.contains("state"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_file_is_invalid_input_naming_it() {
+        let cmd = super::TuiDecideCommand::RequestFile("missing.json".into());
+        match super::tui_decide_request(&cmd, &fs_with(&[])) {
+            Err(magi_rs::decision::DecisionError::InvalidInput { reason }) => {
+                assert!(reason.contains("missing.json"), "{reason}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// PM-S-4: a pasted multi-line request stays one input, is not submitted, and parses.
+    #[test]
+    fn a_pasted_multi_line_request_stays_one_input_and_parses() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (_response_tx, response_rx) = mpsc::channel(4);
+        let (_approval_tx, approval_rx) = mpsc::channel(4);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        app.insert_str("/decide {\n  \"state\": \"x\",\n  \"questions\": {\"q\": {\"type\": \"noul\", \"instructions\": \"?\"}}\n}");
+        assert!(event_rx.try_recv().is_err(), "pasting submits nothing");
+        let cmd = super::parse_tui_decide(app.input.trim()).expect("one command");
+        assert!(super::tui_decide_request(&cmd, &fs_with(&[])).is_ok());
+    }
+
+    fn decision_ok() -> Result<magi_rs::decision::Decision, magi_rs::decision::DecisionError> {
+        use magi_rs::decision::Answer;
+        let mut answers = std::collections::BTreeMap::new();
+        answers.insert(
+            "kind".to_string(),
+            Answer::Choice {
+                choice: "bug".into(),
+                probabilities: std::collections::BTreeMap::from([
+                    ("bug".to_string(), 0.85),
+                    ("feature".to_string(), 0.15),
+                ]),
+                confidence: 0.7,
+                provider_confidence: None,
+            },
+        );
+        answers.insert(
+            "today".to_string(),
+            Answer::Noul {
+                noul: 0.8,
+                confidence: 0.6,
+            },
+        );
+        answers.insert(
+            "urgency".to_string(),
+            Answer::Score {
+                score: 1.9,
+                legend: std::collections::BTreeMap::from([
+                    ("0".to_string(), "Routine".to_string()),
+                    ("1".to_string(), "Soon".to_string()),
+                    ("2".to_string(), "Urgent".to_string()),
+                ]),
+                probabilities: std::collections::BTreeMap::from([
+                    ("0".to_string(), 0.05),
+                    ("1".to_string(), 0.05),
+                    ("2".to_string(), 0.9),
+                ]),
+                confidence: 0.85,
+                provider_confidence: None,
+            },
+        );
+        Ok(magi_rs::decision::Decision {
+            model: "nimble".into(),
+            answers,
+            trace: Default::default(),
+        })
+    }
+
+    #[test]
+    fn the_table_shows_each_answer_with_magi_confidence_and_the_model() {
+        let t = super::render_decision_table(&decision_ok());
+        for needle in [
+            "kind", "bug", "0.70", "today", "yes", "urgency", "Urgent", "nimble",
+        ] {
+            assert!(t.contains(needle), "{needle}:\n{t}");
+        }
+        assert!(!t.contains("schema_version"), "a table, not the raw JSON");
+    }
+
+    #[test]
+    fn an_error_table_shows_the_kind_the_message_and_every_hop() {
+        use magi_rs::decision::{Attempt, AttemptOutcome, Cause, DecisionError, Trace, Usage};
+        let r = Err(DecisionError::ChainExhausted {
+            trace: Trace {
+                attempts: vec![Attempt {
+                    model: "nimble".into(),
+                    outcome: AttemptOutcome::Failed {
+                        cause: Cause::Timeout,
+                        detail: None,
+                    },
+                    usage: Usage::default(),
+                }],
+                usage: Usage::default(),
+            },
+        });
+        let t = super::render_decision_table(&r);
+        for needle in ["decision_unavailable", "chain exhausted", "nimble: timeout"] {
+            assert!(t.contains(needle), "{needle}:\n{t}");
+        }
+    }
+
+    /// CP2 MS2 r1 (S22/REQ-D11): provider-sourced text in the table (legend names) is sanitized and
+    /// redacted before it reaches the screen. Mutation-verified (T8 Paso 4).
+    #[test]
+    fn the_table_never_shows_provider_secrets_or_control_characters() {
+        use magi_rs::decision::Answer;
+        let planted = "sk-ant-api03-planted0123456789abcdefghij"; // allow-secret-scan
+        let mut answers = std::collections::BTreeMap::new();
+        answers.insert(
+            "urgency".to_string(),
+            Answer::Score {
+                score: 0.0,
+                legend: std::collections::BTreeMap::from([
+                    ("0".to_string(), format!("\u{1b}[31m{planted}")),
+                    ("1".to_string(), "Soon".to_string()),
+                ]),
+                probabilities: std::collections::BTreeMap::from([
+                    ("0".to_string(), 1.0),
+                    ("1".to_string(), 0.0),
+                ]),
+                confidence: 1.0,
+                provider_confidence: None,
+            },
+        );
+        let t = super::render_decision_table(&Ok(magi_rs::decision::Decision {
+            model: "nimble".into(),
+            answers,
+            trace: Default::default(),
+        }));
+        assert!(!t.contains(planted), "{t}");
+        assert!(
+            !t.contains('\u{1b}'),
+            "no terminal control sequence reaches the screen: {t}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_client_decide_answers_with_an_error() {
+        let cmd = super::TuiDecideCommand::Request(
+            r#"{"state":"x","questions":{"q":{"type":"noul","instructions":"?"}}}"#.into(),
+        );
+        let reply = super::tui_decide_reply(&cmd, None, &fs_with(&[])).await;
+        assert!(
+            matches!(reply, AgentResponse::Error(ref m) if m.contains("could not be built")),
+            "{reply:?}"
         );
     }
 

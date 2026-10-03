@@ -2214,6 +2214,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let tui_distill_endpoint = tui_decision_endpoint.clone();
     let tui_tool_decision = tui_decision.clone();
     let tui_tool_endpoint = tui_decision_endpoint.clone();
+    let tui_slash_decision = tui_decision.clone();
     let tui_mode_classifier = tui_mode_classifier_wiring(
         provider.clone(),
         Arc::clone(&tui_notices),
@@ -2339,6 +2340,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             max_query_bytes: magi_config.effective_max_query_bytes(),
             tool_result_cap: magi_config.effective_tool_result_cap(),
             clock_coverage: tui_clock_coverage_announcer,
+            decision_client: tui_slash_decision,
         },
         // The chat loop's SELF-ROUTED consults (REQ-A20/A07d) — a different surface from the
         // explicit `/consult` above, which is what `TuiMagiRuntimeConfig` serves.
