@@ -225,7 +225,7 @@ impl SystemOneClient {
             .await
             .unwrap_or_default();
         let body = String::from_utf8_lossy(&bytes);
-        match status {
+        let failure = match status {
             401 | 403 => Failure::http(Cause::Unauthorized, None, status),
             400 | 413 | 422 => {
                 let mut detail =
@@ -264,6 +264,11 @@ impl SystemOneClient {
                 Some(format!("unexpected HTTP status {status}")),
                 status,
             ),
+        };
+        // A spent attempt still counts when its error body reports consumption.
+        Failure {
+            usage: salvage_usage(&bytes),
+            ..failure
         }
     }
 }
@@ -346,6 +351,14 @@ impl SystemOneClient {
             AttemptOutcome::Failed { cause, .. } => ("failed", Some(cause.as_str())),
             AttemptOutcome::LowConfidence { .. } => ("low_confidence", None),
         };
+        let (confidence, min_confidence) = match &attempt.outcome {
+            AttemptOutcome::LowConfidence {
+                confidence,
+                min_confidence,
+                ..
+            } => (Some(*confidence), Some(*min_confidence)),
+            _ => (None, None),
+        };
         let endpoint = self.endpoint_display();
         tracing::event!(
             target: DECISION_LOG_TARGET,
@@ -353,6 +366,8 @@ impl SystemOneClient {
             model = attempt.model.as_str(),
             outcome = outcome,
             cause = cause,
+            confidence = confidence,
+            min_confidence = min_confidence,
             endpoint = endpoint.as_str(),
             latency_ms = latency_ms,
             input_tokens = attempt.usage.input_tokens,
