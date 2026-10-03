@@ -46,7 +46,7 @@ fn main() {
     let elapsed = start.elapsed();
     let per_decrypt_us = elapsed.as_micros() as f64 / CORPUS_SIZE as f64;
 
-    println!("=== ConcatenatedFec performance baseline (REQ-V36) ===");
+    println!("=== ConcatenatedFec performance baseline ===");
     println!("corpus:            {CORPUS_SIZE} records x {MESSAGE_LEN} B plaintext");
     println!("plaintext total:   {plain_bytes} B");
     println!("encoded total:     {encoded_bytes} B");

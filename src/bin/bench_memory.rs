@@ -266,7 +266,7 @@ fn main() {
     const CHARS_PER_TOKEN: f64 = 4.0;
     const SEED: u64 = 42;
 
-    println!("bench_memory: tiered memory benchmark harness (T14, D-08)");
+    println!("bench_memory: tiered memory benchmark harness");
     println!(
         "Dataset   : {} facts, {} probes (seed={})",
         FACTS.len(),
@@ -293,7 +293,7 @@ fn main() {
 
     // ── SC-29 headline ────────────────────────────────────────────────────────
     println!("╔═══════════════════════════════════════════════════════════════╗");
-    println!("║             SC-29 HEADLINE — bench_memory results            ║");
+    println!("║                HEADLINE — bench_memory results               ║");
     println!("╠══════════════════════════╦════════════╦══════════════════════╣");
     println!("║ Metric                   ║ load_all   ║ selective            ║");
     println!("╠══════════════════════════╬════════════╬══════════════════════╣");
@@ -321,7 +321,7 @@ fn main() {
     let lower_staleness = sel.staleness_rate <= la.staleness_rate;
 
     println!(
-        "║ selective recall ≥ load_all: {} (SC-29)                       ║",
+        "║ selective recall ≥ load_all: {}                               ║",
         if selective_ge { "PASS ✓" } else { "FAIL ✗" }
     );
     println!(
@@ -367,7 +367,7 @@ fn main() {
     // ── Exit code ────────────────────────────────────────────────────────────
     // Non-zero exit if SC-29 headline fails (CI-friendly).
     if !selective_ge || !bounded_window || !lower_staleness {
-        eprintln!("ERROR: SC-29 headline assertions failed — check the report.");
+        eprintln!("ERROR: headline assertions failed — check the report.");
         std::process::exit(1);
     }
 }

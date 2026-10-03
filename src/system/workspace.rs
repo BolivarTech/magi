@@ -492,7 +492,7 @@ fn rename_no_replace(tmp: &Path, final_dir: &Path) -> Result<(), HeadlessError> 
                 Err(HeadlessError::Io(format!(
                     "atomic no-replace directory creation is unsupported by this \
                      kernel/filesystem (renameat2 RENAME_NOREPLACE: {errno:?}); \
-                     refusing to create .magi/ non-atomically (REQ-H07)"
+                     refusing to create .magi/ non-atomically"
                 )))
             } else {
                 Err(HeadlessError::Io(format!("rename failed: {errno:?}")))

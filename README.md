@@ -317,7 +317,7 @@ always the first physical key, followed (in this exact order) by `response`,
 `model`, `provider`, `usage`, `timings`, `stop_reason`, `tool_calls[]`,
 `transcript[]`, `consult`, `applied_caps`, `error`.
 
-**Consumer contract while `magi-rs` is `0.x` (REQ-A08b):** `schema_version` does
+**Consumer contract while `magi-rs` is `0.x`:** `schema_version` does
 **not** move when fields are added; the crate's own `0.x` version is the
 compatibility signal instead. A consumer of this JSON **must tolerate new
 fields and pin the crate version**; do not treat an unchanged `schema_version`
@@ -579,7 +579,7 @@ tool output**. A `view` of a file that contains a token, or a `bash` command tha
 prints an environment secret, can surface in that echo. Magi guarantees only that
 **its own** managed secrets (the passphrase and stored vault values) never appear;
 it **cannot** guarantee the output is free of *non-vault* secrets. Treat the rich
-output as sensitive (REQ-H15).
+output as sensitive.
 
 > **Passphrase hygiene:** prefer `MAGI_PASSPHRASE` or the interactive prompt over
 > `-p <passphrase>`; a value on `argv` is visible via `ps` / `/proc/<pid>/cmdline`
@@ -685,6 +685,12 @@ Every one of them accepts `-w <dir>` to operate on a workspace other than the cu
 directory, on either side of the subcommand (`vault -w <dir> ls` and `vault ls -w <dir>`
 are the same command).
 
+**What `vault passwd` does not do.** It changes the passphrase, but the stored data is not
+re-encrypted: the key that encrypts it stays the same, only the passphrase that unlocks that key
+changes. That protects you if the old passphrase leaks. It does not protect you if someone already
+took a copy of the data key. `magi-rs vault set --help` lists every entry the product reads from the
+vault and what each one is for.
+
 ### Default backend — Ollama-first (v0.6.0, BREAKING)
 
 > **Breaking change in 0.6.0.** With **no `magi.toml` and no env vars**, Magi now
@@ -694,7 +700,7 @@ are the same command).
 > no-config default was Anthropic.
 >
 > Melchior was `qwen3.5:397b-cloud` through 0.19.0, until Ollama retired that tag. Balthasar was
-> `gpt-oss:120b-cloud` through 0.20.0, until measurement (REQ-DEF-1) moved it onto the principal
+> `gpt-oss:120b-cloud` through 0.20.0, until measurement moved it onto the principal
 > model, which now also holds that seat.
 
 **To use Anthropic instead**, set `provider = "anthropic"` in `magi.toml` **or**
@@ -1064,7 +1070,7 @@ src/
   lib.rs               -- library root (pub mod vault, magi, redact, ...) so fuzz / coverage targets can link
   config.rs            -- MagiConfig (magi.toml load + provider/model resolution); config/migrate.rs submodule
   defaults.rs          -- single source of truth for all built-in default literals
-  redact.rs            -- URL userinfo redaction by position (REQ-A16), never by content
+  redact.rs            -- URL userinfo redaction by position, never by content
   notices.rs           -- startup notices: per-site level, split by the mouth it reaches
   magi/                -- MAGI trio subsystem: mode resolution, complexity gate, probe (lib, pure)
     mod.rs             -- shared timeout-scale / gate / probe constants
@@ -1077,12 +1083,12 @@ src/
   agent/
     mod.rs             -- Agent orchestrator: multi-turn tool loop + approval gate
     provider.rs        -- Provider trait; AnthropicProvider (SSE) + OpenAiCompatibleProvider + StaticProvider
-    mode_classifier.rs -- mode classification over the main provider (bin; REQ-A07c)
+    mode_classifier.rs -- mode classification over the main provider (bin)
   memory/
     mod.rs             -- subsystem facade: MemoryKind, public re-exports (recall, assemble_selective)
     store.rs           -- SqliteVectorStore: encrypted vector store (memories table)
     embedding.rs       -- EmbeddingProvider trait + OpenAiCompatibleEmbedder
-    retrieval.rs       -- recall() public API (D-13/B1 seam) + composite reranker
+    retrieval.rs       -- recall() public API + composite reranker
     decay.rs           -- strength model, run_forgetting, enforce_size_cap
     context.rs         -- assemble_selective: token-budget context assembler
     profile.rs         -- preference distiller + render_profile (always-injected)
@@ -1094,7 +1100,7 @@ src/
     error.rs           -- MemoryError + EmbeddingError (thiserror)
   bin/
     bench_memory.rs    -- two-arm benchmark binary (cargo run --bin bench_memory)
-    bench_vault_crypto.rs -- FEC/decrypt performance baseline (REQ-V36)
+    bench_vault_crypto.rs -- FEC/decrypt performance baseline
   tools/
     mod.rs             -- Tool trait + ToolError + requires_approval()
     ls.rs read.rs write.rs grep.rs bash.rs knowledge.rs consult.rs

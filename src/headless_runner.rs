@@ -82,8 +82,8 @@ const NO_RESERVATION: usize = 0;
 /// say that the deadline is structurally too short, so a later `error.kind = timeout` can be
 /// attributed to the configuration instead of to the model.
 const TIMEOUT_BELOW_FORMULA_LOG: &str =
-    "the run deadline is below the minimum a consult with its schema retry needs \
-     (REQ-A04); a forced or proactive consult may not complete";
+    "the run deadline is below the minimum a consult with its schema retry needs; \
+     a forced or proactive consult may not complete";
 
 /// What every operator-facing notice is prefixed with on stderr.
 ///

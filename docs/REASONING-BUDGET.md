@@ -73,7 +73,7 @@ The output cap sent on every completion attempt, per seat (billed as completion 
 or not the model used the budget to produce a usable answer). Left absent, magi-rs sends its own
 declared value, `65536` as of v0.21.0 (`DECLARED_COMPLETION_CAP`; magi-core's own crate default
 moved to `32768` in 4.2.0, but magi-rs still sets this field explicitly on every request, so the
-crate default is never inherited). The value comes from replay B of REQ-EE-6: against the E-E
+crate default is never inherited). The value comes from replay B of the reasoning-budget study: against the E-E
 bundle, the slowest titular seat, `glm-5.3`, used 56007 tokens of reasoning and answer, 85% of
 the cap. That is tight, but enough to finish without a `length` cut.
 
@@ -183,7 +183,7 @@ worth stating plainly up front rather than found by surprise later:
   it cannot be cancelled mid-flight.** The TUI puts no outer wall clock around a consult. Each
   attempt gets up to 2335 seconds, and a seat that rotates through its three models, two attempts
   each, can chain six of them; the seats run in parallel, so that is the consult's worst case too.
-  Cancelling an in-flight consult is tracked as its own backlog item under REQ-TUI-1 and did not
+  Cancelling an in-flight consult is tracked as its own backlog item and did not
   ship with this release. Until it does, the TUI reads no keys while a consult runs (Ctrl+C
   included, since the terminal is in raw mode), so the only way out of a stuck one is from outside:
   close the terminal window, or end the `magi-rs` process from another shell. Lower
@@ -272,7 +272,7 @@ large ceiling." Two gaps are worth knowing before relying on it, along with one 
 - **A configured `[magi].agent_timeout_secs` set implausibly high never warns at all.**
   `23350` typed for an intended `2335` triggers nothing: `ceiling_above_sanity` only evaluates on
   the headless path when an explicit `--timeout` was passed, and the configured/TUI path has no
-  equivalent check. The value is visible only by reading it back out of `magi.toml`, and REQ-TUI-1's
+  equivalent check. The value is visible only by reading it back out of `magi.toml`, and the
   no-upper-bound rule means there is no cap to stop it from being obeyed as given.
 - **`applied_caps.ceiling_above_sanity` changes meaning for anything that parses the headless
   JSON.** As of v0.21.0 it is `true` only when both hold at once: an explicit `--timeout` was

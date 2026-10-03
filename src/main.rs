@@ -170,23 +170,25 @@ struct Args {
     #[arg(short, long)]
     logout: bool,
 
-    /// RETIRED (REQ-A22): `magi init` is the only scaffolder now. A plain, hidden
-    /// `bool` — `run` checks it FIRST, before any other startup work, and prints
-    /// [`init_config_retired_message`] instead of doing anything else. Not a clap
-    /// `value_parser` trick (fix round 2, coordinator, 2026-08-03, m4/m5): that
-    /// rendered clap's own synthetic `error: invalid value 'retired' for
-    /// '--init-config <INIT_CONFIG>': ...`, defeating the point of a message meant to
-    /// not make the user think. Still hidden from `--help` (`hide = true`) so the
-    /// retired flag doesn't invite new use — the flag shipped for three releases and
-    /// is documented in `CLAUDE.md`, so silently un-recognizing it would turn a
-    /// one-line migration into a search.
+    // RETIRED (REQ-A22): `magi init` is the only scaffolder now. A plain, hidden
+    // `bool` — `run` checks it FIRST, before any other startup work, and prints
+    // [`init_config_retired_message`] instead of doing anything else. Not a clap
+    // `value_parser` trick (fix round 2, coordinator, 2026-08-03, m4/m5): that
+    // rendered clap's own synthetic `error: invalid value 'retired' for
+    // '--init-config <INIT_CONFIG>': ...`, defeating the point of a message meant to
+    // not make the user think. Still hidden from `--help` (`hide = true`) so the
+    // retired flag doesn't invite new use — the flag shipped for three releases and
+    // is documented in `CLAUDE.md`, so silently un-recognizing it would turn a
+    // one-line migration into a search.
     #[arg(long, hide = true)]
     init_config: bool,
 
-    /// Master passphrase (precedence: -p > MAGI_PASSPHRASE > interactive
-    /// prompt). Global: also applies to the `vault` subcommand (REQ-V04). The
-    /// value may begin with `-`: the word after `-p` is always the passphrase.
+    /// Master passphrase. It is taken from this option first, then from the
+    /// MAGI_PASSPHRASE environment variable, then from an interactive prompt. It also
+    /// applies to the vault commands. The word after -p is always the passphrase, even
+    /// when it starts with a dash.
     //
+    // Maintainer notes (REQ-V04):
     // `allow_hyphen_values`: without it clap rejected `-p --horse-battery-zz`
     // as an unknown argument and REPEATED the passphrase on stderr, a sink no
     // auditor reaches (threat model F-3). The passphrase has no composition
@@ -208,9 +210,9 @@ struct Args {
 /// [`InputFormat`] (auto-detect when the flag is absent).
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CliInputFormat {
-    /// Treat the whole input as the prompt verbatim (never parsed as JSON).
+    /// Treat the whole input as the prompt, never as JSON.
     Text,
-    /// Parse the input as a JSON envelope object.
+    /// Read the input as a JSON request.
     Json,
 }
 
@@ -228,22 +230,22 @@ impl CliInputFormat {
 /// single buffered JSON object.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CliOutputFormat {
-    /// The response text only (streamed to stdout / buffered to `-o`).
+    /// The response text only, shown as it arrives or written to the -o file.
     Text,
-    /// A single rich JSON object (buffered).
+    /// One JSON object with the full result, produced when the run ends.
     Json,
 }
 
 /// Log-verbosity selector for `--log-level` (REQ-H24); maps to [`LogLevel`].
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CliLogLevel {
-    /// Only irrecoverable failures.
+    /// Only failures that cannot be recovered from.
     Error,
-    /// Recoverable but noteworthy conditions.
+    /// Also conditions that were recovered from but are worth knowing.
     Warn,
-    /// Normal operational notices (default).
+    /// Also normal operating notices (default).
     Info,
-    /// Maximum verbosity (redacted, capped tool inputs).
+    /// Everything, with secrets redacted and tool inputs capped.
     Debug,
 }
 
@@ -319,84 +321,83 @@ impl CliMode {
 /// it is inert.
 #[derive(clap::Args, Debug, Default)]
 struct HeadlessArgs {
-    /// Read the prompt/envelope from a file; omitted ⇒ stdin (REQ-H03).
+    /// Read the prompt (or a JSON request) from this file; without it, read standard input.
     #[arg(short = 'i', long)]
     input: Option<PathBuf>,
-    /// Write the output to a file (atomic); omitted ⇒ stdout (REQ-H03).
+    /// Write the result to this file, atomically; without it, print it on standard output.
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
-    /// Force the input interpretation; omitted ⇒ auto-detect (REQ-H04).
+    /// How to read the input; without it, the format is detected.
     #[arg(long, value_enum)]
     input_format: Option<CliInputFormat>,
-    /// Output format; omitted ⇒ text (REQ-H04).
+    /// Output format; without it, text.
     #[arg(long, value_enum)]
     output_format: Option<CliOutputFormat>,
-    /// Working directory: file-tool sandbox root and `.magi/` walk-up base
-    /// (default cwd, REQ-H05).
-    ///
-    /// **There is a second `-w` in this CLI**: [`WorkdirArgs`], carried by `init` and
-    /// `vault`. The two are deliberately separate declarations, not an oversight — this one
-    /// is resolved *after* dispatch (it is also the sandbox root, which only the headless
-    /// runner has), while that one is resolved *before* it, because `init` and `vault` need
-    /// the root to decide where to look. Collapsing them into one `global` arg is what a
-    /// reader reaches for first, and clap rejects it: a global whose id collides with an arg
-    /// in its propagation subtree trips a `debug_assert!` during `Command` construction, so
-    /// the binary panics **at startup under `debug_assertions`** rather than failing to
-    /// parse — and a `--release` build may not catch it at all. Change the flag name or the
-    /// short letter in one place and it must change in the other.
+    /// Working directory: the root of the file-tool sandbox and the place where the search
+    /// for the .magi directory starts (default: the current directory).
+    //
+    // **There is a second `-w` in this CLI**: [`WorkdirArgs`], carried by `init` and
+    // `vault`. The two are deliberately separate declarations, not an oversight — this one
+    // is resolved *after* dispatch (it is also the sandbox root, which only the headless
+    // runner has), while that one is resolved *before* it, because `init` and `vault` need
+    // the root to decide where to look. Collapsing them into one `global` arg is what a
+    // reader reaches for first, and clap rejects it: a global whose id collides with an arg
+    // in its propagation subtree trips a `debug_assert!` during `Command` construction, so
+    // the binary panics **at startup under `debug_assertions`** rather than failing to
+    // parse — and a `--release` build may not catch it at all. Change the flag name or the
+    // short letter in one place and it must change in the other.
     #[arg(short = 'w', long)]
     workdir: Option<PathBuf>,
-    /// Stateless: do not persist session/history/memories (REQ-H18).
+    /// Stateless run: do not save the session, the history or any memory.
     #[arg(long)]
     no_memory: bool,
-    /// Auto-approve all registered tools, hard barriers intact (REQ-H07).
+    /// Approve every tool automatically; the hard safety limits still apply.
     #[arg(long)]
     auto: bool,
-    /// Like `--auto` plus elevated caps and silenced soft guards (REQ-H08).
+    /// Like --auto, with higher limits and the soft safeguards turned off.
     #[arg(long)]
     full_auto: bool,
-    /// Wall-clock ceiling in seconds for the whole run (REQ-H36).
+    /// Maximum time in seconds the whole run may take.
     #[arg(long)]
     timeout: Option<u64>,
-    /// File-log verbosity; omitted ⇒ info.
-    ///
-    /// It used to steer the JSONL run log (REQ-H24), which is retired: it now
-    /// steers the file branch of the single layer, so the flag an operator
-    /// already types keeps meaning what it meant.
+    /// Log file verbosity; without it, info.
+    //
+    // It used to steer the JSONL run log (REQ-H24), which is retired: it now
+    // steers the file branch of the single layer, so the flag an operator
+    // already types keeps meaning what it meant.
     #[arg(long, value_enum)]
     log_level: Option<CliLogLevel>,
-    /// Override the run-log directory (default `.magi/logs`, REQ-H24).
+    /// Directory for the run log (default: .magi/logs).
     #[arg(long)]
     log_dir: Option<PathBuf>,
-    /// Honor an envelope `system` override (default: ignore it, REQ-H12b).
+    /// Honor a system prompt given in the JSON request; by default it is ignored.
     #[arg(long)]
     allow_system_override: bool,
-    /// Refuse to overwrite the `-o` output file if it already exists (REQ-H03).
+    /// Refuse to overwrite the -o file if it already exists.
     #[arg(long)]
     no_clobber: bool,
-    /// Force exactly one MAGI multi-perspective pass in `query` (REQ-H22).
+    /// Force exactly one MAGI multi-perspective pass in query.
     #[arg(long)]
     consult: bool,
-    /// Per-request model override (wins over the envelope, REQ-H12).
+    /// Model for this request; it wins over the one in the JSON request.
     #[arg(long)]
     model: Option<String>,
-    /// Per-request provider override (wins over the envelope, REQ-H12).
+    /// Provider for this request; it wins over the one in the JSON request.
     #[arg(long)]
     provider: Option<String>,
-    /// Per-request tool-call cap; the operator flag can RAISE the ceiling
-    /// (REQ-H08/H12b).
+    /// Tool-call limit for this request; this flag can raise the default ceiling.
     #[arg(long)]
     max_tool_calls: Option<u32>,
-    /// Consult lens; omitted ⇒ INFERRED with an extra model call (REQ-A07c).
+    /// Review lens for a consult; without it, the lens is inferred, which costs an extra model call.
     ///
-    /// Declaring it avoids that call. See also `[magi].default_mode`, which fixes
-    /// the lens for every invocation without touching any call site.
+    /// Declaring it avoids that call. The default_mode setting in the [magi] section of
+    /// magi.toml fixes the lens for every run without touching any command line.
     #[arg(long, value_enum)]
     mode: Option<CliMode>,
-    /// Declares that the content under analysis is NOT trustworthy (REQ-A07d).
+    /// Declare that the content under analysis cannot be trusted.
     ///
-    /// With this flag set, omitting `--mode` is an ERROR instead of an inference:
-    /// no path lets the content itself steer the lens it is reviewed under.
+    /// With this flag, leaving out --mode is an error instead of an inference, so the
+    /// content itself can never choose the lens it is reviewed under.
     #[arg(long)]
     untrusted_content: bool,
 }
@@ -544,11 +545,13 @@ fn resolve_workspace_root(
 /// derive API to see both occurrences, in exchange for being stricter than the norm.
 #[derive(clap::Args, Debug)]
 struct WorkdirArgs {
-    /// Working directory: base for the `.magi/` walk-up (default: the current directory).
-    ///
-    /// `global` propagates it to the nested `vault` subcommands, so `vault -w <dir> ls` and
-    /// `vault ls -w <dir>` both parse. The propagation is confined to the subtree this arg is
-    /// declared in, so it never reaches `query`/`consult` and cannot collide with theirs.
+    /// Working directory where the search for the .magi directory starts (default: the
+    /// current directory). On the vault commands it may go before or after the subcommand
+    /// name.
+    //
+    // `global` propagates it to the nested `vault` subcommands, so `vault -w <dir> ls` and
+    // `vault ls -w <dir>` both parse. The propagation is confined to the subtree this arg is
+    // declared in, so it never reaches `query`/`consult` and cannot collide with theirs.
     #[arg(short = 'w', long, global = true)]
     workdir: Option<PathBuf>,
 }
@@ -559,7 +562,8 @@ struct WorkdirArgs {
 /// self-contained so that addition stays mechanical.
 #[derive(clap::Subcommand, Debug)]
 enum TopCmd {
-    /// Encrypted, zero-knowledge secret store (`ls`/`set`/`rm`/`passwd`).
+    /// Encrypted secret store (ls, set, rm, passwd, diagnose); nothing in it opens without
+    /// the passphrase.
     Vault {
         /// The vault operation to run.
         #[command(subcommand)]
@@ -569,14 +573,14 @@ enum TopCmd {
         wd: WorkdirArgs,
     },
 
-    /// Scaffold a fresh `.magi/` state directory in the working directory
-    /// (config, encrypted DB, logs); refuses to nest or overwrite (REQ-H01).
+    /// Create a fresh .magi directory in the working directory (configuration, encrypted
+    /// database and logs); it refuses to overwrite one or to nest inside another.
     Init(WorkdirArgs),
 
-    /// Run the agent headless over a prompt with structured I/O (REQ-H02).
+    /// Run the agent without the interface on a prompt, with structured input and output.
     Query(HeadlessArgs),
 
-    /// Force a MAGI multi-perspective analysis over the prompt (REQ-H02/H21).
+    /// Run a MAGI multi-perspective analysis on the prompt.
     Consult(ConsultArgs),
 
     /// Ask the decision models a typed question and print the answer as JSON.
@@ -633,11 +637,12 @@ struct ConsultArgs {
     #[command(flatten)]
     headless: HeadlessArgs,
 
-    /// Add `agents` and `consensus` — the trio's structured verdicts — to the JSON output.
+    /// Add agents and consensus, the structured verdicts of the three reviewers, to the JSON
+    /// output.
     ///
-    /// Opt-in because the same text already travels rendered in `report`, which the tool-result
-    /// cap bounds; a machine consumer that wants the typed form declares it and bounds its own
-    /// payload. Requires `--output-format json`.
+    /// Off by default because the same text already appears in the rendered report, whose size
+    /// is capped; a script that wants the typed form asks for it and bounds its own payload.
+    /// Requires --output-format json.
     #[arg(long)]
     structured_verdicts: bool,
 }
@@ -5213,37 +5218,8 @@ async fn attach_persistent_memory(
                     )));
                 }
 
-                // CP2-AG/AJ: warn when the distiller will send memory batches to a
-                // cloud embedding endpoint (non-localhost).
-                //
-                // Task 1.1 (REQ-A21): `embedding.base_url` is now `Option<String>` and
-                // may be absent (inheriting the root `base_url`), so the EFFECTIVE
-                // endpoint — declared or inherited — comes from
-                // `MagiConfig::effective_embedding_base_url`, not the raw field. A
-                // template parse error (REQ-A16c: a literal credential instead of the
-                // `[user]:[password]` placeholders) degrades to skipping this notice —
-                // it is informational, and `load()` does not yet fail closed on a bad
-                // template (that validation is not part of Task 1.1's scope).
-                if let Ok(embedding_url) = magi_config.effective_embedding_base_url() {
-                    if magi_config.memory().distill_enabled && !is_localhost(embedding_url.as_str())
-                    {
-                        // `warn`, and the first reading of this site had it wrong.
-                        // `effective_embedding_base_url` may be INHERITED from the root
-                        // `base_url` — the comment above says so — so the endpoint the
-                        // batches leave for is not necessarily one anybody chose for the
-                        // embedder. Cloud egress arrived at by inheritance is a side
-                        // effect of something nobody decided, which is the same reason
-                        // the divergence notice warns, and it is worth knowing before
-                        // the batches go rather than after.
-                        notices.push(Notice::warn(format!(
-                            "Memory distiller will send bounded memory batches \
-                             (≤ {} tokens) to {} — set distill_enabled = false \
-                             in [memory] for zero cloud memory egress.",
-                            magi_config.memory().distill_max_batch_tokens,
-                            embedding_url.as_str(),
-                        )));
-                    }
-                }
+                // The memory-egress warning for an inherited cloud endpoint lives in
+                // `MagiConfig::resolution_notices`, so it is said once.
             }
         }
     }
@@ -10549,7 +10525,7 @@ mod tests {
         use clap::CommandFactory;
         let help = Args::command().render_long_help().to_string();
         assert!(
-            help.contains("may begin with `-`"),
+            help.contains("even when it starts with a dash"),
             "the -p help does not say a value may begin with a dash:\n{help}"
         );
     }

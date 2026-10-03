@@ -97,17 +97,17 @@ The diagnostics line now shows `memory: N active` (N > 0). Ask:
 (retrieved via the preference profile + budgeted semantic recall). This is the behavior that beats
 the `load_all` baseline.
 
-## 5. Automated A/B proof (the measurable result, SC-29)
+## 5. Automated A/B proof (the measurable result)
 
 ```powershell
 cargo run --release --bin bench_memory
 ```
 
-Prints the headline **`selective recall ≥ load_all: PASS ✓ (SC-29)`** and writes
+Prints the headline **`selective recall ≥ load_all: PASS ✓`** and writes
 `target/bench_memory_report.json` (recall accuracy, mean context tokens/turn, staleness rate per
 arm). Deterministic: fixed seed, a deterministic embedder (no network).
 
-## 6. Verify encryption at rest (REQ-03)
+## 6. Verify encryption at rest
 
 ```powershell
 # Memory text must NOT appear in cleartext in the DB file
@@ -117,7 +117,7 @@ Select-String -Path .magi/.magi-rs-memory.db -Pattern "Rust" -SimpleMatch
 ✅ **Expected:** no matches: text *and* embeddings are encrypted via `CryptoVault`
 (Argon2id → AES-256-GCM-SIV → Reed-Solomon). The in-RAM ANN index is never persisted in clear.
 
-## 7. Graceful degradation (REQ-29)
+## 7. Graceful degradation
 
 With the app running in selective mode, **stop Ollama** and send a turn:
 

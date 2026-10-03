@@ -42,7 +42,7 @@ use tracing_subscriber::Layer;
 use crate::logging::appender::{DailyAppender, Priority, Submitted};
 use crate::logging::auditor::{AuditExempt, Audited, Auditor, CauseKey, Queued};
 use crate::logging::health::{render_transition, HealthTracker, Transition, HEALTH_TARGET};
-use crate::logging::render::{escape_for_line, escape_for_screen, render_event};
+use crate::logging::render::{escape_for_line, escape_for_screen, header_end, render_event};
 
 /// Field name an emitter uses to declare the subsystem half of a [`CauseKey`]
 /// (task 3.3's convention: `cause.subsystem = "…", cause.name = "…"`).
@@ -764,6 +764,7 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
         if let (Some(for_screen), Some((tui, _))) = (for_screen, self.tui.as_ref()) {
             tui.sink.deliver(
                 &for_screen
+                    .map_line(without_log_header)
                     .map_line(escape_for_screen)
                     .truncate_for_display(TUI_PAYLOAD_MAX_BYTES),
             );
@@ -780,6 +781,18 @@ impl<S: Subscriber> Layer<S> for MagiLayer {
             self.reporter.report(outcome);
         }
     }
+}
+
+/// The message part of a rendered line: the timestamp, level, run id and target a person reading
+/// the screen has no use for are cut, and the file keeps them.
+///
+/// A line with no header (an alarm) is returned unchanged.
+///
+/// # Complexity
+///
+/// `O(n)` in the line's length.
+fn without_log_header(line: &str) -> String {
+    line.get(header_end(line)..).unwrap_or(line).to_owned()
 }
 
 /// One interning cache: the leaked values [`intern`] has produced so far,

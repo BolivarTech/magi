@@ -40,8 +40,8 @@ RAG is three chained steps, and the tiered memory covers each one:
 
 | RAG step | What it does | Where it lives here |
 |----------|--------------|---------------------|
-| **1. Retrieval** | Find relevant content by semantic similarity | Embedding on write (`REQ-01/02`) → encrypted ANN index in RAM (`D-05`) → `recall(query, budget, scope)` (`REQ-04`, `D-13`) |
-| **2. Augmentation** | Inject retrieved content into the prompt under a budget | Composite reranker (similarity + recency + salience, `REQ-05`) → token-budget assembler (`REQ-12/13/14`) |
+| **1. Retrieval** | Find relevant content by semantic similarity | Embedding on write → encrypted ANN index in RAM → `recall(query, budget, scope)` |
+| **2. Augmentation** | Inject retrieved content into the prompt under a budget | Composite reranker (similarity + recency + salience) → token-budget assembler |
 | **3. Generation** | The LLM responds with the enriched context | The existing `Provider` openai-compat path, unchanged |
 
 An embedding stored without retrieval and injection never reaches the model: using
@@ -97,7 +97,7 @@ recommended `nomic-embed-text-v2-moe:latest` values.
 ```
 recall(store, embedder, clock, cfg, query, budget, scope) -> Vec<RankedMemory>
 ```
-This is the **stable public API** (design decision D-13): the context assembler
+This is the **stable public API**: the context assembler
 consumes it, and future agent-society consumers can call it directly without pulling
 in token-accounting logic. The composite reranker score is:
 
@@ -202,16 +202,16 @@ behaviour. This is the benchmark control arm; it is not removed.
 
 | Component | Source file | Responsibility |
 |-----------|-------------|----------------|
-| `EmbeddingProvider` trait + `OpenAiCompatibleEmbedder` | `src/memory/embedding.rs` | `embed(texts) → Vec<Vec<f32>>` via `POST {base_url}/embeddings`. Asymmetric task prefixes (D-04). Typed errors + graceful degradation (REQ-29). |
+| `EmbeddingProvider` trait + `OpenAiCompatibleEmbedder` | `src/memory/embedding.rs` | `embed(texts) → Vec<Vec<f32>>` via `POST {base_url}/embeddings`. Asymmetric task prefixes. Typed errors + graceful degradation. |
 | `VectorStore` trait + `SqliteVectorStore` | `src/memory/store.rs` | `memories` table (SQLite). Text **and** vectors encrypted via `CryptoVault`. Salience assigned at write. Shares the `Arc<Mutex<Connection>>` and `derived_key` from `EncryptedSqliteMemory`. |
 | `MemoryConfig` / `EmbeddingConfig` | `src/memory/config.rs` | Serde structs for `[memory]` and `[embedding]` in `magi.toml`. `deny_unknown_fields`; all defaults in `src/defaults.rs`. |
-| `Clock` trait + `SystemClock` / `FixedClock` | `src/memory/clock.rs` | Time abstraction: production = real clock; tests/benchmark = deterministic virtual clock (R-06). |
-| `strength` / `run_forgetting` / `enforce_size_cap` / `purge_expired_archives` | `src/memory/decay.rs` | Strength formula (recency + reinforcement + salience); eviction passes with D-07 retention semantics. |
+| `Clock` trait + `SystemClock` / `FixedClock` | `src/memory/clock.rs` | Time abstraction: production = real clock; tests/benchmark = deterministic virtual clock. |
+| `strength` / `run_forgetting` / `enforce_size_cap` / `purge_expired_archives` | `src/memory/decay.rs` | Strength formula (recency + reinforcement + salience); eviction passes with configurable retention. |
 | `BruteForceIndex` / `InstantDistanceIndex` | `src/memory/index.rs` | In-RAM index. Exact cosine (default); HNSW via `--features ann`. Never persisted in clear. |
-| `recall` + `RankedMemory` | `src/memory/retrieval.rs` | **Public stable API (D-13/B1)**: composite reranker, lazy re-embed, scope filtering. Independent of the assembler. |
+| `recall` + `RankedMemory` | `src/memory/retrieval.rs` | **Public stable API**: composite reranker, lazy re-embed, scope filtering. Independent of the assembler. |
 | `assemble_selective` / `AssembledContext` | `src/memory/context.rs` | Token-budget assembler. Consumes `recall`. Fixed priority. Truncation policy. Gate for `mode`. |
 | `DistillJudge` trait / `distill` / `render_profile` | `src/memory/profile.rs` | Preference profile (always injected). Off-hot-path distiller with LLM judgment surface isolated behind a trait (mockable in tests). Hard supersession. Boost salience. |
-| Salience heuristic | `src/memory/salience.rs` | Deterministic salience assignment at write time (D-11). Configurable `salience_markers`. |
+| Salience heuristic | `src/memory/salience.rs` | Deterministic salience assignment at write time. Configurable `salience_markers`. |
 | Token heuristic | `src/memory/tokens.rs` | `estimate_tokens`, `budget_after_margin`. Deterministic; no BPE. |
 | `SqliteVectorStore::diagnostics` | `src/memory/store.rs` | Startup notice: active / archived / pending-re-embed counts. |
 | Benchmark binary | `src/bin/bench_memory.rs` | Two-arm benchmark (see below). |
@@ -346,7 +346,7 @@ cargo run --release --bin bench_memory
 
 Outputs `target/bench_memory_report.json` and a human-readable summary to stdout.
 
-**Headline result (SC-29):** `selective` matches `load_all` recall accuracy at
+**Headline result:** `selective` matches `load_all` recall accuracy at
 roughly **35% of context tokens per turn**, with a lower staleness rate from
 superseded facts. The run is fully deterministic under `seed = 42` and the fixed
 dataset, so re-running produces identical numbers.

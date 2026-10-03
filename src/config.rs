@@ -1172,14 +1172,14 @@ impl MagiConfig {
             if trio_kind == ProviderKind::Anthropic && control != ReasoningControl::Default {
                 let control_tag = reasoning_control_wire_tag(control);
                 notices.push(Notice::warn(format!(
-                    "notice: `[magi].reasoning = \"{control_tag}\"` will not reach the wire: the \
+                    "`[magi].reasoning = \"{control_tag}\"` will not reach the wire: the \
                      trio runs on `anthropic`, whose seats send no reasoning switch, so every \
                      completion record will report the reasoning state as `Unsupported`."
                 )));
             }
             if let Some(raw) = spelling_raw {
                 notices.push(Notice::warn(format!(
-                    "notice: `[magi].reasoning_spelling = \"{raw}\"` has no effect: the trio \
+                    "`[magi].reasoning_spelling = \"{raw}\"` has no effect: the trio \
                      runs on `{trio_kind}`, and a spelling is only sent to `openai-compat` seats."
                 )));
             }
@@ -1191,7 +1191,7 @@ impl MagiConfig {
             (None, c) if c != ReasoningControl::Default => {
                 let control_tag = reasoning_control_wire_tag(control);
                 vec![Notice::warn(format!(
-                    "notice: `[magi].reasoning = \"{control_tag}\"` will not reach the wire: the \
+                    "`[magi].reasoning = \"{control_tag}\"` will not reach the wire: the \
                      trio runs on `openai-compat` and no `[magi].reasoning_spelling` is \
                      declared, so every completion record will report the reasoning state as \
                      `Unsupported`. Declare the spelling your pinned model was measured to \
@@ -1203,14 +1203,14 @@ impl MagiConfig {
                 if spelling == "effort-none" || spelling == "effort-minimal" =>
             {
                 vec![Notice::warn(format!(
-                    "notice: `[magi].reasoning = \"enabled\"` with `[magi].reasoning_spelling = \
+                    "`[magi].reasoning = \"enabled\"` with `[magi].reasoning_spelling = \
                      \"{spelling}\"` cannot reach the wire: that spelling has no \"on\" position, \
                      so the completion record will report the reasoning state as `Unsupported`."
                 ))]
             }
             (Some(spelling), ReasoningControl::Default) => {
                 vec![Notice::warn(format!(
-                    "notice: `[magi].reasoning_spelling = \"{spelling}\"` has no effect: \
+                    "`[magi].reasoning_spelling = \"{spelling}\"` has no effect: \
                      `[magi].reasoning` is `\"default\"`, so nothing is sent to the wire for \
                      either key."
                 ))]
@@ -1455,7 +1455,7 @@ impl MagiConfig {
             // domain where three were declared, which is the class of degradation nobody
             // discovers until the shared outage takes all three at once.
             notices.push(Notice::warn(format!(
-                "notice: all three mages resolve to the same model (`{model}`), so their declared \
+                "all three mages resolve to the same model (`{model}`), so their declared \
                  lineages describe one failure domain rather than three. The consensus still has \
                  three perspectives — those are structural — but a shared outage takes all three \
                  at once. Declare a model per seat in `[magi]`, or check whether `MAGI_MODEL_*` \
@@ -1904,7 +1904,7 @@ impl MagiConfig {
             .is_some_and(|s| s.trim().is_empty())
         {
             out.push(Notice::info(format!(
-                "notice: `provider` is empty; using the default `{}`",
+                "`provider` is empty; using the default `{}`",
                 // The TEMPLATE is shown by its text and **not redacted**: by REQ-A16c it cannot
                 // contain a secret (a literal credential is a config error, already rejected by
                 // `load()` before reaching here), so running it through `redact_url` would be
@@ -1930,29 +1930,47 @@ impl MagiConfig {
                 && self.embedding.base_url.is_none()
             {
                 // **`warn` when the inherited endpoint leaves the machine, `info` when it
-                // does not.** The distiller notice in `main.rs::attach_persistent_memory`
-                // already settled this criterion for the endpoint one level down: nobody
-                // declared `[embedding].base_url`, so nobody chose where the embedder
-                // talks, and cloud egress arrived at by inheritance is a side effect of
-                // something nobody decided. This is the same fact and a WIDER one — the
-                // distiller's batches are a subset of what this endpoint receives, since
-                // every memory and every query is embedded there — so leaving it at `info`
-                // would put the narrower egress on the screen and keep the wider one in the
-                // file alone.
+                // does not.** Nobody declared `[embedding].base_url`, so nobody chose where
+                // the embedder talks, and cloud egress arrived at by inheritance is a side
+                // effect of something nobody decided. One notice covers everything that goes
+                // there: every memory and every query is embedded at this endpoint, and the
+                // distiller's batches are a subset of that traffic, so the distiller is named
+                // here rather than announced a second time from `attach_persistent_memory`.
                 //
                 // The discriminator is `is_localhost`, not the `!= DEFAULT` above that
                 // decides whether to speak at all: a second local daemon on another port is
-                // non-default and still sends nothing anywhere.
-                let text = format!(
-                    "notice: the embedder inherits `base_url = {}` from the root; declare it \
-                     in [embedding] if you want a different one",
-                    root.as_str(),
-                );
-                out.push(if crate::is_localhost(root.as_str()) {
-                    Notice::info(text)
+                // non-default and still sends nothing anywhere. A declared endpoint is the
+                // operator's decision and is never announced.
+                if crate::is_localhost(root.as_str()) {
+                    out.push(Notice::info(format!(
+                        concat!(
+                            "the embedder inherits `base_url = {}` from the root; declare it ",
+                            "in [embedding] if you want a different one",
+                        ),
+                        root.as_str(),
+                    )));
                 } else {
-                    Notice::warn(text)
-                });
+                    let distiller = if self.memory().distill_enabled {
+                        format!(
+                            concat!(
+                                ". The memory distiller also sends batches of up to {} tokens ",
+                                "there; set distill_enabled = false in [memory] to stop that",
+                            ),
+                            self.memory().distill_max_batch_tokens,
+                        )
+                    } else {
+                        String::new()
+                    };
+                    out.push(Notice::warn(format!(
+                        concat!(
+                            "the embedder inherits `base_url = {}` from the root, so memories ",
+                            "and queries are sent to that endpoint, which is not on this ",
+                            "machine. Declare it in [embedding] if you want a different one{}",
+                        ),
+                        root.as_str(),
+                        distiller,
+                    )));
+                }
             }
         }
 
@@ -1970,11 +1988,11 @@ impl MagiConfig {
         if self.effective_provider() == ProviderKind::Anthropic {
             let declared = self.base_url.is_some();
             out.push(Notice::warn(if declared {
-                "notice: with `provider = \"anthropic\"` the root `base_url` is NOT used for \
+                "with `provider = \"anthropic\"` the root `base_url` is NOT used for \
                  the main agent (Anthropic uses its own endpoint); it only applies to [magi] \
                  and [embedding] if they inherit it"
             } else {
-                "notice: `provider = \"anthropic\"` with the default Ollama `base_url`. That \
+                "`provider = \"anthropic\"` with the default Ollama `base_url`. That \
                  value is NOT used for the main agent; if you wanted Ollama, fix `provider`"
             }));
         }
@@ -1984,7 +2002,7 @@ impl MagiConfig {
         // `warn` by the same precedent: declared, and not in force.
         if self.effective_magi_kind() == ProviderKind::Anthropic && self.magi.base_url.is_some() {
             out.push(Notice::warn(
-                "notice: with `[magi].kind = \"anthropic\"` the `[magi].base_url` is NOT \
+                "with `[magi].kind = \"anthropic\"` the `[magi].base_url` is NOT \
                  used: Anthropic uses its own endpoint",
             ));
         }

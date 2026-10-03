@@ -107,53 +107,69 @@ fn read_bounded_value(reader: impl Read) -> Result<Zeroizing<String>, VaultError
 /// docs (REQ-V09 / SC-V05).
 #[derive(clap::Subcommand, Debug)]
 pub enum VaultCmd {
-    /// Lists every secret's name and timestamps — never a value (REQ-V08).
+    /// List the name and timestamps of every secret, never a value.
+    // REQ-V08.
     Ls,
-    /// Adds a new secret or overwrites an existing one (idempotent). The
-    /// value is entered hidden, either via a TTY prompt or via stdin
-    /// (REQ-V10).
+    /// Add a secret or overwrite an existing one. The value is entered hidden, from a
+    /// terminal prompt or from standard input.
+    // REQ-V10; idempotent.
     Set {
-        /// The secret's name (the `vault` table's primary key).
+        /// Name of the secret.
+        ///
+        /// The product reads these entries:
+        ///   ANTHROPIC_API_KEY            key for the Anthropic main model
+        ///   OPENAI_API_KEY               key for the main model and the embedder on OpenAI-compatible backends
+        ///   DECISION_API_KEY             key for the decision models used by decide
+        ///   BASE_URL_USER                user name for the [user] placeholder in the root base_url
+        ///   BASE_URL_PASSWORD            password for the [password] placeholder in the root base_url
+        ///   MAGI_BASE_URL_USER           same, for the base_url of the [magi] section
+        ///   MAGI_BASE_URL_PASSWORD       same, for the base_url of the [magi] section
+        ///   EMBEDDING_BASE_URL_USER      same, for the base_url of the [embedding] section
+        ///   EMBEDDING_BASE_URL_PASSWORD  same, for the base_url of the [embedding] section
+        ///   DECISION_BASE_URL_USER       same, for the base_url of the [decision] section
+        ///   DECISION_BASE_URL_PASSWORD   same, for the base_url of the [decision] section
+        #[arg(verbatim_doc_comment)]
+        // The vault table's primary key.
         name: String,
-        /// Echoes the value live WHILE it is typed (TTY only; ignored
-        /// without a TTY, where the value comes from stdin instead). Shows
-        /// what is being ENTERED now, never a previously stored value
-        /// (REQ-V21).
+        /// Show the value while you type it (terminal only; ignored when the value comes
+        /// from standard input). It shows what you are entering, never a stored value.
+        // REQ-V21.
         #[arg(long)]
         show: bool,
-        /// Skips the `[Y/n]` overwrite confirmation (scripts/CI).
+        /// Skip the [Y/n] overwrite confirmation (for scripts).
         #[arg(short, long)]
         force: bool,
     },
-    /// Deletes a secret (with a `[Y/n]` confirmation, REQ-V22).
+    /// Delete a secret, after a [Y/n] confirmation.
+    // REQ-V22.
     Rm {
-        /// The secret's name to delete.
+        /// Name of the secret to delete.
         name: String,
-        /// Skips the `[Y/n]` deletion confirmation (scripts/CI).
+        /// Skip the [Y/n] deletion confirmation (for scripts).
         #[arg(short, long)]
         force: bool,
     },
-    /// Changes the master passphrase: re-wraps the existing data key in
-    /// O(1) time. Does **not** re-encrypt any stored data (D-V07) — see the
-    /// CLI documentation for exactly what that limitation does and does not
-    /// protect against.
+    /// Change the master passphrase. The stored data is not re-encrypted: the passphrase
+    /// changes, but the key that encrypts your data stays the same. This protects you if the
+    /// old passphrase leaks, not if a copy of that key was already taken. The README explains
+    /// the limit under "The vault & passphrase".
+    // O(1) re-wrap of the existing data key; limitation D-V07.
     Passwd {
-        /// Echoes the new passphrase live while it is typed (TTY only;
-        /// REQ-V21).
+        /// Show the new passphrase while you type it (terminal only).
+        // REQ-V21.
         #[arg(long)]
         show: bool,
     },
-    /// Read-only structural diagnosis of the `.magi/` DB (REQ-H32): reports
-    /// whether an envelope exists, whether its FEC decodes, and per-table
-    /// row counts — **without** unlocking or mutating anything and
-    /// **without** requiring a passphrase.
-    ///
-    /// Deliberately dispatched OUTSIDE [`run_vault_cmd`] — see that
-    /// function's `Diagnose` arm for why.
+    /// Check the .magi database without unlocking it. Reports whether the key envelope
+    /// exists, whether it can be read back, and the row count of each table. It needs no
+    /// passphrase and changes nothing.
+    //
+    // REQ-H32. Deliberately dispatched OUTSIDE [`run_vault_cmd`] — see that
+    // function's `Diagnose` arm for why.
     Diagnose {
-        /// Also lists the `vault` table's secret NAMES (never values,
-        /// REQ-V09) — opt-in because a name can itself be sensitive
-        /// metadata a caller may not want echoed by default.
+        /// Also list the names of the secrets (never their values). Off by default because
+        /// a name can be sensitive on its own.
+        // REQ-V09.
         #[arg(long)]
         names: bool,
     },
