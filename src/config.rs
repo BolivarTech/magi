@@ -5113,4 +5113,74 @@ base_url = \"https://[user]:[password]@host/v1\"
         ))
         .expect("placeholders parse");
     }
+
+    const WITH_DECISION: &str = "[decision]\nmodel = \"nimble\"\n";
+
+    fn notices_for(toml_body: &str) -> Vec<Notice> {
+        let cfg: MagiConfig =
+            toml::from_str(&format!("{toml_body}\n{WITH_DECISION}")).expect("valid toml");
+        cfg.resolution_notices()
+    }
+
+    fn egress(notices: &[Notice]) -> Vec<&Notice> {
+        notices
+            .iter()
+            .filter(|n| n.text.contains("embedder"))
+            .collect()
+    }
+
+    #[test]
+    fn an_inherited_cloud_embedder_endpoint_gets_one_warning_that_names_the_distiller() {
+        let n = notices_for("base_url = \"https://openrouter.ai/api/v1\"");
+        let e = egress(&n);
+        assert_eq!(e.len(), 1, "{n:?}");
+        assert_eq!(e[0].level, tracing::Level::WARN);
+        assert!(e[0].text.contains("https://openrouter.ai/api/v1"));
+        assert!(e[0].text.contains("[embedding]"), "says how to declare it");
+        assert!(
+            e[0].text.contains("distill_enabled"),
+            "says the distiller sends memories there too"
+        );
+    }
+
+    #[test]
+    fn with_the_distiller_off_the_warning_does_not_mention_it() {
+        let n = notices_for(
+            "base_url = \"https://openrouter.ai/api/v1\"\n[memory]\ndistill_enabled = false",
+        );
+        let e = egress(&n);
+        assert_eq!(e.len(), 1, "{n:?}");
+        assert!(!e[0].text.contains("distill_enabled"), "{}", e[0].text);
+    }
+
+    /// An inherited endpoint that stays on this machine sends nothing off it, so it never warns.
+    #[test]
+    fn an_inherited_local_embedder_endpoint_gets_no_egress_warning() {
+        let n = notices_for("base_url = \"http://localhost:11435/v1\"");
+        assert!(
+            egress(&n).iter().all(|x| x.level != tracing::Level::WARN),
+            "{n:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_embedder_endpoint_is_the_operators_decision_and_gets_no_egress_notice() {
+        let n = notices_for(
+            "base_url = \"https://openrouter.ai/api/v1\"\n[embedding]\nbase_url = \"https://openrouter.ai/api/v1\"",
+        );
+        assert!(egress(&n).is_empty(), "{n:?}");
+    }
+
+    #[test]
+    fn no_startup_notice_prefixes_itself_with_notice() {
+        for body in [
+            "base_url = \"https://openrouter.ai/api/v1\"",
+            "provider = \"anthropic\"",
+            "provider = \"anthropic\"\nbase_url = \"http://lan:11434/v1\"",
+        ] {
+            for n in notices_for(body) {
+                assert!(!n.text.starts_with("notice:"), "{}", n.text);
+            }
+        }
+    }
 }

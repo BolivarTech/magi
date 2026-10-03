@@ -1930,6 +1930,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_screen_shows_the_message_without_the_log_header_while_the_file_keeps_it() {
+        let dir = tempdir().unwrap();
+        let appender = Arc::new(DailyAppender::new(dir.path()).unwrap());
+        let screen = Arc::new(RecordingSink::default());
+        let layer = MagiLayer::new(
+            FileSink::new(Arc::clone(&appender)),
+            crate::logging::filter::Filter::parse("info").expect("valid"),
+            Arc::new(Auditor::new()),
+            Arc::new(crate::logging::DiscardDelivery),
+        )
+        .with_tui(
+            TuiSink::new(Arc::clone(&screen) as Arc<dyn crate::logging::NoticeDelivery>),
+            tracing::Level::WARN,
+        );
+
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "magi_rs::startup", "the embedder sends memories off this machine");
+        });
+
+        let shown = screen.lines.lock().unwrap().clone();
+        assert_eq!(
+            shown,
+            vec!["the embedder sends memories off this machine".to_string()]
+        );
+
+        let written = wait_for_log(dir.path(), "the embedder sends memories");
+        assert!(
+            written.contains(&format!("run={}", crate::logging::run_id())),
+            "{written:?}"
+        );
+        assert!(written.contains("WARN"), "{written:?}");
+        assert!(written.contains("magi_rs::startup: "), "{written:?}");
+    }
+
     /// A secret with NO recognisable shape, and the canary depends on that.
     ///
     /// A key-shaped value, or one sitting in a URL authority, is masked by pass

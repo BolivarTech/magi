@@ -7888,6 +7888,184 @@ mod envelope_audit_guard {
 
 #[cfg(test)]
 mod tests {
+
+    /// Prefixes of the development identifiers that must never reach a user (requirements,
+    /// scenarios, decisions, premortem gaps, review findings).
+    const DEV_ID_PREFIXES: [&str; 7] = ["REQ", "SC", "D", "PM", "R", "RF", "F"];
+
+    /// First development identifier in `text` (for example `REQ-V04`, `D-PM-1`, `RF-8`), if any.
+    ///
+    /// An identifier is one of [`DEV_ID_PREFIXES`] as a whole token, then `-`, an optional run of
+    /// capitals, optionally another `-` and run of capitals, then at least one digit. Walks the
+    /// characters, never byte offsets, so non-ASCII text is safe. This copy is duplicated in
+    /// `tests/no_dev_ids_in_user_text.rs` on purpose: an integration test cannot import from
+    /// the binary.
+    ///
+    /// Complexity: `O(n * p)` for `n` characters and `p` prefixes.
+    fn dev_id_in(text: &str) -> Option<&str> {
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let at = |i: usize| chars.get(i).map(|&(_, c)| c);
+        for start in 0..chars.len() {
+            if start > 0 && at(start - 1).is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            for prefix in DEV_ID_PREFIXES {
+                let mut i = start;
+                if !prefix.chars().all(|p| {
+                    let ok = at(i) == Some(p);
+                    i += 1;
+                    ok
+                }) || at(i) != Some('-')
+                {
+                    continue;
+                }
+                i += 1;
+                while at(i).is_some_and(|c| c.is_ascii_uppercase()) {
+                    i += 1;
+                }
+                if at(i) == Some('-') {
+                    i += 1;
+                    while at(i).is_some_and(|c| c.is_ascii_uppercase()) {
+                        i += 1;
+                    }
+                }
+                if !at(i).is_some_and(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                while at(i).is_some_and(|c| c.is_ascii_digit()) {
+                    i += 1;
+                }
+                let end = chars.get(i).map_or(text.len(), |&(b, _)| b);
+                return text.get(chars[start].0..end);
+            }
+        }
+        None
+    }
+
+    /// Every help screen the binary can print, keyed by its command path.
+    ///
+    /// Recursive over the real clap tree, so a subcommand added tomorrow is covered
+    /// without anyone extending a list.
+    fn all_help_screens() -> Vec<(String, String)> {
+        use clap::CommandFactory;
+
+        fn walk(cmd: &mut clap::Command, path: String, out: &mut Vec<(String, String)>) {
+            out.push((path.clone(), cmd.render_long_help().to_string()));
+            let names: Vec<String> = cmd
+                .get_subcommands()
+                .map(|c| c.get_name().to_string())
+                .collect();
+            for name in names {
+                if let Some(sub) = cmd.find_subcommand_mut(&name) {
+                    walk(sub, format!("{path} {name}"), out);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(&mut Args::command(), "magi-rs".to_string(), &mut out);
+        out
+    }
+
+    #[test]
+    fn the_help_tree_covers_every_subcommand_including_the_nested_vault_ones() {
+        let paths: Vec<String> = all_help_screens().into_iter().map(|(p, _)| p).collect();
+        for expected in [
+            "magi-rs",
+            "magi-rs init",
+            "magi-rs query",
+            "magi-rs consult",
+            "magi-rs decide",
+            "magi-rs vault",
+            "magi-rs vault ls",
+            "magi-rs vault set",
+            "magi-rs vault rm",
+            "magi-rs vault passwd",
+        ] {
+            assert!(
+                paths.iter().any(|p| p == expected),
+                "missing {expected}: {paths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_help_screen_shows_a_development_id_markdown_emphasis_or_backticks() {
+        for (path, help) in all_help_screens() {
+            assert_eq!(
+                dev_id_in(&help),
+                None,
+                "`{path} --help` shows a development id:\n{help}"
+            );
+            assert!(
+                !help.contains("**"),
+                "`{path} --help` shows raw Markdown emphasis:\n{help}"
+            );
+            assert!(
+                !help.contains('`'),
+                "`{path} --help` shows raw backticks:\n{help}"
+            );
+        }
+    }
+
+    /// `vault set --help` names every vault entry the product reads and what it is for, so the
+    /// user does not have to open the README to learn what to store.
+    #[test]
+    fn vault_set_help_names_every_secret_the_product_reads() {
+        let help = all_help_screens()
+            .into_iter()
+            .find(|(p, _)| p == "magi-rs vault set")
+            .map(|(_, h)| h)
+            .expect("the vault set help screen");
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "DECISION_API_KEY",
+            "BASE_URL_USER",
+            "BASE_URL_PASSWORD",
+            "MAGI_BASE_URL_USER",
+            "EMBEDDING_BASE_URL_USER",
+            "DECISION_BASE_URL_USER",
+        ] {
+            assert!(
+                help.contains(name),
+                "`vault set --help` does not name {name}:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_dev_id_matcher_follows_its_table() {
+        let table: [(&str, Option<&str>); 9] = [
+            ("global (REQ-V04).", Some("REQ-V04")),
+            ("see D-V07", Some("D-V07")),
+            ("(REQ-H02/H21)", Some("REQ-H02")),
+            ("D-PM-1 says", Some("D-PM-1")),
+            ("SC-H24, PM-C1, R-V08, RF-8, F-3", Some("SC-H24")),
+            ("UTF-8 and SHA-256 and AES-256-GCM-SIV", None),
+            ("D-Bus, R-tree, a PM-ready build", None),
+            ("REQUEST-1", None),
+            ("", None),
+        ];
+        for (text, expected) in table {
+            assert_eq!(dev_id_in(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_distiller_does_not_announce_its_own_egress_at_startup() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let needle = ["for zero cloud ", "memory egress"].concat();
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("a production part");
+        assert!(
+            !production.contains(&needle),
+            "the egress warning is emitted twice again"
+        );
+    }
+
     /// S-9's inputs on the headless path: the warning is assessed on the ceiling the trio
     /// really runs under and names `--timeout` only when the operator passed one. At the 0.21.0
     /// cap (65 536) an explicit `--timeout 1800` (74 s per request) covers ~4 070 tokens, and the
