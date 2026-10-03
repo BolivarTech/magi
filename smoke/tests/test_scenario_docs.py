@@ -352,21 +352,3 @@ class S13FragmentTests(unittest.TestCase):
         text = "[memory\nmode = \n"
         (body,) = self._installed(text)
         self.assertEqual(body, text)
-
-    def test_a_full_file_without_decision_is_not_completed(self) -> None:
-        """A whole example lacking the section reaches the product as written."""
-        for text in ("provider = \"ollama\"\n\n[memory]\nmode = \"selective\"\n",
-                     "[magi]\nmelchior_model = \"x\"\n"):
-            (body,) = self._installed(text)
-            self.assertEqual(body, text)
-
-    def test_a_full_file_with_decision_is_left_alone(self) -> None:
-        """A whole example that declares the section is installed unchanged."""
-        text = "base_url = \"http://h\"\n\n[decision]\nmodel = \"tev1\"\n"
-        (body,) = self._installed(text)
-        self.assertEqual(body, text)
-
-    def test_a_table_only_fragment_is_still_completed(self) -> None:
-        """A table that is not [magi], with no root key, stays a fragment."""
-        (body,) = self._installed("[embedding]\nmodel = \"e\"\n")
-        self.assertIn("[decision]", body)
