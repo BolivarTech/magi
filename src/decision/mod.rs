@@ -20,6 +20,7 @@ pub mod config;
 pub mod endpoint;
 pub mod envelope;
 pub mod error;
+pub mod internal;
 pub mod protocol;
 
 pub use client::{DecisionClient, DecisionSettings, SystemOneClient};
