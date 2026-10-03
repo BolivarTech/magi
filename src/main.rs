@@ -2215,13 +2215,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // pair the direct headless `magi consult` path already has.
     // The decision client is built ONCE here and shared with the mode classifier; its keys come
     // from `DecideSecrets::from_consumed`, the same path `magi decide` uses (PM-MS2-C3).
-    let (tui_decision, tui_decision_endpoint) =
+    let (tui_decision, tui_decision_endpoint, tui_decision_reason) =
         decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
     let tui_mode_classifier = tui_mode_classifier_wiring(
         provider.clone(),
         Arc::clone(&tui_notices),
         tui_decision,
         tui_decision_endpoint,
+        tui_decision_reason,
     );
     let tui_classifier_notices = tui_notices;
     let tui_default_mode = magi_config.effective_default_mode();
@@ -4809,6 +4810,7 @@ impl AutonomousRunConfig {
 /// * `notices` - the session's one sink, already handed to the logging layer.
 /// * `decision` - the decision client built once at startup, if it could be built.
 /// * `endpoint` - the redacted decision endpoint, for the run log.
+/// * `unavailable_reason` - why the client could not be built, redacted, if it could not.
 ///
 /// # Returns
 /// The classifier for `TuiMagiRuntimeConfig::mode_classifier`: `decide` first, the principal
@@ -4818,6 +4820,7 @@ fn tui_mode_classifier_wiring(
     notices: Arc<crate::tui::TuiNoticeSink>,
     decision: Option<Arc<dyn magi_rs::decision::DecisionClient>>,
     endpoint: String,
+    unavailable_reason: Option<String>,
 ) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
     let llm: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
@@ -4827,9 +4830,10 @@ fn tui_mode_classifier_wiring(
             // with the registered secrets or it redacts with nothing.
             std::sync::Arc::clone(magi_rs::logging::process_auditor()),
         ));
-    Arc::new(crate::agent::decide_classifier::DecideModeClassifier::new(
-        decision, llm, endpoint,
-    ))
+    Arc::new(
+        crate::agent::decide_classifier::DecideModeClassifier::new(decision, llm, endpoint)
+            .with_unavailable_reason(unavailable_reason),
+    )
 }
 
 /// Builds the pair (startup notice, `/consult` message) for the TUI when the trio is not
@@ -6856,13 +6860,14 @@ async fn run_consult_subcommand(
         ));
     // Same key path as `magi decide` (PM-MS2-C3): a hosted endpoint answers 401 otherwise and
     // every inference silently falls back.
-    let (decision, decision_endpoint) =
+    let (decision, decision_endpoint, decision_reason) =
         decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
     let classifier = crate::agent::decide_classifier::DecideModeClassifier::new(
         decision,
         llm_classifier,
         decision_endpoint,
-    );
+    )
+    .with_unavailable_reason(decision_reason);
     // S-9/REQ-EE-5: shares the SAME process-level sink as the mode classifier's own notices —
     // one stderr output path, not two.
     let clock_coverage_announcer = crate::tools::consult::ClockCoverageAnnouncer::new(
@@ -7178,29 +7183,40 @@ fn build_decision_client(
 /// * `keys` - The keys captured at startup.
 ///
 /// # Returns
-/// The client (or `None`) and the redacted endpoint to show in the run log.
+/// The client (or `None`), the redacted endpoint to show in the run log, and, when there is no
+/// client, the redacted reason it could not be built.
 fn decision_client_for(
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
     keys: &DecideSecrets,
-) -> (Option<Arc<dyn magi_rs::decision::DecisionClient>>, String) {
+) -> DecisionClientParts {
     match build_decision_client(config, secret_store, keys) {
         Ok(client) => {
             let endpoint = client.endpoint_display();
             (
                 Some(Arc::new(client) as Arc<dyn magi_rs::decision::DecisionClient>),
                 endpoint,
+                None,
             )
         }
-        Err(_) => (
+        Err(e) => (
             None,
             config
                 .effective_decision_base_url()
                 .map(|t| redact_url(t.as_str()))
                 .unwrap_or_default(),
+            Some(redact_foreign_error(&e).to_string()),
         ),
     }
 }
+
+/// What [`decision_client_for`] returns: the client, its redacted endpoint and, when the client
+/// could not be built, the redacted reason.
+type DecisionClientParts = (
+    Option<Arc<dyn magi_rs::decision::DecisionClient>>,
+    String,
+    Option<String>,
+);
 
 /// Validates the request of a decide run (REQ-D22, REQ-D23).
 ///
@@ -19037,15 +19053,6 @@ agent_timeout_secs = {CEILING}
         }
     }
 
-    /// Loop 1, F3 — the mode classifier's notices must not reach stderr while the TUI owns the
-    /// screen.
-    ///
-    /// `ProcessNoticeSink::once` calls `eprintln!` unconditionally, and `run_tui_ext` enters
-    /// raw mode plus the alternate screen before the event loop starts, so a `/consult` with
-    /// no `--mode` under the default scaffold — the very path inference exists to serve — wrote
-    /// raw text over the ratatui frame. The fix is a sink, not a hardcoded destination: the
-    /// same classifier runs headless, where stderr IS correct.
-    // src/main.rs — mod tests (wiring)
     /// S7 through the real TUI wiring: decide answers, the principal provider is never asked.
     #[tokio::test]
     async fn the_tui_wiring_infers_the_mode_through_decide_first() {
@@ -19056,6 +19063,7 @@ agent_timeout_secs = {CEILING}
             Arc::new(crate::tui::TuiNoticeSink::new()),
             Some(decision),
             "http://localhost:11434".into(),
+            None,
         );
         assert_eq!(
             classifier.classify("evaluate this architecture").await,
@@ -19123,6 +19131,14 @@ agent_timeout_secs = {CEILING}
         }
     }
 
+    /// Loop 1, F3 — the mode classifier's notices must not reach stderr while the TUI owns the
+    /// screen.
+    ///
+    /// `ProcessNoticeSink::once` calls `eprintln!` unconditionally, and `run_tui_ext` enters
+    /// raw mode plus the alternate screen before the event loop starts, so a `/consult` with
+    /// no `--mode` under the default scaffold — the very path inference exists to serve — wrote
+    /// raw text over the ratatui frame. The fix is a sink, not a hardcoded destination: the
+    /// same classifier runs headless, where stderr IS correct.
     mod tui_classifier_notices {
         use super::*;
         use crate::agent::mode_classifier::NoticeSink;
@@ -19139,6 +19155,7 @@ agent_timeout_secs = {CEILING}
                 Arc::clone(&notices),
                 None,
                 String::new(),
+                None,
             );
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             notices.attach(tx);
