@@ -487,6 +487,21 @@ mod tests {
     use super::*;
     use crate::vault::{wire, MaskedDek};
 
+    /// Longest line the `vault set` entry list may have, so it reads in a standard terminal.
+    const MAX_HELP_LINE_CHARS: usize = 100;
+
+    #[test]
+    fn the_vault_set_entry_list_fits_a_standard_terminal() {
+        let too_long: Vec<&str> = SET_NAME_LONG_HELP
+            .lines()
+            .filter(|l| l.chars().count() > MAX_HELP_LINE_CHARS)
+            .collect();
+        assert!(
+            too_long.is_empty(),
+            "help lines over the limit: {too_long:?}"
+        );
+    }
+
     /// Scripted double implementing both [`VaultIo`] and [`PassphrasePrompt`]
     /// (R-V07: these tests never touch a real terminal).
     struct FakeIo {
