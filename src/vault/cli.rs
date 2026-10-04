@@ -102,6 +102,26 @@ fn read_bounded_value(reader: impl Read) -> Result<Zeroizing<String>, VaultError
     Ok(Zeroizing::new(text))
 }
 
+/// Long help of `vault set <NAME>`: the vault entries the product reads.
+///
+/// A string constant rather than a doc comment, because the entries name the literal
+/// `[user]`/`[password]` placeholders and TOML section headers, which rustdoc would read as
+/// intra-doc links.
+const SET_NAME_LONG_HELP: &str = "Name of the secret.
+
+The product reads these entries:
+  ANTHROPIC_API_KEY            key for the Anthropic main model
+  OPENAI_API_KEY               key for the main model and the embedder on OpenAI-compatible backends
+  DECISION_API_KEY             key for the decision models used by decide
+  BASE_URL_USER                user name for the [user] placeholder in the root base_url
+  BASE_URL_PASSWORD            password for the [password] placeholder in the root base_url
+  MAGI_BASE_URL_USER           same, for the base_url of the [magi] section
+  MAGI_BASE_URL_PASSWORD       same, for the base_url of the [magi] section
+  EMBEDDING_BASE_URL_USER      same, for the base_url of the [embedding] section
+  EMBEDDING_BASE_URL_PASSWORD  same, for the base_url of the [embedding] section
+  DECISION_BASE_URL_USER       same, for the base_url of the [decision] section
+  DECISION_BASE_URL_PASSWORD   same, for the base_url of the [decision] section";
+
 /// Subcommands of `magi-rs vault` (REQ-V07). There is deliberately no
 /// `get`/`cat`/`show <name>`/`reveal`/`export` subcommand — see the module
 /// docs (REQ-V09 / SC-V05).
@@ -115,20 +135,7 @@ pub enum VaultCmd {
     // REQ-V10; idempotent.
     Set {
         /// Name of the secret.
-        ///
-        /// The product reads these entries:
-        ///   ANTHROPIC_API_KEY            key for the Anthropic main model
-        ///   OPENAI_API_KEY               key for the main model and the embedder on OpenAI-compatible backends
-        ///   DECISION_API_KEY             key for the decision models used by decide
-        ///   BASE_URL_USER                user name for the [user] placeholder in the root base_url
-        ///   BASE_URL_PASSWORD            password for the [password] placeholder in the root base_url
-        ///   MAGI_BASE_URL_USER           same, for the base_url of the [magi] section
-        ///   MAGI_BASE_URL_PASSWORD       same, for the base_url of the [magi] section
-        ///   EMBEDDING_BASE_URL_USER      same, for the base_url of the [embedding] section
-        ///   EMBEDDING_BASE_URL_PASSWORD  same, for the base_url of the [embedding] section
-        ///   DECISION_BASE_URL_USER       same, for the base_url of the [decision] section
-        ///   DECISION_BASE_URL_PASSWORD   same, for the base_url of the [decision] section
-        #[arg(verbatim_doc_comment)]
+        #[arg(long_help = SET_NAME_LONG_HELP)]
         // The vault table's primary key.
         name: String,
         /// Show the value while you type it (terminal only; ignored when the value comes
