@@ -1301,6 +1301,10 @@ fn consult_panic_notice(join_err: &tokio::task::JoinError) -> String {
     crate::agent::Agent::sanitize_text(&format!("[consult] analyze panicked: {join_err}"))
 }
 
+/// What the TUI says when a `/decide` call crashed instead of answering.
+const DECIDE_CRASH_MESSAGE: &str =
+    "The decide call crashed unexpectedly; the session is still alive.";
+
 /// The `/decide` usage line shown for a malformed command.
 const DECIDE_USAGE: &str = concat!(
     "Usage: /decide {request json} | /decide -i <request file> | ",
@@ -8306,6 +8310,39 @@ mod tests {
             .await
             .expect("the reply arrives once the call finishes");
         assert!(matches!(reply, Some(AgentResponse::Error(_))), "{reply:?}");
+    }
+
+    /// A client whose call panics, to prove a crash still reaches the user.
+    struct PanickingClient;
+
+    #[async_trait::async_trait]
+    impl DecisionClient for PanickingClient {
+        async fn decide(
+            &self,
+            _request: &magi_rs::decision::DecisionRequest,
+        ) -> Result<magi_rs::decision::Decision, DecisionError> {
+            panic!("decision client crashed");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_crashed_decide_task_still_tells_the_user() {
+        let client: Arc<dyn DecisionClient> = Arc::new(PanickingClient);
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut tasks = tokio::task::JoinSet::new();
+        let cmd = super::TuiDecideCommand::Request(
+            r#"{"state":"x","questions":{"q":{"type":"noul","instructions":"?"}}}"#.into(),
+        );
+        super::spawn_decide_reply(&mut tasks, cmd, Some(client), None, tx);
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+            .await
+            .expect("a crash must not leave the user without a reply");
+        match reply {
+            Some(AgentResponse::Error(text)) => {
+                assert!(text.contains("crashed unexpectedly"), "{text}")
+            }
+            other => panic!("expected an error reply, got {other:?}"),
+        }
     }
 
     #[test]
