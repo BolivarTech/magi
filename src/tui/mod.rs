@@ -3517,6 +3517,14 @@ fn replay_paste(drained: &[Event]) -> String {
     text
 }
 
+/// How long the Enter handler waits for the next event of a paste burst.
+///
+/// A terminal that delivers a paste as key events (Windows) may still be sending the rest of the
+/// text when the Enter is handled; waiting this long between events keeps that text in the same
+/// input instead of submitting the first line. A person never presses another key this soon
+/// after Enter, and a lone Enter costs this delay once.
+const PASTE_GRACE: std::time::Duration = std::time::Duration::ZERO;
+
 /// Reads every event that is available without waiting.
 ///
 /// # Returns
@@ -3526,7 +3534,7 @@ fn replay_paste(drained: &[Event]) -> String {
 /// Any terminal read error.
 fn drain_pending_events() -> io::Result<Vec<Event>> {
     let mut drained = Vec::new();
-    while event::poll(std::time::Duration::ZERO)? {
+    while event::poll(PASTE_GRACE)? {
         drained.push(event::read()?);
     }
     Ok(drained)
@@ -8179,6 +8187,21 @@ end"
         assert!(
             window.contains("app.handle_paste(&text)"),
             "Ctrl+V inserts the clipboard without the paste sanitizer: {window}"
+        );
+    }
+
+    #[test]
+    fn the_paste_drain_waits_a_short_grace_for_the_rest_of_the_burst() {
+        assert!(
+            super::PASTE_GRACE > std::time::Duration::ZERO
+                && super::PASTE_GRACE <= std::time::Duration::from_millis(50),
+            "a burst slower than the loop would submit its first line: {:?}",
+            super::PASTE_GRACE
+        );
+        let source = production_source();
+        assert!(
+            source.contains("while event::poll(PASTE_GRACE)?"),
+            "the drain no longer waits for the rest of a paste burst"
         );
     }
 
