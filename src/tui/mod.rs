@@ -15,7 +15,10 @@
 
 use crate::agent::{Agent, AgentRunConfig, ApprovalRequest, StreamPiece};
 use crossterm::{
-    event::{self, DisableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, KeyCode,
+        KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -2063,7 +2066,10 @@ impl App {
     /// # Arguments
     /// * `text` - The pasted payload.
     pub fn handle_paste(&mut self, text: &str) {
-        let _ = text;
+        if self.mode != AppMode::Normal {
+            return;
+        }
+        self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
     }
 
     /// Deletes the character before the current cursor position.
@@ -2528,7 +2534,12 @@ pub async fn run_tui_ext(
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            stdout,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         let _ =
             Terminal::new(CrosstermBackend::new(io::stdout())).and_then(|mut t| t.show_cursor());
         original_hook(panic_info);
@@ -2589,7 +2600,11 @@ pub async fn run_tui_ext(
     // `test_nothing_fallible_runs_while_the_alternate_screen_is_held` fails if
     // one is ever put back.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste
+    )?;
 
     // Cancelled right after `run_app` returns, below — races an in-flight OAuth callback
     // wait so quitting mid-login does not force the process to sit out
@@ -3013,7 +3028,8 @@ pub async fn run_tui_ext(
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     );
     let _ = terminal.show_cursor();
 
@@ -3367,7 +3383,12 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
         drain_approval_requests(&mut app);
 
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
+            let event = event::read()?;
+            if let Event::Paste(text) = &event {
+                app.handle_paste(text);
+                continue;
+            }
+            if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
