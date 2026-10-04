@@ -1558,12 +1558,15 @@ pub(crate) async fn tui_decide_reply(
     build_error: Option<&DecisionError>,
     read: &(dyn Fn(&Path) -> std::io::Result<Vec<u8>> + Sync),
 ) -> AgentResponse {
-    let _ = build_error;
     let Some(client) = client else {
-        let unavailable = DecisionError::ClientUnavailable {
-            reason: "the decision endpoint or its credentials are not set up; see the run log"
-                .to_string(),
-        };
+        let unavailable =
+            build_error
+                .cloned()
+                .unwrap_or_else(|| DecisionError::ClientUnavailable {
+                    reason:
+                        "the decision endpoint or its credentials are not set up; see the run log"
+                            .to_string(),
+                });
         return AgentResponse::Error(render_decision_table(&Err(unavailable)));
     };
     let result = match tui_decide_request(cmd, read) {

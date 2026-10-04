@@ -2221,6 +2221,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let tui_tool_endpoint = tui_decision_endpoint.clone();
     let tui_slash_decision = tui_decision.clone();
     let tui_build_error = tui_decision_reason.clone();
+    if let Some(error) = tui_build_error.as_ref() {
+        // Run log only: the screen shows the typed error when `/decide` is used.
+        tracing::warn!(
+            target: "magi_rs::decision",
+            "decision client unavailable: {}",
+            unavailable_reason(error)
+        );
+    }
     let tui_mode_classifier = tui_mode_classifier_wiring(
         provider.clone(),
         Arc::clone(&tui_notices),
