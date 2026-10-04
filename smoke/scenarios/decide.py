@@ -33,6 +33,7 @@ model mock: it says nothing, so there is nothing to disagree with.
 """
 
 import contextlib
+import dataclasses
 import json
 import os
 import pathlib
@@ -136,7 +137,13 @@ UNREACHABLE_THRESHOLD = 0.99
 
 SCHEMA_VERSION_KEY = "schema_version"
 
-#: One question of each type (spec REQ-D23, example 1).
+#: One question of each type (spec REQ-D23, example 1). The score question is
+#: one the ticket answers unambiguously: with the scaffold's
+#: ``min_confidence = 0.7`` an ambiguous one ("how urgent is this ticket?",
+#: nimble 0.176, tev1 0.294) exhausts the chain. Measured 2026-10-04 on nimble
+#: and tev1, three calls each (identical every time); lowest Magi confidence
+#: per question: nimble team 0.956, refund 0.996, score 0.967; tev1 team
+#: 0.935, refund 0.984, score 0.878.
 THREE_TYPES_REQUEST = {
     "state": {"ticket": ("I was charged twice this month. Please refund the "
                          "extra payment.")},
@@ -154,8 +161,9 @@ THREE_TYPES_REQUEST = {
         },
         "urgency": {
             "type": "score",
-            "instructions": "How urgent is this ticket?",
-            "criteria": ["Routine", "Soon", "Urgent"],
+            "instructions": ("How likely is it that this ticket is about a "
+                             "billing problem?"),
+            "criteria": ["Very unlikely", "Possible", "Certain"],
         },
     },
 }
@@ -931,6 +939,9 @@ D11_ASSERTIONS = (
 #: The tool's name as the agent calls it, and the key of the run record.
 DECIDE_TOOL_NAME = "decide"
 TOOL_CALLS_KEY = "tool_calls"
+#: What the product records for a call the authorization tier refused
+#: (``src/agent/mod.rs``); a call that ran and failed carries other text.
+TIER_DENIAL_TEXT = "denied: not authorized in the current authorization tier"
 QUERY_TIMEOUT_S = 420
 CONSULT_SUBCOMMAND = "consult"
 CONSULT_TIMEOUT_S = 600
@@ -968,11 +979,24 @@ def the_agent_calls_decide_in_the_default_tier(run):
     if not records:
         yield _finding(D11_ASSERTIONS, 0, None, _NOT_CALLED_DETAIL)
         return
-    denied = [record for record in records if record.get("ok") is not True]
-    yield _finding(D11_ASSERTIONS, 0, "" if not denied else (
-        "%d of %d decide calls were not approved or failed: %s"
-        % (len(denied), len(records),
-           "; ".join(_excerpt_text(str(r.get("result"))) for r in denied))))
+    denied = [record for record in records
+              if TIER_DENIAL_TEXT in str(record.get("result"))]
+    failed = [record for record in records
+              if record not in denied and record.get("ok") is not True]
+    observation = "" if not failed else (
+        "%d of %d decide calls were approved and executed but returned an "
+        "error (the request the model built, recorded as an observation): %s"
+        % (len(failed), len(records),
+           "; ".join(_excerpt_text(str(r.get("result"))) for r in failed)))
+    if denied:
+        yield _finding(D11_ASSERTIONS, 0, (
+            "%d of %d decide calls were denied by the tier: %s"
+            % (len(denied), len(records),
+               "; ".join(_excerpt_text(str(r.get("result")))
+                         for r in denied))))
+        return
+    finding = _finding(D11_ASSERTIONS, 0, "")
+    yield dataclasses.replace(finding, detail=observation) if observation else finding
 
 
 # ---------------------------------------------------------------------------
@@ -1180,16 +1204,34 @@ def _questions_and_result_finding(record, questions):
         Finding: PASS on non-empty questions and a result that parses as the
         decide envelope (it carries its ``schema_version``).
     """
-    try:
-        result = json.loads(record.get("result") or "")
-    except ValueError:
-        result = None
+    result = _result_envelope(record.get("result"))
     ok = (isinstance(questions, dict) and bool(questions)
           and isinstance(result, dict) and SCHEMA_VERSION_KEY in result)
     return _finding(D13_ASSERTIONS, 1, "" if ok else (
         "questions %s, result %s" % (
             "present" if isinstance(questions, dict) and questions else "missing",
             _excerpt_text(str(record.get("result"))))))
+
+
+def _result_envelope(text):
+    """Parse the envelope a decide call returned to the agent.
+
+    The agent loop frames a tool error as ``Execution failed: <text>``, so the
+    envelope starts at the first ``{`` and a success has no prefix at all.
+
+    Args:
+        text: The record's ``result``.
+
+    Returns:
+        dict | None: The envelope, or None when the text carries none.
+    """
+    start = str(text or "").find("{")
+    if start < 0:
+        return None
+    try:
+        return json.loads(str(text)[start:])
+    except ValueError:
+        return None
 
 
 def _marker_absent_finding(records, marker):
