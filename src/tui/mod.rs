@@ -3367,58 +3367,87 @@ enum EnterAction {
     InsertNewline,
 }
 
-/// Decides what an Enter key press does.
+/// Whether an event is a key press (a release, resize or focus change is not input).
+fn is_key_press(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press)
+}
+
+/// Decides what an Enter press does, given the events drained right after it.
 ///
 /// On a terminal without bracketed paste (the Windows console never reports it) a pasted
 /// multi-line text arrives as key events, so its line breaks are Enter presses followed at
-/// once by more input. An Enter with more input already queued therefore belongs to a paste
-/// and inserts a line break; a lone Enter submits.
+/// once by more key presses. An Enter with a key press queued behind it therefore belongs
+/// to a paste and inserts a line break; otherwise it submits. Key releases, resizes, focus
+/// and mouse events are not input: a quick tap whose own release is already queued still
+/// submits.
 ///
-/// Known limit: typing Enter and a further key within one poll cycle is read as a paste
-/// line break. Human typing is far slower than the queue drains, so this only affects
-/// scripted input.
+/// Known limit: a person who presses another key within the same instant as Enter (before
+/// the loop drains the queue) is read as a paste line break. Human typing is far slower
+/// than the queue drains, so this only affects scripted or very fast input.
+///
+/// Complexity: O(n) in the number of drained events.
 ///
 /// # Arguments
-/// * `more_input_pending` - Whether another terminal event is already queued.
+/// * `drained` - Every event that was immediately available after the Enter.
 ///
 /// # Returns
 /// The action to take for this Enter.
-fn enter_action(more_input_pending: bool) -> EnterAction {
-    if more_input_pending {
+fn classify_enter(drained: &[Event]) -> EnterAction {
+    if drained.iter().any(is_key_press) {
         EnterAction::InsertNewline
     } else {
         EnterAction::Submit
     }
 }
 
-/// Decides what an Enter press does, given the events drained right after it.
-///
-/// Stub: see the implementation commit.
-///
-/// # Arguments
-/// * `drained` - Every event that was immediately available after the Enter.
-///
-/// # Returns
-/// The action to take for this Enter.
-#[cfg_attr(not(test), allow(dead_code))]
-fn classify_enter(drained: &[Event]) -> EnterAction {
-    let _ = drained;
-    unimplemented!("classify_enter")
-}
-
 /// Text a paste burst contributes to the input, from the events drained after its first Enter.
 ///
-/// Stub: see the implementation commit.
+/// Key presses are replayed in order: a character as itself (unless Control or Alt is held),
+/// Enter as a line break and Tab as a tab. Releases and every other event are ignored.
+///
+/// Complexity: O(n) in the number of drained events.
 ///
 /// # Arguments
 /// * `drained` - Every event that was immediately available after the Enter.
 ///
 /// # Returns
 /// The text to append to the input, after the line break of the Enter itself.
-#[cfg_attr(not(test), allow(dead_code))]
 fn replay_paste(drained: &[Event]) -> String {
-    let _ = drained;
-    unimplemented!("replay_paste")
+    let mut text = String::new();
+    for event in drained {
+        let Event::Key(key) = event else { continue };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match key.code {
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                text.push(c)
+            }
+            KeyCode::Enter => text.push('\n'),
+            KeyCode::Tab => text.push('\t'),
+            _ => {}
+        }
+    }
+    text
+}
+
+/// Reads every event that is available without waiting.
+///
+/// # Returns
+/// The drained events in arrival order.
+///
+/// # Errors
+/// Any terminal read error.
+fn drain_pending_events() -> io::Result<Vec<Event>> {
+    let mut drained = Vec::new();
+    while event::poll(std::time::Duration::ZERO)? {
+        drained.push(event::read()?);
+    }
+    Ok(drained)
 }
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
@@ -3660,13 +3689,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
                         match key.code {
                             KeyCode::Enter => {
-                                if enter_action(event::poll(std::time::Duration::ZERO)?)
-                                    == EnterAction::InsertNewline
-                                {
-                                    app.insert_str(
-                                        "
-",
-                                    );
+                                let drained = drain_pending_events()?;
+                                if classify_enter(&drained) == EnterAction::InsertNewline {
+                                    app.insert_str("\n");
+                                    app.insert_str(&replay_paste(&drained));
                                     continue;
                                 }
                                 let input = std::mem::take(&mut app.input);
@@ -8026,25 +8052,20 @@ mod tests {
         assert_eq!(replay_paste(&[]), "");
     }
 
-    /// An Enter with more input queued is a line break of a paste; a lone Enter submits.
+    /// The Normal-mode Enter arm drains the queue before it decides (R2-I1, R3-I1): without
+    /// the drain, a paste that reaches the loop as key events submits at its first line break.
     #[test]
-    fn enter_with_more_input_pending_inserts_a_newline_and_a_lone_enter_submits() {
-        assert_eq!(enter_action(true), EnterAction::InsertNewline);
-        assert_eq!(enter_action(false), EnterAction::Submit);
-    }
-
-    /// The Normal-mode Enter arm asks the queue before it decides (R2-I1): without the
-    /// poll, a paste that reaches the loop as key events submits at its first line break.
-    #[test]
-    fn the_enter_handler_decides_through_enter_action_on_the_pending_queue() {
+    fn the_enter_handler_decides_through_classify_enter_on_the_drained_queue() {
         let source = production_source();
         let body = block_body(&source, "\nasync fn run_app")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            body.contains("enter_action(") && body.contains("Duration::ZERO"),
-            "the event loop no longer consults the pending queue before submitting on Enter"
+            body.contains("drain_pending_events()")
+                && body.contains("classify_enter(&drained)")
+                && body.contains("replay_paste(&drained)"),
+            "the event loop no longer drains the pending queue before submitting on Enter"
         );
     }
 
