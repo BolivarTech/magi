@@ -2600,11 +2600,10 @@ pub async fn run_tui_ext(
     // `test_nothing_fallible_runs_while_the_alternate_screen_is_held` fails if
     // one is ever put back.
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableBracketedPaste
-    )?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    // Best-effort: a legacy console can refuse it, and a `?` here would return with the
+    // alternate screen held. Without it a paste simply arrives as key events.
+    let _ = execute!(terminal.backend_mut(), EnableBracketedPaste);
 
     // Cancelled right after `run_app` returns, below — races an in-flight OAuth callback
     // wait so quitting mid-login does not force the process to sit out
@@ -7870,8 +7869,10 @@ mod tests {
         let enable = ["Enable", "BracketedPaste"].concat();
         let disable = ["Disable", "BracketedPaste"].concat();
         assert!(
-            production.contains(&format!("EnterAlternateScreen, {enable}")),
-            "entering the alternate screen also enables bracketed paste"
+            production.contains(&format!(
+                "let _ = execute!(terminal.backend_mut(), {enable});"
+            )),
+            "entering the alternate screen is followed by a best-effort bracketed paste enable"
         );
         assert_eq!(
             production
