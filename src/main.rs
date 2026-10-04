@@ -8086,6 +8086,37 @@ mod tests {
         );
     }
 
+    /// The TUI's startup log of a decision client that could not be built stays below the
+    /// screen level: the screen shows the typed error when `/decide` is used, and a WARN
+    /// here would paint over the first frame (R2-I2). The needle is composed from two halves
+    /// so the test does not match itself.
+    #[test]
+    fn the_unbuilt_decision_client_log_stays_below_the_screen_level() {
+        assert!(
+            tracing::Level::INFO > magi_rs::logging::SCREEN_LEVEL,
+            "INFO must be more verbose than the screen level"
+        );
+        let source = include_str!("main.rs").replace('\r', "");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("a production part");
+        let needle = ["decision client ", "unavailable: {}"].concat();
+        let at = production.find(&needle).expect("the startup log exists");
+        let call: String = production[..at]
+            .chars()
+            .rev()
+            .take(200)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        assert!(
+            call.contains("tracing::Level::INFO") && !call.contains("warn!("),
+            "the log must be an INFO event, found: {call}"
+        );
+    }
+
     /// S-9's inputs on the headless path: the warning is assessed on the ceiling the trio
     /// really runs under and names `--timeout` only when the operator passed one. At the 0.21.0
     /// cap (65 536) an explicit `--timeout 1800` (74 s per request) covers ~4 070 tokens, and the
