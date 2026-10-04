@@ -8217,6 +8217,29 @@ mod tests {
         );
     }
 
+    /// With `-q`, the rest of the line is the state text unless it is exactly `-i <one path>`.
+    #[test]
+    fn a_state_text_that_starts_with_the_request_flag_is_text() {
+        let text = |t: &str| {
+            Ok(super::TuiDecideCommand::QuestionsAndText {
+                questions: "q.json".into(),
+                text: t.into(),
+            })
+        };
+        assert_eq!(
+            super::parse_tui_decide("/decide -q q.json -i is a word"),
+            text("-i is a word")
+        );
+        assert_eq!(super::parse_tui_decide("/decide -q q.json -i"), text("-i"));
+        assert_eq!(
+            super::parse_tui_decide("/decide -q q.json -i r.json"),
+            Ok(super::TuiDecideCommand::RequestFileAndQuestions {
+                request: "r.json".into(),
+                questions: "q.json".into()
+            })
+        );
+    }
+
     /// A client that must never be reached: the request fails before any call.
     struct UnreachedClient;
 
