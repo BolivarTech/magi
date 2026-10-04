@@ -8031,6 +8031,22 @@ mod tests {
         }
     }
 
+    /// The OpenAI-compatible key also serves the MAGI trio (`EnvVaultCredentials` reads it), and the
+    /// help says so.
+    #[test]
+    fn vault_set_help_says_the_openai_key_serves_the_magi_trio() {
+        let help = all_help_screens()
+            .into_iter()
+            .find(|(p, _)| p == "magi-rs vault set")
+            .map(|(_, h)| h)
+            .expect("the vault set help screen");
+        let line = help
+            .lines()
+            .find(|l| l.trim_start().starts_with("OPENAI_API_KEY"))
+            .expect("the OPENAI_API_KEY line");
+        assert!(line.contains("MAGI"), "{line}");
+    }
+
     #[test]
     fn the_dev_id_matcher_follows_its_table() {
         let table: [(&str, Option<&str>); 9] = [
