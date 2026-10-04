@@ -1560,8 +1560,15 @@ pub(crate) fn tui_decide_request(
 /// # Errors
 /// The open or read error of the file, or `InvalidData` when it is larger than `cap`.
 fn read_decide_file_bounded(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
-    let _ = cap;
-    std::fs::read(path)
+    let file = std::fs::File::open(path)?;
+    magi_rs::headless::input::read_input_bounded(file, cap).map_err(|err| match err {
+        magi_rs::headless::HeadlessError::InputTooLarge(limit) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("the file is larger than {limit} bytes"),
+        ),
+        magi_rs::headless::HeadlessError::Io(message) => io::Error::other(message),
+        other => io::Error::other(other.to_string()),
+    })
 }
 
 /// Runs a `/decide` command and renders the reply (REQ-D15, REQ-D20).
