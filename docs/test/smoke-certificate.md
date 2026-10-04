@@ -1,18 +1,50 @@
 # Smoke Certificate
 
-- version: 0.21.0
-- commit: 4c4f466
-- date: 2026-10-01 (UTC)
+- version: 0.23.0
+- commit: c6fa9d8
+- date: 2026-10-04 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 43430198a9524a2f1fdd9fbcb41c3c992b4877593144a68695660f56033e40e6 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 720s
-- rounds needed: 2
-- environment: reset with --reset-env before SMOKE #1 (2026-09-30), then 1 uncounted warm-up run; databases created by the new build only
-- scope: 26 of 26 scenarios evaluated
+- binary: sha256 6cdf744c065202d20603819c8362c6517db31e07f5b3f9259122d26109457ac6 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 760s
+- rounds needed: 1
+- scope: 39 of 39 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: active memories not measured, 2072 KB database, 879 KB archived
-- result: 81 passed, 0 not passed, 81 total
+- environment: 137 active memories, 6901 KB database, 3308 KB archived
+- result: 118 passed, 0 not passed, 118 total
 
+[PASS] D1 - decide answers one question of each type against local Ollama with exit 0
+[PASS] D1 - every answer carries a Magi confidence between 0 and 1
+[PASS] D1 - the envelope names the model that answered and its usage
+[PASS] D2 - decide answers one question of each type against OpenRouter with exit 0
+[PASS] D2 - the envelope reports a numeric cost
+[PASS] D2 - the score answer has a legend for every level
+[PASS] D3 - a missing primary model rotates to the declared fallback
+[PASS] D3 - the chain records the primary as model_not_found
+[PASS] D4 - a model excluded by account policy rotates to the next one
+[PASS] D4 - the hop names account_policy and repeats no provider text
+[PASS] D5 - a hosted endpoint without DECISION_API_KEY exits 2 with missing_key
+[PASS] D5 - the message names DECISION_API_KEY
+[PASS] D5 - with the same configuration vault ls still runs
+[PASS] D6 - a v0.22.0 magi.toml is refused naming the missing [decision] section
+[PASS] D6 - an empty magi.toml is refused offering to delete it or run magi-rs init
+[PASS] D7 - a dead endpoint exits 1 with decision_unavailable and no answers
+[PASS] D7 - a base_url without the API prefix is diagnosed with the URL that was tried
+[PASS] D8 - when no model reaches its min_confidence the call exits 1
+[PASS] D8 - every hop is reported as low_confidence with its confidence and threshold
+[PASS] D9 - the planted credential does not reach stdout
+[PASS] D9 - the planted credential does not reach stderr
+[PASS] D9 - the planted credential does not reach the run log
+[PASS] D10 - -q with questions also in the input exits 2 before any request
+[PASS] D10 - -o writes the envelope and leaves stdout empty
+[PASS] D10 - --timeout overrides timeout_secs per attempt
+[PASS] D10 - an explicit model is tried alone
+[PASS] D11 - when the agent calls decide in the default tier the call is approved
+[PASS] D12 - a consult with a dead decision endpoint still completes
+[PASS] D12 - the run log records one mode fallback with its cause
+[PASS] D12 - nothing about the fallback reaches stderr or stdout
+[PASS] D13 - the decide call in tool_calls stores the state as <omitted>
+[PASS] D13 - the decide call in tool_calls keeps its questions and its result
+[PASS] D13 - the state marker reaches neither the decide record nor the decide log lines
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
 [PASS] S1 run=R1 - schema_version is 1
 [PASS] S1 run=R1 - every top-level contract key is present
@@ -58,6 +90,10 @@
 [PASS] S13 - every flag in those invocations exists in that subcommand's --help
 [PASS] S13 - every magi.toml embedded in those docs parses
 [PASS] S13 - every [magi] key the scaffold writes is named in a published guide
+[PASS] S13 - the documented decide flags exist
+[PASS] S13 - the [decision] example in docs/magi.toml.example parses
+[PASS] S13 - the documented /decide forms and the decide tool exist
+[PASS] S13 - no help screen of the release binary shows a development id
 [PASS] S14 - init -w <dir> scaffolds into <dir> and leaves the current directory untouched
 [PASS] S14 - vault -w <dir> ls and vault ls -w <dir> both parse
 [PASS] S14 - given twice, the innermost wins
