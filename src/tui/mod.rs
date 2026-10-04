@@ -1643,10 +1643,22 @@ fn spawn_decide_reply(
     // Drop the results of the calls that already finished so the set stays small.
     while tasks.try_join_next().is_some() {}
     tasks.spawn(async move {
-        let reply = tui_decide_reply(&cmd, client.as_deref(), build_error.as_ref(), &|p| {
-            read_decide_file_bounded(p, magi_rs::headless::limits::MAX_INPUT_BYTES)
-        })
-        .await;
+        // The call runs on an inner task so a panic in it still produces a reply; the guard
+        // aborts that inner task when this one is aborted (the set dropped on quit).
+        let call = tokio::spawn(async move {
+            tui_decide_reply(&cmd, client.as_deref(), build_error.as_ref(), &|p| {
+                read_decide_file_bounded(p, magi_rs::headless::limits::MAX_INPUT_BYTES)
+            })
+            .await
+        });
+        let _guard = crate::task::AbortOnDrop::new(call.abort_handle());
+        let reply = match call.await {
+            Ok(reply) => reply,
+            Err(join_err) if join_err.is_panic() => {
+                AgentResponse::Error(DECIDE_CRASH_MESSAGE.to_string())
+            }
+            Err(_) => return,
+        };
         let _ = response_tx.send(reply).await;
     });
 }
@@ -8339,7 +8351,7 @@ mod tests {
             .expect("a crash must not leave the user without a reply");
         match reply {
             Some(AgentResponse::Error(text)) => {
-                assert!(text.contains("crashed unexpectedly"), "{text}")
+                assert!(text.contains(super::DECIDE_CRASH_MESSAGE), "{text}")
             }
             other => panic!("expected an error reply, got {other:?}"),
         }
