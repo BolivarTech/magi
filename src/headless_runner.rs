@@ -2771,6 +2771,28 @@ mod tests {
         assert_eq!(transcript[0].content, "please also note: X");
     }
 
+    /// The unrecorded-call fallback also omits the `state` of a `decide` call (REQ-D19): the
+    /// transcript is as private as the recorded path.
+    #[test]
+    fn test_build_transcript_omits_the_state_of_an_unrecorded_decide_call() {
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: vec![Content::ToolUse {
+                id: "call-9".to_string(),
+                name: "decide".to_string(),
+                input: serde_json::json!({"state": "SECRET-MARKER", "questions": {}}),
+            }],
+        }];
+        let records: HashMap<&str, &ToolCallRecord> = HashMap::new();
+
+        let transcript = build_transcript(&history, &records);
+
+        let calls = transcript[0].tool_calls.as_ref().expect("the call is kept");
+        let shown = calls[0].input.to_string();
+        assert!(!shown.contains("SECRET-MARKER"), "{shown}");
+        assert!(shown.contains("<omitted>"), "{shown}");
+    }
+
     /// The overwhelmingly common case is unaffected: a PURE tool-result carrier (no text at
     /// all) is still folded away — its outcome already lives inside the requesting
     /// assistant entry's `tool_calls`.
