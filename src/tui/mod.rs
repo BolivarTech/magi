@@ -1479,7 +1479,7 @@ pub(crate) fn parse_tui_decide(trimmed: &str) -> Result<TuiDecideCommand, TuiDec
 fn decide_parse_error_message(error: &TuiDecideParseError) -> String {
     match error {
         TuiDecideParseError::NotADecideCommand | TuiDecideParseError::Usage => {
-            DECIDE_USAGE.to_string()
+            format!("System: {DECIDE_USAGE}")
         }
         TuiDecideParseError::MissingFlagValue(flag) => {
             format!("System: {flag} needs a file path. {DECIDE_USAGE}")
