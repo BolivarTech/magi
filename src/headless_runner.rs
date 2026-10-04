@@ -888,7 +888,9 @@ fn build_transcript(
                                 // never drop the block silently.
                                 .unwrap_or_else(|| ToolCallRecord {
                                     name: name.clone(),
-                                    input: input.clone(),
+                                    input: magi_rs::decision::internal::tool_call_record_input(
+                                        name, input,
+                                    ),
                                     result: String::new(),
                                     ms: 0,
                                     ok: false,
