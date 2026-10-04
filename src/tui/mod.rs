@@ -8216,6 +8216,38 @@ mod tests {
         );
     }
 
+    /// A client that must never be reached: the request fails before any call.
+    struct UnreachedClient;
+
+    #[async_trait::async_trait]
+    impl DecisionClient for UnreachedClient {
+        async fn decide(
+            &self,
+            _request: &magi_rs::decision::DecisionRequest,
+        ) -> Result<magi_rs::decision::Decision, DecisionError> {
+            Err(DecisionError::ClientUnavailable {
+                reason: "unreached".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_decide_file_reply_keeps_the_reader_message() {
+        let cmd = super::TuiDecideCommand::RequestFile(std::path::PathBuf::from("big.json"));
+        let client = UnreachedClient;
+        let reader = |_: &std::path::Path| -> io::Result<Vec<u8>> {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the file is larger than 4 bytes",
+            ))
+        };
+        let reply = super::tui_decide_reply(&cmd, Some(&client), None, &reader).await;
+        assert!(
+            matches!(reply, AgentResponse::Error(ref m) if m.contains("larger than 4 bytes")),
+            "the table names the limit: {reply:?}"
+        );
+    }
+
     #[test]
     fn the_decide_files_are_read_with_the_cli_input_cap() {
         let source = production_source();
