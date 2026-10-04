@@ -6061,6 +6061,33 @@ mod tests {
         );
     }
 
+    /// Enabling bracketed paste is best-effort and its own statement: a legacy console can
+    /// refuse it, and as part of the entering statement its `?` would return with the
+    /// alternate screen already held (R2-M1). Kept out of the window test above, which
+    /// starts after the entering statement and so cannot see it.
+    #[test]
+    fn test_bracketed_paste_is_enabled_apart_from_the_alternate_screen_entry() {
+        let source = production_source();
+        let stmts = collapsed_pieces(block_body(&source, "\npub async fn run_tui_ext"), &[';']);
+        let paste = stmt_with(&stmts, "EnableBracketedPaste");
+        assert!(
+            !paste.contains("EnterAlternateScreen"),
+            "paste is enabled in the entering statement, so its failure leaves the screen held: \
+             {paste:?}"
+        );
+        assert!(
+            !paste.contains('?'),
+            "enabling paste must be best-effort, not propagated: {paste:?}"
+        );
+    }
+
+    fn stmt_with<'a>(stmts: &'a [String], token: &str) -> &'a String {
+        stmts
+            .iter()
+            .find(|s| s.contains(token))
+            .unwrap_or_else(|| panic!("{token} is no longer in production"))
+    }
+
     /// **`Drop` is the sink's last mouth, and nothing pinned that it opens it.**
     /// `a_notice_raised_before_attach_is_never_silently_dropped` proves what
     /// [`TuiNoticeSink::flush`] RETURNS; the loop that writes those strings is a
