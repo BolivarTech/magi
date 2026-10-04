@@ -3391,6 +3391,36 @@ fn enter_action(more_input_pending: bool) -> EnterAction {
     }
 }
 
+/// Decides what an Enter press does, given the events drained right after it.
+///
+/// Stub: see the implementation commit.
+///
+/// # Arguments
+/// * `drained` - Every event that was immediately available after the Enter.
+///
+/// # Returns
+/// The action to take for this Enter.
+#[cfg_attr(not(test), allow(dead_code))]
+fn classify_enter(drained: &[Event]) -> EnterAction {
+    let _ = drained;
+    unimplemented!("classify_enter")
+}
+
+/// Text a paste burst contributes to the input, from the events drained after its first Enter.
+///
+/// Stub: see the implementation commit.
+///
+/// # Arguments
+/// * `drained` - Every event that was immediately available after the Enter.
+///
+/// # Returns
+/// The text to append to the input, after the line break of the Enter itself.
+#[cfg_attr(not(test), allow(dead_code))]
+fn replay_paste(drained: &[Event]) -> String {
+    let _ = drained;
+    unimplemented!("replay_paste")
+}
+
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -7925,6 +7955,75 @@ mod tests {
             2,
             "the panic hook and the normal teardown both disable bracketed paste"
         );
+    }
+
+    fn key(code: KeyCode, kind: KeyEventKind) -> Event {
+        let mut k = crossterm::event::KeyEvent::new(code, KeyModifiers::NONE);
+        k.kind = kind;
+        Event::Key(k)
+    }
+
+    fn press(code: KeyCode) -> Event {
+        key(code, KeyEventKind::Press)
+    }
+
+    /// A lone Enter, or one followed only by its own Release, a resize or a focus change,
+    /// is not a paste and submits.
+    #[test]
+    fn an_enter_followed_by_no_key_press_submits() {
+        assert_eq!(classify_enter(&[]), EnterAction::Submit);
+        assert_eq!(
+            classify_enter(&[key(KeyCode::Enter, KeyEventKind::Release)]),
+            EnterAction::Submit
+        );
+        assert_eq!(
+            classify_enter(&[Event::Resize(80, 24), Event::FocusGained]),
+            EnterAction::Submit
+        );
+    }
+
+    /// Any further key press queued behind the Enter marks a paste burst.
+    #[test]
+    fn an_enter_followed_by_a_key_press_is_a_paste_line_break() {
+        assert_eq!(
+            classify_enter(&[
+                key(KeyCode::Enter, KeyEventKind::Release),
+                press(KeyCode::Char('b'))
+            ]),
+            EnterAction::InsertNewline
+        );
+    }
+
+    /// The replay keeps presses in order, maps Enter and Tab, and ignores releases and the rest.
+    #[test]
+    fn the_replay_turns_presses_into_text_in_order() {
+        let drained = [
+            press(KeyCode::Char('a')),
+            key(KeyCode::Char('a'), KeyEventKind::Release),
+            press(KeyCode::Enter),
+            press(KeyCode::Tab),
+            press(KeyCode::Up),
+            Event::Resize(1, 1),
+            press(KeyCode::Char('b')),
+        ];
+        assert_eq!(
+            replay_paste(&drained),
+            "a
+	b"
+        );
+    }
+
+    /// Multibyte characters survive the replay whole.
+    #[test]
+    fn the_replay_keeps_multibyte_characters() {
+        let drained = [press(KeyCode::Char('é')), press(KeyCode::Char('日'))];
+        assert_eq!(replay_paste(&drained), "é日");
+    }
+
+    /// Nothing drained replays nothing.
+    #[test]
+    fn the_replay_of_no_events_is_empty() {
+        assert_eq!(replay_paste(&[]), "");
     }
 
     /// An Enter with more input queued is a line break of a paste; a lone Enter submits.
