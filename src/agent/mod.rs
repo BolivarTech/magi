@@ -1819,6 +1819,13 @@ async fn write_turn_to_memory(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::tools::ToolResult;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use futures::stream::{self, BoxStream};
+    use serde_json::{json, Value};
+
     /// The judge of an agent without a decision client still learns where `decide` points and
     /// why it is absent.
     #[test]
@@ -1830,13 +1837,6 @@ mod tests {
         assert_eq!(endpoint, "http://decide.example");
         assert_eq!(reason.as_deref(), Some("no key"));
     }
-
-    use super::*;
-    use crate::tools::ToolResult;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use futures::stream::{self, BoxStream};
-    use serde_json::{json, Value};
 
     pub struct MockProvider;
 

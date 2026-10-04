@@ -7238,7 +7238,7 @@ fn build_decision_client(
 ///
 /// # Returns
 /// The client (or `None`), the redacted endpoint to show in the run log, and, when there is no
-/// client, the redacted reason it could not be built.
+/// client, the error it could not be built with (redaction happens at the consumers).
 fn decision_client_for(
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
