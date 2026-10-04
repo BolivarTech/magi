@@ -3360,7 +3360,6 @@ fn drain_approval_requests(app: &mut App) {
 
 /// What the Enter key does in Normal mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // removed once the Enter handler consumes it
 enum EnterAction {
     /// Send the input line.
     Submit,
@@ -3384,9 +3383,12 @@ enum EnterAction {
 ///
 /// # Returns
 /// The action to take for this Enter.
-#[allow(dead_code)] // removed once the Enter handler consumes it
-fn enter_action(_more_input_pending: bool) -> EnterAction {
-    EnterAction::Submit
+fn enter_action(more_input_pending: bool) -> EnterAction {
+    if more_input_pending {
+        EnterAction::InsertNewline
+    } else {
+        EnterAction::Submit
+    }
 }
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
@@ -3628,6 +3630,15 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
                         match key.code {
                             KeyCode::Enter => {
+                                if enter_action(event::poll(std::time::Duration::ZERO)?)
+                                    == EnterAction::InsertNewline
+                                {
+                                    app.insert_str(
+                                        "
+",
+                                    );
+                                    continue;
+                                }
                                 let input = std::mem::take(&mut app.input);
                                 app.cursor_position = 0;
                                 let trimmed = input.trim();

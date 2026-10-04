@@ -142,7 +142,7 @@ Some models return slightly different numbers when the same request is repeated.
 
 ## From the TUI and from the agent
 
-`/decide` takes the same request as the command line, in four forms: a whole request pasted on the line (`/decide {...}`), `/decide -i request.json`, `/decide -q questions.json some text` (the text becomes a text `state`), and `/decide -i state.json -q questions.json`. The result is a table with the question, the chosen option (or the level name for a `score`, yes/no for a `noul`), Magi's `confidence` and the model that answered. Errors show their `kind`, the message and the chain of attempts.
+`/decide` takes the same request as the command line, in four forms: a whole request pasted on the line (`/decide {...}`), `/decide -i request.json`, `/decide -q questions.json some text` (the text becomes a text `state`), and `/decide -i state.json -q questions.json`. The result is a table with the question, the chosen option (or the level name for a `score`, yes/no for a `noul`), Magi's `confidence` and the model that answered. Errors show their `kind`, the message and the chain of attempts. A multi-line paste is taken as one input, on every platform, and is not sent until you press Enter yourself.
 
 Like `/consult`, `/decide` keeps the session busy until it finishes and cannot be cancelled from the keyboard. The wait is bounded by the timeout of each model in the chain; to leave sooner, close the process.
 
