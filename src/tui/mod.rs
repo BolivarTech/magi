@@ -1547,6 +1547,7 @@ pub(crate) fn tui_decide_request(
 /// # Arguments
 /// * `cmd` - The parsed command.
 /// * `client` - The session's decision client, if one could be built.
+/// * `build_error` - Why the client could not be built, shown instead of a generic notice.
 /// * `read` - The injected file reader (`Sync`: the future lives inside `tokio::spawn`).
 ///
 /// # Returns
@@ -1554,8 +1555,10 @@ pub(crate) fn tui_decide_request(
 pub(crate) async fn tui_decide_reply(
     cmd: &TuiDecideCommand,
     client: Option<&dyn DecisionClient>,
+    build_error: Option<&DecisionError>,
     read: &(dyn Fn(&Path) -> std::io::Result<Vec<u8>> + Sync),
 ) -> AgentResponse {
+    let _ = build_error;
     let Some(client) = client else {
         let unavailable = DecisionError::ClientUnavailable {
             reason: "the decision endpoint or its credentials are not set up; see the run log"
@@ -2249,6 +2252,8 @@ pub struct TuiMagiRuntimeConfig {
     pub clock_coverage: Arc<crate::tools::consult::ClockCoverageAnnouncer>,
     /// The session's decision client for `/decide` (REQ-D15), `None` when it could not be built.
     pub decision_client: Option<Arc<dyn DecisionClient>>,
+    /// Why `decision_client` is `None`, so `/decide` can name the missing entry and its remedy.
+    pub decision_build_error: Option<DecisionError>,
 }
 
 /// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
@@ -2503,6 +2508,7 @@ pub async fn run_tui_ext(
         tool_result_cap,
         clock_coverage,
         decision_client,
+        decision_build_error,
     } = magi_runtime;
 
     let original_hook = std::panic::take_hook();
@@ -2793,9 +2799,13 @@ pub async fn run_tui_ext(
                     }
                 }
                 UiEvent::Decide(cmd) => {
-                    let reply =
-                        tui_decide_reply(&cmd, decision_client.as_deref(), &|p| std::fs::read(p))
-                            .await;
+                    let reply = tui_decide_reply(
+                        &cmd,
+                        decision_client.as_deref(),
+                        decision_build_error.as_ref(),
+                        &|p| std::fs::read(p),
+                    )
+                    .await;
                     let _ = response_tx.send(reply).await;
                 }
                 UiEvent::Login => {
@@ -7928,11 +7938,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_client_decide_shows_the_build_error_with_its_remedy() {
+        let cmd = super::TuiDecideCommand::Request(
+            r#"{"state":"x","questions":{"q":{"type":"noul","instructions":"?"}}}"#.into(),
+        );
+        let build_error = DecisionError::MissingVaultEntry {
+            entry: "DECISION_BASE_URL_USER",
+        };
+        let reply = super::tui_decide_reply(&cmd, None, Some(&build_error), &fs_with(&[])).await;
+        assert!(
+            matches!(
+                reply,
+                AgentResponse::Error(ref m)
+                    if m.contains("missing_key")
+                        && m.contains("vault set DECISION_BASE_URL_USER")
+            ),
+            "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn without_a_client_decide_answers_with_an_error() {
         let cmd = super::TuiDecideCommand::Request(
             r#"{"state":"x","questions":{"q":{"type":"noul","instructions":"?"}}}"#.into(),
         );
-        let reply = super::tui_decide_reply(&cmd, None, &fs_with(&[])).await;
+        let reply = super::tui_decide_reply(&cmd, None, None, &fs_with(&[])).await;
         assert!(
             matches!(reply, AgentResponse::Error(ref m) if m.contains("could not be built")),
             "{reply:?}"

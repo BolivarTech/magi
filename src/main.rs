@@ -2220,12 +2220,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let tui_tool_decision = tui_decision.clone();
     let tui_tool_endpoint = tui_decision_endpoint.clone();
     let tui_slash_decision = tui_decision.clone();
+    let tui_build_error = tui_decision_reason.clone();
     let tui_mode_classifier = tui_mode_classifier_wiring(
         provider.clone(),
         Arc::clone(&tui_notices),
         tui_decision,
         tui_decision_endpoint,
-        tui_decision_reason,
+        tui_decision_reason.as_ref().map(unavailable_reason),
     );
     let tui_classifier_notices = tui_notices;
     let tui_default_mode = magi_config.effective_default_mode();
@@ -2346,6 +2347,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             tool_result_cap: magi_config.effective_tool_result_cap(),
             clock_coverage: tui_clock_coverage_announcer,
             decision_client: tui_slash_decision,
+            decision_build_error: tui_build_error,
         },
         // The chat loop's SELF-ROUTED consults (REQ-A20/A07d) — a different surface from the
         // explicit `/consult` above, which is what `TuiMagiRuntimeConfig` serves.
@@ -6902,7 +6904,7 @@ async fn run_consult_subcommand(
         llm_classifier,
         decision_endpoint,
     )
-    .with_unavailable_reason(decision_reason);
+    .with_unavailable_reason(decision_reason.as_ref().map(unavailable_reason));
     // S-9/REQ-EE-5: shares the SAME process-level sink as the mode classifier's own notices —
     // one stderr output path, not two.
     let clock_coverage_announcer = crate::tools::consult::ClockCoverageAnnouncer::new(
@@ -7240,18 +7242,29 @@ fn decision_client_for(
                 .effective_decision_base_url()
                 .map(|t| redact_url(t.as_str()))
                 .unwrap_or_default(),
-            Some(redact_foreign_error(&e).to_string()),
+            Some(e),
         ),
     }
 }
 
 /// What [`decision_client_for`] returns: the client, its redacted endpoint and, when the client
-/// could not be built, the redacted reason.
+/// could not be built, the build error.
 type DecisionClientParts = (
     Option<Arc<dyn magi_rs::decision::DecisionClient>>,
     String,
-    Option<String>,
+    Option<DecisionError>,
 );
+
+/// The redacted, user-audience text of a client build failure, for the run log.
+///
+/// # Arguments
+/// * `error` - The build failure.
+///
+/// # Returns
+/// The text with foreign content masked.
+fn unavailable_reason(error: &DecisionError) -> String {
+    redact_foreign_error(error).to_string()
+}
 
 /// Validates the request of a decide run (REQ-D22, REQ-D23).
 ///
