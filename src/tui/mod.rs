@@ -3358,6 +3358,37 @@ fn drain_approval_requests(app: &mut App) {
     }
 }
 
+/// What the Enter key does in Normal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // removed once the Enter handler consumes it
+enum EnterAction {
+    /// Send the input line.
+    Submit,
+    /// Add a line break to the input and keep editing.
+    InsertNewline,
+}
+
+/// Decides what an Enter key press does.
+///
+/// On a terminal without bracketed paste (the Windows console never reports it) a pasted
+/// multi-line text arrives as key events, so its line breaks are Enter presses followed at
+/// once by more input. An Enter with more input already queued therefore belongs to a paste
+/// and inserts a line break; a lone Enter submits.
+///
+/// Known limit: typing Enter and a further key within one poll cycle is read as a paste
+/// line break. Human typing is far slower than the queue drains, so this only affects
+/// scripted input.
+///
+/// # Arguments
+/// * `more_input_pending` - Whether another terminal event is already queued.
+///
+/// # Returns
+/// The action to take for this Enter.
+#[allow(dead_code)] // removed once the Enter handler consumes it
+fn enter_action(_more_input_pending: bool) -> EnterAction {
+    EnterAction::Submit
+}
+
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -7882,6 +7913,28 @@ mod tests {
                 .count(),
             2,
             "the panic hook and the normal teardown both disable bracketed paste"
+        );
+    }
+
+    /// An Enter with more input queued is a line break of a paste; a lone Enter submits.
+    #[test]
+    fn enter_with_more_input_pending_inserts_a_newline_and_a_lone_enter_submits() {
+        assert_eq!(enter_action(true), EnterAction::InsertNewline);
+        assert_eq!(enter_action(false), EnterAction::Submit);
+    }
+
+    /// The Normal-mode Enter arm asks the queue before it decides (R2-I1): without the
+    /// poll, a paste that reaches the loop as key events submits at its first line break.
+    #[test]
+    fn the_enter_handler_decides_through_enter_action_on_the_pending_queue() {
+        let source = production_source();
+        let body = block_body(&source, "\nasync fn run_app")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            body.contains("enter_action(") && body.contains("Duration::ZERO"),
+            "the event loop no longer consults the pending queue before submitting on Enter"
         );
     }
 
