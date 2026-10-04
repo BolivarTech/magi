@@ -1617,6 +1617,30 @@ pub(crate) async fn tui_decide_reply(
     }
 }
 
+/// Runs a `/decide` command on its own task so the event loop keeps serving other events.
+///
+/// The task is owned by `tasks`, so dropping the set (when the loop ends) aborts a call still
+/// in flight, the way `/consult`'s task is abandoned on quit. The reply is sent through
+/// `response_tx` as soon as it is ready.
+///
+/// # Arguments
+/// * `tasks` - The set that owns the spawned task.
+/// * `cmd` - The parsed command.
+/// * `client` - The session's decision client, if one could be built.
+/// * `build_error` - Why the client could not be built.
+/// * `response_tx` - Where the reply goes.
+#[allow(dead_code)] // the event loop switches to it in the fix commit
+fn spawn_decide_reply(
+    tasks: &mut tokio::task::JoinSet<()>,
+    cmd: TuiDecideCommand,
+    client: Option<Arc<dyn DecisionClient>>,
+    build_error: Option<DecisionError>,
+    response_tx: mpsc::Sender<AgentResponse>,
+) {
+    let _ = (tasks, cmd, client, build_error, response_tx);
+    todo!("spawn the reply task")
+}
+
 /// Masks a provider-sourced string: URL credentials first, then secret-shaped tokens.
 ///
 /// # Arguments
@@ -8242,6 +8266,60 @@ mod tests {
                 request: "r.json".into(),
                 questions: "q.json".into()
             })
+        );
+    }
+
+    /// A client that blocks until released, to prove the caller is not held by the call.
+    struct GatedClient(std::sync::Arc<tokio::sync::Notify>);
+
+    #[async_trait::async_trait]
+    impl DecisionClient for GatedClient {
+        async fn decide(
+            &self,
+            _request: &magi_rs::decision::DecisionRequest,
+        ) -> Result<magi_rs::decision::Decision, DecisionError> {
+            self.0.notified().await;
+            Err(DecisionError::ClientUnavailable {
+                reason: "released".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_spawned_decide_returns_before_the_call_finishes_and_replies_later() {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let client: Arc<dyn DecisionClient> = Arc::new(GatedClient(gate.clone()));
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut tasks = tokio::task::JoinSet::new();
+        let cmd = super::TuiDecideCommand::Request(
+            r#"{"state":"x","questions":{"q":{"type":"noul","instructions":"?"}}}"#.into(),
+        );
+        super::spawn_decide_reply(&mut tasks, cmd, Some(client), None, tx);
+        assert!(rx.try_recv().is_err(), "no reply while the call is pending");
+        gate.notify_one();
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the reply arrives once the call finishes");
+        assert!(matches!(reply, Some(AgentResponse::Error(_))), "{reply:?}");
+    }
+
+    #[test]
+    fn the_decide_arm_hands_the_call_to_a_task_instead_of_awaiting_it() {
+        let source = production_source();
+        let start = source
+            .find("UiEvent::Decide(cmd) => {")
+            .expect("the /decide arm moved — re-anchor this guard, do not delete it");
+        let rest = &source[start..];
+        let arm = &rest[..rest
+            .find("UiEvent::Login => {")
+            .expect("the /login arm follows")];
+        assert!(
+            arm.contains("spawn_decide_reply("),
+            "the arm must spawn the call"
+        );
+        assert!(
+            !arm.contains("tui_decide_reply("),
+            "the arm must not await the reply inline"
         );
     }
 
