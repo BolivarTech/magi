@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.22.0
 # Date: 2026-10-01
-"""D1-D10 -- ``magi decide`` against real backends, and its refusals.
+"""D1-D13 -- ``magi decide`` against real backends, its refusals and its agent use.
 
 ``decide`` asks a System One model for a typed decision. What the unit suite
 cannot see is the part this module covers: a real Ollama and a real OpenRouter
@@ -36,6 +36,7 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import socketserver
@@ -917,6 +918,372 @@ def _explicit_model_finding(root, base_url, model):
     ok = len(chain) == 1 and chain[0].get("model") == model
     return _finding(D10_ASSERTIONS, 3, "" if ok else (
         "chain was %s, expected one hop for %r" % (_brief(chain), model)))
+
+
+# ---------------------------------------------------------------------------
+# D11 -- S11 and S24, the agent calls decide on its own in the default tier
+# ---------------------------------------------------------------------------
+
+D11_ASSERTIONS = (
+    "when the agent calls decide in the default tier the call is approved",
+)
+
+#: The tool's name as the agent calls it, and the key of the run record.
+DECIDE_TOOL_NAME = "decide"
+TOOL_CALLS_KEY = "tool_calls"
+QUERY_TIMEOUT_S = 420
+CONSULT_SUBCOMMAND = "consult"
+CONSULT_TIMEOUT_S = 600
+
+#: A request that is plainly a closed choice and that names the tool, so the
+#: only open question is whether the main model reaches for it. Whether it
+#: does is the model's behaviour, never the product's contract.
+D11_PROMPT = (
+    "Use the decide tool, and nothing else, to classify this issue: 'The "
+    "application crashes when I click Save'. Ask ONE choice question named "
+    "kind with the options bug, feature and question. Then tell me the "
+    "result in one sentence.\n")
+
+
+@scenario("D11", assertions=D11_ASSERTIONS, needs_backend=True)
+def the_agent_calls_decide_in_the_default_tier(run):
+    """Ask the agent a closed question without ``--auto`` and read its record.
+
+    ``decide`` is a read-only tool, so the default tier approves it with no
+    flag. The choice to call it belongs to the main model: when it answers
+    without calling the tool there is nothing to judge, and the assertion is
+    ``CANNOT_TEST`` with the observation recorded.
+
+    Args:
+        run: Always ``None``.
+
+    Yields:
+        Finding: One per entry of :data:`D11_ASSERTIONS`.
+    """
+    attempt = _query_in_environment(D11_PROMPT, "d11-query")
+    records = _decide_records(attempt)
+    if records is None:
+        yield from _cannot_or_fail(D11_ASSERTIONS, attempt)
+        return
+    if not records:
+        yield _finding(D11_ASSERTIONS, 0, None, _NOT_CALLED_DETAIL)
+        return
+    denied = [record for record in records if record.get("ok") is not True]
+    yield _finding(D11_ASSERTIONS, 0, "" if not denied else (
+        "%d of %d decide calls were not approved or failed: %s"
+        % (len(denied), len(records),
+           "; ".join(_excerpt_text(str(r.get("result"))) for r in denied))))
+
+
+# ---------------------------------------------------------------------------
+# D12 -- S12, a dead decision endpoint costs a consult nothing
+# ---------------------------------------------------------------------------
+
+D12_ASSERTIONS = (
+    "a consult with a dead decision endpoint still completes",
+    "the run log records one mode fallback with its cause",
+    "nothing about the fallback reaches stderr or stdout",
+)
+
+#: What the product writes for an internal fallback (its log target and
+#: message). Neither may reach a screen.
+FALLBACK_LOG_TARGET = "magi_rs::decision::fallback"
+FALLBACK_MESSAGE = "fell back to the LLM"
+FALLBACK_MODE_FIELD = "consumer=mode"
+_FALLBACK_CAUSE = re.compile(r"cause=([a-z0-9_]+)")
+D12_PAYLOAD = (b"Is a single-line change worth a full review? Answer "
+               b"briefly.\n")
+
+
+@scenario("D12", assertions=D12_ASSERTIONS, needs_backend=True)
+def a_dead_decision_endpoint_costs_a_consult_nothing(run):
+    """Run a consult whose decision endpoint refuses connections.
+
+    The consult names no mode, so the product infers it: it asks ``decide``
+    first, fails, and must fall back to the main model, leave exactly one run
+    log entry with the cause, and say nothing anywhere else. The workspace is
+    the environment's own configuration with only ``[decision]`` replaced.
+
+    Args:
+        run: Always ``None``.
+
+    Yields:
+        Finding: One per entry of :data:`D12_ASSERTIONS`, in that order.
+    """
+    root = _seed_scratch("d12")
+    if root is None:
+        yield from _all(D12_ASSERTIONS, Outcome.CANNOT_TEST, _NO_SEED_DETAIL)
+        return
+    try:
+        environment_toml = _read_environment_toml()
+        dead = "http://127.0.0.1:%d" % _closed_port()
+        if environment_toml is None or not _write_toml(root, (
+                _without_decision(environment_toml) + "\n"
+                + _decision_section(dead, "smoke-dead-decision-model"))):
+            yield from _all(D12_ASSERTIONS, Outcome.CANNOT_TEST,
+                            _NO_INSTALL_DETAIL)
+            return
+        attempt = runs.attempt(
+            [CONSULT_SUBCOMMAND, "--output-format", "json", WORKDIR_FLAG,
+             str(root), NO_MEMORY_FLAG],
+            stdin=D12_PAYLOAD, timeout_s=CONSULT_TIMEOUT_S, label="d12-consult",
+            env={"MAGI_PASSPHRASE": runs.passphrase(), **BLANK_KEY})
+        if not attempt.ok:
+            yield from _all(D12_ASSERTIONS, Outcome.CANNOT_TEST,
+                            attempt.failure)
+            return
+        yield _consult_completed_finding(attempt)
+        yield _one_fallback_entry_finding(_read_logs(root))
+        yield _fallback_is_silent_finding(attempt)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _consult_completed_finding(attempt):
+    """Judge D12's first assertion.
+
+    Args:
+        attempt: The consult capture.
+
+    Returns:
+        Finding: PASS on exit 0 with a JSON object on stdout.
+    """
+    envelope = _envelope_of(attempt)
+    ok = attempt.output.exit_code == EXIT_DECIDED and envelope is not None
+    return _finding(D12_ASSERTIONS, 0, "" if ok else (
+        "exit %d, stdout %s: %s" % (
+            attempt.output.exit_code,
+            "is a JSON object" if envelope is not None else "is not JSON",
+            _excerpt(attempt.output))))
+
+
+def _one_fallback_entry_finding(log):
+    """Judge D12's second assertion over the run log.
+
+    Args:
+        log: The log bytes, or None.
+
+    Returns:
+        Finding: PASS on exactly one mode entry carrying a cause.
+    """
+    if log is None:
+        return _finding(D12_ASSERTIONS, 1,
+                        "the product wrote no run log, so no fallback was "
+                        "recorded")
+    lines = [line for line in log.decode("utf-8", errors="replace").splitlines()
+             if FALLBACK_LOG_TARGET in line and FALLBACK_MODE_FIELD in line]
+    causes = [_FALLBACK_CAUSE.search(line) for line in lines]
+    ok = len(lines) == 1 and causes[0] is not None
+    return _finding(D12_ASSERTIONS, 1, "" if ok else (
+        "%d mode fallback entries in the run log, causes %s"
+        % (len(lines), [c.group(1) if c else None for c in causes])))
+
+
+def _fallback_is_silent_finding(attempt):
+    """Judge D12's third assertion over both screens.
+
+    Args:
+        attempt: The consult capture.
+
+    Returns:
+        Finding: PASS when neither stream names the fallback.
+    """
+    leaks = [name for name, data in (("stdout", attempt.output.stdout),
+                                     ("stderr", attempt.output.stderr))
+             for needle in (FALLBACK_LOG_TARGET, FALLBACK_MESSAGE)
+             if needle.encode("utf-8") in data]
+    return _finding(D12_ASSERTIONS, 2, "" if not leaks else (
+        "the fallback is named on %s" % ", ".join(sorted(set(leaks)))))
+
+
+# ---------------------------------------------------------------------------
+# D13 -- S16 and S21, the run record of a decide call keeps no state
+# ---------------------------------------------------------------------------
+
+D13_ASSERTIONS = (
+    "the decide call in tool_calls stores the state as <omitted>",
+    "the decide call in tool_calls keeps its questions and its result",
+    "the state marker reaches neither the decide record nor the decide log lines",
+)
+
+STATE_OMITTED = "<omitted>"
+DECISION_LOG_TARGET = "magi_rs::decision"
+
+
+@scenario("D13", assertions=D13_ASSERTIONS, needs_backend=True)
+def a_decide_call_leaves_no_state_in_the_record(run):
+    """Make the agent pass a unique marker as the state and search for it.
+
+    The marker is minted per run and appears nowhere else in the prompt than
+    as the state, so finding it in the decide record or the decide log lines
+    can only mean the product stored the state. ``CANNOT_TEST`` when the main
+    model did not call ``decide``, or put the marker somewhere else than the
+    state: both are the model's behaviour.
+
+    Args:
+        run: Always ``None``.
+
+    Yields:
+        Finding: One per entry of :data:`D13_ASSERTIONS`, in that order.
+    """
+    marker = mint_credential()
+    prompt = (
+        "Use the decide tool, and nothing else. Pass EXACTLY this text as the "
+        "state, character for character: %s . Ask ONE choice question named "
+        "kind with the options bug, feature and question, whose instructions "
+        "do not repeat that text. Then tell me the result in one sentence.\n"
+        % marker.marker)
+    attempt = _query_in_environment(prompt, "d13-query", planted=(marker,))
+    records = _decide_records(attempt)
+    if records is None:
+        yield from _cannot_or_fail(D13_ASSERTIONS, attempt)
+        return
+    if not records:
+        yield from _all(D13_ASSERTIONS, Outcome.CANNOT_TEST,
+                        _NOT_CALLED_DETAIL)
+        return
+    record = records[0]
+    questions = (record.get("input") or {}).get("questions")
+    if marker.marker in json.dumps(questions):
+        yield from _all(D13_ASSERTIONS, Outcome.CANNOT_TEST,
+                        "the model put the marker in the questions, so the "
+                        "state could not be told from them")
+        return
+    yield _state_omitted_finding(record)
+    yield _questions_and_result_finding(record, questions)
+    yield _marker_absent_finding(records, marker.marker)
+
+
+def _state_omitted_finding(record):
+    """Judge D13's first assertion.
+
+    Args:
+        record: The first decide record of ``tool_calls``.
+
+    Returns:
+        Finding: PASS when ``input.state`` is the omission marker.
+    """
+    state = (record.get("input") or {}).get("state")
+    return _finding(D13_ASSERTIONS, 0, "" if state == STATE_OMITTED else (
+        "input.state is %s, expected %r" % (_excerpt_text(repr(state)),
+                                            STATE_OMITTED)))
+
+
+def _questions_and_result_finding(record, questions):
+    """Judge D13's second assertion.
+
+    Args:
+        record: The first decide record.
+        questions: Its ``input.questions``.
+
+    Returns:
+        Finding: PASS on non-empty questions and a result that parses as the
+        decide envelope (it carries its ``schema_version``).
+    """
+    try:
+        result = json.loads(record.get("result") or "")
+    except ValueError:
+        result = None
+    ok = (isinstance(questions, dict) and bool(questions)
+          and isinstance(result, dict) and SCHEMA_VERSION_KEY in result)
+    return _finding(D13_ASSERTIONS, 1, "" if ok else (
+        "questions %s, result %s" % (
+            "present" if isinstance(questions, dict) and questions else "missing",
+            _excerpt_text(str(record.get("result"))))))
+
+
+def _marker_absent_finding(records, marker):
+    """Judge D13's third assertion over the record and the log.
+
+    Args:
+        records: Every decide record of the run.
+        marker: The planted state marker.
+
+    Returns:
+        Finding: PASS when neither the records nor the decide log lines carry
+        it; CANNOT_TEST when no run log exists to search.
+    """
+    if marker in json.dumps(records):
+        return _finding(D13_ASSERTIONS, 2,
+                        "the marker is in the decide record of tool_calls")
+    log = _read_logs(runs.workspace_root())
+    if log is None:
+        return _finding(D13_ASSERTIONS, 2, None,
+                        "the product wrote no run log to search")
+    lines = [line for line in log.decode("utf-8", errors="replace").splitlines()
+             if DECISION_LOG_TARGET in line]
+    return _finding(D13_ASSERTIONS, 2, "" if not any(
+        marker in line for line in lines) else (
+        "the marker is in a decide log line"))
+
+
+_NOT_CALLED_DETAIL = (
+    "the main model answered without calling decide; whether it reaches for "
+    "the tool is its behaviour, not the product's contract (recorded as an "
+    "observation)")
+
+
+def _read_environment_toml():
+    """The persistent environment's ``magi.toml``.
+
+    Returns:
+        str | None: Its text, or None when unreadable.
+    """
+    try:
+        return (runs.workspace_root() / MAGI_DIR_NAME
+                / MAGI_TOML_NAME).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _query_in_environment(prompt, label, *, planted=()):
+    """Run ``magi query`` at the default tier against the environment.
+
+    Args:
+        prompt: What to ask the agent.
+        label: The archive label.
+        planted: Secrets the prompt carries.
+
+    Returns:
+        Attempt: The capture, or why there is none.
+    """
+    return runs.attempt(
+        [QUERY_SUBCOMMAND, "--output-format", "json", WORKDIR_FLAG,
+         str(runs.workspace_root()), NO_MEMORY_FLAG],
+        stdin=prompt.encode("utf-8"), timeout_s=QUERY_TIMEOUT_S, label=label,
+        planted=planted,
+        env={"MAGI_PASSPHRASE": runs.passphrase(), **BLANK_KEY})
+
+
+def _decide_records(attempt):
+    """The ``decide`` entries of a query's ``tool_calls``.
+
+    Args:
+        attempt: The query capture.
+
+    Returns:
+        list[dict] | None: The records (possibly empty), or None when the
+        output carries no readable ``tool_calls``.
+    """
+    envelope = _envelope_of(attempt)
+    calls = envelope.get(TOOL_CALLS_KEY) if envelope else None
+    if not isinstance(calls, list):
+        return None
+    return [call for call in calls
+            if isinstance(call, dict) and call.get("name") == DECIDE_TOOL_NAME]
+
+
+def _excerpt_text(text, limit=200):
+    """Shorten a text for a detail.
+
+    Args:
+        text: Any text.
+        limit: Characters to keep.
+
+    Returns:
+        str: The start of *text*.
+    """
+    return text[:limit]
 
 
 # ---------------------------------------------------------------------------

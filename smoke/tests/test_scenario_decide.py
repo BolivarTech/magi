@@ -158,7 +158,7 @@ class _FakeDecide:
             ProductOutput | None: The canned answer, or None for the default.
         """
         args = list(call.args)
-        if args[:1] == ["init"]:
+        if args[:1] == ["init"] and "--help" not in args:
             root = pathlib.Path(call.cwd)
             (root / ".magi").mkdir(parents=True, exist_ok=True)
             (root / ".magi" / "magi.toml").write_text(_SCAFFOLD,
@@ -605,7 +605,7 @@ class _DocsProduct:
             ProductOutput | None: The canned answer.
         """
         args = list(call.args)
-        if args[:1] == ["init"]:
+        if args[:1] == ["init"] and "--help" not in args:
             root = pathlib.Path(call.cwd)
             (root / ".magi").mkdir(parents=True, exist_ok=True)
             (root / ".magi" / "magi.toml").write_text(
@@ -618,6 +618,9 @@ class _DocsProduct:
                             b"  decide  Ask\n  init  Scaffold\n", b"", 0)
         if args == ["decide", "--help"]:
             return _capture(_help_text(self.decide_flags).encode(), b"", 0)
+        if args[-1:] == ["--help"]:
+            # Any other help screen (S13 now walks every listed subcommand).
+            return _capture(b"Usage: magi-rs\n", b"", 0)
         return None
 
 

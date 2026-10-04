@@ -208,8 +208,20 @@ that number exists.
 ### The decide scenarios (v0.23.0)
 
 D1 to D10 add 26 assertions, and S13 gains two (the documented `decide` flags exist; the
-`[decision]` example in `docs/magi.toml.example` parses). The harness now promises 36
-scenarios and 109 assertions.
+`[decision]` example in `docs/magi.toml.example` parses). The second half of the feature
+adds D11 to D13 (seven assertions) and two more to S13. The harness now promises 39
+scenarios and 118 assertions.
+
+| Id | What it measures |
+|---|---|
+| D11 | an agent call to `decide` at the default tier (no `--auto`) is approved. `CANNOT_TEST` when the main model did not call the tool: reaching for it is the model's behaviour |
+| D12 | a consult whose decision endpoint is dead still completes, the run log holds exactly one mode fallback entry with its cause, and neither stdout nor stderr names it |
+| D13 | in the `tool_calls[]` record of an agent `decide` call the state is `<omitted>`, the questions and the result stay, and a unique state marker is in neither the record nor the `magi_rs::decision` log lines. `CANNOT_TEST` when the model did not call the tool |
+| S13 (+2) | the four `/decide` forms and the `decide` tool are named in the published guides and still defined in the sources (existence, not behaviour: the TUI cannot be driven here); and no `--help` screen of the release binary, root and every nested subcommand, shows a development id or raw Markdown |
+
+D11 and D13 run `magi query` against the persistent environment and D12 runs `magi consult`
+in a scratch workspace; D12 costs one trio consult. The smoke runner has no subset flag, so
+a dry run of these means a whole `--smoke-1` run.
 
 **Keys.** D2 and D4 call OpenRouter and read the key from `DECISION_API_KEY` in the harness's own
 environment, at run time. Nothing is read from a file in the repository, and the value is declared

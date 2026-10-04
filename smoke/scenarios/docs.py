@@ -58,6 +58,8 @@ S13_ASSERTIONS = (
     "every [magi] key the scaffold writes is named in a published guide",
     "the documented decide flags exist",
     "the [decision] example in docs/magi.toml.example parses",
+    "the documented /decide forms and the decide tool exist",
+    "no help screen of the release binary shows a development id",
 )
 
 #: The ``decide`` subcommand and the flags the published documentation tells a
@@ -72,6 +74,35 @@ DECIDE_FLAGS = ("--input", "--output", "--questions", "--timeout",
 #: presence makes it an example of ``decide`` and not of something else.
 EXAMPLE_CONFIG = pathlib.Path("docs") / "magi.toml.example"
 DECISION_TABLE = "decision"
+
+#: The four ``/decide`` forms the guides document, each recognised by what it
+#: starts with, and the files that carry them. The TUI cannot be driven from
+#: here, so what is checked is that the documents name every form and that the
+#: product's sources still define the command and the tool: "exists", never
+#: "behaves" (the D scenarios cover the behaviour).
+DECIDE_DOC_FILES = (pathlib.Path("README.md"), pathlib.Path("docs") / "decide.md")
+DECIDE_FORMS = (
+    re.compile(r"/decide \{"),
+    re.compile(r"/decide -i \S+"),
+    re.compile(r"/decide -q \S+ \S"),
+    re.compile(r"/decide -i \S+ -q \S+"),
+)
+DECIDE_TOOL_PHRASE = re.compile(r"`?decide`? tool")
+TUI_SOURCE = pathlib.Path("src") / "tui" / "mod.rs"
+TOOL_SOURCE = pathlib.Path("src") / "tools" / "decide.rs"
+TUI_COMMAND_NEEDLE = '"/decide"'
+TOOL_NAME_NEEDLE = '"decide"'
+
+#: Development identifiers that must never reach a user (requirements,
+#: scenarios, decisions, premortem gaps, review findings): one of these
+#: prefixes as a whole token, a dash, optional capitals, optionally another
+#: dash and capitals, then a digit. The same shape the product's own guard
+#: uses. Markdown emphasis and backticks are matched too, because a help screen
+#: is plain text and shows them literally.
+DEV_ID = re.compile(
+    r"(?<![A-Za-z0-9_])(?:REQ|SC|D|PM|RF|R|F)-[A-Z]*(?:-[A-Z]*)?[0-9]")
+HELP_MARKDOWN = ("**", "`")
+HELP_SUBCOMMAND_SKIP = "help"
 
 #: A key named only in the changelog is announced, not documented.
 CHANGELOG_NAME = "CHANGELOG.md"
@@ -140,7 +171,7 @@ def the_published_documentation_is_still_true(run):
 
     Yields:
         Finding: One per entry of :data:`S13_ASSERTIONS`, in that order. Always
-        six, whatever went wrong: a scenario that stops early erases the
+        eight, whatever went wrong: a scenario that stops early erases the
         assertions it never reached from the report.
     """
     try:
@@ -160,10 +191,12 @@ def the_published_documentation_is_still_true(run):
         for index in (0, 1):
             yield _finding(index, Outcome.CANNOT_TEST, unread)
         decide_finding = _finding(4, Outcome.CANNOT_TEST, unread)
+        help_finding = _finding(7, Outcome.CANNOT_TEST, unread)
     else:
         yield _subcommand_finding(invocations, _subcommands_in(root_help))
         yield _flag_finding(invocations, surface)
         decide_finding = _decide_flags_finding(invocations, surface)
+        help_finding = _help_text_finding(surface)
 
     embedded = _read_configs(documents)
     workspace = _seed_workspace()
@@ -176,6 +209,8 @@ def the_published_documentation_is_still_true(run):
         yield key_coverage
         yield decide_finding
         yield _example_finding(workspace)
+        yield _decide_forms_finding(documents, surface)
+        yield help_finding
     finally:
         # Removed here, and the scratch area's own reset is not an argument
         # against it: --reset-env is a recovery an operator runs, not a
@@ -435,6 +470,84 @@ def _decide_flags_finding(invocations, surface):
     if problems:
         return _finding(4, Outcome.FAIL, "; ".join(problems))
     return _finding(4, Outcome.PASS, "")
+
+
+def _decide_forms_finding(documents, surface):
+    """Assertion 7: the four ``/decide`` forms and the tool are documented and defined.
+
+    Complexity: ``O(size of the files read)``.
+
+    Args:
+        documents: The published documents, relative to the repository root.
+        surface: The product's cached account of itself; a product that does
+            not answer for ``decide`` cannot have the tool behind it.
+
+    Returns:
+        Finding: PASS when every form appears in a published guide and the
+        sources still define the TUI command and the tool; FAIL naming what is
+        missing; CANNOT_TEST when a file could not be read.
+    """
+    root = runs.repo_root()
+    try:
+        text = "\n".join(
+            (root / path).read_text(encoding="utf-8")
+            for path in DECIDE_DOC_FILES if path in documents)
+        tui = (root / TUI_SOURCE).read_text(encoding="utf-8")
+        tool = (root / TOOL_SOURCE).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return _finding(6, Outcome.CANNOT_TEST,
+                        "a file behind the /decide check could not be read: %s"
+                        % exc)
+    problems = ["no published guide shows the form %r" % form.pattern
+                for form in DECIDE_FORMS if form.search(text) is None]
+    if surface.help_for((DECIDE_SUBCOMMAND,)) is None:
+        problems.append("the product does not answer %s for %s"
+                        % (HELP_FLAG, DECIDE_SUBCOMMAND))
+    if TUI_COMMAND_NEEDLE not in tui:
+        problems.append("%s no longer defines the /decide command"
+                        % TUI_SOURCE.as_posix())
+    if TOOL_NAME_NEEDLE not in tool:
+        problems.append("%s no longer names the decide tool"
+                        % TOOL_SOURCE.as_posix())
+    if DECIDE_TOOL_PHRASE.search(text) is None:
+        problems.append("no published guide names the decide tool")
+    return _finding(6, Outcome.FAIL if problems else Outcome.PASS,
+                    "; ".join(problems))
+
+
+def _help_text_finding(surface):
+    """Assertion 8: no help screen carries a development id or raw Markdown.
+
+    Walks the root and every nested subcommand the product lists, asking each
+    for ``--help`` (cached, so the earlier assertions already paid for most).
+
+    Complexity: ``O(subcommands)`` invocations, each cached, and ``O(size)``
+    per screen for the scan.
+
+    Args:
+        surface: The product's cached account of itself.
+
+    Returns:
+        Finding: PASS, or FAIL naming each screen and what it shows.
+    """
+    offenders = []
+    pending = [()]
+    while pending:
+        path = pending.pop()
+        text = surface.help_for(path)
+        if text is None:
+            offenders.append("%r could not be asked for %s"
+                             % (" ".join(path) or "the root", HELP_FLAG))
+            continue
+        shown = [match.group(0) for match in DEV_ID.finditer(text)]
+        shown += [mark for mark in HELP_MARKDOWN if mark in text]
+        if shown:
+            offenders.append("%r shows %s" % (" ".join(path) or "the root",
+                                              ", ".join(sorted(set(shown)))))
+        pending.extend(path + (name,) for name in sorted(_subcommands_in(text))
+                       if name != HELP_SUBCOMMAND_SKIP)
+    return _finding(7, Outcome.FAIL if offenders else Outcome.PASS,
+                    "; ".join(offenders))
 
 
 def _example_finding(root):
@@ -711,7 +824,7 @@ def _first_line(stream: bytes) -> str:
 
 
 def _finding(index: int, outcome: Outcome, detail: str) -> Finding:
-    """Build one of S13's six findings.
+    """Build one of S13's eight findings.
 
     Args:
         index: Which entry of :data:`S13_ASSERTIONS` this is.
