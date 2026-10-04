@@ -1450,16 +1450,21 @@ pub(crate) fn parse_tui_decide(trimmed: &str) -> Result<TuiDecideCommand, TuiDec
         }
         DECIDE_FLAG_QUESTIONS => {
             let (questions, after) = flag_value(DECIDE_FLAG_QUESTIONS, after)?;
+            let text = TuiDecideCommand::QuestionsAndText {
+                questions: questions.clone(),
+                text: after.trim().to_string(),
+            };
             match next_token(after) {
-                Some((DECIDE_FLAG_REQUEST, tail)) => {
-                    let (request, tail) = flag_value(DECIDE_FLAG_REQUEST, tail)?;
-                    both_files(request, questions, tail)
-                }
-                Some(_) => Ok(TuiDecideCommand::QuestionsAndText {
-                    questions,
-                    text: after.trim().to_string(),
-                }),
                 None => Err(TuiDecideParseError::Usage),
+                // `-i` is the second file only when exactly one path follows it; any other
+                // continuation is part of the state text.
+                Some((DECIDE_FLAG_REQUEST, tail)) => match flag_value(DECIDE_FLAG_REQUEST, tail) {
+                    Ok((request, rest)) if rest.trim().is_empty() => {
+                        Ok(TuiDecideCommand::RequestFileAndQuestions { request, questions })
+                    }
+                    _ => Ok(text),
+                },
+                Some(_) => Ok(text),
             }
         }
         flag if flag.starts_with('-') => {
