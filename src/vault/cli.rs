@@ -111,7 +111,7 @@ const SET_NAME_LONG_HELP: &str = "Name of the secret.
 
 The product reads these entries:
   ANTHROPIC_API_KEY            key for the Anthropic main model
-  OPENAI_API_KEY               key for the main model and the embedder on OpenAI-compatible backends
+  OPENAI_API_KEY               key for the main model, the embedder and the MAGI trio on OpenAI-compatible backends
   DECISION_API_KEY             key for the decision models used by decide
   BASE_URL_USER                user name for the [user] placeholder in the root base_url
   BASE_URL_PASSWORD            password for the [password] placeholder in the root base_url
