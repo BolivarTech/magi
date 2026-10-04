@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.23.0
+// Date: 2026-10-04
+
 //! The `magi decide` JSON envelope (REQ-D10) and its redaction per audience (REQ-D11).
 //!
 //! One renderer serves the direct user (`magi decide`, `/decide`) and the

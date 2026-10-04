@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.23.0
+// Date: 2026-10-04
+
 //! Typed decisions served by System One models (REQ-D00..D24).
 //!
 //! This module holds the System One request and response types, the input

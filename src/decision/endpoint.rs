@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.23.0
+// Date: 2026-10-04
+
 //! System One URL derivation, same-origin comparison and API key selection
 //! (REQ-D03, REQ-D04).
 

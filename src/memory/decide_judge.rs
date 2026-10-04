@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.23.0
+// Date: 2026-10-04
+
 //! Contradiction judge answered by `decide` first and by the LLM judge second (REQ-D13).
 //!
 //! Lives in the **bin** next to [`crate::memory::judge::LlmDistillJudge`], which it wraps as its

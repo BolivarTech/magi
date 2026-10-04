@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.23.0
+// Date: 2026-10-04
+
 //! Configuration types of the `[decision]` section (REQ-D01, REQ-D21).
 
 /// Value of `[decision].keep_alive`: an Ollama duration (`"10m"`) or a number of

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-26
+// Version: 0.23.0
+// Date: 2026-10-04
 
 //! Memory subsystem — tiered, consultable memory with forgetting.
 //!

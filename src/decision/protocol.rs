@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.23.0
+// Date: 2026-10-04
+
 //! System One protocol types and input validation (REQ-D07, REQ-D22, REQ-D23).
 
 use std::collections::BTreeMap;

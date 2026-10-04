@@ -1,3 +1,7 @@
+// Author: Julian Bolivar
+// Version: 0.23.0
+// Date: 2026-10-04
+
 //! Inferred-mode tier answered by `decide` first and by the principal LLM second (REQ-D12).
 //!
 //! Lives in the **bin** next to [`crate::agent::mode_classifier::ProviderClassifier`], which it

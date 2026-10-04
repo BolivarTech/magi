@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.23.0
+# Date: 2026-10-04
 """The nine hard cuts that run before any scenario.
 
 A cut is a step that can raise ``PreflightError``, which is exit 2. Counted

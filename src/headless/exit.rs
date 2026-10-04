@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Version: 0.23.0
+// Date: 2026-10-04
 
 //! Mapping of a headless outcome to an actionable exit code (REQ-H23/H23b).
 //!

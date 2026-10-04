@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.23.0
+# Date: 2026-10-04
 """Tests for the preflight's ordering and its hard cuts."""
 
 import contextlib

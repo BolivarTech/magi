@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.22.0
-# Date: 2026-10-02
+# Version: 0.23.0
+# Date: 2026-10-04
 """Unit tests for the decide scenarios D1-D10 and the helpers they share.
 
 The product is doubled by :class:`_FakeDecide`, which scaffolds a workspace the

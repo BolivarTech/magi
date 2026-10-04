@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.18.1
-// Date: 2026-09-02
+// Version: 0.23.0
+// Date: 2026-10-04
 
 //! One `tracing` layer, carrying both sinks with the level each is gated at.
 //!
