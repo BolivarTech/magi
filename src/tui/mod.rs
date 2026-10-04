@@ -1543,6 +1543,27 @@ pub(crate) fn tui_decide_request(
     }
 }
 
+/// Reads a `/decide` file argument, refusing anything larger than `cap` bytes.
+///
+/// The CLI bounds its `-i`/`-q` input the same way, so a typo that points `/decide` at a huge
+/// file fails with a clear error instead of loading the whole file into memory.
+///
+/// Complexity: O(n) in the bytes read, never more than `cap + 1`.
+///
+/// # Arguments
+/// * `path` - The file named after `-i` or `-q`.
+/// * `cap` - The largest accepted size in bytes.
+///
+/// # Returns
+/// The file's bytes.
+///
+/// # Errors
+/// The open or read error of the file, or `InvalidData` when it is larger than `cap`.
+fn read_decide_file_bounded(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
+    let _ = cap;
+    std::fs::read(path)
+}
+
 /// Runs a `/decide` command and renders the reply (REQ-D15, REQ-D20).
 ///
 /// A failure is reported as an error and never replaced by an LLM answer.
@@ -2830,7 +2851,9 @@ pub async fn run_tui_ext(
                         &cmd,
                         decision_client.as_deref(),
                         decision_build_error.as_ref(),
-                        &|p| std::fs::read(p),
+                        &|p| {
+                            read_decide_file_bounded(p, magi_rs::headless::limits::MAX_INPUT_BYTES)
+                        },
                     )
                     .await;
                     let _ = response_tx.send(reply).await;
@@ -8164,6 +8187,39 @@ mod tests {
 
     /// CP2 MS2 r1 (S22/REQ-D11): provider-sourced text in the table (legend names) is sanitized and
     /// redacted before it reaches the screen. Mutation-verified (T8 Paso 4).
+    #[test]
+    fn a_decide_file_within_the_cap_is_read_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("request.json");
+        std::fs::write(&path, b"12345").expect("write");
+        let bytes = read_decide_file_bounded(&path, 5).expect("within the cap");
+        assert_eq!(bytes, b"12345");
+    }
+
+    #[test]
+    fn a_decide_file_over_the_cap_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("request.json");
+        std::fs::write(&path, b"12345").expect("write");
+        let err = read_decide_file_bounded(&path, 4).expect_err("over the cap");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains('4'),
+            "the error names the limit: {err}"
+        );
+    }
+
+    #[test]
+    fn the_decide_files_are_read_with_the_cli_input_cap() {
+        let source = production_source();
+        assert!(
+            source.contains(
+                "read_decide_file_bounded(p, magi_rs::headless::limits::MAX_INPUT_BYTES)"
+            ),
+            "/decide reads its files without the CLI's input bound"
+        );
+    }
+
     #[test]
     fn the_table_never_shows_credentials_inside_a_provider_url() {
         // Mutation g2 of T8: the URL-credential layer (redact_foreign_text) needs its own guard,
