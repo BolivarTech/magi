@@ -187,8 +187,37 @@ impl ModeClassifier for DecideModeClassifier {
     }
 }
 
+/// Captures every event of the fallback target.
+#[cfg(test)]
+pub(crate) fn fallback_lines<F: std::future::Future<Output = ()>>(f: F) -> Vec<String> {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            if e.metadata().target() == magi_rs::decision::internal::FALLBACK_LOG_TARGET {
+                if let Ok(mut v) = self.0.lock() {
+                    v.push(magi_rs::logging::render::render_event(e));
+                }
+            }
+        }
+    }
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let _g = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(Capture(Arc::clone(&lines))),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    rt.block_on(f);
+    let v = lines.lock().expect("lines").clone();
+    v
+}
+
 #[cfg(test)]
 mod tests {
+    use super::fallback_lines;
     use super::*;
     use magi_rs::decision::error::{Attempt, Decision, Trace, Usage};
     use magi_rs::magi::mode::{resolve_mode_guarded, ModeSources};
@@ -285,35 +314,6 @@ mod tests {
             fallback as Arc<dyn ModeClassifier>,
             "http://localhost:11434".into(),
         )
-    }
-
-    /// Captures every event of the fallback target.
-    fn fallback_lines<F: std::future::Future<Output = ()>>(f: F) -> Vec<String> {
-        struct Capture(Arc<Mutex<Vec<String>>>);
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
-            fn on_event(
-                &self,
-                e: &tracing::Event<'_>,
-                _: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if e.metadata().target() == magi_rs::decision::internal::FALLBACK_LOG_TARGET {
-                    if let Ok(mut v) = self.0.lock() {
-                        v.push(magi_rs::logging::render::render_event(e));
-                    }
-                }
-            }
-        }
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let _g = tracing::subscriber::set_default(
-            tracing_subscriber::registry().with(Capture(Arc::clone(&lines))),
-        );
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rt");
-        rt.block_on(f);
-        let v = lines.lock().expect("lines").clone();
-        v
     }
 
     /// S7.

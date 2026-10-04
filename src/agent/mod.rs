@@ -487,6 +487,8 @@ pub struct Agent {
     memory_subsystem: Option<MemorySubsystem>,
     /// Decision client and its redacted endpoint, when `decide` could be built (REQ-D13).
     decision: Option<(Arc<dyn DecisionClient>, String)>,
+    /// Redacted endpoint and reason when `decide` could not be built, for the judge's run log.
+    decision_unavailable: Option<(String, String)>,
 }
 
 impl Agent {
@@ -501,6 +503,7 @@ impl Agent {
             approval_tx: None,
             memory_subsystem: None,
             decision: None,
+            decision_unavailable: None,
         }
     }
 
@@ -513,14 +516,25 @@ impl Agent {
         self.decision = Some((client, endpoint));
     }
 
-    /// The decision client and endpoint a new distillation judge starts from.
+    /// Records why no decision client exists, so the contradiction judge's run-log entries name
+    /// the endpoint and the reason.
+    ///
+    /// # Arguments
+    /// * `endpoint` - The redacted decision endpoint.
+    /// * `reason` - The redacted reason the client could not be built.
+    pub fn set_decision_unavailable(&mut self, endpoint: String, reason: String) {
+        self.decision_unavailable = Some((endpoint, reason));
+    }
+
+    /// The decision client, endpoint and unavailability reason a new distillation judge starts from.
     ///
     /// # Returns
-    /// The client (or `None` when none was attached) and the endpoint to log.
-    fn decision_parts(&self) -> (Option<Arc<dyn DecisionClient>>, String) {
+    /// The client (or `None` when none was attached), the endpoint to log, and the reason there is
+    /// no client, if one was recorded.
+    fn decision_parts(&self) -> (Option<Arc<dyn DecisionClient>>, String, Option<String>) {
         match &self.decision {
-            Some((client, endpoint)) => (Some(Arc::clone(client)), endpoint.clone()),
-            None => (None, String::new()),
+            Some((client, endpoint)) => (Some(Arc::clone(client)), endpoint.clone(), None),
+            None => (None, String::new(), None),
         }
     }
 
@@ -735,12 +749,13 @@ impl Agent {
         if !sub.cfg.distill_on_session_close || !sub.cfg.distill_enabled {
             return Ok(());
         }
-        let (decision, endpoint) = self.decision_parts();
+        let (decision, endpoint, reason) = self.decision_parts();
         let judge = DecideContradictionJudge::new(
             decision,
             Box::new(LlmDistillJudge::new(self.provider.clone())),
             endpoint,
-        );
+        )
+        .with_unavailable_reason(reason);
         let _ = distill(
             &*sub.store,
             &judge,
@@ -936,12 +951,13 @@ impl Agent {
                 false
             };
             if should_distill {
-                let (decision, endpoint) = self.decision_parts();
+                let (decision, endpoint, reason) = self.decision_parts();
                 let judge = DecideContradictionJudge::new(
                     decision,
                     Box::new(LlmDistillJudge::new(self.provider.clone())),
                     endpoint,
-                );
+                )
+                .with_unavailable_reason(reason);
                 if let Err(e) = distill(&*store, &judge, &*embedder, &*clock, &cfg, &scope).await {
                     // Non-fatal — route through chunk_tx so the notice renders inside
                     // the ratatui frame instead of corrupting it via raw stderr.
@@ -1800,6 +1816,18 @@ async fn write_turn_to_memory(
 
 #[cfg(test)]
 mod tests {
+    /// The judge of an agent without a decision client still learns where `decide` points and
+    /// why it is absent.
+    #[test]
+    fn decision_parts_carry_the_endpoint_and_reason_when_there_is_no_client() {
+        let mut agent = Agent::new(Arc::new(MockProvider));
+        agent.set_decision_unavailable("http://decide.example".into(), "no key".into());
+        let (client, endpoint, reason) = agent.decision_parts();
+        assert!(client.is_none());
+        assert_eq!(endpoint, "http://decide.example");
+        assert_eq!(reason.as_deref(), Some("no key"));
+    }
+
     use super::*;
     use crate::tools::ToolResult;
     use anyhow::Result;
