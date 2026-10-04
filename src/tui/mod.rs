@@ -3523,7 +3523,7 @@ fn replay_paste(drained: &[Event]) -> String {
 /// text when the Enter is handled; waiting this long between events keeps that text in the same
 /// input instead of submitting the first line. A person never presses another key this soon
 /// after Enter, and a lone Enter costs this delay once.
-const PASTE_GRACE: std::time::Duration = std::time::Duration::ZERO;
+const PASTE_GRACE: std::time::Duration = std::time::Duration::from_millis(15);
 
 /// Reads every event that is available without waiting.
 ///
