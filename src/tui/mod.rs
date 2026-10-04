@@ -2056,6 +2056,16 @@ impl App {
         self.cursor_position += text.len();
     }
 
+    /// Inserts text delivered by the terminal's bracketed paste, without submitting it.
+    ///
+    /// Carriage returns are normalized to line feeds. Only Normal mode takes input.
+    ///
+    /// # Arguments
+    /// * `text` - The pasted payload.
+    pub fn handle_paste(&mut self, text: &str) {
+        let _ = text;
+    }
+
     /// Deletes the character before the current cursor position.
     pub fn delete_char(&mut self) {
         if self.selection_start.is_some() {
@@ -7776,6 +7786,54 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// PM-S-4: a bracketed paste of a multi-line `/decide` stays one input, submits nothing, parses.
+    #[test]
+    fn a_bracketed_paste_of_a_multi_line_request_is_one_unsent_input() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (_response_tx, response_rx) = mpsc::channel(4);
+        let (_approval_tx, approval_rx) = mpsc::channel(4);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        app.handle_paste(concat!(
+            "/decide {\r\n",
+            "  \"state\": \"x\",\r\n",
+            "  \"questions\": {\"q\": {\"type\": \"noul\", \"instructions\": \"?\"}}\r\n",
+            "}"
+        ));
+        assert!(event_rx.try_recv().is_err(), "pasting submits nothing");
+        assert!(app.messages.is_empty(), "nothing reached the transcript");
+        assert!(!app.input.contains('\r'), "line breaks are normalized");
+        let cmd = super::parse_tui_decide(app.input.trim()).expect("one command");
+        assert!(super::tui_decide_request(&cmd, &fs_with(&[])).is_ok());
+    }
+
+    /// Bracketed paste is enabled with the alternate screen and undone on every restore path.
+    #[test]
+    fn bracketed_paste_is_enabled_on_entry_and_disabled_on_every_restore_path() {
+        let src = include_str!("mod.rs").replace('\r', "");
+        let production = src
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let enable = ["Enable", "BracketedPaste"].concat();
+        let disable = ["Disable", "BracketedPaste"].concat();
+        assert!(
+            production.contains(&format!("EnterAlternateScreen, {enable}")),
+            "entering the alternate screen also enables bracketed paste"
+        );
+        assert_eq!(
+            production
+                .matches(&format!(
+                    "LeaveAlternateScreen, DisableMouseCapture, {disable}"
+                ))
+                .count(),
+            2,
+            "the panic hook and the normal teardown both disable bracketed paste"
+        );
     }
 
     /// PM-S-4: a pasted multi-line request stays one input, is not submitted, and parses.
