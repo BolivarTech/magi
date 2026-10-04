@@ -1456,7 +1456,7 @@ pub(crate) fn parse_tui_decide(trimmed: &str) -> Result<TuiDecideCommand, TuiDec
             let (questions, after) = flag_value(DECIDE_FLAG_QUESTIONS, after)?;
             let text = TuiDecideCommand::QuestionsAndText {
                 questions: questions.clone(),
-                text: after.trim().to_string(),
+                text: after.trim_start().to_string(),
             };
             match next_token(after) {
                 None => Err(TuiDecideParseError::Usage),
@@ -2149,7 +2149,8 @@ impl App {
         if self.mode != AppMode::Normal {
             return;
         }
-        self.insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.insert_str(&crate::agent::Agent::sanitize_text(&normalized));
     }
 
     /// Deletes the character before the current cursor position.
@@ -3688,7 +3689,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         // `insert_char` loop here is O(N^2) on the pasted
                                         // length and freezes the event loop on a large paste
                                         // (MS2 gate S7 seventh-pass finding).
-                                        app.insert_str(&text);
+                                        app.handle_paste(&text);
                                     }
                                 }
                                 continue;
