@@ -401,6 +401,51 @@ mod tests {
         assert_eq!(ok, Some(Mode::Design), "under the limit decide is used");
     }
 
+    /// Serialized bytes of the state the classifier builds for `content`.
+    fn serialized_state_len(content: &str) -> usize {
+        serde_json::to_vec(&json!({"request": content}))
+            .expect("serializes")
+            .len()
+    }
+
+    /// Content of exactly `target` serialized state bytes, built from repeats of `unit` plus
+    /// ASCII padding.
+    fn content_of_serialized_len(unit: &str, target: usize) -> String {
+        let overhead = serialized_state_len("");
+        let unit_len = serialized_state_len(unit) - overhead;
+        let room = target - overhead;
+        let mut content = unit.repeat(room / unit_len);
+        content.push_str(&"x".repeat(room % unit_len));
+        assert_eq!(serialized_state_len(&content), target);
+        content
+    }
+
+    /// D-PM-1: the limit counts SERIALIZED bytes, inclusive at the limit and exclusive one over,
+    /// whatever the content is made of (multibyte characters, escaped line breaks).
+    #[test]
+    fn the_limit_is_judged_on_serialized_bytes_at_its_exact_boundary() {
+        for unit in ["x", "é", "\n", "日\n"] {
+            let at = content_of_serialized_len(unit, MODE_STATE_LIMIT_BYTES);
+            let over = content_of_serialized_len(unit, MODE_STATE_LIMIT_BYTES + 1);
+            let client = Scripted::new(chose("design"));
+            let c = classifier(
+                Some(Arc::clone(&client)),
+                Fallback::new(Some(Mode::Analysis)),
+            );
+            let verdicts = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("rt")
+                .block_on(async { (c.classify(&at).await, c.classify(&over).await) });
+            assert_eq!(
+                verdicts,
+                (Some(Mode::Design), Some(Mode::Analysis)),
+                "unit {unit:?}"
+            );
+            assert_eq!(client.calls.load(Ordering::SeqCst), 1, "unit {unit:?}");
+        }
+    }
+
     #[test]
     fn without_a_client_every_inference_falls_back_and_logs_client_unavailable() {
         let fb = Fallback::new(Some(Mode::Analysis));
