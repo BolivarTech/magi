@@ -8152,6 +8152,47 @@ mod tests {
 
     /// PM-S-4: a pasted multi-line request stays one input, is not submitted, and parses.
     #[test]
+    fn a_paste_drops_terminal_escapes_and_control_characters() {
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let (_response_tx, response_rx) = mpsc::channel(4);
+        let (_approval_tx, approval_rx) = mpsc::channel(4);
+        let mut app = App::new(event_tx, response_rx, approval_rx);
+        app.handle_paste(
+            "ok[31mred[0m tab	line
+end",
+        );
+        assert_eq!(
+            app.input,
+            "okred tab	line
+end"
+        );
+    }
+
+    #[test]
+    fn the_clipboard_shortcut_pastes_through_the_same_sanitizing_path() {
+        let source = production_source();
+        let at = source
+            .find("clipboard.get_text()")
+            .expect("the Ctrl+V clipboard read is in production");
+        let window: String = source[at..].chars().take(400).collect();
+        assert!(
+            window.contains("app.handle_paste(&text)"),
+            "Ctrl+V inserts the clipboard without the paste sanitizer: {window}"
+        );
+    }
+
+    #[test]
+    fn the_state_text_after_q_keeps_its_trailing_whitespace() {
+        assert_eq!(
+            super::parse_tui_decide("/decide -q q.json   two words 	"),
+            Ok(super::TuiDecideCommand::QuestionsAndText {
+                questions: "q.json".into(),
+                text: "two words 	".into(),
+            })
+        );
+    }
+
+    #[test]
     fn a_pasted_multi_line_request_stays_one_input_and_parses() {
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let (_response_tx, response_rx) = mpsc::channel(4);
