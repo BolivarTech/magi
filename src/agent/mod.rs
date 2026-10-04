@@ -534,7 +534,10 @@ impl Agent {
     fn decision_parts(&self) -> (Option<Arc<dyn DecisionClient>>, String, Option<String>) {
         match &self.decision {
             Some((client, endpoint)) => (Some(Arc::clone(client)), endpoint.clone(), None),
-            None => (None, String::new(), None),
+            None => match &self.decision_unavailable {
+                Some((endpoint, reason)) => (None, endpoint.clone(), Some(reason.clone())),
+                None => (None, String::new(), None),
+            },
         }
     }
 

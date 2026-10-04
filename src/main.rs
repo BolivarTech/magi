@@ -2250,8 +2250,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     );
 
     let mut agent = Agent::new(provider);
-    if let Some(client) = tui_distill_decision {
-        agent.set_decision_client(client, tui_distill_endpoint);
+    match (tui_distill_decision, tui_build_error.as_ref()) {
+        (Some(client), _) => agent.set_decision_client(client, tui_distill_endpoint),
+        (None, Some(error)) => {
+            agent.set_decision_unavailable(tui_distill_endpoint, unavailable_reason(error));
+        }
+        (None, None) => {}
     }
 
     match memory_store {
@@ -6541,10 +6545,13 @@ async fn run_query_subcommand(
     let mut agent = Agent::new(provider);
     // Same client builder as the TUI and `magi decide` (REQ-D13): the distiller asks `decide`
     // before the LLM judge.
-    let (query_decision, query_decision_endpoint, _) =
+    let (query_decision, query_decision_endpoint, query_decision_error) =
         decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
-    if let Some(client) = query_decision.clone() {
-        agent.set_decision_client(client, query_decision_endpoint.clone());
+    match (query_decision.clone(), query_decision_error.as_ref()) {
+        (Some(client), _) => agent.set_decision_client(client, query_decision_endpoint.clone()),
+        (None, Some(error)) => agent
+            .set_decision_unavailable(query_decision_endpoint.clone(), unavailable_reason(error)),
+        (None, None) => {}
     }
 
     // Persistence unless `--no-memory` (REQ-H18): notices go to stderr.

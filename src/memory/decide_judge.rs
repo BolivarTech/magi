@@ -49,6 +49,8 @@ pub struct DecideContradictionJudge {
     fallback: Box<dyn DistillJudge>,
     /// Redacted endpoint shown in the run log.
     endpoint: String,
+    /// Why the client could not be built, redacted, for the `client_unavailable` entry.
+    unavailable_reason: Option<String>,
     /// Set once a transport-class failure is seen: the rest of the pass skips `decide`.
     tripped: AtomicBool,
 }
@@ -72,6 +74,7 @@ impl DecideContradictionJudge {
             client,
             fallback,
             endpoint,
+            unavailable_reason: None,
             tripped: AtomicBool::new(false),
         }
     }
@@ -85,8 +88,8 @@ impl DecideContradictionJudge {
     ///
     /// # Returns
     /// The judge, with the reason attached.
-    pub fn with_unavailable_reason(self, reason: Option<String>) -> Self {
-        let _ = reason;
+    pub fn with_unavailable_reason(mut self, reason: Option<String>) -> Self {
+        self.unavailable_reason = reason;
         self
     }
 
@@ -137,7 +140,12 @@ impl DistillJudge for DecideContradictionJudge {
     async fn contradicts(&self, older: &str, newer: &str) -> Result<bool, MemoryError> {
         let Some(client) = self.client.as_ref() else {
             return self
-                .fall_back(older, newer, FallbackCause::ClientUnavailable, None)
+                .fall_back(
+                    older,
+                    newer,
+                    FallbackCause::ClientUnavailable,
+                    self.unavailable_reason.as_deref(),
+                )
                 .await;
         };
         if self.tripped.load(Ordering::SeqCst) {
