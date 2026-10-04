@@ -2223,8 +2223,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     let tui_build_error = tui_decision_reason.clone();
     if let Some(error) = tui_build_error.as_ref() {
         // Run log only: the screen shows the typed error when `/decide` is used.
-        tracing::warn!(
-            target: "magi_rs::decision",
+        // INFO, below `SCREEN_LEVEL`: a WARN would paint over the first frame.
+        tracing::event!(
+            target: magi_rs::decision::client::DECISION_LOG_TARGET,
+            tracing::Level::INFO,
             "decision client unavailable: {}",
             unavailable_reason(error)
         );
