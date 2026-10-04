@@ -121,7 +121,7 @@ A rejected request (HTTP 400, 413 or 422) is reported as `invalid_input` and the
 
 ## Timeouts
 
-`timeout_secs` applies to each attempt, so with several models in the chain a dead endpoint can cost three timeouts. The default of 120 seconds is generous on purpose: a cold local load takes from a few seconds to well over a minute depending on the model and how busy the machine is. `--timeout SECONDS` replaces it for one run. Set `keep_alive` if you have a machine dedicated to these models and want them to stay loaded.
+`timeout_secs` applies to each attempt, so a dead endpoint costs one timeout per model in the chain. The default of 120 seconds is generous on purpose: a cold local load takes from a few seconds to well over a minute depending on the model and how busy the machine is. `--timeout SECONDS` replaces it for one run. Set `keep_alive` if you have a machine dedicated to these models and want them to stay loaded.
 
 ## Confidence and thresholds
 
@@ -143,6 +143,8 @@ Some models return slightly different numbers when the same request is repeated.
 ## From the TUI and from the agent
 
 `/decide` takes the same request as the command line, in four forms: a whole request pasted on the line (`/decide {...}`), `/decide -i request.json`, `/decide -q questions.json some text` (the text becomes a text `state`), and `/decide -i state.json -q questions.json`. The result is a table with the question, the chosen option (or the level name for a `score`, yes/no for a `noul`), Magi's `confidence` and the model that answered. Errors show their `kind`, the message and the chain of attempts.
+
+Like `/consult`, `/decide` keeps the session busy until it finishes and cannot be cancelled from the keyboard. The wait is bounded by the timeout of each model in the chain; to leave sooner, close the process.
 
 The agent has a `decide` tool as well, and uses it when a task is a closed choice, a yes/no question or a score against a rubric. It is not meant for generating text or for design and code reviews; that is what the agent itself and `consult` are for. It runs without asking unless you set `auto_approve = false`, and `magi query` allows it at the default tier. The agent reports the result in plain language. The full result stays in `tool_calls[]` of the `magi query` output, with the `state` replaced by `"<omitted>"` and without the rejected answers of `low_confidence` attempts or any text the provider returned with an error. When `decide` fails, the agent is told, and it does not make up an answer.
 
