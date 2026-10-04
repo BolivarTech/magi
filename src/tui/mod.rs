@@ -1500,13 +1500,14 @@ fn decide_parse_error_message(error: &TuiDecideParseError) -> String {
 /// The file's bytes.
 ///
 /// # Errors
-/// [`DecisionError::InvalidInput`] naming the path (the OS error text is not repeated).
+/// [`DecisionError::InvalidInput`] naming the path and carrying the reader's message (for
+/// example the size limit); the message holds no file content.
 fn read_decide_file(
     read: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
     path: &Path,
 ) -> Result<Vec<u8>, DecisionError> {
-    read(path).map_err(|_| DecisionError::InvalidInput {
-        reason: format!("could not read {}", path.display()),
+    read(path).map_err(|err| DecisionError::InvalidInput {
+        reason: format!("could not read {}: {err}", path.display()),
     })
 }
 
