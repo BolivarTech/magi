@@ -1629,7 +1629,6 @@ pub(crate) async fn tui_decide_reply(
 /// * `client` - The session's decision client, if one could be built.
 /// * `build_error` - Why the client could not be built.
 /// * `response_tx` - Where the reply goes.
-#[allow(dead_code)] // the event loop switches to it in the fix commit
 fn spawn_decide_reply(
     tasks: &mut tokio::task::JoinSet<()>,
     cmd: TuiDecideCommand,
@@ -1637,8 +1636,15 @@ fn spawn_decide_reply(
     build_error: Option<DecisionError>,
     response_tx: mpsc::Sender<AgentResponse>,
 ) {
-    let _ = (tasks, cmd, client, build_error, response_tx);
-    todo!("spawn the reply task")
+    // Drop the results of the calls that already finished so the set stays small.
+    while tasks.try_join_next().is_some() {}
+    tasks.spawn(async move {
+        let reply = tui_decide_reply(&cmd, client.as_deref(), build_error.as_ref(), &|p| {
+            read_decide_file_bounded(p, magi_rs::headless::limits::MAX_INPUT_BYTES)
+        })
+        .await;
+        let _ = response_tx.send(reply).await;
+    });
 }
 
 /// Masks a provider-sourced string: URL credentials first, then secret-shaped tokens.
@@ -2700,6 +2706,8 @@ pub async fn run_tui_ext(
     // distillation pass), silently losing whatever it recorded after the drain ran (MS2 gate
     // S7 finding).
     let event_loop = tokio::spawn(async move {
+        // Owns the `/decide` calls in flight; dropping it with the loop aborts them.
+        let mut decide_tasks = tokio::task::JoinSet::new();
         while let Some(event) = event_rx.recv().await {
             match event {
                 UiEvent::Input(text) => {
@@ -2884,16 +2892,13 @@ pub async fn run_tui_ext(
                     }
                 }
                 UiEvent::Decide(cmd) => {
-                    let reply = tui_decide_reply(
-                        &cmd,
-                        decision_client.as_deref(),
-                        decision_build_error.as_ref(),
-                        &|p| {
-                            read_decide_file_bounded(p, magi_rs::headless::limits::MAX_INPUT_BYTES)
-                        },
-                    )
-                    .await;
-                    let _ = response_tx.send(reply).await;
+                    spawn_decide_reply(
+                        &mut decide_tasks,
+                        cmd,
+                        decision_client.clone(),
+                        decision_build_error.clone(),
+                        response_tx.clone(),
+                    );
                 }
                 UiEvent::Login => {
                     let oauth = crate::services::oauth::OAuthService::new();
