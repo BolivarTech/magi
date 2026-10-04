@@ -8019,6 +8019,20 @@ mod tests {
         );
     }
 
+    /// Every parse error reaches the transcript with the same `System: ` prefix.
+    #[test]
+    fn every_decide_parse_error_message_carries_the_system_prefix() {
+        for error in [
+            super::TuiDecideParseError::Usage,
+            super::TuiDecideParseError::NotADecideCommand,
+            super::TuiDecideParseError::MissingFlagValue("-i"),
+            super::TuiDecideParseError::UnsupportedFlag("--x".to_string()),
+        ] {
+            let message = super::decide_parse_error_message(&error);
+            assert!(message.starts_with("System: "), "{message}");
+        }
+    }
+
     #[tokio::test]
     async fn without_a_client_decide_shows_the_build_error_with_its_remedy() {
         let cmd = super::TuiDecideCommand::Request(
