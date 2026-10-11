@@ -18,11 +18,6 @@ pub const FALLBACK_LOG_TARGET: &str = "magi_rs::decision::fallback";
 pub const DECIDE_TOOL_NAME: &str = "decide";
 /// Marker that replaces the `state` in the recorded tool input (REQ-D19).
 pub const STATE_OMITTED: &str = "<omitted>";
-/// D-PM-1: the largest serialized `state`, in bytes, the mode inference sends to `decide`;
-/// anything larger goes straight to the LLM. Measured: local models reject a request by context
-/// window from about 19 KB (`nimble`) and about 4.5 KB (`tev1`), well under Ollama's 64 KiB
-/// body cap.
-pub const MODE_STATE_LIMIT_BYTES: usize = 19_000;
 /// REQ-D13: a `noul` at or above this counts as "contradicts" (exactly 0.5 is yes).
 pub const NOUL_YES_THRESHOLD: f64 = 0.5;
 

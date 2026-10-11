@@ -27,7 +27,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use magi_core::schema::Mode;
 use magi_rs::decision::internal::{
-    log_fallback, mode_from_label, mode_questions, Consumer, FallbackCause, MODE_STATE_LIMIT_BYTES,
+    log_fallback, mode_from_label, mode_questions, Consumer, FallbackCause,
 };
 use magi_rs::decision::{
     Answer, AttemptOutcome, Cause, DecisionClient, DecisionError, DecisionRequest,
@@ -41,8 +41,9 @@ const STATE_REQUEST_FIELD: &str = "request";
 /// Mode classifier that asks `decide` first and falls back to the principal LLM in the same
 /// inference (REQ-D12).
 ///
-/// Content whose serialized state exceeds [`MODE_STATE_LIMIT_BYTES`] goes straight to the
-/// fallback: a decision over truncated text looks as sure as one over the whole text (D-PM-1).
+/// Content whose serialized state exceeds the configured `[decision].max_state_bytes` goes
+/// straight to the fallback: a decision over truncated text looks as sure as one over the whole
+/// text (D-PM-1).
 /// Every fallback leaves one run-log entry and nothing on any screen.
 pub struct DecideModeClassifier {
     /// Decision client, or `None` when it could not be built.
@@ -53,6 +54,8 @@ pub struct DecideModeClassifier {
     endpoint: String,
     /// Why the client could not be built, as Magi worded it (already redacted).
     unavailable_reason: Option<String>,
+    /// Largest serialized state, in bytes, sent to `decide` (D-PM-1).
+    max_state_bytes: usize,
 }
 
 impl DecideModeClassifier {
@@ -75,6 +78,7 @@ impl DecideModeClassifier {
             fallback,
             endpoint,
             unavailable_reason: None,
+            max_state_bytes: crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES,
         }
     }
 
@@ -97,7 +101,8 @@ impl DecideModeClassifier {
     ///
     /// # Returns
     /// The classifier, with the limit applied.
-    pub fn with_max_state_bytes(self, _max_state_bytes: usize) -> Self {
+    pub fn with_max_state_bytes(mut self, max_state_bytes: usize) -> Self {
+        self.max_state_bytes = max_state_bytes;
         self
     }
 
@@ -163,7 +168,7 @@ impl ModeClassifier for DecideModeClassifier {
         };
         let state = json!({ STATE_REQUEST_FIELD: content });
         let state_bytes = serde_json::to_vec(&state).map_or(usize::MAX, |v| v.len());
-        if state_bytes > MODE_STATE_LIMIT_BYTES {
+        if state_bytes > self.max_state_bytes {
             return self.fall_back(content, FallbackCause::TooLarge, None).await;
         }
         let request = match DecisionRequest::new(state, mode_questions()) {

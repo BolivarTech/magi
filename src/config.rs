@@ -1779,12 +1779,13 @@ impl MagiConfig {
     /// The `[decision]` section as the run uses it (REQ-D02, REQ-D21).
     ///
     /// No section (no `magi.toml`) resolves to the built-in chain. A declared section is used
-    /// as written, with only the optional scalars `timeout_secs` and `auto_approve` completed
+    /// as written, with only the optional scalars `timeout_secs`, `auto_approve` and
+    /// `max_state_bytes` completed
     /// from `defaults.rs`; its fallbacks are never completed, so a section that declares none
     /// has none.
     ///
     /// # Returns
-    /// An owned section whose `timeout_secs` and `auto_approve` are `Some`.
+    /// An owned section whose `timeout_secs`, `auto_approve` and `max_state_bytes` are `Some`.
     #[must_use]
     pub fn effective_decision(&self) -> magi_rs::decision::DecisionSection {
         let mut section = match &self.decision {
@@ -1797,6 +1798,9 @@ impl MagiConfig {
         section
             .auto_approve
             .get_or_insert(crate::defaults::DEFAULT_DECISION_AUTO_APPROVE);
+        section
+            .max_state_bytes
+            .get_or_insert(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES);
         section
     }
 

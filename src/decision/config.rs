@@ -49,7 +49,6 @@ pub struct DecisionSection {
     /// Confidence threshold of the primary model.
     pub min_confidence: Option<f64>,
     /// Largest serialized mode-inference `state`, in UTF-8 bytes, sent to `decide`.
-    #[serde(skip)]
     pub max_state_bytes: Option<usize>,
     /// Ordered fallbacks, on the same endpoint.
     #[serde(default)]
@@ -99,6 +98,9 @@ pub enum DecisionConfigError {
     /// `timeout_secs` is zero.
     #[error("[decision].timeout_secs must be at least 1")]
     TimeoutBelowOne,
+    /// `max_state_bytes` is zero.
+    #[error("[decision].max_state_bytes must be at least 1")]
+    MaxStateBytesBelowOne,
     /// `keep_alive` is a blank string.
     #[error("[decision].keep_alive must not be blank")]
     BlankKeepAlive,
@@ -144,6 +146,10 @@ impl DecisionSection {
 
         if self.timeout_secs == Some(0) {
             return Err(DecisionConfigError::TimeoutBelowOne);
+        }
+
+        if self.max_state_bytes == Some(0) {
+            return Err(DecisionConfigError::MaxStateBytesBelowOne);
         }
 
         if let Some(KeepAlive::Text(ref t)) = self.keep_alive {

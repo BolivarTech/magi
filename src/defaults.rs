@@ -69,6 +69,9 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// `typesafe/jev-1.13` (64 000 tokens) taken as bytes: a token averages more than one byte, so a
 /// state of that many bytes always fits that window.
 pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 64_000;
+/// State limit the scaffold writes, active: it fits the context window of the local `nimble`
+/// model, which rejects a request by window from about 19 KB (measured in the calibration).
+pub const SCAFFOLD_DECISION_MAX_STATE_BYTES: usize = 19_000;
 
 /// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
 /// (REQ-D02, REQ-D06, REQ-D21).
@@ -94,7 +97,7 @@ pub fn default_decision_section() -> magi_rs::decision::DecisionSection {
         keep_alive: None,
         auto_approve: Some(DEFAULT_DECISION_AUTO_APPROVE),
         min_confidence: None,
-        max_state_bytes: None,
+        max_state_bytes: Some(DEFAULT_DECISION_MAX_STATE_BYTES),
         fallback: DEFAULT_DECISION_FALLBACK_MODELS
             .iter()
             .map(|model| magi_rs::decision::DecisionFallback {
@@ -349,6 +352,29 @@ pub fn render_default_magi_toml() -> String {
     )
     .unwrap();
     writeln!(out, "auto_approve = {}", DEFAULT_DECISION_AUTO_APPROVE).unwrap();
+    writeln!(
+        out,
+        "# Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# to the main model. {} fits the window of the local `nimble` model. With a hosted decision",
+        SCAFFOLD_DECISION_MAX_STATE_BYTES
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# model such as typesafe/jev-1.13, raise it or delete the line (built-in default {}).",
+        DEFAULT_DECISION_MAX_STATE_BYTES
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "max_state_bytes = {}",
+        SCAFFOLD_DECISION_MAX_STATE_BYTES
+    )
+    .unwrap();
     out.push_str(concat!(
         "# Below this confidence the answer is discarded and the next model in the chain is tried. When the
 ",
@@ -388,6 +414,8 @@ pub fn render_default_magi_toml() -> String {
         "# model        = \"typesafe/jev-1.13\"
 ",
         "# timeout_secs = 30
+",
+        "# max_state_bytes = 64000
 ",
         "#
 ",
