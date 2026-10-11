@@ -73,6 +73,9 @@ const KEEP_ALIVE_FIELD: &str = "keep_alive";
 const MIN_CHOICES: usize = 2;
 /// Fields the input of `magi decide` may carry (REQ-D23).
 const INPUT_FIELDS: [&str; 3] = [STATE_FIELD, QUESTIONS_FIELD, MODEL_FIELD];
+/// Problem reported for a question without usable `instructions`.
+const INSTRUCTIONS_REQUIRED: &str =
+    "`instructions` is required (a non-empty description of what to decide)";
 
 /// Builds the error every validation failure of this module returns.
 fn invalid(reason: impl Into<String>) -> DecisionError {
@@ -82,7 +85,26 @@ fn invalid(reason: impl Into<String>) -> DecisionError {
 }
 
 /// The problem of one question, if any; never quotes a value of the question.
+///
+/// The type's own rules come first, then `instructions`, which every type requires
+/// (user decision 2026-10-10: Ollama rejects a question without them with an opaque 400).
 fn question_problem(question: &Question) -> Option<&'static str> {
+    type_problem(question).or_else(|| instructions_problem(question))
+}
+
+/// The problem with the `instructions` of one question, if any: missing, empty or blank.
+fn instructions_problem(question: &Question) -> Option<&'static str> {
+    let (Question::Noul { instructions, .. }
+    | Question::Choice { instructions, .. }
+    | Question::Score { instructions, .. }) = question;
+    match instructions.as_deref().map(str::trim) {
+        Some(text) if !text.is_empty() => None,
+        _ => Some(INSTRUCTIONS_REQUIRED),
+    }
+}
+
+/// The problem with the type-specific fields of one question, if any.
+fn type_problem(question: &Question) -> Option<&'static str> {
     match question {
         Question::Noul { .. } => None,
         Question::Choice { criteria, .. } => match criteria {

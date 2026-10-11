@@ -32,8 +32,9 @@ const DESCRIPTION: &str = concat!(
     "use it to write text, explain or reason (that is your job), nor for design or code ",
     "reviews (use `consult`).\n",
     "Input: `state` (a string, object or array describing the situation) and `questions` (a ",
-    "map from a name to a question). Every `choice` and `score` needs `criteria` with at least ",
-    "two options or levels, and may take `instructions`. Minimal examples: ",
+    "map from a name to a question). Every question needs `instructions`, a short description ",
+    "of what to decide; every `choice` and `score` also needs `criteria` with at least two ",
+    "options or levels. Minimal examples: ",
     r#"{"type":"choice","instructions":"Is this a bug or a feature?","#,
     r#""criteria":{"bug":"a defect","feature":"a request"}}; "#,
     r#"{"type":"noul","instructions":"Does the user ask for a refund?"}; "#,
@@ -158,7 +159,18 @@ impl Tool for DecideTool {
                 },
                 QUESTIONS_FIELD: {
                     "type": "object",
-                    "description": "Map from a question name to a choice, noul or score question."
+                    "description": "Map from a question name to a choice, noul or score question.",
+                    "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"enum": ["choice", "noul", "score"]},
+                            "instructions": {
+                                "type": "string",
+                                "description": "What to decide, in plain words; never empty."
+                            }
+                        },
+                        "required": ["type", "instructions"]
+                    }
                 }
             },
             "required": [STATE_FIELD, QUESTIONS_FIELD],
