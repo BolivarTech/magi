@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.23.0
-// Date: 2026-10-04
+// Date: 2026-10-11
 
 //! `magi decide` end to end against a local stand-in for a System One endpoint
 //! (REQ-D22; S3, S4, S5, S6, S13, S20, S22, S23). The stand-in is `mockito`: these tests pin the

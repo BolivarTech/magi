@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.23.0
-# Date: 2026-10-04
+# Date: 2026-10-11
 """Parsing of ``smoke.toml``, the harness's own configuration.
 
 The file carries the environment's vault passphrase in clear, so every error

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.23.0
-// Date: 2026-10-04
+// Date: 2026-10-11
 
 //! Internal uses of `decide`: the mode and contradiction questions, the closed
 //! set of fallback causes and the run-log record of an internal fallback

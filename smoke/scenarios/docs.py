@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.23.0
-# Date: 2026-10-04
+# Date: 2026-10-11
 """S13 -- the documentation that ships is still true about the binary that ships.
 
 The documents in the published package are the ones a user reads before they

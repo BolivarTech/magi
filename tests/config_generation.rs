@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.23.0
-// Date: 2026-10-04
+// Date: 2026-10-11
 
 //! S6/S19 end to end: the generation check runs before any other startup work, so an old or empty
 //! `magi.toml` is refused before the encrypted database is opened or a model is called.

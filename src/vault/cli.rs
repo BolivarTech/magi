@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.23.0
-// Date: 2026-10-04
+// Date: 2026-10-11
 //! `magi-rs vault` subcommands: `ls` / `set` / `rm` / `passwd` (REQ-V07..V11,
 //! V21, V22, V40) plus `diagnose` (REQ-H32) — see [`VaultCmd::Diagnose`] for
 //! why that one subcommand is deliberately dispatched OUTSIDE

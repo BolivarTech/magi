@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.23.0
-// Date: 2026-10-04
+// Date: 2026-10-11
 
 //! Two-arm benchmark binary for the tiered memory subsystem (T14, D-08, REQ-24').
 //!

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.23.0
-// Date: 2026-10-04
+// Date: 2026-10-11
 #![forbid(unsafe_code)]
 //! magi-rs library: exposes the `magi`, `vault`, and `headless` subsystems for fuzzing,
 //! coverage, and tests, as well as the `main.rs` binary.

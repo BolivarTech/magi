@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.23.0
-// Date: 2026-10-04
+// Date: 2026-10-11
 
 //! Guards the text a user can read against development identifiers (`REQ-…`, `SC-…`, `D-…`,
 //! `PM-…`, `R-…`, `RF-…`, `F-…`).

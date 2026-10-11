@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.23.0
-# Date: 2026-10-04
+# Date: 2026-10-11
 """Regression tests for the three harness defects SMOKE #1 found in D1, D11 and D13.
 
 The product was correct in all three; the scenarios judged more than the
