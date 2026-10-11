@@ -50,6 +50,7 @@ Everything lives in the `[decision]` section of `.magi/magi.toml`; see `docs/mag
 | `timeout_secs` | `[decision]` | `120` | Seconds to wait for each model, per attempt. |
 | `keep_alive` | `[decision]` | not sent | Ollama only: how long to keep the model loaded (`"10m"`, `"2h"`, `-1`). |
 | `auto_approve` | `[decision]` | `true` | Whether the agent's `decide` tool runs without asking. |
+| `max_state_bytes` | `[decision]` | `64000` | Largest consult, in bytes, whose mode is inferred with `decide` (at least 1). `magi init` writes 19000, which fits the local `nimble`. |
 | `min_confidence` | `[decision]` | no threshold | Per-model confidence floor (0 to 1) for the primary. |
 | `model` | `[[decision.fallback]]` | none (required in each entry) | A fallback model, tried in order. |
 | `min_confidence` | `[[decision.fallback]]` | no threshold | Confidence floor for that fallback. |
@@ -155,7 +156,7 @@ Two choices that used to cost a main-model call go to the decision models first:
 - If the chain cannot answer (endpoint down, timeout, invalid answer, or every model under its threshold), the main model answers instead. Nothing is shown in the TUI or on the terminal.
 - Each fallback is logged, one entry per occurrence, never merged, with its cause: one of the attempt causes below, or `too_large`, `low_confidence`, `client_unavailable` or `skipped_after_failure`.
 - In one memory-distillation pass, once an attempt fails at the transport level, the remaining pairs of that pass go straight to the main model. The next pass tries `decide` again.
-- Mode inference sends at most `MODE_STATE_LIMIT_BYTES` (19 000 bytes) of the consult. Larger content goes straight to the main model without calling `decide`, and the content is never truncated.
+- Mode inference sends at most `[decision].max_state_bytes` of the consult: 64 000 bytes by default, the window of `typesafe/jev-1.13` counted in bytes, and 19 000 in the file `magi init` writes, which fits the local `nimble`. Raise it, or delete the line, when the decision model is hosted. Larger content goes straight to the main model without calling `decide`, and the content is never truncated.
 - Explicit calls (`magi-rs decide`, `/decide`, the tool) never fall back to the main model. It could only invent the probabilities.
 
 ## Output
@@ -226,7 +227,7 @@ Failures before any model is called (an old `magi.toml`, a wrong passphrase, an 
 Every use of `decide` sends text to the endpoint in `[decision]`:
 
 - `magi-rs decide` and `/decide` send the `state` you give, the questions and the model name.
-- Mode inference sends the content of the consult, up to `MODE_STATE_LIMIT_BYTES`.
+- Mode inference sends the content of the consult, up to `[decision].max_state_bytes`.
 - The contradiction check sends pairs of memories exactly as stored, without redaction. The main model already received them the same way.
 - The `decide` tool sends the `state` the agent builds.
 
