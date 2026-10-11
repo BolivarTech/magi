@@ -4923,10 +4923,15 @@ fn headless_mode_classifier_wiring(
     unavailable_reason: Option<String>,
     magi_config: &crate::config::MagiConfig,
 ) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
-    let _ = magi_config;
     Arc::new(
         crate::agent::decide_classifier::DecideModeClassifier::new(decision, llm, endpoint)
-            .with_unavailable_reason(unavailable_reason),
+            .with_unavailable_reason(unavailable_reason)
+            .with_max_state_bytes(
+                magi_config
+                    .effective_decision()
+                    .max_state_bytes
+                    .unwrap_or(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
+            ),
     )
 }
 
