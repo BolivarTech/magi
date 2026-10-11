@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn the_built_in_defaults_carry_the_hosted_state_limit() {
-        assert_eq!(default_decision_section().max_state_bytes, Some(64_000));
+        assert_eq!(default_decision_section().max_state_bytes, Some(128_000));
     }
 
     #[test]
@@ -2033,7 +2033,7 @@ mod tests {
         let comment_names_the_hosted_default = text
             .lines()
             .filter(|l| l.trim_start().starts_with('#'))
-            .any(|l| l.contains("64000"));
+            .any(|l| l.contains("128000"));
         assert!(
             comment_names_the_hosted_default,
             "a comment tells the operator the built-in default for hosted models"

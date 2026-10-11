@@ -4930,7 +4930,7 @@ model = \"x\"
     fn an_absent_max_state_bytes_resolves_to_the_built_in_default() {
         assert_eq!(
             MagiConfig::default().effective_decision().max_state_bytes,
-            Some(64_000),
+            Some(128_000),
             "no magi.toml"
         );
         let c = MagiConfig::from_toml_str(
@@ -4941,7 +4941,7 @@ model = \"x\"
         .expect("valid");
         assert_eq!(
             c.effective_decision().max_state_bytes,
-            Some(64_000),
+            Some(128_000),
             "declared section without the field"
         );
     }
