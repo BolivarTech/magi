@@ -60,7 +60,7 @@ timeout_secs = 120
 auto_approve = true
 # Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight
 # to the main model. 19000 fits the window of the local `nimble` model. With a hosted decision
-# model such as typesafe/jev-1.13, raise it or delete the line (built-in default 64000).
+# model such as typesafe/jev-1.13, raise it or delete the line (built-in default 128000).
 max_state_bytes = 19000
 # Below this confidence the answer is discarded and the next model in the chain is tried. When the
 # chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
@@ -81,7 +81,6 @@ min_confidence = 0.7
 # base_url     = "https://openrouter.ai/api/v1"
 # model        = "typesafe/jev-1.13"
 # timeout_secs = 30
-# max_state_bytes = 64000
 #
 # [[decision.fallback]]
 # model = "togethercomputer/tev1-4b-experimental"
