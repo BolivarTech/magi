@@ -290,7 +290,7 @@ impl DecisionRequest {
 /// ```
 /// use magi_rs::decision::protocol::parse_decide_input;
 ///
-/// let input = br#"{"state": "a ticket", "questions": {"q": {"type": "noul"}}}"#;
+/// let input = br#"{"state": "a ticket", "questions": {"q": {"type": "noul", "instructions": "Is it urgent?"}}}"#;
 /// let request = parse_decide_input(input, None).unwrap();
 /// assert!(request.model().is_none());
 /// ```
@@ -791,7 +791,8 @@ mod tests {
     fn keys_inside_the_state_and_option_names_are_user_data_not_unknown_fields() {
         parse(json!({
             "state": {"anything": {"nested": true}, "questons": 1},
-            "questions": {"triage": {"type": "choice", "criteria": {"weird key": "a", "another one": "b"}}}
+            "questions": {"triage": {"type": "choice", "instructions": "Which one?",
+                "criteria": {"weird key": "a", "another one": "b"}}}
         }))
         .expect("state content and option names are data (REQ-D23)");
     }
@@ -800,6 +801,7 @@ mod tests {
     fn noul_criteria_accept_only_true_and_false_keys() {
         parse(
             json!({"state": "x", "questions": {"obstacle": {"type": "noul",
+            "instructions": "Is there an obstacle ahead?",
             "criteria": {"true": "closer than the safety distance", "false": "path clear"}}}}),
         )
         .expect("valid");
@@ -810,8 +812,8 @@ mod tests {
 
     #[test]
     fn with_a_questions_file_the_input_carries_only_state_and_model() {
-        let questions =
-            json!({"next_action": {"type": "choice", "criteria": {"forward": "f", "stop": "s"}}});
+        let questions = json!({"next_action": {"type": "choice", "instructions": "What next?",
+                "criteria": {"forward": "f", "stop": "s"}}});
         let req = parse_decide_input(
             json!({"state": {"front_distance_m": 0.35}, "model": "tev1"})
                 .to_string()
@@ -911,11 +913,62 @@ mod tests {
         assert!(r.contains("question \"\""), "{r}");
     }
 
+    /// One question of each type, complete except for `instructions`.
+    fn question_without_instructions(kind: &str) -> serde_json::Value {
+        match kind {
+            "noul" => json!({"type": "noul"}),
+            "choice" => json!({"type": "choice", "criteria": {"bug": "Broken", "feature": "New"}}),
+            _ => json!({"type": "score", "criteria": ["Routine", "Urgent"]}),
+        }
+    }
+
+    /// User decision 2026-10-10: every question type needs `instructions`, rejected locally
+    /// with a message naming the question and the field.
+    #[test]
+    fn a_question_of_any_type_without_instructions_is_invalid_input_naming_it() {
+        for kind in ["noul", "choice", "score"] {
+            let r = reason(parse(json!({"state": "x",
+                "questions": {"team": question_without_instructions(kind)}})));
+            assert_eq!(
+                r,
+                "question \"team\": `instructions` is required \
+                 (a non-empty description of what to decide)",
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_or_blank_instructions_are_invalid_input() {
+        for kind in ["noul", "choice", "score"] {
+            for text in ["", "   ", "\t\n "] {
+                let mut question = question_without_instructions(kind);
+                question["instructions"] = json!(text);
+                let r = reason(parse(
+                    json!({"state": "x", "questions": {"team": question}}),
+                ));
+                assert!(
+                    r.contains("question \"team\"") && r.contains("instructions"),
+                    "{kind} {text:?}: {r}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn new_rejects_a_question_without_instructions_like_the_parser() {
+        let questions: Questions =
+            serde_json::from_value(json!({"team": question_without_instructions("noul")}))
+                .expect("map");
+        let r = reason(DecisionRequest::new(json!("s"), questions));
+        assert!(r.contains("question \"team\""), "{r}");
+    }
+
     /// Review Focus 2: names are user data and travel as they are.
     #[test]
     fn question_and_option_names_with_quotes_newlines_and_unicode_are_data() {
         let req = parse(json!({"state": "x", "questions": {"a\"b
-ñ": {"type": "choice",
+ñ": {"type": "choice", "instructions": "Which one?",
             "criteria": {"sí": "yes", "no
 ": "no"}}}}))
         .expect("valid");

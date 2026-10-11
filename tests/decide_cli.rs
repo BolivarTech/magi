@@ -238,6 +238,33 @@ fn invalid_input_is_rejected_before_any_request() {
     never.assert();
 }
 
+/// User decision 2026-10-10: a question without `instructions` is rejected locally (exit 2, empty
+/// chain, zero usage) instead of reaching a provider that answers with an opaque HTTP 400.
+#[test]
+fn a_question_without_instructions_is_rejected_before_any_request() {
+    let mut server = mockito::Server::new();
+    let never = server.mock("POST", Matcher::Any).expect(0).create();
+    let ws = workspace(&decision_toml(&server.url(), ""));
+    let (code, out, err) = decide(
+        &ws,
+        &[],
+        r#"{"state":"x","questions":{"team":{"type":"choice","criteria":{"a":"A","b":"B"}}}}"#,
+        &[],
+    );
+    assert_eq!(code, EXIT_MISUSE, "{err}");
+    let v = envelope(&out);
+    assert_eq!(v["error"]["kind"], "invalid_input");
+    let message = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("question \"team\"") && message.contains("instructions"),
+        "{message}"
+    );
+    assert_eq!(v["chain"], json!([]));
+    assert_eq!(v["usage"]["input_tokens"], 0);
+    assert_eq!(v["usage"]["output_tokens"], 0);
+    never.assert();
+}
+
 /// S23(b): `--timeout` overrides `timeout_secs` per attempt.
 #[test]
 fn the_timeout_flag_overrides_the_toml_per_attempt() {

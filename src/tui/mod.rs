@@ -7974,6 +7974,28 @@ mod tests {
         assert_eq!(req.state(), &serde_json::json!(r#"{"looks":"json"}"#));
     }
 
+    /// User decision 2026-10-10: `/decide` rejects a question without `instructions` locally.
+    #[test]
+    fn a_tui_question_without_instructions_is_invalid_input_naming_it() {
+        let cmd = super::TuiDecideCommand::QuestionsAndText {
+            questions: "q.json".into(),
+            text: "is this a bug?".into(),
+        };
+        let files: &'static [(&str, &str)] = &[(
+            "q.json",
+            r#"{"kind":{"type":"choice","criteria":{"bug":"a defect","feature":"a request"}}}"#,
+        )];
+        match super::tui_decide_request(&cmd, &fs_with(files)) {
+            Err(magi_rs::decision::DecisionError::InvalidInput { reason }) => {
+                assert!(
+                    reason.contains("question \"kind\"") && reason.contains("instructions"),
+                    "{reason}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// S25: -q with a request that also carries questions is an error.
     #[test]
     fn questions_in_both_the_request_file_and_the_questions_file_are_rejected() {

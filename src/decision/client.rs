@@ -1110,8 +1110,8 @@ mod tests {
     #[tokio::test]
     async fn every_question_must_reach_the_threshold_and_the_attempt_reports_the_lowest() {
         let questions: Questions = serde_json::from_value(json!({
-            "pick": {"type": "choice", "criteria": {"x": "x", "y": "y"}},
-            "level": {"type": "score", "criteria": ["low", "high"]}}))
+            "pick": {"type": "choice", "instructions": "Pick one", "criteria": {"x": "x", "y": "y"}},
+            "level": {"type": "score", "instructions": "How high?", "criteria": ["low", "high"]}}))
         .expect("q");
         let req = DecisionRequest::new(json!("s"), questions).expect("valid");
         let body = json!({"model": "a", "answers": {

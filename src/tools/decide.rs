@@ -323,6 +323,44 @@ mod tests {
         assert_eq!(client.calls.load(Ordering::SeqCst), 0);
     }
 
+    /// User decision 2026-10-10: a question without `instructions` is rejected before the client.
+    #[tokio::test]
+    async fn a_question_without_instructions_never_reaches_the_client() {
+        let (t, client) = tool(answered(), true);
+        let r = t
+            .execute(
+                json!({"state": "x", "questions": {"kind": {"type": "choice",
+                    "criteria": {"bug": "a defect", "feature": "a request"}}}}),
+                &CancellationToken::new(),
+            )
+            .await;
+        match r {
+            Err(ToolError::InvalidArguments(msg)) => {
+                assert!(
+                    msg.contains("question \"kind\"") && msg.contains("instructions"),
+                    "{msg}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The description and the schema tell the agent that every question needs `instructions`.
+    #[test]
+    fn the_description_and_schema_require_instructions_on_every_question() {
+        let (t, _) = tool(answered(), true);
+        assert!(
+            t.description()
+                .contains("Every question needs `instructions`"),
+            "{}",
+            t.description()
+        );
+        let schema = t.input_schema();
+        let question = &schema["properties"]["questions"]["additionalProperties"];
+        assert_eq!(question["required"], json!(["type", "instructions"]));
+    }
+
     /// S21/REQ-D11 (mutation-verified): the agent gets Magi's text, never the provider's, nor rejected answers.
     #[tokio::test]
     async fn a_failure_reaches_the_agent_without_provider_text_or_rejected_answers() {
