@@ -4883,7 +4883,6 @@ fn tui_mode_classifier_wiring(
     unavailable_reason: Option<String>,
     magi_config: &crate::config::MagiConfig,
 ) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
-    let _ = magi_config;
     let llm: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
@@ -4895,7 +4894,7 @@ fn tui_mode_classifier_wiring(
     Arc::new(
         crate::agent::decide_classifier::DecideModeClassifier::new(decision, llm, endpoint)
             .with_unavailable_reason(unavailable_reason)
-            .with_max_state_bytes(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
+            .with_max_state_bytes(configured_state_limit(magi_config)),
     )
 }
 
