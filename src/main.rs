@@ -2237,7 +2237,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         tui_decision,
         tui_decision_endpoint,
         tui_decision_reason.as_ref().map(unavailable_reason),
-        configured_state_limit(&magi_config),
+        &magi_config,
     );
     let tui_classifier_notices = tui_notices;
     let tui_default_mode = magi_config.effective_default_mode();
@@ -4870,7 +4870,7 @@ impl AutonomousRunConfig {
 /// * `decision` - the decision client built once at startup, if it could be built.
 /// * `endpoint` - the redacted decision endpoint, for the run log.
 /// * `unavailable_reason` - why the client could not be built, redacted, if it could not.
-/// * `max_state_bytes` - the largest serialized state, in bytes, sent to `decide`.
+/// * `magi_config` - the loaded configuration; only `[decision]` is read.
 ///
 /// # Returns
 /// The classifier for `TuiMagiRuntimeConfig::mode_classifier`: `decide` first, the principal
@@ -4881,8 +4881,9 @@ fn tui_mode_classifier_wiring(
     decision: Option<Arc<dyn magi_rs::decision::DecisionClient>>,
     endpoint: String,
     unavailable_reason: Option<String>,
-    max_state_bytes: usize,
+    magi_config: &crate::config::MagiConfig,
 ) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
+    let _ = magi_config;
     let llm: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
             provider,
@@ -4894,7 +4895,7 @@ fn tui_mode_classifier_wiring(
     Arc::new(
         crate::agent::decide_classifier::DecideModeClassifier::new(decision, llm, endpoint)
             .with_unavailable_reason(unavailable_reason)
-            .with_max_state_bytes(max_state_bytes),
+            .with_max_state_bytes(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
     )
 }
 
@@ -19418,7 +19419,7 @@ agent_timeout_secs = {CEILING}
             Some(decision),
             "http://localhost:11434".into(),
             None,
-            crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES,
+            &crate::config::MagiConfig::default(),
         );
         assert_eq!(
             classifier.classify("evaluate this architecture").await,
@@ -19435,6 +19436,13 @@ agent_timeout_secs = {CEILING}
     /// provider without asking `decide`.
     #[tokio::test]
     async fn the_tui_wiring_applies_the_configured_state_limit() {
+        let cfg = crate::config::MagiConfig::from_toml_str(
+            "[decision]
+model = \"nimble\"
+max_state_bytes = 100
+",
+        )
+        .expect("valid");
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let decision: Arc<dyn magi_rs::decision::DecisionClient> = Arc::new(FixedDesign);
         let classifier = tui_mode_classifier_wiring(
@@ -19443,7 +19451,7 @@ agent_timeout_secs = {CEILING}
             Some(decision),
             "http://localhost:11434".into(),
             None,
-            100,
+            &cfg,
         );
         let _ = classifier.classify(&"x".repeat(200)).await;
         assert_eq!(
@@ -19451,6 +19459,24 @@ agent_timeout_secs = {CEILING}
             1,
             "over the configured limit the principal provider answers"
         );
+    }
+
+    /// Without a `max_state_bytes` line, with or without a `[decision]` section, the limit is the
+    /// built-in default.
+    #[test]
+    fn an_absent_state_limit_resolves_to_the_built_in_default() {
+        let declared = crate::config::MagiConfig::from_toml_str(
+            "[decision]
+model = \"nimble\"
+",
+        )
+        .expect("valid");
+        for cfg in [crate::config::MagiConfig::default(), declared] {
+            assert_eq!(
+                configured_state_limit(&cfg),
+                crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES
+            );
+        }
     }
 
     /// The headless `magi consult` wiring reads `[decision].max_state_bytes`: content over a
@@ -19566,7 +19592,7 @@ agent_timeout_secs = {CEILING}
                 None,
                 String::new(),
                 None,
-                crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES,
+                &crate::config::MagiConfig::default(),
             );
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             notices.attach(tx);
