@@ -428,7 +428,7 @@ cat state.json | magi-rs decide --no-memory -q questions.json  # no vault, no pa
 | `--no-memory` | Do not open the encrypted database; keys come from the environment only |
 | `--timeout SECONDS` | Wait this long for each model, instead of `[decision].timeout_secs` |
 
-The input is always JSON. A request has a `state` (string, object or array, forwarded as it is), a map of `questions`, and optionally a `model` that replaces the primary model for that run, with no fallbacks. A question is a `choice` (options in `criteria`, at least 2), a `noul` (a yes/no probability) or a `score` (a list of levels in `criteria`, at least 2). Unknown fields are rejected before any model is called. Four example inputs follow. The first has one question of each type:
+The input is always JSON. A request has a `state` (string, object or array, forwarded as it is), a map of `questions`, and optionally a `model` that replaces the primary model for that run, with no fallbacks. A question is a `choice` (options in `criteria`, at least 2), a `noul` (a yes/no probability) or a `score` (a list of levels in `criteria`, at least 2). Every question also needs `instructions`, a short description of what to decide. Unknown fields, and a question without `instructions`, are rejected before any model is called. Four example inputs follow. The first has one question of each type:
 
 ```json
 {"state": {"ticket": "I was charged twice this month. Please refund the extra payment."},

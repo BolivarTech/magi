@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
-## [0.23.0] - 2026-10-04
+## [0.23.0] - 2026-10-10
 
 ### Breaking: `magi.toml` needs a `[decision]` section
 
@@ -21,7 +21,7 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ### Added
 
-- **`magi-rs decide`**: asks a closed question of a small decision model (System One protocol) and prints, as one JSON object, the chosen option and the probability of every option. Three question types: `choice`, `noul` (a yes/no probability) and `score`. Flags: `-i`, `-o`, `-q` (a reusable question file), `-w`, `--no-memory` and `--timeout`. Exit codes are `0` (decided), `1` (no decision) and `2` (invalid input or key). See `docs/decide.md`.
+- **`magi-rs decide`**: asks a closed question of a small decision model (System One protocol) and prints, as one JSON object, the chosen option and the probability of every option. Three question types: `choice`, `noul` (a yes/no probability) and `score`; every question must carry `instructions`, and one without them is rejected before any model is called. Flags: `-i`, `-o`, `-q` (a reusable question file), `-w`, `--no-memory` and `--timeout`. Exit codes are `0` (decided), `1` (no decision) and `2` (invalid input or key). See `docs/decide.md`.
 - **`[decision]` in `magi.toml`**: `base_url` (defaults to the root `base_url`), `model`, `timeout_secs` (120), `keep_alive`, `auto_approve`, an optional per-model `min_confidence`, and ordered `[[decision.fallback]]` models on the same endpoint. `magi init` writes it with `nimble` and `tev1` on local Ollama, each with `min_confidence = 0.7` already active, and an OpenRouter example in comments. The 0.7 comes from the maintainer's calibration and may not suit your data; commenting it out disables the threshold. With no `magi.toml`, the built-in defaults set no threshold.
 - **`DECISION_API_KEY`**, from the environment or the vault, plus `DECISION_BASE_URL_USER` and `DECISION_BASE_URL_PASSWORD` for credentials in the URL. Without `DECISION_API_KEY`, the main model's key is used only when `[decision]` has the same origin; a key is never sent to another host.
 - **The `decide` tool and `/decide`.** The agent can call `decide` on its own for closed choices, yes/no questions and scores; it needs no approval by default (`auto_approve`), and `magi query` allows it at its default tier. Its result is kept in `tool_calls[]` with the `state` replaced by `"<omitted>"`. `/decide` in the TUI takes a whole request, `-i`, `-q` plus text, or `-i` plus `-q`, and prints a table.

@@ -2,13 +2,13 @@
 
 `magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated, so a decision usually comes back in well under a second once the model is loaded.
 
-The models speak the System One protocol: you send a `state` (text or JSON) and a set of questions, and each question has one of three types.
+The models speak the System One protocol: you send a `state` (text or JSON) and a set of questions, and each question has one of three types. Every question, whatever its type, needs `instructions`: a short, non-empty description of what to decide.
 
 | Type | You provide | You get back |
 |---|---|---|
-| `choice` | `criteria`: option name → description (at least 2 options) | the chosen option and a probability for each option |
-| `noul` | optional `instructions` and `criteria` (`true` / `false` descriptions) | one number in [0, 1], the probability of "yes" |
-| `score` | `criteria`: a list of levels (at least 2) | a `score` in level units, a probability per level index, and a `legend` naming the levels |
+| `choice` | `instructions` and `criteria`: option name → description (at least 2 options) | the chosen option and a probability for each option |
+| `noul` | `instructions`, and optionally `criteria` (`true` / `false` descriptions) | one number in [0, 1], the probability of "yes" |
+| `score` | `instructions` and `criteria`: a list of levels (at least 2) | a `score` in level units, a probability per level index, and a `legend` naming the levels |
 
 ## Providers and models
 
@@ -105,7 +105,7 @@ Keys never go in `magi.toml`.
 }
 ```
 
-`state` may be a string, an object or an array, and it is forwarded as it is. An optional `"model"` replaces the primary model for that run; only that model is tried, with no fallbacks. Fields the protocol does not define are rejected. The `noul` question carries `instructions` in every example here; the code accepts it without them, but the provider documentation is not consistent about whether it is required, so include it.
+`state` may be a string, an object or an array, and it is forwarded as it is. An optional `"model"` replaces the primary model for that run; only that model is tried, with no fallbacks. Fields the protocol does not define are rejected. A question without `instructions`, or with only blank space in them, is rejected before any model is called, with an error that names the question.
 
 To reuse the same questions with a changing state, put just the question map in a file and pass it with `-q`; the request then carries only `state` and, optionally, `model`. Sending `questions` in both places is an error.
 
