@@ -65,10 +65,11 @@ pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
 /// Whether the agent's `decide` tool runs without asking (REQ-D16).
 pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// Largest serialized mode-inference `state`, in UTF-8 bytes, sent to `decide` when
-/// `[decision].max_state_bytes` is absent (D-PM-1). It is the context window of
-/// `typesafe/jev-1.13` (64 000 tokens) taken as bytes: a token averages more than one byte, so a
-/// state of that many bytes always fits that window.
-pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 64_000;
+/// `[decision].max_state_bytes` is absent (D-PM-1). Sized for `typesafe/jev-1.13`, whose window
+/// is 64 000 tokens: at roughly 4 bytes per token of English text, 128 000 bytes stay well inside
+/// it. Ollama rejects any request body over 64 KiB before loading the model, so with Ollama a
+/// larger state just falls back to the main model at no cost.
+pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 128_000;
 /// State limit the scaffold writes, active: it fits the context window of the local `nimble`
 /// model, which rejects a request by window from about 19 KB (measured in the calibration).
 pub const SCAFFOLD_DECISION_MAX_STATE_BYTES: usize = 19_000;
@@ -414,8 +415,6 @@ pub fn render_default_magi_toml() -> String {
         "# model        = \"typesafe/jev-1.13\"
 ",
         "# timeout_secs = 30
-",
-        "# max_state_bytes = 64000
 ",
         "#
 ",
