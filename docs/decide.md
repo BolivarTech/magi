@@ -118,7 +118,7 @@ Ollama enforces its own limits, and `magi-rs` passes its rejection back to you:
 - 2 to 26 options per `choice`;
 - a request body of at most 64 KiB.
 
-A rejected request (HTTP 400, 413 or 422) is reported as `invalid_input` and the chain does not move on, because every model on the endpoint would reject it the same way. Locally, `magi-rs` refuses a request with no questions, a `choice` or `score` without `criteria`, or fewer than 2 options or levels.
+A rejected request (HTTP 400, 413 or 422) is reported as `invalid_input` and the chain does not move on, because every model on the endpoint would reject it the same way. Locally, `magi-rs` refuses a request with no questions, a question without `instructions`, a `choice` or `score` without `criteria`, or fewer than 2 options or levels.
 
 ## Timeouts
 
