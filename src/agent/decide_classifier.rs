@@ -90,6 +90,17 @@ impl DecideModeClassifier {
         self
     }
 
+    /// Sets the largest serialized state, in bytes, sent to `decide`.
+    ///
+    /// # Arguments
+    /// * `max_state_bytes` - The configured `[decision].max_state_bytes`.
+    ///
+    /// # Returns
+    /// The classifier, with the limit applied.
+    pub fn with_max_state_bytes(self, _max_state_bytes: usize) -> Self {
+        self
+    }
+
     /// Logs the fallback and asks the LLM classifier.
     ///
     /// # Arguments
@@ -228,6 +239,9 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     const DEADLINE: Duration = Duration::from_secs(30);
+    /// State limit the boundary tests configure; distinct from every built-in value so a
+    /// classifier that ignored the configuration would be caught.
+    const LIMIT: usize = 1_000;
 
     struct Scripted {
         reply: Result<Decision, DecisionError>,
@@ -385,19 +399,20 @@ mod tests {
     fn content_over_the_limit_goes_straight_to_the_llm() {
         let client = Scripted::new(chose("design"));
         let fb = Fallback::new(Some(Mode::CodeReview));
-        let c = classifier(Some(Arc::clone(&client)), Arc::clone(&fb));
-        let big = "x".repeat(MODE_STATE_LIMIT_BYTES);
+        let c = classifier(Some(Arc::clone(&client)), Arc::clone(&fb)).with_max_state_bytes(LIMIT);
+        let big = "x".repeat(LIMIT);
         let lines = fallback_lines(async move {
             assert_eq!(c.classify(&big).await, Some(Mode::CodeReview));
         });
         assert_eq!(client.calls.load(Ordering::SeqCst), 0);
         assert!(lines.iter().any(|l| l.contains("too_large")), "{lines:?}");
-        let small = classifier(Some(Scripted::new(chose("design"))), Fallback::new(None));
+        let small = classifier(Some(Scripted::new(chose("design"))), Fallback::new(None))
+            .with_max_state_bytes(LIMIT);
         let ok = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("rt")
-            .block_on(small.classify(&"x".repeat(MODE_STATE_LIMIT_BYTES - 64)));
+            .block_on(small.classify(&"x".repeat(LIMIT - 64)));
         assert_eq!(ok, Some(Mode::Design), "under the limit decide is used");
     }
 
@@ -425,13 +440,14 @@ mod tests {
     #[test]
     fn the_limit_is_judged_on_serialized_bytes_at_its_exact_boundary() {
         for unit in ["x", "é", "\n", "日\n"] {
-            let at = content_of_serialized_len(unit, MODE_STATE_LIMIT_BYTES);
-            let over = content_of_serialized_len(unit, MODE_STATE_LIMIT_BYTES + 1);
+            let at = content_of_serialized_len(unit, LIMIT);
+            let over = content_of_serialized_len(unit, LIMIT + 1);
             let client = Scripted::new(chose("design"));
             let c = classifier(
                 Some(Arc::clone(&client)),
                 Fallback::new(Some(Mode::Analysis)),
-            );
+            )
+            .with_max_state_bytes(LIMIT);
             let verdicts = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -444,6 +460,30 @@ mod tests {
             );
             assert_eq!(client.calls.load(Ordering::SeqCst), 1, "unit {unit:?}");
         }
+    }
+
+    /// The configured limit, not a built-in one, decides: one byte over a small limit goes to the
+    /// LLM with a `too_large` entry, and content exactly at it reaches `decide`.
+    #[test]
+    fn a_configured_small_limit_routes_by_that_limit() {
+        const SMALL: usize = 100;
+        let at = content_of_serialized_len("x", SMALL);
+        let over = content_of_serialized_len("x", SMALL + 1);
+        let client = Scripted::new(chose("design"));
+        let fb = Fallback::new(Some(Mode::Analysis));
+        let c = classifier(Some(Arc::clone(&client)), Arc::clone(&fb)).with_max_state_bytes(SMALL);
+        let lines = fallback_lines(async move {
+            assert_eq!(c.classify(&over).await, Some(Mode::Analysis), "over");
+            assert_eq!(c.classify(&at).await, Some(Mode::Design), "at");
+        });
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            1,
+            "decide only at the limit"
+        );
+        assert_eq!(fb.calls.load(Ordering::SeqCst), 1, "the LLM only over it");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("too_large"), "{lines:?}");
     }
 
     #[test]
@@ -592,7 +632,8 @@ mod tests {
                 .await;
             classifier(None, Fallback::new(None)).classify("x").await;
             classifier(Some(Scripted::new(chose("design"))), Fallback::new(None))
-                .classify(&"x".repeat(MODE_STATE_LIMIT_BYTES))
+                .with_max_state_bytes(LIMIT)
+                .classify(&"x".repeat(LIMIT))
                 .await;
         });
         let seen = seen.lock().expect("seen").clone();

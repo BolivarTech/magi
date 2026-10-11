@@ -48,6 +48,9 @@ pub struct DecisionSection {
     pub auto_approve: Option<bool>,
     /// Confidence threshold of the primary model.
     pub min_confidence: Option<f64>,
+    /// Largest serialized mode-inference `state`, in UTF-8 bytes, sent to `decide`.
+    #[serde(skip)]
+    pub max_state_bytes: Option<usize>,
     /// Ordered fallbacks, on the same endpoint.
     #[serde(default)]
     pub fallback: Vec<DecisionFallback>,
@@ -320,6 +323,55 @@ model = \"tev1\t\"
             let s = section(text).unwrap_or_else(|e| panic!("{what}: must parse, got {e}"));
             assert!(s.validate().is_err(), "{what}");
         }
+    }
+
+    #[test]
+    fn max_state_bytes_parses_and_passes_validation() {
+        let s = section(
+            "model = \"m\"
+max_state_bytes = 64000
+",
+        )
+        .expect("parses");
+        assert_eq!(s.max_state_bytes, Some(64_000));
+        assert_eq!(s.validate(), Ok(()));
+        let s = section(
+            "model = \"m\"
+max_state_bytes = 1
+",
+        )
+        .expect("parses");
+        assert_eq!(s.validate(), Ok(()), "1 is the smallest valid limit");
+    }
+
+    #[test]
+    fn a_zero_max_state_bytes_is_rejected_naming_the_field() {
+        let s = section(
+            "model = \"m\"
+max_state_bytes = 0
+",
+        )
+        .expect("parses");
+        let err = s.validate().expect_err("0 is below the minimum");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[decision].max_state_bytes") && msg.contains("at least 1"),
+            "{msg}"
+        );
+    }
+
+    /// Passes before the field exists, by design: `deny_unknown_fields` on the fallback is what
+    /// keeps the limit a property of the section.
+    #[test]
+    fn max_state_bytes_inside_a_fallback_is_rejected() {
+        assert!(section(
+            "model = \"m\"
+[[fallback]]
+model = \"f\"
+max_state_bytes = 100
+"
+        )
+        .is_err());
     }
 
     #[test]

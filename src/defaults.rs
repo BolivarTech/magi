@@ -64,6 +64,11 @@ pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.7;
 pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
 /// Whether the agent's `decide` tool runs without asking (REQ-D16).
 pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
+/// Largest serialized mode-inference `state`, in UTF-8 bytes, sent to `decide` when
+/// `[decision].max_state_bytes` is absent (D-PM-1). It is the context window of
+/// `typesafe/jev-1.13` (64 000 tokens) taken as bytes: a token averages more than one byte, so a
+/// state of that many bytes always fits that window.
+pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 64_000;
 
 /// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
 /// (REQ-D02, REQ-D06, REQ-D21).
@@ -89,6 +94,7 @@ pub fn default_decision_section() -> magi_rs::decision::DecisionSection {
         keep_alive: None,
         auto_approve: Some(DEFAULT_DECISION_AUTO_APPROVE),
         min_confidence: None,
+        max_state_bytes: None,
         fallback: DEFAULT_DECISION_FALLBACK_MODELS
             .iter()
             .map(|model| magi_rs::decision::DecisionFallback {
@@ -1980,6 +1986,41 @@ mod tests {
             render_default_magi_toml().contains("commenting it out disables"),
             "the file says how to switch the threshold off"
         );
+    }
+
+    #[test]
+    fn the_built_in_defaults_carry_the_hosted_state_limit() {
+        assert_eq!(default_decision_section().max_state_bytes, Some(64_000));
+    }
+
+    #[test]
+    fn the_scaffold_writes_an_active_state_limit_sized_for_the_local_model() {
+        let d = scaffold_decision();
+        assert_eq!(
+            d.get("max_state_bytes").and_then(toml::Value::as_integer),
+            Some(19_000),
+            "the scaffold limit is active and fits the local nimble window"
+        );
+        let text = render_default_magi_toml();
+        let comment_names_the_hosted_default = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .any(|l| l.contains("64000"));
+        assert!(
+            comment_names_the_hosted_default,
+            "a comment tells the operator the built-in default for hosted models"
+        );
+        let section: magi_rs::decision::DecisionSection = d
+            .try_into()
+            .expect("the scaffold section deserializes into the lib type");
+        assert_eq!(section.max_state_bytes, Some(19_000));
+    }
+
+    #[test]
+    fn the_scaffolded_toml_loads_with_the_local_state_limit() {
+        let cfg = crate::config::MagiConfig::from_toml_str(&render_default_magi_toml())
+            .expect("the scaffold loads");
+        assert_eq!(cfg.effective_decision().max_state_bytes, Some(19_000));
     }
 
     #[test]

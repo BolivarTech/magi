@@ -4923,6 +4923,53 @@ model = \"x\"
     }
 
     #[test]
+    fn an_absent_max_state_bytes_resolves_to_the_built_in_default() {
+        assert_eq!(
+            MagiConfig::default().effective_decision().max_state_bytes,
+            Some(64_000),
+            "no magi.toml"
+        );
+        let c = MagiConfig::from_toml_str(
+            "[decision]
+model = \"x\"
+",
+        )
+        .expect("valid");
+        assert_eq!(
+            c.effective_decision().max_state_bytes,
+            Some(64_000),
+            "declared section without the field"
+        );
+    }
+
+    #[test]
+    fn a_declared_max_state_bytes_is_used_as_written() {
+        let c = MagiConfig::from_toml_str(
+            "[decision]
+model = \"x\"
+max_state_bytes = 500
+",
+        )
+        .expect("valid");
+        assert_eq!(c.effective_decision().max_state_bytes, Some(500));
+    }
+
+    #[test]
+    fn a_zero_max_state_bytes_fails_load_naming_the_field() {
+        let err = MagiConfig::from_toml_str(
+            "[decision]
+model = \"x\"
+max_state_bytes = 0
+",
+        )
+        .expect_err("0 is below the minimum");
+        assert!(
+            err.to_string().contains("[decision].max_state_bytes"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_toml_without_decision_fails_load_with_the_guided_procedure() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_toml(

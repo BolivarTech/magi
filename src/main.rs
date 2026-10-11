@@ -2237,6 +2237,10 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         tui_decision,
         tui_decision_endpoint,
         tui_decision_reason.as_ref().map(unavailable_reason),
+        magi_config
+            .effective_decision()
+            .max_state_bytes
+            .unwrap_or(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
     );
     let tui_classifier_notices = tui_notices;
     let tui_default_mode = magi_config.effective_default_mode();
@@ -4869,6 +4873,7 @@ impl AutonomousRunConfig {
 /// * `decision` - the decision client built once at startup, if it could be built.
 /// * `endpoint` - the redacted decision endpoint, for the run log.
 /// * `unavailable_reason` - why the client could not be built, redacted, if it could not.
+/// * `max_state_bytes` - the largest serialized state, in bytes, sent to `decide`.
 ///
 /// # Returns
 /// The classifier for `TuiMagiRuntimeConfig::mode_classifier`: `decide` first, the principal
@@ -4879,6 +4884,7 @@ fn tui_mode_classifier_wiring(
     decision: Option<Arc<dyn magi_rs::decision::DecisionClient>>,
     endpoint: String,
     unavailable_reason: Option<String>,
+    max_state_bytes: usize,
 ) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
     let llm: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
         Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
@@ -4890,7 +4896,8 @@ fn tui_mode_classifier_wiring(
         ));
     Arc::new(
         crate::agent::decide_classifier::DecideModeClassifier::new(decision, llm, endpoint)
-            .with_unavailable_reason(unavailable_reason),
+            .with_unavailable_reason(unavailable_reason)
+            .with_max_state_bytes(max_state_bytes),
     )
 }
 
@@ -6921,7 +6928,13 @@ async fn run_consult_subcommand(
         llm_classifier,
         decision_endpoint,
     )
-    .with_unavailable_reason(decision_reason.as_ref().map(unavailable_reason));
+    .with_unavailable_reason(decision_reason.as_ref().map(unavailable_reason))
+    .with_max_state_bytes(
+        magi_config
+            .effective_decision()
+            .max_state_bytes
+            .unwrap_or(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
+    );
     // S-9/REQ-EE-5: shares the SAME process-level sink as the mode classifier's own notices —
     // one stderr output path, not two.
     let clock_coverage_announcer = crate::tools::consult::ClockCoverageAnnouncer::new(
@@ -19369,6 +19382,7 @@ agent_timeout_secs = {CEILING}
             Some(decision),
             "http://localhost:11434".into(),
             None,
+            crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES,
         );
         assert_eq!(
             classifier.classify("evaluate this architecture").await,
@@ -19378,6 +19392,28 @@ agent_timeout_secs = {CEILING}
             asked.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "the principal provider was asked"
+        );
+    }
+
+    /// The TUI wiring applies the configured state limit: content over it goes to the principal
+    /// provider without asking `decide`.
+    #[tokio::test]
+    async fn the_tui_wiring_applies_the_configured_state_limit() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decision: Arc<dyn magi_rs::decision::DecisionClient> = Arc::new(FixedDesign);
+        let classifier = tui_mode_classifier_wiring(
+            Arc::new(NeverAsked(Arc::clone(&asked))),
+            Arc::new(crate::tui::TuiNoticeSink::new()),
+            Some(decision),
+            "http://localhost:11434".into(),
+            None,
+            100,
+        );
+        let _ = classifier.classify(&"x".repeat(200)).await;
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "over the configured limit the principal provider answers"
         );
     }
 
@@ -19461,6 +19497,7 @@ agent_timeout_secs = {CEILING}
                 None,
                 String::new(),
                 None,
+                crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES,
             );
             let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentResponse>(8);
             notices.attach(tx);
