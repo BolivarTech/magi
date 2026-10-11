@@ -2237,10 +2237,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         tui_decision,
         tui_decision_endpoint,
         tui_decision_reason.as_ref().map(unavailable_reason),
-        magi_config
-            .effective_decision()
-            .max_state_bytes
-            .unwrap_or(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
+        configured_state_limit(&magi_config),
     );
     let tui_classifier_notices = tui_notices;
     let tui_default_mode = magi_config.effective_default_mode();
@@ -4901,6 +4898,21 @@ fn tui_mode_classifier_wiring(
     )
 }
 
+/// The `[decision].max_state_bytes` the mode classifier applies: the declared value, or the
+/// built-in default when the line is absent.
+///
+/// # Parameters
+/// * `magi_config` - the loaded configuration; only `[decision]` is read.
+///
+/// # Returns
+/// The largest serialized state, in UTF-8 bytes, sent to `decide`.
+fn configured_state_limit(magi_config: &crate::config::MagiConfig) -> usize {
+    magi_config
+        .effective_decision()
+        .max_state_bytes
+        .unwrap_or(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES)
+}
+
 /// Builds the mode classifier of headless `magi consult`: `decide` first, `llm` as its fallback,
 /// with the state limit read from `[decision].max_state_bytes`.
 ///
@@ -4926,12 +4938,7 @@ fn headless_mode_classifier_wiring(
     Arc::new(
         crate::agent::decide_classifier::DecideModeClassifier::new(decision, llm, endpoint)
             .with_unavailable_reason(unavailable_reason)
-            .with_max_state_bytes(
-                magi_config
-                    .effective_decision()
-                    .max_state_bytes
-                    .unwrap_or(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
-            ),
+            .with_max_state_bytes(configured_state_limit(magi_config)),
     )
 }
 
