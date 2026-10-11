@@ -4916,8 +4916,8 @@ fn configured_state_limit(magi_config: &crate::config::MagiConfig) -> usize {
 /// Builds the mode classifier of headless `magi consult`: `decide` first, `llm` as its fallback,
 /// with the state limit read from `[decision].max_state_bytes`.
 ///
-/// Reading the limit here, rather than taking it as a parameter, is what lets one test guard the
-/// headless site: the caller cannot forget to apply it.
+/// The limit is read here, rather than taken as a parameter, so the test of this function guards
+/// it: a caller that builds its classifier through this function cannot skip the limit.
 ///
 /// # Parameters
 /// * `llm` - the principal-provider classifier, used when `decide` cannot answer.
