@@ -4901,6 +4901,35 @@ fn tui_mode_classifier_wiring(
     )
 }
 
+/// Builds the mode classifier of headless `magi consult`: `decide` first, `llm` as its fallback,
+/// with the state limit read from `[decision].max_state_bytes`.
+///
+/// Reading the limit here, rather than taking it as a parameter, is what lets one test guard the
+/// headless site: the caller cannot forget to apply it.
+///
+/// # Parameters
+/// * `llm` - the principal-provider classifier, used when `decide` cannot answer.
+/// * `decision` - the decision client built once at startup, if it could be built.
+/// * `endpoint` - the redacted decision endpoint, for the run log.
+/// * `unavailable_reason` - why the client could not be built, redacted, if it could not.
+/// * `magi_config` - the loaded configuration; only `[decision]` is read.
+///
+/// # Returns
+/// The classifier for `MagiRuntimeParams::classifier`.
+fn headless_mode_classifier_wiring(
+    llm: Arc<dyn magi_rs::magi::mode::ModeClassifier>,
+    decision: Option<Arc<dyn magi_rs::decision::DecisionClient>>,
+    endpoint: String,
+    unavailable_reason: Option<String>,
+    magi_config: &crate::config::MagiConfig,
+) -> Arc<dyn magi_rs::magi::mode::ModeClassifier> {
+    let _ = magi_config;
+    Arc::new(
+        crate::agent::decide_classifier::DecideModeClassifier::new(decision, llm, endpoint)
+            .with_unavailable_reason(unavailable_reason),
+    )
+}
+
 /// Builds the pair (startup notice, `/consult` message) for the TUI when the trio is not
 /// buildable (REQ-A06, SC-A06b).
 ///
@@ -6923,17 +6952,12 @@ async fn run_consult_subcommand(
     // every inference silently falls back.
     let (decision, decision_endpoint, decision_reason) =
         decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
-    let classifier = crate::agent::decide_classifier::DecideModeClassifier::new(
-        decision,
+    let classifier = headless_mode_classifier_wiring(
         llm_classifier,
+        decision,
         decision_endpoint,
-    )
-    .with_unavailable_reason(decision_reason.as_ref().map(unavailable_reason))
-    .with_max_state_bytes(
-        magi_config
-            .effective_decision()
-            .max_state_bytes
-            .unwrap_or(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES),
+        decision_reason.as_ref().map(unavailable_reason),
+        &magi_config,
     );
     // S-9/REQ-EE-5: shares the SAME process-level sink as the mode classifier's own notices —
     // one stderr output path, not two.
@@ -6974,7 +6998,7 @@ async fn run_consult_subcommand(
     let timeout = Some(consult_deadline(&timeout_decision));
     let runtime = MagiRuntimeParams {
         kind: registered_magi_kind(&magi_config, provider_kind),
-        classifier: &classifier,
+        classifier: classifier.as_ref(),
         configured_mode,
         untrusted_content,
         magi_config: &magi_config,
@@ -19409,6 +19433,39 @@ agent_timeout_secs = {CEILING}
             None,
             100,
         );
+        let _ = classifier.classify(&"x".repeat(200)).await;
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "over the configured limit the principal provider answers"
+        );
+    }
+
+    /// The headless `magi consult` wiring reads `[decision].max_state_bytes`: content over a
+    /// configured limit goes to the principal provider, content under it to `decide`.
+    #[tokio::test]
+    async fn the_headless_wiring_applies_the_configured_state_limit() {
+        let cfg = crate::config::MagiConfig::from_toml_str(
+            "[decision]\nmodel = \"nimble\"\nmax_state_bytes = 100\n",
+        )
+        .expect("valid");
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let llm: Arc<dyn magi_rs::magi::mode::ModeClassifier> =
+            Arc::new(crate::agent::mode_classifier::ProviderClassifier::new(
+                Arc::new(NeverAsked(Arc::clone(&asked))),
+                Arc::new(crate::agent::mode_classifier::ProcessNoticeSink::default()),
+                std::sync::Arc::clone(magi_rs::logging::process_auditor()),
+            ));
+        let decision: Arc<dyn magi_rs::decision::DecisionClient> = Arc::new(FixedDesign);
+        let classifier = headless_mode_classifier_wiring(
+            llm,
+            Some(decision),
+            "http://localhost:11434".into(),
+            None,
+            &cfg,
+        );
+        assert_eq!(classifier.classify("short").await, Some(Mode::Design));
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
         let _ = classifier.classify(&"x".repeat(200)).await;
         assert_eq!(
             asked.load(std::sync::atomic::Ordering::SeqCst),
