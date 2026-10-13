@@ -4849,8 +4849,10 @@ mod tests {
         );
     }
 
-    /// REQ-K07: the `/login` rebuild chooses its key through `post_login_trio_key` and says so
-    /// when an own key is not Anthropic-shaped. Source guard: the event loop cannot be driven.
+    /// REQ-K07: the `/login` rebuild chooses its key through `post_login_trio_key`, and says
+    /// that an own key is not Anthropic-shaped only once the rebuild succeeded: the notice
+    /// claims the rebuilt trio keeps using that key, which is false if the rebuild failed.
+    /// Source guard: the event loop cannot be driven.
     #[test]
     fn the_login_rebuild_picks_its_key_through_post_login_trio_key() {
         let src = production_source();
@@ -4865,8 +4867,16 @@ mod tests {
             "the login rebuild must choose its key via post_login_trio_key"
         );
         assert!(
-            window.contains("post_login_shape_mismatch("),
-            "the login rebuild must say when the trio's own key is not Anthropic-shaped"
+            !window.contains("post_login_shape_mismatch("),
+            "the shape notice must not be sent before the rebuild is known to have succeeded"
+        );
+        let tail = &src[rebuild..];
+        let ok_arm = tail.find("Ok(new_magi) =>").expect("the rebuild's Ok arm");
+        let err_arm = tail.find("Err(").expect("the rebuild's Err arm");
+        let ok_body = tail.get(ok_arm..err_arm).unwrap_or("");
+        assert!(
+            ok_body.contains("post_login_shape_mismatch("),
+            "the rebuild's Ok arm must say when the trio's own key is not Anthropic-shaped"
         );
     }
 
