@@ -9592,9 +9592,33 @@ mod tests {
             "decide resolves credentials and never arms the auditor"
         );
         assert!(
-            body.contains("decision_api_key("),
+            body.contains("own_secrets("),
             "decide arms the auditor without the decision key it resolved"
         );
+    }
+
+    /// Every surface that arms the auditor chains the sections' own keys into the same call,
+    /// so a key that only its section variable explains is never left to the pattern pass.
+    #[test]
+    fn every_surface_arms_the_section_keys_with_the_rest() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source.split_once(FIRST_TEST_MODULE).expect("tests");
+        for surface in [
+            "async fn run(",
+            "async fn prepare_headless(",
+            "async fn run_decide_subcommand(",
+        ] {
+            let start = production.find(surface).expect("surface");
+            let body = production.get(start..).unwrap_or("");
+            let end = body
+                .get(1..)
+                .and_then(|r| r.find("\nasync fn "))
+                .map_or(body.len(), |i| i + 1);
+            assert!(
+                code_lines_only(body.get(..end).unwrap_or(body)).contains("own_secrets("),
+                "{surface}"
+            );
+        }
     }
 
     #[test]
@@ -10705,18 +10729,6 @@ mod tests {
         let keys = api_keys(&consumed);
         assert_eq!(keys.decision_key.as_deref(), Some("dec-key"));
         assert_eq!(keys.openai_key.as_deref(), Some("prin-key"));
-    }
-
-    #[test]
-    fn the_decide_surface_arms_the_decision_key_beside_the_other_keys() {
-        let armed = decide_secrets_to_arm(Some("a-key"), Some("o-key"), Some("d-key"));
-        let names: Vec<&str> = armed.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DECISION_API_KEY"]
-        );
-        assert_eq!(armed[2].1, "d-key");
-        assert!(decide_secrets_to_arm(None, None, Some("  ")).is_empty());
     }
 
     #[test]

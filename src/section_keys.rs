@@ -392,6 +392,21 @@ impl SectionKeys {
     pub fn retained(&self) -> &[RetainedKey] {
         &self.retained
     }
+
+    /// The keys that only a section's own variable explains, named by that variable, for the
+    /// log auditor's exact pass.
+    ///
+    /// Inherited keys are left out: they are the principal's keys, armed under
+    /// `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` already.
+    ///
+    /// # Returns
+    /// One `(name, value)` pair per section whose source is [`KeySource::Own`], in the order
+    /// magi, embedding, decision.
+    ///
+    /// Complexity: O(1).
+    pub fn own_secrets(&self) -> Vec<(crate::logging::auditor::SecretName, &str)> {
+        todo!()
+    }
 }
 
 /// Prefix of an Anthropic API key, the shape the rebuilt trio expects.
@@ -453,6 +468,45 @@ mod tests {
 
     fn pair(r: Option<ResolvedSecret>) -> Option<(String, bool)> {
         r.map(|s| (s.value, s.from_env))
+    }
+
+    #[test]
+    fn only_own_section_keys_are_armed_by_their_variable_name() {
+        let e = env(
+            Some("prin-key"),
+            None,
+            Some("magi-own"),
+            Some("embed-own"),
+            Some("dec-own"),
+        );
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some("http://127.0.0.1:1"),
+            Some(ROOT),
+            Some(ROOT),
+        );
+        let armed: Vec<(String, String)> = k
+            .own_secrets()
+            .into_iter()
+            .map(|(n, v)| (n.as_str().to_string(), v.to_string()))
+            .collect();
+        assert_eq!(
+            armed,
+            vec![
+                ("MAGI_API_KEY".into(), "magi-own".into()),
+                ("EMBEDDING_API_KEY".into(), "embed-own".into()),
+                ("DECISION_API_KEY".into(), "dec-own".into())
+            ]
+        );
+        let inherited = resolve(
+            &env(Some("prin-key"), None, None, None, None),
+            ProviderKind::OpenAiCompat,
+            Some(ROOT),
+            Some(ROOT),
+            Some(ROOT),
+        );
+        assert!(inherited.own_secrets().is_empty());
     }
 
     #[test]
