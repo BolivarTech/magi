@@ -1,6 +1,6 @@
 # Typed decisions: `magi-rs decide`
 
-`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated, With the default `clef-flash`, 95 % of requests took about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ).
+`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated. With the default `clef-flash`, 95 % of requests took about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ).
 
 The models speak the System One protocol: you send a `state` (text or JSON) and a set of questions, and each question has one of three types. Every question, whatever its type, needs `instructions`: a short, non-empty description of what to decide.
 
@@ -14,7 +14,7 @@ The models speak the System One protocol: you send a `state` (text or JSON) and 
 
 | Provider | `base_url` | Key | Notes |
 |---|---|---|---|
-| Ollama (default, certified) | `http://localhost:11434` | none | Needs Ollama 0.35 or later. Local, free, no rate limits. |
+| Ollama (default, certified) | `http://localhost:11434` | none | Needs Ollama 0.35.1 or later. Local, free, no rate limits. |
 | OpenRouter (hosted, certified) | `https://openrouter.ai/api/v1` | `DECISION_API_KEY` | Billed per input token; output is free. |
 | TypeSafe directly | `https://api.typesafe.ai` | `DECISION_API_KEY` | Same protocol; not part of the certified set. |
 

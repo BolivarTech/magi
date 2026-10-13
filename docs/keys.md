@@ -41,7 +41,7 @@ With `[magi].kind = "anthropic"` the seats always talk to Anthropic's API, so th
 
 With `kind = "ollama"` the seats carry no key at all.
 
-`MAGI_API_KEY` has to be a key for the provider of `[magi].kind`. The variable carries whatever you put in it, so if you change `kind` and leave an old key behind, that key is sent to the new provider, which will reject it. After a `/login` that rebuilds the trio on Anthropic, a `MAGI_API_KEY` that is set still wins over the key the login just stored.
+`MAGI_API_KEY` has to be a key for the provider of `[magi].kind`. The variable carries whatever you put in it, so if you change `kind` and leave an old key behind, that key is sent to the new provider, which will reject it. A `/login` always rebuilds the trio on Anthropic. If the trio already ran on Anthropic, a `MAGI_API_KEY` that is set still wins over the key the login just stored; otherwise the rebuilt trio uses the login key, so a key meant for another provider is never sent to Anthropic.
 
 ### A warning about the shape of the key
 
@@ -61,7 +61,7 @@ The entry names the variable to declare and the origin, with any credentials in 
 
 If the endpoint does need one, the failure itself shows up:
 
-- Trio. A consult reports `no API key was sent to <origin>; declare MAGI_API_KEY with: magi-rs vault set MAGI_API_KEY`. If a key was sent and refused, the message says so instead: it names `MAGI_API_KEY` and reminds you that the key must be for the provider of `[magi].kind`, or, for an inherited key, it names the variable that was rejected. This appears even when all three seats fail.
+- Trio. A consult reports `no API key was sent to <origin>; declare MAGI_API_KEY with: magi-rs vault set MAGI_API_KEY`. If a key was sent and refused, the message says so instead: it names `MAGI_API_KEY` and reminds you that the key must be for the provider of `[magi].kind`, or, for an inherited key, it names the variable that was rejected. When all three seats fail, only the first case is reported (no key was sent); a refused key then shows the provider's own error.
 - Embedder. The memory status line reads `memory: retrieval failing — the embedding endpoint asked for a key and none was sent; set one with: magi-rs vault set EMBEDDING_API_KEY`. A rejected key of its own, or the rejected inherited `OPENAI_API_KEY`, gets its own wording and points at the same command. Past context stops being used while it fails.
 - Decision models. `magi-rs decide` reports `missing_key`.
 

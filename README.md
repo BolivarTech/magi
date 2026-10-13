@@ -1207,7 +1207,7 @@ crate, so a relative one would dangle for anyone reading this on crates.io.
 | Vault passphrase | For persistence | Chosen on first run (or supplied via `-p`/`MAGI_PASSPHRASE`). Without one available the session runs ephemeral (the on-disk DB is left untouched) |
 | [Ollama](https://ollama.com/) (default backend) | For live replies (default) | running daemon + a chat model (e.g. `kimi-k2.6:cloud`); run `ollama signin` for `:cloud` tags. Any OpenAI-compatible endpoint works by pointing `base_url` elsewhere |
 | Embedding model | For tiered memory (`selective`, the default) | `ollama pull nomic-embed-text-v2-moe:latest`; without it memory degrades gracefully to text-only persistence |
-| Ollama 0.35 or later, and the decision models | For `magi-rs decide` | `ollama pull clef-flash` (about 11 GB) and `ollama pull nimble`; without them `magi-rs decide` returns an error that names the missing model, and the internal decisions fall back to the main model |
+| Ollama 0.35.1 or later, and the decision models | For `magi-rs decide` | `ollama pull clef-flash` (10.9 GB) and `ollama pull nimble`; without them `magi-rs decide` returns an error that names the missing model, and the internal decisions fall back to the main model |
 | Anthropic API key | Optional (opt-in) | only with `provider = "anthropic"`; via env var, the vault, or `/login` |
 
 ### Default models (Ollama)

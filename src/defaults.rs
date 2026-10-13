@@ -52,12 +52,16 @@ pub const DEFAULT_MAGI_BALTHASAR_LINEAGE: &str = "moonshot";
 /// Lineage of [`DEFAULT_MAGI_CASPAR`] — see [`DEFAULT_MAGI_MELCHIOR_LINEAGE`].
 pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 
-/// Primary decision model written by the scaffold and applied when no `[decision]` is declared
-/// (REQ-D06, REQ-D21).
+/// Primary decision model applied when no `[decision]` is declared (REQ-D06, REQ-D21).
+///
+/// Kept apart from [`SCAFFOLD_DECISION_MODEL`] on purpose: the built-in chain runs with no
+/// threshold, the scaffold's with a calibrated one, so the two are adopted on separate evidence
+/// and may differ (in 0.24.0 both name `clef-flash`; the no-threshold measurement backed it too).
 pub const DEFAULT_DECISION_MODEL: &str = "clef-flash";
 /// Ordered fallbacks of the default decision chain, on the same endpoint as the primary.
 pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 1] = ["nimble"];
-/// Primary decision model the scaffold writes.
+/// Primary decision model the scaffold writes, with its calibrated threshold
+/// ([`SCAFFOLD_DECISION_MIN_CONFIDENCE`]). See [`DEFAULT_DECISION_MODEL`] for why it is separate.
 pub const SCAFFOLD_DECISION_MODEL: &str = "clef-flash";
 /// Ordered fallbacks the scaffold writes, on the same endpoint as the primary.
 pub const SCAFFOLD_DECISION_FALLBACK_MODELS: [&str; 1] = ["nimble"];
