@@ -689,8 +689,8 @@ impl OpenAiCompatibleEmbedder {
             detected_dim: AtomicUsize::new(0),
             query_prefix: cfg.query_prefix.clone(),
             document_prefix: cfg.document_prefix.clone(),
+            key_source: initial_key_source(api_key.as_deref()),
             api_key,
-            key_source: KeySource::Own,
         }
     }
 }
