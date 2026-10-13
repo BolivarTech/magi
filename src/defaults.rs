@@ -57,6 +57,10 @@ pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 pub const DEFAULT_DECISION_MODEL: &str = "nimble";
 /// Ordered fallbacks of the default decision chain, on the same endpoint as the primary.
 pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 1] = ["tev1"];
+/// Primary decision model the scaffold writes.
+pub const SCAFFOLD_DECISION_MODEL: &str = "nimble";
+/// Ordered fallbacks the scaffold writes, on the same endpoint as the primary.
+pub const SCAFFOLD_DECISION_FALLBACK_MODELS: [&str; 1] = ["tev1"];
 /// Confidence threshold the scaffold writes, active, on every chain entry (REQ-D24). It comes from
 /// the maintainer's calibration; the built-in defaults of [`default_decision_section`] carry none.
 pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.7;
@@ -332,7 +336,7 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(out, "base_url     = \"http://localhost:11434\"").unwrap();
     writeln!(out, "# Primary decision model. Required in this section.").unwrap();
-    writeln!(out, "model        = \"{}\"", DEFAULT_DECISION_MODEL).unwrap();
+    writeln!(out, "model        = \"{}\"", SCAFFOLD_DECISION_MODEL).unwrap();
     writeln!(
         out,
         "# Per-attempt timeout in seconds (covers a local cold load). Optional, default {}.",
@@ -395,9 +399,9 @@ pub fn render_default_magi_toml() -> String {
         "# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
 ",
     ));
-    for fallback in default_decision_section().fallback {
+    for model in SCAFFOLD_DECISION_FALLBACK_MODELS {
         writeln!(out, "[[decision.fallback]]").unwrap();
-        writeln!(out, "model = \"{}\"", fallback.model).unwrap();
+        writeln!(out, "model = \"{}\"", model).unwrap();
         writeln!(out, "min_confidence = {}", SCAFFOLD_DECISION_MIN_CONFIDENCE).unwrap();
         writeln!(out).unwrap();
     }
@@ -1908,13 +1912,13 @@ mod tests {
     #[test]
     fn the_default_decision_section_is_the_scaffold_chain() {
         let d = default_decision_section();
-        assert_eq!(d.model, "nimble");
+        assert_eq!(d.model, "clef-flash");
         assert_eq!(
             d.fallback
                 .iter()
                 .map(|f| f.model.as_str())
                 .collect::<Vec<_>>(),
-            vec!["tev1"]
+            vec!["nimble"]
         );
         assert_eq!(d.timeout_secs, Some(DEFAULT_DECISION_TIMEOUT_SECS));
         assert_eq!(d.auto_approve, Some(DEFAULT_DECISION_AUTO_APPROVE));
@@ -1935,7 +1939,10 @@ mod tests {
     #[test]
     fn the_scaffold_declares_the_default_decision_chain_active() {
         let d = scaffold_decision();
-        assert_eq!(d.get("model").and_then(toml::Value::as_str), Some("nimble"));
+        assert_eq!(
+            d.get("model").and_then(toml::Value::as_str),
+            Some("clef-flash")
+        );
         assert_eq!(
             d.get("timeout_secs").and_then(toml::Value::as_integer),
             Some(120)
@@ -1959,11 +1966,56 @@ mod tests {
             .iter()
             .filter_map(|f| f.get("model").and_then(toml::Value::as_str))
             .collect();
-        assert_eq!(fallbacks, vec!["tev1"]);
+        assert_eq!(fallbacks, vec!["nimble"]);
         let section: magi_rs::decision::DecisionSection = d
             .try_into()
             .expect("the scaffold section deserializes into the lib type");
         assert_eq!(section.validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_scaffold_names_clef_flash_with_nimble_as_its_fallback() {
+        let d = scaffold_decision();
+        assert_eq!(
+            d.get("model").and_then(toml::Value::as_str),
+            Some("clef-flash")
+        );
+        let fallbacks: Vec<&str> = d
+            .get("fallback")
+            .and_then(toml::Value::as_array)
+            .expect("fallbacks")
+            .iter()
+            .filter_map(|f| f.get("model").and_then(toml::Value::as_str))
+            .collect();
+        assert_eq!(fallbacks, vec!["nimble"]);
+        assert_eq!(
+            d.get("min_confidence").and_then(toml::Value::as_float),
+            Some(SCAFFOLD_DECISION_MIN_CONFIDENCE)
+        );
+        assert_eq!(
+            d.get("max_state_bytes").and_then(toml::Value::as_integer),
+            Some(i64::try_from(SCAFFOLD_DECISION_MAX_STATE_BYTES).expect("fits"))
+        );
+    }
+
+    #[test]
+    fn the_built_in_defaults_never_carry_a_threshold() {
+        let d = default_decision_section();
+        assert_eq!(d.min_confidence, None);
+        assert!(d.fallback.iter().all(|f| f.min_confidence.is_none()));
+    }
+
+    #[test]
+    fn the_scaffold_comment_states_the_measured_cold_load_budget() {
+        let text = render_default_magi_toml();
+        assert!(
+            text.contains("135 s"),
+            "the worst case of the chain is written next to timeout_secs"
+        );
+        assert!(
+            text.contains("66 s"),
+            "the minimum timeout for the primary is written next to timeout_secs"
+        );
     }
 
     #[test]
@@ -1989,7 +2041,7 @@ mod tests {
         let d = scaffold_decision();
         assert_eq!(
             d.get("min_confidence").and_then(toml::Value::as_float),
-            Some(0.7),
+            Some(0.75),
             "the primary carries an active threshold"
         );
         let fallbacks = d
@@ -2000,7 +2052,7 @@ mod tests {
         for entry in fallbacks {
             assert_eq!(
                 entry.get("min_confidence").and_then(toml::Value::as_float),
-                Some(0.7),
+                Some(0.75),
                 "every fallback carries the same active threshold"
             );
         }
@@ -2008,7 +2060,7 @@ mod tests {
             .iter()
             .filter_map(|f| f.get("model").and_then(toml::Value::as_str))
             .collect();
-        assert_eq!(models, vec!["tev1"], "the chain is nimble -> tev1");
+        assert_eq!(models, vec!["nimble"], "the chain is clef-flash -> nimble");
         assert!(
             render_default_magi_toml().contains("commenting it out disables"),
             "the file says how to switch the threshold off"
@@ -2025,8 +2077,8 @@ mod tests {
         let d = scaffold_decision();
         assert_eq!(
             d.get("max_state_bytes").and_then(toml::Value::as_integer),
-            Some(19_000),
-            "the scaffold limit is active and fits the local nimble window"
+            Some(61_000),
+            "the scaffold limit is active and fits the local clef-flash body cap"
         );
         let text = render_default_magi_toml();
         let comment_names_the_hosted_default = text
@@ -2040,7 +2092,7 @@ mod tests {
         let section: magi_rs::decision::DecisionSection = d
             .try_into()
             .expect("the scaffold section deserializes into the lib type");
-        assert_eq!(section.max_state_bytes, Some(19_000));
+        assert_eq!(section.max_state_bytes, Some(61_000));
     }
 
     #[test]
