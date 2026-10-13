@@ -2351,10 +2351,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             clock_coverage: tui_clock_coverage_announcer,
             decision_client: tui_slash_decision,
             decision_build_error: tui_build_error,
-            magi_own_key: Some(section_keys.magi())
-                .filter(|key| key.source() == magi_rs::section_keys::KeySource::Own)
-                .and_then(|key| key.value())
-                .map(str::to_string),
+            magi_own_key: section_keys.post_login_own_key().map(str::to_string),
         },
         // The chat loop's SELF-ROUTED consults (REQ-A20/A07d) — a different surface from the
         // explicit `/consult` above, which is what `TuiMagiRuntimeConfig` serves.

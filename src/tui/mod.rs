@@ -2357,8 +2357,9 @@ pub struct TuiMagiRuntimeConfig {
     pub decision_client: Option<Arc<dyn DecisionClient>>,
     /// Why `decision_client` is `None`, so `/decide` can name the missing entry and its remedy.
     pub decision_build_error: Option<DecisionError>,
-    /// The trio's own key, already chosen by the section keys (`Some` only when it is the
-    /// trio's own, never inherited). The post-`/login` rebuild prefers it to the login key.
+    /// The trio's own key, already chosen by the section keys (`Some` only for an Anthropic
+    /// trio's own key, never inherited, never another provider's). The post-`/login` rebuild,
+    /// which is always Anthropic, prefers it to the login key.
     pub magi_own_key: Option<String>,
 }
 

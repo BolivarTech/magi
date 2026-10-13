@@ -234,6 +234,9 @@ pub struct SectionKeys {
     retained: Vec<RetainedKey>,
     /// The trio kind to name in the shape warning, set when `MAGI_API_KEY` contradicts it (REQ-K10).
     shape_mismatch: Option<crate::magi::kind::ProviderKind>,
+    /// The resolved `[magi].kind`, so the post-`/login` rebuild can tell an Anthropic trio's own
+    /// key from one meant for another provider.
+    magi_kind: crate::magi::kind::ProviderKind,
 }
 
 /// Everything [`SectionKeys::resolve`] needs, already resolved by the caller.
@@ -383,6 +386,7 @@ impl SectionKeys {
             decision,
             retained,
             shape_mismatch,
+            magi_kind: inputs.magi_kind,
         }
     }
 
@@ -396,7 +400,10 @@ impl SectionKeys {
     /// The own `MAGI_API_KEY` of an Anthropic trio, else `None` (the login key is used).
     pub fn post_login_own_key(&self) -> Option<&str> {
         Some(&self.magi)
-            .filter(|key| key.source() == KeySource::Own)
+            .filter(|key| {
+                self.magi_kind == crate::magi::kind::ProviderKind::Anthropic
+                    && key.source() == KeySource::Own
+            })
             .and_then(SectionKey::value)
     }
 
