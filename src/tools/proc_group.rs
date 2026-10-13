@@ -230,10 +230,10 @@ impl GroupKiller {
         {
             if let Some(pgid) = self.pgid.take() {
                 if let Some(pid) = rustix::process::Pid::from_raw(pgid) {
-                    // `rustix` is pinned to 0.38 (see Cargo.toml); the
-                    // `kill_process_group` signature is compile-verified — it
-                    // builds, so the API matches this call.
-                    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::Kill);
+                    // `rustix` 1.x (see Cargo.toml): `Signal` is a struct with
+                    // associated constants, so SIGKILL is `Signal::KILL`. This
+                    // branch only compiles on Unix; a Windows build never sees it.
+                    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
                 }
             }
         }
