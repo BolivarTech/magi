@@ -17,7 +17,7 @@ from smoke.outcome import Finding
 #: certificate renderer, which publishes "N of N scenarios evaluated", and by
 #: the test that asserts the registry actually holds that many. One constant
 #: with two readers is what keeps the headline and the registry from drifting.
-DECLARED_SCENARIO_COUNT = 39
+DECLARED_SCENARIO_COUNT = 42
 
 #: How many ASSERTIONS those scenarios promise between them, per section 8 of
 #: the spec. A separate constant because it answers a separate question, and
@@ -47,7 +47,13 @@ DECLARED_SCENARIO_COUNT = 39
 #: costs a consult nothing; the run record keeps no state) and S13 adds 2 (the
 #: documented /decide forms and the decide tool exist; no help screen shows a
 #: development id), v0.23.0. The scenario count goes 36 -> 39 with them.
-DECLARED_ASSERTION_COUNT = 118
+#:
+#: 125 on 2026-10-13: the three per-section key scenarios K1-K3 add 7 assertions
+#: (2+3+2: a withheld key is logged once and kept off the screen; a key shaped
+#: for the other provider warns without blocking; a hosted trio answers with its
+#: own key and names the variable without it), v0.24.0. The scenario count goes
+#: 39 -> 42 with them.
+DECLARED_ASSERTION_COUNT = 125
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is
