@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Version: 0.24.0
+// Date: 2026-10-13
 
 //! Cross-platform spawn of a child process inside a **killable group**, so a
 //! wall-clock timeout (REQ-H36) can terminate the whole subprocess *tree* — not
