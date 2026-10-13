@@ -1462,10 +1462,14 @@ impl Agent {
             forced_consult_done = true;
         }
 
+        // A zero cap means no tool may run, so none is declared either: the request then carries
+        // no `tools` field and a model without tool support can still answer (REQ-T01).
+        let declares_tools = config.max_tool_calls > 0;
         loop {
+            let declared_tools: &[Box<dyn Tool>] = if declares_tools { &self.tools } else { &[] };
             let mut stream = self
                 .provider
-                .stream_messages(&working, &self.tools, config.system.as_deref())
+                .stream_messages(&working, declared_tools, config.system.as_deref())
                 .await?;
             let mut full_text = String::new();
             // REQ-H23b: count TextDelta blocks in THIS turn (reset each iteration);
