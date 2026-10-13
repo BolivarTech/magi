@@ -3011,6 +3011,11 @@ fn stale_composition_notice(window_tokens: usize, max_query_bytes: usize) -> Opt
 /// RENDERED cause of `MagiReport::failed_agents` — see
 /// `tools::consult::keyless_auth_explanation` — which is where a real 401 IS reachable; the
 /// details and their genuine scope are in this task's report.
+/// The variables an Anthropic trio seat can take its key from, in precedence order (REQ-K07):
+/// the trio's own key first, then the Anthropic key.
+#[allow(dead_code)] // Red stub: the Anthropic branch of `build_native_provider` uses it in Green.
+const ANTHROPIC_SEAT_KEY_VARS: &str = "MAGI_API_KEY or ANTHROPIC_API_KEY";
+
 #[derive(Debug, thiserror::Error)]
 enum SeatError {
     /// The kind requires a credential and none is resolved.
@@ -16152,8 +16157,210 @@ model = \"nimble\"
             }
         }
 
-        fn cfg_openai_compat_without_credentials() -> MagiConfig {
-            MagiConfig::from_toml_str("provider = \"openai-compat\"\n").unwrap()
+        /// PM-S-1 / D-PM-2: an openai-compat seat with no key is built and sends no Authorization.
+        #[tokio::test]
+        async fn an_openai_compat_seat_without_a_key_builds_and_sends_no_authorization() {
+            let mut server = mockito::Server::new_async().await;
+            let m = server
+                .mock("POST", mockito::Matcher::Any)
+                .match_header("authorization", mockito::Matcher::Missing)
+                .with_status(500)
+                .expect_at_least(1)
+                .create_async()
+                .await;
+            let none = FixedCreds {
+                openai: None,
+                anthropic: None,
+            };
+            let provider = build_native_provider(
+                ProviderKind::OpenAiCompat,
+                &endpoint_at(&format!("{}/v1", server.url())),
+                "m",
+                Some(&none),
+                Duration::from_secs(5),
+                None,
+                &mut Vec::new(),
+            )
+            .unwrap_or_else(|e| {
+                panic!("an openai-compat seat with no key is built without a header: {e}")
+            });
+            let _ = provider
+                .complete("s", "u", &CompletionConfig::default())
+                .await;
+            m.assert_async().await;
+        }
+
+        /// K-S1 / K-S2 / K-S3 through the real resolution: the trio's endpoint receives only what its origin allows.
+        #[tokio::test]
+        async fn the_trio_endpoint_receives_only_the_key_its_origin_allows() {
+            use magi_rs::section_keys::{ApiKeys, KeyInputs, SectionKeys};
+            let mut server = mockito::Server::new_async().await;
+            let trio = format!("{}/v1", server.url()); // http://127.0.0.1:<port>/v1
+            let port = server.url().rsplit(':').next().expect("port").to_string();
+            let other_root = format!("http://localhost:{port}/v1"); // same port, another host: another origin
+            for (root, magi_key, expected) in [
+                (other_root.as_str(), None, mockito::Matcher::Missing),
+                (
+                    other_root.as_str(),
+                    Some("magi-key"),
+                    mockito::Matcher::Exact("Bearer magi-key".into()),
+                ),
+                (
+                    trio.as_str(),
+                    None,
+                    mockito::Matcher::Exact("Bearer prin-key".into()),
+                ),
+            ] {
+                let m = server
+                    .mock("POST", mockito::Matcher::Any)
+                    .match_header("authorization", expected)
+                    .with_status(500)
+                    .expect_at_least(1)
+                    .create_async()
+                    .await;
+                let env = ApiKeys {
+                    openai_key: Some("prin-key".into()),
+                    magi_key: magi_key.map(str::to_string),
+                    anthropic_key: None,
+                    decision_key: None,
+                    embedding_key: None,
+                };
+                let keys = SectionKeys::resolve(&KeyInputs {
+                    env: &env,
+                    secret_store: None,
+                    magi_kind: ProviderKind::OpenAiCompat,
+                    root_endpoint: root,
+                    magi_endpoint: Some(&trio),
+                    embedding_endpoint: None,
+                    decision_endpoint: None,
+                });
+                let provider = build_native_provider(
+                    ProviderKind::OpenAiCompat,
+                    &endpoint_at(&trio),
+                    "m",
+                    Some(&keys),
+                    Duration::from_secs(5),
+                    None,
+                    &mut Vec::new(),
+                )
+                .unwrap_or_else(|e| panic!("builds: {e}"));
+                let _ = provider
+                    .complete("s", "u", &CompletionConfig::default())
+                    .await;
+                m.assert_async().await;
+                m.remove_async().await;
+            }
+        }
+
+        /// K-S9 (second half): a trio on an unauthenticated LAN Ollama in another origin builds with no key.
+        #[test]
+        fn a_trio_on_another_lan_origin_builds_without_a_key() {
+            use magi_rs::section_keys::{ApiKeys, KeyInputs, SectionKeys};
+            let lan = "http://192.168.0.30:11434/v1"; // allow-secret-scan
+            let env = ApiKeys {
+                openai_key: Some("prin-key".into()),
+                magi_key: None,
+                anthropic_key: None,
+                decision_key: None,
+                embedding_key: None,
+            };
+            let keys = SectionKeys::resolve(&KeyInputs {
+                env: &env,
+                secret_store: None,
+                magi_kind: ProviderKind::OpenAiCompat,
+                root_endpoint: "http://localhost:11434/v1",
+                magi_endpoint: Some(lan),
+                embedding_endpoint: None,
+                decision_endpoint: None,
+            });
+            assert!(build_native_provider(
+                ProviderKind::OpenAiCompat,
+                &endpoint_at(lan),
+                "m",
+                Some(&keys),
+                Duration::from_secs(5),
+                None,
+                &mut Vec::new()
+            )
+            .is_ok());
+        }
+
+        /// RF5 / D2: an anthropic seat still needs a key, and says which two variables can carry it.
+        #[test]
+        fn an_anthropic_seat_without_a_key_names_both_variables() {
+            let none = FixedCreds {
+                openai: None,
+                anthropic: None,
+            };
+            let Err(err) = build_native_provider(
+                ProviderKind::Anthropic,
+                &endpoint_at("http://localhost:11434/v1"),
+                "claude-sonnet-4-6",
+                Some(&none),
+                Duration::from_secs(5),
+                None,
+                &mut Vec::new(),
+            ) else {
+                panic!("an anthropic seat with no key is not built")
+            };
+            let text = err.to_string();
+            assert!(
+                text.contains("MAGI_API_KEY") && text.contains("ANTHROPIC_API_KEY"),
+                "{text}"
+            );
+        }
+
+        /// D7: the root the keys compare against is the principal's endpoint, computed the same way.
+        #[test]
+        fn the_root_of_the_keys_is_the_principal_endpoint() {
+            for (toml, env_url) in [
+                ("provider = \"ollama\"\n", None),
+                (
+                    "provider = \"ollama\"\nbase_url = \"http://h:1/v1\"\n",
+                    None,
+                ),
+                (
+                    "provider = \"ollama\"\nbase_url = \"  \"\n",
+                    Some("http://env:2/v1"),
+                ),
+                ("provider = \"anthropic\"\n", Some("   ")),
+            ] {
+                let cfg = MagiConfig::from_toml_str(toml).expect("valid");
+                let root = resolve_endpoints(&cfg, env_url, None)
+                    .expect("resolves")
+                    .root;
+                let principal =
+                    resolve_effective_principal_endpoint(&cfg, env_url, None).expect("resolves");
+                assert_eq!(root.as_str(), principal.as_str(), "{toml:?} {env_url:?}");
+            }
+        }
+
+        #[test]
+        fn every_trio_surface_hands_the_section_keys_to_the_builder() {
+            let source = include_str!("main.rs").replace('\r', "");
+            let (production, _) = source.split_once(FIRST_TEST_MODULE).expect("tests");
+            assert!(
+                !code_lines_only(production).contains("EnvVaultCredentials"),
+                "the second resolution is back"
+            );
+            for surface in ["async fn run(", "async fn prepare_headless("] {
+                let start = production.find(surface).expect("surface");
+                let body = production.get(start..).unwrap_or("");
+                let end = body
+                    .get(1..)
+                    .and_then(|r| r.find("\nasync fn "))
+                    .map_or(body.len(), |i| i + 1);
+                assert!(
+                    body.get(..end)
+                        .unwrap_or(body)
+                        .contains("SectionKeys::resolve("),
+                    "{surface}"
+                );
+            }
+        }
+
+        fn cfg_anthropic_without_credentials() -> MagiConfig {
+            MagiConfig::from_toml_str("provider = \"anthropic\"\n").unwrap()
         }
 
         /// Only Caspar has a model that does not resolve to a valid Claude alias; the other two
@@ -16987,7 +17194,7 @@ model = \"nimble\"
                     assert!(seats.iter().all(|(_, cause)| matches!(
                         cause,
                         SeatError::MissingCredential {
-                            var: "ANTHROPIC_API_KEY"
+                            var: ANTHROPIC_SEAT_KEY_VARS
                         }
                     )));
                 }
@@ -16999,8 +17206,9 @@ model = \"nimble\"
 
         /// SC-A05b / SC-A05c: fallen seats are named, and ALL of them.
         ///
-        /// The fixture deliberately uses `kind = "openai-compat"`: `ollama` is keyless, so it
-        /// never produces `MissingCredential` and the test would prove nothing.
+        /// The fixture deliberately uses `kind = "anthropic"`: `ollama` is keyless and an
+        /// `openai-compat` seat without a key is built with no `Authorization` header (D-PM-2), so
+        /// neither produces `MissingCredential` and the test would prove nothing.
         #[test]
         fn unbuildable_seats_are_named_all_at_once() {
             let mut notices = Vec::new();
@@ -17008,8 +17216,8 @@ model = \"nimble\"
             // it is not — `match` avoids that bound entirely.
             let err = match build_magi_orchestrator(
                 &TrioBuild {
-                    cfg: &cfg_openai_compat_without_credentials(),
-                    principal_kind: ProviderKind::OpenAiCompat,
+                    cfg: &cfg_anthropic_without_credentials(),
+                    principal_kind: ProviderKind::Anthropic,
                     endpoints: &test_endpoints(),
                     creds: None,
                     warn_tokens: None,
