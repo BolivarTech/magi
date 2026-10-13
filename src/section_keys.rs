@@ -386,6 +386,20 @@ impl SectionKeys {
         }
     }
 
+    /// The trio's own key as the post-`/login` rebuild may use it.
+    ///
+    /// `/login` always rebuilds the trio as Anthropic, so the own key is kept only when it was
+    /// already meant for Anthropic: an own key of an OpenAI-compatible trio (an OpenRouter key,
+    /// say) would otherwise reach `api.anthropic.com`. Inherited and absent keys never count.
+    ///
+    /// # Returns
+    /// The own `MAGI_API_KEY` of an Anthropic trio, else `None` (the login key is used).
+    pub fn post_login_own_key(&self) -> Option<&str> {
+        Some(&self.magi)
+            .filter(|key| key.source() == KeySource::Own)
+            .and_then(SectionKey::value)
+    }
+
     /// The trio's key.
     ///
     /// # Returns
@@ -994,6 +1008,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `/login` rebuilds the trio as Anthropic: only an Anthropic trio's own key may follow it.
+    #[test]
+    fn after_login_only_an_anthropic_trios_own_key_is_kept() {
+        let anthropic_own = resolve(
+            &env(None, Some("ak-toy"), Some("sk-ant-toy-0001"), None, None), // allow-secret-scan
+            ProviderKind::Anthropic,
+            Some(ROOT),
+            None,
+            None,
+        );
+        assert_eq!(anthropic_own.post_login_own_key(), Some("sk-ant-toy-0001")); // allow-secret-scan
+
+        let openai_compat_own = resolve(
+            &env(None, Some("ak-toy"), Some("sk-or-toy-0001"), None, None), // allow-secret-scan
+            ProviderKind::OpenAiCompat,
+            Some(ROOT),
+            None,
+            None,
+        );
+        assert_eq!(openai_compat_own.post_login_own_key(), None);
+
+        let anthropic_inherited = resolve(
+            &env(None, Some("ak-toy"), None, None, None),
+            ProviderKind::Anthropic,
+            Some(ROOT),
+            None,
+            None,
+        );
+        assert_eq!(anthropic_inherited.post_login_own_key(), None);
     }
 
     #[test]
