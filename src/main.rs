@@ -8087,6 +8087,23 @@ mod tests {
         assert!(line.contains("MAGI"), "{line}");
     }
 
+    /// Each key that belongs to one section has its own line in `vault set --help`.
+    #[test]
+    fn vault_set_help_lists_the_section_keys() {
+        let help = all_help_screens()
+            .into_iter()
+            .find(|(p, _)| p == "magi-rs vault set")
+            .map(|(_, h)| h)
+            .expect("the vault set help screen");
+        for var in ["MAGI_API_KEY", "EMBEDDING_API_KEY"] {
+            assert!(
+                help.lines().any(|l| l.trim_start().starts_with(var)),
+                "{var} missing:
+{help}"
+            );
+        }
+    }
+
     #[test]
     fn the_dev_id_matcher_follows_its_table() {
         let table: [(&str, Option<&str>); 9] = [
