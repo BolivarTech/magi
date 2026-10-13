@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.23.0
 # Date: 2026-10-11
-"""D1-D13 -- ``magi decide`` against real backends, its refusals and its agent use.
+"""D1-D14 -- ``magi decide`` against real backends, its refusals and its agent use.
 
 ``decide`` asks a System One model for a typed decision. What the unit suite
 cannot see is the part this module covers: a real Ollama and a real OpenRouter
@@ -1257,6 +1257,116 @@ def _marker_absent_finding(records, marker):
     return _finding(D13_ASSERTIONS, 2, "" if not any(
         marker in line for line in lines) else (
         "the marker is in a decide log line"))
+
+
+# ---------------------------------------------------------------------------
+# D14 -- the adopted default: clef-flash in the scaffold
+# ---------------------------------------------------------------------------
+
+D14_ASSERTIONS = (
+    "the scaffold names clef-flash with its threshold active",
+    "magi decide answers the example request with clef-flash",
+)
+
+#: The model, threshold and fallback ``magi init`` writes into ``[decision]``.
+ADOPTED_MODEL = "clef-flash"
+ADOPTED_FALLBACK = "nimble"
+ADOPTED_MIN_CONFIDENCE = 0.75
+
+#: Causes of a first hop that mean the backend or the model is missing, which
+#: is the environment's refusal and not the product's.
+BACKEND_MISSING_CAUSES = (CAUSE_MODEL_NOT_FOUND, CAUSE_NOT_FOUND,
+                          CAUSE_TRANSPORT, CAUSE_TIMEOUT)
+
+
+def scaffold_adoption_problem(text):
+    """Judge whether a ``magi.toml`` carries the adopted decision chain.
+
+    The text is parsed, so a commented-out threshold counts as absent.
+
+    Complexity: ``O(len(text))``.
+
+    Args:
+        text: The content of a freshly scaffolded ``magi.toml``.
+
+    Returns:
+        str: Empty when ``[decision]`` names the adopted model with its
+        threshold active and the adopted fallback, otherwise the detail.
+    """
+    try:
+        section = tomllib.loads(text).get("decision")
+    except tomllib.TOMLDecodeError as error:
+        return "magi.toml does not parse: %s" % error
+    if not isinstance(section, dict):
+        return "magi.toml has no [decision] section"
+    fallbacks = section.get("fallback")
+    fallback = (fallbacks[0].get("model") if isinstance(fallbacks, list)
+                and fallbacks and isinstance(fallbacks[0], dict) else None)
+    if (section.get("model") == ADOPTED_MODEL
+            and section.get("min_confidence") == ADOPTED_MIN_CONFIDENCE
+            and fallback == ADOPTED_FALLBACK):
+        return ""
+    return "model %r, min_confidence %r, first fallback %r" % (
+        section.get("model"), section.get("min_confidence"), fallback)
+
+
+@scenario("D14", assertions=D14_ASSERTIONS, needs_backend=True)
+def the_scaffold_adopts_clef_flash(run):
+    """Scaffold a workspace and ask its own ``[decision]`` chain a question.
+
+    The workspace keeps the text ``magi init`` wrote, so the second assertion
+    runs the chain a new user gets. A missing local Ollama or a model that was
+    never pulled is ``CANNOT_TEST``: it is the environment, not the product.
+
+    Args:
+        run: Always ``None``.
+
+    Yields:
+        Finding: One per entry of :data:`D14_ASSERTIONS`, in that order.
+    """
+    root = _seed_scratch("d14")
+    if root is None:
+        yield from _all(D14_ASSERTIONS, Outcome.CANNOT_TEST, _NO_SEED_DETAIL)
+        return
+    try:
+        text = _read_toml(root)
+        if text is None:
+            yield from _all(D14_ASSERTIONS, Outcome.CANNOT_TEST,
+                            _NO_INSTALL_DETAIL)
+            return
+        yield _finding(D14_ASSERTIONS, 0, scaffold_adoption_problem(text))
+        attempt = _decide(root, THREE_TYPES_REQUEST, "d14-decide",
+                          env=BLANK_KEY, memory=False)
+        yield _adopted_answer_finding(attempt)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _adopted_answer_finding(attempt):
+    """Judge "decide answers the example request with the adopted model".
+
+    Args:
+        attempt: The capture of the decide run.
+
+    Returns:
+        Finding: ``CANNOT_TEST`` without a capture or when the first hop shows
+        the backend or the model is missing; otherwise PASS or FAIL.
+    """
+    envelope = _envelope_of(attempt)
+    if envelope is None:
+        return _cannot_or_fail_one(D14_ASSERTIONS, 1, attempt)
+    cause = _first_hop_cause(envelope)
+    if cause in BACKEND_MISSING_CAUSES:
+        return _finding(D14_ASSERTIONS, 1, None,
+                        "the first hop failed with %s, so %s could not "
+                        "answer here" % (cause, ADOPTED_MODEL))
+    if (attempt.output.exit_code == EXIT_DECIDED
+            and envelope.get("model") == ADOPTED_MODEL
+            and isinstance(envelope.get("answers"), dict)):
+        return _finding(D14_ASSERTIONS, 1, "")
+    return _finding(D14_ASSERTIONS, 1, "exit %d, answering model %r, chain %s"
+                    % (attempt.output.exit_code, envelope.get("model"),
+                       _brief(_chain(envelope))))
 
 
 _NOT_CALLED_DETAIL = (
