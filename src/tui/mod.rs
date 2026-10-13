@@ -3006,15 +3006,6 @@ pub async fn run_tui_ext(
                                             // stopped applying the moment a user logged in.
                                             // REQ-K07: the trio's own key wins over the login
                                             // key; a non-Anthropic-shaped one is said, not blocked.
-                                            if magi_rs::section_keys::post_login_shape_mismatch(
-                                                magi_own_key.as_deref(),
-                                            ) {
-                                                let _ = response_tx
-                                                    .send(AgentResponse::Notice(
-                                                        POST_LOGIN_SHAPE_NOTICE.to_string(),
-                                                    ))
-                                                    .await;
-                                            }
                                             let trio_key =
                                                 magi_rs::section_keys::post_login_trio_key(
                                                     magi_own_key.as_deref(),
@@ -3027,6 +3018,17 @@ pub async fn run_tui_ext(
                                                 &completion,
                                             ) {
                                                 Ok(new_magi) => {
+                                                    // Only now: the notice says the rebuilt trio keeps the key,
+                                                    // which is false if the rebuild failed.
+                                                    if magi_rs::section_keys::post_login_shape_mismatch(
+                                                        magi_own_key.as_deref(),
+                                                    ) {
+                                                        let _ = response_tx
+                                                            .send(AgentResponse::Notice(
+                                                                POST_LOGIN_SHAPE_NOTICE.to_string(),
+                                                            ))
+                                                            .await;
+                                                    }
                                                     // REQ-A12c: the rebuild is Anthropic, so
                                                     // BOTH the session's own `magi_kind` and
                                                     // the rebuilt tool's must say so — a stale
