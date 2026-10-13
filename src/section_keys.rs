@@ -979,6 +979,19 @@ mod tests {
         assert!(!post_login_shape_mismatch(Some("  ")));
     }
 
+    /// An Ollama trio sends no key at all, so its shape warning must not claim the key is sent.
+    #[test]
+    fn the_shape_warning_never_claims_an_ollama_trio_sends_the_key() {
+        let e = env(None, None, Some("sk-ant-toy-0001"), None, None); // allow-secret-scan
+        let k = resolve(&e, ProviderKind::Ollama, Some(ROOT), None, None);
+        let warning = k
+            .startup_notices()
+            .into_iter()
+            .find(|n| n.level == tracing::Level::WARN)
+            .expect("the shape warning");
+        assert!(!warning.text.contains("sent anyway"), "{}", warning.text);
+    }
+
     #[test]
     fn a_magi_key_of_the_wrong_shape_for_the_trio_kind_warns_once_without_its_value() {
         use crate::notices::Notice;
