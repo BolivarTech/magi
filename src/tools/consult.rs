@@ -625,6 +625,8 @@ fn keyless_auth_explanation(cause: &str, auth: &TrioAuth) -> Option<String> {
     if !cause.contains(PROVIDER_AUTH_ERROR_MARKER) {
         return None;
     }
+    // An Ollama trio never carries a key (its section is always `Absent`), so the source adds
+    // nothing: the explanation is about the kind, not about which key was refused.
     if auth.kind == ProviderKind::Ollama {
         return Some(KEYLESS_AUTH_EXPLANATION.to_string());
     }
