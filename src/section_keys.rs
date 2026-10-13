@@ -926,6 +926,73 @@ mod tests {
     }
 
     #[test]
+    fn a_magi_key_of_the_wrong_shape_for_the_trio_kind_warns_once_without_its_value() {
+        use crate::notices::Notice;
+        for (kind, key, warns) in [
+            (ProviderKind::OpenAiCompat, "sk-ant-toy-0001", true), // allow-secret-scan
+            (ProviderKind::Ollama, "sk-ant-toy-0001", true),       // allow-secret-scan
+            (ProviderKind::Anthropic, "sk-or-toy-0001", true),     // allow-secret-scan
+            (ProviderKind::Anthropic, "sk-toy-0001", true),        // allow-secret-scan
+            (ProviderKind::OpenAiCompat, "sk-or-toy-0001", false), // allow-secret-scan
+            (ProviderKind::Anthropic, "sk-ant-toy-0001", false),   // allow-secret-scan
+        ] {
+            let e = env(None, None, Some(key), None, None);
+            let k = resolve(&e, kind, Some(ROOT), None, None);
+            let warn: Vec<Notice> = k
+                .startup_notices()
+                .into_iter()
+                .filter(|n| n.level == tracing::Level::WARN)
+                .collect();
+            assert_eq!(warn.len(), usize::from(warns), "{kind:?} {key}");
+            if let Some(n) = warn.first() {
+                assert!(
+                    n.text.contains("MAGI_API_KEY")
+                        && n.text.contains("[magi].kind")
+                        && !n.text.contains(key),
+                    "{}",
+                    n.text
+                );
+            }
+            if kind != ProviderKind::Ollama {
+                assert_eq!(
+                    k.magi().value(),
+                    Some(key),
+                    "never blocks: the key is still used"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_magi_key_never_warns_about_its_shape() {
+        for kind in [
+            ProviderKind::OpenAiCompat,
+            ProviderKind::Anthropic,
+            ProviderKind::Ollama,
+        ] {
+            let k = resolve(
+                &env(
+                    Some("sk-ant-toy-0001"), // allow-secret-scan
+                    Some("sk-ant-toy-0002"), // allow-secret-scan
+                    None,
+                    None,
+                    None,
+                ),
+                kind,
+                Some(ROOT),
+                None,
+                None,
+            );
+            assert!(
+                k.startup_notices()
+                    .iter()
+                    .all(|n| n.level != tracing::Level::WARN),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn after_login_without_an_own_key_the_login_key_is_used() {
         assert_eq!(
             post_login_trio_key(None, "login-key".to_string()),
