@@ -110,7 +110,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use magi_rs::section_keys::{
-    env_or_vault, ApiKeys, SharedSecretStore, EMBEDDING_KEY_ENV, MAGI_KEY_ENV,
+    env_or_vault, ApiKeys, SectionKey, SharedSecretStore, EMBEDDING_KEY_ENV, MAGI_KEY_ENV,
 };
 
 /// A passphrase read from `-p`/`--passphrase`, wrapped in [`Zeroizing`] so the
@@ -5199,6 +5199,28 @@ fn anthropic_banner(resolved: Option<(&str, &str)>) -> Notice {
 /// Propagates a fatal session-store error from `list_sessions`/`create_session`;
 /// a failed vector-store or embedder init degrades to text-only persistence
 /// with a notice, never an error (REQ-29).
+/// Builds the embedder for `endpoint` with the key its section chose.
+///
+/// # Arguments
+/// * `magi_config` - the loaded configuration (`[embedding]` model, dimension, prefixes).
+/// * `endpoint` - the resolved embedding endpoint the embedder calls.
+/// * `key` - the `[embedding]` key chosen by origin.
+///
+/// # Returns
+/// The embedder.
+///
+/// # Errors
+/// The embedder's construction error, as text.
+#[allow(dead_code)] // Red stub
+fn build_embedder(
+    magi_config: &MagiConfig,
+    endpoint: &str,
+    key: &SectionKey,
+) -> Result<OpenAiCompatibleEmbedder, String> {
+    let _ = (magi_config, endpoint, key);
+    todo!("Red stub")
+}
+
 async fn attach_persistent_memory(
     agent: &mut Agent,
     concrete_store: EncryptedSqliteMemory,
@@ -16385,6 +16407,94 @@ model = \"nimble\"
                         .unwrap_or(body)
                         .contains("SectionKeys::resolve("),
                     "{surface}"
+                );
+            }
+        }
+
+        /// K-S4 / K-S3: the embedding endpoint receives only the key its origin allows.
+        #[tokio::test]
+        async fn the_embedding_endpoint_receives_only_the_key_its_origin_allows() {
+            use crate::memory::embedding::EmbeddingProvider;
+            use magi_rs::section_keys::{ApiKeys, KeyInputs, SectionKeys};
+            let mut server = mockito::Server::new_async().await;
+            let port = server.url().rsplit(':').next().expect("port").to_string();
+            let other_root = format!("http://localhost:{port}/v1");
+            let cfg = MagiConfig::from_toml_str(
+                "provider = \"ollama\"
+[embedding]
+dim = 3
+",
+            )
+            .expect("valid");
+            for (root, own, expected) in [
+                (other_root.clone(), None, mockito::Matcher::Missing),
+                (
+                    other_root.clone(),
+                    Some("embed-key"),
+                    mockito::Matcher::Exact("Bearer embed-key".into()),
+                ),
+                (
+                    server.url(),
+                    None,
+                    mockito::Matcher::Exact("Bearer prin-key".into()),
+                ),
+            ] {
+                let m = server
+                    .mock("POST", "/embeddings")
+                    .match_header("authorization", expected)
+                    .with_status(200)
+                    .with_header("content-type", "application/json")
+                    .with_body(r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#)
+                    .create_async()
+                    .await;
+                let env = ApiKeys {
+                    openai_key: Some("prin-key".into()),
+                    embedding_key: own.map(str::to_string),
+                    magi_key: None,
+                    anthropic_key: None,
+                    decision_key: None,
+                };
+                let keys = SectionKeys::resolve(&KeyInputs {
+                    env: &env,
+                    secret_store: None,
+                    magi_kind: ProviderKind::Ollama,
+                    root_endpoint: &root,
+                    magi_endpoint: None,
+                    embedding_endpoint: Some(&server.url()),
+                    decision_endpoint: None,
+                });
+                let emb = build_embedder(&cfg, &server.url(), keys.embedding()).expect("builds");
+                emb.embed(&["x".to_string()]).await.expect("embeds");
+                m.assert_async().await;
+                m.remove_async().await;
+            }
+        }
+
+        #[test]
+        fn every_embedder_site_takes_its_key_from_the_section_keys() {
+            let source = include_str!("main.rs").replace('\r', "");
+            let (production, _) = source.split_once(FIRST_TEST_MODULE).expect("tests");
+            assert!(
+                !code_lines_only(production).contains("let embed_key = resolve_openai_key("),
+                "an embedder site still reads OPENAI_API_KEY on its own"
+            );
+        }
+
+        #[test]
+        fn the_keys_and_the_embedder_resolve_the_same_embedding_endpoint() {
+            for toml in [
+                "",
+                "[embedding]
+base_url = \"http://192.168.0.30:11434/v1\"
+", // allow-secret-scan
+                "base_url = \"http://127.0.0.1:11434/v1\"
+",
+            ] {
+                let cfg = MagiConfig::from_toml_str(toml).expect("fixture parses");
+                assert_eq!(
+                    section_endpoints(&cfg, None).0,
+                    resolve_effective_embedding_endpoint(&cfg, None).ok(),
+                    "{toml:?}"
                 );
             }
         }
