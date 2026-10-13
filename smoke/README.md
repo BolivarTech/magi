@@ -259,6 +259,35 @@ assumption A4), the time `decide` takes without `--no-memory` and with a passphr
 invocation), and the body OpenRouter returns for an unknown model, which belongs in the product's
 404 markers if it is new.
 
+### The per-section key scenarios (v0.24.0)
+
+K1 to K3 add seven assertions (2 + 3 + 2). The harness now promises 42 scenarios and 125
+assertions.
+
+| Id | Invariant | Without its environment |
+|---|---|---|
+| K1 | with the principal on `localhost` and the trio declared on `127.0.0.1`, the run log holds exactly one entry naming `MAGI_API_KEY` and the trio's origin, and neither `stdout` nor `stderr` shows the withheld-key notice | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule); the screen half is `CANNOT_TEST` when the log entry is missing, because a quiet screen would prove nothing |
+| K2 | a `MAGI_API_KEY` shaped `sk-ant-` under `kind = "openai-compat"`, and one shaped `sk-or-` under `kind = "anthropic"`, each warn on `stderr` naming `MAGI_API_KEY` and `[magi].kind` without the value; a `sk-or-` key under `openai-compat` does not | none needed: the principal points at a closed port and the warning is written before any request. The third assertion is `CANNOT_TEST` unless one of the first two showed the warning |
+| K3 | against OpenRouter as the trio, `MAGI_API_KEY` makes a consult answer, and without it (the principal's toy key is sent instead) the consult fails naming `MAGI_API_KEY` | `CANNOT_TEST` without a key in `DECISION_API_KEY` (same variable as D2 and D4), and for both assertions when the trio does not answer with the key: a stale key and a dead network look alike, so the second assertion is judged only once the first showed the endpoint working |
+
+Every key these scenarios plant is a toy value (`sk-ant-toy-0001`, `sk-or-toy-0001`) and is
+declared as planted so the archive scrubs it. K1 and K2 run `magi query --no-memory` in a scratch
+workspace seeded with `magi init`, with every other key variable blanked so the harness's own
+environment cannot leak in. K3 runs `magi consult` and costs one trio consult on free-tier hosted
+models (`HOSTED_SEATS` in `smoke/scenarios/keys.py`); those model names are unmeasured until the
+first run against a valid key.
+
+**The interactive window is not driven.** The withheld-key notice is routed by the same function in
+every surface, so K1 runs headless, where the screen is `stdout` plus `stderr`. A terminal
+mouth that differed would be a unit-test property of that function, not something this harness can
+see without a pseudo-terminal.
+
+**Mutations.** Removing the shape warning from `SectionKeys::startup_notices` must turn K2 red;
+sending the withheld-key entry to the screen must turn K1 red.
+
+**Cheap profile.** K1 uses the scaffold's own models and sends one trivial prompt; K2 sends a
+prompt to a closed port. Neither has an expected red.
+
 ## Out of scope
 
 ```
@@ -303,7 +332,7 @@ assumes is the exact failure this harness exists to avoid.
 | S25 | REQ-EE-3 and REQ-EE-1, OQ-8: `reasoning = "disabled"` round-trips on the default trio; no measured count above zero; no trace text in the envelope |
 | S26 | REQ-EE-1: with no key declared every attempt reports `default` and a reasoning state in magi-core's shape |
 
-The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above.
+The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 
 ## Adding a scenario
 
