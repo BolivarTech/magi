@@ -2149,6 +2149,50 @@ mod tests {
         }
     }
 
+    /// Each wording, pinned verbatim: a lost line continuation once put a run of spaces inside two
+    /// of them, and `contains` checks cannot see that.
+    #[test]
+    fn every_rejected_key_wording_is_exact() {
+        let cases = [
+            (
+                ProviderKind::OpenAiCompat,
+                KeySource::Absent,
+                ORIGIN,
+                "no API key was sent to http://127.0.0.1:11434; declare MAGI_API_KEY with: \
+                 magi-rs vault set MAGI_API_KEY",
+            ),
+            (
+                ProviderKind::OpenAiCompat,
+                KeySource::Own,
+                "",
+                "the endpoint rejected the key in MAGI_API_KEY; it must be a key for the provider \
+                 of [magi].kind (replace it with: magi-rs vault set MAGI_API_KEY)",
+            ),
+            (
+                ProviderKind::OpenAiCompat,
+                KeySource::Inherited,
+                "",
+                "the endpoint rejected the inherited OPENAI_API_KEY; declare MAGI_API_KEY with: \
+                 magi-rs vault set MAGI_API_KEY",
+            ),
+            (
+                ProviderKind::Anthropic,
+                KeySource::Inherited,
+                "",
+                "the endpoint rejected the inherited ANTHROPIC_API_KEY; declare MAGI_API_KEY with: \
+                 magi-rs vault set MAGI_API_KEY",
+            ),
+        ];
+        for (kind, source, origin, expected) in cases {
+            let text = keyless_auth_explanation(
+                &auth_cause(),
+                &TrioAuth::new(kind, source, origin.into()),
+            )
+            .expect("explained");
+            assert_eq!(text, expected, "{kind:?} {source:?}");
+        }
+    }
+
     #[test]
     fn no_wording_echoes_the_cause() {
         const CANARY: &str = "c4n4ry-s3cr3t";
