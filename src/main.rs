@@ -109,7 +109,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-use magi_rs::section_keys::{env_or_vault, ApiKeys, SharedSecretStore};
+use magi_rs::section_keys::{
+    env_or_vault, ApiKeys, SharedSecretStore, EMBEDDING_KEY_ENV, MAGI_KEY_ENV,
+};
 
 /// A passphrase read from `-p`/`--passphrase`, wrapped in [`Zeroizing`] so the
 /// plaintext never lingers in memory after use (secrets-separation invariant).
@@ -823,8 +825,8 @@ struct ConsumedSecrets {
     embedding_key: Option<String>,
 }
 
-/// Reads the four secret env vars into a [`ConsumedSecrets`], then removes all
-/// four from the process environment (REQ-H37).
+/// Reads the six secret env vars into a [`ConsumedSecrets`], then removes all
+/// six from the process environment (REQ-H37).
 ///
 /// The removal is **symmetric** — passphrase *and* every API key — so that a
 /// later in-workspace interpreter (`python`/`node`) cannot exfiltrate them by
@@ -844,17 +846,21 @@ fn read_then_scrub_secret_env() -> ConsumedSecrets {
     let anthropic_key = env::var(ANTHROPIC_KEY_ENV).ok();
     let openai_key = env::var(OPENAI_KEY_ENV).ok();
     let decision_key = env::var(DECISION_KEY_ENV).ok();
+    let magi_key = env::var(MAGI_KEY_ENV).ok();
+    let embedding_key = env::var(EMBEDDING_KEY_ENV).ok();
     env::remove_var(PASSPHRASE_ENV);
     env::remove_var(ANTHROPIC_KEY_ENV);
     env::remove_var(OPENAI_KEY_ENV);
     env::remove_var(DECISION_KEY_ENV);
+    env::remove_var(MAGI_KEY_ENV);
+    env::remove_var(EMBEDDING_KEY_ENV);
     ConsumedSecrets {
         passphrase,
         anthropic_key,
         openai_key,
         decision_key,
-        magi_key: None,
-        embedding_key: None,
+        magi_key,
+        embedding_key,
     }
 }
 
