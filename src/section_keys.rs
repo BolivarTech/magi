@@ -112,6 +112,158 @@ fn trimmed_non_blank(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|t| !t.is_empty())
 }
 
+/// Where a section's key came from; the wording of an authentication failure depends on it
+/// (REQ-K06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// The section's own variable (`MAGI_API_KEY`, `EMBEDDING_API_KEY`, `DECISION_API_KEY`).
+    Own,
+    /// `OPENAI_API_KEY` on the root endpoint's origin, or `ANTHROPIC_API_KEY` for an Anthropic
+    /// trio.
+    Inherited,
+    /// No key: no `Authorization` header (OpenAI-compatible) or a seat that cannot be built
+    /// (Anthropic).
+    Absent,
+}
+
+/// The key chosen for one section and where it came from. Its `Debug` never prints the value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SectionKey {
+    value: Option<String>,
+    source: KeySource,
+}
+
+impl SectionKey {
+    /// The key to send, or `None` for no authentication header.
+    ///
+    /// # Returns
+    /// The selected key, if any.
+    pub fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    /// Where the key came from.
+    ///
+    /// # Returns
+    /// The [`KeySource`] of this section.
+    pub fn source(&self) -> KeySource {
+        self.source
+    }
+}
+
+/// Prints the source and whether a key is present, never the key itself.
+impl std::fmt::Debug for SectionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SectionKey")
+            .field("value", &self.value.as_ref().map(|_| "***"))
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// A section that did not inherit `OPENAI_API_KEY` because its origin differs from the root's
+/// (REQ-K09).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedKey {
+    variable: &'static str,
+    origin_redacted: String,
+}
+
+impl RetainedKey {
+    /// The variable that would carry the section's own key.
+    ///
+    /// # Returns
+    /// `MAGI_API_KEY`, `EMBEDDING_API_KEY` or `DECISION_API_KEY`.
+    pub fn variable(&self) -> &'static str {
+        self.variable
+    }
+
+    /// The section's origin, redacted.
+    ///
+    /// # Returns
+    /// `scheme://host[:port]` without credentials.
+    pub fn origin_redacted(&self) -> &str {
+        &self.origin_redacted
+    }
+}
+
+/// Keys already chosen for every section that can point at its own endpoint (REQ-K01..K03).
+///
+/// The principal's own key is not here: it keeps its resolution path, which shares
+/// [`env_or_vault`]. Holds only owned strings and copyable enums, so it is `Send + Sync` and is
+/// shared read-only.
+pub struct SectionKeys {
+    magi: SectionKey,
+    embedding: SectionKey,
+    decision: SectionKey,
+    retained: Vec<RetainedKey>,
+}
+
+/// Everything [`SectionKeys::resolve`] needs, already resolved by the caller.
+pub struct KeyInputs<'a> {
+    /// The keys consumed (and scrubbed) from the environment at startup.
+    pub env: &'a ApiKeys,
+    /// The open vault, if any.
+    pub secret_store: Option<&'a SharedSecretStore>,
+    /// The resolved `[magi].kind`: decides how the trio's key is chosen.
+    pub magi_kind: crate::magi::kind::ProviderKind,
+    /// The root endpoint `OPENAI_API_KEY` belongs to (`OPENAI_BASE_URL` > root `base_url` >
+    /// built-in default), for any principal kind.
+    pub root_endpoint: &'a str,
+    /// The resolved `[magi]` endpoint, or `None` when it did not resolve.
+    pub magi_endpoint: Option<&'a str>,
+    /// The resolved `[embedding]` endpoint, or `None` when it did not resolve.
+    pub embedding_endpoint: Option<&'a str>,
+    /// The resolved `[decision]` endpoint, or `None` when it did not resolve.
+    pub decision_endpoint: Option<&'a str>,
+}
+
+impl SectionKeys {
+    /// Chooses the key of every section (spec §B).
+    ///
+    /// # Arguments
+    /// * `inputs` - consumed environment, vault, trio kind and resolved endpoints.
+    ///
+    /// # Returns
+    /// The chosen keys and the sections whose inheritance was refused.
+    pub fn resolve(inputs: &KeyInputs<'_>) -> SectionKeys {
+        let _ = inputs;
+        todo!("T4 Green")
+    }
+
+    /// The trio's key.
+    ///
+    /// # Returns
+    /// The [`SectionKey`] of `[magi]`.
+    pub fn magi(&self) -> &SectionKey {
+        &self.magi
+    }
+
+    /// The embedder's key.
+    ///
+    /// # Returns
+    /// The [`SectionKey`] of `[embedding]`.
+    pub fn embedding(&self) -> &SectionKey {
+        &self.embedding
+    }
+
+    /// The decision client's key.
+    ///
+    /// # Returns
+    /// The [`SectionKey`] of `[decision]`.
+    pub fn decision(&self) -> &SectionKey {
+        &self.decision
+    }
+
+    /// The sections that did not inherit `OPENAI_API_KEY` because of their origin.
+    ///
+    /// # Returns
+    /// One entry per such section, in the order magi, embedding, decision.
+    pub fn retained(&self) -> &[RetainedKey] {
+        &self.retained
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +355,295 @@ mod tests {
             from_env: true,
         };
         assert!(!format!("{s:?}").contains("s3cr3t-value"));
+    }
+
+    use crate::magi::kind::ProviderKind;
+
+    const ROOT: &str = "http://localhost:11434/v1";
+
+    fn env(
+        openai: Option<&str>,
+        anthropic: Option<&str>,
+        magi: Option<&str>,
+        embedding: Option<&str>,
+        decision: Option<&str>,
+    ) -> ApiKeys {
+        let s = |v: Option<&str>| v.map(str::to_string);
+        ApiKeys {
+            openai_key: s(openai),
+            anthropic_key: s(anthropic),
+            magi_key: s(magi),
+            embedding_key: s(embedding),
+            decision_key: s(decision),
+        }
+    }
+
+    fn resolve(
+        env: &ApiKeys,
+        kind: ProviderKind,
+        magi: Option<&str>,
+        embedding: Option<&str>,
+        decision: Option<&str>,
+    ) -> SectionKeys {
+        SectionKeys::resolve(&KeyInputs {
+            env,
+            secret_store: None,
+            magi_kind: kind,
+            root_endpoint: ROOT,
+            magi_endpoint: magi,
+            embedding_endpoint: embedding,
+            decision_endpoint: decision,
+        })
+    }
+
+    fn all(k: &SectionKeys) -> [(Option<&str>, KeySource); 3] {
+        [
+            (k.magi().value(), k.magi().source()),
+            (k.embedding().value(), k.embedding().source()),
+            (k.decision().value(), k.decision().source()),
+        ]
+    }
+
+    #[test]
+    fn an_own_key_wins_on_any_origin() {
+        let e = env(Some("prin"), None, Some("mk"), Some("ek"), Some("dk"));
+        for target in [ROOT, "http://127.0.0.1:9"] {
+            let k = resolve(
+                &e,
+                ProviderKind::OpenAiCompat,
+                Some(target),
+                Some(target),
+                Some(target),
+            );
+            assert_eq!(
+                all(&k),
+                [
+                    (Some("mk"), KeySource::Own),
+                    (Some("ek"), KeySource::Own),
+                    (Some("dk"), KeySource::Own)
+                ],
+                "{target}"
+            );
+            assert!(k.retained().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_principal_key_is_inherited_on_the_roots_origin() {
+        let e = env(Some("prin"), None, None, None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some("http://localhost:11434"),
+            Some(ROOT),
+            Some("http://LOCALHOST:11434/x"),
+        );
+        assert_eq!(all(&k), [(Some("prin"), KeySource::Inherited); 3]);
+        assert!(k.retained().is_empty());
+    }
+
+    #[test]
+    fn another_origin_gets_no_key_and_one_retained_entry_per_section() {
+        let e = env(Some("prin"), None, None, None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some("http://127.0.0.1:11434"),
+            Some("http://127.0.0.1:11435/v1"),
+            Some("https://openrouter.ai/api/v1"),
+        );
+        assert_eq!(all(&k), [(None, KeySource::Absent); 3]);
+        let got: Vec<(&str, &str)> = k
+            .retained()
+            .iter()
+            .map(|r| (r.variable(), r.origin_redacted()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("MAGI_API_KEY", "http://127.0.0.1:11434"),
+                ("EMBEDDING_API_KEY", "http://127.0.0.1:11435"),
+                ("DECISION_API_KEY", "https://openrouter.ai")
+            ]
+        );
+    }
+
+    /// RF1 / K-S5: the adversarial origins of `decide`, now for every section.
+    #[test]
+    fn adversarial_origins_never_inherit_in_any_section() {
+        let e = env(Some("prin"), None, None, None, None);
+        for target in [
+            "http://localhost:11434@evil.com",
+            "https://localhost:11434",
+            "http://localhost:11435",
+            "http://localhost.evil.com:11434",
+            "http://evil-localhost:11434",
+            "http://evil.com\\@localhost:11434",
+            "http://localhost%40evil.com:11434",
+            "http://[::ffff:127.0.0.1]:11434",
+            "not a url",
+        ] {
+            let k = resolve(
+                &e,
+                ProviderKind::OpenAiCompat,
+                Some(target),
+                Some(target),
+                Some(target),
+            );
+            assert_eq!(all(&k), [(None, KeySource::Absent); 3], "{target}");
+        }
+    }
+
+    #[test]
+    fn equivalent_spellings_inherit_in_every_section() {
+        let e = env(Some("prin"), None, None, None, None);
+        for target in [
+            "http://LOCALHOST:11434",
+            "http://localhost.:11434",
+            "http://localhost:11434/other/path",
+        ] {
+            let k = resolve(
+                &e,
+                ProviderKind::OpenAiCompat,
+                Some(target),
+                Some(target),
+                Some(target),
+            );
+            assert_eq!(
+                all(&k),
+                [(Some("prin"), KeySource::Inherited); 3],
+                "{target}"
+            );
+        }
+    }
+
+    /// RF2: blank is absent, in both directions, and never produces a retained entry.
+    #[test]
+    fn a_blank_principal_key_is_absent_and_logs_nothing() {
+        let e = env(Some("   "), None, None, None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some("http://127.0.0.1:1"),
+            Some(ROOT),
+            None,
+        );
+        assert_eq!(all(&k), [(None, KeySource::Absent); 3]);
+        assert!(k.retained().is_empty());
+    }
+
+    #[test]
+    fn a_blank_own_key_is_not_an_own_key() {
+        let e = env(Some("prin"), None, Some(" "), Some(""), Some("\n"));
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some(ROOT),
+            Some(ROOT),
+            Some(ROOT),
+        );
+        assert_eq!(all(&k), [(Some("prin"), KeySource::Inherited); 3]);
+    }
+
+    /// RF3 / D1.
+    #[test]
+    fn an_unresolved_section_endpoint_is_absent_and_logs_nothing() {
+        let e = env(Some("prin"), None, None, None, None);
+        let k = resolve(&e, ProviderKind::OpenAiCompat, None, None, None);
+        assert_eq!(all(&k), [(None, KeySource::Absent); 3]);
+        assert!(k.retained().is_empty());
+    }
+
+    #[test]
+    fn an_own_key_is_read_from_the_vault_when_the_env_has_none() {
+        let ss = vault(&[
+            ("MAGI_API_KEY", "mk-vault"),
+            ("EMBEDDING_API_KEY", "ek-vault"),
+        ]);
+        let e = env(None, None, None, None, None);
+        let k = SectionKeys::resolve(&KeyInputs {
+            env: &e,
+            secret_store: Some(&ss),
+            magi_kind: ProviderKind::OpenAiCompat,
+            root_endpoint: ROOT,
+            magi_endpoint: Some(ROOT),
+            embedding_endpoint: Some(ROOT),
+            decision_endpoint: Some(ROOT),
+        });
+        assert_eq!(
+            (k.magi().value(), k.magi().source()),
+            (Some("mk-vault"), KeySource::Own)
+        );
+        assert_eq!(
+            (k.embedding().value(), k.embedding().source()),
+            (Some("ek-vault"), KeySource::Own)
+        );
+    }
+
+    /// K-S8 / RF5: an Anthropic trio never compares origins and never logs a retained key.
+    #[test]
+    fn an_anthropic_trio_never_compares_origins() {
+        let without = env(Some("prin"), Some("ak"), None, None, None);
+        let k = resolve(
+            &without,
+            ProviderKind::Anthropic,
+            Some("http://127.0.0.1:1"),
+            None,
+            None,
+        );
+        assert_eq!(
+            (k.magi().value(), k.magi().source()),
+            (Some("ak"), KeySource::Inherited)
+        );
+        assert!(k.retained().is_empty());
+        let with = env(Some("prin"), Some("ak"), Some("mk"), None, None);
+        let k = resolve(&with, ProviderKind::Anthropic, None, None, None);
+        assert_eq!(
+            (k.magi().value(), k.magi().source()),
+            (Some("mk"), KeySource::Own)
+        );
+    }
+
+    #[test]
+    fn an_ollama_trio_carries_no_key_and_logs_nothing() {
+        let e = env(Some("prin"), None, Some("mk"), None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::Ollama,
+            Some("http://127.0.0.1:1"),
+            None,
+            None,
+        );
+        assert_eq!(
+            (k.magi().value(), k.magi().source()),
+            (None, KeySource::Absent)
+        );
+        assert!(k.retained().is_empty());
+    }
+
+    #[test]
+    fn section_keys_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SectionKeys>();
+    }
+
+    #[test]
+    fn without_any_key_every_section_is_absent() {
+        let e = env(None, None, None, None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some(ROOT),
+            Some(ROOT),
+            Some(ROOT),
+        );
+        assert_eq!(all(&k), [(None, KeySource::Absent); 3]);
+    }
+
+    #[test]
+    fn a_section_key_never_prints_its_value() {
+        let e = env(None, None, Some("s3cr3t-magi"), None, None);
+        let k = resolve(&e, ProviderKind::OpenAiCompat, Some(ROOT), None, None);
+        assert!(!format!("{:?}", k.magi()).contains("s3cr3t-magi"));
     }
 }

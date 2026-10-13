@@ -2387,6 +2387,17 @@ struct EnvVaultCredentials<'a> {
     secret_store: Option<&'a SharedSecretStore>,
 }
 
+/// The trio's credentials are the `[magi]` key [`SectionKeys`] already chose for the trio's kind
+/// (REQ-K01, REQ-K07): no seat re-reads the environment or the vault.
+impl Credentials for magi_rs::section_keys::SectionKeys {
+    fn openai(&self) -> Option<String> {
+        todo!("T4 Green")
+    }
+    fn anthropic(&self) -> Option<String> {
+        todo!("T4 Green")
+    }
+}
+
 impl Credentials for EnvVaultCredentials<'_> {
     fn openai(&self) -> Option<String> {
         resolve_openai_key(self.openai_env, self.secret_store)
@@ -17548,6 +17559,33 @@ model = \"nimble\"
             };
             assert_eq!(c.openai(), None);
             assert_eq!(c.anthropic(), None);
+        }
+
+        #[test]
+        fn section_keys_are_the_trios_credentials() {
+            use magi_rs::section_keys::{ApiKeys, KeyInputs, SectionKeys};
+            let e = ApiKeys {
+                openai_key: Some("prin".into()),
+                anthropic_key: Some("ak".into()),
+                magi_key: Some("mk".into()),
+                embedding_key: None,
+                decision_key: None,
+            };
+            let resolve = |kind: ProviderKind, magi: Option<&str>| {
+                SectionKeys::resolve(&KeyInputs {
+                    env: &e,
+                    secret_store: None,
+                    magi_kind: kind,
+                    root_endpoint: "http://localhost:11434/v1",
+                    magi_endpoint: magi,
+                    embedding_endpoint: None,
+                    decision_endpoint: None,
+                })
+            };
+            let k = resolve(ProviderKind::OpenAiCompat, Some("http://127.0.0.1:1"));
+            assert_eq!(k.openai().as_deref(), Some("mk"));
+            let k = resolve(ProviderKind::Anthropic, None);
+            assert_eq!(k.anthropic().as_deref(), Some("mk"));
         }
 
         /// Restores the precedence coverage the trio always had for per-seat overrides:

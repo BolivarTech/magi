@@ -54,6 +54,24 @@ pub fn same_origin(a: &str, b: &str) -> bool {
     }
 }
 
+/// The WHATWG origin of `raw` as `scheme://host[:port]`: default port omitted, no userinfo or
+/// path, host lower-cased and without a trailing dot.
+///
+/// It formats the same parse [`same_origin`] compares, so two URLs share an origin exactly when
+/// their `origin_url` is equal and present.
+///
+/// Complexity: O(n) in the length of `raw`.
+///
+/// # Arguments
+/// * `raw` - the URL to reduce.
+///
+/// # Returns
+/// The origin, or `None` when the URL does not parse or has no host.
+pub fn origin_url(raw: &str) -> Option<String> {
+    let _ = raw;
+    todo!("T4 Green")
+}
+
 /// Keeps a key only when it is not blank.
 fn non_blank(key: Option<&str>) -> Option<&str> {
     key.filter(|k| !k.trim().is_empty())
@@ -188,5 +206,60 @@ mod tests {
             None
         );
         assert_eq!(select_api_key(None, None, "http://a:1", "http://a:1"), None);
+    }
+
+    #[test]
+    fn the_origin_url_keeps_scheme_host_and_a_non_default_port_only() {
+        assert_eq!(
+            origin_url("http://127.0.0.1:11434/v1").as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
+        assert_eq!(
+            origin_url("https://openrouter.ai:443/api/v1").as_deref(),
+            Some("https://openrouter.ai")
+        );
+        assert_eq!(
+            origin_url("http://alice:pw@host:1/v1").as_deref(),
+            Some("http://host:1")
+        );
+        assert_eq!(
+            origin_url("http://LOCALHOST:11434").as_deref(),
+            Some("http://localhost:11434")
+        );
+        assert_eq!(origin_url("not a url"), None);
+    }
+
+    /// The adversarial and equivalent pairs of the two tests above, as one table (K-S5).
+    const K_S5_ROWS: [(&str, &str); 22] = [
+        ("http://localhost.evil.com", "http://localhost"),
+        ("http://localhost:11434@evil.com", "http://localhost:11434"),
+        ("http://example.com", "https://example.com"),
+        ("http://localhost:11434", "http://localhost:11435"),
+        ("http://evil-localhost", "http://localhost"),
+        ("http://localhost", "http://localhostx"),
+        ("http://[::ffff:127.0.0.1]:11434", "http://127.0.0.1:11434"),
+        ("not a url", "not a url"),
+        ("http://localhost:11434", "not a url"),
+        ("http://evil.com\\@localhost", "http://localhost"),
+        ("http://localhost%40evil.com", "http://localhost"),
+        ("http://", "http://localhost"),
+        ("http://:11434", "http://localhost:11434"),
+        ("http://LOCALHOST:11434", "http://localhost:11434"),
+        ("http://localhost.:11434", "http://localhost:11434"),
+        ("https://host:443/v1", "https://host/x"),
+        ("http://host:80", "http://host"),
+        ("http://localhost:11434", "http://localhost:11434/v1"),
+        ("http://bücher.example", "http://xn--bcher-kva.example"),
+        ("https://[user]:[password]@host/v1", "https://host"),
+        ("http://good/@evil", "http://good"),
+        ("http://alice:pw@host:1/v1", "http://host:1"),
+    ];
+
+    #[test]
+    fn origin_url_agrees_with_same_origin() {
+        for (a, b) in K_S5_ROWS {
+            let equal = origin_url(a).is_some() && origin_url(a) == origin_url(b);
+            assert_eq!(equal, same_origin(a, b), "{a} vs {b}");
+        }
     }
 }
