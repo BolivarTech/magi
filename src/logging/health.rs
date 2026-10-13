@@ -1785,6 +1785,21 @@ mod tests {
                 "✓ memory: retrieval restored",
             ),
             (
+                CauseKey::new("embedder", "unauthorized_no_key"),
+                "memory: retrieval failing — the embedding endpoint asked for a key and none was sent; set one with: magi-rs vault set EMBEDDING_API_KEY",
+                "✓ memory: retrieval restored",
+            ),
+            (
+                CauseKey::new("embedder", "unauthorized_own_key"),
+                "memory: retrieval failing — the embedding endpoint rejected the key in EMBEDDING_API_KEY; replace it with: magi-rs vault set EMBEDDING_API_KEY",
+                "✓ memory: retrieval restored",
+            ),
+            (
+                CauseKey::new("embedder", "unauthorized_inherited_key"),
+                "memory: retrieval failing — the embedding endpoint rejected the inherited OPENAI_API_KEY; declare EMBEDDING_API_KEY with: magi-rs vault set EMBEDDING_API_KEY",
+                "✓ memory: retrieval restored",
+            ),
+            (
                 CauseKey::new("provider", "unreachable"),
                 "provider: unreachable — the turn cannot complete",
                 "✓ provider: reachable again",
@@ -1795,6 +1810,28 @@ mod tests {
                 "✓ vault: unlocked",
             ),
         ]
+    }
+
+    #[test]
+    fn every_rejected_embedder_key_names_embedding_api_key_and_the_command() {
+        for cause in [
+            "unauthorized_no_key",
+            "unauthorized_own_key",
+            "unauthorized_inherited_key",
+        ] {
+            let key = CauseKey::ALL
+                .iter()
+                .copied()
+                .find(|k| k.subsystem() == "embedder" && k.cause() == cause)
+                .expect("declared");
+            let (down, up) = screen_messages(key).expect("a row");
+            assert!(
+                down.contains("EMBEDDING_API_KEY")
+                    && down.contains("magi-rs vault set EMBEDDING_API_KEY"),
+                "{down}"
+            );
+            assert_eq!(up, "✓ memory: retrieval restored");
+        }
     }
 
     #[test]

@@ -174,6 +174,19 @@ impl std::fmt::Debug for SectionKey {
 }
 
 impl SectionKey {
+    /// Builds a key of a chosen source, for tests that need one without resolving a section.
+    ///
+    /// # Arguments
+    /// * `value` - the key to carry, if any.
+    /// * `source` - where the key is said to have come from.
+    ///
+    /// # Returns
+    /// A [`SectionKey`] holding both.
+    #[doc(hidden)]
+    pub fn for_test(value: Option<String>, source: KeySource) -> SectionKey {
+        SectionKey { value, source }
+    }
+
     /// A section without a key.
     fn absent() -> SectionKey {
         SectionKey {

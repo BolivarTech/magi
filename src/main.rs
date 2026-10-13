@@ -16476,6 +16476,18 @@ dim = 3
         }
 
         #[test]
+        fn the_embedder_is_built_with_the_source_of_its_section_key() {
+            use magi_rs::section_keys::KeySource;
+            let cfg = MagiConfig::from_toml_str("").expect("defaults parse");
+            for source in [KeySource::Own, KeySource::Inherited, KeySource::Absent] {
+                let key = SectionKey::for_test(None, source);
+                let embedder =
+                    build_embedder(&cfg, "http://127.0.0.1:11434/v1", &key).expect("builds");
+                assert_eq!(embedder.key_source(), source, "{source:?}");
+            }
+        }
+
+        #[test]
         fn every_embedder_site_takes_its_key_from_the_section_keys() {
             let source = include_str!("main.rs").replace('\r', "");
             let (production, _) = source.split_once(FIRST_TEST_MODULE).expect("tests");

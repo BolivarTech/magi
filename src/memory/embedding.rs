@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::memory::config::EmbeddingConfig;
 use crate::memory::error::EmbeddingError;
+use magi_rs::section_keys::KeySource;
 
 // ─── Trait ───────────────────────────────────────────────────────────────────
 
@@ -144,6 +145,8 @@ pub struct OpenAiCompatibleEmbedder {
     /// `None` or empty → header omitted (compatible with Ollama's no-auth mode).
     /// Never included in error messages.
     api_key: Option<String>,
+    /// Where the key came from; names the cause when the endpoint rejects it.
+    key_source: KeySource,
 }
 
 impl OpenAiCompatibleEmbedder {
@@ -176,8 +179,31 @@ impl OpenAiCompatibleEmbedder {
             detected_dim: AtomicUsize::new(0),
             query_prefix: cfg.query_prefix.clone(),
             document_prefix: cfg.document_prefix.clone(),
+            key_source: initial_key_source(api_key.as_deref()),
             api_key,
         })
+    }
+
+    /// Records where the key came from, so a rejected key is explained by its origin.
+    ///
+    /// # Arguments
+    /// * `source` - the [`KeySource`] of the embedding section's key.
+    ///
+    /// # Returns
+    /// The embedder with `source` recorded.
+    // Red stub: ignores `source`.
+    #[allow(dead_code)]
+    pub fn with_key_source(self, source: KeySource) -> Self {
+        let _ = source;
+        self
+    }
+
+    /// Where the key came from.
+    ///
+    /// # Returns
+    /// The recorded [`KeySource`].
+    pub(crate) fn key_source(&self) -> KeySource {
+        self.key_source
     }
 
     /// Prefixes each text with [`document_prefix`][Self::document_prefix] and
@@ -448,7 +474,8 @@ const EMBEDDER_RECOVERY_CAUSE: &str = EMBEDDER_UNREACHABLE;
 /// counts in this milestone. `every_error_variant_falls_on_one_side_of_the_
 /// reachability_split` counts both halves exactly, so a variant added, moved or
 /// dropped fails there as well as failing the exhaustive `match`.
-fn failure_cause(error: &EmbeddingError) -> &'static str {
+fn failure_cause(error: &EmbeddingError, source: KeySource) -> &'static str {
+    let _ = source;
     match error {
         EmbeddingError::Timeout | EmbeddingError::Network => EMBEDDER_UNREACHABLE,
         EmbeddingError::Http(_)
@@ -488,7 +515,7 @@ fn failure_cause(error: &EmbeddingError) -> &'static str {
 ///
 /// One line per subsystem *operation* — one embedder call — which is units per
 /// turn, not thousands.
-fn report_health(failure: Option<&EmbeddingError>) {
+fn report_health(failure: Option<&EmbeddingError>, source: KeySource) {
     match failure {
         None => tracing::event!(
             target: EMBEDDER_TARGET,
@@ -501,7 +528,7 @@ fn report_health(failure: Option<&EmbeddingError>) {
             target: EMBEDDER_TARGET,
             tracing::Level::WARN,
             cause.subsystem = EMBEDDER_SUBSYSTEM,
-            cause.name = failure_cause(e),
+            cause.name = failure_cause(e, source),
             "embedding request failed: {e}"
         ),
     }
@@ -513,7 +540,7 @@ impl EmbeddingProvider for OpenAiCompatibleEmbedder {
     /// way out — see [`report_health`].
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         let outcome = self.call_embeddings(texts).await;
-        report_health(outcome.as_ref().err());
+        report_health(outcome.as_ref().err(), self.key_source());
         outcome
     }
 
@@ -585,6 +612,14 @@ fn reorder_by_index(mut data: Vec<EmbedData>) -> Result<Vec<EmbedData>, Embeddin
     Ok(data)
 }
 
+/// The source a freshly built embedder assumes: `Own` when a key was given, else `Absent`.
+fn initial_key_source(key: Option<&str>) -> KeySource {
+    match key {
+        Some(k) if !k.is_empty() => KeySource::Own,
+        _ => KeySource::Absent,
+    }
+}
+
 /// Resolves `cfg.base_url` for construction: blank or absent falls back to the
 /// Ollama default (review round 2, C1 defense in depth; m6 — shared by `new` and
 /// `new_with_client` to remove the ≥3-line duplicate B3 flags).
@@ -641,6 +676,7 @@ impl OpenAiCompatibleEmbedder {
             query_prefix: cfg.query_prefix.clone(),
             document_prefix: cfg.document_prefix.clone(),
             api_key,
+            key_source: KeySource::Own,
         }
     }
 }
@@ -1503,11 +1539,11 @@ mod tests {
 
         let unreachable = all
             .iter()
-            .filter(|e| failure_cause(e) == EMBEDDER_UNREACHABLE)
+            .filter(|e| failure_cause(e, KeySource::Own) == EMBEDDER_UNREACHABLE)
             .count();
         let answered_badly = all
             .iter()
-            .filter(|e| failure_cause(e) == EMBEDDER_HTTP_ERROR)
+            .filter(|e| failure_cause(e, KeySource::Own) == EMBEDDER_HTTP_ERROR)
             .count();
 
         assert_eq!(
@@ -1515,15 +1551,49 @@ mod tests {
             "a timeout and a network failure are the only two that never got an answer"
         );
         assert_eq!(
-            answered_badly, 5,
-            "a 500, a rejected key, a throttle, an undecodable body AND a dimension \
-             mismatch are all an endpoint that answered"
+            answered_badly, 4,
+            "a 500, a throttle, an undecodable body AND a dimension mismatch are all \
+             an endpoint that answered"
+        );
+        let unauthorized = all
+            .iter()
+            .filter(|e| failure_cause(e, KeySource::Own) == "unauthorized_own_key")
+            .count();
+        assert_eq!(
+            unauthorized, 1,
+            "a rejected key is named by where the key came from"
         );
         assert_eq!(
-            unreachable + answered_badly,
+            unreachable + answered_badly + unauthorized,
             all.len(),
             "a variant reached neither cause, so the split is not a split"
         );
+    }
+
+    #[test]
+    fn a_rejected_key_names_its_cause_by_where_the_key_came_from() {
+        assert_eq!(
+            failure_cause(&EmbeddingError::Auth, KeySource::Absent),
+            "unauthorized_no_key"
+        );
+        assert_eq!(
+            failure_cause(&EmbeddingError::Auth, KeySource::Own),
+            "unauthorized_own_key"
+        );
+        assert_eq!(
+            failure_cause(&EmbeddingError::Auth, KeySource::Inherited),
+            "unauthorized_inherited_key"
+        );
+        for source in [KeySource::Absent, KeySource::Own, KeySource::Inherited] {
+            assert_eq!(
+                failure_cause(&EmbeddingError::Timeout, source),
+                EMBEDDER_UNREACHABLE
+            );
+            assert_eq!(
+                failure_cause(&EmbeddingError::Http("500".into()), source),
+                EMBEDDER_HTTP_ERROR
+            );
+        }
     }
 
     #[tokio::test]
@@ -1870,8 +1940,8 @@ mod tests {
         // mapping and then again on what the emitter actually put on the wire,
         // because only the second is what the tracker will key on.
         assert_eq!(
-            failure_cause(&first_error),
-            failure_cause(&second_error),
+            failure_cause(&first_error, KeySource::Own),
+            failure_cause(&second_error, KeySource::Own),
             "two 500s are one cause, whatever their bodies say"
         );
         let keyed = keyed_events(&seen);
