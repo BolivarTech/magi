@@ -792,10 +792,13 @@ struct ConsultSuccessBody {
     annotated: String,
 }
 
-fn tui_consult_success_body(report: &MagiReport, kind: ProviderKind) -> ConsultSuccessBody {
+fn tui_consult_success_body(
+    report: &MagiReport,
+    auth: &crate::tools::consult::TrioAuth,
+) -> ConsultSuccessBody {
     ConsultSuccessBody {
         banner: report.degraded.then_some(DEGRADED_BANNER),
-        annotated: crate::tools::consult::annotate_report_text(report, kind),
+        annotated: crate::tools::consult::annotate_report_text(report, auth),
     }
 }
 
@@ -816,10 +819,10 @@ fn tui_consult_success_body(report: &MagiReport, kind: ProviderKind) -> ConsultS
 /// drive in a test, so the exact bytes the user receives are verified here instead.
 fn tui_consult_success_reply(
     report: &MagiReport,
-    kind: ProviderKind,
+    auth: &crate::tools::consult::TrioAuth,
     cap: usize,
 ) -> crate::tools::consult::Truncated {
-    let pieces = tui_consult_success_body(report, kind);
+    let pieces = tui_consult_success_body(report, auth);
     let section = crate::tools::consult::completions_section(report);
     match pieces.banner {
         Some(banner) => crate::tools::consult::truncate_report_with_preserved_prefix(
@@ -848,10 +851,10 @@ fn tui_consult_success_reply(
 /// needs to redact again.
 ///
 /// Extracted for the same reason as [`tui_consult_success_body`].
-fn tui_consult_error_body(err: &MagiError, kind: ProviderKind) -> String {
+fn tui_consult_error_body(err: &MagiError, auth: &crate::tools::consult::TrioAuth) -> String {
     format!(
         "MAGI consult failed: {}",
-        crate::tools::consult::explain_magi_error(err, kind)
+        crate::tools::consult::explain_magi_error(err, auth)
     )
 }
 
@@ -884,11 +887,11 @@ fn tui_consult_error_body(err: &MagiError, kind: ProviderKind) -> String {
 /// than leaving a dangling `ESC` at the tail.
 fn tui_consult_error_reply(
     err: &MagiError,
-    kind: ProviderKind,
+    auth: &crate::tools::consult::TrioAuth,
     cap: usize,
 ) -> crate::tools::consult::Truncated {
     let mut truncated =
-        crate::tools::consult::truncate_report(&tui_consult_error_body(err, kind), cap, "");
+        crate::tools::consult::truncate_report(&tui_consult_error_body(err, auth), cap, "");
     truncated.text = crate::agent::Agent::sanitize_text(&truncated.text);
     truncated
 }
@@ -2322,7 +2325,7 @@ impl App {
 /// - `mode_classifier` — consulted by [`resolve_tui_consult_mode`] only when `/consult` has no explicit `--mode` and no `[magi].default_mode` is set (REQ-A07c).
 /// - `default_mode` — `[magi].default_mode`, resolved once at startup (REQ-A15).
 /// - `untrusted_content` — `[magi].untrusted_content` only; the TUI never exposes this as a command-line flag (REQ-A07d/SC-A07t).
-/// - `magi_kind` (REQ-A12c) — the [`ProviderKind`] the trio runs under. Feeds [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit `/consult` command gets the SAME keyless-auth guidance `ConsultTool`/headless already have.
+/// - `magi_auth` (REQ-A12c, REQ-K06) — how the trio authenticates: its kind, the source of its key and its redacted origin. Feeds [`tui_consult_success_body`]/[`tui_consult_error_body`] so the explicit `/consult` command gets the SAME keyless-auth guidance `ConsultTool`/headless already have.
 /// - `max_query_bytes` (REQ-A11b) — `MagiConfig::effective_max_query_bytes()`, resolved once at startup. Checked by the explicit `/consult` command via `crate::tools::consult::check_query_size` — the SAME cap the tool path and the headless direct path enforce (SC-A11c).
 /// - `tool_result_cap` (REQ-A11b) — `MagiConfig::effective_tool_result_cap()`, resolved once at startup. Bounds the explicit `/consult` command's body via [`tui_consult_success_reply`] before it reaches the terminal — which reserves room for the `[DEGRADED: ...]` banner ahead of the report, rather than handing the whole joined string to `crate::tools::consult::truncate_report` the way a prior fix did (see [`tui_consult_success_body`]'s own doc).
 pub struct TuiMagiRuntimeConfig {
@@ -2340,8 +2343,8 @@ pub struct TuiMagiRuntimeConfig {
     pub default_mode: Option<Mode>,
     /// `[magi].untrusted_content` (REQ-A07d/SC-A07t).
     pub untrusted_content: bool,
-    /// The `ProviderKind` the trio runs under (REQ-A12c).
-    pub magi_kind: ProviderKind,
+    /// How the trio authenticates (REQ-A12c, REQ-K06).
+    pub(crate) magi_auth: crate::tools::consult::TrioAuth,
     /// Effective input cap (REQ-A11b), checked before any model call.
     pub max_query_bytes: usize,
     /// Effective output cap (REQ-A11b), applied to the `/consult` reply.
@@ -2608,9 +2611,9 @@ pub async fn run_tui_ext(
         classifier_notices,
         default_mode,
         untrusted_content,
-        // `mut`: a successful `/login` rebuilds the trio on Anthropic, and the session's kind
+        // `mut`: a successful `/login` rebuilds the trio on Anthropic, and the session's auth
         // must follow it — see `post_login_magi_kind`.
-        mut magi_kind,
+        mut magi_auth,
         max_query_bytes,
         tool_result_cap,
         clock_coverage,
@@ -2872,7 +2875,7 @@ pub async fn run_tui_ext(
                             // away on a long degraded report, leaving a thin consensus
                             // rendered as if it were full-strength.
                             let truncated =
-                                tui_consult_success_reply(&report, magi_kind, tool_result_cap);
+                                tui_consult_success_reply(&report, &magi_auth, tool_result_cap);
                             // Sanitize the verbatim report (LLM-generated) before rendering —
                             // strips ANSI escapes / control chars, matching the TextDelta path.
                             let body = crate::agent::Agent::sanitize_text(&truncated.text);
@@ -2894,7 +2897,8 @@ pub async fn run_tui_ext(
                             // is capped — see that function's own doc for the defect this
                             // closes (an unbounded provider error body bypassing
                             // `tool_result_cap`).
-                            let truncated = tui_consult_error_reply(&e, magi_kind, tool_result_cap);
+                            let truncated =
+                                tui_consult_error_reply(&e, &magi_auth, tool_result_cap);
                             let _ = response_tx.send(AgentResponse::Error(truncated.text)).await;
                         }
                         Err(join_err) => {
@@ -3028,14 +3032,23 @@ pub async fn run_tui_ext(
                                                     // `Ollama` here explains a later 401 as a
                                                     // keyless-endpoint problem that no longer
                                                     // exists.
-                                                    magi_kind = post_login_magi_kind(magi_kind);
+                                                    magi_auth =
+                                                        crate::tools::consult::TrioAuth::new(
+                                                            post_login_magi_kind(magi_auth.kind),
+                                                            if magi_own_key.is_some() {
+                                                                magi_rs::section_keys::KeySource::Own
+                                                            } else {
+                                                                magi_rs::section_keys::KeySource::Inherited
+                                                            },
+                                                            String::new(),
+                                                        );
                                                     runner_agent
                                                         .register_or_replace_tool(Box::new(
                                                         crate::tools::consult::ConsultTool::new(
                                                             new_magi.clone(),
                                                             magi_auto_approve,
                                                         )
-                                                        .with_kind(magi_kind)
+                                                        .with_auth(magi_auth.clone())
                                                         .with_max_query_bytes(max_query_bytes)
                                                         .with_output_cap(tool_result_cap)
                                                         .with_clock_coverage(Arc::clone(
@@ -4393,6 +4406,17 @@ fn ui(f: &mut Frame, app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    /// The authentication description the keyless-hint tests run under: keyless for Ollama,
+    /// an own key for any kind that carries a credential.
+    fn trio_auth_for_tests(kind: ProviderKind) -> crate::tools::consult::TrioAuth {
+        let source = if kind == ProviderKind::Ollama {
+            magi_rs::section_keys::KeySource::Absent
+        } else {
+            magi_rs::section_keys::KeySource::Own
+        };
+        crate::tools::consult::TrioAuth::new(kind, source, String::new())
+    }
+
     use super::*;
     use magi_core::providers::claude::ClaudeProvider;
     use magi_core::schema::AgentName;
@@ -4985,7 +5009,7 @@ mod tests {
         // is well under `TOOL_RESULT_CAP_BYTES`).
         let body = tui_consult_success_reply(
             &report,
-            ProviderKind::Ollama,
+            &trio_auth_for_tests(ProviderKind::Ollama),
             magi_rs::magi::TOOL_RESULT_CAP_BYTES,
         )
         .text;
@@ -5014,7 +5038,7 @@ mod tests {
 
         let body = tui_consult_success_reply(
             &report,
-            ProviderKind::OpenAiCompat,
+            &trio_auth_for_tests(ProviderKind::OpenAiCompat),
             magi_rs::magi::TOOL_RESULT_CAP_BYTES,
         )
         .text;
@@ -5073,7 +5097,8 @@ mod tests {
         // needs to guarantee BOTH the banner and some report content survive
         // (75 bytes reserved for the banner + 38 for `mark_overhead()` = 113).
         const CAP: usize = 300;
-        let out = tui_consult_success_reply(&report, ProviderKind::Ollama, CAP);
+        let out =
+            tui_consult_success_reply(&report, &trio_auth_for_tests(ProviderKind::Ollama), CAP);
 
         assert!(
             out.text.len() <= CAP,
@@ -5118,7 +5143,8 @@ mod tests {
         // proving the absence of a banner is not just an artifact of an
         // untruncated reply.
         const CAP: usize = 300;
-        let out = tui_consult_success_reply(&report, ProviderKind::Ollama, CAP);
+        let out =
+            tui_consult_success_reply(&report, &trio_auth_for_tests(ProviderKind::Ollama), CAP);
 
         assert!(
             out.text.len() <= CAP,
@@ -5154,7 +5180,8 @@ mod tests {
         let report = degraded_report_fixture().await;
 
         let cap = DEGRADED_BANNER.len() + 2 + magi_rs::magi::mark_overhead();
-        let out = tui_consult_success_reply(&report, ProviderKind::Ollama, cap);
+        let out =
+            tui_consult_success_reply(&report, &trio_auth_for_tests(ProviderKind::Ollama), cap);
 
         assert!(
             out.text.len() <= cap,
@@ -5192,7 +5219,7 @@ mod tests {
             .await
             .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
 
-        let body = tui_consult_error_body(&err, ProviderKind::Ollama);
+        let body = tui_consult_error_body(&err, &trio_auth_for_tests(ProviderKind::Ollama));
         assert!(
             body.contains("keyless") && body.contains("openai-compat"),
             "the probable-cause hint must reach the TUI body: {body}"
@@ -5225,12 +5252,16 @@ mod tests {
             .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
 
         assert!(
-            tui_consult_error_body(&err, ProviderKind::Ollama).contains("keyless"),
+            tui_consult_error_body(&err, &trio_auth_for_tests(ProviderKind::Ollama))
+                .contains("keyless"),
             "control: the hint IS correct while the session really is keyless"
         );
         assert!(
-            !tui_consult_error_body(&err, post_login_magi_kind(ProviderKind::Ollama))
-                .contains("keyless"),
+            !tui_consult_error_body(
+                &err,
+                &trio_auth_for_tests(post_login_magi_kind(ProviderKind::Ollama))
+            )
+            .contains("keyless"),
             "after /login the endpoint carries a credential, so pointing the user at a \
              keyless-configuration problem sends them to debug the wrong thing"
         );
@@ -5251,7 +5282,7 @@ mod tests {
             .await
             .expect_err("0 of 3 succeed ⇒ Err(InsufficientAgents)");
 
-        let body = tui_consult_error_body(&err, ProviderKind::OpenAiCompat);
+        let body = tui_consult_error_body(&err, &trio_auth_for_tests(ProviderKind::OpenAiCompat));
         assert!(
             !body.contains("keyless"),
             "openai-compat carries a credential: no hint: {body}"
@@ -5274,7 +5305,8 @@ mod tests {
         let err = MagiError::Provider(provider_err);
         let cap = 256;
 
-        let out = tui_consult_error_reply(&err, ProviderKind::OpenAiCompat, cap);
+        let out =
+            tui_consult_error_reply(&err, &trio_auth_for_tests(ProviderKind::OpenAiCompat), cap);
 
         assert!(
             out.text.len() <= cap,
@@ -5297,9 +5329,10 @@ mod tests {
             required: 2,
         };
         let cap = 4096;
-        let body = tui_consult_error_body(&err, ProviderKind::OpenAiCompat);
+        let body = tui_consult_error_body(&err, &trio_auth_for_tests(ProviderKind::OpenAiCompat));
 
-        let out = tui_consult_error_reply(&err, ProviderKind::OpenAiCompat, cap);
+        let out =
+            tui_consult_error_reply(&err, &trio_auth_for_tests(ProviderKind::OpenAiCompat), cap);
 
         assert_eq!(out.text, body, "well under the cap, nothing should change");
         assert!(
@@ -5323,7 +5356,8 @@ mod tests {
         let err = MagiError::Provider(provider_err);
         let cap = 4096;
 
-        let out = tui_consult_error_reply(&err, ProviderKind::OpenAiCompat, cap);
+        let out =
+            tui_consult_error_reply(&err, &trio_auth_for_tests(ProviderKind::OpenAiCompat), cap);
 
         assert!(
             !out.text.contains('\x1B'),

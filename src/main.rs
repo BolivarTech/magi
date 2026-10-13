@@ -2295,7 +2295,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         consult_magi.as_ref(),
         ConsultToolRegistration {
             auto_approve: magi_config.magi().auto_approve,
-            kind: registered_magi_kind(&magi_config, provider_kind),
+            auth: trio_auth(&magi_config, provider_kind, &section_keys, &endpoints),
             magi_endpoint_diverges: magi_config.magi_endpoint_diverges(),
             max_query_bytes: magi_config.effective_max_query_bytes(),
             output_cap: magi_config.effective_tool_result_cap(),
@@ -2343,7 +2343,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             classifier_notices: tui_classifier_notices,
             default_mode: tui_default_mode,
             untrusted_content: tui_untrusted_content,
-            magi_kind: registered_magi_kind(&magi_config, provider_kind),
+            magi_auth: trio_auth(&magi_config, provider_kind, &section_keys, &endpoints),
             max_query_bytes: magi_config.effective_max_query_bytes(),
             tool_result_cap: magi_config.effective_tool_result_cap(),
             clock_coverage: tui_clock_coverage_announcer,
@@ -2583,6 +2583,36 @@ fn section_endpoints(
 
 fn registered_magi_kind(cfg: &MagiConfig, principal_kind: ProviderKind) -> ProviderKind {
     resolve_magi_kind(cfg, principal_kind).unwrap_or(principal_kind)
+}
+
+/// How the trio authenticates, for explaining a rejected authentication (REQ-K06): the kind it
+/// runs under, where [`SectionKeys`](magi_rs::section_keys::SectionKeys) got its key and the
+/// redacted origin of `[magi]`'s endpoint.
+///
+/// # Arguments
+/// * `cfg` - the loaded configuration.
+/// * `principal_kind` - the env-resolved principal kind (see [`registered_magi_kind`]).
+/// * `keys` - the keys chosen once at startup.
+/// * `endpoints` - the resolved endpoints; only `[magi]`'s is read.
+///
+/// # Returns
+/// The [`TrioAuth`](crate::tools::consult::TrioAuth) every consult surface hands to the tool, the
+/// headless direct route and the TUI `/consult` command. The origin goes through [`redact_url`]
+/// and is empty when `[magi]`'s endpoint does not parse.
+fn trio_auth(
+    cfg: &MagiConfig,
+    principal_kind: ProviderKind,
+    keys: &magi_rs::section_keys::SectionKeys,
+    endpoints: &ResolvedEndpoints,
+) -> crate::tools::consult::TrioAuth {
+    let origin = magi_rs::endpoint_key::origin_url(endpoints.magi.as_str())
+        .map(|origin| redact_url(&origin))
+        .unwrap_or_default();
+    crate::tools::consult::TrioAuth::new(
+        registered_magi_kind(cfg, principal_kind),
+        keys.magi().source(),
+        origin,
+    )
 }
 
 /// BACKEND model for `kind`: the one a trio seat inherits without its own override, AND the
@@ -4619,11 +4649,12 @@ fn build_magi_orchestrator(
 struct ConsultToolRegistration {
     /// Whether the registered tool auto-approves an autonomous invocation.
     auto_approve: bool,
-    /// The `ProviderKind` under which the trio runs (REQ-A12c): construction-time, via
-    /// `ConsultTool::with_kind`, so `ConsultTool::execute` does not have to resolve it again on
-    /// each call. Determines whether a 401/403 from `MagiReport::failed_agents` is explained as
-    /// keyless configuration. See `tools::consult::keyless_auth_explanation`.
-    kind: ProviderKind,
+    /// How the trio authenticates (REQ-A12c, REQ-K06): construction-time, via
+    /// `ConsultTool::with_auth`, so `ConsultTool::execute` does not have to resolve it again on
+    /// each call. Determines how a 401/403 from `MagiReport::failed_agents` is explained: as
+    /// keyless configuration or by where the key came from. See
+    /// `tools::consult::keyless_auth_explanation`.
+    auth: crate::tools::consult::TrioAuth,
     /// `MagiConfig::magi_endpoint_diverges()`, resolved ONCE here (fix round 1, Finding 1) and
     /// passed to `ConsultTool::with_magi_endpoint_diverges`, same pattern as `kind`, same
     /// reason: `ConsultTool::execute` does not re-resolve it per call.
@@ -4660,7 +4691,7 @@ fn register_consult_tool_if_available(
 ) {
     let ConsultToolRegistration {
         auto_approve,
-        kind,
+        auth,
         magi_endpoint_diverges,
         max_query_bytes,
         output_cap,
@@ -4669,7 +4700,7 @@ fn register_consult_tool_if_available(
     if let Some(magi) = consult_magi {
         agent.register_tool(Box::new(
             crate::tools::consult::ConsultTool::new(magi.clone(), auto_approve)
-                .with_kind(kind)
+                .with_auth(auth)
                 .with_magi_endpoint_diverges(magi_endpoint_diverges)
                 .with_max_query_bytes(max_query_bytes)
                 .with_clock_coverage(clock_coverage)
@@ -5789,7 +5820,11 @@ struct HeadlessContext {
     /// REQ-A01b vocabulary, not just that it equals some literal —
     /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary` and its
     /// envelope-field sibling below assert on it directly.
+    #[cfg_attr(not(test), allow(dead_code))]
     provider_kind: ProviderKind,
+    /// How the trio authenticates (REQ-K06), computed once here from the same keys the trio was
+    /// built with; both dispatchers hand it to the consult surfaces.
+    magi_auth: crate::tools::consult::TrioAuth,
     /// The MAGI trio built with native providers (REQ-A01), or why it couldn't be
     /// (REQ-A06). Built ONCE here — both `run_query_subcommand` and
     /// `run_consult_subcommand` need the exact same result, so this is the shared
@@ -6382,12 +6417,14 @@ async fn prepare_headless(
     // context that led up to it from being thrown away with the run.
     logging?;
 
+    let magi_auth = trio_auth(&magi_config, provider_kind, &section_keys, &endpoints);
     Ok(HeadlessContext {
         workdir,
         memory,
         magi_config,
         provider,
         provider_kind,
+        magi_auth,
         consult_magi,
         resolved,
         prompt,
@@ -6582,7 +6619,7 @@ async fn run_query_subcommand(
         workdir,
         magi_config,
         provider,
-        provider_kind,
+        magi_auth,
         consult_magi,
         resolved,
         prompt,
@@ -6663,7 +6700,7 @@ async fn run_query_subcommand(
         consult_magi.as_ref(),
         ConsultToolRegistration {
             auto_approve: magi_config.magi().auto_approve,
-            kind: registered_magi_kind(&magi_config, provider_kind),
+            auth: magi_auth,
             magi_endpoint_diverges: magi_config.magi_endpoint_diverges(),
             max_query_bytes: magi_config.effective_max_query_bytes(),
             output_cap: magi_config.effective_tool_result_cap(),
@@ -6933,7 +6970,7 @@ async fn run_consult_subcommand(
     let HeadlessContext {
         magi_config,
         provider,
-        provider_kind,
+        magi_auth,
         consult_magi,
         resolved,
         prompt,
@@ -7027,7 +7064,7 @@ async fn run_consult_subcommand(
     // removes by construction. See `the_consult_subcommand_does_not_resolve_the_clock_itself`.
     let timeout = Some(consult_deadline(&timeout_decision));
     let runtime = MagiRuntimeParams {
-        kind: registered_magi_kind(&magi_config, provider_kind),
+        auth: magi_auth,
         classifier: classifier.as_ref(),
         configured_mode,
         untrusted_content,
@@ -16123,8 +16160,14 @@ model = \"nimble\"
             );
             let json = render_rotations(&report.rotations).to_string();
             let lines = rotation_lines(&report.rotations).join("\n");
-            let annotated =
-                crate::tools::consult::annotate_report_text(&report, ProviderKind::Ollama);
+            let annotated = crate::tools::consult::annotate_report_text(
+                &report,
+                &crate::tools::consult::TrioAuth::new(
+                    ProviderKind::Ollama,
+                    magi_rs::section_keys::KeySource::Absent,
+                    String::new(),
+                ),
+            );
             assert!(
                 json.contains("rescue-model") && lines.contains("rescue-model"),
                 "both renderers must have produced real telemetry: {json} / {lines}"
@@ -18185,7 +18228,14 @@ base_url = \"http://192.168.0.30:11434/v1\"
             };
             use magi_rs::magi::mode::{ModeResolution, ModeSource};
 
-            let annotated = annotate_report_text(report, ProviderKind::Ollama);
+            let annotated = annotate_report_text(
+                report,
+                &crate::tools::consult::TrioAuth::new(
+                    ProviderKind::Ollama,
+                    magi_rs::section_keys::KeySource::Absent,
+                    String::new(),
+                ),
+            );
             let section = completions_section(report);
             let truncated =
                 truncate_report(&annotated, magi_rs::magi::TOOL_RESULT_CAP_BYTES, &section);
@@ -18415,8 +18465,14 @@ base_url = \"http://192.168.0.30:11434/v1\"
                 "the clause was lost or cut: {detail}"
             );
 
-            let annotated =
-                crate::tools::consult::annotate_report_text(&report, ProviderKind::Ollama);
+            let annotated = crate::tools::consult::annotate_report_text(
+                &report,
+                &crate::tools::consult::TrioAuth::new(
+                    ProviderKind::Ollama,
+                    magi_rs::section_keys::KeySource::Absent,
+                    String::new(),
+                ),
+            );
             assert!(annotated.contains(&clause), "text surface: {annotated}");
             let audited_text = magi_rs::notices::audited_field(&annotated);
             assert!(
@@ -18503,7 +18559,14 @@ base_url = \"http://192.168.0.30:11434/v1\"
                 matches!(err, magi_core::error::MagiError::InsufficientAgents { .. }),
                 "{err}"
             );
-            let explained = crate::tools::consult::explain_magi_error(&err, ProviderKind::Ollama);
+            let explained = crate::tools::consult::explain_magi_error(
+                &err,
+                &crate::tools::consult::TrioAuth::new(
+                    ProviderKind::Ollama,
+                    magi_rs::section_keys::KeySource::Absent,
+                    String::new(),
+                ),
+            );
             assert!(explained.contains("insufficient agents"), "{explained}");
             assert!(
                 !explained.contains("reasoning channel"),
@@ -18861,7 +18924,11 @@ base_url = \"http://192.168.0.30:11434/v1\"
                 Some(&magi),
                 ConsultToolRegistration {
                     auto_approve: false,
-                    kind: ProviderKind::Ollama,
+                    auth: crate::tools::consult::TrioAuth::new(
+                        ProviderKind::Ollama,
+                        magi_rs::section_keys::KeySource::Absent,
+                        String::new(),
+                    ),
                     magi_endpoint_diverges: false,
                     max_query_bytes: magi_rs::magi::MAX_QUERY_BYTES,
                     output_cap: magi_rs::magi::TOOL_RESULT_CAP_BYTES,
@@ -18879,7 +18946,11 @@ base_url = \"http://192.168.0.30:11434/v1\"
                 None,
                 ConsultToolRegistration {
                     auto_approve: false,
-                    kind: ProviderKind::Ollama,
+                    auth: crate::tools::consult::TrioAuth::new(
+                        ProviderKind::Ollama,
+                        magi_rs::section_keys::KeySource::Absent,
+                        String::new(),
+                    ),
                     magi_endpoint_diverges: false,
                     max_query_bytes: magi_rs::magi::MAX_QUERY_BYTES,
                     output_cap: magi_rs::magi::TOOL_RESULT_CAP_BYTES,

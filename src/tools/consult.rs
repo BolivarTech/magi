@@ -27,6 +27,7 @@ use magi_rs::magi::{
     TRUNCATION_MARK,
 };
 use magi_rs::redact::{foreign_serde_label, redact_foreign_error, redact_foreign_text};
+use magi_rs::section_keys::KeySource;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -541,6 +542,30 @@ pub(crate) fn truncate_report_with_preserved_prefix(
 /// [`keyless_auth_explanation`] and this task's report.**
 const PROVIDER_AUTH_ERROR_MARKER: &str = "auth error: ";
 
+/// Who the trio runs as, for explaining a rejected authentication (REQ-A12c, REQ-K06).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrioAuth {
+    /// The kind the trio runs under.
+    pub(crate) kind: ProviderKind,
+    /// Where the trio's key came from.
+    #[allow(dead_code)] // Red stub
+    pub(crate) source: KeySource,
+    /// The redacted origin of `[magi]`'s endpoint; empty when unknown.
+    #[allow(dead_code)] // Red stub
+    pub(crate) origin_redacted: String,
+}
+
+impl TrioAuth {
+    /// Builds the description of the trio's authentication.
+    pub(crate) fn new(kind: ProviderKind, source: KeySource, origin_redacted: String) -> Self {
+        Self {
+            kind,
+            source,
+            origin_redacted,
+        }
+    }
+}
+
 /// The REUSABLE core of the keyless explanation (REQ-A12c, B3) — ONE single wording, consumed
 /// by the TWO reachable paths in this file: [`keyless_auth_explanation`] (POSITIVE evidence:
 /// the [`PROVIDER_AUTH_ERROR_MARKER`] present in the cause of ONE seat, via
@@ -596,9 +621,9 @@ const KEYLESS_AUTH_EXPLANATION: &str = "`[magi].kind = \"ollama\"` is keyless an
 /// case of "badly chosen kind", not the more likely one. Documented with full evidence in this
 /// task's report (round 2).
 #[must_use]
-fn keyless_auth_explanation(cause: &str, kind: ProviderKind) -> Option<&'static str> {
-    (kind == ProviderKind::Ollama && cause.contains(PROVIDER_AUTH_ERROR_MARKER))
-        .then_some(KEYLESS_AUTH_EXPLANATION)
+fn keyless_auth_explanation(cause: &str, auth: &TrioAuth) -> Option<String> {
+    (auth.kind == ProviderKind::Ollama && cause.contains(PROVIDER_AUTH_ERROR_MARKER))
+        .then(|| KEYLESS_AUTH_EXPLANATION.to_string())
 }
 
 /// Appends, at the end of the text already rendered by magi-core, one note for each seat in
@@ -619,10 +644,10 @@ fn keyless_auth_explanation(cause: &str, kind: ProviderKind) -> Option<&'static 
 /// (`ConsultTool::execute`, `analyze_direct`), the explicit TUI `/consult`
 /// (`src/tui/mod.rs::tui_consult_success_body`) calls this directly — it is the SAME annotation
 /// on the three surfaces (B3), never a fourth independent wording.
-pub(crate) fn annotate_report_text(report: &MagiReport, kind: ProviderKind) -> String {
+pub(crate) fn annotate_report_text(report: &MagiReport, auth: &TrioAuth) -> String {
     let mut text = report.report.clone();
     for (agent, cause) in &report.failed_agents {
-        if let Some(explanation) = keyless_auth_explanation(cause, kind) {
+        if let Some(explanation) = keyless_auth_explanation(cause, auth) {
             // The opening "rejected by authentication" is an ASSERTION, and here it is backed:
             // `keyless_auth_explanation` only returned `Some` because `cause` (the REAL cause
             // of this seat) contained `PROVIDER_AUTH_ERROR_MARKER` — positive evidence.
@@ -1211,7 +1236,7 @@ fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
 /// finding 2— the explicit TUI `/consult` (`src/tui/mod.rs::tui_consult_error_body`): the three
 /// surfaces share this single function instead of each one writing its own translation (B3).
 #[must_use]
-pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String {
+pub(crate) fn explain_magi_error(err: &MagiError, auth: &TrioAuth) -> String {
     // B11 — `redact_foreign_error`, NEVER `redact_url`, and the difference matters here:
     // `redact_url` assumes the ENTIRE input is a URL and fully redacts anything it cannot
     // traverse as such (`locate_userinfo` returns `Unparseable` for any string without `://`) —
@@ -1225,7 +1250,7 @@ pub(crate) fn explain_magi_error(err: &MagiError, kind: ProviderKind) -> String 
     // future variant indeed could interpolate a URL; it is always redacted, not only for
     // today's variants.
     let base = redact_foreign_error(err);
-    match (err, kind) {
+    match (err, auth.kind) {
         (MagiError::InsufficientAgents { .. }, ProviderKind::Ollama) => {
             // Narrowed (E-B, spec §6): a prior wording read as a diagnosis ("possible cause:
             // <keyless>") and sent a requester down the wrong path — their endpoint had already
@@ -1284,11 +1309,11 @@ pub struct ConsultTool {
     /// `ApprovalRequest` emitted). The explicit `/consult` TUI command path is NEVER gated
     /// regardless of this flag.
     auto_approve: bool,
-    /// The `ProviderKind` the trio runs under (REQ-A12c) — feeds [`keyless_auth_explanation`]
-    /// via [`report_to_consult_json`]. Defaults to [`ProviderKind::OpenAiCompat`] (see
-    /// [`Self::new`]), under which the explanation never applies — a caller that does not care
-    /// about this feature does not need to call [`Self::with_kind`].
-    kind: ProviderKind,
+    /// How the trio authenticates (REQ-A12c, REQ-K06) — feeds [`keyless_auth_explanation`]
+    /// via [`report_to_consult_json`]. Defaults to an OpenAI-compatible trio with its own key
+    /// (see [`Self::new`]), under which no extra hint is added — a caller that does not care
+    /// about this feature does not need to call [`Self::with_auth`].
+    auth: TrioAuth,
     /// `crate::config::MagiConfig::magi_endpoint_diverges()`, resolved ONCE at construction
     /// (fix round 1, Finding 1) — feeds `RunContext.endpoint_divergence` in [`Tool::execute`].
     /// Defaults to `false` (see [`Self::new`]).
@@ -1328,9 +1353,9 @@ impl ConsultTool {
     /// * `auto_approve` - When `true`, the tool opts out of the approval gate for autonomous launches (the agent tool loop will auto-approve it and emit a TUI notice). Default is `false` — the agent asks before each launch.
     ///
     /// # Returns
-    /// A new `ConsultTool` instance with a routing-tuned description and `kind` defaulted to
-    /// [`ProviderKind::OpenAiCompat`] — call [`Self::with_kind`] to declare the trio's real
-    /// kind when REQ-A12c's explanation should apply.
+    /// A new `ConsultTool` instance with a routing-tuned description and `auth` defaulted to an
+    /// OpenAI-compatible trio with its own key — call [`Self::with_auth`] to declare the trio's
+    /// real authentication when REQ-A12c's explanation should apply.
     pub fn new(magi: Arc<Magi>, auto_approve: bool) -> Self {
         Self {
             magi,
@@ -1341,9 +1366,9 @@ impl ConsultTool {
                 trivial, factual, or lookup questions — answer those directly."
                 .to_string(),
             auto_approve,
-            // Neutral: `keyless_auth_explanation` only ever fires under `Ollama`, so this
-            // default is equivalent to the feature being off until declared.
-            kind: ProviderKind::OpenAiCompat,
+            // Neutral: with an own key no wording adds a hint to the total-failure message, so
+            // this default is equivalent to the feature being off until declared.
+            auth: TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Own, String::new()),
             // Safe default: "no divergence" until a caller declares otherwise via
             // `Self::with_magi_endpoint_diverges`, mirroring `kind`'s own default.
             magi_endpoint_diverges: false,
@@ -1357,20 +1382,21 @@ impl ConsultTool {
         }
     }
 
-    /// Declares the `ProviderKind` the trio runs under (REQ-A12c).
+    /// Declares how the trio authenticates (REQ-A12c, REQ-K06): its kind, where its key came from
+    /// and the redacted origin it talks to.
     ///
     /// Builder-style (`self` by value) so production call sites read as `ConsultTool::new(magi,
-    /// auto_approve).with_kind(kind)` without a second mutable binding, and so the ~13 existing
+    /// auto_approve).with_auth(auth)` without a second mutable binding, and so the ~13 existing
     /// test call sites that do not care about this feature do not need to change at all.
     #[must_use]
-    pub fn with_kind(mut self, kind: ProviderKind) -> Self {
-        self.kind = kind;
+    pub(crate) fn with_auth(mut self, auth: TrioAuth) -> Self {
+        self.auth = auth;
         self
     }
 
     /// Declares whether the trio runs on an endpoint different from the principal provider
     /// (`crate::config::MagiConfig::magi_endpoint_diverges()`), fix round 1 Finding 1. Same
-    /// builder shape as [`Self::with_kind`], for the same reason.
+    /// builder shape as [`Self::with_auth`], for the same reason.
     #[must_use]
     pub fn with_magi_endpoint_diverges(mut self, diverges: bool) -> Self {
         self.magi_endpoint_diverges = diverges;
@@ -1378,7 +1404,7 @@ impl ConsultTool {
     }
 
     /// Declares the effective input cap (`MagiConfig::effective_max_query_bytes`, REQ-A11b).
-    /// Same builder shape as [`Self::with_kind`], for the same reason.
+    /// Same builder shape as [`Self::with_auth`], for the same reason.
     #[must_use]
     pub fn with_max_query_bytes(mut self, cap: usize) -> Self {
         self.max_query_bytes = cap;
@@ -1386,7 +1412,7 @@ impl ConsultTool {
     }
 
     /// Declares the effective output cap (`MagiConfig::effective_tool_result_cap`, REQ-A11b).
-    /// Same builder shape as [`Self::with_kind`], for the same reason.
+    /// Same builder shape as [`Self::with_auth`], for the same reason.
     #[must_use]
     pub fn with_output_cap(mut self, cap: usize) -> Self {
         self.output_cap = cap;
@@ -1394,7 +1420,7 @@ impl ConsultTool {
     }
 
     /// Declares the announcer for REQ-EE-5's per-activation clock-coverage warning (S-9). Same
-    /// builder shape as [`Self::with_kind`], for the same reason.
+    /// builder shape as [`Self::with_auth`], for the same reason.
     #[must_use]
     pub fn with_clock_coverage(mut self, announcer: Arc<ClockCoverageAnnouncer>) -> Self {
         self.clock_coverage = Some(announcer);
@@ -1495,7 +1521,7 @@ impl Tool for ConsultTool {
             joined = handle => match joined {
                 Ok(Ok(report)) => report,
                 Ok(Err(e)) => {
-                    return Err(ToolError::ExecutionError(explain_magi_error(&e, self.kind)))
+                    return Err(ToolError::ExecutionError(explain_magi_error(&e, &self.auth)))
                 }
                 Err(join_err) => {
                     return Err(ToolError::ExecutionError(format!(
@@ -1512,7 +1538,7 @@ impl Tool for ConsultTool {
         // end (see `a_keyless_auth_failure_reaches_the_ consult_report_end_to_end`) would
         // silently stop reaching the user, and a report cut right at the annotation boundary
         // could drop it either way.
-        let annotated = annotate_report_text(&report, self.kind);
+        let annotated = annotate_report_text(&report, &self.auth);
         // REQ-A11b/SC-A11d: bounds the string that becomes this call's `ToolResult` — the text
         // re-sent on every subsequent turn of the session — with the same truncation-level
         // vocabulary the JSON exposes via `report_truncated`.
@@ -1718,15 +1744,20 @@ mod tests {
         // `MagiError::Provider(provider_err).to_string()`.
         let cause = magi_core::error::MagiError::Provider(provider_err).to_string();
         assert_eq!(
-            keyless_auth_explanation(&cause, ProviderKind::Ollama),
+            keyless_auth_explanation(
+                &cause,
+                &TrioAuth::new(ProviderKind::Ollama, KeySource::Absent, String::new())
+            )
+            .as_deref(),
             Some(KEYLESS_AUTH_EXPLANATION),
             "a real magi-core auth rendering must be recognized: {cause:?}"
         );
     }
 
-    /// SC-A12f: under a kind that DOES carry a credential, the same real rendering is left
-    /// alone — a 401 there can be a genuinely bad credential, and reinterpreting it would send
-    /// the user to the wrong file.
+    /// SC-A12f: under a kind that DOES carry a credential, the same real rendering is never
+    /// explained as a keyless configuration — a 401 there can be a genuinely bad credential, and
+    /// that wording would send the user to the wrong file. It is explained by the key's source
+    /// instead (REQ-K06).
     #[test]
     fn keyless_auth_explanation_does_not_reinterpret_under_a_credentialed_kind() {
         let provider_err = magi_core::providers::claude::ClaudeProvider::map_status_to_error(
@@ -1737,10 +1768,12 @@ mod tests {
         );
         let cause = magi_core::error::MagiError::Provider(provider_err).to_string();
         for kind in [ProviderKind::OpenAiCompat, ProviderKind::Anthropic] {
-            assert_eq!(
-                keyless_auth_explanation(&cause, kind),
-                None,
-                "kind {kind:?} carries a credential: a 401 there is not reinterpreted"
+            let auth = TrioAuth::new(kind, KeySource::Own, String::new());
+            let text = keyless_auth_explanation(&cause, &auth).expect("explained by its source");
+            assert!(text.contains("MAGI_API_KEY"), "{text}");
+            assert_ne!(
+                text, KEYLESS_AUTH_EXPLANATION,
+                "kind {kind:?} carries a credential: a 401 there is not a keyless problem"
             );
         }
     }
@@ -1750,7 +1783,13 @@ mod tests {
     #[test]
     fn keyless_auth_explanation_ignores_causes_without_the_auth_marker() {
         let cause = "timeout: agent timed out after 90s";
-        assert_eq!(keyless_auth_explanation(cause, ProviderKind::Ollama), None);
+        assert_eq!(
+            keyless_auth_explanation(
+                cause,
+                &TrioAuth::new(ProviderKind::Ollama, KeySource::Absent, String::new())
+            ),
+            None
+        );
     }
 
     /// B11: the explanation is FIXED text — it never echoes `cause`, so a secret that somehow
@@ -1760,8 +1799,11 @@ mod tests {
     fn keyless_auth_explanation_never_echoes_the_raw_cause() {
         const CANARY: &str = "c4n4ry-s3cr3t";
         let cause = format!("{PROVIDER_AUTH_ERROR_MARKER}token={CANARY}");
-        let explanation =
-            keyless_auth_explanation(&cause, ProviderKind::Ollama).expect("marker present");
+        let explanation = keyless_auth_explanation(
+            &cause,
+            &TrioAuth::new(ProviderKind::Ollama, KeySource::Absent, String::new()),
+        )
+        .expect("marker present");
         assert!(!explanation.contains(CANARY), "{explanation}");
     }
 
@@ -1772,8 +1814,9 @@ mod tests {
     /// "auth error: x" text.
     #[tokio::test]
     async fn a_keyless_auth_failure_reaches_the_consult_report_end_to_end() {
-        let tool = ConsultTool::new(magi_caspar_fails_with_auth_error(), false)
-            .with_kind(ProviderKind::Ollama);
+        let tool = ConsultTool::new(magi_caspar_fails_with_auth_error(), false).with_auth(
+            TrioAuth::new(ProviderKind::Ollama, KeySource::Absent, String::new()),
+        );
         let out = tool
             .execute(
                 json!({"query": "should we migrate X to Y?"}),
@@ -1795,8 +1838,9 @@ mod tests {
     /// problem.
     #[tokio::test]
     async fn a_keyless_auth_failure_is_not_annotated_under_a_credentialed_kind() {
-        let tool = ConsultTool::new(magi_caspar_fails_with_auth_error(), false)
-            .with_kind(ProviderKind::OpenAiCompat);
+        let tool = ConsultTool::new(magi_caspar_fails_with_auth_error(), false).with_auth(
+            TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Own, String::new()),
+        );
         let out = tool
             .execute(
                 json!({"query": "should we migrate X to Y?"}),
@@ -1849,7 +1893,10 @@ mod tests {
             succeeded: 0,
             required: 2,
         };
-        let msg = explain_magi_error(&err, ProviderKind::Ollama);
+        let msg = explain_magi_error(
+            &err,
+            &TrioAuth::new(ProviderKind::Ollama, KeySource::Absent, String::new()),
+        );
         assert!(
             msg.contains("insufficient agents") || msg.contains("0 succeeded"),
             "the underlying message must survive, not be replaced: {msg}"
@@ -1892,7 +1939,7 @@ mod tests {
             required: 2,
         };
         for kind in [ProviderKind::OpenAiCompat, ProviderKind::Anthropic] {
-            let msg = explain_magi_error(&err, kind);
+            let msg = explain_magi_error(&err, &TrioAuth::new(kind, KeySource::Own, String::new()));
             assert!(
                 !msg.contains("keyless"),
                 "kind {kind:?} carries a credential: no hint: {msg}"
@@ -1909,7 +1956,10 @@ mod tests {
             size: 10_000,
             max: 5_000,
         };
-        let msg = explain_magi_error(&err, ProviderKind::Ollama);
+        let msg = explain_magi_error(
+            &err,
+            &TrioAuth::new(ProviderKind::Ollama, KeySource::Absent, String::new()),
+        );
         assert!(!msg.contains("keyless"), "{msg}");
         assert!(msg.contains("10000") || msg.contains("5000"), "{msg}");
     }
@@ -1928,7 +1978,10 @@ mod tests {
             succeeded: 0,
             required: 2,
         };
-        let msg = explain_magi_error(&err, ProviderKind::OpenAiCompat);
+        let msg = explain_magi_error(
+            &err,
+            &TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Own, String::new()),
+        );
         assert_eq!(
             msg,
             err.to_string(),
@@ -1942,8 +1995,9 @@ mod tests {
     #[tokio::test]
     async fn a_total_seat_failure_under_ollama_surfaces_the_keyless_hint_through_consult_tool_execute(
     ) {
-        let tool = ConsultTool::new(magi_all_fail_with_auth_errors(), false)
-            .with_kind(ProviderKind::Ollama);
+        let tool = ConsultTool::new(magi_all_fail_with_auth_errors(), false).with_auth(
+            TrioAuth::new(ProviderKind::Ollama, KeySource::Absent, String::new()),
+        );
         let err = tool
             .execute(
                 json!({"query": "should we migrate X to Y?"}),
@@ -1966,8 +2020,9 @@ mod tests {
     /// pass the positive test above too).
     #[tokio::test]
     async fn a_total_seat_failure_under_openai_compat_does_not_surface_the_keyless_hint() {
-        let tool = ConsultTool::new(magi_all_fail_with_auth_errors(), false)
-            .with_kind(ProviderKind::OpenAiCompat);
+        let tool = ConsultTool::new(magi_all_fail_with_auth_errors(), false).with_auth(
+            TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Own, String::new()),
+        );
         let err = tool
             .execute(
                 json!({"query": "should we migrate X to Y?"}),
@@ -1983,6 +2038,127 @@ mod tests {
             !msg.contains("keyless"),
             "openai-compat carries a credential: no hint: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // REQ-K06: the 401/403 wording depends on where the trio's key came from
+    // -----------------------------------------------------------------------
+
+    /// A real `ProviderError::Auth` rendering, as magi-core produces it for one seat.
+    fn auth_cause() -> String {
+        let e = magi_core::providers::claude::ClaudeProvider::map_status_to_error(
+            401,
+            "x",
+            vec![],
+            None,
+        );
+        magi_core::error::MagiError::Provider(e).to_string()
+    }
+
+    const ORIGIN: &str = "http://127.0.0.1:11434";
+
+    #[test]
+    fn a_keyless_openai_compat_seat_rejected_on_auth_names_magi_api_key_and_the_origin() {
+        let auth = TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Absent, ORIGIN.into());
+        let text = keyless_auth_explanation(&auth_cause(), &auth).expect("explained");
+        assert!(
+            text.contains("no API key was sent")
+                && text.contains(ORIGIN)
+                && text.contains("magi-rs vault set MAGI_API_KEY"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_own_key_rejected_says_it_must_belong_to_the_provider_of_the_trio_kind() {
+        for kind in [ProviderKind::OpenAiCompat, ProviderKind::Anthropic] {
+            let text = keyless_auth_explanation(
+                &auth_cause(),
+                &TrioAuth::new(kind, KeySource::Own, String::new()),
+            )
+            .expect("explained");
+            assert!(
+                text.contains("rejected the key in MAGI_API_KEY") && text.contains("[magi].kind"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inherited_key_rejected_names_the_variable_it_came_from() {
+        for (kind, var) in [
+            (ProviderKind::OpenAiCompat, "OPENAI_API_KEY"),
+            (ProviderKind::Anthropic, "ANTHROPIC_API_KEY"),
+        ] {
+            let text = keyless_auth_explanation(
+                &auth_cause(),
+                &TrioAuth::new(kind, KeySource::Inherited, String::new()),
+            )
+            .expect("explained");
+            assert!(
+                text.contains(&format!("inherited {var}"))
+                    && text.contains("magi-rs vault set MAGI_API_KEY"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_wording_echoes_the_cause() {
+        const CANARY: &str = "c4n4ry-s3cr3t";
+        let cause = format!("{PROVIDER_AUTH_ERROR_MARKER}token={CANARY}");
+        for (kind, source) in [
+            (ProviderKind::OpenAiCompat, KeySource::Absent),
+            (ProviderKind::OpenAiCompat, KeySource::Own),
+            (ProviderKind::OpenAiCompat, KeySource::Inherited),
+            (ProviderKind::Anthropic, KeySource::Inherited),
+        ] {
+            let text =
+                keyless_auth_explanation(&cause, &TrioAuth::new(kind, source, ORIGIN.into()))
+                    .expect("explained");
+            assert!(!text.contains(CANARY), "{text}");
+        }
+    }
+
+    /// 0 of 3 seats on a keyless openai-compat trio: the reason comes from the key's source, not
+    /// from the cause magi-core discards.
+    #[test]
+    fn a_total_failure_of_a_keyless_openai_compat_trio_names_magi_api_key() {
+        let err = MagiError::InsufficientAgents {
+            succeeded: 0,
+            required: 2,
+        };
+        let text = explain_magi_error(
+            &err,
+            &TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Absent, ORIGIN.into()),
+        );
+        assert!(
+            text.starts_with(&redact_foreign_error(&err).to_string()),
+            "the base message comes first: {text}"
+        );
+        assert!(
+            text.contains("MAGI_API_KEY") && text.contains(ORIGIN),
+            "{text}"
+        );
+    }
+
+    /// The same, end to end through `ConsultTool::execute`.
+    #[tokio::test]
+    async fn a_total_failure_of_a_keyless_trio_reaches_the_tool_result_naming_magi_api_key() {
+        let tool = ConsultTool::new(magi_all_fail_with_auth_errors(), false).with_auth(
+            TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Absent, ORIGIN.into()),
+        );
+        let err = tool
+            .execute(
+                json!({"query": "should we migrate X to Y?"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("0 of 3 succeed");
+        let ToolError::ExecutionError(msg) = err else {
+            panic!("expected ExecutionError")
+        };
+        assert!(msg.contains("magi-rs vault set MAGI_API_KEY"), "{msg}");
     }
 
     /// `ConsultTool` with `auto_approve = false` (default) MUST require approval.

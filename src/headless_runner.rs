@@ -43,7 +43,6 @@ use magi_rs::headless::types::{
     AppliedCaps, ErrorKind, ErrorPayload, RunOutcome, StopReason, Timings, ToolCallRecord,
     TranscriptEntry, Usage,
 };
-use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::mode::{resolve_mode_guarded, ModeClassifier, ModeError, ModeSources};
 use magi_rs::magi::{BudgetTelemetry, TimeoutDecision};
 use magi_rs::redact::redact_foreign_text;
@@ -56,7 +55,7 @@ use crate::task::AbortOnDrop;
 use crate::tools::consult::{
     annotate_report_text, check_query_size, completions_section, explain_magi_error,
     report_to_consult_json, truncate_report, ClockCoverageAnnouncer, RunContext,
-    StructuredVerdicts,
+    StructuredVerdicts, TrioAuth,
 };
 
 /// Dedup key for [`NoticeSink::once`] — the SC-A04d warning, distinct from the
@@ -222,7 +221,7 @@ pub(crate) async fn resolve_direct_mode(
 /// new consumers become a **field** each, not an 11th/12th parameter.
 ///
 /// # Fields
-/// - `kind` — the [`ProviderKind`] the trio runs under; feeds [`report_to_consult_json`]/[`explain_magi_error`] for provider-specific guidance (REQ-A12c).
+/// - `auth` — how the trio authenticates (its kind, the source of its key and its redacted origin); feeds [`report_to_consult_json`]/[`explain_magi_error`] for provider-specific guidance (REQ-A12c).
 /// - `classifier` — consulted **only** when neither a call's `explicit_mode` nor `configured_mode` is set, via [`resolve_mode_guarded`] (REQ-A07c).
 /// - `configured_mode` — `[magi].default_mode`, if declared; wins over the classification level, below a call's `explicit_mode` (REQ-A15).
 /// - `untrusted_content` — REQ-A07d's guard: with this `true` and no mode declared by any other level, the run fails closed ([`ConsultRunError::UntrustedContentRequiresMode`]) instead of classifying hostile content.
@@ -238,8 +237,8 @@ pub(crate) async fn resolve_direct_mode(
 /// because it has NO production caller left. Borrowing its justification for a struct that does
 /// have one invites the next reader to conclude this is test scaffolding and gate it away.
 pub(crate) struct MagiRuntimeParams<'a> {
-    /// The `ProviderKind` the trio runs under (REQ-A12c).
-    pub(crate) kind: ProviderKind,
+    /// How the trio authenticates (REQ-A12c, REQ-K06).
+    pub(crate) auth: TrioAuth,
     /// Consulted only when no mode was declared by any other level (REQ-A07c).
     pub(crate) classifier: &'a dyn ModeClassifier,
     /// `[magi].default_mode`, if declared (REQ-A15).
@@ -456,7 +455,7 @@ async fn analyze_direct(
             // The annotation (REQ-A12c) is applied BEFORE truncating —
             // `report_to_consult_json` renders `truncated.text` verbatim, so the
             // annotation step has to happen here, not inside `truncate_report`.
-            let annotated = annotate_report_text(&report, runtime.kind);
+            let annotated = annotate_report_text(&report, &runtime.auth);
             // REQ-A11b/SC-A11d (the `magi consult` headless direct route): bounds
             // the report the same way the tool-loop route does, with the SAME
             // truncation-level vocabulary surfaced via `report_truncated`.
@@ -486,7 +485,7 @@ async fn analyze_direct(
         }
         Ok(Err(e)) => Err(ConsultRunError::Runtime(explain_magi_error(
             &e,
-            runtime.kind,
+            &runtime.auth,
         ))),
         Err(join_err) => Err(ConsultRunError::Runtime(format!(
             "consult crashed: {join_err}"
@@ -1458,6 +1457,8 @@ mod payload_audit_guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use magi_rs::magi::kind::ProviderKind;
+    use magi_rs::section_keys::KeySource;
 
     use anyhow::Result;
     use async_trait::async_trait;
@@ -1620,7 +1621,7 @@ mod tests {
         static CFG: std::sync::OnceLock<MagiConfig> = std::sync::OnceLock::new();
         static SINK: std::sync::OnceLock<RecordingNoticeSink> = std::sync::OnceLock::new();
         MagiRuntimeParams {
-            kind: ProviderKind::OpenAiCompat,
+            auth: TrioAuth::new(ProviderKind::OpenAiCompat, KeySource::Own, String::new()),
             classifier: &NeverClassifier,
             configured_mode: None,
             untrusted_content: false,
