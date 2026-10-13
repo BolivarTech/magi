@@ -422,6 +422,31 @@ fn decide_judges_the_magi_key_shape_against_the_real_trio_kind() {
         !log.contains("does not look like a key"),
         "a well-formed key was flagged:\n{log}"
     );
+
+    // Positive control: the same key under an OpenAI-compatible trio IS flagged, so the absence
+    // above is the shape check's verdict and not an empty or missing log.
+    let mut twin_server = mockito::Server::new();
+    let _twin = twin_server
+        .mock("POST", "/v1/systemone")
+        .with_status(200)
+        .with_body(OK_BODY)
+        .create();
+    let twin = workspace(&format!(
+        "provider = \"ollama\"\n[magi]\nkind = \"openai-compat\"\n[decision]\nmodel = \"nimble\"\nbase_url = \"{}\"\n",
+        twin_server.url()
+    ));
+    let (code, _out, err) = decide(
+        &twin,
+        &[],
+        INPUT,
+        &[("MAGI_API_KEY", "sk-ant-toy-0001")], // allow-secret-scan
+    );
+    assert_eq!(code, EXIT_OK, "{err}");
+    let twin_log = run_log(&twin);
+    assert!(
+        twin_log.contains("does not look like a key"),
+        "a mis-shaped key was not flagged:\n{twin_log}"
+    );
 }
 
 /// D-PM-1 / K-S7: an Anthropic principal whose root shares the decision origin lends OPENAI_API_KEY.

@@ -8075,8 +8075,8 @@ mod tests {
         }
     }
 
-    /// The OpenAI-compatible key also serves the MAGI trio (`EnvVaultCredentials` reads it), and the
-    /// help says so.
+    /// The OpenAI-compatible key also serves the MAGI trio (`SectionKeys` hands it over on the root
+    /// endpoint's origin only), and the help says so.
     #[test]
     fn vault_set_help_says_the_openai_key_serves_the_magi_trio() {
         let help = all_help_screens()
@@ -9653,6 +9653,29 @@ mod tests {
                 "{surface}"
             );
         }
+    }
+
+    /// The post-`/login` rebuild is always Anthropic, so the TUI may hand it only an Anthropic
+    /// trio's own key: `run()` takes it from `post_login_own_key`, never from the trio key directly
+    /// (a filter on the source alone sent an OpenRouter key to Anthropic after a login).
+    #[test]
+    fn the_tui_hands_the_login_rebuild_only_the_key_post_login_own_key_allows() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once(FIRST_TEST_MODULE)
+            .expect("this file has a test module");
+        let start = production.find("async fn run(").expect("run");
+        let body = production.get(start..).unwrap_or("");
+        let end = body
+            .get(1..)
+            .and_then(|r| r.find("\nasync fn "))
+            .map_or(body.len(), |i| i + 1);
+        let run_body = code_lines_only(body.get(..end).unwrap_or(body));
+        let line = run_body
+            .lines()
+            .find(|l| l.trim_start().starts_with("magi_own_key:"))
+            .expect("run() fills magi_own_key");
+        assert!(line.contains(".post_login_own_key()"), "{line}");
     }
 
     /// Every surface hands the retained-key entries to its log (REQ-K09): they are a diagnostic
