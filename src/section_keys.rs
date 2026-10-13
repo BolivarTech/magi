@@ -47,6 +47,18 @@ pub const MAGI_KEY_ENV: &str = "MAGI_API_KEY";
 /// Environment variable and vault entry of the embedder's own key (REQ-K02).
 pub const EMBEDDING_KEY_ENV: &str = "EMBEDDING_API_KEY";
 
+/// Environment variable and vault entry of the decision endpoint's own key (REQ-D04).
+const DECISION_KEY_ENV: &str = "DECISION_API_KEY";
+
+/// The OpenAI-compatible key every OpenAI-compatible section may inherit on the root's origin.
+const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// The Anthropic key an Anthropic trio falls back to (REQ-K07).
+const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+
+/// What a retained entry shows when the section's endpoint has no parsable origin.
+const UNPARSABLE_ORIGIN: &str = "(endpoint without a valid origin)";
+
 /// The API keys read (and scrubbed) from the environment at startup; never the passphrase.
 ///
 /// Values are kept as read: blank ones are filtered where they are used ([`env_or_vault`]).
@@ -161,6 +173,16 @@ impl std::fmt::Debug for SectionKey {
     }
 }
 
+impl SectionKey {
+    /// A section without a key.
+    fn absent() -> SectionKey {
+        SectionKey {
+            value: None,
+            source: KeySource::Absent,
+        }
+    }
+}
+
 /// A section that did not inherit `OPENAI_API_KEY` because its origin differs from the root's
 /// (REQ-K09).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,8 +249,87 @@ impl SectionKeys {
     /// # Returns
     /// The chosen keys and the sections whose inheritance was refused.
     pub fn resolve(inputs: &KeyInputs<'_>) -> SectionKeys {
-        let _ = inputs;
-        todo!("T4 Green")
+        let env = inputs.env;
+        let store = inputs.secret_store;
+        let read = |name: &str, value: &Option<String>| {
+            env_or_vault(name, value.as_deref(), store).map(|r| r.value)
+        };
+        let openai = read(OPENAI_KEY_ENV, &env.openai_key);
+        let mut retained = Vec::new();
+        // One OpenAI-compatible section, decided by a single `select_api_key` call (REQ-K03): an
+        // own key wins; otherwise `OPENAI_API_KEY` only on the root's origin; a refusal by origin
+        // is recorded as a `RetainedKey` (REQ-K09). It lives inside `resolve` so that `resolve`
+        // stays the only caller of `select_api_key` (the single-source guard checks it).
+        let mut openai_section =
+            |variable: &'static str, own: Option<String>, endpoint: Option<&str>| -> SectionKey {
+                if let Some(own) = own {
+                    return SectionKey {
+                        value: Some(own),
+                        source: KeySource::Own,
+                    };
+                }
+                let Some(endpoint) = endpoint else {
+                    return SectionKey::absent();
+                };
+                match crate::endpoint_key::select_api_key(
+                    None,
+                    openai.as_deref(),
+                    inputs.root_endpoint,
+                    endpoint,
+                ) {
+                    Some(key) => SectionKey {
+                        value: Some(key),
+                        source: KeySource::Inherited,
+                    },
+                    None => {
+                        if openai.is_some() {
+                            let origin = crate::endpoint_key::origin_url(endpoint)
+                                .unwrap_or_else(|| UNPARSABLE_ORIGIN.to_string());
+                            retained.push(RetainedKey {
+                                variable,
+                                origin_redacted: crate::redact::redact_url(&origin),
+                            });
+                        }
+                        SectionKey::absent()
+                    }
+                }
+            };
+        let magi_own = read(MAGI_KEY_ENV, &env.magi_key);
+        let magi = match inputs.magi_kind {
+            crate::magi::kind::ProviderKind::OpenAiCompat => {
+                openai_section(MAGI_KEY_ENV, magi_own, inputs.magi_endpoint)
+            }
+            crate::magi::kind::ProviderKind::Anthropic => match magi_own {
+                Some(own) => SectionKey {
+                    value: Some(own),
+                    source: KeySource::Own,
+                },
+                None => match read(ANTHROPIC_KEY_ENV, &env.anthropic_key) {
+                    Some(k) => SectionKey {
+                        value: Some(k),
+                        source: KeySource::Inherited,
+                    },
+                    None => SectionKey::absent(),
+                },
+            },
+            crate::magi::kind::ProviderKind::Ollama => SectionKey::absent(),
+        };
+        let embedding = openai_section(
+            EMBEDDING_KEY_ENV,
+            read(EMBEDDING_KEY_ENV, &env.embedding_key),
+            inputs.embedding_endpoint,
+        );
+        let decision = openai_section(
+            DECISION_KEY_ENV,
+            read(DECISION_KEY_ENV, &env.decision_key),
+            inputs.decision_endpoint,
+        );
+        SectionKeys {
+            magi,
+            embedding,
+            decision,
+            retained,
+        }
     }
 
     /// The trio's key.

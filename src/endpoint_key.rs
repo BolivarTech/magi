@@ -21,6 +21,12 @@ use reqwest::Url;
 ///
 /// Returns `None` when the URL does not parse or has no host.
 fn origin_of(raw: &str) -> Option<(String, String, u16)> {
+    origin_parts(raw).map(|(scheme, host, port, _)| (scheme, host, port))
+}
+
+/// The one parse behind [`origin_of`] and [`origin_url`]: scheme, host (no trailing dot),
+/// effective port, and whether that port is explicit (not the scheme's default).
+fn origin_parts(raw: &str) -> Option<(String, String, u16, bool)> {
     let url = Url::parse(raw).ok()?;
     let host = url.host_str()?.trim_end_matches('.');
     if host.is_empty() {
@@ -30,6 +36,7 @@ fn origin_of(raw: &str) -> Option<(String, String, u16)> {
         url.scheme().to_string(),
         host.to_string(),
         url.port_or_known_default()?,
+        url.port().is_some(),
     ))
 }
 
@@ -68,8 +75,12 @@ pub fn same_origin(a: &str, b: &str) -> bool {
 /// # Returns
 /// The origin, or `None` when the URL does not parse or has no host.
 pub fn origin_url(raw: &str) -> Option<String> {
-    let _ = raw;
-    todo!("T4 Green")
+    let (scheme, host, port, explicit) = origin_parts(raw)?;
+    Some(if explicit {
+        format!("{scheme}://{host}:{port}")
+    } else {
+        format!("{scheme}://{host}")
+    })
 }
 
 /// Keeps a key only when it is not blank.

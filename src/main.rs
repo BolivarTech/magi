@@ -2391,10 +2391,10 @@ struct EnvVaultCredentials<'a> {
 /// (REQ-K01, REQ-K07): no seat re-reads the environment or the vault.
 impl Credentials for magi_rs::section_keys::SectionKeys {
     fn openai(&self) -> Option<String> {
-        todo!("T4 Green")
+        self.magi().value().map(str::to_string)
     }
     fn anthropic(&self) -> Option<String> {
-        todo!("T4 Green")
+        self.magi().value().map(str::to_string)
     }
 }
 
