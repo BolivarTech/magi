@@ -394,6 +394,9 @@ impl SectionKeys {
     }
 }
 
+/// Prefix of an Anthropic API key, the shape the rebuilt trio expects.
+const ANTHROPIC_KEY_PREFIX: &str = "sk-ant-";
+
 /// Key the trio uses after `/login` rebuilds it as Anthropic: the trio's own key wins
 /// (REQ-K07); otherwise the key the login just stored. Blank counts as absent.
 ///
@@ -406,8 +409,10 @@ impl SectionKeys {
 ///
 /// Complexity: O(n) in the key length (trim).
 pub fn post_login_trio_key(own_magi_key: Option<&str>, login_key: String) -> String {
-    let _ = (own_magi_key, login_key);
-    todo!("Red stub")
+    own_magi_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map_or(login_key, str::to_string)
 }
 
 /// True when the trio, rebuilt as Anthropic after `/login`, would use an own key that is not
@@ -422,8 +427,10 @@ pub fn post_login_trio_key(own_magi_key: Option<&str>, login_key: String) -> Str
 ///
 /// Complexity: O(n) in the key length (trim).
 pub fn post_login_shape_mismatch(own_magi_key: Option<&str>) -> bool {
-    let _ = own_magi_key;
-    todo!("Red stub")
+    own_magi_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .is_some_and(|key| !key.starts_with(ANTHROPIC_KEY_PREFIX))
 }
 
 #[cfg(test)]

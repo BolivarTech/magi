@@ -2354,6 +2354,9 @@ pub struct TuiMagiRuntimeConfig {
     pub decision_client: Option<Arc<dyn DecisionClient>>,
     /// Why `decision_client` is `None`, so `/decide` can name the missing entry and its remedy.
     pub decision_build_error: Option<DecisionError>,
+    /// The trio's own key, already chosen by the section keys (`Some` only when it is the
+    /// trio's own, never inherited). The post-`/login` rebuild prefers it to the login key.
+    pub magi_own_key: Option<String>,
 }
 
 /// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
@@ -2387,6 +2390,10 @@ pub struct TuiConsultWiring {
     /// inert after the rebuild is SAID, not silent (CP2 seg1 loop 2, Caspar; Loop 1 round 1).
     pub post_login_notices: Vec<Notice>,
 }
+
+/// Shown when `/login` rebuilds the trio on Anthropic but the trio's own key is not shaped like
+/// an Anthropic key. Names the variable and the setting, never the key.
+const POST_LOGIN_SHAPE_NOTICE: &str = "MAGI_API_KEY does not look like an Anthropic key, but the MAGI trio now runs on Anthropic after login. Check MAGI_API_KEY and [magi].kind.";
 
 /// Resolves the wall-clock ceiling used to rebuild the MAGI trio's native
 /// `ClaudeProvider` after `/login` (I-5) — the SAME precedence
@@ -2609,6 +2616,7 @@ pub async fn run_tui_ext(
         clock_coverage,
         decision_client,
         decision_build_error,
+        magi_own_key,
     } = magi_runtime;
 
     let original_hook = std::panic::take_hook();
@@ -2991,8 +2999,24 @@ pub async fn run_tui_ext(
                                             // block used to build `Magi::new` directly, so every
                                             // configured `[magi]` reasoning/cap key silently
                                             // stopped applying the moment a user logged in.
+                                            // REQ-K07: the trio's own key wins over the login
+                                            // key; a non-Anthropic-shaped one is said, not blocked.
+                                            if magi_rs::section_keys::post_login_shape_mismatch(
+                                                magi_own_key.as_deref(),
+                                            ) {
+                                                let _ = response_tx
+                                                    .send(AgentResponse::Notice(
+                                                        POST_LOGIN_SHAPE_NOTICE.to_string(),
+                                                    ))
+                                                    .await;
+                                            }
+                                            let trio_key =
+                                                magi_rs::section_keys::post_login_trio_key(
+                                                    magi_own_key.as_deref(),
+                                                    api_key,
+                                                );
                                             match rebuild_consult_trio_after_login(
-                                                api_key,
+                                                trio_key,
                                                 model,
                                                 configured_agent_timeout_secs,
                                                 &completion,
