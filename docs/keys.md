@@ -29,7 +29,7 @@ For the trio (when `[magi].kind` is `openai-compat`), the embedder and the decis
 
 The main endpoint here is the root one: `OPENAI_BASE_URL` if set, else the root `base_url`, else the built-in default. That holds whatever your main provider is, Anthropic included. A section with no `base_url` of its own inherits the root one, so it always has the same origin and shares the key.
 
-Two addresses have the same origin when scheme, host and port match. The port may be implicit (`https` means 443). Capitalization and a trailing dot on the host do not matter. The path does not count. These are different origins: `http` against `https`, `localhost` against `127.0.0.1`, the same host on another port, a host that only shares a prefix or suffix with the other, and any URL that does not parse. In every one of those cases `OPENAI_API_KEY` stays home.
+Two addresses have the same origin when scheme, host and port match. The port may be implicit (`https` means 443). Capitalization and a trailing dot on the host do not matter. The path does not count. These are different origins: `http` against `https`, `localhost` against `127.0.0.1`, the same host on another port, a host that only shares a prefix or suffix with the other, an IPv4 address against its IPv6-mapped form (`127.0.0.1` against `[::ffff:127.0.0.1]`), and any URL that does not parse. In every one of those cases `OPENAI_API_KEY` stays home.
 
 Because the path is ignored, a gateway that routes several services by path is a single origin, and every section pointed at it receives the main key. If you do not want that, declare the section's own key.
 
