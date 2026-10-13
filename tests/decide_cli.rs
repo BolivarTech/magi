@@ -396,6 +396,34 @@ fn an_anthropic_principal_never_lends_its_key() {
     m.assert();
 }
 
+/// The key-shape check judges `MAGI_API_KEY` against the trio's real kind on every surface: an
+/// Anthropic trio with an Anthropic key is well formed and `decide` must not log otherwise.
+#[test]
+fn decide_judges_the_magi_key_shape_against_the_real_trio_kind() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("POST", "/v1/systemone")
+        .with_status(200)
+        .with_body(OK_BODY)
+        .create();
+    let ws = workspace(&format!(
+        "provider = \"ollama\"\n[magi]\nkind = \"anthropic\"\n[decision]\nmodel = \"nimble\"\nbase_url = \"{}\"\n",
+        server.url()
+    ));
+    let (code, _out, err) = decide(
+        &ws,
+        &[],
+        INPUT,
+        &[("MAGI_API_KEY", "sk-ant-toy-0001")], // allow-secret-scan
+    );
+    assert_eq!(code, EXIT_OK, "{err}");
+    let log = run_log(&ws);
+    assert!(
+        !log.contains("does not look like a key"),
+        "a well-formed key was flagged:\n{log}"
+    );
+}
+
 /// D-PM-1 / K-S7: an Anthropic principal whose root shares the decision origin lends OPENAI_API_KEY.
 #[test]
 fn an_anthropic_principal_lends_the_openai_key_on_the_roots_origin() {
