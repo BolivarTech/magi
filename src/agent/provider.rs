@@ -1360,6 +1360,35 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    /// REQ-T01: an OpenAI-compatible request with no tools carries no `tools` field at all.
+    #[test]
+    fn an_openai_request_without_tools_omits_the_field() {
+        let req = OpenAiRequest {
+            model: "m".to_string(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            stream: true,
+            stream_options: OpenAiStreamOptions {
+                include_usage: true,
+            },
+        };
+        assert!(serde_json::to_value(&req).unwrap().get("tools").is_none());
+    }
+
+    /// REQ-T01: an Anthropic request with no tools carries no `tools` field at all.
+    #[test]
+    fn an_anthropic_request_without_tools_omits_the_field() {
+        let req = AnthropicRequest {
+            model: "m".to_string(),
+            messages: Vec::new(),
+            max_tokens: 1,
+            tools: Vec::new(),
+            stream: true,
+            system: None,
+        };
+        assert!(serde_json::to_value(&req).unwrap().get("tools").is_none());
+    }
+
     #[test]
     fn test_parse_tool_input_empty_is_object() {
         // B-S1: empty / whitespace accumulates to a valid empty object.

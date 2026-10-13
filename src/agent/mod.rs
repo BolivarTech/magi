@@ -3120,6 +3120,56 @@ mod tests {
         }
     }
 
+    /// Records how many tools each request declared; answers with plain text so the turn ends.
+    struct ToolCountingProvider {
+        seen: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ToolCountingProvider {
+        async fn stream_messages(
+            &self,
+            _messages: &[Message],
+            tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            self.seen.lock().unwrap().push(tools.len());
+            let chunks = vec![
+                Ok(ResponseChunk::TextDelta("ok".to_string())),
+                Ok(ResponseChunk::MessageDone(Message::assistant("ok"))),
+            ];
+            Ok(Box::pin(stream::iter(chunks)))
+        }
+    }
+
+    async fn tools_declared_with_cap(cap: usize) -> Vec<usize> {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = Agent::new(Arc::new(ToolCountingProvider { seen: seen.clone() }));
+        let (tool, _executed) = TrackingTool::new("safe_op", true);
+        agent.register_tool(Box::new(tool));
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let config = AgentRunConfig {
+            max_tool_calls: cap,
+            ..AgentRunConfig::default()
+        };
+        let reply = agent.query_streaming("hi", tx, config).await.unwrap();
+        assert_eq!(reply, "ok");
+        let seen = seen.lock().unwrap().clone();
+        seen
+    }
+
+    /// REQ-T01: a zero cap sends no tools at all, so a model without tool support can answer.
+    #[tokio::test]
+    async fn a_zero_tool_cap_declares_no_tools_to_the_provider() {
+        assert_eq!(tools_declared_with_cap(0).await, vec![0]);
+    }
+
+    /// REQ-T01: any other cap keeps declaring every registered tool.
+    #[tokio::test]
+    async fn a_non_zero_tool_cap_declares_every_registered_tool() {
+        assert_eq!(tools_declared_with_cap(15).await, vec![1]);
+    }
+
     /// Adversarial: a safe tool (`requires_approval() = false`) is auto-approved
     /// and executes even when a blanket-denier `approval_tx` is connected.
     /// No `ApprovalRequest` must be emitted for the safe tool.
