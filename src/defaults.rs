@@ -1567,7 +1567,20 @@ mod tests {
         // The two scan predicates, defined ONCE so the control below and the real assertions
         // run the same code: a control that re-states the planted text instead of calling the
         // predicate is a tautology, and stays green when the predicate is broken.
-        let names_an_api_key = |text: &str| text.to_lowercase().contains("api_key");
+        // A key ASSIGNMENT, active or commented (`api_key = ...`, `# openai_api_key = ...`): that
+        // is what would put a credential in the file. Prose naming a variable such as the trio's
+        // key does not assign anything and stays allowed, so each section can say which variable
+        // holds its key.
+        let names_an_api_key = |text: &str| {
+            text.lines().any(|line| {
+                let t = line.trim_start();
+                let t = t.strip_prefix('#').unwrap_or(t).trim_start();
+                t.split_once('=').is_some_and(|(key, _)| {
+                    let key = key.trim();
+                    !key.contains(' ') && key.to_lowercase().contains("api_key")
+                })
+            })
+        };
         let carries_a_key_prefix = |text: &str| text.contains("sk-");
 
         // Control 2: each predicate fires on material that SHOULD be caught, planted into the
@@ -1580,13 +1593,28 @@ mod tests {
             "the api_key predicate must fire on a planted field, or it detects nothing at all"
         );
         assert!(
+            names_an_api_key(&format!(
+                "{s}
+# openai_api_key = \"x\"
+"
+            )),
+            "a commented-out key assignment must be caught too"
+        );
+        assert!(
+            !names_an_api_key(
+                "# Set MAGI_API_KEY in the environment.
+"
+            ),
+            "prose naming a key variable assigns nothing and must not be caught"
+        );
+        assert!(
             carries_a_key_prefix(&planted_prefix),
             "the sk- predicate must fire on a planted prefix, or it detects nothing at all"
         );
 
         assert!(
             !names_an_api_key(&s),
-            "docs/magi.toml.example must not contain 'api_key'"
+            "docs/magi.toml.example must not assign an api_key"
         );
         assert!(
             !carries_a_key_prefix(&s),
