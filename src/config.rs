@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.23.0
-// Date: 2026-10-11
+// Version: 0.24.0
+// Date: 2026-10-13
 
 //! Persistent magi-rs configuration from `magi.toml`. NON-SECRET only — API keys never live
 //! here (env/keyring/key.txt).

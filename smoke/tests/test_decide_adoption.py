@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 0.23.0
+# Version: 0.24.0
 # Date: 2026-10-13
 """The adoption scenario D14: registration, verbatim texts and judging helpers."""
 

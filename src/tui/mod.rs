@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.23.0
-// Date: 2026-10-11
+// Version: 0.24.0
+// Date: 2026-10-13
 
 // The strict lint set of `src/logging/`, applied HERE because this file
 // implements `NoticeSink` and its contract says an implementation must not

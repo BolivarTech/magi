@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.23.0
-// Date: 2026-10-12
+// Version: 0.24.0
+// Date: 2026-10-13
 
 //! Same-origin comparison and API key selection for every section that can point at its own endpoint.
 #![deny(missing_docs)]
