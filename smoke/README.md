@@ -277,7 +277,7 @@ in `src/defaults.rs` changes.
 ### The per-section key scenarios (v0.24.0)
 
 K1 to K3 add seven assertions (2 + 3 + 2). The harness now promises 42 scenarios and 125
-assertions (D14 below raises that to 43 and 127).
+assertions; the adoption scenario D14 raises that to 43 and 127.
 
 | Id | Invariant | Without its environment |
 |---|---|---|
@@ -296,7 +296,7 @@ answered 429 or 404 and would have made the scenario intermittent.
 
 **The interactive window is not driven.** The withheld-key notice is routed by the same function in
 every surface, so K1 runs headless, where the screen is `stdout` plus `stderr`. A terminal
-mouth that differed would be a unit-test property of that function, not something this harness can
+route that differed would be a unit-test property of that function, not something this harness can
 see without a pseudo-terminal.
 
 **Mutations.** Removing the shape warning from `SectionKeys::startup_notices` must turn K2 red;
