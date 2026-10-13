@@ -342,8 +342,10 @@ impl SectionKeys {
         let shape_mismatch = magi_own
             .as_deref()
             .filter(|key| {
-                key.starts_with(ANTHROPIC_KEY_PREFIX)
-                    != (inputs.magi_kind == crate::magi::kind::ProviderKind::Anthropic)
+                contradicts_kind(
+                    key,
+                    inputs.magi_kind == crate::magi::kind::ProviderKind::Anthropic,
+                )
             })
             .map(|_| inputs.magi_kind);
         let magi = match inputs.magi_kind {
@@ -469,8 +471,18 @@ impl SectionKeys {
     }
 }
 
-/// Prefix of an Anthropic API key, the shape the rebuilt trio expects.
+/// Prefix of an Anthropic API key: the only key shape a provider documents, hence the only one
+/// the shape warning interprets (REQ-K10).
 const ANTHROPIC_KEY_PREFIX: &str = "sk-ant-";
+
+/// True when `key` is shaped for a different provider than the trio's: Anthropic-shaped for a
+/// non-Anthropic trio, or not Anthropic-shaped for an Anthropic one. The single shape rule,
+/// shared by startup and the post-login rebuild.
+///
+/// Complexity: O(1).
+fn contradicts_kind(key: &str, trio_is_anthropic: bool) -> bool {
+    key.starts_with(ANTHROPIC_KEY_PREFIX) != trio_is_anthropic
+}
 
 /// Key the trio uses after `/login` rebuilds it as Anthropic: the trio's own key wins
 /// (REQ-K07); otherwise the key the login just stored. Blank counts as absent.
@@ -505,7 +517,7 @@ pub fn post_login_shape_mismatch(own_magi_key: Option<&str>) -> bool {
     own_magi_key
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .is_some_and(|key| !key.starts_with(ANTHROPIC_KEY_PREFIX))
+        .is_some_and(|key| contradicts_kind(key, true))
 }
 
 #[cfg(test)]
