@@ -105,3 +105,60 @@ fn the_env_then_vault_precedence_is_defined_once_and_its_former_copies_delegate(
         }
     }
 }
+
+/// Names of the functions, in production code, that call `fn <callee>(` (definitions and comments excluded).
+/// Every caller this returns must have a non-empty name (asserted by the guard): a declaration shape the
+/// tokenizer misses yields an empty name and turns the guard red instead of passing silently.
+fn callers(callee: &str) -> Vec<(String, String)> {
+    let call = format!("{callee}(");
+    let def = format!("fn {callee}(");
+    let mut out = Vec::new();
+    for (path, text) in production_sources() {
+        let mut current = String::new();
+        for line in text.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            if let Some(i) = t.find("fn ") {
+                if let Some(name) = t[i + 3..].split(['(', '<']).next() {
+                    if t[..i].split_whitespace().all(|w| {
+                        matches!(
+                            w,
+                            "pub"
+                                | "pub(crate)"
+                                | "pub(super)"
+                                | "async"
+                                | "const"
+                                | "unsafe"
+                                | "extern"
+                                | "\"C\""
+                                | "default"
+                        )
+                    }) {
+                        current = name.trim().to_string();
+                    }
+                }
+            }
+            if t.contains(&call) && !t.contains(&def) {
+                out.push((path.clone(), current.clone()));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn same_origin_is_called_only_by_select_api_key_and_that_only_by_section_keys_resolve() {
+    assert!(
+        callers("same_origin")
+            .iter()
+            .all(|(p, f)| p == "endpoint_key.rs" && f == "select_api_key"),
+        "{:?}",
+        callers("same_origin")
+    );
+    assert_eq!(
+        callers("select_api_key"),
+        vec![("section_keys.rs".to_string(), "resolve".to_string())]
+    );
+}

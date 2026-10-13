@@ -396,6 +396,69 @@ fn an_anthropic_principal_never_lends_its_key() {
     m.assert();
 }
 
+/// D-PM-1 / K-S7: an Anthropic principal whose root shares the decision origin lends OPENAI_API_KEY.
+#[test]
+fn an_anthropic_principal_lends_the_openai_key_on_the_roots_origin() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("POST", "/v1/systemone")
+        .match_header("authorization", "Bearer prin-key")
+        .with_status(200)
+        .with_body(OK_BODY)
+        .create();
+    let ws = workspace(&format!(
+        "provider = \"anthropic\"
+base_url = \"{u}\"
+[decision]
+model = \"nimble\"
+base_url = \"{u}\"
+",
+        u = server.url()
+    ));
+    let (code, _out, err) = decide(
+        &ws,
+        &[],
+        INPUT,
+        &[
+            ("ANTHROPIC_API_KEY", "ak-planted"),
+            ("OPENAI_API_KEY", "prin-key"),
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{err}");
+    m.assert();
+}
+
+/// The trio's and the embedder's own keys never reach the decision endpoint.
+#[test]
+fn other_sections_keys_never_reach_decide() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("POST", "/v1/systemone")
+        .match_header("authorization", Matcher::Missing)
+        .with_status(200)
+        .with_body(OK_BODY)
+        .create();
+    let ws = workspace(&format!(
+        "provider = \"ollama\"
+[decision]
+model = \"nimble\"
+base_url = \"{}\"
+",
+        server.url()
+    ));
+    let (code, _out, err) = decide(
+        &ws,
+        &[],
+        INPUT,
+        &[
+            ("MAGI_API_KEY", "magi-key"),
+            ("EMBEDDING_API_KEY", "embed-key"),
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{err}");
+    m.assert();
+}
+
 /// REQ-D05: placeholders without a vault are `missing_key`, before any request.
 #[test]
 fn placeholders_without_a_vault_are_missing_key_before_any_request() {
