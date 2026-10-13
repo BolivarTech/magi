@@ -259,10 +259,25 @@ assumption A4), the time `decide` takes without `--no-memory` and with a passphr
 invocation), and the body OpenRouter returns for an unknown model, which belongs in the product's
 404 markers if it is new.
 
+### The adoption scenario (v0.24.0)
+
+D14 adds two assertions: the scaffold names `clef-flash` with its threshold active, and
+`magi decide` answers the three-type example request with it. The harness now promises 43
+scenarios and 127 assertions.
+
+| Id | Invariant | Without its environment |
+|---|---|---|
+| D14 | in a workspace scaffolded by `magi init`, the parsed `[decision]` section has `model = "clef-flash"`, an active `min_confidence = 0.75` and `nimble` as first fallback; and `magi decide` run there with the example request exits 0 with `clef-flash` as the answering model | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule), and for the second assertion when the first hop fails because the model is missing, unreachable or timed out; never `FAIL` for those |
+
+The threshold is read from the parsed file, so a commented-out line does not count. D14 seeds
+its own scratch workspace and keeps the text `init` wrote, so it judges what a new user gets,
+not the persistent environment's profile. The first assertion fails if `SCAFFOLD_DECISION_MODEL`
+in `src/defaults.rs` changes.
+
 ### The per-section key scenarios (v0.24.0)
 
 K1 to K3 add seven assertions (2 + 3 + 2). The harness now promises 42 scenarios and 125
-assertions.
+assertions (D14 below raises that to 43 and 127).
 
 | Id | Invariant | Without its environment |
 |---|---|---|
