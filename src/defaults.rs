@@ -242,14 +242,18 @@ pub fn no_config_notice() -> String {
 /// `include_str!` any external file.
 ///
 /// # Layout
-/// - **Active**: `provider`, `[openai]`, `[anthropic]`, `[magi]`, the five `[memory]`
-///   essentials (`mode`, `context_budget_tokens`, `distill_enabled`,
-///   `evicted_retention_days`, `max_records`), and the `[embedding]` essentials
-///   (`model`, `dim` — `base_url` is deliberately NOT among them).
-/// - **Commented**: `[embedding].base_url`, whose whole purpose is to be ABSENT so the embedder
-///   inherits the root endpoint (REQ-A21); emitting it active pins a value and silently ends
-///   that inheritance. Plus all remaining `[memory]`/`[embedding]` fields with inline
-///   documentation, ready to uncomment.
+/// Sections are grouped with their own sub-tables, in this order: the root keys, `[openai]`,
+/// `[anthropic]`, `[magi]` followed by its `[[magi.fallback]]` pool, `[memory]`, `[embedding]`,
+/// and `[decision]` followed by its `[[decision.fallback]]` chain.
+/// - **Active**: `provider` and the root `base_url`, `[openai]`, `[anthropic]`, `[magi]`, the
+///   five `[memory]` essentials (`mode`, `context_budget_tokens`, `distill_enabled`,
+///   `evicted_retention_days`, `max_records`), the `[embedding]` essentials (`model`, `dim`)
+///   and the `[decision]` chain.
+/// - **Commented**: the `base_url` of `[magi]`, `[embedding]` and `[decision]`, whose whole
+///   purpose is to be ABSENT so each section inherits the root endpoint (REQ-A21); emitting one
+///   active pins a value and silently ends that inheritance. Each sits next to the name of the
+///   section's API key. Plus all remaining `[memory]`/`[embedding]` fields with inline
+///   documentation, ready to uncomment. `[memory]` has no endpoint and says so.
 pub fn render_default_magi_toml() -> String {
     use crate::memory::config::{EmbeddingConfig, MemoryConfig};
     use std::fmt::Write as FmtWrite;
