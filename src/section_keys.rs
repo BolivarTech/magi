@@ -15,7 +15,11 @@
     )
 )]
 
-/// The vault as every surface shares it (moved from `src/main.rs`).
+/// The vault as every surface shares it: passphrase resolution, key discovery and the TUI's
+/// `/login` and `/logout` handlers.
+///
+/// `VaultStore`, the concrete type behind the trait object, is `Send` but deliberately not
+/// `Sync` (its mask rotates on every access); the `Mutex` supplies the exclusion.
 pub type SharedSecretStore = std::sync::Arc<std::sync::Mutex<dyn crate::vault::SecretStore + Send>>;
 
 /// A secret found by [`env_or_vault`], and where it came from.
@@ -27,6 +31,7 @@ pub struct ResolvedSecret {
     pub from_env: bool,
 }
 
+/// Prints the origin but never the value.
 impl std::fmt::Debug for ResolvedSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedSecret")
@@ -36,7 +41,30 @@ impl std::fmt::Debug for ResolvedSecret {
     }
 }
 
-/// The consumed env value if non-blank (trimmed), else the vault entry `name` if non-blank (trimmed).
+/// Resolves a key: the consumed env value if non-blank (trimmed), else the vault entry `name` if
+/// non-blank (trimmed).
+///
+/// Complexity: O(1) plus one vault read. Never fails: a poisoned lock is recovered and an absent
+/// entry is `None`. Recovering a poisoned lock is deliberate: the vault is read once at startup,
+/// and a panic elsewhere must not leave every section without its key.
+///
+/// # Arguments
+/// * `name` - the vault entry to fall back to.
+/// * `env_value` - the value consumed from the environment at startup, if any.
+/// * `secret_store` - the open vault, if any.
+///
+/// # Returns
+/// The secret and its origin, or `None` when neither source holds a non-blank value.
+///
+/// # Examples
+/// ```
+/// use magi_rs::section_keys::env_or_vault;
+///
+/// let found = env_or_vault("MAGI_API_KEY", Some(" from-env"), None).expect("env value");
+/// assert_eq!(found.value, "from-env");
+/// assert!(found.from_env);
+/// assert!(env_or_vault("MAGI_API_KEY", Some("  "), None).is_none());
+/// ```
 pub fn env_or_vault(
     name: &str,
     env_value: Option<&str>,
