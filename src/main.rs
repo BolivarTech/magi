@@ -2253,13 +2253,12 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             // **Not registered with the auditor again here.** The same value was
             // armed thirty lines above, and a second registration only earns a
             // second "too short" warning for one credential.
-            let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
             let mut attach_notices: Vec<Notice> = Vec::new();
             attach_persistent_memory(
                 &mut agent,
                 concrete_store,
                 &magi_config,
-                embed_key,
+                section_keys.embedding(),
                 secret_store.as_ref(),
                 &mut attach_notices,
             )
@@ -5188,9 +5187,8 @@ fn anthropic_banner(resolved: Option<(&str, &str)>) -> Notice {
 /// to `notices`. Shared by the TUI launch and the headless `query` path so the
 /// memory wiring lives in exactly one place (DRY).
 ///
-/// `embed_key` is the already-resolved `OPENAI_API_KEY` for the embedder
-/// (`env > vault`); the caller resolves it so this helper stays free of most
-/// secret-store plumbing. `secret_store` (review round 2, C3) is still needed
+/// `embedding_key` is the `[embedding]` key the section keys already chose by origin; the
+/// caller resolves it so this helper stays free of most secret-store plumbing. `secret_store` (review round 2, C3) is still needed
 /// here — not just the resolved key — because [`resolve_effective_embedding_endpoint`]
 /// may need to substitute `[user]:[password]` credentials into the embedding
 /// `base_url` itself, which is a different secret than the API key.
@@ -5211,21 +5209,21 @@ fn anthropic_banner(resolved: Option<(&str, &str)>) -> Notice {
 ///
 /// # Errors
 /// The embedder's construction error, as text.
-#[allow(dead_code)] // Red stub
 fn build_embedder(
     magi_config: &MagiConfig,
     endpoint: &str,
     key: &SectionKey,
 ) -> Result<OpenAiCompatibleEmbedder, String> {
-    let _ = (magi_config, endpoint, key);
-    todo!("Red stub")
+    let mut cfg = magi_config.embedding().clone();
+    cfg.base_url = Some(endpoint.to_string());
+    OpenAiCompatibleEmbedder::new(&cfg, key.value().map(str::to_string)).map_err(|e| e.to_string())
 }
 
 async fn attach_persistent_memory(
     agent: &mut Agent,
     concrete_store: EncryptedSqliteMemory,
     magi_config: &MagiConfig,
-    embed_key: Option<String>,
+    embedding_key: &SectionKey,
     secret_store: Option<&SharedSecretStore>,
     notices: &mut Vec<Notice>,
 ) -> anyhow::Result<()> {
@@ -5266,11 +5264,7 @@ async fn attach_persistent_memory(
         // text-only persistence with a notice, same as an embedder construction
         // failure (REQ-29): it is never silently swallowed.
         let embedder_result = resolve_effective_embedding_endpoint(magi_config, secret_store)
-            .and_then(|url| {
-                let mut cfg = magi_config.embedding().clone();
-                cfg.base_url = Some(url);
-                OpenAiCompatibleEmbedder::new(&cfg, embed_key).map_err(|e| e.to_string())
-            });
+            .and_then(|url| build_embedder(magi_config, &url, embedding_key));
         match embedder_result {
             Err(err) => {
                 // `warn`: retrieval is gone for the session, so answers stop
@@ -5804,8 +5798,8 @@ struct HeadlessContext {
     prompt: String,
     /// The authorization tier for this run.
     tier: Tier,
-    /// The already-resolved embedding key (`env > vault`), for persistence.
-    embed_key: Option<String>,
+    /// The `[embedding]` key chosen by origin, for persistence.
+    embedding_key: SectionKey,
     /// The vault handle wired over `memory`, if one unlocked (review round 2,
     /// C3): `attach_persistent_memory` needs the LIVE handle, not just a
     /// resolved key, to substitute `[user]:[password]` credentials into the
@@ -6323,12 +6317,13 @@ async fn prepare_headless(
         trio_notices.push(n);
     }
 
-    let embed_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
+    // The principal key is still armed here until the arming moves to the section keys.
+    let armed_openai_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
     // REQ-L49, the headless half. Without this the surface a CI job uses ships
     // a log protected by the pattern pass alone: the exact pass only covers
     // what was registered.
     //
-    // It sits on THIS `embed_key` and not the one in `run()`. An earlier edit
+    // It sits on THIS key and not the one in `run()`. An earlier edit
     // matched the first line of that shape in the file, which belongs to the
     // TUI, and left this surface unarmed while looking done.
     for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
@@ -6339,7 +6334,7 @@ async fn prepare_headless(
         )
         .as_ref()
         .map(|c| c.api_key.as_str()),
-        embed_key.as_deref(),
+        armed_openai_key.as_deref(),
     )) {
         // Through the notice list, the same way the TUI does it. Written straight to stderr
         // this said the same thing in a second sentence and skipped `emit_notices`
@@ -6390,7 +6385,7 @@ async fn prepare_headless(
         resolved,
         prompt,
         tier,
-        embed_key,
+        embedding_key: section_keys.embedding().clone(),
         secret_store,
         limits,
         env_mode,
@@ -6584,7 +6579,7 @@ async fn run_query_subcommand(
         resolved,
         prompt,
         tier,
-        embed_key,
+        embedding_key,
         secret_store,
         memory,
         limits,
@@ -6634,7 +6629,7 @@ async fn run_query_subcommand(
                 &mut agent,
                 store,
                 &magi_config,
-                embed_key,
+                &embedding_key,
                 secret_store.as_ref(),
                 &mut notices,
             )
