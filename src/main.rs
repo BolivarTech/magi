@@ -2107,12 +2107,20 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         secret_store.as_ref(),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let creds = EnvVaultCredentials {
-        magi_config: &magi_config,
-        anthropic_env: anthropic_key.as_deref(),
-        openai_env: openai_key.as_deref(),
-        secret_store: secret_store.as_ref(),
-    };
+    // Every section's key is chosen ONCE, here, by origin (REQ-K01..K03): the trio takes its
+    // credentials from these keys and never re-reads the environment or the vault.
+    let (embedding_endpoint, decision_endpoint) =
+        section_endpoints(&magi_config, secret_store.as_ref());
+    let section_keys =
+        magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
+            env: &decide_secrets,
+            secret_store: secret_store.as_ref(),
+            magi_kind: registered_magi_kind(&magi_config, provider_kind),
+            root_endpoint: endpoints.root.as_str(),
+            magi_endpoint: Some(endpoints.magi.as_str()),
+            embedding_endpoint: embedding_endpoint.as_deref(),
+            decision_endpoint: decision_endpoint.as_deref(),
+        });
 
     // Read ONCE and shared by the probe AND the builder below (sixth-pass gate finding, S8):
     // the probe must measure exactly the models `build_magi_orchestrator` is about to run,
@@ -2164,7 +2172,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             cfg: &magi_config,
             principal_kind: provider_kind,
             endpoints: &endpoints,
-            creds: Some(&creds),
+            creds: Some(&section_keys),
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
@@ -2363,25 +2371,7 @@ trait Credentials {
     fn anthropic(&self) -> Option<String>;
 }
 
-/// Bridge between the existing `env > vault` resolution ([`discover_config`],
-/// [`resolve_openai_key`]) and the [`Credentials`] trait required by the native trio.
-///
-/// Reuses those two functions instead of reimplementing precedence a third time (B3):
-/// `discover_config` also resolves the Anthropic model, which is discarded here — cheap, and
-/// avoids yet another copy of the same four lines "trimmed env, or trimmed `vault.get(NAME)`".
-struct EnvVaultCredentials<'a> {
-    /// Config already loaded — `discover_config` needs it for the Anthropic model (discarded
-    /// here), even though this view only asks for the key.
-    magi_config: &'a MagiConfig,
-    /// `ANTHROPIC_API_KEY` already read (and scrubbed) from the environment at startup.
-    anthropic_env: Option<&'a str>,
-    /// `OPENAI_API_KEY` already read (and scrubbed) from the environment at startup.
-    openai_env: Option<&'a str>,
-    /// The vault opened this session, if any.
-    secret_store: Option<&'a SharedSecretStore>,
-}
-
-/// The trio's credentials are the `[magi]` key [`SectionKeys`] already chose for the trio's kind
+/// The trio's credentials are the `[magi]` key [`SectionKeys`](magi_rs::section_keys::SectionKeys) already chose for the trio's kind
 /// (REQ-K01, REQ-K07): no seat re-reads the environment or the vault.
 impl Credentials for magi_rs::section_keys::SectionKeys {
     fn openai(&self) -> Option<String> {
@@ -2389,15 +2379,6 @@ impl Credentials for magi_rs::section_keys::SectionKeys {
     }
     fn anthropic(&self) -> Option<String> {
         self.magi().value().map(str::to_string)
-    }
-}
-
-impl Credentials for EnvVaultCredentials<'_> {
-    fn openai(&self) -> Option<String> {
-        resolve_openai_key(self.openai_env, self.secret_store)
-    }
-    fn anthropic(&self) -> Option<String> {
-        discover_config(self.magi_config, self.anthropic_env, self.secret_store).map(|c| c.api_key)
     }
 }
 
@@ -2566,6 +2547,33 @@ fn resolve_magi_kind(
 /// # Returns
 /// The kind every downstream consumer of the trio should report/use.
 #[must_use]
+/// The resolved `[embedding]` and `[decision]` endpoints, in that order, as the key selection
+/// sees them (REQ-K01..K03, D1).
+///
+/// Each is resolved by the SAME function its consumer uses: the embedder's
+/// [`resolve_effective_embedding_endpoint`] and the decision client's [`resolve_decision_endpoint`],
+/// so the origin [`SectionKeys`](magi_rs::section_keys::SectionKeys) compares is exactly the host
+/// that receives the key. An endpoint that does not resolve is `None` (the section gets no key).
+///
+/// # Arguments
+/// * `cfg` - the loaded configuration.
+/// * `secret_store` - the open vault, for `[user]`/`[password]` placeholders.
+///
+/// # Returns
+/// `(embedding, decision)`.
+fn section_endpoints(
+    cfg: &MagiConfig,
+    secret_store: Option<&SharedSecretStore>,
+) -> (Option<String>, Option<String>) {
+    let embedding = resolve_effective_embedding_endpoint(cfg, secret_store).ok();
+    let decision = cfg
+        .effective_decision_base_url()
+        .ok()
+        .and_then(|t| resolve_decision_endpoint(&t, secret_store).ok())
+        .map(|e| e.as_str().to_string());
+    (embedding, decision)
+}
+
 fn registered_magi_kind(cfg: &MagiConfig, principal_kind: ProviderKind) -> ProviderKind {
     resolve_magi_kind(cfg, principal_kind).unwrap_or(principal_kind)
 }
@@ -3013,7 +3021,6 @@ fn stale_composition_notice(window_tokens: usize, max_query_bytes: usize) -> Opt
 /// details and their genuine scope are in this task's report.
 /// The variables an Anthropic trio seat can take its key from, in precedence order (REQ-K07):
 /// the trio's own key first, then the Anthropic key.
-#[allow(dead_code)] // Red stub: the Anthropic branch of `build_native_provider` uses it in Green.
 const ANTHROPIC_SEAT_KEY_VARS: &str = "MAGI_API_KEY or ANTHROPIC_API_KEY";
 
 #[derive(Debug, thiserror::Error)]
@@ -3462,11 +3469,10 @@ fn build_native_provider(
             Arc::new(OllamaProvider::with_timeout(root, model, client_timeout).map_err(to_seat)?)
         }
         ProviderKind::OpenAiCompat => {
-            let key = creds
-                .and_then(|c| c.openai())
-                .ok_or(SeatError::MissingCredential {
-                    var: "OPENAI_API_KEY",
-                })?;
+            // D-PM-2: a seat whose resolution ends without a key is built and sends no
+            // `Authorization` header (magi-core treats `None` that way); the missing key, if the
+            // endpoint wanted one, surfaces as a named 401 (REQ-K06).
+            let key = creds.and_then(|c| c.openai());
             // `with_dialect`, never the deprecated `with_timeout` (magi-core 4.1.0): the fourth
             // parameter is `Dialect::MaxTokens` LITERAL, never `Dialect::default()` (G10) — even
             // though the two agree today, a literal keeps this call's promise independent of the
@@ -3480,7 +3486,7 @@ fn build_native_provider(
             let provider = OpenAiCompatibleProvider::with_dialect(
                 base_url.as_str(),
                 model,
-                Some(key),
+                key,
                 Dialect::MaxTokens,
                 client_timeout,
             )
@@ -3499,7 +3505,7 @@ fn build_native_provider(
             let key = creds
                 .and_then(|c| c.anthropic())
                 .ok_or(SeatError::MissingCredential {
-                    var: "ANTHROPIC_API_KEY",
+                    var: ANTHROPIC_SEAT_KEY_VARS,
                 })?;
             Arc::new(ClaudeProvider::with_timeout(key, model, client_timeout).map_err(to_seat)?)
         }
@@ -5892,9 +5898,10 @@ async fn prepare_headless(
     command: &str,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
-    anthropic_key: Option<String>,
-    openai_key: Option<String>,
+    keys: &ApiKeys,
 ) -> Result<HeadlessContext, i32> {
+    let anthropic_key = keys.anthropic_key.clone();
+    let openai_key = keys.openai_key.clone();
     // Validated through the SAME resolver `init`/`vault` use (v0.14.0). Until then this line
     // was a bare `unwrap_or_else`, and the two halves of the CLI disagreed about what a
     // mistyped `-w` is: `init` rejected it up front naming the path (exit 2), while `query`
@@ -6194,12 +6201,19 @@ async fn prepare_headless(
             return Err(1);
         }
     };
-    let creds = EnvVaultCredentials {
-        magi_config: &magi_config,
-        anthropic_env: anthropic_key.as_deref(),
-        openai_env: openai_key.as_deref(),
-        secret_store: secret_store.as_ref(),
-    };
+    // Same single key selection as the TUI (REQ-K01..K03): see `run()`.
+    let (embedding_endpoint, decision_endpoint) =
+        section_endpoints(&magi_config, secret_store.as_ref());
+    let section_keys =
+        magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
+            env: keys,
+            secret_store: secret_store.as_ref(),
+            magi_kind: registered_magi_kind(&magi_config, provider_kind),
+            root_endpoint: endpoints.root.as_str(),
+            magi_endpoint: Some(endpoints.magi.as_str()),
+            embedding_endpoint: embedding_endpoint.as_deref(),
+            decision_endpoint: decision_endpoint.as_deref(),
+        });
 
     // Read ONCE and shared by the probe AND the builder below — see `run()`'s comment for why
     // (sixth-pass gate finding, S8).
@@ -6258,7 +6272,7 @@ async fn prepare_headless(
             cfg: &magi_config,
             principal_kind: provider_kind,
             endpoints: &endpoints,
-            creds: Some(&creds),
+            creds: Some(&section_keys),
             warn_tokens,
             env_overrides: &env_overrides,
             capability_cache: capability_cache.as_ref(),
@@ -6531,16 +6545,7 @@ async fn run_query_subcommand(
     cwd: &Path,
     decide_secrets: ApiKeys,
 ) -> i32 {
-    let ctx = match prepare_headless(
-        &h,
-        "query",
-        passphrase_flag,
-        cwd,
-        decide_secrets.anthropic_key.clone(),
-        decide_secrets.openai_key.clone(),
-    )
-    .await
-    {
+    let ctx = match prepare_headless(&h, "query", passphrase_flag, cwd, &decide_secrets).await {
         Ok(c) => c,
         Err(code) => return code,
     };
@@ -6891,16 +6896,7 @@ async fn run_consult_subcommand(
         );
         return 2;
     }
-    let ctx = match prepare_headless(
-        &h,
-        "consult",
-        passphrase_flag,
-        cwd,
-        decide_secrets.anthropic_key.clone(),
-        decide_secrets.openai_key.clone(),
-    )
-    .await
-    {
+    let ctx = match prepare_headless(&h, "consult", passphrase_flag, cwd, &decide_secrets).await {
         Ok(c) => c,
         Err(code) => return code,
     };
@@ -11879,7 +11875,13 @@ model = \"nimble\"
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
+                        .block_on(prepare_headless(
+                            &h,
+                            "query",
+                            None,
+                            &cwd,
+                            &test_decide_secrets(None),
+                        ))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "anthropic");
@@ -11918,7 +11920,13 @@ model = \"nimble\"
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
+                        .block_on(prepare_headless(
+                            &h,
+                            "query",
+                            None,
+                            &cwd,
+                            &test_decide_secrets(None),
+                        ))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "anthropic");
@@ -11959,7 +11967,13 @@ model = \"nimble\"
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
+                        .block_on(prepare_headless(
+                            &h,
+                            "query",
+                            None,
+                            &cwd,
+                            &test_decide_secrets(None),
+                        ))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -11992,7 +12006,13 @@ model = \"nimble\"
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
+                        .block_on(prepare_headless(
+                            &h,
+                            "query",
+                            None,
+                            &cwd,
+                            &test_decide_secrets(None),
+                        ))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -12020,7 +12040,13 @@ model = \"nimble\"
 
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     let ctx = rt
-                        .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
+                        .block_on(prepare_headless(
+                            &h,
+                            "query",
+                            None,
+                            &cwd,
+                            &test_decide_secrets(None),
+                        ))
                         .expect("prepare_headless must succeed");
 
                     assert_eq!(ctx.resolved.provider, "ollama");
@@ -16903,7 +16929,13 @@ model = \"nimble\"
 
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         let ctx = rt
-                            .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
+                            .block_on(prepare_headless(
+                                &h,
+                                "query",
+                                None,
+                                &cwd,
+                                &test_decide_secrets(None),
+                            ))
                             .expect("prepare_headless must succeed");
 
                         assert_eq!(
@@ -17735,32 +17767,6 @@ model = \"nimble\"
                 notice.contains("ollama.lan"),
                 "the host must stay visible: {notice}"
             );
-        }
-
-        #[test]
-        fn env_vault_credentials_resolves_openai_and_anthropic_from_env() {
-            let cfg = MagiConfig::default();
-            let c = EnvVaultCredentials {
-                magi_config: &cfg,
-                anthropic_env: Some("sk-ant-test"),
-                openai_env: Some("sk-oai-test"),
-                secret_store: None,
-            };
-            assert_eq!(c.openai().as_deref(), Some("sk-oai-test"));
-            assert_eq!(c.anthropic().as_deref(), Some("sk-ant-test"));
-        }
-
-        #[test]
-        fn env_vault_credentials_is_none_without_env_or_vault() {
-            let cfg = MagiConfig::default();
-            let c = EnvVaultCredentials {
-                magi_config: &cfg,
-                anthropic_env: None,
-                openai_env: None,
-                secret_store: None,
-            };
-            assert_eq!(c.openai(), None);
-            assert_eq!(c.anthropic(), None);
         }
 
         #[test]
@@ -19015,7 +19021,13 @@ model = \"nimble\"
 
                         let rt = tokio::runtime::Runtime::new().unwrap();
                         let ctx = rt
-                            .block_on(prepare_headless(&h, "query", None, &cwd, None, None))
+                            .block_on(prepare_headless(
+                                &h,
+                                "query",
+                                None,
+                                &cwd,
+                                &test_decide_secrets(None),
+                            ))
                             .expect("prepare_headless must succeed");
 
                         let notice = ctx.divergence_notice.expect(
