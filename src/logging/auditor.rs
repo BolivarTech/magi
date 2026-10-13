@@ -135,6 +135,15 @@ const UNREACHABLE: &str = "unreachable";
 /// whichever of its causes it names.
 const HTTP_ERROR: &str = "http_error";
 
+/// The cause of an embedding endpoint that wanted a key and was sent none.
+const UNAUTHORIZED_NO_KEY: &str = "unauthorized_no_key";
+
+/// The cause of an embedding endpoint that rejected the section's own key.
+const UNAUTHORIZED_OWN_KEY: &str = "unauthorized_own_key";
+
+/// The cause of an embedding endpoint that rejected the inherited principal key.
+const UNAUTHORIZED_INHERITED_KEY: &str = "unauthorized_inherited_key";
+
 impl CauseKey {
     /// Every declared cause.
     ///
@@ -152,6 +161,9 @@ impl CauseKey {
     pub const ALL: &'static [CauseKey] = &[
         CauseKey::new(EMBEDDER, UNREACHABLE),
         CauseKey::new(EMBEDDER, HTTP_ERROR),
+        CauseKey::new(EMBEDDER, UNAUTHORIZED_NO_KEY),
+        CauseKey::new(EMBEDDER, UNAUTHORIZED_OWN_KEY),
+        CauseKey::new(EMBEDDER, UNAUTHORIZED_INHERITED_KEY),
     ];
 
     /// Builds a cause key from its two `'static` halves.

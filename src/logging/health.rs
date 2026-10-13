@@ -420,6 +420,12 @@ const SUBSYSTEM_VAULT: &str = "vault";
 const CAUSE_UNREACHABLE: &str = "unreachable";
 /// A subsystem that answered, badly.
 const CAUSE_HTTP_ERROR: &str = "http_error";
+/// An embedding endpoint that asked for a key and was sent none.
+const CAUSE_UNAUTHORIZED_NO_KEY: &str = "unauthorized_no_key";
+/// An embedding endpoint that rejected the section's own key.
+const CAUSE_UNAUTHORIZED_OWN_KEY: &str = "unauthorized_own_key";
+/// An embedding endpoint that rejected the inherited principal key.
+const CAUSE_UNAUTHORIZED_INHERITED_KEY: &str = "unauthorized_inherited_key";
 /// A vault that is closed.
 const CAUSE_LOCKED: &str = "locked";
 
@@ -469,6 +475,18 @@ fn screen_messages(key: CauseKey) -> Option<(&'static str, &'static str)> {
         )),
         (SUBSYSTEM_EMBEDDER, CAUSE_HTTP_ERROR) => Some((
             "memory: retrieval failing — answers will not use past context",
+            "✓ memory: retrieval restored",
+        )),
+        (SUBSYSTEM_EMBEDDER, CAUSE_UNAUTHORIZED_NO_KEY) => Some((
+            "memory: retrieval failing — the embedding endpoint asked for a key and none was sent; set one with: magi-rs vault set EMBEDDING_API_KEY",
+            "✓ memory: retrieval restored",
+        )),
+        (SUBSYSTEM_EMBEDDER, CAUSE_UNAUTHORIZED_OWN_KEY) => Some((
+            "memory: retrieval failing — the embedding endpoint rejected the key in EMBEDDING_API_KEY; replace it with: magi-rs vault set EMBEDDING_API_KEY",
+            "✓ memory: retrieval restored",
+        )),
+        (SUBSYSTEM_EMBEDDER, CAUSE_UNAUTHORIZED_INHERITED_KEY) => Some((
+            "memory: retrieval failing — the embedding endpoint rejected the inherited OPENAI_API_KEY; declare EMBEDDING_API_KEY with: magi-rs vault set EMBEDDING_API_KEY",
             "✓ memory: retrieval restored",
         )),
         (SUBSYSTEM_PROVIDER, CAUSE_UNREACHABLE) => Some((

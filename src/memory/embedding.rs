@@ -191,10 +191,8 @@ impl OpenAiCompatibleEmbedder {
     ///
     /// # Returns
     /// The embedder with `source` recorded.
-    // Red stub: ignores `source`.
-    #[allow(dead_code)]
-    pub fn with_key_source(self, source: KeySource) -> Self {
-        let _ = source;
+    pub fn with_key_source(mut self, source: KeySource) -> Self {
+        self.key_source = source;
         self
     }
 
@@ -441,6 +439,15 @@ const EMBEDDER_UNREACHABLE: &str = "unreachable";
 /// [`CauseKey::ALL`][ck].
 const EMBEDDER_HTTP_ERROR: &str = "http_error";
 
+/// The cause a rejected key (401/403) names when no key was sent.
+const EMBEDDER_UNAUTHORIZED_NO_KEY: &str = "unauthorized_no_key";
+
+/// The cause a rejected key names when it was the section's own `EMBEDDING_API_KEY`.
+const EMBEDDER_UNAUTHORIZED_OWN_KEY: &str = "unauthorized_own_key";
+
+/// The cause a rejected key names when it was the inherited `OPENAI_API_KEY`.
+const EMBEDDER_UNAUTHORIZED_INHERITED_KEY: &str = "unauthorized_inherited_key";
+
 /// The cause the success event names.
 ///
 /// **Recovery is per SUBSYSTEM**, so this only has to name a declared cause of
@@ -458,15 +465,19 @@ const EMBEDDER_RECOVERY_CAUSE: &str = EMBEDDER_UNREACHABLE;
 /// # Parameters
 ///
 /// * `error` — the typed failure the call produced.
+/// * `source` — where the embedder's key came from; it names a rejected key.
 ///
 /// # Returns
 ///
 /// The cause half of the key. The split is "did an answer arrive at all", and
-/// it divides all **seven** `EmbeddingError` variants into **two** and **five**:
+/// it divides all **seven** `EmbeddingError` variants into **two**, **four** and
+/// **one**:
 ///
 /// - reachability — `Timeout` and `Network`: nothing answered.
-/// - answered badly — `Http`, `Auth`, `RateLimited`, `Malformed` and `Dim`: an
+/// - answered badly — `Http`, `RateLimited`, `Malformed` and `Dim`: an
 ///   endpoint replied, and the reply was wrong.
+/// - rejected key — `Auth`: named by `source` (no key sent, the section's own
+///   key, or the inherited one) so the user knows which variable to fix.
 ///
 /// **The counts are asserted, not asserted-by-prose.** This sentence named four
 /// on the second side while the arm below covered five, because `Dim` was added
@@ -475,11 +486,14 @@ const EMBEDDER_RECOVERY_CAUSE: &str = EMBEDDER_UNREACHABLE;
 /// reachability_split` counts both halves exactly, so a variant added, moved or
 /// dropped fails there as well as failing the exhaustive `match`.
 fn failure_cause(error: &EmbeddingError, source: KeySource) -> &'static str {
-    let _ = source;
     match error {
         EmbeddingError::Timeout | EmbeddingError::Network => EMBEDDER_UNREACHABLE,
+        EmbeddingError::Auth => match source {
+            KeySource::Absent => EMBEDDER_UNAUTHORIZED_NO_KEY,
+            KeySource::Own => EMBEDDER_UNAUTHORIZED_OWN_KEY,
+            KeySource::Inherited => EMBEDDER_UNAUTHORIZED_INHERITED_KEY,
+        },
         EmbeddingError::Http(_)
-        | EmbeddingError::Auth
         | EmbeddingError::RateLimited
         | EmbeddingError::Malformed(_)
         | EmbeddingError::Dim { .. } => EMBEDDER_HTTP_ERROR,

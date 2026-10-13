@@ -5251,7 +5251,9 @@ fn build_embedder(
 ) -> Result<OpenAiCompatibleEmbedder, String> {
     let mut cfg = magi_config.embedding().clone();
     cfg.base_url = Some(endpoint.to_string());
-    OpenAiCompatibleEmbedder::new(&cfg, key.value().map(str::to_string)).map_err(|e| e.to_string())
+    OpenAiCompatibleEmbedder::new(&cfg, key.value().map(str::to_string))
+        .map(|embedder| embedder.with_key_source(key.source()))
+        .map_err(|e| e.to_string())
 }
 
 async fn attach_persistent_memory(
