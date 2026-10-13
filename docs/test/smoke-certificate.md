@@ -1,16 +1,16 @@
 # Smoke Certificate
 
-- version: 0.23.0
-- commit: 532a374
-- date: 2026-10-12 (UTC)
+- version: 0.24.0
+- commit: 85cc602
+- date: 2026-10-13 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 32d869c9b3032f705277ce7bf84318cfeb01289738fa2c8785065473c3710fc6 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 744s
+- binary: sha256 9eb237f0044b095e1647d5bbc374517bb026c5b4757b1e59e5280b74a3d3c2f8 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 712s
 - rounds needed: 1
-- scope: 39 of 39 scenarios evaluated
+- scope: 43 of 43 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: active memories not measured, 471 KB database, 306 KB archived
-- result: 118 passed, 0 not passed, 118 total
+- environment: active memories not measured, 2043 KB database, 1065 KB archived
+- result: 127 passed, 0 not passed, 127 total
 
 [PASS] D1 - decide answers one question of each type against local Ollama with exit 0
 [PASS] D1 - every answer carries a Magi confidence between 0 and 1
@@ -45,6 +45,15 @@
 [PASS] D13 - the decide call in tool_calls stores the state as <omitted>
 [PASS] D13 - the decide call in tool_calls keeps its questions and its result
 [PASS] D13 - the state marker reaches neither the decide record nor the decide log lines
+[PASS] D14 - the scaffold names clef-flash with its threshold active
+[PASS] D14 - magi decide answers the example request with clef-flash
+[PASS] K1 - the run log has exactly one entry naming MAGI_API_KEY and http://127.0.0.1:11434
+[PASS] K1 - the screen shows nothing about the retained key
+[PASS] K2 - a sk-ant- MAGI_API_KEY under openai-compat warns naming MAGI_API_KEY and [magi].kind, without the value
+[PASS] K2 - a sk-or- MAGI_API_KEY under anthropic warns the same way
+[PASS] K2 - a sk-or- MAGI_API_KEY under openai-compat does not warn
+[PASS] K3 - with MAGI_API_KEY the OpenRouter trio answers a consult
+[PASS] K3 - without it the consult failure names MAGI_API_KEY
 [PASS] S1 run=R1 - exit 0 and stdout parses as JSON
 [PASS] S1 run=R1 - schema_version is 1
 [PASS] S1 run=R1 - every top-level contract key is present
