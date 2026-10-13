@@ -64,6 +64,10 @@ pub fn same_origin(a: &str, b: &str) -> bool {
 /// The WHATWG origin of `raw` as `scheme://host[:port]`: default port omitted, no userinfo or
 /// path, host lower-cased and without a trailing dot.
 ///
+/// "Default port omitted" holds for an explicitly written one too: the WHATWG parser drops a port
+/// equal to the scheme's default, so `http://host:80` and `https://host:443/v1` reduce to
+/// `http://host` and `https://host`, exactly as [`same_origin`] treats them.
+///
 /// It formats the same parse [`same_origin`] compares, so two URLs share an origin exactly when
 /// their `origin_url` is equal and present.
 ///

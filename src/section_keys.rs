@@ -81,7 +81,9 @@ pub struct ApiKeys {
 ///
 /// Complexity: O(1) plus one vault read. Never fails: a poisoned lock is recovered and an absent
 /// entry is `None`. Recovering a poisoned lock is deliberate: the vault is read once at startup,
-/// and a panic elsewhere must not leave every section without its key.
+/// and a panic elsewhere must not leave every section without its key. A vault read error also
+/// counts as absent, as it did before this helper existed: it fails safe (no key is sent), and a
+/// section that needed one reports its 401/403 naming the variable to set.
 ///
 /// # Arguments
 /// * `name` - the vault entry to fall back to.
