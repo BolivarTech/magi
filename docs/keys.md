@@ -45,9 +45,9 @@ With `kind = "ollama"` the seats carry no key at all.
 
 ### A warning about the shape of the key
 
-At startup, if `MAGI_API_KEY` is set and its shape contradicts `[magi].kind`, you get one warning that names `MAGI_API_KEY` and the kind, never the value. The key is still sent. The only shape magi-rs recognizes is Anthropic's prefix, `sk-ant-`: it warns when an `anthropic` trio has a key without that prefix, and when any other kind has a key with it.
+At startup, if `MAGI_API_KEY` is set and its shape contradicts `[magi].kind`, you get one warning that names `MAGI_API_KEY` and the kind, never the value. It is only a warning and blocks nothing. The only shape magi-rs recognizes is Anthropic's prefix, `sk-ant-`: it warns when an `anthropic` trio has a key without that prefix, and when any other kind has a key with it.
 
-That is the whole check, and it cannot tell two OpenAI-compatible providers apart. A key that starts `sk-or-` on an `openai-compat` trio gives no warning, whether it is for OpenRouter or not, while a plain `sk-...` key on an `anthropic` trio does warn, because it lacks `sk-ant-`. The warning also appears if a `/login` moves the trio to Anthropic while a mismatched `MAGI_API_KEY` is set.
+That is the whole check, and it cannot tell two OpenAI-compatible providers apart. A key that starts `sk-or-` on an `openai-compat` trio gives no warning, whether it is for OpenRouter or not, while a plain `sk-...` key on an `anthropic` trio does warn, because it lacks `sk-ant-`. A `/login` repeats the warning for an `anthropic` trio whose own `MAGI_API_KEY` lacks the prefix, since the rebuilt trio keeps using that key.
 
 ## When a key is withheld
 

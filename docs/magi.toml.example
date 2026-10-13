@@ -130,8 +130,8 @@ auto_approve = false
 # (scheme, host and port; the path does not count) as the root one, and otherwise sends no key.
 # A gateway that routes by path is one origin and receives the main key; declare the trio's own
 # key to avoid that. With kind = "anthropic" the seats use the trio's own key if set and the
-# Anthropic key otherwise. The trio's key must be a key for the provider of `kind`. Startup warns,
-# and still sends the key, when an `anthropic` trio has a key without Anthropic's documented
+# Anthropic key otherwise. The trio's key must be a key for the provider of `kind`. Startup warns
+# (a warning only; nothing is blocked) when an `anthropic` trio has a key without Anthropic's documented
 # prefix or any other kind has a key with it. That is the only shape check: two
 # OpenAI-compatible providers cannot be told apart, so an OpenRouter-style key on
 # `openai-compat` gives no warning, while an unprefixed key on `anthropic` does.

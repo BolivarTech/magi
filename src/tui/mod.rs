@@ -2397,7 +2397,7 @@ pub struct TuiConsultWiring {
 
 /// Shown when `/login` rebuilds the trio on Anthropic but the trio's own key is not shaped like
 /// an Anthropic key. Names the variable and the setting, never the key.
-const POST_LOGIN_SHAPE_NOTICE: &str = "MAGI_API_KEY does not look like an Anthropic key, but the MAGI trio now runs on Anthropic after login. Check MAGI_API_KEY and [magi].kind.";
+const POST_LOGIN_SHAPE_NOTICE: &str = "MAGI_API_KEY does not look like an Anthropic key, and the MAGI trio keeps using it after login. Check MAGI_API_KEY.";
 
 /// Resolves the wall-clock ceiling used to rebuild the MAGI trio's native
 /// `ClaudeProvider` after `/login` (I-5) — the SAME precedence
