@@ -316,6 +316,15 @@ pub fn render_default_magi_toml() -> String {
     // `base_url` moved to the ROOT in Task 1.1 (REQ-A21) — it used to live under
     // `[openai]`, which no longer accepts it (`deny_unknown_fields`).
     writeln!(out, "base_url = \"{}\"", DEFAULT_OPENAI_BASE_URL).unwrap();
+    // The main key is named here once; each endpoint section below names its own key and when it
+    // falls back to this one (REQ-K08).
+    out.push_str(concat!(
+        "# API key of the main model, never written in this file: OPENAI_API_KEY for ollama and\n",
+        "# openai-compat (a local Ollama needs none) or ANTHROPIC_API_KEY for anthropic, read from the\n",
+        "# environment or stored with `magi-rs vault set <NAME>`. [magi], [embedding] and [decision]\n",
+        "# can each have a key of their own; without one they use this main key, under the conditions\n",
+        "# each section states. Details in docs/keys.md.\n",
+    ));
     writeln!(out).unwrap();
 
     // ── [openai] ─────────────────────────────────────────────────────────────
@@ -328,131 +337,27 @@ pub fn render_default_magi_toml() -> String {
     writeln!(out, "model = \"{}\"", DEFAULT_ANTHROPIC_MODEL).unwrap();
     writeln!(out).unwrap();
 
-    // ── [decision] (REQ-D06, REQ-D21) ────────────────────────────────────────
-    // Goes BEFORE `[magi]`: the `[[magi.fallback]]` pool must stay the last thing in the file.
-    writeln!(out, "[decision]").unwrap();
-    writeln!(
-        out,
-        "# Endpoint of the System One decision models. Optional: absent = the root `base_url`."
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "# The protocol path is derived from it: a base_url ending in /v1 gets /systemone, any other gets /v1/systemone."
-    )
-    .unwrap();
-    writeln!(out, "base_url     = \"http://localhost:11434\"").unwrap();
-    writeln!(out, "# Primary decision model. Required in this section.").unwrap();
-    writeln!(out, "model        = \"{}\"", SCAFFOLD_DECISION_MODEL).unwrap();
-    writeln!(
-        out,
-        "# Per-attempt timeout in seconds (covers a local cold load). Optional, default {}.",
-        DEFAULT_DECISION_TIMEOUT_SECS
-    )
-    .unwrap();
-    out.push_str(concat!(
-        "# `clef-flash` loaded in 16.5 s on an idle machine and 49.4 s on a busy one (RTX 5060 Ti, 16 GB),
-",
-        "# so it needs at least 66 s here. Inside one consult the chain can take about 135 s: this timeout
-",
-        "# for `clef-flash` plus the 14.3 s cold load of `nimble`. Numbers from other hardware will differ.
-",
-    ));
-    writeln!(out, "timeout_secs = {}", DEFAULT_DECISION_TIMEOUT_SECS).unwrap();
-    writeln!(
-        out,
-        "# Ollama only. Optional: absent = not sent (server default). \"10m\", \"2h\", or -1 (keep loaded)."
-    )
-    .unwrap();
-    writeln!(out, "# keep_alive = \"10m\"").unwrap();
-    writeln!(
-        out,
-        "# Approval of the agent's `decide` tool. Optional, default {}.",
-        DEFAULT_DECISION_AUTO_APPROVE
-    )
-    .unwrap();
-    writeln!(out, "auto_approve = {}", DEFAULT_DECISION_AUTO_APPROVE).unwrap();
-    writeln!(
-        out,
-        "# Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "# to the main model. {} fits the request-size cap measured with the local `clef-flash` model. With a hosted decision",
-        SCAFFOLD_DECISION_MAX_STATE_BYTES
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "# model such as typesafe/jev-1.13, raise it or delete the line (built-in default {}).",
-        DEFAULT_DECISION_MAX_STATE_BYTES
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "max_state_bytes = {}",
-        SCAFFOLD_DECISION_MAX_STATE_BYTES
-    )
-    .unwrap();
-    out.push_str(concat!(
-        "# Below this confidence the answer is discarded and the next model in the chain is tried. When the
-",
-        "# chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
-",
-        "# Optional, per model; commenting it out disables the threshold (the top option is always taken).
-",
-        "# The value below comes from the maintainer's own calibration and may not fit your data or use
-",
-        "# case: measure on yours before relying on it.
-",
-    ));
-    writeln!(out, "min_confidence = {}", SCAFFOLD_DECISION_MIN_CONFIDENCE).unwrap();
-    out.push_str(concat!(
-        "
-",
-        "# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
-",
-    ));
-    for model in SCAFFOLD_DECISION_FALLBACK_MODELS {
-        writeln!(out, "[[decision.fallback]]").unwrap();
-        writeln!(out, "model = \"{}\"", model).unwrap();
-        writeln!(out, "min_confidence = {}", SCAFFOLD_DECISION_MIN_CONFIDENCE).unwrap();
-        writeln!(out).unwrap();
-    }
-    out.push_str(concat!(
-        "# --- Example: OpenRouter (hosted). Needs DECISION_API_KEY in the environment or
-",
-        "# --- `magi-rs vault set DECISION_API_KEY`. The key never goes in this file.
-",
-        "# --- Comment out the [decision] section above before uncommenting this one: a file holds one.
-",
-        "# [decision]
-",
-        "# base_url     = \"https://openrouter.ai/api/v1\"
-",
-        "# model        = \"typesafe/jev-1.13\"
-",
-        "# timeout_secs = 30
-",
-        "#
-",
-        "# [[decision.fallback]]
-",
-        "# model = \"togethercomputer/tev1-4b-experimental\"
-",
-        "#
-",
-        "# [[decision.fallback]]
-",
-        "# model = \"upstage/solar-decide\"
-",
-        "
-",
-    ));
-
     // ── [magi] ───────────────────────────────────────────────────────────────
+    out.push_str(concat!(
+        "# ---------------------------------------------------------------------------\n",
+        "# [magi] — the trio behind `consult`, followed by its rotation pool.\n",
+    ));
     writeln!(out, "[magi]").unwrap();
+    writeln!(
+        out,
+        "# Endpoint of the trio. Commented = the root base_url; uncomment and edit it to send the\n\
+         # trio somewhere else.\n\
+         # base_url = \"{}\"",
+        DEFAULT_OPENAI_BASE_URL
+    )
+    .unwrap();
+    out.push_str(concat!(
+        "# API key of the trio: MAGI_API_KEY, from the environment or\n",
+        "# `magi-rs vault set MAGI_API_KEY`; never in this file. Without it, an openai-compat trio uses\n",
+        "# the main key, OPENAI_API_KEY, as long as its endpoint has the root base_url's origin (scheme,\n",
+        "# host and port), and sends no key on any other origin. An anthropic trio uses ANTHROPIC_API_KEY\n",
+        "# instead, and an ollama trio (this file's default) sends no key.\n",
+    ));
     writeln!(out, "melchior_model  = \"{}\"", DEFAULT_MAGI_MELCHIOR).unwrap();
     writeln!(out, "balthasar_model = \"{}\"", DEFAULT_MAGI_BALTHASAR).unwrap();
     writeln!(out, "caspar_model    = \"{}\"", DEFAULT_MAGI_CASPAR).unwrap();
@@ -584,6 +489,29 @@ pub fn render_default_magi_toml() -> String {
 ",
     ));
 
+    // ── The pool closes the [magi] group ──────────────────────────────────────────────────────
+    // In TOML a loose key written below `[[magi.fallback]]` belongs to the last pool entry, so the
+    // comment tells the operator where new [magi] keys go; a misplaced one fails to load
+    // (`deny_unknown_fields` on the entry) rather than landing silently in the wrong table.
+    writeln!(
+        out,
+        "# Rotation pool, shared by the three seats, strongest first. Every label here is one no \
+         seat holds, so each entry can serve any of the three."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# New [magi] keys go ABOVE this pool: a key written below it belongs to the last entry."
+    )
+    .unwrap();
+    for (model, lineage) in DEFAULT_SCAFFOLD_POOL {
+        writeln!(out).unwrap();
+        writeln!(out, "[[magi.fallback]]").unwrap();
+        writeln!(out, "model   = \"{model}\"").unwrap();
+        writeln!(out, "lineage = \"{lineage}\"").unwrap();
+    }
+    writeln!(out).unwrap();
+
     // ── [memory] active essentials ────────────────────────────────────────────
     writeln!(
         out,
@@ -606,6 +534,12 @@ pub fn render_default_magi_toml() -> String {
     )
     .unwrap();
     writeln!(out, "[memory]").unwrap();
+    // [memory] has no endpoint, and `deny_unknown_fields` refuses a `base_url` here, so the
+    // section says where its endpoint lives instead of showing a line that would stop the load.
+    out.push_str(concat!(
+        "# No endpoint or key of its own: memories are embedded through the [embedding] endpoint\n",
+        "# below, which also carries the key. A base_url in this section stops the file from loading.\n",
+    ));
     writeln!(
         out,
         "mode = \"{}\"                  # selective | load_all  (load_all = v0.6.0 control)",
@@ -819,11 +753,6 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(out, "# Set model to your installed embedding model.").unwrap();
     writeln!(out, "# Run: ollama pull {}", emb.model).unwrap();
-    writeln!(
-        out,
-        "# The embedding API key is read from OPENAI_API_KEY env only (never in this file)."
-    )
-    .unwrap();
     writeln!(out, "[embedding]").unwrap();
     // `emb.base_url` is `Option<String>` and `EmbeddingConfig::default()` leaves it
     // `None` (REQ-A21, so it can inherit the root `base_url`) — the display text for
@@ -841,10 +770,22 @@ pub fn render_default_magi_toml() -> String {
     // real and valid endpoint.
     writeln!(
         out,
-        "# base_url = \"{}\"   # inherits the root base_url when commented",
+        "# Endpoint of the embedder. Commented = the root base_url; uncomment and edit it to embed\n\
+         # somewhere else.\n\
+         # base_url = \"{}\"",
         crate::memory::config::d::emb_base_url()
     )
     .unwrap();
+    out.push_str(concat!(
+        "# API key of the embedder: EMBEDDING_API_KEY, from the environment or
+",
+        "# `magi-rs vault set EMBEDDING_API_KEY`; never in this file. Without it the embedder uses the
+",
+        "# main key, OPENAI_API_KEY, as long as its endpoint has the root base_url's origin (scheme,
+",
+        "# host and port), and sends no key on any other origin.
+",
+    ));
     writeln!(
         out,
         "model    = \"{}\"  # CHANGE to your installed embedding model — run: ollama pull <model>",
@@ -879,29 +820,136 @@ pub fn render_default_magi_toml() -> String {
     )
     .unwrap();
 
-    // ── The pool goes LAST IN THE FILE, and that is a TOML rule, not a style choice ──────────
-    // Every loose key and every sub-table must precede the first array of tables. A rule phrased
-    // as "last in the [magi] block" would let a later addition to [magi] — or a new sub-table —
-    // land after the array and parse into the wrong table. "Last in the file" leaves nowhere to
-    // get it wrong, which is why [embedding] above is deliberately emitted before this point.
+    // ── [decision] (REQ-D06, REQ-D21), followed by its own fallbacks ──────────
     writeln!(out).unwrap();
+    out.push_str(concat!(
+        "# ---------------------------------------------------------------------------\n",
+        "# [decision] — typed decisions from System One models (`magi decide`).\n",
+    ));
+    writeln!(out, "[decision]").unwrap();
     writeln!(
         out,
-        "# ---------------------------------------------------------------------------"
+        "# Endpoint of the System One decision models. Commented = the root base_url; uncomment and\n\
+         # edit it to use another one. The protocol path is derived from it: a base_url ending in /v1\n\
+         # gets /systemone, any other gets /v1/systemone.\n\
+         # base_url     = \"{}\"",
+        DEFAULT_OPENAI_BASE_URL
+    )
+    .unwrap();
+    out.push_str(concat!(
+        "# API key of the decision models: DECISION_API_KEY, from the environment or\n",
+        "# `magi-rs vault set DECISION_API_KEY`; never in this file. Without it `decide` uses the main\n",
+        "# key, OPENAI_API_KEY, as long as its endpoint has the root base_url's origin (scheme, host\n",
+        "# and port), and sends no key on any other origin.\n",
+    ));
+    writeln!(out, "# Primary decision model. Required in this section.").unwrap();
+    writeln!(out, "model        = \"{}\"", SCAFFOLD_DECISION_MODEL).unwrap();
+    writeln!(
+        out,
+        "# Per-attempt timeout in seconds (covers a local cold load). Optional, default {}.",
+        DEFAULT_DECISION_TIMEOUT_SECS
+    )
+    .unwrap();
+    out.push_str(concat!(
+        "# `clef-flash` loaded in 16.5 s on an idle machine and 49.4 s on a busy one (RTX 5060 Ti, 16 GB),
+",
+        "# so it needs at least 66 s here. Inside one consult the chain can take about 135 s: this timeout
+",
+        "# for `clef-flash` plus the 14.3 s cold load of `nimble`. Numbers from other hardware will differ.
+",
+    ));
+    writeln!(out, "timeout_secs = {}", DEFAULT_DECISION_TIMEOUT_SECS).unwrap();
+    writeln!(
+        out,
+        "# Ollama only. Optional: absent = not sent (server default). \"10m\", \"2h\", or -1 (keep loaded)."
+    )
+    .unwrap();
+    writeln!(out, "# keep_alive = \"10m\"").unwrap();
+    writeln!(
+        out,
+        "# Approval of the agent's `decide` tool. Optional, default {}.",
+        DEFAULT_DECISION_AUTO_APPROVE
+    )
+    .unwrap();
+    writeln!(out, "auto_approve = {}", DEFAULT_DECISION_AUTO_APPROVE).unwrap();
+    writeln!(
+        out,
+        "# Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight"
     )
     .unwrap();
     writeln!(
         out,
-        "# Rotation pool, shared by the three seats, strongest first. Every label here is one no \
-         seat holds, so each entry can serve any of the three."
+        "# to the main model. {} fits the request-size cap measured with the local `clef-flash` model. With a hosted decision",
+        SCAFFOLD_DECISION_MAX_STATE_BYTES
     )
     .unwrap();
-    for (model, lineage) in DEFAULT_SCAFFOLD_POOL {
+    writeln!(
+        out,
+        "# model such as typesafe/jev-1.13, raise it or delete the line (built-in default {}).",
+        DEFAULT_DECISION_MAX_STATE_BYTES
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "max_state_bytes = {}",
+        SCAFFOLD_DECISION_MAX_STATE_BYTES
+    )
+    .unwrap();
+    out.push_str(concat!(
+        "# Below this confidence the answer is discarded and the next model in the chain is tried. When the
+",
+        "# chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
+",
+        "# Optional, per model; commenting it out disables the threshold (the top option is always taken).
+",
+        "# The value below comes from the maintainer's own calibration and may not fit your data or use
+",
+        "# case: measure on yours before relying on it.
+",
+    ));
+    writeln!(out, "min_confidence = {}", SCAFFOLD_DECISION_MIN_CONFIDENCE).unwrap();
+    out.push_str(concat!(
+        "
+",
+        "# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
+",
+    ));
+    for model in SCAFFOLD_DECISION_FALLBACK_MODELS {
+        writeln!(out, "[[decision.fallback]]").unwrap();
+        writeln!(out, "model = \"{}\"", model).unwrap();
+        writeln!(out, "min_confidence = {}", SCAFFOLD_DECISION_MIN_CONFIDENCE).unwrap();
         writeln!(out).unwrap();
-        writeln!(out, "[[magi.fallback]]").unwrap();
-        writeln!(out, "model   = \"{model}\"").unwrap();
-        writeln!(out, "lineage = \"{lineage}\"").unwrap();
     }
+    out.push_str(concat!(
+        "# --- Example: OpenRouter (hosted). Needs DECISION_API_KEY in the environment or
+",
+        "# --- `magi-rs vault set DECISION_API_KEY`. The key never goes in this file.
+",
+        "# --- Comment out the [decision] section above before uncommenting this one: a file holds one.
+",
+        "# [decision]
+",
+        "# base_url     = \"https://openrouter.ai/api/v1\"
+",
+        "# model        = \"typesafe/jev-1.13\"
+",
+        "# timeout_secs = 30
+",
+        "#
+",
+        "# [[decision.fallback]]
+",
+        "# model = \"togethercomputer/tev1-4b-experimental\"
+",
+        "#
+",
+        "# [[decision.fallback]]
+",
+        "# model = \"upstage/solar-decide\"
+",
+        "
+",
+    ));
 
     out
 }
