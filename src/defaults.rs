@@ -54,16 +54,17 @@ pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 
 /// Primary decision model written by the scaffold and applied when no `[decision]` is declared
 /// (REQ-D06, REQ-D21).
-pub const DEFAULT_DECISION_MODEL: &str = "nimble";
+pub const DEFAULT_DECISION_MODEL: &str = "clef-flash";
 /// Ordered fallbacks of the default decision chain, on the same endpoint as the primary.
-pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 1] = ["tev1"];
+pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 1] = ["nimble"];
 /// Primary decision model the scaffold writes.
-pub const SCAFFOLD_DECISION_MODEL: &str = "nimble";
+pub const SCAFFOLD_DECISION_MODEL: &str = "clef-flash";
 /// Ordered fallbacks the scaffold writes, on the same endpoint as the primary.
-pub const SCAFFOLD_DECISION_FALLBACK_MODELS: [&str; 1] = ["tev1"];
+pub const SCAFFOLD_DECISION_FALLBACK_MODELS: [&str; 1] = ["nimble"];
 /// Confidence threshold the scaffold writes, active, on every chain entry (REQ-D24). It comes from
-/// the maintainer's calibration; the built-in defaults of [`default_decision_section`] carry none.
-pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.7;
+/// the maintainer's calibration of `clef-flash` followed by `nimble`; the built-in defaults of
+/// [`default_decision_section`] carry none.
+pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.75;
 /// Per-attempt timeout in seconds; sized to cover a local cold model load (REQ-D21).
 pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
 /// Whether the agent's `decide` tool runs without asking (REQ-D16).
@@ -74,9 +75,11 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// it. Ollama rejects any request body over 64 KiB before loading the model, so with Ollama a
 /// larger state just falls back to the main model at no cost.
 pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 128_000;
-/// State limit the scaffold writes, active: it fits the context window of the local `nimble`
-/// model, which rejects a request by window from about 19 KB (measured in the calibration).
-pub const SCAFFOLD_DECISION_MAX_STATE_BYTES: usize = 19_000;
+/// State limit the scaffold writes, active: a 61 455-byte state was accepted by the local
+/// `clef-flash` model in the calibration, which saw no rejection by window, only the request-body
+/// cap of Ollama. `nimble`, the fallback, rejects by window from about 19 KB; that falls through to
+/// the main model.
+pub const SCAFFOLD_DECISION_MAX_STATE_BYTES: usize = 61_000;
 
 /// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
 /// (REQ-D02, REQ-D06, REQ-D21).
@@ -343,6 +346,14 @@ pub fn render_default_magi_toml() -> String {
         DEFAULT_DECISION_TIMEOUT_SECS
     )
     .unwrap();
+    out.push_str(concat!(
+        "# `clef-flash` loaded in 16.5 s on an idle machine and 49.4 s on a busy one (RTX 5060 Ti, 16 GB),
+",
+        "# so it needs at least 66 s here. Inside one consult the chain can take about 135 s: this timeout
+",
+        "# for `clef-flash` plus the 14.3 s cold load of `nimble`. Numbers from other hardware will differ.
+",
+    ));
     writeln!(out, "timeout_secs = {}", DEFAULT_DECISION_TIMEOUT_SECS).unwrap();
     writeln!(
         out,
@@ -364,7 +375,7 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(
         out,
-        "# to the main model. {} fits the window of the local `nimble` model. With a hosted decision",
+        "# to the main model. {} fits the request-size cap measured with the local `clef-flash` model. With a hosted decision",
         SCAFFOLD_DECISION_MAX_STATE_BYTES
     )
     .unwrap();
@@ -2099,7 +2110,7 @@ mod tests {
     fn the_scaffolded_toml_loads_with_the_local_state_limit() {
         let cfg = crate::config::MagiConfig::from_toml_str(&render_default_magi_toml())
             .expect("the scaffold loads");
-        assert_eq!(cfg.effective_decision().max_state_bytes, Some(19_000));
+        assert_eq!(cfg.effective_decision().max_state_bytes, Some(61_000));
     }
 
     #[test]
