@@ -2292,12 +2292,15 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         workspace_root.clone(),
     )?));
     agent.register_tool(Box::new(BashTool::new(workspace_root.clone())?));
+    // One authentication summary for both consult surfaces of this run: the agent's tool and
+    // the TUI's `/consult` explain a rejected key from the same keys.
+    let tui_trio_auth = trio_auth(&magi_config, provider_kind, &section_keys, &endpoints);
     register_consult_tool_if_available(
         &mut agent,
         consult_magi.as_ref(),
         ConsultToolRegistration {
             auto_approve: magi_config.magi().auto_approve,
-            auth: trio_auth(&magi_config, provider_kind, &section_keys, &endpoints),
+            auth: tui_trio_auth.clone(),
             magi_endpoint_diverges: magi_config.magi_endpoint_diverges(),
             max_query_bytes: magi_config.effective_max_query_bytes(),
             output_cap: magi_config.effective_tool_result_cap(),
@@ -2345,7 +2348,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             classifier_notices: tui_classifier_notices,
             default_mode: tui_default_mode,
             untrusted_content: tui_untrusted_content,
-            magi_auth: trio_auth(&magi_config, provider_kind, &section_keys, &endpoints),
+            magi_auth: tui_trio_auth,
             max_query_bytes: magi_config.effective_max_query_bytes(),
             tool_result_cap: magi_config.effective_tool_result_cap(),
             clock_coverage: tui_clock_coverage_announcer,

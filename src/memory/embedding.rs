@@ -191,7 +191,7 @@ impl OpenAiCompatibleEmbedder {
     ///
     /// # Returns
     /// The embedder with `source` recorded.
-    pub fn with_key_source(mut self, source: KeySource) -> Self {
+    pub(crate) fn with_key_source(mut self, source: KeySource) -> Self {
         self.key_source = source;
         self
     }
