@@ -9630,6 +9630,32 @@ mod tests {
         }
     }
 
+    /// Every surface hands the retained-key entries to its log (REQ-K09): they are a diagnostic
+    /// for the run log, so a surface that forgets them leaves the withheld key unexplained.
+    #[test]
+    fn every_surface_hands_the_retained_key_notices_to_its_log() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once(FIRST_TEST_MODULE)
+            .expect("this file has a test module");
+        for surface in [
+            "async fn run(",
+            "async fn prepare_headless(",
+            "async fn run_decide_subcommand(",
+        ] {
+            let start = production.find(surface).expect("surface");
+            let body = production.get(start..).unwrap_or("");
+            let end = body
+                .get(1..)
+                .and_then(|r| r.find("\nasync fn "))
+                .map_or(body.len(), |i| i + 1);
+            assert!(
+                code_lines_only(body.get(..end).unwrap_or(body)).contains(".startup_notices()"),
+                "{surface}"
+            );
+        }
+    }
+
     #[test]
     fn the_auditor_is_armed_with_every_credential_the_run_resolved() {
         // REQ-L49's exact pass is what catches a secret NO pattern recognises.

@@ -406,6 +406,14 @@ impl SectionKeys {
         &self.retained
     }
 
+    /// The run-log entries that say a section's key was withheld (REQ-K09).
+    ///
+    /// # Returns
+    /// One `INFO` notice per retained section, in the order magi, embedding, decision.
+    pub fn startup_notices(&self) -> Vec<crate::notices::Notice> {
+        todo!()
+    }
+
     /// The keys that only a section's own variable explains, named by that variable, for the
     /// log auditor's exact pass.
     ///
@@ -918,5 +926,107 @@ mod tests {
             post_login_trio_key(Some("   "), "login-key".to_string()),
             "login-key"
         ); // allow-secret-scan
+    }
+
+    #[test]
+    fn a_retained_key_becomes_one_file_only_notice_naming_the_variable_the_origin_and_the_command()
+    {
+        let e = env(Some("prin-secret"), None, None, None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some("http://127.0.0.1:11434"),
+            Some(ROOT),
+            None,
+        );
+        let (screen, file) = crate::notices::partition_by_mouth(k.startup_notices());
+        assert!(
+            screen.is_empty(),
+            "nothing reaches the TUI or stderr: {screen:?}"
+        );
+        assert_eq!(file.len(), 1);
+        let text = &file[0].text;
+        assert!(
+            text.contains("OPENAI_API_KEY")
+                && text.contains("http://127.0.0.1:11434")
+                && text.contains("magi-rs vault set MAGI_API_KEY"),
+            "{text}"
+        );
+        assert!(!text.contains("prin-secret"), "{text}");
+    }
+
+    #[test]
+    fn three_retained_sections_give_three_notices_in_section_order() {
+        let e = env(Some("prin"), None, None, None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some("http://127.0.0.1:1"),
+            Some("http://127.0.0.1:2"),
+            Some("http://127.0.0.1:3"),
+        );
+        let texts: Vec<String> = k.startup_notices().into_iter().map(|n| n.text).collect();
+        assert_eq!(texts.len(), 3);
+        for (t, var) in texts
+            .iter()
+            .zip(["MAGI_API_KEY", "EMBEDDING_API_KEY", "DECISION_API_KEY"])
+        {
+            assert!(t.contains(var), "{t}");
+        }
+    }
+
+    #[test]
+    fn no_retained_key_gives_no_notice() {
+        for (e, kind) in [
+            (
+                env(Some("prin"), None, None, None, None),
+                ProviderKind::OpenAiCompat,
+            ),
+            (
+                env(Some("prin"), Some("ak"), None, None, None),
+                ProviderKind::Anthropic,
+            ),
+            (
+                env(Some("prin"), None, None, None, None),
+                ProviderKind::Ollama,
+            ),
+            (
+                env(Some(" "), None, None, None, None),
+                ProviderKind::OpenAiCompat,
+            ),
+        ] {
+            let target =
+                if kind == ProviderKind::OpenAiCompat && e.openai_key.as_deref() == Some("prin") {
+                    ROOT
+                } else {
+                    "http://127.0.0.1:1"
+                };
+            let k = resolve(&e, kind, Some(target), Some(ROOT), Some(ROOT));
+            assert!(k.startup_notices().is_empty(), "{kind:?}");
+        }
+    }
+
+    /// RF4.
+    #[test]
+    fn a_retained_origin_never_carries_credentials() {
+        let e = env(Some("prin"), None, None, None, None);
+        let k = resolve(
+            &e,
+            ProviderKind::OpenAiCompat,
+            Some("http://alice:pw-canary@127.0.0.1:11434/v1"), // allow-secret-scan
+            None,
+            None,
+        );
+        let text = k
+            .startup_notices()
+            .into_iter()
+            .map(|n| n.text)
+            .collect::<String>();
+        assert!(
+            text.contains("127.0.0.1:11434")
+                && !text.contains("pw-canary")
+                && !text.contains("alice"),
+            "{text}"
+        );
     }
 }
