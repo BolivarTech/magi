@@ -1986,22 +1986,6 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         anthropic_key.as_deref(),
         secret_store.as_ref(),
     );
-    // REQ-L49: arm the auditor's EXACT pass with what this run actually
-    // resolved. Until this call existed the registry was empty in the shipped
-    // binary, so the pass that catches a secret no pattern recognises never ran
-    // — only the pattern pass protected the log. It goes here because this is
-    // the first point where both credentials are known, and after `init_logging`
-    // so the layer already holds the same process auditor.
-    for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
-        config.as_ref().map(|c| c.api_key.as_str()),
-        resolve_openai_key(openai_key.as_deref(), secret_store.as_ref()).as_deref(),
-    )) {
-        // The return value's first consumer. A credential too short for the
-        // rolling hash is still registered and still covered by the pattern
-        // pass, but the operator deserves to know which one got the weaker of
-        // the two.
-        startup_notices.push(short_secret_notice(short));
-    }
     // Task 4.1: replaces `resolve_provider`/`legacy_backend_label` — the vocabulary is
     // unified now, so there is nothing left to normalize a raw `ProviderKind` onto.
     let provider_kind =
@@ -2121,6 +2105,26 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             embedding_endpoint: embedding_endpoint.as_deref(),
             decision_endpoint: decision_endpoint.as_deref(),
         });
+    // REQ-L49: arm the auditor's EXACT pass with what this run actually
+    // resolved. Until this call existed the registry was empty in the shipped
+    // binary, so the pass that catches a secret no pattern recognises never ran
+    // — only the pattern pass protected the log. It goes here because this is
+    // the first point where every credential is known, and after `init_logging`
+    // so the layer already holds the same process auditor.
+    let principal_openai_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
+    let mut armed = secrets_to_arm(
+        config.as_ref().map(|c| c.api_key.as_str()),
+        principal_openai_key.as_deref(),
+    );
+    // The sections' own keys are armed in the same call (REQ-K04).
+    armed.extend(section_keys.own_secrets());
+    for short in magi_rs::logging::register_process_secrets(&armed) {
+        // The return value's first consumer. A credential too short for the
+        // rolling hash is still registered and still covered by the pattern
+        // pass, but the operator deserves to know which one got the weaker of
+        // the two.
+        startup_notices.push(short_secret_notice(short));
+    }
 
     // Read ONCE and shared by the probe AND the builder below (sixth-pass gate finding, S8):
     // the probe must measure exactly the models `build_magi_orchestrator` is about to run,
@@ -6319,7 +6323,7 @@ async fn prepare_headless(
         trio_notices.push(n);
     }
 
-    // The principal key is still armed here until the arming moves to the section keys.
+    // The principal's key keeps its own resolution; the sections' own keys join it below.
     let armed_openai_key = resolve_openai_key(openai_key.as_deref(), secret_store.as_ref());
     // REQ-L49, the headless half. Without this the surface a CI job uses ships
     // a log protected by the pattern pass alone: the exact pass only covers
@@ -6328,16 +6332,17 @@ async fn prepare_headless(
     // It sits on THIS key and not the one in `run()`. An earlier edit
     // matched the first line of that shape in the file, which belongs to the
     // TUI, and left this surface unarmed while looking done.
-    for short in magi_rs::logging::register_process_secrets(&secrets_to_arm(
-        discover_config(
-            &magi_config,
-            anthropic_key.as_deref(),
-            secret_store.as_ref(),
-        )
-        .as_ref()
-        .map(|c| c.api_key.as_str()),
+    let armed_config = discover_config(
+        &magi_config,
+        anthropic_key.as_deref(),
+        secret_store.as_ref(),
+    );
+    let mut armed = secrets_to_arm(
+        armed_config.as_ref().map(|c| c.api_key.as_str()),
         armed_openai_key.as_deref(),
-    )) {
+    );
+    armed.extend(section_keys.own_secrets());
+    for short in magi_rs::logging::register_process_secrets(&armed) {
         // Through the notice list, the same way the TUI does it. Written straight to stderr
         // this said the same thing in a second sentence and skipped `emit_notices`
         // altogether, so on the surface a CI job reads it never reached the day's file.
@@ -7060,29 +7065,6 @@ fn api_keys(consumed: &ConsumedSecrets) -> ApiKeys {
     }
 }
 
-/// The credentials the decide surface registers with the process auditor: the Anthropic and
-/// OpenAI keys the run holds, plus the decision key (REQ-D04, REQ-D11).
-///
-/// # Arguments
-/// * `anthropic` / `openai` / `decision` - The resolved keys; blank values are skipped.
-///
-/// # Returns
-/// The `(name, value)` pairs to register, in that order.
-fn decide_secrets_to_arm<'a>(
-    anthropic: Option<&'a str>,
-    openai: Option<&'a str>,
-    decision: Option<&'a str>,
-) -> Vec<(magi_rs::logging::auditor::SecretName, &'a str)> {
-    let mut out = secrets_to_arm(anthropic, openai);
-    if let Some(key) = non_blank(decision) {
-        out.push((
-            magi_rs::logging::auditor::SecretName::new(DECISION_KEY_ENV),
-            key,
-        ));
-    }
-    out
-}
-
 /// The opened encrypted store of a headless run and the vault wired over it.
 type OpenedVault = (Option<EncryptedSqliteMemory>, Option<SharedSecretStore>);
 
@@ -7165,19 +7147,6 @@ fn resolve_decision_endpoint(
             reason: redact_foreign_error(&other).to_string(),
         },
     })
-}
-
-/// The key stored for the decision endpoint: the consumed `DECISION_API_KEY`, else the vault
-/// entry of the same name. A blank value is absent (REQ-A12).
-///
-/// # Arguments
-/// * `keys` - The keys captured at startup.
-/// * `secret_store` - The open vault, if any.
-///
-/// # Returns
-/// The trimmed key, or `None`.
-fn decision_api_key(keys: &ApiKeys, secret_store: Option<&SharedSecretStore>) -> Option<String> {
-    env_or_vault(DECISION_KEY_ENV, keys.decision_key.as_deref(), secret_store).map(|s| s.value)
 }
 
 /// Builds the decision client once (REQ-D00, D04, D05).
@@ -7439,13 +7408,28 @@ async fn run_decide_subcommand(
     // Arm the auditor's exact pass with every credential this run holds, before anything is
     // logged or printed. The vault-resolved endpoint credentials are registered where they are
     // resolved.
-    let decision_key = decision_api_key(&secrets, secret_store.as_ref());
+    let root_endpoint = resolve_effective_principal_endpoint(
+        &magi_config,
+        env::var("OPENAI_BASE_URL").ok().as_deref(),
+        secret_store.as_ref(),
+    )
+    .map(|e| e.as_str().to_string())
+    .unwrap_or_default();
+    let (_, decision_endpoint) = section_endpoints(&magi_config, secret_store.as_ref());
+    let section_keys =
+        magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
+            env: &secrets,
+            secret_store: secret_store.as_ref(),
+            magi_kind: ProviderKind::Ollama,
+            root_endpoint: &root_endpoint,
+            magi_endpoint: None,
+            embedding_endpoint: None,
+            decision_endpoint: decision_endpoint.as_deref(),
+        });
     let openai_key = resolve_openai_key(secrets.openai_key.as_deref(), secret_store.as_ref());
-    let short_secrets = magi_rs::logging::register_process_secrets(&decide_secrets_to_arm(
-        secrets.anthropic_key.as_deref(),
-        openai_key.as_deref(),
-        decision_key.as_deref(),
-    ));
+    let mut armed = secrets_to_arm(secrets.anthropic_key.as_deref(), openai_key.as_deref());
+    armed.extend(section_keys.own_secrets());
+    let short_secrets = magi_rs::logging::register_process_secrets(&armed);
     // Same split as `prepare_headless`: the screen half now, the file half once a log exists.
     let (cfg_screen, mut cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
     cfg_file.extend(short_secrets.into_iter().map(short_secret_notice));
@@ -7476,24 +7460,6 @@ async fn run_decide_subcommand(
     };
     // The `[decision]` key is chosen by origin like every other section's (REQ-K03, D-PM-1); the
     // trio and the embedder take no part, so their endpoints are absent.
-    let root_endpoint = resolve_effective_principal_endpoint(
-        &magi_config,
-        env::var("OPENAI_BASE_URL").ok().as_deref(),
-        secret_store.as_ref(),
-    )
-    .map(|e| e.as_str().to_string())
-    .unwrap_or_default();
-    let (_, decision_endpoint) = section_endpoints(&magi_config, secret_store.as_ref());
-    let section_keys =
-        magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
-            env: &secrets,
-            secret_store: secret_store.as_ref(),
-            magi_kind: ProviderKind::Ollama,
-            root_endpoint: &root_endpoint,
-            magi_endpoint: None,
-            embedding_endpoint: None,
-            decision_endpoint: decision_endpoint.as_deref(),
-        });
     let (result, endpoint) = decide_once(
         &input,
         questions.as_deref(),

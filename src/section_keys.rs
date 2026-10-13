@@ -405,7 +405,16 @@ impl SectionKeys {
     ///
     /// Complexity: O(1).
     pub fn own_secrets(&self) -> Vec<(crate::logging::auditor::SecretName, &str)> {
-        todo!()
+        use crate::logging::auditor::SecretName;
+        [
+            (MAGI_KEY_ENV, &self.magi),
+            (EMBEDDING_KEY_ENV, &self.embedding),
+            (DECISION_KEY_ENV, &self.decision),
+        ]
+        .into_iter()
+        .filter(|(_, key)| key.source == KeySource::Own)
+        .filter_map(|(name, key)| key.value.as_deref().map(|v| (SecretName::new(name), v)))
+        .collect()
     }
 }
 
