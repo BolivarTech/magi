@@ -631,7 +631,8 @@ fn keyless_auth_explanation(cause: &str, auth: &TrioAuth) -> Option<String> {
     Some(match auth.source {
         KeySource::Absent => no_key_sent_wording(auth),
         KeySource::Own => format!(
-            "the endpoint rejected the key in {MAGI_KEY_ENV}; it must be a key for the provider of              [magi].kind (replace it with: {VAULT_SET_MAGI_KEY})"
+            "the endpoint rejected the key in {MAGI_KEY_ENV}; it must be a key for the provider of \
+             [magi].kind (replace it with: {VAULT_SET_MAGI_KEY})"
         ),
         KeySource::Inherited => {
             let variable = if auth.kind == ProviderKind::Anthropic {
@@ -640,7 +641,8 @@ fn keyless_auth_explanation(cause: &str, auth: &TrioAuth) -> Option<String> {
                 OPENAI_KEY_ENV
             };
             format!(
-                "the endpoint rejected the inherited {variable}; declare {MAGI_KEY_ENV} with:                  {VAULT_SET_MAGI_KEY}"
+                "the endpoint rejected the inherited {variable}; declare {MAGI_KEY_ENV} with: \
+                 {VAULT_SET_MAGI_KEY}"
             )
         }
     })
