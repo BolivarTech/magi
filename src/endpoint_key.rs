@@ -59,34 +59,38 @@ fn non_blank(key: Option<&str>) -> Option<&str> {
     key.filter(|k| !k.trim().is_empty())
 }
 
-/// Picks the API key to send to the decision endpoint.
+/// Picks the API key to send to a section's endpoint.
 ///
-/// A non-blank `decision_key` wins. Otherwise the principal key is
-/// inherited only when both endpoints share an origin, so a key never
-/// reaches a host that is not its own. Blank keys count as absent.
+/// A non-blank `own_key` (the key dedicated to the section) wins. Otherwise
+/// `inherited_key` (the key of the endpoint the section falls back to, such
+/// as the principal provider) is used only when `home_url` and `target_url`
+/// share an origin, so a key never reaches a host that is not its own. Blank
+/// keys count as absent.
 ///
 /// The key is resolved once, when the client is built: a vault change made
 /// by another process is not seen until the next start.
 ///
+/// Complexity: O(n) in the combined length of the two URLs.
+///
 /// # Arguments
-/// * `decision_key` - the dedicated decision key, if any.
-/// * `principal_key` - the principal provider key, if any.
-/// * `principal_base_url` - endpoint the principal key belongs to.
-/// * `decision_base_url` - the decision endpoint.
+/// * `own_key` - the key dedicated to the section, if any.
+/// * `inherited_key` - the fallback key, if any.
+/// * `home_url` - endpoint the inherited key belongs to.
+/// * `target_url` - the endpoint the selected key will be sent to.
 ///
 /// # Returns
 /// The key to send, or `None` for no authentication header.
 pub fn select_api_key(
-    decision_key: Option<&str>,
-    principal_key: Option<&str>,
-    principal_base_url: &str,
-    decision_base_url: &str,
+    own_key: Option<&str>,
+    inherited_key: Option<&str>,
+    home_url: &str,
+    target_url: &str,
 ) -> Option<String> {
-    if let Some(key) = non_blank(decision_key) {
+    if let Some(key) = non_blank(own_key) {
         return Some(key.to_string());
     }
-    non_blank(principal_key)
-        .filter(|_| same_origin(principal_base_url, decision_base_url))
+    non_blank(inherited_key)
+        .filter(|_| same_origin(home_url, target_url))
         .map(str::to_string)
 }
 
