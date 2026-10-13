@@ -223,6 +223,24 @@ mod tests {
         assert_eq!(select_api_key(None, None, "http://a:1", "http://a:1"), None);
     }
 
+    /// IPv6 literal endpoints: the host keeps its brackets in both the comparison and the
+    /// formatted origin, so a bracketed host matches itself and formats as a valid URL.
+    #[test]
+    fn ipv6_literal_endpoints_compare_and_format_with_their_brackets() {
+        assert!(same_origin("http://[::1]:11434/v1", "http://[::1]:11434"));
+        assert!(same_origin("http://[::1]:80", "http://[::1]/x"));
+        assert!(!same_origin("http://[::1]:11434", "http://[::2]:11434"));
+        assert!(!same_origin("http://[::1]:11434", "http://127.0.0.1:11434"));
+        assert_eq!(
+            origin_url("http://[::1]:11434/v1").as_deref(),
+            Some("http://[::1]:11434")
+        );
+        assert_eq!(
+            origin_url("https://[2001:db8::1]:443/api").as_deref(),
+            Some("https://[2001:db8::1]")
+        );
+    }
+
     #[test]
     fn the_origin_url_keeps_scheme_host_and_a_non_default_port_only() {
         assert_eq!(
