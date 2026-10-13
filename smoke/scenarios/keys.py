@@ -88,14 +88,17 @@ CONSULT_PROMPT = (b"Is a single-line change worth a full review? Answer "
 QUERY_TIMEOUT_S = 420
 CONSULT_TIMEOUT_S = 600
 
-#: K3: the hosted trio. Three distinct lineages (the product refuses fewer) and
-#: free-tier models, so a certifying run costs nothing. Unmeasured: the first
-#: run against a valid key either confirms these or replaces them.
+#: K3: the hosted trio. Three distinct lineages (the product refuses fewer).
+#: Measured 2026-10-13 with a valid key: two consults answered (exit 0) in
+#: 55-71 s, each model under 1 USD per million tokens. The free-tier variants
+#: were tried first and rejected: on the same day OpenRouter no longer listed
+#: these three, and the free models it did list answered 429 or 404, which
+#: would make the scenario intermittent.
 HOSTED_BASE_URL = decide.OPENROUTER_BASE_URL
 HOSTED_SEATS = (
-    ("melchior", "meta-llama/llama-3.3-70b-instruct:free", "meta"),
-    ("balthasar", "google/gemma-3-27b-it:free", "google"),
-    ("caspar", "mistralai/mistral-small-3.2-24b-instruct:free", "mistral"),
+    ("melchior", "meta-llama/llama-3.3-70b-instruct", "meta"),
+    ("balthasar", "google/gemma-3-27b-it", "google"),
+    ("caspar", "mistralai/mistral-small-3.2-24b-instruct", "mistral"),
 )
 MAGI_TABLE = "[magi]"
 FALLBACK_TABLE = "[[magi.fallback]]"

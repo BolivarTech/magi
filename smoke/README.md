@@ -288,9 +288,11 @@ assertions (D14 below raises that to 43 and 127).
 Every key these scenarios plant is a toy value (`sk-ant-toy-0001`, `sk-or-toy-0001`) and is
 declared as planted so the archive scrubs it. K1 and K2 run `magi query --no-memory` in a scratch
 workspace seeded with `magi init`, with every other key variable blanked so the harness's own
-environment cannot leak in. K3 runs `magi consult` and costs one trio consult on free-tier hosted
-models (`HOSTED_SEATS` in `smoke/scenarios/keys.py`); those model names are unmeasured until the
-first run against a valid key.
+environment cannot leak in. K3 runs `magi consult` and costs two trio consults on three low-cost hosted
+models (`HOSTED_SEATS` in `smoke/scenarios/keys.py`), each under 1 USD per million tokens.
+They were measured on 2026-10-13: with a valid key a consult answered in 55 to 71 s. Free-tier
+models were rejected after the same measurement, because the ones OpenRouter listed that day
+answered 429 or 404 and would have made the scenario intermittent.
 
 **The interactive window is not driven.** The withheld-key notice is routed by the same function in
 every surface, so K1 runs headless, where the screen is `stdout` plus `stderr`. A terminal
