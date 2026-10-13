@@ -460,8 +460,8 @@ impl SectionKeys {
         if let Some(kind) = self.shape_mismatch {
             notices.push(crate::notices::Notice::warn(format!(
                 "{MAGI_KEY_ENV} does not look like a key for the provider of [magi].kind = \"{kind}\" \
-                 (Anthropic keys start with {ANTHROPIC_KEY_PREFIX}). It is sent anyway; check it if \
-                 the trio answers 401 or 403."
+                 (Anthropic keys start with {ANTHROPIC_KEY_PREFIX}). This is only a warning and blocks \
+                 nothing; check the key if the trio answers 401 or 403."
             )));
         }
         notices
