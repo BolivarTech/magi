@@ -5820,7 +5820,10 @@ struct HeadlessContext {
     /// REQ-A01b vocabulary, not just that it equals some literal —
     /// `test_prepare_headless_cli_provider_override_normalizes_the_new_vocabulary` and its
     /// envelope-field sibling below assert on it directly.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// **`#[cfg(test)]`, not `#[allow(dead_code)]`**, like `divergence_notice` below: since the trio's
+    /// authentication moved to `magi_auth`, no dispatcher reads it back off `ctx`, only those tests.
+    #[cfg(test)]
     provider_kind: ProviderKind,
     /// How the trio authenticates (REQ-K06), computed once here from the same keys the trio was
     /// built with; both dispatchers hand it to the consult surfaces.
@@ -6423,6 +6426,7 @@ async fn prepare_headless(
         memory,
         magi_config,
         provider,
+        #[cfg(test)]
         provider_kind,
         magi_auth,
         consult_magi,
