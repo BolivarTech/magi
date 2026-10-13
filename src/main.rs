@@ -109,7 +109,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-use magi_rs::section_keys::{env_or_vault, SharedSecretStore};
+use magi_rs::section_keys::{env_or_vault, ApiKeys, SharedSecretStore};
 
 /// A passphrase read from `-p`/`--passphrase`, wrapped in [`Zeroizing`] so the
 /// plaintext never lingers in memory after use (secrets-separation invariant).
@@ -817,6 +817,10 @@ struct ConsumedSecrets {
     openai_key: Option<String>,
     /// The decision endpoint key (`DECISION_API_KEY`), if it was set (REQ-D04).
     decision_key: Option<String>,
+    /// The trio's own key (`MAGI_API_KEY`), if it was set (REQ-K01).
+    magi_key: Option<String>,
+    /// The embedder's own key (`EMBEDDING_API_KEY`), if it was set (REQ-K02).
+    embedding_key: Option<String>,
 }
 
 /// Reads the four secret env vars into a [`ConsumedSecrets`], then removes all
@@ -849,6 +853,8 @@ fn read_then_scrub_secret_env() -> ConsumedSecrets {
         anthropic_key,
         openai_key,
         decision_key,
+        magi_key: None,
+        embedding_key: None,
     }
 }
 
@@ -1592,7 +1598,7 @@ fn main() -> ExitCode {
 /// Propagates any fatal I/O, configuration, or TUI error (mapped to
 /// [`ExitCode::FAILURE`] by [`bootstrap_headless`]).
 async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
-    let decide_secrets = DecideSecrets::from_consumed(&secrets);
+    let decide_secrets = api_keys(&secrets);
     let ConsumedSecrets {
         passphrase: env_passphrase,
         anthropic_key,
@@ -2181,7 +2187,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // explicit `/consult` needs the same `resolve_mode_guarded` classifier/config
     // pair the direct headless `magi consult` path already has.
     // The decision client is built ONCE here and shared with the mode classifier; its keys come
-    // from `DecideSecrets::from_consumed`, the same path `magi decide` uses (PM-MS2-C3).
+    // from `api_keys`, the same path `magi decide` uses (PM-MS2-C3).
     let (tui_decision, tui_decision_endpoint, tui_decision_reason) =
         decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
     let tui_distill_decision = tui_decision.clone();
@@ -6507,7 +6513,7 @@ async fn run_query_subcommand(
     h: HeadlessArgs,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
-    decide_secrets: DecideSecrets,
+    decide_secrets: ApiKeys,
 ) -> i32 {
     let ctx = match prepare_headless(
         &h,
@@ -6855,7 +6861,7 @@ async fn run_consult_subcommand(
     explicit_mode: Option<Mode>,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
-    decide_secrets: DecideSecrets,
+    decide_secrets: ApiKeys,
 ) -> i32 {
     // REQ-EA06, BEFORE `prepare_headless`: the flag only has somewhere to put its output in the
     // JSON object, so under text output it is operator misuse — exit 2, named, nothing written.
@@ -6998,36 +7004,21 @@ async fn run_consult_subcommand(
     finish_headless(&h, &outcome, limits.tool_result_cap)
 }
 
-/// Keys the decide subcommand may use, captured from the environment before it was scrubbed
-/// (REQ-D04).
+/// The API keys captured from the environment before it was scrubbed, as every surface reads
+/// them (REQ-D04, REQ-K04).
 ///
-/// Built only by [`Self::from_consumed`], so every surface that needs the decision key reads
-/// it from the same place.
-struct DecideSecrets {
-    /// The decision endpoint key (`DECISION_API_KEY`), if it was set.
-    decision_key: Option<String>,
-    /// The OpenAI-compatible key (`OPENAI_API_KEY`), the principal's key when it is not
-    /// Anthropic.
-    openai_key: Option<String>,
-    /// The Anthropic key (`ANTHROPIC_API_KEY`). Never sent by decide; kept so the auditor can
-    /// mask it if anything echoes it.
-    anthropic_key: Option<String>,
-}
-
-impl DecideSecrets {
-    /// Copies the two keys decide can use out of the consumed environment.
-    ///
-    /// # Arguments
-    /// * `consumed` - The secrets read and scrubbed at startup.
-    ///
-    /// # Returns
-    /// The keys, with no further resolution: blank values are filtered where they are used.
-    fn from_consumed(consumed: &ConsumedSecrets) -> Self {
-        Self {
-            decision_key: consumed.decision_key.clone(),
-            openai_key: consumed.openai_key.clone(),
-            anthropic_key: consumed.anthropic_key.clone(),
-        }
+/// # Arguments
+/// * `consumed` - The secrets read and scrubbed at startup.
+///
+/// # Returns
+/// The keys, with no further resolution: blank values are filtered where they are used.
+fn api_keys(consumed: &ConsumedSecrets) -> ApiKeys {
+    ApiKeys {
+        anthropic_key: consumed.anthropic_key.clone(),
+        openai_key: consumed.openai_key.clone(),
+        decision_key: consumed.decision_key.clone(),
+        magi_key: consumed.magi_key.clone(),
+        embedding_key: consumed.embedding_key.clone(),
     }
 }
 
@@ -7147,10 +7138,7 @@ fn resolve_decision_endpoint(
 ///
 /// # Returns
 /// The trimmed key, or `None`.
-fn decision_api_key(
-    keys: &DecideSecrets,
-    secret_store: Option<&SharedSecretStore>,
-) -> Option<String> {
+fn decision_api_key(keys: &ApiKeys, secret_store: Option<&SharedSecretStore>) -> Option<String> {
     env_or_vault(DECISION_KEY_ENV, keys.decision_key.as_deref(), secret_store).map(|s| s.value)
 }
 
@@ -7171,7 +7159,7 @@ fn decision_api_key(
 fn principal_key_and_endpoint(
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-    keys: &DecideSecrets,
+    keys: &ApiKeys,
 ) -> Option<(String, String)> {
     let kind =
         resolve_effective_provider_kind(config, env::var("MAGI_PROVIDER").ok().as_deref()).ok()?;
@@ -7207,7 +7195,7 @@ fn principal_key_and_endpoint(
 fn build_decision_client(
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-    keys: &DecideSecrets,
+    keys: &ApiKeys,
 ) -> Result<SystemOneClient, DecisionError> {
     let template =
         config
@@ -7241,7 +7229,7 @@ fn build_decision_client(
 ///
 /// An unbuildable client is an absent one: the internal decisions then fall back to the LLM and
 /// log it (REQ-D12). Every internal surface builds its client here, with keys from
-/// [`DecideSecrets::from_consumed`], so none can forget the decision key.
+/// [`api_keys`], so none can forget the decision key.
 ///
 /// # Arguments
 /// * `config` - The loaded configuration.
@@ -7254,7 +7242,7 @@ fn build_decision_client(
 fn decision_client_for(
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-    keys: &DecideSecrets,
+    keys: &ApiKeys,
 ) -> DecisionClientParts {
     match build_decision_client(config, secret_store, keys) {
         Ok(client) => {
@@ -7341,7 +7329,7 @@ async fn decide_once(
     timeout_secs: Option<u64>,
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-    keys: &DecideSecrets,
+    keys: &ApiKeys,
 ) -> (Result<Decision, DecisionError>, String) {
     // The template carries placeholders, never a secret; redacting it is the second layer.
     let configured_endpoint = config
@@ -7407,7 +7395,7 @@ async fn run_decide_subcommand(
     args: DecideArgs,
     passphrase_flag: Option<Zeroizing<String>>,
     cwd: &Path,
-    secrets: DecideSecrets,
+    secrets: ApiKeys,
 ) -> i32 {
     let started = std::time::Instant::now();
     let workdir = match resolve_workspace_root(args.workdir.clone(), cwd) {
@@ -10652,14 +10640,51 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn the_section_keys_are_read_then_scrubbed_from_the_process_env() {
+        use magi_rs::section_keys::{EMBEDDING_KEY_ENV, MAGI_KEY_ENV};
+        with_var(MAGI_KEY_ENV, Some("magi-env-key"), || {
+            with_var(EMBEDDING_KEY_ENV, Some("embed-env-key"), || {
+                let consumed = read_then_scrub_secret_env();
+                assert_eq!(consumed.magi_key.as_deref(), Some("magi-env-key"));
+                assert_eq!(consumed.embedding_key.as_deref(), Some("embed-env-key"));
+                assert!(env::var(MAGI_KEY_ENV).is_err());
+                assert!(env::var(EMBEDDING_KEY_ENV).is_err());
+                let keys = api_keys(&consumed);
+                assert_eq!(keys.magi_key.as_deref(), Some("magi-env-key"));
+                assert_eq!(keys.embedding_key.as_deref(), Some("embed-env-key"));
+            });
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_tool_child_never_inherits_a_section_key() {
+        use magi_rs::section_keys::{EMBEDDING_KEY_ENV, MAGI_KEY_ENV};
+        with_var(MAGI_KEY_ENV, Some("magi-env-key"), || {
+            with_var(EMBEDDING_KEY_ENV, Some("embed-env-key"), || {
+                let child = crate::tools::proc_group::tool_child_env();
+                for name in [MAGI_KEY_ENV, EMBEDDING_KEY_ENV] {
+                    assert!(
+                        !child.iter().any(|(k, _)| k.eq_ignore_ascii_case(name)),
+                        "{name} reached a tool child"
+                    );
+                }
+            });
+        });
+    }
+
+    #[test]
     fn decision_secrets_come_from_the_consumed_env_and_only_from_it() {
         let consumed = ConsumedSecrets {
             passphrase: None,
             anthropic_key: Some("anthropic-key".into()),
             openai_key: Some("prin-key".into()),
             decision_key: Some("dec-key".into()),
+            magi_key: None,
+            embedding_key: None,
         };
-        let keys = DecideSecrets::from_consumed(&consumed);
+        let keys = api_keys(&consumed);
         assert_eq!(keys.decision_key.as_deref(), Some("dec-key"));
         assert_eq!(keys.openai_key.as_deref(), Some("prin-key"));
     }
@@ -19521,11 +19546,13 @@ model = \"nimble\"
     }
 
     /// Keys of a consult test run: the given Anthropic key and no decision or OpenAI key.
-    fn test_decide_secrets(anthropic_key: Option<&str>) -> DecideSecrets {
-        DecideSecrets {
+    fn test_decide_secrets(anthropic_key: Option<&str>) -> ApiKeys {
+        ApiKeys {
             decision_key: None,
             openai_key: None,
             anthropic_key: anthropic_key.map(str::to_string),
+            magi_key: None,
+            embedding_key: None,
         }
     }
 

@@ -41,6 +41,29 @@ impl std::fmt::Debug for ResolvedSecret {
     }
 }
 
+/// Environment variable and vault entry of the trio's own key (REQ-K01).
+pub const MAGI_KEY_ENV: &str = "MAGI_API_KEY";
+
+/// Environment variable and vault entry of the embedder's own key (REQ-K02).
+pub const EMBEDDING_KEY_ENV: &str = "EMBEDDING_API_KEY";
+
+/// The API keys read (and scrubbed) from the environment at startup; never the passphrase.
+///
+/// Values are kept as read: blank ones are filtered where they are used ([`env_or_vault`]).
+pub struct ApiKeys {
+    /// The Anthropic key (`ANTHROPIC_API_KEY`).
+    pub anthropic_key: Option<String>,
+    /// The OpenAI-compatible key (`OPENAI_API_KEY`), the principal's key when it is not
+    /// Anthropic.
+    pub openai_key: Option<String>,
+    /// The decision endpoint key (`DECISION_API_KEY`).
+    pub decision_key: Option<String>,
+    /// The trio's own key (`MAGI_API_KEY`).
+    pub magi_key: Option<String>,
+    /// The embedder's own key (`EMBEDDING_API_KEY`).
+    pub embedding_key: Option<String>,
+}
+
 /// Resolves a key: the consumed env value if non-blank (trimmed), else the vault entry `name` if
 /// non-blank (trimmed).
 ///
