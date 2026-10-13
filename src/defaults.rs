@@ -1584,26 +1584,178 @@ mod tests {
         );
     }
 
-    /// The pool must be the LAST thing in the file. In TOML every loose key and sub-table has to
-    /// precede the first array of tables, so anything emitted after it would parse into the pool
-    /// entry instead of its own table — silently, which is the part that makes it dangerous.
+    /// Active table headers of `toml_text` (`[x]`, `[x.y]`, `[[x.y]]`), in file order, with the
+    /// brackets stripped. Commented headers such as `# [decision]` are not headers.
+    ///
+    /// Complexity: O(lines).
+    fn active_table_headers(toml_text: &str) -> Vec<String> {
+        toml_text
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('['))
+            .map(|l| l.trim_matches(|c| c == '[' || c == ']').to_string())
+            .collect()
+    }
+
+    /// The lines that belong to the table `[name]` itself: from the line after its header up to
+    /// the next active table header of any kind, so a sub-table or a pool closes it.
+    ///
+    /// Complexity: O(lines).
+    ///
+    /// # Panics
+    /// When the scaffold has no `[name]` header.
+    fn own_section_lines<'a>(toml_text: &'a str, name: &str) -> Vec<&'a str> {
+        let header = format!("[{name}]");
+        let lines: Vec<&str> = toml_text.lines().collect();
+        let start = lines
+            .iter()
+            .position(|l| l.trim() == header)
+            .unwrap_or_else(|| panic!("the scaffold must declare {header}"));
+        lines[start + 1..]
+            .iter()
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .copied()
+            .collect()
+    }
+
+    /// Every sub-table and every array of tables sits right after its parent's group: `[magi]`,
+    /// then its own sub-tables and `[[magi.fallback]]` pool, before any other section starts.
+    /// A pool parked at the end of the file, far from `[magi]`, is the layout this replaces.
     #[test]
-    fn nothing_is_emitted_after_the_fallback_pool() {
-        let scaffold = render_default_magi_toml();
-        let first_pool = scaffold
-            .find("[[magi.fallback]]")
-            .expect("the scaffold must declare a pool");
-        let tail = &scaffold[first_pool..];
-        for line in tail.lines() {
-            let t = line.trim();
-            if t.is_empty() || t.starts_with('#') || t.starts_with("[[magi.fallback]]") {
+    fn every_sub_table_follows_its_parent_section() {
+        let headers = active_table_headers(&render_default_magi_toml());
+        for (i, header) in headers.iter().enumerate() {
+            let Some((parent, _)) = header.split_once('.') else {
                 continue;
-            }
-            assert!(
-                t.starts_with("model") || t.starts_with("lineage"),
-                "only pool entries may follow the pool; found: {t}"
+            };
+            let previous = &headers[..i]
+                .last()
+                .unwrap_or_else(|| panic!("[{header}] cannot open the file"));
+            let previous_parent = previous.split_once('.').map_or(previous.as_str(), |p| p.0);
+            assert_eq!(
+                previous_parent, parent,
+                "[{header}] must follow [{parent}] or another of its sub-tables, not [{previous}]; \
+                 headers: {headers:?}"
             );
         }
+    }
+
+    /// The three sections with an endpoint of their own each show their `base_url` COMMENTED:
+    /// visible, so the operator knows the knob exists, and inactive, so the section inherits the
+    /// root endpoint until someone uncomments it.
+    #[test]
+    fn every_endpoint_section_offers_its_base_url_commented() {
+        let scaffold = render_default_magi_toml();
+        for name in ["magi", "embedding", "decision"] {
+            let section = own_section_lines(&scaffold, name);
+            assert!(
+                section
+                    .iter()
+                    .any(|l| l.trim_start().starts_with("# base_url")),
+                "[{name}] must show a commented base_url line: {section:?}"
+            );
+            assert!(
+                !section
+                    .iter()
+                    .any(|l| l.trim_start().starts_with("base_url")),
+                "[{name}].base_url must stay commented so the section inherits the root: \
+                 {section:?}"
+            );
+        }
+    }
+
+    /// Uncommenting a section's `base_url` line, and nothing else, gives a file that still loads
+    /// and points that section at the root endpoint's value: the line is ready to edit.
+    #[test]
+    fn uncommenting_a_section_base_url_loads_and_sets_that_endpoint() {
+        let scaffold = render_default_magi_toml();
+        for name in ["magi", "embedding", "decision"] {
+            let header = format!("[{name}]");
+            let mut in_section = false;
+            let mut uncommented = false;
+            let edited: String = scaffold
+                .lines()
+                .map(|line| {
+                    let t = line.trim_start();
+                    if t.starts_with('[') {
+                        in_section = t == header;
+                    }
+                    if in_section && !uncommented && t.starts_with("# base_url") {
+                        uncommented = true;
+                        let value = t.trim_start_matches("# ");
+                        // Drop a trailing `# ...` note after the quoted value.
+                        let end = value.rfind('"').map_or(value.len(), |i| i + 1);
+                        return value[..end].to_string();
+                    }
+                    line.to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                uncommented,
+                "[{name}] has no commented base_url to uncomment"
+            );
+            crate::config::MagiConfig::from_toml_str(&edited)
+                .unwrap_or_else(|e| panic!("uncommenting [{name}].base_url must load: {e}"));
+            let table: toml::Table = toml::from_str(&edited).expect("parses");
+            let value = table
+                .get(name)
+                .and_then(|s| s.get("base_url"))
+                .and_then(toml::Value::as_str);
+            assert_eq!(value, Some(DEFAULT_OPENAI_BASE_URL), "[{name}]");
+        }
+    }
+
+    /// `[memory]` has no endpoint: the parser refuses a `base_url` there, so the section says
+    /// where its endpoint lives instead of showing a line that would stop the program.
+    #[test]
+    fn the_memory_section_points_to_the_embedding_endpoint() {
+        let scaffold = render_default_magi_toml();
+        let section = own_section_lines(&scaffold, "memory");
+        assert!(
+            !section.iter().any(|l| l.contains("base_url =")),
+            "[memory] accepts no base_url: {section:?}"
+        );
+        assert!(
+            section
+                .iter()
+                // `endpoint` too: the `# [embedding] — ...` banner that opens the next section
+                // also falls inside this range and must not satisfy the check.
+                .any(|l| l.trim_start().starts_with('#')
+                    && l.contains("[embedding]")
+                    && l.contains("endpoint")),
+            "[memory] must say its endpoint is [embedding]'s: {section:?}"
+        );
+    }
+
+    /// Each endpoint section names the variable that holds its key and the main key it falls
+    /// back to; the root names the main keys. The line that said the embedder reads
+    /// `OPENAI_API_KEY` only predates per-section keys and must be gone.
+    #[test]
+    fn each_endpoint_section_names_its_key_and_the_main_key_it_falls_back_to() {
+        let scaffold = render_default_magi_toml();
+        for (name, own) in [
+            ("magi", "MAGI_API_KEY"),
+            ("embedding", "EMBEDDING_API_KEY"),
+            ("decision", "DECISION_API_KEY"),
+        ] {
+            let text = own_section_lines(&scaffold, name).join("\n");
+            for needle in [own, "OPENAI_API_KEY", "magi-rs vault set"] {
+                assert!(text.contains(needle), "[{name}] must name {needle}: {text}");
+            }
+        }
+        let root: String = scaffold
+            .lines()
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] {
+            assert!(root.contains(needle), "the root must name {needle}: {root}");
+        }
+        assert!(
+            !scaffold.contains("OPENAI_API_KEY env only"),
+            "stale embedder key line"
+        );
     }
 
     /// The no-config startup notice must name every accepted `provider` value too.
