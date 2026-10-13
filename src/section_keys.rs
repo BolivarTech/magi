@@ -48,13 +48,13 @@ pub const MAGI_KEY_ENV: &str = "MAGI_API_KEY";
 pub const EMBEDDING_KEY_ENV: &str = "EMBEDDING_API_KEY";
 
 /// Environment variable and vault entry of the decision endpoint's own key (REQ-D04).
-const DECISION_KEY_ENV: &str = "DECISION_API_KEY";
+pub const DECISION_KEY_ENV: &str = "DECISION_API_KEY";
 
 /// The OpenAI-compatible key every OpenAI-compatible section may inherit on the root's origin.
-const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
+pub const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
 
 /// The Anthropic key an Anthropic trio falls back to (REQ-K07).
-const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+pub const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// What a retained entry shows when the section's endpoint has no parsable origin.
 const UNPARSABLE_ORIGIN: &str = "(endpoint without a valid origin)";
@@ -248,6 +248,35 @@ impl SectionKeys {
     ///
     /// # Returns
     /// The chosen keys and the sections whose inheritance was refused.
+    ///
+    /// Complexity: O(1) per section plus one vault read per key, and O(n) in the length of the
+    /// URLs for each origin comparison.
+    ///
+    /// # Examples
+    /// ```
+    /// use magi_rs::magi::kind::ProviderKind;
+    /// use magi_rs::section_keys::{ApiKeys, KeyInputs, KeySource, SectionKeys};
+    ///
+    /// let env = ApiKeys {
+    ///     anthropic_key: None,
+    ///     openai_key: Some("principal-key".into()),
+    ///     decision_key: None,
+    ///     magi_key: None,
+    ///     embedding_key: None,
+    /// };
+    /// let keys = SectionKeys::resolve(&KeyInputs {
+    ///     env: &env,
+    ///     secret_store: None,
+    ///     magi_kind: ProviderKind::OpenAiCompat,
+    ///     root_endpoint: "http://localhost:11434/v1",
+    ///     magi_endpoint: Some("http://localhost:11434/v1"),
+    ///     embedding_endpoint: Some("http://192.168.0.30:11434/v1"),
+    ///     decision_endpoint: None,
+    /// });
+    /// assert_eq!(keys.magi().source(), KeySource::Inherited); // same origin as the root
+    /// assert_eq!(keys.embedding().value(), None); // another origin: no key is sent
+    /// assert_eq!(keys.retained()[0].variable(), "EMBEDDING_API_KEY");
+    /// ```
     pub fn resolve(inputs: &KeyInputs<'_>) -> SectionKeys {
         let env = inputs.env;
         let store = inputs.secret_store;

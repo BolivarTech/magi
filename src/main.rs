@@ -783,14 +783,8 @@ fn resolve_openai_key(
     env_or_vault(OPENAI_KEY_ENV, env_key, secret_store).map(|s| s.value)
 }
 
-/// Environment variable name holding the Anthropic API key (REQ-H37).
-const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
-
-/// Environment variable name holding the OpenAI-compatible API key (REQ-H37).
-const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
-
-/// Environment variable and vault entry holding the decision endpoint key (REQ-D04).
-const DECISION_KEY_ENV: &str = "DECISION_API_KEY";
+// The secret variable names are defined once, in the lib (REQ-H37, REQ-D04).
+use magi_rs::section_keys::{ANTHROPIC_KEY_ENV, DECISION_KEY_ENV, OPENAI_KEY_ENV};
 
 /// Warning emitted at startup when loose legacy state files sit in the working
 /// directory but no `.magi/` exists (REQ-H17/H31). The pre-headless layout is no
