@@ -7459,11 +7459,18 @@ async fn run_decide_subcommand(
     .map(|e| e.as_str().to_string())
     .unwrap_or_default();
     let (_, decision_endpoint) = section_endpoints(&magi_config, secret_store.as_ref());
+    // The trio takes no part here (no endpoint, so no key), but its kind is the real one so the
+    // key-shape check judges `MAGI_API_KEY` the way the TUI and headless runs do (REQ-K10). An
+    // unresolvable principal falls back to Ollama, as the decide path always did for the trio.
+    let magi_kind =
+        resolve_effective_provider_kind(&magi_config, env::var("MAGI_PROVIDER").ok().as_deref())
+            .map(|principal| registered_magi_kind(&magi_config, principal))
+            .unwrap_or(ProviderKind::Ollama);
     let section_keys =
         magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
             env: &secrets,
             secret_store: secret_store.as_ref(),
-            magi_kind: ProviderKind::Ollama,
+            magi_kind,
             root_endpoint: &root_endpoint,
             magi_endpoint: None,
             embedding_endpoint: None,
