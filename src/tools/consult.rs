@@ -27,7 +27,7 @@ use magi_rs::magi::{
     TRUNCATION_MARK,
 };
 use magi_rs::redact::{foreign_serde_label, redact_foreign_error, redact_foreign_text};
-use magi_rs::section_keys::KeySource;
+use magi_rs::section_keys::{KeySource, ANTHROPIC_KEY_ENV, MAGI_KEY_ENV, OPENAI_KEY_ENV};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -548,10 +548,8 @@ pub(crate) struct TrioAuth {
     /// The kind the trio runs under.
     pub(crate) kind: ProviderKind,
     /// Where the trio's key came from.
-    #[allow(dead_code)] // Red stub
     pub(crate) source: KeySource,
     /// The redacted origin of `[magi]`'s endpoint; empty when unknown.
-    #[allow(dead_code)] // Red stub
     pub(crate) origin_redacted: String,
 }
 
@@ -588,13 +586,15 @@ const KEYLESS_AUTH_EXPLANATION: &str = "`[magi].kind = \"ollama\"` is keyless an
      the key via env or vault.";
 
 /// Translates the cause of ONE seat —as it appears in `MagiReport::failed_agents`— into an
-/// actionable configuration error, when that cause is a rejected authentication UNDER a keyless
-/// kind (REQ-A12c, SC-A12f).
+/// actionable explanation, when that cause is a rejected authentication (REQ-A12c, SC-A12f,
+/// REQ-K06).
 ///
-/// Returns `None` for any other combination: under a kind that DOES carry credentials (`openai-
-/// compat`/`anthropic`), a 401/403 can be a genuinely bad credential, and reinterpreting it as
-/// a configuration error would send the user to check the wrong file — an ACTIVELY incorrect
-/// diagnosis, not an extra guard.
+/// Returns `None` when the cause is not an authentication failure. Otherwise the wording depends
+/// on who the trio runs as: under a keyless kind (`ollama`) it names the configuration; under a
+/// kind that DOES carry credentials (`openai-compat`/`anthropic`) a 401/403 can be a genuinely
+/// bad credential, so it is never explained as a keyless configuration — that would send the
+/// user to check the wrong file — and instead says where the key came from
+/// ([`TrioAuth::source`]) and which variable to declare.
 ///
 /// **Does not interpolate `cause` into the result.** The message is fixed text: there is
 /// nothing
@@ -622,8 +622,45 @@ const KEYLESS_AUTH_EXPLANATION: &str = "`[magi].kind = \"ollama\"` is keyless an
 /// task's report (round 2).
 #[must_use]
 fn keyless_auth_explanation(cause: &str, auth: &TrioAuth) -> Option<String> {
-    (auth.kind == ProviderKind::Ollama && cause.contains(PROVIDER_AUTH_ERROR_MARKER))
-        .then(|| KEYLESS_AUTH_EXPLANATION.to_string())
+    if !cause.contains(PROVIDER_AUTH_ERROR_MARKER) {
+        return None;
+    }
+    if auth.kind == ProviderKind::Ollama {
+        return Some(KEYLESS_AUTH_EXPLANATION.to_string());
+    }
+    Some(match auth.source {
+        KeySource::Absent => no_key_sent_wording(auth),
+        KeySource::Own => format!(
+            "the endpoint rejected the key in {MAGI_KEY_ENV}; it must be a key for the provider of              [magi].kind (replace it with: {VAULT_SET_MAGI_KEY})"
+        ),
+        KeySource::Inherited => {
+            let variable = if auth.kind == ProviderKind::Anthropic {
+                ANTHROPIC_KEY_ENV
+            } else {
+                OPENAI_KEY_ENV
+            };
+            format!(
+                "the endpoint rejected the inherited {variable}; declare {MAGI_KEY_ENV} with:                  {VAULT_SET_MAGI_KEY}"
+            )
+        }
+    })
+}
+
+/// The command that stores the trio's own key; shared by every wording that points at it.
+const VAULT_SET_MAGI_KEY: &str = "magi-rs vault set MAGI_API_KEY";
+
+/// The wording for a trio that sent no key at all: says where nothing was sent and how to
+/// declare a key. Fixed text plus the already-redacted origin; nothing from a rejected cause.
+///
+/// # Arguments
+/// * `auth` - the trio's authentication; only `origin_redacted` is read.
+fn no_key_sent_wording(auth: &TrioAuth) -> String {
+    let destination = if auth.origin_redacted.is_empty() {
+        String::new()
+    } else {
+        format!(" to {}", auth.origin_redacted)
+    };
+    format!("no API key was sent{destination}; declare {MAGI_KEY_ENV} with: {VAULT_SET_MAGI_KEY}")
 }
 
 /// Appends, at the end of the text already rendered by magi-core, one note for each seat in
@@ -1225,12 +1262,13 @@ fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
 ///
 /// # Parameters
 /// * `err` - the error returned by `Magi::analyze()`.
-/// * `kind` - the `ProviderKind` the trio ran under.
+/// * `auth` - how the trio authenticated: its kind and where its key came from.
 ///
 /// # Returns
-/// The `Display` of `err` (redacted — B11, see below), with the keyless hint ADDED (never in
-/// its place) when `err` is `InsufficientAgents` and `kind` is `Ollama`. In any other case,
-/// only the `Display` of `err`.
+/// The `Display` of `err` (redacted — B11, see below), with a hint ADDED (never in its place)
+/// when `err` is `InsufficientAgents`: the keyless hint under `Ollama`, or the no-key-sent
+/// wording for an OpenAI-compatible trio whose key is absent. In any other case, only the
+/// `Display` of `err`.
 ///
 /// Consumed by `ConsultTool::execute`, `analyze_direct` (headless), AND —since fix round 4,
 /// finding 2— the explicit TUI `/consult` (`src/tui/mod.rs::tui_consult_error_body`): the three
@@ -1266,6 +1304,14 @@ pub(crate) fn explain_magi_error(err: &MagiError, auth: &TrioAuth) -> String {
                  served an unavailable model; weigh this against the succeeded/required counts \
                  above and any per-seat detail your logs captured before assuming it is the cause."
             )
+        }
+        // REQ-K06: the trio sent no key, so a total failure may be a missing one. The reason comes
+        // from where the key came from (`auth.source`), not from the cause magi-core discards; it
+        // is a plain fact, not a diagnosis, so it needs no "possible cause" hedging.
+        (MagiError::InsufficientAgents { .. }, ProviderKind::OpenAiCompat)
+            if auth.source == KeySource::Absent =>
+        {
+            format!("{base} — {}", no_key_sent_wording(auth))
         }
         _ => base.to_string(),
     }
