@@ -2105,6 +2105,8 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             embedding_endpoint: embedding_endpoint.as_deref(),
             decision_endpoint: decision_endpoint.as_deref(),
         });
+    // A withheld key is a run-log diagnostic (REQ-K09), never screen text.
+    startup_notices.extend(section_keys.startup_notices());
     // REQ-L49: arm the auditor's EXACT pass with what this run actually
     // resolved. Until this call existed the registry was empty in the shipped
     // binary, so the pass that catches a secret no pattern recognises never ran
@@ -6417,6 +6419,7 @@ async fn prepare_headless(
     // lines up, where its destination did not exist yet, and this is the first point at which
     // it does. Its screen-bound half was already announced back there — see that site.
     trio_notices.extend(cfg_file);
+    trio_notices.extend(section_keys.startup_notices());
     emit_notices(trio_notices);
     // Only now: the bring-up's own error already printed its reason, and this keeps the
     // context that led up to it from being thrown away with the run.
@@ -7476,6 +7479,7 @@ async fn run_decide_subcommand(
     // Same split as `prepare_headless`: the screen half now, the file half once a log exists.
     let (cfg_screen, mut cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
     cfg_file.extend(short_secrets.into_iter().map(short_secret_notice));
+    cfg_file.extend(section_keys.startup_notices());
     emit_notices(cfg_screen);
     // decide has no log flags; the configuration and the environment decide the log.
     let logging = match workspace.as_ref() {

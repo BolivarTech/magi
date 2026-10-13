@@ -411,7 +411,16 @@ impl SectionKeys {
     /// # Returns
     /// One `INFO` notice per retained section, in the order magi, embedding, decision.
     pub fn startup_notices(&self) -> Vec<crate::notices::Notice> {
-        todo!()
+        self.retained
+            .iter()
+            .map(|r| {
+                crate::notices::Notice::info(format!(
+                    "{OPENAI_KEY_ENV} was not sent to {}: it is not the main endpoint's origin. \
+                     If that endpoint needs a key, run: magi-rs vault set {}",
+                    r.origin_redacted, r.variable
+                ))
+            })
+            .collect()
     }
 
     /// The keys that only a section's own variable explains, named by that variable, for the
