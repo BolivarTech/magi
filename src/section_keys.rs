@@ -232,6 +232,8 @@ pub struct SectionKeys {
     embedding: SectionKey,
     decision: SectionKey,
     retained: Vec<RetainedKey>,
+    /// The trio kind to name in the shape warning, set when `MAGI_API_KEY` contradicts it (REQ-K10).
+    shape_mismatch: Option<crate::magi::kind::ProviderKind>,
 }
 
 /// Everything [`SectionKeys::resolve`] needs, already resolved by the caller.
@@ -337,6 +339,13 @@ impl SectionKeys {
                 }
             };
         let magi_own = read(MAGI_KEY_ENV, &env.magi_key);
+        let shape_mismatch = magi_own
+            .as_deref()
+            .filter(|key| {
+                key.starts_with(ANTHROPIC_KEY_PREFIX)
+                    != (inputs.magi_kind == crate::magi::kind::ProviderKind::Anthropic)
+            })
+            .map(|_| inputs.magi_kind);
         let magi = match inputs.magi_kind {
             crate::magi::kind::ProviderKind::OpenAiCompat => {
                 openai_section(MAGI_KEY_ENV, magi_own, inputs.magi_endpoint)
@@ -371,6 +380,7 @@ impl SectionKeys {
             embedding,
             decision,
             retained,
+            shape_mismatch,
         }
     }
 
@@ -406,12 +416,15 @@ impl SectionKeys {
         &self.retained
     }
 
-    /// The run-log entries that say a section's key was withheld (REQ-K09).
+    /// The startup notices of the section keys.
     ///
     /// # Returns
-    /// One `INFO` notice per retained section, in the order magi, embedding, decision.
+    /// One `INFO` notice per retained section, in the order magi, embedding, decision (REQ-K09),
+    /// then one `WARN` notice when `MAGI_API_KEY` is shaped for another provider than
+    /// `[magi].kind` (REQ-K10). The warning never carries the key and never changes what is sent.
     pub fn startup_notices(&self) -> Vec<crate::notices::Notice> {
-        self.retained
+        let mut notices: Vec<_> = self
+            .retained
             .iter()
             .map(|r| {
                 crate::notices::Notice::info(format!(
@@ -420,7 +433,15 @@ impl SectionKeys {
                     r.origin_redacted, r.variable
                 ))
             })
-            .collect()
+            .collect();
+        if let Some(kind) = self.shape_mismatch {
+            notices.push(crate::notices::Notice::warn(format!(
+                "{MAGI_KEY_ENV} does not look like a key for the provider of [magi].kind = \"{kind}\" \
+                 (Anthropic keys start with {ANTHROPIC_KEY_PREFIX}). It is sent anyway; check it if \
+                 the trio answers 401 or 403."
+            )));
+        }
+        notices
     }
 
     /// The keys that only a section's own variable explains, named by that variable, for the
