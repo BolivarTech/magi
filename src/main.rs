@@ -2197,7 +2197,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     // The decision client is built ONCE here and shared with the mode classifier; its keys come
     // from `api_keys`, the same path `magi decide` uses (PM-MS2-C3).
     let (tui_decision, tui_decision_endpoint, tui_decision_reason) =
-        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
+        decision_client_for(&magi_config, secret_store.as_ref(), section_keys.decision());
     let tui_distill_decision = tui_decision.clone();
     let tui_distill_endpoint = tui_decision_endpoint.clone();
     let tui_tool_decision = tui_decision.clone();
@@ -5800,6 +5800,8 @@ struct HeadlessContext {
     tier: Tier,
     /// The `[embedding]` key chosen by origin, for persistence.
     embedding_key: SectionKey,
+    /// The `[decision]` key chosen by origin, for the internal decision client.
+    decision_key: SectionKey,
     /// The vault handle wired over `memory`, if one unlocked (review round 2,
     /// C3): `attach_persistent_memory` needs the LIVE handle, not just a
     /// resolved key, to substitute `[user]:[password]` credentials into the
@@ -6386,6 +6388,7 @@ async fn prepare_headless(
         prompt,
         tier,
         embedding_key: section_keys.embedding().clone(),
+        decision_key: section_keys.decision().clone(),
         secret_store,
         limits,
         env_mode,
@@ -6580,6 +6583,7 @@ async fn run_query_subcommand(
         prompt,
         tier,
         embedding_key,
+        decision_key,
         secret_store,
         memory,
         limits,
@@ -6613,7 +6617,7 @@ async fn run_query_subcommand(
     // Same client builder as the TUI and `magi decide` (REQ-D13): the distiller asks `decide`
     // before the LLM judge.
     let (query_decision, query_decision_endpoint, query_decision_error) =
-        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
+        decision_client_for(&magi_config, secret_store.as_ref(), &decision_key);
     match (query_decision.clone(), query_decision_error.as_ref()) {
         (Some(client), _) => agent.set_decision_client(client, query_decision_endpoint.clone()),
         (None, Some(error)) => agent
@@ -6935,6 +6939,7 @@ async fn run_consult_subcommand(
         budget,
         clock_coverage,
         secret_store,
+        decision_key,
         ..
     } = ctx;
 
@@ -6971,7 +6976,7 @@ async fn run_consult_subcommand(
     // Same key path as `magi decide` (PM-MS2-C3): a hosted endpoint answers 401 otherwise and
     // every inference silently falls back.
     let (decision, decision_endpoint, decision_reason) =
-        decision_client_for(&magi_config, secret_store.as_ref(), &decide_secrets);
+        decision_client_for(&magi_config, secret_store.as_ref(), &decision_key);
     let classifier = headless_mode_classifier_wiring(
         llm_classifier,
         decision,
@@ -7175,49 +7180,16 @@ fn decision_api_key(keys: &ApiKeys, secret_store: Option<&SharedSecretStore>) ->
     env_or_vault(DECISION_KEY_ENV, keys.decision_key.as_deref(), secret_store).map(|s| s.value)
 }
 
-/// The principal provider's key and resolved endpoint, when its key may be offered to the
-/// decision endpoint at all (REQ-D04).
-///
-/// An Anthropic principal never lends its key: its endpoint is never the decision one. A
-/// principal whose endpoint cannot be resolved lends nothing, because without the endpoint the
-/// same-origin rule cannot be applied.
-///
-/// # Arguments
-/// * `config` - The loaded configuration.
-/// * `secret_store` - The open vault, if any.
-/// * `keys` - The keys captured at startup.
-///
-/// # Returns
-/// `(key, endpoint)` of the principal, or `None`.
-fn principal_key_and_endpoint(
-    config: &MagiConfig,
-    secret_store: Option<&SharedSecretStore>,
-    keys: &ApiKeys,
-) -> Option<(String, String)> {
-    let kind =
-        resolve_effective_provider_kind(config, env::var("MAGI_PROVIDER").ok().as_deref()).ok()?;
-    if matches!(kind, ProviderKind::Anthropic) {
-        return None;
-    }
-    let key = resolve_openai_key(keys.openai_key.as_deref(), secret_store)?;
-    let endpoint = resolve_effective_principal_endpoint(
-        config,
-        env::var("OPENAI_BASE_URL").ok().as_deref(),
-        secret_store,
-    )
-    .ok()?;
-    Some((key, endpoint.as_str().to_string()))
-}
-
 /// Builds the decision client once (REQ-D00, D04, D05).
 ///
-/// The key is resolved here, so a `vault set DECISION_API_KEY` from another process is not seen
-/// until the process restarts.
+/// The key is the `[decision]` section's, already chosen by origin in
+/// [`SectionKeys`](magi_rs::section_keys::SectionKeys) (REQ-K03, D-PM-1): this function selects
+/// nothing itself.
 ///
 /// # Arguments
 /// * `config` - The loaded configuration.
 /// * `secret_store` - The open vault, if any.
-/// * `keys` - The keys captured at startup.
+/// * `key` - The `[decision]` key chosen at startup.
 ///
 /// # Returns
 /// A client over the effective `[decision]` chain.
@@ -7228,7 +7200,7 @@ fn principal_key_and_endpoint(
 fn build_decision_client(
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-    keys: &ApiKeys,
+    key: &SectionKey,
 ) -> Result<SystemOneClient, DecisionError> {
     let template =
         config
@@ -7237,17 +7209,10 @@ fn build_decision_client(
                 reason: redact_foreign_error(&e).to_string(),
             })?;
     let base_url = resolve_decision_endpoint(&template, secret_store)?;
-    let principal = principal_key_and_endpoint(config, secret_store, keys);
-    let api_key = magi_rs::endpoint_key::select_api_key(
-        decision_api_key(keys, secret_store).as_deref(),
-        principal.as_ref().map(|(key, _)| key.as_str()),
-        principal.as_ref().map_or("", |(_, url)| url.as_str()),
-        base_url.as_str(),
-    );
     let decision = config.effective_decision();
     SystemOneClient::new(DecisionSettings {
         base_url: base_url.as_str().to_string(),
-        api_key: api_key.map(Zeroizing::new),
+        api_key: key.value().map(|k| Zeroizing::new(k.to_string())),
         chain: decision.chain(),
         timeout: Duration::from_secs(
             decision
@@ -7261,13 +7226,13 @@ fn build_decision_client(
 /// Builds the decision client the internal surfaces share, never failing the run.
 ///
 /// An unbuildable client is an absent one: the internal decisions then fall back to the LLM and
-/// log it (REQ-D12). Every internal surface builds its client here, with keys from
-/// [`api_keys`], so none can forget the decision key.
+/// log it (REQ-D12). Every internal surface builds its client here, with the `[decision]` key
+/// from [`SectionKeys`](magi_rs::section_keys::SectionKeys), so none can forget the decision key.
 ///
 /// # Arguments
 /// * `config` - The loaded configuration.
 /// * `secret_store` - The open vault, if any.
-/// * `keys` - The keys captured at startup.
+/// * `key` - The `[decision]` key chosen at startup.
 ///
 /// # Returns
 /// The client (or `None`), the redacted endpoint to show in the run log, and, when there is no
@@ -7275,9 +7240,9 @@ fn build_decision_client(
 fn decision_client_for(
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-    keys: &ApiKeys,
+    key: &SectionKey,
 ) -> DecisionClientParts {
-    match build_decision_client(config, secret_store, keys) {
+    match build_decision_client(config, secret_store, key) {
         Ok(client) => {
             let endpoint = client.endpoint_display();
             (
@@ -7362,7 +7327,7 @@ async fn decide_once(
     timeout_secs: Option<u64>,
     config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-    keys: &ApiKeys,
+    key: &SectionKey,
 ) -> (Result<Decision, DecisionError>, String) {
     // The template carries placeholders, never a secret; redacting it is the second layer.
     let configured_endpoint = config
@@ -7373,7 +7338,7 @@ async fn decide_once(
         Ok(r) => r,
         Err(e) => return (Err(e), configured_endpoint),
     };
-    let client = match build_decision_client(config, secret_store, keys) {
+    let client = match build_decision_client(config, secret_store, key) {
         Ok(c) => c,
         Err(e) => return (Err(e), configured_endpoint),
     };
@@ -7509,13 +7474,33 @@ async fn run_decide_subcommand(
         },
         None => None,
     };
+    // The `[decision]` key is chosen by origin like every other section's (REQ-K03, D-PM-1); the
+    // trio and the embedder take no part, so their endpoints are absent.
+    let root_endpoint = resolve_effective_principal_endpoint(
+        &magi_config,
+        env::var("OPENAI_BASE_URL").ok().as_deref(),
+        secret_store.as_ref(),
+    )
+    .map(|e| e.as_str().to_string())
+    .unwrap_or_default();
+    let (_, decision_endpoint) = section_endpoints(&magi_config, secret_store.as_ref());
+    let section_keys =
+        magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
+            env: &secrets,
+            secret_store: secret_store.as_ref(),
+            magi_kind: ProviderKind::Ollama,
+            root_endpoint: &root_endpoint,
+            magi_endpoint: None,
+            embedding_endpoint: None,
+            decision_endpoint: decision_endpoint.as_deref(),
+        });
     let (result, endpoint) = decide_once(
         &input,
         questions.as_deref(),
         args.timeout,
         &magi_config,
         secret_store.as_ref(),
-        &secrets,
+        section_keys.decision(),
     )
     .await;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
