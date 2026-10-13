@@ -28,18 +28,37 @@ pub struct ResolvedSecret {
 }
 
 impl std::fmt::Debug for ResolvedSecret {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSecret")
+            .field("value", &"***")
+            .field("from_env", &self.from_env)
+            .finish()
     }
 }
 
 /// The consumed env value if non-blank (trimmed), else the vault entry `name` if non-blank (trimmed).
 pub fn env_or_vault(
-    _name: &str,
-    _env_value: Option<&str>,
-    _secret_store: Option<&SharedSecretStore>,
+    name: &str,
+    env_value: Option<&str>,
+    secret_store: Option<&SharedSecretStore>,
 ) -> Option<ResolvedSecret> {
-    todo!()
+    if let Some(value) = trimmed_non_blank(env_value) {
+        return Some(ResolvedSecret {
+            value: value.to_string(),
+            from_env: true,
+        });
+    }
+    let mut guard = secret_store?.lock().unwrap_or_else(|p| p.into_inner());
+    let stored = guard.get(name).ok()?;
+    trimmed_non_blank(Some(stored.as_str())).map(|value| ResolvedSecret {
+        value: value.to_string(),
+        from_env: false,
+    })
+}
+
+/// The trimmed text, or `None` when it is absent or blank.
+fn trimmed_non_blank(text: Option<&str>) -> Option<&str> {
+    text.map(str::trim).filter(|t| !t.is_empty())
 }
 
 #[cfg(test)]

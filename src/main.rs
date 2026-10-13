@@ -109,15 +109,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-/// A [`SecretStore`] shared between the passphrase-resolution/API-key
-/// discovery code above and the TUI's `/login`/`/logout` handlers
-/// (`tui::run_tui_ext`'s `secret_store` parameter).
-///
-/// `VaultStore` (the concrete type behind this trait object) is `Send` but
-/// deliberately **not** `Sync` (its mask rotates on every access, MAGI run 8
-/// — see `src/vault/store.rs`); the `Mutex` supplies the exclusion, which is
-/// exactly what `Mutex<T>: Sync` requires of its `T: Send`.
-type SharedSecretStore = Arc<Mutex<dyn SecretStore + Send>>;
+use magi_rs::section_keys::{env_or_vault, SharedSecretStore};
 
 /// A passphrase read from `-p`/`--passphrase`, wrapped in [`Zeroizing`] so the
 /// plaintext never lingers in memory after use (secrets-separation invariant).
@@ -722,25 +714,12 @@ fn discover_config(
     secret_store: Option<&SharedSecretStore>,
 ) -> Option<Config> {
     let model = resolve_anthropic_model(config, env::var("ANTHROPIC_MODEL").ok().as_deref());
-    // REQ-A12 / MS2 gate S8 seventh-pass finding: a blank/whitespace-only env value is ABSENT,
-    // never a literal key — an `ANTHROPIC_API_KEY=""` exported empty in a CI script must fall
-    // through to the vault instead of short-circuiting it with an empty key that will 401.
-    if let Some(key) = non_blank(env_key) {
-        return Some(Config {
-            api_key: key.trim().to_string(),
-            model,
-            source: "ENV".to_string(),
-        });
-    }
-    let ss = secret_store?;
-    let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
-    let key = guard.get("ANTHROPIC_API_KEY").ok()?;
+    // A blank env value is absent, never a literal key: it falls through to the vault.
+    let secret = env_or_vault(ANTHROPIC_KEY_ENV, env_key, secret_store)?;
     Some(Config {
-        // Trim like the env path: a stored/exported key with stray whitespace or
-        // a trailing newline would otherwise produce a malformed auth header (401).
-        api_key: key.as_str().trim().to_string(),
+        api_key: secret.value,
         model,
-        source: "vault".to_string(),
+        source: if secret.from_env { "ENV" } else { "vault" }.to_string(),
     })
 }
 
@@ -799,17 +778,7 @@ fn resolve_openai_key(
     env_key: Option<&str>,
     secret_store: Option<&SharedSecretStore>,
 ) -> Option<String> {
-    // REQ-A12 / MS2 gate S8 seventh-pass finding: same absent-not-invalid rule as
-    // `discover_config` — a blank `OPENAI_API_KEY` falls through to the vault.
-    if let Some(key) = non_blank(env_key) {
-        return Some(key.trim().to_string());
-    }
-    let ss = secret_store?;
-    let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
-    guard
-        .get("OPENAI_API_KEY")
-        .ok()
-        .map(|z| z.as_str().trim().to_string())
+    env_or_vault(OPENAI_KEY_ENV, env_key, secret_store).map(|s| s.value)
 }
 
 /// Environment variable name holding the Anthropic API key (REQ-H37).
@@ -7182,13 +7151,7 @@ fn decision_api_key(
     keys: &DecideSecrets,
     secret_store: Option<&SharedSecretStore>,
 ) -> Option<String> {
-    if let Some(key) = non_blank(keys.decision_key.as_deref()) {
-        return Some(key.to_string());
-    }
-    let ss = secret_store?;
-    let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
-    let stored = guard.get(DECISION_KEY_ENV).ok()?;
-    non_blank(Some(stored.as_str())).map(str::to_string)
+    env_or_vault(DECISION_KEY_ENV, keys.decision_key.as_deref(), secret_store).map(|s| s.value)
 }
 
 /// The principal provider's key and resolved endpoint, when its key may be offered to the
