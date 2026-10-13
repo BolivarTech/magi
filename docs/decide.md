@@ -1,6 +1,6 @@
 # Typed decisions: `magi-rs decide`
 
-`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated, so a decision usually comes back in well under a second once the model is loaded.
+`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated, With the default `clef-flash`, 95 % of requests took about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ).
 
 The models speak the System One protocol: you send a `state` (text or JSON) and a set of questions, and each question has one of three types. Every question, whatever its type, needs `instructions`: a short, non-empty description of what to decide.
 
@@ -24,8 +24,8 @@ Models used by the scaffold that `magi init` writes:
 
 | Model | Provider | Role |
 |---|---|---|
-| `nimble` | Ollama | primary |
-| `tev1` | Ollama | fallback (4B) |
+| `clef-flash` | Ollama | primary (10.9 GB, Apache-2.0) |
+| `nimble` | Ollama | fallback |
 | `typesafe/jev-1.13` | OpenRouter | primary in the commented example |
 | `togethercomputer/tev1-4b-experimental` | OpenRouter | fallback in the example |
 | `upstage/solar-decide` | OpenRouter | fallback in the example |
@@ -33,9 +33,11 @@ Models used by the scaffold that `magi init` writes:
 The Ollama models have to be pulled once:
 
 ```bash
+ollama pull clef-flash
 ollama pull nimble
-ollama pull tev1
 ```
+
+`clef-flash` needs Ollama 0.35.1 or later. It loaded in 16.5 s on an idle machine and 49.4 s on a busy one, so it needs a `timeout_secs` of at least 66 s; the default of 120 leaves room. Inside one consult the chain can take about 135 s in the worst case: the 120 s timeout of `clef-flash` plus the 14.3 s cold load of `nimble`. All of these figures were measured on an RTX 5060 Ti with 16 GB and will differ on other hardware.
 
 Without them, `magi-rs decide` fails with an error that names the missing model, and the chain moves on to the next one. Fallbacks always live on the same endpoint as `[decision]`; there is no `base_url` per fallback.
 
@@ -50,7 +52,7 @@ Everything lives in the `[decision]` section of `.magi/magi.toml`; see `docs/mag
 | `timeout_secs` | `[decision]` | `120` | Seconds to wait for each model, per attempt. |
 | `keep_alive` | `[decision]` | not sent | Ollama only: how long to keep the model loaded (`"10m"`, `"2h"`, `-1`). |
 | `auto_approve` | `[decision]` | `true` | Whether the agent's `decide` tool runs without asking. |
-| `max_state_bytes` | `[decision]` | `128000` | Largest consult, in bytes, whose mode is inferred with `decide` (at least 1). `magi init` writes 19000, which fits the local `nimble`. |
+| `max_state_bytes` | `[decision]` | `128000` | Largest consult, in bytes, whose mode is inferred with `decide` (at least 1). `magi init` writes 61000, the request size the local `clef-flash` accepted in the calibration. |
 | `min_confidence` | `[decision]` | no threshold | Per-model confidence floor (0 to 1) for the primary. |
 | `model` | `[[decision.fallback]]` | none (required in each entry) | A fallback model, tried in order. |
 | `min_confidence` | `[[decision.fallback]]` | no threshold | Confidence floor for that fallback. |
@@ -137,7 +139,7 @@ With a threshold set, a model whose answer falls below it is skipped and the nex
 
 Some models return slightly different numbers when the same request is repeated. A threshold set very close to a model's usual value can therefore accept in one call and rotate in the next, so leave a margin.
 
-`magi init` writes `min_confidence = 0.7` on `nimble` and on `tev1`, active. The 0.7 comes from the maintainer's calibration on the maintainer's own prompts, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
+`magi init` writes `min_confidence = 0.75` on `clef-flash` and on `nimble`, active. The 0.75 comes from the maintainer's calibration on the maintainer's own prompts, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
 
 `tev1:0.8b` is not in the default chain: in the calibration it answered "yes" to almost every contradiction check, including pairs that did not contradict, and a wrong "yes" retires a memory that is still true.
 
@@ -156,7 +158,7 @@ Two choices that used to cost a main-model call go to the decision models first:
 - If the chain cannot answer (endpoint down, timeout, invalid answer, or every model under its threshold), the main model answers instead. Nothing is shown in the TUI or on the terminal.
 - Each fallback is logged, one entry per occurrence, never merged, with its cause: one of the attempt causes below, or `too_large`, `low_confidence`, `client_unavailable` or `skipped_after_failure`.
 - In one memory-distillation pass, once an attempt fails at the transport level, the remaining pairs of that pass go straight to the main model. The next pass tries `decide` again.
-- Mode inference sends at most `[decision].max_state_bytes` of the consult: 128 000 bytes by default, sized for the 64 000-token window of `typesafe/jev-1.13` (about 4 bytes per token of English text), and 19 000 in the file `magi init` writes, which fits the local `nimble`. Raise it, or delete the line, when the decision model is hosted. Ollama rejects a request body over 64 KiB before loading the model, so with Ollama a larger limit only means the main model answers instead. Larger content goes straight to the main model without calling `decide`, and the content is never truncated.
+- Mode inference sends at most `[decision].max_state_bytes` of the consult: 128 000 bytes by default, sized for the 64 000-token window of `typesafe/jev-1.13` (about 4 bytes per token of English text), and 61 000 in the file `magi init` writes, the request size the local `clef-flash` accepted in the calibration. Raise it, or delete the line, when the decision model is hosted. Ollama rejects a request body over 64 KiB before loading the model, so with Ollama a larger limit only means the main model answers instead. Larger content goes straight to the main model without calling `decide`, and the content is never truncated.
 - Explicit calls (`magi-rs decide`, `/decide`, the tool) never fall back to the main model. It could only invent the probabilities.
 
 ## Output

@@ -32,6 +32,9 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ### Changed
 
+- **`clef-flash` is the primary decision model** in the file `magi init` writes and in the built-in defaults used when there is no `magi.toml`. Pull it with `ollama pull clef-flash` (10.9 GB, Apache-2.0, Ollama 0.35.1 or later). It loaded in 16.5 s on an idle machine and 49.4 s on a busy one, and 95 % of requests took about 3 s once loaded, measured on an RTX 5060 Ti with 16 GB. The scaffold writes `min_confidence = 0.75` on both chain entries and `max_state_bytes = 61000`; the built-in defaults still set no threshold. In the worst case a consult spends about 135 s in the chain (120 s for `clef-flash` plus the 14.3 s cold load of `nimble`).
+- **The decision fallback is `nimble` instead of `tev1`**, in the scaffold and in the built-in defaults.
+- A workspace that already has a `magi.toml` keeps its chain, threshold and limits: `magi init` never edits an existing file.
 - **`vault set --help` lists `MAGI_API_KEY` and `EMBEDDING_API_KEY`**, and says that `OPENAI_API_KEY` reaches the trio, the embedder and `decide` only on the main endpoint's origin.
 - **Dependencies are refreshed to their latest compatible releases**, including the major bumps `thiserror` 2, `unicode-width` 0.2, `axum` 0.8, `base64` 0.23, `region` 4 and `rustix` 1. Behavior does not change. The yanked `chacha20` 0.10.1 is replaced by 0.10.2.
 

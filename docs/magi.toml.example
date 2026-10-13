@@ -52,28 +52,31 @@ model = "claude-sonnet-4-6"
 # The protocol path is derived from it: a base_url ending in /v1 gets /systemone, any other gets /v1/systemone.
 base_url     = "http://localhost:11434"
 # Primary decision model. Required in this section.
-model        = "nimble"
+model        = "clef-flash"
 # Per-attempt timeout in seconds (covers a local cold load). Optional, default 120.
+# `clef-flash` loaded in 16.5 s on an idle machine and 49.4 s on a busy one (RTX 5060 Ti, 16 GB),
+# so it needs at least 66 s here. Inside one consult the chain can take about 135 s: this timeout
+# for `clef-flash` plus the 14.3 s cold load of `nimble`. Numbers from other hardware will differ.
 timeout_secs = 120
 # Ollama only. Optional: absent = not sent (server default). "10m", "2h", or -1 (keep loaded).
 # keep_alive = "10m"
 # Approval of the agent's `decide` tool. Optional, default true.
 auto_approve = true
 # Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight
-# to the main model. 19000 fits the window of the local `nimble` model. With a hosted decision
+# to the main model. 61000 fits the request-size cap measured with the local `clef-flash` model. With a hosted decision
 # model such as typesafe/jev-1.13, raise it or delete the line (built-in default 128000).
-max_state_bytes = 19000
+max_state_bytes = 61000
 # Below this confidence the answer is discarded and the next model in the chain is tried. When the
 # chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.
 # Optional, per model; commenting it out disables the threshold (the top option is always taken).
 # The value below comes from the maintainer's own calibration and may not fit your data or use
 # case: measure on yours before relying on it.
-min_confidence = 0.7
+min_confidence = 0.75
 
 # Ordered fallbacks on the SAME endpoint, tried after the primary fails.
 [[decision.fallback]]
-model = "tev1"
-min_confidence = 0.7
+model = "nimble"
+min_confidence = 0.75
 
 # --- Example: OpenRouter (hosted). Needs the decision key (see docs/decide.md) in the environment or
 # --- in the vault (`magi-rs vault set`). The key never goes in this file.
