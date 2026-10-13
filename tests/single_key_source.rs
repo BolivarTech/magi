@@ -67,3 +67,41 @@ fn origin_comparison_and_key_selection_are_defined_once_in_the_neutral_module() 
         vec!["endpoint_key.rs".to_string()]
     );
 }
+
+/// The body of `fn <name>(` in `text`, up to the next top-level item.
+fn fn_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let start = text.find(&format!("fn {name}("))?;
+    let rest = &text[start..];
+    let end = [
+        "\nfn ",
+        "\nasync fn ",
+        "\npub fn ",
+        "\npub(crate) fn ",
+        "\nstruct ",
+        "\nimpl ",
+        "\nconst ",
+    ]
+    .iter()
+    .filter_map(|n| rest[1..].find(n).map(|i| i + 1))
+    .min()
+    .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+#[test]
+fn the_env_then_vault_precedence_is_defined_once_and_its_former_copies_delegate() {
+    assert_eq!(
+        definitions("env_or_vault"),
+        vec!["section_keys.rs".to_string()]
+    );
+    for (path, text) in production_sources() {
+        for former in ["resolve_openai_key", "discover_config", "decision_api_key"] {
+            if let Some(body) = fn_body(&text, former) {
+                assert!(
+                    !body.contains(".get("),
+                    "{path}: {former} reads the vault itself instead of calling env_or_vault"
+                );
+            }
+        }
+    }
+}

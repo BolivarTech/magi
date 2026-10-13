@@ -12,4 +12,5 @@ pub mod logging;
 pub mod magi;
 pub mod notices;
 pub mod redact;
+pub mod section_keys;
 pub mod vault;
