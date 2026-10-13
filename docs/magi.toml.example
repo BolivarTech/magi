@@ -10,7 +10,8 @@
 # only `docs/magi.toml.example` is tracked.
 #
 # Credentials NEVER live here: they travel by env (the Anthropic and OpenAI
-# credential env vars) or in the vault (`magi-rs vault set NAME`). An unknown
+# credential env vars, plus one per section that can have its own endpoint; see
+# docs/keys.md) or in the vault (`magi-rs vault set NAME`). An unknown
 # field is a PARSE ERROR, and a file that exists but does not parse is FATAL.
 # `provider` accepts exactly three values:
 #   ollama         local or remote Ollama daemon (this file's default)
@@ -120,6 +121,18 @@ auto_approve = false
 # value above.
 # base_url = "http://remote-host:11434/v1"
 
+# Key for the trio: it has its own environment variable and vault entry, named in
+# docs/keys.md, and it never goes in this file. Without one, an `openai-compat` trio reuses the
+# main model's OpenAI-compatible key only when this section's endpoint has the same origin
+# (scheme, host and port; the path does not count) as the root one, and otherwise sends no key.
+# A gateway that routes by path is one origin and receives the main key; declare the trio's own
+# key to avoid that. With kind = "anthropic" the seats use the trio's own key if set and the
+# Anthropic key otherwise. The trio's key must be a key for the provider of `kind`. Startup warns,
+# and still sends the key, when an `anthropic` trio has a key without Anthropic's documented
+# prefix or any other kind has a key with it. That is the only shape check: two
+# OpenAI-compatible providers cannot be told apart, so an OpenRouter-style key on
+# `openai-compat` gives no warning, while an unprefixed key on `anthropic` does.
+
 # Sets the mode for invocations that do not pass `--mode`. Declaring it counts as
 # declared, so the classification call is skipped: a pipeline running bulk consults
 # pays zero classifications without touching its call sites. Omitted means the mode is
@@ -227,6 +240,10 @@ dim   = 0
 # Overrides the embedding endpoint. Commented out means it inherits the root `base_url`.
 # BREAKING: until v0.11.0 this key always carried its own value, so it never inherited.
 # base_url = "..."
+# Key for the embedder: it has its own environment variable and vault entry, named in
+# docs/keys.md. Without one, the main model's OpenAI-compatible key is used only when this
+# section's endpoint has the same origin as the root one; on any other origin no key is sent
+# and an endpoint that wants one answers 401 or 403.
 
 [logging]
 # Where the daily files live. Relative paths resolve against the workspace root.

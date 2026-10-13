@@ -605,6 +605,29 @@ The **OpenAI-compatible key** (`OPENAI_API_KEY`), used by the OpenAI / Ollama / 
 
 For a local Ollama daemon neither is needed: magi-rs falls back to a dummy value. Any authenticated endpoint (real OpenAI, OpenRouter, Groq) needs one, and will fail with a clear `401` if it is absent from both places.
 
+**Each section that can have its own endpoint has its own key.** The full rules are in [docs/keys.md](docs/keys.md).
+
+| Section | Key |
+|---|---|
+| main model | `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, depending on `provider` |
+| `[magi]` (the trio) | `MAGI_API_KEY` |
+| `[embedding]` | `EMBEDDING_API_KEY` |
+| `[decision]` | `DECISION_API_KEY` |
+
+Each one resolves env var first, vault entry second (`magi-rs vault set MAGI_API_KEY`, and so on). When a section has no key of its own, it inherits `OPENAI_API_KEY` only if its endpoint has the same origin as the main one: same scheme, host and port, with the path ignored. A gateway that routes by path counts as one origin and therefore receives the main key; declare the section's own key to avoid that. On any other origin no key is sent, so the main key never reaches a host you did not point it at. An endpoint that needs a key then answers `401` or `403`, and the message names the variable to set.
+
+`MAGI_API_KEY` also applies when `[magi].kind = "anthropic"`: the seats use it if set and `ANTHROPIC_API_KEY` otherwise. It must be a key for the provider of `[magi].kind`.
+
+#### Upgrading to 0.24.0
+
+Before 0.24.0 the trio and the embedder always received `OPENAI_API_KEY`, even with a `base_url` pointing elsewhere. Now they receive it only on the main endpoint's origin. After upgrading, a `401` or `403` from the trio or the embedder usually comes from one of three setups:
+
+- The main endpoint is `http://localhost:11434` and `[magi]` or `[embedding]` uses `http://127.0.0.1:11434`, or the other way round.
+- The same host on another port, such as a proxy next to the daemon.
+- `provider = "anthropic"` with an OpenAI-compatible trio or embedder on an origin other than the root `base_url`.
+
+The message of the error names the variable, and each withheld key leaves an `OPENAI_API_KEY was not sent to ...` entry in the day's log under `.magi/logs/`. To fix a section, store its own key with `magi-rs vault set MAGI_API_KEY` (trio) or `magi-rs vault set EMBEDDING_API_KEY` (embedder). See the [CHANGELOG](CHANGELOG.md) for the full entry.
+
 **A standard API key is the recommended, supported path.** Create one at [console.anthropic.com](https://console.anthropic.com/) (with billing enabled) and set `ANTHROPIC_API_KEY` or store it with `magi-rs vault set ANTHROPIC_API_KEY`.
 
 > **`/login` (OAuth) is best-effort.** It reuses Anthropic's Claude Code OAuth client to mint a key on your account. That flow is intended for Anthropic's own clients, so it may be **rate-limited, throttled, or blocked** at any time and is not guaranteed. The minted key is written to the vault. Prefer a standard API key.
@@ -773,6 +796,7 @@ settings above. All built-in default literals live in one place:
 
 - **Anthropic key.** `ANTHROPIC_API_KEY` env var, or the vault entry of the same name (see above).
 - **OpenAI-compatible key.** `OPENAI_API_KEY` env var, or the vault entry of the same name (`magi-rs vault set OPENAI_API_KEY`). For a local Ollama instance, magi-rs falls back to a dummy value (`"ollama"`) so you can run without setting anything.
+- **Trio key.** `MAGI_API_KEY` env var, or the vault entry of the same name. **Embedder key.** `EMBEDDING_API_KEY`, same way. Both fall back to `OPENAI_API_KEY` only on the main endpoint's origin (see [docs/keys.md](docs/keys.md)).
 - Placing `api_key` / `OPENAI_API_KEY` (or any other unknown field) inside `magi.toml` is rejected at parse time under `deny_unknown_fields`, not silently dropped.
 - **An authenticated `base_url` never carries a literal credential.** Use the
   `[user]`/`[password]` placeholders in its `userinfo`, resolved from the vault at use

@@ -77,7 +77,7 @@ The key is read once, at startup, after the vault is opened. It is chosen in thi
 2. The main model's key, only when `[decision]` points at the same origin as the main model: same scheme, host and effective port. The path and any credentials in the URL do not count.
 3. No authentication header.
 
-A key is never sent to a different host. Because the test is on the origin, a gateway that routes several services by URL path counts as one origin, and it would receive the main model's key. If that is not what you want, set `DECISION_API_KEY`, which takes precedence. A missing key is not a load error; if the endpoint needs one, it answers 401 or 403 and `magi-rs decide` reports `missing_key`.
+A key is never sent to a different host. The same rule applies to the trio and the embedder; see [keys.md](keys.md). Because the test is on the origin, a gateway that routes several services by URL path counts as one origin, and it would receive the main model's key. If that is not what you want, set `DECISION_API_KEY`, which takes precedence. A missing key is not a load error; if the endpoint needs one, it answers 401 or 403 and `magi-rs decide` reports `missing_key`.
 
 Credentials in the URL itself work as in the other sections: write `[user]` and `[password]` placeholders in `base_url` and store the values with `magi-rs vault set DECISION_BASE_URL_USER` and `magi-rs vault set DECISION_BASE_URL_PASSWORD`. A literal credential in the URL is a load error. If one of the two entries is missing, `magi-rs decide` stops before calling any model and names the entry.
 

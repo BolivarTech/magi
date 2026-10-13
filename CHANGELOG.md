@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [Unreleased]
+
+### Security
+
+- **The main model's key no longer travels to another origin.** The MAGI trio and the embedder used to receive `OPENAI_API_KEY` wherever their `base_url` pointed. They now receive it only when their endpoint has the same origin as the main one (same scheme, host and port; the path does not count), and otherwise no key is sent. Every section that can have its own endpoint now has its own key: `MAGI_API_KEY` for the trio, `EMBEDDING_API_KEY` for the embedder, `DECISION_API_KEY` for the decision models.
+- **Dependencies:** `quinn-proto` is updated to 0.11.19, which clears RUSTSEC-2026-0338, RUSTSEC-2026-0339, RUSTSEC-2026-0340, RUSTSEC-2026-0341 and RUSTSEC-2026-0342. The crate appears in the lockfile, but no feature magi-rs enables compiles it, so released binaries never contained the affected code.
+
+### Breaking: keys for the trio and the embedder follow the origin
+
+- A configuration that relied on `OPENAI_API_KEY` reaching a different origin stops sending it, and an endpoint that needs a key answers `401` or `403`. Three setups are affected: the same machine spelled differently (`localhost` against `127.0.0.1`), the same host on another port (a proxy next to the daemon), and `provider = "anthropic"` with an OpenAI-compatible trio or embedder on an origin other than the root `base_url`. A trio or embedder on the root origin keeps working and needs nothing.
+- **To upgrade:** store the section's own key, `magi-rs vault set MAGI_API_KEY` for the trio or `magi-rs vault set EMBEDDING_API_KEY` for the embedder (using the value you used for `OPENAI_API_KEY` restores the old behavior). The error message names the variable, and each withheld key writes an `OPENAI_API_KEY was not sent to ...` entry to the day's log under `.magi/logs/`. The steps are in [Upgrading to 0.24.0](docs/keys.md#upgrading-to-0240).
+- An OpenAI-compatible trio seat that ends up with no key is now built without an `Authorization` header instead of failing at startup, so a trio on a second Ollama that needs no authentication works. An Anthropic seat with no key still fails, and the error now names `MAGI_API_KEY` and `ANTHROPIC_API_KEY`.
+- With an Anthropic main model, `[decision]` now inherits `OPENAI_API_KEY` when it sits on the root origin (`OPENAI_BASE_URL`, else the root `base_url`). Before, it inherited nothing in that case.
+- `magi.toml` does not change: keys never lived in it.
+
+### Added
+
+- **`MAGI_API_KEY`** and **`EMBEDDING_API_KEY`**, from the environment or the vault. They are read and cleared from the environment at startup like the other keys, and child processes do not inherit them. `MAGI_API_KEY` also applies when `[magi].kind = "anthropic"`: the seats use it if set and `ANTHROPIC_API_KEY` otherwise, so the trio can bill to another account. It must be a key for the provider of `[magi].kind`.
+- **A key that was not sent is logged.** Each section that did not inherit `OPENAI_API_KEY` because of its origin writes one `INFO` entry to the run log, naming the variable to declare and the origin with any URL credentials hidden. Nothing appears on screen, because an endpoint that needs no key is a valid setup.
+- **A rejected key names its source.** A `401` or `403` from the trio says whether no key was sent, the section's own key was refused or the inherited one was, and gives the `magi-rs vault set` command. This holds even when all three seats fail. The embedder's status line does the same with `EMBEDDING_API_KEY`.
+- **A startup warning for a mis-shaped `MAGI_API_KEY`.** It fires when an `anthropic` trio has a key without the `sk-ant-` prefix, or any other kind has a key with it, and never prints the value. The key is still sent. It cannot tell two OpenAI-compatible providers apart. `/login` applies the same check when it moves the trio to Anthropic.
+- [`docs/keys.md`](docs/keys.md) explains which key each section uses, how origins are compared and what to do when a key is withheld.
+
+### Changed
+
+- **`vault set --help` lists `MAGI_API_KEY` and `EMBEDDING_API_KEY`**, and says that `OPENAI_API_KEY` reaches the trio, the embedder and `decide` only on the main endpoint's origin.
+- **Dependencies are refreshed to their latest compatible releases**, including the major bumps `thiserror` 2, `unicode-width` 0.2, `axum` 0.8, `base64` 0.23, `region` 4 and `rustix` 1. Behavior does not change. The yanked `chacha20` 0.10.1 is replaced by 0.10.2.
+
+### Fixed
+
+- **`magi-rs query --max-tool-calls 0` now sends requests with no tools declared.** The request carries no `tools` field, for both providers, so a model without tool support can answer. Before, the cap only counted calls and every request still declared all the tools.
+
 ## [0.23.0] - 2026-10-11
 
 ### Breaking: `magi.toml` needs a `[decision]` section
