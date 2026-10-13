@@ -4800,6 +4800,27 @@ mod tests {
         );
     }
 
+    /// REQ-K07: the `/login` rebuild chooses its key through `post_login_trio_key` and says so
+    /// when an own key is not Anthropic-shaped. Source guard: the event loop cannot be driven.
+    #[test]
+    fn the_login_rebuild_picks_its_key_through_post_login_trio_key() {
+        let src = production_source();
+        let rebuild = src
+            .find("match rebuild_consult_trio_after_login(")
+            .expect("login rebuild site");
+        let head = &src[..rebuild];
+        let start = head.char_indices().rev().nth(1500).map_or(0, |(i, _)| i);
+        let window = &head[start..];
+        assert!(
+            window.contains("post_login_trio_key("),
+            "the login rebuild must choose its key via post_login_trio_key"
+        );
+        assert!(
+            window.contains("post_login_shape_mismatch("),
+            "the login rebuild must say when the trio's own key is not Anthropic-shaped"
+        );
+    }
+
     /// S-9, direct `/consult`: the handler announces the clock-coverage warning BEFORE it
     /// launches the analysis. A source guard because the arm lives inside `run_tui_ext`'s event
     /// loop, which no test drives directly.

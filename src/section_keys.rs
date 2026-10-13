@@ -394,6 +394,38 @@ impl SectionKeys {
     }
 }
 
+/// Key the trio uses after `/login` rebuilds it as Anthropic: the trio's own key wins
+/// (REQ-K07); otherwise the key the login just stored. Blank counts as absent.
+///
+/// # Arguments
+/// * `own_magi_key` - the trio's own key (`MAGI_API_KEY` or its vault entry), if any.
+/// * `login_key` - the key the login just minted.
+///
+/// # Returns
+/// The key the rebuilt trio authenticates with.
+///
+/// Complexity: O(n) in the key length (trim).
+pub fn post_login_trio_key(own_magi_key: Option<&str>, login_key: String) -> String {
+    let _ = (own_magi_key, login_key);
+    todo!("Red stub")
+}
+
+/// True when the trio, rebuilt as Anthropic after `/login`, would use an own key that is not
+/// Anthropic-shaped (`sk-ant-`): the same shape rule as at startup, evaluated for the rebuilt
+/// kind. Never blocks.
+///
+/// # Arguments
+/// * `own_magi_key` - the trio's own key, if any.
+///
+/// # Returns
+/// `true` when a non-blank own key lacks the `sk-ant-` prefix.
+///
+/// Complexity: O(n) in the key length (trim).
+pub fn post_login_shape_mismatch(own_magi_key: Option<&str>) -> bool {
+    let _ = own_magi_key;
+    todo!("Red stub")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,5 +807,33 @@ mod tests {
         let e = env(None, None, Some("s3cr3t-magi"), None, None);
         let k = resolve(&e, ProviderKind::OpenAiCompat, Some(ROOT), None, None);
         assert!(!format!("{:?}", k.magi()).contains("s3cr3t-magi"));
+    }
+
+    #[test]
+    fn after_login_the_trios_own_key_wins_over_the_login_key() {
+        assert_eq!(
+            post_login_trio_key(Some("magi-own-key"), "login-key".to_string()), // allow-secret-scan
+            "magi-own-key"
+        );
+    }
+
+    #[test]
+    fn after_login_a_non_anthropic_own_key_is_flagged_and_an_anthropic_one_is_not() {
+        assert!(post_login_shape_mismatch(Some("sk-or-own"))); // allow-secret-scan
+        assert!(!post_login_shape_mismatch(Some("sk-ant-own"))); // allow-secret-scan
+        assert!(!post_login_shape_mismatch(None));
+        assert!(!post_login_shape_mismatch(Some("  ")));
+    }
+
+    #[test]
+    fn after_login_without_an_own_key_the_login_key_is_used() {
+        assert_eq!(
+            post_login_trio_key(None, "login-key".to_string()),
+            "login-key"
+        ); // allow-secret-scan
+        assert_eq!(
+            post_login_trio_key(Some("   "), "login-key".to_string()),
+            "login-key"
+        ); // allow-secret-scan
     }
 }
