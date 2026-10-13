@@ -6,6 +6,7 @@
 //! coverage, and tests, as well as the `main.rs` binary.
 pub mod decision;
 pub mod encoding;
+pub mod endpoint_key;
 pub mod headless;
 pub mod logging;
 pub mod magi;

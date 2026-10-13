@@ -7254,7 +7254,7 @@ fn build_decision_client(
             })?;
     let base_url = resolve_decision_endpoint(&template, secret_store)?;
     let principal = principal_key_and_endpoint(config, secret_store, keys);
-    let api_key = magi_rs::decision::endpoint::select_api_key(
+    let api_key = magi_rs::endpoint_key::select_api_key(
         decision_api_key(keys, secret_store).as_deref(),
         principal.as_ref().map(|(key, _)| key.as_str()),
         principal.as_ref().map_or("", |(_, url)| url.as_str()),
