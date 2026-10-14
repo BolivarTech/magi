@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.24.1] - 2026-10-13
+
+### Changed
+
+- **`magi init` writes a grouped `magi.toml`.** Each section now sits with its own sub-tables: `[magi]` is followed by its `[[magi.fallback]]` rotation pool instead of the pool trailing at the end of the file, and `[decision]` keeps its `[[decision.fallback]]` chain right below it. The order is the root keys, `[openai]`, `[anthropic]`, `[magi]` with its pool, `[memory]`, `[embedding]`, `[decision]`. A comment above the pool says that new `[magi]` keys go above it. Existing files are not touched.
+- **Every section with an endpoint of its own shows its `base_url`, commented.** `[magi]`, `[embedding]` and `[decision]` each carry a commented `base_url` line set to the root endpoint, so giving a section its own endpoint means uncommenting one line. `[decision]` no longer writes an active `base_url = "http://localhost:11434"`; it inherits the root `base_url` (`http://localhost:11434/v1`), and the decision URL it resolves to is the same. `[memory]` has no endpoint, and its comment points to `[embedding]`.
+- **The scaffold names each section's API key.** The root comment names `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`; `[magi]`, `[embedding]` and `[decision]` name `MAGI_API_KEY`, `EMBEDDING_API_KEY` and `DECISION_API_KEY` with their `magi-rs vault set` command, and say when the section falls back to the main key: only when its endpoint has the root `base_url`'s origin. `docs/magi.toml.example` now names the same variables and groups the pool with `[magi]` too.
+
+### Fixed
+
+- The scaffold said the embedder reads its key from `OPENAI_API_KEY` only. Since 0.24.0 it reads `EMBEDDING_API_KEY` first, and falls back to `OPENAI_API_KEY` only on the root endpoint's origin.
+
 ## [0.24.0] - 2026-10-13
 
 ### Security
@@ -1781,7 +1793,8 @@ Initial pre-release, published primarily to reserve the `magi-rs` crate name.
 - `ratatui` TUI with Normal / Selection / Visual modes and Unicode-safe input.
 - OAuth (PKCE) login and OS keyring integration, with `magi-rust` legacy migration.
 
-[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/BolivarTech/magi/compare/v0.24.1...HEAD
+[0.24.1]: https://github.com/BolivarTech/magi/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/BolivarTech/magi/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/BolivarTech/magi/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/BolivarTech/magi/compare/v0.21.0...v0.22.0

@@ -9,9 +9,12 @@
 # Copy what you need into `.magi/magi.toml` and edit. That file is gitignored;
 # only `docs/magi.toml.example` is tracked.
 #
-# Credentials NEVER live here: they travel by env (the Anthropic and OpenAI
-# credential env vars, plus one per section that can have its own endpoint; see
-# docs/keys.md) or in the vault (`magi-rs vault set NAME`). An unknown
+# Credentials NEVER live here: they travel by env or in the vault
+# (`magi-rs vault set NAME`). The main model uses OPENAI_API_KEY (ollama and
+# openai-compat) or ANTHROPIC_API_KEY (anthropic). [magi], [embedding] and
+# [decision] can each have their own key (MAGI_API_KEY, EMBEDDING_API_KEY,
+# DECISION_API_KEY); without one they use OPENAI_API_KEY only on the root
+# endpoint's origin. See docs/keys.md. An unknown
 # field is a PARSE ERROR, and a file that exists but does not parse is FATAL.
 # `provider` accepts exactly three values:
 #   ollama         local or remote Ollama daemon (this file's default)
@@ -48,9 +51,14 @@ model = "claude-sonnet-4-6"
 # [decision] — typed decisions from System One models (`magi decide`)
 # ===========================================================================
 [decision]
-# Endpoint of the System One decision models. Optional: absent = the root `base_url`.
-# The protocol path is derived from it: a base_url ending in /v1 gets /systemone, any other gets /v1/systemone.
-base_url     = "http://localhost:11434"
+# Endpoint of the System One decision models. Commented = the root `base_url`; uncomment and
+# edit it to use another one. The protocol path is derived from it: a base_url ending in /v1
+# gets /systemone, any other gets /v1/systemone.
+# base_url     = "http://localhost:11434/v1"
+# API key of the decision models: DECISION_API_KEY, from the environment or
+# `magi-rs vault set DECISION_API_KEY`; never in this file. Without it `decide` uses the main
+# key, OPENAI_API_KEY, as long as its endpoint has the root base_url's origin (scheme, host and
+# port), and sends no key on any other origin.
 # Primary decision model. Required in this section.
 model        = "clef-flash"
 # Per-attempt timeout in seconds (covers a local cold load). Optional, default 120.
@@ -78,8 +86,8 @@ min_confidence = 0.75
 model = "nimble"
 min_confidence = 0.75
 
-# --- Example: OpenRouter (hosted). Needs the decision key (see docs/decide.md) in the environment or
-# --- in the vault (`magi-rs vault set`). The key never goes in this file.
+# --- Example: OpenRouter (hosted). Needs DECISION_API_KEY in the environment or
+# --- `magi-rs vault set DECISION_API_KEY`. The key never goes in this file.
 # --- Comment out the [decision] section above before uncommenting this one: a file holds one.
 # [decision]
 # base_url     = "https://openrouter.ai/api/v1"
@@ -124,13 +132,13 @@ auto_approve = false
 # value above.
 # base_url = "http://remote-host:11434/v1"
 
-# Key for the trio: it has its own environment variable and vault entry, named in
-# docs/keys.md, and it never goes in this file. Without one, an `openai-compat` trio reuses the
-# main model's OpenAI-compatible key only when this section's endpoint has the same origin
+# Key for the trio: MAGI_API_KEY, from the environment or `magi-rs vault set MAGI_API_KEY`;
+# it never goes in this file. Without it, an `openai-compat` trio reuses the main key,
+# OPENAI_API_KEY, only when this section's endpoint has the same origin
 # (scheme, host and port; the path does not count) as the root one, and otherwise sends no key.
 # A gateway that routes by path is one origin and receives the main key; declare the trio's own
-# key to avoid that. With kind = "anthropic" the seats use the trio's own key if set and the
-# Anthropic key otherwise. The trio's key must be a key for the provider of `kind`. Startup warns
+# key to avoid that. With kind = "anthropic" the seats use MAGI_API_KEY if set and
+# ANTHROPIC_API_KEY otherwise; an `ollama` trio sends no key. The trio's key must be a key for the provider of `kind`. Startup warns
 # (a warning only; nothing is blocked) when an `anthropic` trio has a key without Anthropic's documented
 # prefix or any other kind has a key with it. That is the only shape check: two
 # OpenAI-compatible providers cannot be told apart, so an OpenRouter-style key on
@@ -237,42 +245,11 @@ code_review = 200
 design      = 500
 analysis    = 200
 
-[embedding]
-model = "nomic-embed-text-v2-moe:latest"
-dim   = 0
-# Overrides the embedding endpoint. Commented out means it inherits the root `base_url`.
-# BREAKING: until v0.11.0 this key always carried its own value, so it never inherited.
-# base_url = "..."
-# Key for the embedder: it has its own environment variable and vault entry, named in
-# docs/keys.md. Without one, the main model's OpenAI-compatible key is used only when this
-# section's endpoint has the same origin as the root one; on any other origin no key is sent
-# and an endpoint that wants one answers 401 or 403.
 
-[logging]
-# Where the daily files live. Relative paths resolve against the workspace root.
-log_dir = ".magi/logs"
-# What the FILE branch writes. A bare level, or a comma-separated list of
-# `target=level` directives with a bare level as the default:
-#   file_filter = "magi_rs=debug,magi_core=warn,error"
-# The longest matching target wins, so a general rule and a specific one compose.
-# A crate name written with dashes matches the module path with underscores.
-# An unknown level word is a load error, never a silent fallback to `info`.
-file_filter = "info"
-# Whether a rotated file is compressed to `.xz`.
-compress = true
-# Age in days past which a rotated file is compressed.
-compress_after_days = 2
-# Age in days past which a file is deleted. Counts DAYS -- the retired
-# `[headless].log_retention` counted RUNS, and there is no conversion between them.
-retain_days = 30
-# Ceiling on the whole directory, in bytes. 512 MiB. The oldest go first.
-max_total_bytes = 536870912
-
-# ── The rotation pool goes LAST IN THE FILE ────────────────────────────────────
-# Not "last in the [magi] block": in TOML every loose key and sub-table must precede the
-# first array of tables, so a key added to [magi] later could land after this array and
-# parse into the wrong table. "Last in the file" leaves nowhere to get it wrong — which
-# is why [embedding] above sits before it.
+# ── The rotation pool closes the [magi] group ──────────────────────────────────
+# New [magi] keys go ABOVE this pool: in TOML a loose key written below an array of
+# tables belongs to its last entry, and this one refuses unknown keys, so a misplaced
+# key stops the file from loading.
 #
 # Ordered STRONGEST to WEAKEST: the order is the rotation preference. It is a SHARED pool,
 # not one list per seat — what consensus needs is that a rotation lands on a lineage the
@@ -301,3 +278,34 @@ lineage = "mistral"
 [[magi.fallback]]
 model   = "gemma4:cloud"
 lineage = "google"
+
+[embedding]
+model = "nomic-embed-text-v2-moe:latest"
+dim   = 0
+# Overrides the embedding endpoint. Commented out means it inherits the root `base_url`.
+# BREAKING: until v0.11.0 this key always carried its own value, so it never inherited.
+# base_url = "..."
+# Key for the embedder: EMBEDDING_API_KEY, from the environment or
+# `magi-rs vault set EMBEDDING_API_KEY`; never in this file. Without it the main key,
+# OPENAI_API_KEY, is used only when this section's endpoint has the same origin as the root
+# one; on any other origin no key is sent and an endpoint that wants one answers 401 or 403.
+
+[logging]
+# Where the daily files live. Relative paths resolve against the workspace root.
+log_dir = ".magi/logs"
+# What the FILE branch writes. A bare level, or a comma-separated list of
+# `target=level` directives with a bare level as the default:
+#   file_filter = "magi_rs=debug,magi_core=warn,error"
+# The longest matching target wins, so a general rule and a specific one compose.
+# A crate name written with dashes matches the module path with underscores.
+# An unknown level word is a load error, never a silent fallback to `info`.
+file_filter = "info"
+# Whether a rotated file is compressed to `.xz`.
+compress = true
+# Age in days past which a rotated file is compressed.
+compress_after_days = 2
+# Age in days past which a file is deleted. Counts DAYS -- the retired
+# `[headless].log_retention` counted RUNS, and there is no conversion between them.
+retain_days = 30
+# Ceiling on the whole directory, in bytes. 512 MiB. The oldest go first.
+max_total_bytes = 536870912
