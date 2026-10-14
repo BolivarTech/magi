@@ -1,15 +1,15 @@
 # Smoke Certificate
 
-- version: 0.24.1
-- commit: 5ad8a34
+- version: 0.24.2
+- commit: 9f08e47
 - date: 2026-10-14 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 4842edf5bc3662dd762770e092b4c8dfaa3324f723ceff35f9ae5f97eaa53812 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 638s
-- rounds needed: 1
+- binary: sha256 03b81695f54fb4cc17e3c502c362ee85ff7db7bd5333e2907103e3a888a36ec4 (rebuilt from the commit above)
+- real cost: 8 backend run(s) in 680s
+- rounds needed: 3
 - scope: 43 of 43 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: active memories not measured, 2441 KB database, 1284 KB archived
+- environment: active memories not measured, 4001 KB database, 2061 KB archived
 - result: 127 passed, 0 not passed, 127 total
 
 [PASS] D1 - decide answers one question of each type against local Ollama with exit 0
