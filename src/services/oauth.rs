@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.20.0
-// Date: 2026-09-26
+// Version: 0.24.2
+// Date: 2026-10-14
 
 //! This module implements the OAuth 2.0 flow with PKCE for Anthropic Console.
 
@@ -12,7 +12,7 @@ use axum::{
     Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::{thread_rng, RngCore};
+use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -133,7 +133,7 @@ pub struct Pkce {
 impl Pkce {
     pub fn generate() -> Self {
         let mut verifier_bytes = [0u8; 32];
-        thread_rng().fill_bytes(&mut verifier_bytes);
+        rand::rng().fill_bytes(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -174,7 +174,7 @@ pub struct OAuthService {
 impl OAuthService {
     pub fn new() -> Self {
         let mut state_bytes = [0u8; 32];
-        thread_rng().fill_bytes(&mut state_bytes);
+        rand::rng().fill_bytes(&mut state_bytes);
         let state = URL_SAFE_NO_PAD.encode(state_bytes);
 
         Self {

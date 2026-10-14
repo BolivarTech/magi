@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.0
-// Date: 2026-10-13
+// Version: 0.24.2
+// Date: 2026-10-14
 
 //! The Agent orchestrator coordinates between the Provider and the Tools.
 
@@ -30,6 +30,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use magi_core::schema::Mode;
 use magi_rs::decision::DecisionClient;
+use magi_rs::encoding::lower_hex;
 use magi_rs::magi::gate::{evaluate, GateTelemetry, GateThresholds, GateVerdict, NoGateTelemetry};
 use magi_rs::magi::mode::{
     agent_chosen_mode, input_for_dispatch, resolve_mode_guarded, ModeConfig, ModeSources,
@@ -1774,8 +1775,10 @@ async fn write_turn_to_memory(
     // migration dedup contract is unchanged.
     let seq = TURN_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!(
-        "turn:{:x}",
-        Sha256::digest(format!("{now}:{role:?}:{seq}:{text}").as_bytes())
+        "turn:{}",
+        lower_hex(&Sha256::digest(
+            format!("{now}:{role:?}:{seq}:{text}").as_bytes()
+        ))
     );
 
     let m = Memory {

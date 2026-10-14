@@ -1075,7 +1075,7 @@ unaffected.
 
 ## Security Model
 
-- **Encrypted memory (envelope DEK/KEK).** A random 32-byte **data key (DEK)** encrypts every record via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate (Argon2id → AES-256-GCM-SIV → error-correcting FEC, `#![forbid(unsafe_code)]`). The user **passphrase** plus a per-DB salt derives a **KEK** (Argon2id, OWASP 2025: 64 MiB, t=3, p=4) that **wraps** the DEK; `vault_meta` stores `{salt, wrapped_dek}`, each FEC-encoded. The DEK is unwrapped **once per session** and held **masked in RAM** (`MaskedDek`: XOR mask rotated from `OsRng` on every access, best-effort `mlock`). No Argon2 runs per record.
+- **Encrypted memory (envelope DEK/KEK).** A random 32-byte **data key (DEK)** encrypts every record via the audited [`cryptovault`](https://crates.io/crates/cryptovault) crate (Argon2id → AES-256-GCM-SIV → error-correcting FEC, `#![forbid(unsafe_code)]`). The user **passphrase** plus a per-DB salt derives a **KEK** (Argon2id, OWASP 2025: 64 MiB, t=3, p=4) that **wraps** the DEK; `vault_meta` stores `{salt, wrapped_dek}`, each FEC-encoded. The DEK is unwrapped **once per session** and held **masked in RAM** (`MaskedDek`: XOR mask rotated from the OS random source (`SysRng`) on every access, best-effort `mlock`). No Argon2 runs per record.
 - **Zero-knowledge unlock.** Nothing persisted opens the DB without the passphrase: no OS keyring, no cached file, no copy of the DEK on disk (`system::secrets` and the `keyring` dependency were removed in v0.9.0). The passphrase resolves as `-p` > `MAGI_PASSPHRASE` > interactive prompt; a hard strength floor (`zxcvbn` ≥ 3, ≥ 12 chars, no override) guards against offline brute-force of a portable `.db`. Forgetting the passphrase means the data is unrecoverable. There is no backdoor.
 - **Never loses your data.** A wrong passphrase or a corrupt wrapped key fails with a typed, **retryable** error and **never wipes** the database. Only a brand-new or pre-envelope DB (no wrapped key present) is bootstrapped fresh. `vault_meta` is FEC-protected, so on-disk bit-rot is corrected before the unwrap; corruption beyond the FEC's reach surfaces as a distinct `VaultMetaCorrupt` error, never a silent wrong key.
 - **Secrets separation.** The passphrase (which unlocks the DEK) and the stored API keys (entries *inside* the vault) are different secrets in different places: rotating a stored API key never requires re-keying the passphrase, and a wrong API key never invalidates the local conversation DB. `magi-rs vault passwd` rotates the passphrase without re-encrypting any record (it re-wraps the same DEK).
@@ -1134,7 +1134,7 @@ src/
   vault/
     mod.rs             -- SecretStore boundary + public re-exports (frontier main.rs sees)
     envelope.rs        -- DEK/KEK envelope: bootstrap/open, wrap/unwrap/rekey, keyless FEC over vault_meta
-    memguard.rs        -- MaskedDek: DEK masked in RAM (OsRng per-access rotation), harden_process
+    memguard.rs        -- MaskedDek: DEK masked in RAM (SysRng per-access rotation), harden_process
     master.rs          -- passphrase resolution (-p > env > prompt), zxcvbn strength floor
     store.rs           -- VaultStore: the `vault` table + SecretStore CRUD (one blob per secret)
     cli.rs             -- `magi-rs vault {ls,set,rm,passwd}` (hidden prompt / stdin, Y-only confirm)

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.23.0
-// Date: 2026-10-11
+// Version: 0.24.2
+// Date: 2026-10-14
 #![deny(missing_docs)]
 #![deny(clippy::missing_docs_in_private_items)]
 #![deny(clippy::missing_errors_doc, clippy::missing_panics_doc)]
@@ -864,7 +864,7 @@ mod tests {
         // (REQ-A21), so a regression here would not leave a loose key — it would make the
         // parsing below fail with a generic `unknown field`. This textual assertion fails with
         // a message that names the cause, instead of a parse panic that has to be interpreted.
-        let raw_value: toml::Value = raw
+        let raw_value: toml::Table = raw
             .parse()
             .expect("the scanned magi.toml must be valid TOML");
         if let Some(openai) = raw_value.get("openai") {

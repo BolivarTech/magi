@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.24.2] - 2026-10-14
+
+### Changed
+
+- **Dependencies:** `toml` 0.8 → 1.1, `sha2` 0.10 → 0.11 and `rand` 0.8 → 0.10. Nothing you can observe changes: `magi.toml` files load as before, with the same errors for unknown keys and for credentials written into `base_url`, and memory records keep the ids they already have in the database.
+- The data-key mask and the ids that tie split log events together now draw their randomness from `rand`'s `SysRng`, which is the operating system's generator under its new name. The entropy source has not changed.
+
 ## [0.24.1] - 2026-10-13
 
 ### Changed

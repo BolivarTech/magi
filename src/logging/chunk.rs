@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.18.0
-// Date: 2026-08-31
+// Version: 0.24.2
+// Date: 2026-10-14
 
 //! Splitting an oversized event into bounded, UTF-8-safe lines.
 
@@ -8,8 +8,8 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 
 /// Maximum bytes a single written line may occupy, terminator included.
 pub const MAX_LINE_BYTES: usize = 4096;
@@ -56,7 +56,7 @@ impl EventId {
     pub fn new() -> Self {
         let pid = process::id();
         let mut bytes = [0u8; 8];
-        let mut rng = OsRng;
+        let mut rng = SysRng;
         let rand = match rng.try_fill_bytes(&mut bytes) {
             Ok(()) => u64::from_ne_bytes(bytes),
             Err(_) => {

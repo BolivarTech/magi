@@ -1,10 +1,10 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-17
+// Version: 0.24.2
+// Date: 2026-10-14
 //! In-RAM protection of the data key (DEK) — REQ-V41 / REQ-V42.
 //!
 //! The DEK never sits in RAM in the clear between operations: it lives XOR-masked
-//! with a random mask, and the mask is **rotated with fresh [`OsRng`] entropy on
+//! with a random mask, and the mask is **rotated with fresh [`SysRng`] entropy on
 //! every access** ([`MaskedDek::with_dek`]). The backing page is best-effort locked
 //! against swap ([`region::lock`]); process-dump suppression is applied by
 //! [`harden_process`]. All of these are **best-effort**: a failure warns and
@@ -20,8 +20,8 @@
 //! roadmap (`dev-docs/PENDING_IMPLEMENTATION.md` §13.4) for the hardware-backed
 //! alternatives that are out of scope for v1.
 
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use zeroize::Zeroize;
 
 use crate::vault::VaultError;
@@ -102,9 +102,9 @@ impl MaskedDek {
         let mut buf = Box::new([0u8; BUF_LEN]);
         {
             let (masked, mask) = buf.split_at_mut(KEY_LEN);
-            OsRng
+            SysRng
                 .try_fill_bytes(mask)
-                .map_err(|e| VaultError::Crypto(format!("OsRng failed: {e}")))?;
+                .map_err(|e| VaultError::Crypto(format!("SysRng failed: {e}")))?;
             // `dek` is the only holder of the plaintext key (Zeroizing, scrubbed
             // on drop); XOR straight from it — no plaintext stack copy is made.
             for (out, (d, k)) in masked.iter_mut().zip(dek.iter().zip(mask.iter())) {
@@ -134,7 +134,7 @@ impl MaskedDek {
     }
 
     /// Unmasks the DEK into a transient `Zeroizing` buffer, runs `f`, then re-masks
-    /// with a **fresh** [`OsRng`] mask (SC-V50). Takes `&mut self` because the mask
+    /// with a **fresh** [`SysRng`] mask (SC-V50). Takes `&mut self` because the mask
     /// rotates on every access.
     ///
     /// The re-mask runs inside a drop-guard, so even if `f` panics the buffer is
@@ -174,17 +174,17 @@ impl MaskedDek {
     ///
     /// [`VaultError::Crypto`] if fresh mask generation fails for the copy (a broken
     /// OS entropy source). *(Plan refined `-> Self` to `-> Result` during MS2 impl:
-    /// an `OsRng` failure is a real, if near-impossible, error, not a panic.)*
+    /// an `SysRng` failure is a real, if near-impossible, error, not a panic.)*
     pub fn duplicate(&mut self) -> Result<Self, VaultError> {
         self.with_dek(|dek| Self::new(zeroize::Zeroizing::new(dek.to_vec())))
     }
 
-    /// Re-masks the buffer in place with a fresh `OsRng` mask; on the (essentially
-    /// impossible) `OsRng` failure, re-masks with the existing mask so the buffer is
+    /// Re-masks the buffer in place with a fresh `SysRng` mask; on the (essentially
+    /// impossible) `SysRng` failure, re-masks with the existing mask so the buffer is
     /// never left in the clear, and records a warning. Never panics.
     fn remask_from(&mut self, plain: &[u8]) {
         let mut new_mask = [0u8; KEY_LEN];
-        let ok = OsRng.try_fill_bytes(&mut new_mask).is_ok();
+        let ok = SysRng.try_fill_bytes(&mut new_mask).is_ok();
         let (masked, mask) = self.buf.split_at_mut(KEY_LEN);
         if ok {
             for (out, (p, nk)) in masked.iter_mut().zip(plain.iter().zip(new_mask.iter())) {
@@ -198,7 +198,7 @@ impl MaskedDek {
                 *out = p ^ k;
             }
             self.warnings
-                .push("OsRng failed during mask rotation; mask not rotated".to_string());
+                .push("SysRng failed during mask rotation; mask not rotated".to_string());
         }
         new_mask.zeroize();
     }

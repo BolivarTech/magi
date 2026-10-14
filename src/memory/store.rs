@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.20.0
-// Date: 2026-09-26
+// Version: 0.24.2
+// Date: 2026-10-14
 
 //! Encrypted vector store: `memories` table, `VectorStore` trait, and
 //! `SqliteVectorStore` (REQ-01, REQ-03, REQ-04).
@@ -31,6 +31,7 @@ use crate::memory::error::MemoryError;
 use crate::memory::salience::assign_salience;
 use crate::memory::MemoryKind;
 use cryptovault::CryptoVault;
+use magi_rs::encoding::lower_hex;
 use magi_rs::vault::MaskedDek;
 
 // ─── Memory struct ────────────────────────────────────────────────────────────
@@ -634,7 +635,7 @@ impl SqliteVectorStore {
                 h.update(role_str.as_bytes());
                 h.update([0x1F_u8]);
                 h.update(text.as_bytes());
-                format!("mig:{:x}", h.finalize())
+                format!("mig:{}", lower_hex(&h.finalize()))
             };
 
             // Deterministic config-aware salience at write time (H1 / REQ-35 / D-11).

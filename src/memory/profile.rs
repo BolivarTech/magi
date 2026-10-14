@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.20.0
-// Date: 2026-09-26
+// Version: 0.24.2
+// Date: 2026-10-14
 
 //! Preference distiller: promotes durable preferences from episodic memory to a
 //! compact profile, manages hard supersession, and renders the always-injected
@@ -15,6 +15,7 @@
 //! - [`render_profile`] produces the bounded, always-injected preference string.
 
 use async_trait::async_trait;
+use magi_rs::encoding::lower_hex;
 use sha2::{Digest, Sha256};
 
 use crate::memory::clock::Clock;
@@ -354,7 +355,7 @@ pub async fn render_profile(
 ///
 /// The memory id is deterministic:
 /// ```text
-/// id = format!("pref:{:x}", Sha256::digest(normalized))
+/// id = format!("pref:{}", lower_hex(&Sha256::digest(normalized)))
 /// ```
 /// where `normalized = pref.to_lowercase().trim()`.
 /// This gives **latest-wins upsert** semantics: `"Use Rust"` and `"use rust  "`
@@ -394,7 +395,7 @@ async fn promote_to_profile(
     }
 
     // Deterministic id from the normalized text (D-15 / latest-wins upsert).
-    let id = format!("pref:{:x}", Sha256::digest(normalized.as_bytes()));
+    let id = format!("pref:{}", lower_hex(&Sha256::digest(normalized.as_bytes())));
 
     let now = clock.now();
     let salience = cfg.preference_salience.clamp(0.0, 1.0);
@@ -692,8 +693,8 @@ mod tests {
 
         // Reconstruct the deterministic id to look up the raw memory.
         let id = format!(
-            "pref:{:x}",
-            Sha256::digest("always use dark mode".as_bytes())
+            "pref:{}",
+            lower_hex(&Sha256::digest("always use dark mode".as_bytes()))
         );
         let mem = store
             .get(&id)
