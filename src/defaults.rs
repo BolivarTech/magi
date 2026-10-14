@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.24.0
+// Version: 0.24.1
 // Date: 2026-10-13
 
 //! Built-in default backend profile (Ollama-first). MANUAL MAINTENANCE: these
