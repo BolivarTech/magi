@@ -2625,11 +2625,11 @@ mod tests {
     /// failure, never a status made of the IP's first octet (`HTTP 127`).
     #[tokio::test]
     async fn a_closed_port_on_an_ip_host_is_not_reported_as_an_http_status() {
+        use crate::agent::provider::{OpenAiCompatibleProvider, OpenAiSettings};
         let port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
             listener.local_addr().expect("local addr").port()
         };
-        use crate::agent::provider::{OpenAiCompatibleProvider, OpenAiSettings};
         let provider = OpenAiCompatibleProvider::new(OpenAiSettings {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             api_key: "k".into(),
@@ -2650,6 +2650,38 @@ mod tests {
             "the IP became a status: {message}"
         );
         assert!(message.contains("Could not reach"), "{message}");
+    }
+
+    /// End to end: a non-2xx response from the main provider reaches the JSON payload as the
+    /// fixed template built from its typed status, and nothing of the body it sent back, which
+    /// here echoes a credential no key pattern recognizes.
+    #[tokio::test]
+    async fn a_provider_http_error_reaches_the_payload_as_its_typed_status_only() {
+        use crate::agent::provider::{OpenAiCompatibleProvider, OpenAiSettings};
+        const ECHOED_SECRET: &str = "hunter2-correct-horse";
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_body(format!(
+                "denied for https://smoke:{ECHOED_SECRET}@proxy.invalid/v1"
+            ))
+            .create_async()
+            .await;
+        let provider = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: server.url(),
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut agent = Agent::new(Arc::new(provider));
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", &wiring(None)).await;
+
+        assert_eq!(outcome.stop_reason, StopReason::Error);
+        let message = outcome.error.expect("a 401 response is an error").message;
+        assert_eq!(message, "provider error: HTTP 401");
+        assert!(!message.contains(ECHOED_SECRET), "{message}");
     }
 
     /// Priority `Error > Denied`: a denial occurs, then the provider fails ⇒ the
