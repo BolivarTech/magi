@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.24.3] - 2026-10-18
+
+### Fixed
+
+- **A refused connection is no longer reported as an HTTP status.** When a headless run could not reach its endpoint, the error in the JSON output could name a status taken from the URL. With the host given as an IP, a refused connection to `http://203.0.113.10:11434` came out as `provider error: HTTP 203`, a status that even reads as a success. The status now comes only from the HTTP response, so a transport failure reads as one.
+- **A `429` in an error message no longer triggers a rate-limit retry.** Any text containing `429` used to be retried, a port such as `:14290` included. Now only a response with status 429 is, which still covers real rate limits.
+
+### Security
+
+- **Dependencies:** `rustls` is updated to 0.23.46, which clears RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and RUSTSEC-2026-0349.
+
 ## [0.24.2] - 2026-10-14
 
 ### Changed

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.0
-// Date: 2026-10-13
+// Version: 0.24.3
+// Date: 2026-10-18
 
 //! This module defines the Provider trait for AI backend interactions.
 
