@@ -12,7 +12,7 @@ changes and the **patch** position signals backward-compatible fixes.
 ### Fixed
 
 - **A refused connection is no longer reported as an HTTP status.** When a headless `query` or `consult` could not reach its endpoint, the error in the JSON output could name a status taken from the URL. With the host given as an IP, a refused connection to `http://203.0.113.10:11434` came out as `provider error: HTTP 203`, a status that even reads as a success. The status now comes only from the HTTP response, so a transport failure reads as one.
-- **An HTTP error from the main provider is always reported as `provider error: HTTP <status>` in headless `query`.** The provider's own messages never contained the word `http`, so until now they usually skipped that template and `error.message` carried the response body, with key-shaped values redacted. The body no longer appears there: it can echo credentials no pattern recognizes. The interactive TUI still shows the full message.
+- **An HTTP error from the main provider is always reported as `provider error: HTTP <status>` in headless `query`.** The provider's error format never contains the word `http`, so unless the body did, these errors skipped that template and `error.message` carried the response body, with key-shaped values redacted. The body no longer appears there: it can echo credentials no pattern recognizes. The interactive TUI still shows the full message.
 - **A `429` in an error message no longer triggers a rate-limit retry.** Any text containing `429` used to be retried, a port such as `:14290` included. Now only a response with status 429 is, which still covers real rate limits.
 
 ### Security
