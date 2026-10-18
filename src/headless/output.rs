@@ -163,15 +163,6 @@ const PRODUCT_LABELS: &[&str] = &[
     "enabled",
 ];
 
-/// Length in characters of an HTTP status code (`"401"`, `"500"`, …).
-const HTTP_STATUS_TOKEN_LEN: usize = 3;
-
-/// Lowest HTTP status code recognized by the classifier.
-const HTTP_STATUS_MIN: u16 = 100;
-
-/// Highest HTTP status code recognized by the classifier.
-const HTTP_STATUS_MAX: u16 = 599;
-
 /// Substring that marks a provider error as a network timeout.
 ///
 /// The full phrase is required (not the bare word `"timeout"`) to avoid falsely classifying a
@@ -384,46 +375,46 @@ pub fn write_text(
     Ok(())
 }
 
-/// Classifies `raw` as a provider error shaped like an HTTP status.
-///
-/// Recognizes any message that mentions `"http"` (case-insensitive) and contains a three-digit
-/// numeric token in the valid HTTP status range (100-599); returns the code if found. It is
-/// intentionally narrow — it never matches a bare number without the word `"http"` present — so
-/// it does not mistakenly classify unrelated text that merely contains a number.
-fn classify_http_status(raw: &str) -> Option<u16> {
-    const HTTP_KEYWORD: &str = "http";
-    if !raw.to_ascii_lowercase().contains(HTTP_KEYWORD) {
-        return None;
-    }
-    raw.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|tok| tok.len() == HTTP_STATUS_TOKEN_LEN && tok.bytes().all(|b| b.is_ascii_digit()))
-        .find_map(|tok| tok.parse::<u16>().ok())
-        .filter(|code| (HTTP_STATUS_MIN..=HTTP_STATUS_MAX).contains(code))
-}
-
 /// Sanitizes an error message potentially coming from an external layer (HTTP provider, SQLite,
 /// IO) so it is safe to emit to stdout/stderr/log/`error.message` (REQ-H15c).
 ///
-/// Approach is **allowlist-first**: it first tries to classify `raw` into a known error class
-/// (HTTP status, timeout, connection refused) and, if it succeeds, returns a fixed **template**
-/// message that does **not** echo any raw text from `raw` — so a secret embedded in the tail of
-/// the message (e.g., a URL or a header reflected by the provider) never reaches the output. If
-/// `raw` does not match any known template, a **safety net** (`fence`, defense in depth) is
+/// Approach is **allowlist-first**: it first tries to classify the failure into a known error
+/// class (HTTP status, timeout, connection refused) and, if it succeeds, returns a fixed
+/// **template** message that does **not** echo any raw text from `raw` — so a secret embedded in
+/// the tail of the message (e.g., a URL or a header reflected by the provider) never reaches the
+/// output. If no known template matches, a **safety net** (`fence`, defense in depth) is
 /// applied: known key-like patterns (`sk-…`, `Bearer …`, `AKIA…`, long hex/base64-like runs)
 /// are redacted and the rest of the text is returned intact.
+///
+/// # Why the HTTP status is a parameter
+///
+/// The status comes from the response, typed, never from `raw`. Parsing it out of the text read
+/// any three-digit number in the status range as one, and the message of a failed request also
+/// holds its URL: a refused connection to `http://192.168.0.30` came out as `HTTP 192`, and one
+/// to `10.200.x.x` as a false `HTTP 200`.
+///
+/// # Parameters
+///
+/// * `raw` - the error text, untrusted.
+/// * `http_status` - the status of the response the error came from, if there was one; `None`
+///   for a transport failure or an error that never reached a server.
+///
+/// # Returns
+///
+/// The template for a known class, else `raw` with its key-like patterns redacted.
 ///
 /// # Examples
 ///
 /// ```rust,ignore
 /// // Ilustrativo, no un doctest ejecutado.
 /// assert_eq!(
-///     sanitize_error_message("http 401 Unauthorized: sk-ant-xxxxxxxxxxxxxxxx"),
+///     sanitize_error_message("http 401 Unauthorized: sk-ant-xxxxxxxxxxxxxxxx", Some(401)),
 ///     "provider error: HTTP 401"
 /// );
-/// assert_eq!(sanitize_error_message("plain network timeout"), "plain network timeout");
+/// assert_eq!(sanitize_error_message("plain network timeout", None), "plain network timeout");
 /// ```
-pub fn sanitize_error_message(raw: &str) -> String {
-    if let Some(status) = classify_http_status(raw) {
+pub fn sanitize_error_message(raw: &str, http_status: Option<u16>) -> String {
+    if let Some(status) = http_status {
         return format!("provider error: HTTP {status}");
     }
     let lower = raw.to_ascii_lowercase();
@@ -761,7 +752,7 @@ pub fn secret_pattern_ranges(raw: &str) -> Vec<std::ops::Range<usize>> {
 pub fn fuzz_sanitize_error_entrypoint(data: &[u8]) {
     let s = String::from_utf8_lossy(data);
     // Both sanitizers must be total (never panic) on arbitrary text.
-    let _ = sanitize_error_message(&s);
+    let _ = sanitize_error_message(&s, None);
     let redacted = redact_secret_patterns(&s);
     // Idempotency: a surviving key-pattern would change on a second pass.
     debug_assert_eq!(
@@ -1118,17 +1109,17 @@ mod tests {
             "AKIAIOSFODNN7EXAMPLE",
         ];
         for secret in secrets {
-            let msg = sanitize_error_message(&format!("http 401: {secret} rejected"));
+            let msg = sanitize_error_message(&format!("http 401: {secret} rejected"), Some(401));
             assert!(!msg.contains(secret), "leaked: {secret}");
         }
 
         assert_eq!(
-            sanitize_error_message("plain network timeout"),
+            sanitize_error_message("plain network timeout", None),
             "plain network timeout"
         );
 
         assert_eq!(
-            sanitize_error_message("http 401 Unauthorized: sk-ant-xxxxxxxxxxxxxxxx"),
+            sanitize_error_message("http 401 Unauthorized: sk-ant-xxxxxxxxxxxxxxxx", Some(401)),
             "provider error: HTTP 401"
         );
     }
@@ -1139,20 +1130,21 @@ mod tests {
     #[test]
     fn test_sanitize_fence_redacts_each_pattern_when_no_known_class_matches() {
         let sk_like = format!("sk-{}", "a".repeat(20));
-        let out = sanitize_error_message(&format!("upstream rejected key {sk_like} for tenant"));
+        let out =
+            sanitize_error_message(&format!("upstream rejected key {sk_like} for tenant"), None);
         assert!(!out.contains(&sk_like));
         assert!(out.contains(REDACTED_PLACEHOLDER));
 
         let bearer_msg = "auth failed: Bearer abc123DEF456token";
-        let out2 = sanitize_error_message(bearer_msg);
+        let out2 = sanitize_error_message(bearer_msg, None);
         assert!(!out2.contains("abc123DEF456token"));
 
         let akia_like = format!("AKIA{}", "B".repeat(16));
-        let out3 = sanitize_error_message(&format!("leaked credential {akia_like} found"));
+        let out3 = sanitize_error_message(&format!("leaked credential {akia_like} found"), None);
         assert!(!out3.contains(&akia_like));
 
         let generic_run = "Z".repeat(40);
-        let out4 = sanitize_error_message(&format!("token dump: {generic_run} end"));
+        let out4 = sanitize_error_message(&format!("token dump: {generic_run} end"), None);
         assert!(!out4.contains(&generic_run));
     }
 
@@ -1161,10 +1153,10 @@ mod tests {
     #[test]
     fn test_generic_secret_run_threshold_is_exact_boundary() {
         let below = "a".repeat(GENERIC_SECRET_RUN_MIN_LEN - 1);
-        assert_eq!(sanitize_error_message(&below), below);
+        assert_eq!(sanitize_error_message(&below, None), below);
 
         let at_threshold = "a".repeat(GENERIC_SECRET_RUN_MIN_LEN);
-        let out = sanitize_error_message(&at_threshold);
+        let out = sanitize_error_message(&at_threshold, None);
         assert!(out.contains(REDACTED_PLACEHOLDER));
         assert!(!out.contains(&at_threshold));
     }
@@ -1190,16 +1182,56 @@ mod tests {
         }
     }
 
+    /// A number in the URL is never an HTTP status: a refused connection to a host given as an IP
+    /// is reported as refused, not as `HTTP 192`, and `10.200.x.x` never becomes a false
+    /// `HTTP 200`. Only the status the caller read from a response is one.
+    #[test]
+    fn an_ip_in_the_url_is_never_read_as_an_http_status() {
+        assert_eq!(
+            sanitize_error_message(
+                "error sending request for url (http://192.168.0.30:11434/v1/chat/completions):                  connection refused",
+                None
+            ),
+            "network error: connection refused"
+        );
+        for raw in [
+            "error sending request for url (http://10.200.0.5:11434/api/chat): tcp connect error",
+            "Could not reach the OpenAI-compatible backend at http://127.0.0.1:9/v1.",
+            "error sending request for url (https://example.invalid:443/v1/chat/completions)",
+        ] {
+            let out = sanitize_error_message(raw, None);
+            assert!(!out.contains("HTTP"), "a URL number became a status: {out}");
+        }
+    }
+
+    /// A typed status yields the fixed template and echoes nothing of the raw text, whatever
+    /// the text says.
+    #[test]
+    fn a_typed_status_yields_the_template_without_echoing_the_raw_text() {
+        let key = format!("sk-ant-{}", "SECRET".repeat(3));
+        assert_eq!(
+            sanitize_error_message(
+                &format!("OpenAI API Error [503 Service Unavailable]: proxy echoed {key}"),
+                Some(503)
+            ),
+            "provider error: HTTP 503"
+        );
+        assert_eq!(
+            sanitize_error_message("no status word anywhere", Some(401)),
+            "provider error: HTTP 401"
+        );
+    }
+
     /// Additional recognized classes (timeout, connection refused) produce their fixed template
     /// instead of echoing the provider's raw message.
     #[test]
     fn test_sanitize_error_message_classifies_timeout_and_connection_refused() {
         assert_eq!(
-            sanitize_error_message("upstream request timed out after 30s"),
+            sanitize_error_message("upstream request timed out after 30s", None),
             "provider error: request timed out"
         );
         assert_eq!(
-            sanitize_error_message("io error: connection refused (os error 111)"),
+            sanitize_error_message("io error: connection refused (os error 111)", None),
             "network error: connection refused"
         );
     }
@@ -1213,11 +1245,11 @@ mod tests {
         // scanner (`tests/no_hardcoded_secrets.rs`); it is a synthetic fixture.
         let token = format!("{}{}", "tok", "EN1234567890abcdef");
 
-        let lower = sanitize_error_message(&format!("auth failed: bearer {token}"));
+        let lower = sanitize_error_message(&format!("auth failed: bearer {token}"), None);
         assert!(!lower.contains(&token), "lowercase bearer leaked: {lower}");
         assert!(lower.contains(REDACTED_PLACEHOLDER));
 
-        let upper = sanitize_error_message(&format!("auth failed: BEARER {token}"));
+        let upper = sanitize_error_message(&format!("auth failed: BEARER {token}"), None);
         assert!(!upper.contains(&token), "uppercase BEARER leaked: {upper}");
         assert!(upper.contains(REDACTED_PLACEHOLDER));
     }

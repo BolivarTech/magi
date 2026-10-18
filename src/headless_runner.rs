@@ -49,6 +49,7 @@ use magi_rs::redact::redact_foreign_text;
 
 use crate::agent::messages::{Content, Message, Role};
 use crate::agent::mode_classifier::NoticeSink;
+use crate::agent::provider::ProviderHttpError;
 use crate::agent::{Agent, AgentRunConfig, RunObserver, StreamPiece, MAX_TOOL_CALLS_ERROR};
 use crate::config::MagiConfig;
 use crate::task::AbortOnDrop;
@@ -513,7 +514,7 @@ fn consult_error_outcome(
         // without a declared mode is a configuration problem, not a runtime one
         // (REQ-A07d/REQ-A07r) — `ModeError`'s `Display` already names the fix.
         ConsultRunError::UntrustedContentRequiresMode(e) => ErrorPayload {
-            message: audited_payload(&sanitize_error_message(&e.to_string())),
+            message: audited_payload(&sanitize_error_message(&e.to_string(), None)),
             kind: ErrorKind::InputInvalid,
         },
         ConsultRunError::Timeout => ErrorPayload {
@@ -521,7 +522,9 @@ fn consult_error_outcome(
             kind: ErrorKind::Timeout,
         },
         ConsultRunError::Runtime(message) => ErrorPayload {
-            message: audited_payload(&sanitize_error_message(&message)),
+            // No status to pass: `Magi::analyze` reports a seat's HTTP failure inside
+            // `InsufficientAgents` or the report, never as a typed provider error.
+            message: audited_payload(&sanitize_error_message(&message, None)),
             kind: ErrorKind::Runtime,
         },
     };
@@ -1241,7 +1244,10 @@ pub async fn run_query(
                     None,
                     StopReason::Error,
                     Some(ErrorPayload {
-                        message: audited_payload(&sanitize_error_message(&message)),
+                        message: audited_payload(&sanitize_error_message(
+                            &message,
+                            ProviderHttpError::status_of(&e),
+                        )),
                         kind: ErrorKind::Runtime,
                     }),
                 )
@@ -2613,6 +2619,37 @@ mod tests {
         assert_eq!(outcome.stop_reason, StopReason::Error);
         assert!(outcome.error.is_some(), "error payload must be populated");
         assert_eq!(outcome.response, None);
+    }
+
+    /// End to end: a query against a closed port on a host given as an IP reports a transport
+    /// failure, never a status made of the IP's first octet (`HTTP 127`).
+    #[tokio::test]
+    async fn a_closed_port_on_an_ip_host_is_not_reported_as_an_http_status() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+            listener.local_addr().expect("local addr").port()
+        };
+        use crate::agent::provider::{OpenAiCompatibleProvider, OpenAiSettings};
+        let provider = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let mut agent = Agent::new(Arc::new(provider));
+
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = run_query(resolved_stub(), policy, &mut agent, "prompt", &wiring(None)).await;
+
+        assert_eq!(outcome.stop_reason, StopReason::Error);
+        let message = outcome
+            .error
+            .expect("a refused connection is an error")
+            .message;
+        assert!(
+            !message.contains("HTTP"),
+            "the IP became a status: {message}"
+        );
+        assert!(message.contains("Could not reach"), "{message}");
     }
 
     /// Priority `Error > Denied`: a denial occurs, then the provider fails ⇒ the

@@ -120,7 +120,7 @@ pub trait Provider: Send + Sync {
                         "Stream ended without MessageDone or content"
                     ));
                 }
-                Err(e) if attempts < max_attempts && is_retryable_error(&e.to_string()) => {
+                Err(e) if attempts < max_attempts && is_retryable_error(&e) => {
                     let wait_secs = 2_u64.pow(attempts as u32);
                     sleep(Duration::from_secs(wait_secs)).await;
                     continue;
@@ -220,17 +220,28 @@ fn finalize_tool(tool: Option<(String, String, String)>, full_content: &mut Vec<
     }
 }
 
+/// HTTP status of an upstream rate limit (`429 Too Many Requests`).
+const RATE_LIMITED_STATUS: u16 = 429;
+
+/// Stable opening of [`connection_error_hint`], the context a refused or unreachable
+/// connection carries.
+const CONNECTION_HINT_PREFIX: &str = "Could not reach the OpenAI-compatible backend";
+
 /// Returns `true` when a `send_messages` error should be retried.
 ///
 /// Retryable conditions:
-/// - `"429"` in the error string — upstream rate-limit.
-/// - `"Could not reach the OpenAI-compatible backend"` — transient connection
-///   failure (the stable prefix of [`connection_error_hint`]).
+/// - a typed [`ProviderHttpError`] with status 429 — upstream rate-limit. The status is read
+///   from the type, never from the text: a `429` in a port, an IP or a body is not one.
+/// - an error whose message opens with [`CONNECTION_HINT_PREFIX`] — transient connection
+///   failure ([`connection_error_hint`] is the outermost context there).
 ///
 /// A persistent outage will still fail after `max_attempts` tries; the
 /// distiller then retries on the next scheduled pass (CP2-Z).
-fn is_retryable_error(msg: &str) -> bool {
-    msg.contains("429") || msg.contains("Could not reach the OpenAI-compatible backend")
+fn is_retryable_error(err: &anyhow::Error) -> bool {
+    match ProviderHttpError::status_of(err) {
+        Some(status) => status == RATE_LIMITED_STATUS,
+        None => err.to_string().starts_with(CONNECTION_HINT_PREFIX),
+    }
 }
 
 /// A provider that returns static, canned responses.
@@ -580,6 +591,71 @@ struct OpenAiFnDelta {
     arguments: Option<String>,
 }
 
+/// A non-success HTTP response from the main agent's provider.
+///
+/// Carries the status as a number so a consumer that classifies the failure (the headless error
+/// sanitizer) reads it from the response instead of parsing the message: the message of a
+/// failed request can also hold its URL, and a host given as an IP (`http://192.168.0.30`)
+/// looks like a status there.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// let err = ProviderHttpError::new(401, "OpenAI API Error [401 Unauthorized]: bad key".into());
+/// assert_eq!(err.status, 401);
+/// assert_eq!(err.to_string(), "OpenAI API Error [401 Unauthorized]: bad key");
+/// ```
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct ProviderHttpError {
+    /// The HTTP status code of the response.
+    pub status: u16,
+    /// The full message, provider body included, worded as the provider reports it.
+    message: String,
+}
+
+impl ProviderHttpError {
+    /// Builds the error for a response with `status`.
+    ///
+    /// # Parameters
+    ///
+    /// * `status` - the response's HTTP status code.
+    /// * `message` - the text `Display` shows, unchanged from what the provider reported before
+    ///   the status was typed.
+    ///
+    /// # Returns
+    ///
+    /// The error, ready to wrap in an [`anyhow::Error`].
+    pub fn new(status: u16, message: String) -> Self {
+        Self { status, message }
+    }
+
+    /// The HTTP status of `err`, read from the typed error and never from its text.
+    ///
+    /// # Why typed and not parsed
+    ///
+    /// The message of a failed request can also carry its URL, and a host given as an IP
+    /// (`http://192.168.0.30:11434`) or a port (`:14290`) holds numbers that look like a
+    /// status: parsing the text read a refused connection as `HTTP 192`, a false `HTTP 200`
+    /// for `10.200.x.x`, and a rate limit wherever `429` appeared. Only a status the provider
+    /// read from a response is one.
+    ///
+    /// # Parameters
+    ///
+    /// * `err` - the error to inspect; every cause in its chain is checked, so a context added
+    ///   on top does not hide the status.
+    ///
+    /// # Returns
+    ///
+    /// The status when some cause is a [`ProviderHttpError`], else `None`: a transport failure
+    /// has no status.
+    pub fn status_of(err: &anyhow::Error) -> Option<u16> {
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<Self>())
+            .map(|http| http.status)
+    }
+}
+
 // ─── OpenAI-compatible provider ───────────────────────────────────────────────
 
 /// Connection settings for [`OpenAiCompatibleProvider`]. Named fields make the
@@ -681,7 +757,7 @@ pub fn build_openai_provider(
 pub fn connection_error_hint(base_url: &str) -> String {
     let base_url = redact_url(base_url);
     format!(
-        "Could not reach the OpenAI-compatible backend at {base_url}. \
+        "{CONNECTION_HINT_PREFIX} at {base_url}. \
          If you use Ollama, make sure it is running; if you point at OpenAI or another \
          service, check base_url and OPENAI_API_KEY; or set provider=\"anthropic\" in \
          magi.toml to use Anthropic."
@@ -918,7 +994,11 @@ impl Provider for OpenAiCompatibleProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("OpenAI API Error [{}]: {}", status, body));
+            return Err(ProviderHttpError::new(
+                status.as_u16(),
+                format!("OpenAI API Error [{}]: {}", status, body),
+            )
+            .into());
         }
         let st = OaiState {
             src: response
@@ -1056,19 +1136,21 @@ impl Provider for AnthropicProvider {
             let body = response.text().await?;
 
             if let Ok(error_res) = serde_json::from_str::<AnthropicErrorResponse>(&body) {
-                return Err(anyhow::anyhow!(
-                    "Anthropic API Error [{}] ({}): {}",
-                    status,
-                    error_res.error.error_type,
-                    error_res.error.message
-                ));
+                return Err(ProviderHttpError::new(
+                    status.as_u16(),
+                    format!(
+                        "Anthropic API Error [{}] ({}): {}",
+                        status, error_res.error.error_type, error_res.error.message
+                    ),
+                )
+                .into());
             }
 
-            return Err(anyhow::anyhow!(
-                "Anthropic API Error [{}]: Raw Body: {}",
-                status,
-                body
-            ));
+            return Err(ProviderHttpError::new(
+                status.as_u16(),
+                format!("Anthropic API Error [{}]: Raw Body: {}", status, body),
+            )
+            .into());
         }
 
         let bytes_stream = response
@@ -2240,6 +2322,70 @@ mod tests {
             .contains("401"));
     }
 
+    /// A non-2xx response reaches the caller as a typed [`ProviderHttpError`] carrying the
+    /// status, with the message it always had: the headless sanitizer reads the number from
+    /// the type, never from text that may also hold the URL.
+    #[tokio::test]
+    async fn an_openai_http_error_carries_its_status_typed() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(401)
+            .with_body("{\"error\":{\"message\":\"bad key\"}}")
+            .create_async()
+            .await;
+        let p = OpenAiCompatibleProvider::new(OpenAiSettings {
+            base_url: url,
+            api_key: "k".into(),
+            model: "m".into(),
+        });
+        let err = p
+            .send_messages(&[Message::user("hi")], &[], None)
+            .await
+            .unwrap_err();
+        let typed = err
+            .downcast_ref::<ProviderHttpError>()
+            .expect("a non-2xx response is a ProviderHttpError");
+        assert_eq!(typed.status, 401);
+        assert_eq!(
+            err.to_string(),
+            "OpenAI API Error [401 Unauthorized]: {\"error\":{\"message\":\"bad key\"}}"
+        );
+    }
+
+    /// Both Anthropic error shapes (a parsed error object and a raw body) carry the status typed.
+    #[tokio::test]
+    async fn an_anthropic_http_error_carries_its_status_typed() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _parsed = server
+            .mock("POST", "/messages")
+            .match_header("x-api-key", "parsed")
+            .with_status(401)
+            .with_body(
+                json!({"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}})
+                    .to_string(),
+            )
+            .create_async()
+            .await;
+        let _raw = server
+            .mock("POST", "/messages")
+            .match_header("x-api-key", "raw")
+            .with_status(503)
+            .with_body("upstream unavailable")
+            .create_async()
+            .await;
+        for (key, status) in [("parsed", 401_u16), ("raw", 503)] {
+            let provider = AnthropicProvider::with_base_url(key.into(), "m".into(), url.clone());
+            let err = provider.send_messages(&[], &[], None).await.unwrap_err();
+            let typed = err
+                .downcast_ref::<ProviderHttpError>()
+                .unwrap_or_else(|| panic!("{key}: not a ProviderHttpError: {err}"));
+            assert_eq!(typed.status, status, "{key}");
+        }
+    }
+
     // ─── OpenAiCompatibleProvider (Task 5: tool_calls assembly) ───────────────
 
     #[tokio::test]
@@ -2504,32 +2650,68 @@ mod tests {
     /// directly, not the full 3× backoff loop.
     #[test]
     fn test_is_retryable_error_matches_429_and_connection_hint() {
-        // 429 rate-limit → retryable
+        let http = |status: u16, text: &str| {
+            anyhow::Error::new(ProviderHttpError::new(status, text.into()))
+        };
+        // 429 rate-limit, typed → retryable
         assert!(
-            is_retryable_error("upstream replied 429 Too Many Requests"),
+            is_retryable_error(&http(
+                429,
+                "OpenAI API Error [429 Too Many Requests]: slow down"
+            )),
             "429 must be retryable"
         );
-        // The connection_error_hint prefix → retryable (transient connection failure)
-        let hint = connection_error_hint("http://localhost:11434/v1");
+        // A refused connection carries the connection_error_hint context → retryable,
+        // whatever the URL holds
+        let refused = anyhow::anyhow!("tcp connect error")
+            .context(connection_error_hint("http://10.0.0.5:14290/v1"));
         assert!(
-            is_retryable_error(&hint),
+            is_retryable_error(&refused),
             "connection_error_hint must be retryable"
         );
-        // Just the stable substring in isolation
+        // Unrelated auth and server errors → NOT retryable
         assert!(
-            is_retryable_error("Could not reach the OpenAI-compatible backend at http://x/v1."),
-            "connection-hint substring must be retryable regardless of URL"
-        );
-        // Unrelated auth error → NOT retryable
-        assert!(
-            !is_retryable_error("OpenAI API Error [401]: bad key"),
+            !is_retryable_error(&http(401, "OpenAI API Error [401 Unauthorized]: bad key")),
             "401 auth error must not be retryable"
         );
-        // 500 server error → NOT retryable
         assert!(
-            !is_retryable_error("OpenAI API Error [500]: internal error"),
+            !is_retryable_error(&http(500, "OpenAI API Error [500]: internal error")),
             "500 error must not be retryable"
         );
+    }
+
+    /// A `429` that is not the response's status — a port or an IP in the text, a body that
+    /// mentions one — is never read as a rate limit.
+    #[test]
+    fn a_429_outside_the_status_is_never_a_rate_limit() {
+        let untyped = anyhow::anyhow!(
+            "error decoding response body for url (http://10.0.0.5:14290/v1/chat/completions)"
+        );
+        assert!(!is_retryable_error(&untyped), "a port became a rate limit");
+        let body = anyhow::Error::new(ProviderHttpError::new(
+            401,
+            "OpenAI API Error [401 Unauthorized]: key 429abc revoked".into(),
+        ));
+        assert!(
+            !is_retryable_error(&body),
+            "a body's 429 became a rate limit"
+        );
+    }
+
+    /// The status survives a context added on top of the typed error, and an untyped error
+    /// has none even when its text holds a URL with an IP in the status range.
+    #[test]
+    fn status_of_reads_the_typed_status_and_never_the_text() {
+        let typed = anyhow::Error::new(ProviderHttpError::new(
+            401,
+            "OpenAI API Error [401 Unauthorized]: x".into(),
+        ))
+        .context("the turn failed");
+        assert_eq!(ProviderHttpError::status_of(&typed), Some(401));
+        let untyped = anyhow::anyhow!(
+            "error sending request for url (http://192.168.0.30:11434/v1/chat/completions): http 500"
+        );
+        assert_eq!(ProviderHttpError::status_of(&untyped), None);
     }
 
     #[tokio::test]
