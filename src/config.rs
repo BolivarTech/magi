@@ -116,6 +116,10 @@ pub enum ConfigError {
         min: u64,
     },
 
+    /// `[headless].max_system_bytes` is zero: a cap of 0 would reject every non-blank `system`.
+    #[error("[headless].max_system_bytes must be at least 1")]
+    MaxSystemBytesBelowOne,
+
     /// `tool_result_cap_bytes` falls below the minimum viable (REQ-A11b).
     #[error(
         "tool_result_cap_bytes = {got} is below the minimum viable value ({min}): below that \
@@ -1343,6 +1347,9 @@ impl MagiConfig {
         self.validate_max_tokens()?;
         self.validate_agent_timeout()?;
         self.validate_output_cap()?;
+        if self.headless.max_system_bytes == Some(0) {
+            return Err(ConfigError::MaxSystemBytesBelowOne);
+        }
         self.validate_diversity_rules()?;
         if let Some(decision) = &self.decision {
             decision.validate()?;

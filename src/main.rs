@@ -5934,7 +5934,7 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
         // and this function can no longer read it from its own section.
         tool_result_cap,
         full_auto_timeout_secs: cfg.timeout_secs.unwrap_or(d.full_auto_timeout_secs),
-        max_system_bytes: d.max_system_bytes, // Red stub: Green reads the declared value
+        max_system_bytes: cfg.max_system_bytes.unwrap_or(d.max_system_bytes),
     }
 }
 
