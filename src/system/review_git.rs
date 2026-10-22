@@ -284,11 +284,22 @@ fn drain_bounded(mut reader: impl Read, cap: u64) -> Vec<u8> {
     kept
 }
 
-/// The sandbox check of a review's `File`/`Directory` paths.
+/// The sandbox check of a review's `File`/`Directory` paths: [`PathGuard::validate`], whose
+/// rejections (`..`, an absolute path elsewhere, a symlinked directory that leaves, a NUL byte)
+/// all become [`ReviewError::OutsideWorkspace`] naming the path.
+///
+/// # Returns
+///
+/// The canonical path inside the workspace (a missing tail is appended lexically).
+///
+/// # Errors
+///
+/// [`ReviewError::OutsideWorkspace`] for any path the guard refuses.
 #[allow(dead_code)] // wired by the code-review subcommand (T2.10)
 pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBuf, ReviewError> {
-    let _ = guard;
-    Ok(path.to_path_buf()) // Red stub
+    guard
+        .validate(path)
+        .map_err(|_| ReviewError::OutsideWorkspace(path.display().to_string()))
 }
 
 /// The `-c` values that neutralize the filter drivers the reviewed repository's own config
