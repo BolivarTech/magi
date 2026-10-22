@@ -71,6 +71,9 @@ use magi_rs::headless::policy::{Policy, Tier};
 use magi_rs::headless::resolution::{
     resolve as resolve_params, CliOverrides, ConfigDefaults, Resolved,
 };
+use magi_rs::headless::system_field::{
+    validate_envelope_system, SYSTEM_IGNORED_LOG, SYSTEM_IGNORED_WARNING,
+};
 use magi_rs::headless::types::{ErrorKind, RunOutcome, StopReason};
 use magi_rs::headless::HeadlessError;
 use magi_rs::magi::clock_coverage::{ClockCoverageWarning, CoveringLever};
@@ -4082,6 +4085,32 @@ fn build_magi_orchestrator(
     b: &TrioBuild<'_>,
     notices: &mut Vec<Notice>,
 ) -> Result<Arc<Magi>, TrioError> {
+    build_magi_orchestrator_adjusted(b, None, notices)
+}
+
+/// [`build_magi_orchestrator`] with an optional per-mage prompt adjustment (REQ-SY04).
+///
+/// With `Some(prompts)`, each `(seat, prompt)` is installed for every mode, as it comes: the
+/// prompts were already built and validated by
+/// [`magi_rs::headless::system_field::validate_envelope_system`], so this function neither
+/// rebuilds them nor has an error path of its own for them. The prompt belongs to the seat, so a
+/// rotation to a pool candidate keeps it. With `None` the trio uses magi-core's default prompts.
+///
+/// # Arguments
+/// * `b` - The trio's construction inputs.
+/// * `adjustment` - The validated adjusted prompts, one per seat, or `None`.
+/// * `notices` - Receives the non-fatal construction notices.
+///
+/// # Returns
+/// The built orchestrator.
+///
+/// # Errors
+/// The same as [`build_magi_orchestrator`].
+fn build_magi_orchestrator_adjusted(
+    b: &TrioBuild<'_>,
+    adjustment: Option<&[(AgentName, String)]>,
+    notices: &mut Vec<Notice>,
+) -> Result<Arc<Magi>, TrioError> {
     let &TrioBuild {
         cfg,
         principal_kind,
@@ -4624,6 +4653,12 @@ fn build_magi_orchestrator(
     // have captured the trio-only value.
     if let Some(warn) = warn_tokens {
         builder = builder.with_input_warn_tokens(warn);
+    }
+
+    // REQ-SY04: the only custom prompt installed on the trio (pinned by
+    // `the_adjustment_is_the_only_custom_prompt_installed_on_the_trio`).
+    for (seat, prompt) in adjustment.unwrap_or_default() {
+        builder = builder.with_custom_prompt_all_modes(*seat, prompt.clone());
     }
 
     builder
@@ -5892,6 +5927,10 @@ struct HeadlessContext {
     /// their own [`crate::tools::consult::ClockCoverageAnnouncer`] rather than recomputing the
     /// assessment a second way.
     clock_coverage: Option<ClockCoverageWarning>,
+    /// Whether the trio was built with the caller's `system` adjustment on every mage
+    /// (REQ-SY04): the adjustment was passed to the build and the build returned `Ok`. Only
+    /// `consult` reads it, as the source of its published `system_override_applied`.
+    system_adjustment_installed: bool,
 }
 
 /// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
@@ -5939,10 +5978,8 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
 }
 
 /// Subcommands whose override appends the caller's system to each mage's default prompt (SY04, SY05).
-#[allow(dead_code)] // Red stub
 const SYSTEM_ADJUSTED_COMMANDS: &[&str] = &["consult"];
 /// Subcommands whose override replaces the operator's system prompt (SY07).
-#[allow(dead_code)] // Red stub
 const SYSTEM_REPLACED_COMMANDS: &[&str] = &["query"];
 
 /// Discovers state, unlocks the vault (fail-closed), loads config, reads and
@@ -6204,12 +6241,32 @@ async fn prepare_headless(
         h.allow_system_override,
         magi_config.headless().allow_system_override,
     );
+    // REQ-SY05/SY06: validated BEFORE resolution consumes the envelope and before any endpoint
+    // is touched. The cap applies to every subcommand; the marker check and the adjusted prompts
+    // only where the override appends to each mage. `Some(prompts)` exists only then, with a
+    // non-blank `system`, and is what the trio build below installs as it is.
+    let system_adjustment = match validate_envelope_system(
+        envelope.system.as_deref(),
+        SYSTEM_ADJUSTED_COMMANDS.contains(&command) && allow_system_override,
+        limits.max_system_bytes,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return Err(headless_error_exit_code(&e));
+        }
+    };
+    // Only a subcommand that declared what its override does may report one as applied: an
+    // unclassified subcommand that accepted the flag reads as "ignored" and raises the three
+    // signals, instead of claiming an override nothing installs.
+    let override_classified =
+        SYSTEM_ADJUSTED_COMMANDS.contains(&command) || SYSTEM_REPLACED_COMMANDS.contains(&command);
     let resolved = resolve_params(
         envelope,
         &defaults,
         &overrides,
         operator_ceiling,
-        allow_system_override,
+        allow_system_override && override_classified,
     );
     // Task 4.1: no more `legacy_backend_label` mutation — `resolved.provider` already
     // carries the unified REQ-A01b vocabulary end to end (whatever `h.provider`/
@@ -6218,6 +6275,12 @@ async fn prepare_headless(
     // SAME override>envelope>default precedence, so the two never disagree about
     // which backend wins.
     let provider_kind = effective_provider_kind;
+    // REQ-SY02(1): on stderr always, whatever `--log-level` says, and here, before anything
+    // below can fail the run, so a later failure never erases it. The run-log half waits for the
+    // logging layer further down.
+    if resolved.applied_caps.system_ignored {
+        magi_rs::notices::eprint_audited(SYSTEM_IGNORED_WARNING);
+    }
 
     // Build the principal provider from the resolved model/provider + keys.
     let provider: Arc<dyn Provider> = match provider_kind {
@@ -6332,7 +6395,7 @@ async fn prepare_headless(
     // S-9/REQ-EE-5: the SAME derivation `resolved_ceiling` above already used (see
     // `headless_clock_coverage`'s own doc) — never a second, competing formula.
     let clock_coverage = headless_clock_coverage(&magi_config, h.timeout);
-    let consult_magi = build_magi_orchestrator(
+    let consult_magi = build_magi_orchestrator_adjusted(
         &TrioBuild {
             cfg: &magi_config,
             principal_kind: provider_kind,
@@ -6344,8 +6407,13 @@ async fn prepare_headless(
             probe: &probe,
             ceiling: resolved_ceiling,
         },
+        system_adjustment.as_deref(),
         &mut trio_notices,
     );
+    // What `consult` publishes as `system_override_applied` (REQ-SY04): the adjustment was handed
+    // to the build AND the build succeeded. Never derived from the flag alone: a blank `system`
+    // with the flag installs nothing.
+    let system_adjustment_installed = system_adjustment.is_some() && consult_magi.is_ok();
     // REQ-A07p/SC-A07p (fix round 4, finding 1): headless is the surface this notice
     // matters MOST for, not least — REQ-A07c/SC-A07f describe exactly this path (a
     // scripted `magi consult` without `--mode` pays the classification call this
@@ -6421,6 +6489,12 @@ async fn prepare_headless(
     // Only now: the bring-up's own error already printed its reason, and this keeps the
     // context that led up to it from being thrown away with the run.
     logging?;
+    // REQ-SY02(2): after the layer is up, so the day's file receives it and `--log-level`
+    // filters it. No `cause.*` fields on purpose: an ignored `system` is the caller's choice, not
+    // a product failure, so no subsystem's health moves.
+    if resolved.applied_caps.system_ignored {
+        tracing::warn!(target: "magi_rs::headless", "{SYSTEM_IGNORED_LOG}");
+    }
 
     let magi_auth = trio_auth(&magi_config, provider_kind, &section_keys, &endpoints);
     Ok(HeadlessContext {
@@ -6444,6 +6518,7 @@ async fn prepare_headless(
         timeout_decision,
         budget,
         clock_coverage,
+        system_adjustment_installed,
         #[cfg(test)]
         divergence_notice: headless_divergence_notice,
     })
@@ -6988,6 +7063,7 @@ async fn run_consult_subcommand(
         clock_coverage,
         secret_store,
         decision_key,
+        system_adjustment_installed,
         ..
     } = ctx;
 
@@ -7084,8 +7160,7 @@ async fn run_consult_subcommand(
             crate::tools::consult::StructuredVerdicts::Omit
         },
         budget,
-        // Red stub: wired to the build in Green.
-        system_override_applied: false,
+        system_override_applied: system_adjustment_installed,
         clock_coverage: &clock_coverage_announcer,
     };
     let outcome = run_consult(resolved, magi, &prompt, timeout, explicit_mode, &runtime).await;

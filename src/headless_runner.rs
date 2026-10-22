@@ -1027,9 +1027,9 @@ pub async fn run_consult(
             // here (MS2 gate S6 finding 1).
             timeout_secs: timeout.map(|d| d.as_secs()),
             budget: runtime.budget,
-            // Red stub: still believes `resolve`.
-            system_override_applied: resolved.applied_caps.system_override_applied
-                || runtime.system_override_applied,
+            // From the trio build, never from `resolve` (E9): in `consult` the flag reports
+            // whether the adjustment was actually installed on the mages.
+            system_override_applied: runtime.system_override_applied,
             ..resolved.applied_caps
         },
         error,
