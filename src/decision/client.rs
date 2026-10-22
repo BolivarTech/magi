@@ -26,7 +26,7 @@ pub const RESPONSE_BODY_CAP: usize = 1024 * 1024;
 /// Ollama before 0.40 (captured on 0.35.0, 2026-10-01):
 /// `{"error":"model \"<m>\" not found, try pulling it first"}`. Later versions answer
 /// `{"error":"model '<m>' not found"}`, which names the model and is matched by
-/// [`names_missing_model`] instead.
+/// the missing-model check of the 404 handler instead.
 pub const MODEL_NOT_FOUND_MARKERS: &[&str] = &["not found, try pulling it first"];
 /// OpenRouter, E4: "0 endpoints out of 1 requested are available matching your guardrail
 /// restrictions and data policy...".
