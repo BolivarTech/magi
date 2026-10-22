@@ -257,5 +257,6 @@
 heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
+# headless_system_field opens the Argon2-encrypted DB through the binary, so it starves CPU like the vault tests.
 filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag) | binary(bootstrap_strength_floor) | binary(headless_system_field)'
 test-group = "heavy"
