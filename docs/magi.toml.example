@@ -290,6 +290,17 @@ dim   = 0
 # OPENAI_API_KEY, is used only when this section's endpoint has the same origin as the root
 # one; on any other origin no key is sent and an endpoint that wants one answers 401 or 403.
 
+# [headless] — `magi query` / `magi consult` envelope handling
+# [headless]
+# Apply the envelope's `system` field instead of ignoring it (same as --allow-system-override).
+# Without it a `system` is ignored and the run says so on stderr, in the run log and in
+# `applied_caps.system_ignored`. `query` replaces the operator prompt; `consult` adds the text to
+# each mage's prompt. The text is forwarded as written, with no secret scan.
+# allow_system_override = false
+# Largest accepted envelope `system`, in bytes (at least 1). Larger is rejected with exit 2,
+# with or without the flag.
+# max_system_bytes = 16384
+
 [logging]
 # Where the daily files live. Relative paths resolve against the workspace root.
 log_dir = ".magi/logs"

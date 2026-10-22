@@ -310,6 +310,44 @@ classifier, so it is exactly this JSON shape (not a CLI flag typed by hand)
 that needs to declare both fields. See [Mode routing](#mode-routing) for what
 each one does.
 
+#### The envelope `system` field
+
+`system` is ignored unless the operator turns it on, with `--allow-system-override` or
+`[headless] allow_system_override = true`. Ignoring it is never silent. Magi prints this on
+stderr whatever `--log-level` says, writes a warning to the run log, and sets
+`applied_caps.system_ignored` to `true`:
+
+```text
+warning: the request's "system" field was ignored; pass --allow-system-override or set [headless] allow_system_override = true to apply it
+```
+
+The warning never repeats the ignored text. A `system` that is empty or only whitespace counts
+as absent: no warning, no flag, and it does not count toward the size cap.
+
+With the flag on, the two commands differ:
+
+- `magi query` replaces the operator's system prompt with the envelope's `system`.
+- `magi consult` adds it to the prompt of each of the three mages, under an
+  `## Additional instructions` heading placed just before that prompt's `## Output format`
+  section. It refines the mage's role; it does not replace it, and the output format still
+  applies. `applied_caps.system_override_applied` is `true` only when the text reached the mages.
+
+Two checks run before any model is called, and both exit with code 2:
+
+- `[headless] max_system_bytes` (default 16384, at least 1) caps the size of `system` in bytes.
+  It applies to `query` and `consult`, with or without the flag.
+- With `consult` and the flag, a `system` that has a line holding a verdict marker
+  (`<MAGI_VERDICT>` or `</MAGI_VERDICT>`) or a line that is exactly `## Output format` is
+  rejected, never rewritten.
+
+Rejecting marker lines stops a forged verdict block, not a `system` that asks a mage for a
+verdict. Do not use `--allow-system-override` on runs whose verdict gates anything. The JSON
+envelope is only as trusted as the process that writes it.
+
+The applied `system` goes to the three mages, and to any fallback a seat rotates to, exactly as
+written. It does not pass through a secret detector, so whoever sends the envelope answers for
+what is in it.
+
 ### JSON output shape
 
 `--output-format json` writes one buffered JSON object with `schema_version`
@@ -391,7 +429,7 @@ window, which is what that cap exists to prevent.
 #### `applied_caps`
 
 `applied_caps` reports the limits actually enforced on this run, so a caller can tell an operator
-cap from a request that was simply honored as asked. It carries nine keys, all always present:
+cap from a request that was simply honored as asked. It carries ten keys, all always present:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -399,13 +437,14 @@ cap from a request that was simply honored as asked. It carries nine keys, all a
 | `max_tool_calls_clamped` | bool | `true` if the envelope's `max_tool_calls` was cut down to that cap |
 | `timeout_secs` | number \| null | the wall-clock cap in seconds, if one was set |
 | `system_override_applied` | bool | `true` if the envelope's `system` prompt was applied (requires the operator flag) |
+| `system_ignored` | bool | `true` if the envelope carried a non-blank `system` that was ignored because the operator flag was off. Never `true` together with `system_override_applied` |
 | `operation_budget_secs` | number | the per-attempt budget each mage ran under during this run |
 | `ceiling_floored` | bool | `true` if the derived ceiling was raised to the 15 s floor. Strictly "raised": a ceiling that lands exactly on the floor was reached, not clamped, and reports `false` |
 | `floor_activation_threshold_secs` | number | the smallest `--timeout` that avoids the floor under this run's rotation settings. This is not "the minimum for the run to succeed": a script that retries at this value can still exhaust its budget against a slow model. When it comes back unreasonably large, the fix is to lower `max_rotations`, not to raise `--timeout` |
 | `max_rotations_effective` | number | the rotation count the budget was computed with, so a caller can weigh that second lever without redoing the arithmetic |
 | `ceiling_above_sanity` | bool | `true` only when an explicit `--timeout` derived a ceiling above the sanity threshold (2400 seconds as of v0.21.0, raised from 600 so the recommended gate `--timeout 16820` — which derives 2335 — does not itself trigger it), which usually means a mistyped `--timeout`. Never `true` on the configured/TUI path, however large `agent_timeout_secs` is: there is no `--timeout` to have mistyped. Worth watching in CI, where stderr is unreliable and this flag is the only signal |
 
-The last five are new in v0.15.0 and additive under the same policy as `consult` above, with no
+`system_ignored` is new in v0.25.0. The five keys after it are new in v0.15.0. All are additive under the same policy as `consult` above, with no
 `schema_version` bump: the tolerate-new-fields rule applies here too.
 
 ### Typed decisions: `magi-rs decide`

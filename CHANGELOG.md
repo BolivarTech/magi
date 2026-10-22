@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [Unreleased]
+
+### Added
+
+- **`applied_caps.system_ignored`.** A headless `query` or `consult` whose envelope carries a non-blank `system` now says when it was ignored. The new key is `true` in that case and `false` otherwise, and it is never `true` together with `system_override_applied`. `schema_version` does not move, but a consumer that counts the exact keys of `applied_caps` now sees ten, not nine.
+- **A stderr warning for an ignored `system`.** Without `--allow-system-override` (or `[headless] allow_system_override = true`), the run prints a fixed warning on stderr whatever `--log-level` is, and writes a warning to the run log. Neither repeats the ignored text. An empty or whitespace-only `system` counts as absent and triggers nothing.
+- **`[headless] max_system_bytes`.** Caps the envelope `system` in bytes (default 16384, at least 1) for `query` and `consult`, with or without the flag. A larger `system` is rejected with exit code 2.
+
+### Changed
+
+- **`consult --allow-system-override` now applies the `system`.** Before, the JSON reported the override as applied although the text never reached a mage. Now the text is added to each mage's prompt under `## Additional instructions`, just before `## Output format`, and `system_override_applied` is `true` only when it got there. `query` with the flag behaves as before, except that a blank `system` no longer replaces the operator's prompt.
+- **`consult` rejects a reserved line in the applied `system`.** With the flag, a `system` containing a verdict-marker line or a line that is exactly `## Output format` is rejected with exit code 2. See the README for what this does and does not protect against.
+
+### Security
+
+- **Dependencies:** `rustls-webpki` is updated to 0.103.16 and `webpki-root-certs` to 1.0.10, which clears RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
+
 ## [0.24.3] - 2026-10-18
 
 ### Fixed
