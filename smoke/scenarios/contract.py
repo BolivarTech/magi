@@ -75,7 +75,7 @@ TOP_LEVEL_KEYS = (
     "usage",
 )
 
-#: The nine keys ``applied_caps`` serialises: four of its own plus the five
+#: The ten keys ``applied_caps`` serialises: five of its own plus the five
 #: ``BudgetTelemetry`` flattens in beside them. Checked for EXACT equality,
 #: which is the whole point of the assertion.
 APPLIED_CAPS_KEYS = (
@@ -86,6 +86,7 @@ APPLIED_CAPS_KEYS = (
     "max_tool_calls",
     "max_tool_calls_clamped",
     "operation_budget_secs",
+    "system_ignored",
     "system_override_applied",
     "timeout_secs",
 )

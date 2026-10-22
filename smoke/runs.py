@@ -529,7 +529,11 @@ LARGE_CONSULT_CEILING_S = 20184
 #: ``planning/milestones/MS2-smoke-measure.md``: R4 282.296s, R5 169.610s,
 #: R8 66.062s. The key set is exact: it names every run whose
 #: ``needs_trio`` is true, no more and no fewer.
-TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67}
+#: R10 carries R8's figure PROVISIONALLY: it is the same kind of run (a small
+#: consult) and has not been measured yet. Replace it with R10's own wall clock
+#: at the next run against a real backend.
+TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
+                                        "R10": 67}
 
 #: The factor a trio run's ``timeout_s`` must clear over its measurement in
 #: :data:`TRIO_RUNS_MEASURED_S`. The cloud endpoint's pace varies by time
@@ -538,6 +542,31 @@ TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67}
 #: so the harness timeout carries double that single sample rather than
 #: trusting it at face value.
 MEASURED_WALL_CLOCK_MARGIN = 2
+
+#: The default of ``[headless] max_system_bytes``. R11 sends one byte more, so
+#: it fails if the product's default cap moves without the harness noticing.
+SYSTEM_CAP_DEFAULT_BYTES = 16384
+
+#: Flags that make the product read the prompt as a JSON envelope.
+ENVELOPE_FLAGS = ("--input-format", "json")
+
+#: The system text R9 and R10 carry. R9 is told it will be ignored and R10
+#: that it will be applied; neither assertion depends on what a model answers.
+_ENVELOPE_SYSTEM = "Answer in as few words as you can."
+
+
+def _envelope(prompt: str, system: str) -> bytes:
+    """Serialise a ``{prompt, system}`` request envelope.
+
+    Args:
+        prompt: The request text.
+        system: The envelope's ``system`` field.
+
+    Returns:
+        bytes: The envelope as UTF-8 JSON, ready for standard input.
+    """
+    return json.dumps({"prompt": prompt, "system": system}).encode("utf-8")
+
 
 #: The question R3 asks, and the one R2 asks without memory. ONE constant
 #: for both, so the control cannot drift away from the run it controls.
@@ -726,6 +755,29 @@ DEFINITIONS: dict[str, RunDefinition] = {
         # envelope -- but carries the MINIMAL payload, because the shape of the
         # envelope does not depend on what was consulted.
         needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=300),
+    # R9-R11 feed the envelope ``system`` field to the product (S44-S46).
+    # R9 is a query with no override flag: the field must be ignored loudly,
+    # and --log-level error proves the stderr warning does not depend on it.
+    "R9": RunDefinition(
+        run_id="R9",
+        argv=("query",) + COMMON_FLAGS + ENVELOPE_FLAGS
+        + ("--no-memory", "--log-level", "error"),
+        stdin=_envelope("say ok", _ENVELOPE_SYSTEM),
+        needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=180),
+    # R10 is a full trio consult with the override flag; its timeout is R8's.
+    "R10": RunDefinition(
+        run_id="R10",
+        argv=("consult",) + COMMON_FLAGS + ENVELOPE_FLAGS
+        + ("--allow-system-override",),
+        stdin=_envelope("Is a single-line change worth a full review? "
+                        "Answer briefly.", _ENVELOPE_SYSTEM),
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=300),
+    # R11 is refused before any model is reached, so it can be short.
+    "R11": RunDefinition(
+        run_id="R11",
+        argv=("query",) + COMMON_FLAGS + ENVELOPE_FLAGS + ("--no-memory",),
+        stdin=_envelope("say ok", "x" * (SYSTEM_CAP_DEFAULT_BYTES + 1)),
+        needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60),
 }
 
 

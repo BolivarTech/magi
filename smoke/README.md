@@ -305,6 +305,24 @@ sending the withheld-key entry to the screen must turn K1 red.
 **Cheap profile.** K1 uses the scaffold's own models and sends one trivial prompt; K2 sends a
 prompt to a closed port. Neither has an expected red.
 
+### The envelope `system` field scenarios (v0.25.0)
+
+S44 to S46 add ten assertions (4 + 3 + 3). The harness now promises 46 scenarios and 137
+assertions.
+
+| Id | Invariant | Without its environment |
+|---|---|---|
+| S44 | `query` fed an envelope with a `system` field and no override flag exits 0, writes the ignored-field warning to `stderr` even at `--log-level error`, and reports `applied_caps.system_ignored: true` and `system_override_applied: false` | `CANNOT_TEST` with no reachable backend (the runner's backend rule) |
+| S45 | `consult --allow-system-override` fed the same envelope reports `system_override_applied: true` and `system_ignored: false`. Both flags are read from any JSON document the run wrote, error envelopes included, since they record what was installed before the mages were called. Only the first assertion needs a healthy trio | the first assertion is `CANNOT_TEST` on a provider or timeout error; the other two are `CANNOT_TEST` only when the run left no capture, and `FAIL` when stdout carries no `applied_caps` |
+| S46 | a `system` one byte over the default `max_system_bytes` (16 384) exits 2, names `max_system_bytes` on `stderr` and writes no `response` or `consult` output to `stdout` | none: the refusal comes before any model is reached |
+
+**Cost.** R9 is one short `query` with `--no-memory`. R11 never reaches a model. R10 is a complete
+`consult` of the trio on a small payload, the same kind of run as R8, with the same 300 s
+harness timeout. Its wall clock has not been measured yet: `TRIO_RUNS_MEASURED_S["R10"]` carries
+R8's 67 s provisionally. It is measured twice, once with the cheap profile on the first
+real-backend run and once with the product defaults on the run that certifies, and both
+figures are written here when they exist.
+
 ## Out of scope
 
 ```
@@ -348,6 +366,9 @@ assumes is the exact failure this harness exists to avoid.
 | S24 | SC-L14 and REQ-L19, a clean run's diagnostics reach the day's log and never the screen |
 | S25 | REQ-EE-3 and REQ-EE-1, OQ-8: `reasoning = "disabled"` round-trips on the default trio; no measured count above zero; no trace text in the envelope |
 | S26 | REQ-EE-1: with no key declared every attempt reports `default` and a reasoning state in magi-core's shape |
+| S44 | an envelope `system` field that is ignored is announced on `stderr` and in `applied_caps` |
+| S45 | `consult --allow-system-override` reports the adjustment as installed |
+| S46 | a `system` over `max_system_bytes` is refused with exit 2 before any model runs |
 
 The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 
