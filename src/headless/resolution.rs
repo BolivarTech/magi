@@ -19,6 +19,7 @@
 //! reach `pub` APIs from the lib.
 
 use super::input::Envelope;
+use super::system_field::non_blank;
 use super::types::{AppliedCaps, SystemPolicy};
 use crate::magi::BudgetTelemetry;
 
@@ -132,7 +133,12 @@ pub fn resolve(
     };
 
     // System (SAFETY): the envelope's is only honored with the operator's flag.
-    let (system, system_override_applied) = match (allow_system_override, env.system) {
+    // A blank `system` counts as absent (REQ-SY01); a present one is either applied or ignored.
+    let caller = env
+        .system
+        .filter(|raw| non_blank(Some(raw.as_str())).is_some());
+    let system_ignored = !allow_system_override && caller.is_some();
+    let (system, system_override_applied) = match (allow_system_override, caller) {
         (true, Some(caller)) => (SystemPolicy::CallerOverride(caller), true),
         _ => (SystemPolicy::Operator(defaults.system.clone()), false),
     };
@@ -147,7 +153,7 @@ pub fn resolve(
             max_tool_calls,
             max_tool_calls_clamped,
             timeout_secs: None,
-            system_ignored: false, // Red stub
+            system_ignored,
             system_override_applied,
             // Placeholder: this layer cannot know the ceiling (it is resolved in main.rs). The
             // runner stamps the real one, exactly as it does for timeout_secs.
