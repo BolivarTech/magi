@@ -25,6 +25,7 @@ _GOLDEN = {
         "max_tool_calls": 15,
         "max_tool_calls_clamped": False,
         "operation_budget_secs": 149,
+        "system_ignored": False,
         "system_override_applied": False,
         "timeout_secs": None,
     },

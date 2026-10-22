@@ -31,3 +31,4 @@ from smoke.scenarios import logging  # noqa: F401
 from smoke.scenarios import screen_policy  # noqa: F401
 from smoke.scenarios import decide  # noqa: F401
 from smoke.scenarios import keys  # noqa: F401
+from smoke.scenarios import system_field  # noqa: F401
