@@ -3,8 +3,13 @@
 // Date: 2026-10-22
 
 //! What a review reviews: its input kinds and how they resolve to files and a content source.
+//!
+//! Every ref from the caller is validated ([`validate_ref`]) and pinned to the SHA `rev-parse`
+//! returns before any other git call, so a branch that moves during the review cannot mix two
+//! commits. Diffs are split per file on bytes, so one section that is not UTF-8 is set aside
+//! without sinking the rest.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::error::ReviewError;
 use super::source::GitCommand;
@@ -16,9 +21,9 @@ pub enum ReviewInput {
     File(PathBuf),
     /// A directory, every file reviewed whole from the worktree.
     Directory(PathBuf),
-    /// One commit (`None` is `HEAD`).
+    /// One commit against its parent (`None` is `HEAD`; a root commit against the empty tree).
     Commit(Option<String>),
-    /// The diff between two commits.
+    /// The diff from `from` to `to`.
     Range {
         /// The old end.
         from: String,
@@ -32,7 +37,7 @@ pub enum ReviewInput {
         /// The reviewed branch.
         head: String,
     },
-    /// Staged, unstaged and untracked changes.
+    /// Staged, unstaged and untracked (not ignored) changes against `HEAD`.
     Uncommitted,
 }
 
@@ -40,59 +45,532 @@ pub enum ReviewInput {
 pub struct ReviewFile {
     /// Path relative to the workspace, with `/` separators.
     pub path: String,
-    /// Its diff section, or `None` when it is reviewed whole.
+    /// Its own diff section, or `None` when it is reviewed whole.
     pub diff: Option<String>,
 }
 
 /// Where the content of a review comes from.
 pub enum SourceKind {
-    /// The worktree, with an optional old side.
+    /// The worktree, with an optional old side (the SHA of `HEAD` for uncommitted changes).
     Worktree {
         /// The old side's commit.
         old_rev: Option<String>,
     },
-    /// A git revision.
+    /// A git revision, never the worktree.
     Revision {
         /// The new side's commit.
         new_rev: String,
-        /// The old side's commit.
+        /// The old side's commit (`None` for a root commit).
         old_rev: Option<String>,
     },
 }
 
 /// A resolved input.
 pub struct ResolvedInput {
-    /// The files to review.
+    /// The files to review, in the order git or the walk produced them.
     pub files: Vec<ReviewFile>,
     /// Where their content comes from.
     pub source_kind: SourceKind,
-    /// Diff sections or names that are not UTF-8, by their lossy path.
+    /// Diff sections and file names that are not UTF-8, by their lossily decoded path; their
+    /// content is never sent.
     pub not_utf8: Vec<String>,
 }
 
-/// Rejects a ref git could read as an option or a range.
+/// The diff flags every diff of a review carries: no colour, no external driver, no textconv,
+/// paths relative to the workspace (and only what lies under it).
+const DIFF_FLAGS: &[&str] = &["--no-color", "--no-ext-diff", "--no-textconv", "--relative"];
+/// What `ls-files` lists: tracked and untracked files git does not ignore, NUL-separated.
+const LS_FILES_ALL: &[&str] = &[
+    "ls-files",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+    "-z",
+];
+/// The mode of a gitlink (a submodule): its "content" is a commit id, never reviewed.
+const GITLINK_MODE: &str = "160000";
+
+/// Rejects a ref git could read as an option, a range or several arguments.
 ///
 /// # Errors
 ///
-/// [`ReviewError::InvalidRef`].
+/// [`ReviewError::InvalidRef`] for an empty ref, one that starts with `-`, or one that contains
+/// `..`, whitespace or a control character (NUL included).
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::input::validate_ref;
+///
+/// assert!(validate_ref("feature/x").is_ok());
+/// assert!(validate_ref("--output=x").is_err());
+/// ```
 pub fn validate_ref(r: &str) -> Result<(), ReviewError> {
-    let _ = r;
+    let hostile = r.is_empty()
+        || r.starts_with('-')
+        || r.contains("..")
+        || r.chars().any(|c| c.is_whitespace() || c.is_control());
+    if hostile {
+        return Err(ReviewError::InvalidRef(r.escape_debug().to_string()));
+    }
     Ok(())
 }
 
-/// Resolves an input to its files and content source.
+/// Resolves an input to its files and its single content source.
+///
+/// # Arguments
+///
+/// * `input` - What to review.
+/// * `workspace` - The workspace root; git runs there and every path is relative to it.
+/// * `git` - The git runner.
+/// * `guard` - The sandbox check for `File`/`Directory` paths; returns the resolved path.
+///
+/// # Returns
+///
+/// The files, the [`SourceKind`] to read them from and the sections set aside as not UTF-8.
+/// Linear in the size of the diff or the listing.
 ///
 /// # Errors
 ///
-/// See [`ReviewError`].
+/// [`ReviewError::InvalidRef`] before any git call for a hostile ref,
+/// [`ReviewError::RefNotFound`] for a ref that names no commit, [`ReviewError::OutsideWorkspace`]
+/// from the guard, [`ReviewError::NotReviewable`] for a `File` that is a directory,
+/// [`ReviewError::Git`] when git fails (inside a repository, a failing git never falls back to a
+/// walk that would ignore `.gitignore`), [`ReviewError::Io`] for a failing walk, and
+/// [`ReviewError::NothingToReview`] when nothing is left.
 pub fn resolve_input(
     input: &ReviewInput,
     workspace: &Path,
     git: &dyn GitCommand,
     guard: &dyn Fn(&Path) -> Result<PathBuf, ReviewError>,
 ) -> Result<ResolvedInput, ReviewError> {
-    let _ = (input, workspace, git, guard);
-    Err(ReviewError::Io("not implemented".into()))
+    let resolved = match input {
+        ReviewInput::File(p) => resolve_file(p, workspace, guard)?,
+        ReviewInput::Directory(d) => resolve_directory(d, workspace, git, guard)?,
+        ReviewInput::Commit(r) => {
+            let r = r.as_deref().unwrap_or("HEAD");
+            validate_ref(r)?;
+            let sha = verify(git, r)?;
+            let old_rev = match git.run(&["rev-parse", "--verify", &format!("{r}^^{{commit}}")]) {
+                Ok(parent) => Some(parent.trim().to_string()),
+                Err(ReviewError::Git(_)) => None,
+                Err(other) => return Err(other),
+            };
+            let mut args = vec!["diff-tree", "-p", "-r", "--root"];
+            args.extend_from_slice(DIFF_FLAGS);
+            args.push(&sha);
+            from_diff(&git.run_bytes(&args)?, sha.clone(), old_rev)
+        }
+        ReviewInput::Range { from, to } => {
+            validate_ref(from)?;
+            validate_ref(to)?;
+            let (old, new) = (verify(git, from)?, verify(git, to)?);
+            from_diff(&diff(git, &format!("{old}..{new}"))?, new, Some(old))
+        }
+        ReviewInput::Branches { base, head } => {
+            validate_ref(base)?;
+            validate_ref(head)?;
+            let (base_sha, head_sha) = (verify(git, base)?, verify(git, head)?);
+            let merge_base = merge_base(git, base, head, &base_sha, &head_sha)?;
+            let text = diff(git, &format!("{merge_base}..{head_sha}"))?;
+            from_diff(&text, head_sha, Some(merge_base))
+        }
+        ReviewInput::Uncommitted => resolve_uncommitted(git)?,
+    };
+    if resolved.files.is_empty() && resolved.not_utf8.is_empty() {
+        return Err(ReviewError::NothingToReview);
+    }
+    Ok(resolved)
+}
+
+/// Whether `dir` or one of its ancestors holds a `.git` entry (a directory, or a file as in a
+/// linked worktree). Decides "no repository" by the disk, never by the text of a git error.
+pub(crate) fn inside_a_repository(dir: &Path) -> bool {
+    dir.ancestors()
+        .any(|a| std::fs::symlink_metadata(a.join(".git")).is_ok())
+}
+
+/// `rev-parse --verify <r>^{commit}`, trimmed: the SHA every later call uses.
+fn verify(git: &dyn GitCommand, r: &str) -> Result<String, ReviewError> {
+    match git.run(&["rev-parse", "--verify", &format!("{r}^{{commit}}")]) {
+        Ok(sha) if !sha.trim().is_empty() => Ok(sha.trim().to_string()),
+        Ok(_) | Err(ReviewError::Git(_)) => Err(ReviewError::RefNotFound(r.to_string())),
+        Err(other) => Err(other),
+    }
+}
+
+/// `diff <DIFF_FLAGS> <spec>`.
+fn diff(git: &dyn GitCommand, spec: &str) -> Result<Vec<u8>, ReviewError> {
+    let mut args = vec!["diff"];
+    args.extend_from_slice(DIFF_FLAGS);
+    args.push(spec);
+    git.run_bytes(&args)
+}
+
+/// The merge base of two pinned SHAs, or an error that names both refs and what to do instead.
+fn merge_base(
+    git: &dyn GitCommand,
+    base: &str,
+    head: &str,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<String, ReviewError> {
+    let failure = |detail: String| {
+        let git_says = if detail.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", detail.trim())
+        };
+        ReviewError::Git(format!(
+            "{base} and {head} have no common ancestor to compare from; review them as a range \
+             with --from {base} --to {head}{git_says}"
+        ))
+    };
+    match git.run(&["merge-base", base_sha, head_sha]) {
+        Ok(sha) if !sha.trim().is_empty() => Ok(sha.trim().to_string()),
+        Ok(_) => Err(failure(String::new())),
+        Err(ReviewError::Git(msg)) => Err(failure(msg)),
+        Err(other) => Err(other),
+    }
+}
+
+/// A `File` input: one path from the worktree, through the guard.
+fn resolve_file(
+    p: &Path,
+    workspace: &Path,
+    guard: &dyn Fn(&Path) -> Result<PathBuf, ReviewError>,
+) -> Result<ResolvedInput, ReviewError> {
+    let guarded = guard(&workspace.join(p))?;
+    if std::fs::symlink_metadata(&guarded).is_ok_and(|m| m.is_dir()) {
+        return Err(ReviewError::NotReviewable {
+            path: p.display().to_string(),
+            cause: "directory",
+        });
+    }
+    let path = relative(workspace, &guarded)?;
+    Ok(ResolvedInput {
+        files: vec![ReviewFile { path, diff: None }],
+        source_kind: SourceKind::Worktree { old_rev: None },
+        not_utf8: Vec::new(),
+    })
+}
+
+/// A `Directory` input: what git lists (tracked and untracked, not ignored) and still exists
+/// as a non-directory, or, with no repository anywhere above it, an ordered walk of the disk.
+fn resolve_directory(
+    d: &Path,
+    workspace: &Path,
+    git: &dyn GitCommand,
+    guard: &dyn Fn(&Path) -> Result<PathBuf, ReviewError>,
+) -> Result<ResolvedInput, ReviewError> {
+    let dir = guard(&workspace.join(d))?;
+    let rel = relative(workspace, &dir)?;
+    let mut resolved = ResolvedInput {
+        files: Vec::new(),
+        source_kind: SourceKind::Worktree { old_rev: None },
+        not_utf8: Vec::new(),
+    };
+    match git.run(&["rev-parse", "--is-inside-work-tree"]) {
+        Ok(out) if out.trim() == "true" => {
+            let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
+            let mut args = LS_FILES_ALL.to_vec();
+            args.extend_from_slice(&["--", pathspec]);
+            let (names, not_utf8) = split_nul(&git.run_bytes(&args)?);
+            resolved.not_utf8 = not_utf8;
+            // A tracked file deleted from the tree, or a submodule (a directory), is not read.
+            resolved.files = names
+                .into_iter()
+                .filter(|name| {
+                    std::fs::symlink_metadata(workspace.join(name)).is_ok_and(|m| !m.is_dir())
+                })
+                .map(|path| ReviewFile { path, diff: None })
+                .collect();
+        }
+        Ok(out) => {
+            return Err(ReviewError::Git(format!(
+                "{} is not inside a git work tree (git answered {:?})",
+                workspace.display(),
+                out.trim()
+            )))
+        }
+        Err(ReviewError::Git(msg)) if inside_a_repository(&dir) => {
+            return Err(ReviewError::Git(msg));
+        }
+        Err(ReviewError::Git(_)) => {
+            let mut found = Vec::new();
+            walk(&dir, &rel, &mut found, &mut resolved.not_utf8)?;
+            found.sort();
+            resolved.files = found
+                .into_iter()
+                .map(|path| ReviewFile { path, diff: None })
+                .collect();
+        }
+        Err(other) => return Err(other),
+    }
+    Ok(resolved)
+}
+
+/// Walks `dir` (whose workspace-relative path is `rel`) without following symlinks, collecting
+/// every non-directory entry. O(entries).
+fn walk(
+    dir: &Path,
+    rel: &str,
+    found: &mut Vec<String>,
+    not_utf8: &mut Vec<String>,
+) -> Result<(), ReviewError> {
+    let io = |e: std::io::Error| ReviewError::Io(format!("{}: {e}", dir.display()));
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let name = entry.file_name();
+        let path = match (name.to_str(), rel.is_empty()) {
+            (Some(n), true) => n.to_string(),
+            (Some(n), false) => format!("{rel}/{n}"),
+            (None, _) => {
+                not_utf8.push(format!("{rel}/{}", name.to_string_lossy()));
+                continue;
+            }
+        };
+        if entry.file_type().map_err(io)?.is_dir() {
+            walk(&entry.path(), &path, found, not_utf8)?;
+        } else {
+            found.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Uncommitted changes: the diff against the SHA of `HEAD` plus untracked files whole, or, in a
+/// repository without commits, every tracked and untracked file whole.
+fn resolve_uncommitted(git: &dyn GitCommand) -> Result<ResolvedInput, ReviewError> {
+    match verify(git, "HEAD") {
+        Ok(head) => {
+            let mut resolved = from_diff(&diff(git, &head)?, String::new(), None);
+            resolved.source_kind = SourceKind::Worktree {
+                old_rev: Some(head),
+            };
+            let (names, not_utf8) =
+                split_nul(&git.run_bytes(&["ls-files", "--others", "--exclude-standard", "-z"])?);
+            resolved.not_utf8.extend(not_utf8);
+            resolved.files.extend(
+                names
+                    .into_iter()
+                    .map(|path| ReviewFile { path, diff: None }),
+            );
+            Ok(resolved)
+        }
+        Err(ReviewError::RefNotFound(_)) => {
+            let (names, not_utf8) = split_nul(&git.run_bytes(LS_FILES_ALL)?);
+            Ok(ResolvedInput {
+                files: names
+                    .into_iter()
+                    .map(|path| ReviewFile { path, diff: None })
+                    .collect(),
+                source_kind: SourceKind::Worktree { old_rev: None },
+                not_utf8,
+            })
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Splits NUL-separated names; the ones that are not UTF-8 come back apart, decoded lossily.
+fn split_nul(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
+    let mut names = Vec::new();
+    let mut not_utf8 = Vec::new();
+    for name in bytes.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+        match std::str::from_utf8(name) {
+            Ok(n) => names.push(n.to_string()),
+            Err(_) => not_utf8.push(String::from_utf8_lossy(name).into_owned()),
+        }
+    }
+    (names, not_utf8)
+}
+
+/// The workspace-relative, `/`-separated form of a guarded path.
+fn relative(workspace: &Path, guarded: &Path) -> Result<String, ReviewError> {
+    let outside = || ReviewError::OutsideWorkspace(guarded.display().to_string());
+    let tail = guarded
+        .strip_prefix(workspace)
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let canonical = std::fs::canonicalize(workspace).ok()?;
+            guarded.strip_prefix(canonical).ok().map(Path::to_path_buf)
+        })
+        .ok_or_else(outside)?;
+    let mut parts = Vec::new();
+    for component in tail.components() {
+        match component {
+            Component::Normal(part) => {
+                parts.push(part.to_str().ok_or_else(|| ReviewError::NotReviewable {
+                    path: guarded.display().to_string(),
+                    cause: "not utf-8",
+                })?)
+            }
+            Component::CurDir => {}
+            _ => return Err(outside()),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+/// A diff-based input: the per-file split of `bytes`, read from `new_rev` against `old_rev`.
+fn from_diff(bytes: &[u8], new_rev: String, old_rev: Option<String>) -> ResolvedInput {
+    let (files, not_utf8) = split_diff(bytes);
+    ResolvedInput {
+        files,
+        source_kind: SourceKind::Revision { new_rev, old_rev },
+        not_utf8,
+    }
+}
+
+/// Splits a diff into one [`ReviewFile`] per `diff --git` section, on bytes. Sections that are
+/// not UTF-8 go to the second list by their lossy path; sections with nothing to review (a mode
+/// change, a pure rename, a submodule) are dropped. O(n) in the diff.
+fn split_diff(bytes: &[u8]) -> (Vec<ReviewFile>, Vec<String>) {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in bytes.split_inclusive(|b| *b == b'\n') {
+        if line.starts_with(b"diff --git ") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    let ends = starts.iter().skip(1).copied().chain([bytes.len()]);
+    let mut files = Vec::new();
+    let mut not_utf8 = Vec::new();
+    for (start, end) in starts.iter().copied().zip(ends) {
+        let Some(section) = bytes.get(start..end) else {
+            continue;
+        };
+        match std::str::from_utf8(section) {
+            Ok(text) => {
+                if let Some(path) = reviewable_path(text) {
+                    files.push(ReviewFile {
+                        path,
+                        diff: Some(text.to_string()),
+                    });
+                }
+            }
+            Err(_) => {
+                if let Some(path) = reviewable_path(&String::from_utf8_lossy(section)) {
+                    not_utf8.push(path);
+                }
+            }
+        }
+    }
+    (files, not_utf8)
+}
+
+/// The path of a section worth reviewing (it has hunks, or it is binary and gets listed), or
+/// `None` for a gitlink, a header-only section with nothing to review, or an unparseable header.
+fn reviewable_path(section: &str) -> Option<String> {
+    let mut lines = section.lines();
+    let first = lines.next()?;
+    let header: Vec<&str> = lines.take_while(|l| !l.starts_with("@@")).collect();
+    let has_hunk = section.lines().any(|l| l.starts_with("@@"));
+    let gitlink = header.iter().any(|l| {
+        (l.starts_with("index ") || l.contains("mode "))
+            && l.split(' ').next_back() == Some(GITLINK_MODE)
+    });
+    let binary = header
+        .iter()
+        .any(|l| l.starts_with("Binary files ") || *l == "GIT binary patch");
+    if gitlink || !(has_hunk || binary) {
+        return None;
+    }
+    section_path(first, &header).filter(|p| !p.is_empty())
+}
+
+/// The path of a section: `rename to`, then `+++`, then `---` for a deletion, then the
+/// symmetric split of the `diff --git` header.
+fn section_path(first: &str, header: &[&str]) -> Option<String> {
+    let after = |prefix: &str| header.iter().find_map(|l| l.strip_prefix(prefix));
+    if let Some(p) = after("rename to ").and_then(unquote) {
+        return Some(p);
+    }
+    let side = |line: Option<&str>| -> Option<String> {
+        let raw = line?;
+        let raw = raw.strip_suffix('\t').unwrap_or(raw);
+        if raw == "/dev/null" {
+            return None;
+        }
+        let path = unquote(raw)?;
+        let path = path
+            .strip_prefix("b/")
+            .or_else(|| path.strip_prefix("a/"))?;
+        (!path.is_empty()).then(|| path.to_string())
+    };
+    let new_side = after("+++ ");
+    let deleted = new_side.is_some_and(|l| l.strip_suffix('\t').unwrap_or(l) == "/dev/null");
+    let from_sides = if deleted {
+        side(after("--- "))
+    } else {
+        side(new_side)
+    };
+    from_sides.or_else(|| header_path(first))
+}
+
+/// The path of a `diff --git <a> <b>` header whose two halves are the same path: the text has
+/// odd length `2k + 1`, byte `k` is a space, and the halves differ only in `a/` against `b/`
+/// (quoted or not). Never cut at the first or last ` b/`: a path may contain one.
+fn header_path(first: &str) -> Option<String> {
+    let rest = first.strip_prefix("diff --git ")?;
+    let k = rest.len() / 2;
+    if rest.len() % 2 == 0 || rest.as_bytes().get(k) != Some(&b' ') {
+        return None;
+    }
+    let (left, right) = (rest.get(..k)?, rest.get(k + 1..)?);
+    for (a, b) in [("a/", "b/"), ("\"a/", "\"b/")] {
+        if let (Some(l), Some(r)) = (left.strip_prefix(a), right.strip_prefix(b)) {
+            if l == r {
+                return unquote(left)?.strip_prefix("a/").map(str::to_string);
+            }
+        }
+    }
+    None
+}
+
+/// Undoes git's C-style quoting (`"..."` with `\\ \" \a \b \t \n \v \f \r` and octal `\ooo`
+/// bytes); an unquoted text comes back as is. `None` for a malformed quote or escape, or bytes
+/// that are not UTF-8.
+fn unquote(text: &str) -> Option<String> {
+    let Some(inner) = text.strip_prefix('"') else {
+        return Some(text.to_string());
+    };
+    let inner = inner.strip_suffix('"')?;
+    let mut out = Vec::with_capacity(inner.len());
+    let mut bytes = inner.bytes();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'"' => return None,
+            b'\\' => {
+                let escaped = match bytes.next()? {
+                    b'\\' => b'\\',
+                    b'"' => b'"',
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'v' => 0x0b,
+                    b'f' => 0x0c,
+                    b'r' => b'\r',
+                    d @ b'0'..=b'7' => {
+                        let mut value = u32::from(d - b'0');
+                        for _ in 0..2 {
+                            let next = bytes.next().filter(|c| (b'0'..=b'7').contains(c))?;
+                            value = value * 8 + u32::from(next - b'0');
+                        }
+                        u8::try_from(value).ok()?
+                    }
+                    _ => return None,
+                };
+                out.push(escaped);
+            }
+            other => out.push(other),
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 #[cfg(test)]

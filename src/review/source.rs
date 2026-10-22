@@ -3,133 +3,312 @@
 // Date: 2026-10-22
 
 //! The single content source of a review: every stage that reads code reads it through here.
+//!
+//! A review reads its code from exactly one place, chosen once from the input: a git revision
+//! ([`RevisionSource`], `git show <rev>:./<path>`) or the worktree ([`WorktreeSource`]), with an
+//! optional old side for deleted lines. Nothing mixes the worktree with another revision.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
 
-/// Per-file byte cap: a larger file is never returned.
+/// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
 pub const MAX_REVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
-/// Byte cap of any one git output.
+/// Byte cap of any one git output; past it git is stopped ([`ReviewError::GitOutputTooLarge`]).
 pub const MAX_GIT_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
-/// Bytes of a failing git call's stderr that are kept.
+/// Bytes of a git call's stderr that are kept for the error message.
 pub const MAX_GIT_STDERR_BYTES: u64 = 4 * 1024;
 /// Byte cap of everything one review reads.
 pub const MAX_REVIEW_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
-/// Names a review never reads.
-pub const NEVER_REVIEWED: &[&str] = &[".git", ".magi", ".magi-rs-memory.db"];
+/// The memory database's file name; its `-wal`/`-shm` companions share the prefix.
+const MEMORY_DB_PREFIX: &str = ".magi-rs-memory.db";
+/// Names a review never reads: the git and Magi directories and the memory database.
+pub const NEVER_REVIEWED: &[&str] = &[".git", ".magi", MEMORY_DB_PREFIX];
 
-/// Runs git.
+/// Runs git for a review.
+///
+/// The production implementation neutralizes the reviewed repository's config and environment;
+/// test doubles answer by the exact argument list.
 pub trait GitCommand: Send + Sync {
-    /// Runs git with `args` and returns its stdout.
+    /// Runs git with `args` and returns its stdout as bytes.
     ///
     /// # Errors
     ///
-    /// [`ReviewError::Git`] when git fails.
+    /// [`ReviewError::Git`] when git cannot run or exits with an error, and
+    /// [`ReviewError::GitOutputTooLarge`] when its output passes the cap.
     fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError>;
 
-    /// Default: `run_bytes` decoded as UTF-8 (`Git` error if it is not).
+    /// Runs git and decodes its stdout as UTF-8.
     ///
     /// # Errors
     ///
-    /// As [`GitCommand::run_bytes`].
+    /// As [`GitCommand::run_bytes`], and [`ReviewError::Git`] when the output is not UTF-8.
     fn run(&self, args: &[&str]) -> Result<String, ReviewError> {
-        let _ = args;
-        Err(ReviewError::Io("not implemented".into()))
+        String::from_utf8(self.run_bytes(args)?).map_err(|_| {
+            ReviewError::Git(format!(
+                "git {} printed output that is not UTF-8",
+                args.first().copied().unwrap_or_default()
+            ))
+        })
     }
 }
 
-/// Reads the content of a review.
+/// Reads the content of a review, as bytes (binary and non-UTF-8 files are filtered later).
 pub trait ContentSource: Send + Sync {
-    /// The new side (or the worktree).
+    /// Reads `path` (relative, `/`-separated) from the new side, or the worktree.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(None)` when the path does not exist on that side.
     ///
     /// # Errors
     ///
-    /// Implementation specific.
+    /// Implementation specific; see [`WorktreeSource`] and [`RevisionSource`].
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError>;
-    /// The old side.
+
+    /// Reads `path` from the old side.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(None)` when there is no old side or the path does not exist on it.
     ///
     /// # Errors
     ///
-    /// Implementation specific.
+    /// As [`ContentSource::read`].
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError>;
 }
 
-/// Reads at most `cap` bytes.
+/// Reads all of `reader`, but never more than `cap + 1` bytes.
+///
+/// # Arguments
+///
+/// * `reader` - What to read.
+/// * `cap` - The largest accepted size, in bytes.
+///
+/// # Returns
+///
+/// `Some(bytes)` when the content fits in `cap`, `None` when it is larger (what was read is
+/// dropped). O(min(n, cap)) time and memory.
 ///
 /// # Errors
 ///
 /// The reader's I/O error.
-pub fn read_bounded(reader: impl std::io::Read, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
-    let _ = (reader, cap);
-    Ok(None)
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::source::read_bounded;
+///
+/// assert_eq!(read_bounded(&b"abc"[..], 3).unwrap(), Some(b"abc".to_vec()));
+/// assert_eq!(read_bounded(&b"abcd"[..], 3).unwrap(), None);
+/// ```
+pub fn read_bounded(reader: impl Read, cap: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut buf = Vec::new();
+    reader.take(cap.saturating_add(1)).read_to_end(&mut buf)?;
+    let len = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+    Ok((len <= cap).then_some(buf))
 }
 
 /// Whether a path is one a review never reads.
+///
+/// True for a component `.git` or `.magi`, or a last component that starts with
+/// `.magi-rs-memory.db`. Components split on `/` and `\`, compared ASCII-case-insensitively after
+/// trimming trailing `.` and ` ` (Windows resolves `.GIT`, `.git.` and `.git ` to `.git`; the
+/// same rule everywhere over-blocks a `.Git` directory on Linux, the safe direction).
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::source::is_never_reviewed;
+///
+/// assert!(is_never_reviewed("sub/.GIT/config"));
+/// assert!(!is_never_reviewed(".gitignore"));
+/// ```
 pub fn is_never_reviewed(path: &str) -> bool {
-    let _ = path;
-    false
+    let components: Vec<&str> = path
+        .split(['/', '\\'])
+        .map(|c| c.trim_end_matches(['.', ' ']))
+        .collect();
+    let named = components
+        .iter()
+        .any(|c| NEVER_REVIEWED.iter().any(|n| c.eq_ignore_ascii_case(n)));
+    let database = components.last().is_some_and(|last| {
+        last.get(..MEMORY_DB_PREFIX.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(MEMORY_DB_PREFIX))
+    });
+    named || database
 }
 
-/// The worktree.
+/// Reads the worktree under a root, never outside it.
+///
+/// Each read canonicalizes `root.join(path)`, checks by path components that it stays under the
+/// canonical root, refuses a resolved target that is a never-reviewed path (a symlink alias of
+/// `.git/config`), and reads that canonical path with the per-file cap. A directory component
+/// swapped for a symlink between the check and the open is a declared, accepted window.
 pub struct WorktreeSource<'g> {
-    _root: PathBuf,
-    _git: Option<&'g dyn GitCommand>,
+    /// The root as given; paths are joined to it (a verbatim canonical root would not resolve `..`).
+    root: PathBuf,
+    /// The canonical root, or the error that kept it from resolving (every read then fails).
+    canonical_root: Result<PathBuf, String>,
+    /// The old side, when the worktree is compared against a commit.
+    old: Option<RevisionSource<'g>>,
 }
 
 impl<'g> WorktreeSource<'g> {
     /// A worktree source with no old side.
+    ///
+    /// Infallible: if `root` cannot be canonicalized the error is kept, and every read returns it.
     pub fn new(root: PathBuf) -> Self {
+        let canonical_root = std::fs::canonicalize(&root).map_err(|e| e.to_string());
         Self {
-            _root: root,
-            _git: None,
+            root,
+            canonical_root,
+            old: None,
         }
     }
 
-    /// A worktree source whose old side is `old_rev`.
+    /// A worktree source whose old side is the commit `old_rev` (`git show <old_rev>:./<path>`).
     pub fn with_old(root: PathBuf, git: &'g dyn GitCommand, old_rev: String) -> Self {
-        let _ = old_rev;
         Self {
-            _root: root,
-            _git: Some(git),
+            old: Some(RevisionSource::new(git, old_rev, None)),
+            ..Self::new(root)
         }
     }
 }
 
 impl ContentSource for WorktreeSource<'_> {
+    /// # Errors
+    ///
+    /// [`ReviewError::Io`] when the root did not resolve or a read fails,
+    /// [`ReviewError::OutsideWorkspace`] when the path resolves outside the root,
+    /// [`ReviewError::Protected`] when it resolves to a never-reviewed path, and
+    /// [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        let _ = path;
-        Err(ReviewError::Git("not implemented".into()))
+        let io = |e: std::io::Error| ReviewError::Io(format!("{path}: {e}"));
+        let canonical_root = self
+            .canonical_root
+            .as_ref()
+            .map_err(|e| ReviewError::Io(format!("{}: {e}", self.root.display())))?;
+        let joined = self.root.join(path);
+        match std::fs::symlink_metadata(&joined) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io(e)),
+            Ok(_) => {}
+        }
+        let canonical = std::fs::canonicalize(&joined).map_err(io)?;
+        let Ok(relative) = canonical.strip_prefix(canonical_root) else {
+            return Err(ReviewError::OutsideWorkspace(path.to_string()));
+        };
+        if is_never_reviewed(&relative.to_string_lossy()) {
+            return Err(ReviewError::Protected(path.to_string()));
+        }
+        let file = std::fs::File::open(&canonical).map_err(io)?;
+        match read_bounded(file, MAX_REVIEW_FILE_BYTES).map_err(io)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => Err(ReviewError::TooLarge {
+                path: path.to_string(),
+                limit: MAX_REVIEW_FILE_BYTES,
+            }),
+        }
     }
 
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        let _ = path;
-        Err(ReviewError::Git("not implemented".into()))
+        match &self.old {
+            Some(old) => old.read(path),
+            None => Ok(None),
+        }
     }
 }
 
-/// A git revision.
+/// Reads a git revision (`git show <rev>:./<path>`), never the worktree.
+///
+/// "Absent" is decided by the revision's path list (`ls-tree`, run once per revision), never by
+/// the text of a git error: a path not listed is `Ok(None)`, and a failing `show` on a listed
+/// path is an error.
 pub struct RevisionSource<'g> {
-    _git: &'g dyn GitCommand,
+    git: &'g dyn GitCommand,
+    new_rev: String,
+    old_rev: Option<String>,
+    /// The path list of each revision read so far.
+    listings: Mutex<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl<'g> RevisionSource<'g> {
     /// A source over `new_rev`, with `old_rev` as its old side.
     pub fn new(git: &'g dyn GitCommand, new_rev: String, old_rev: Option<String>) -> Self {
-        let _ = (new_rev, old_rev);
-        Self { _git: git }
+        Self {
+            git,
+            new_rev,
+            old_rev,
+            listings: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Whether `rev` holds `path`, listing `rev` once. O(log n) per lookup after the listing.
+    fn holds(&self, rev: &str, path: &str) -> Result<bool, ReviewError> {
+        let mut listings = self.listings.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(paths) = listings.get(rev) {
+            return Ok(paths.contains(path));
+        }
+        let out = self
+            .git
+            .run_bytes(&["ls-tree", "-r", "--name-only", "-z", rev])?;
+        let paths: BTreeSet<String> = out
+            .split(|b| *b == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        let holds = paths.contains(path);
+        listings.insert(rev.to_string(), paths);
+        Ok(holds)
+    }
+
+    /// Reads `path` at `rev`, with the per-file cap.
+    fn read_at(&self, rev: &str, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+        if !self.holds(rev, path)? {
+            return Ok(None);
+        }
+        let too_large = || ReviewError::TooLarge {
+            path: path.to_string(),
+            limit: MAX_REVIEW_FILE_BYTES,
+        };
+        let spec = format!("{rev}:./{path}");
+        match self
+            .git
+            .run_bytes(&["show", "--no-ext-diff", "--no-textconv", &spec])
+        {
+            Ok(bytes) if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_REVIEW_FILE_BYTES => {
+                Err(too_large())
+            }
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(ReviewError::GitOutputTooLarge { .. }) => Err(too_large()),
+            Err(ReviewError::Git(msg)) => Err(ReviewError::Git(format!(
+                "cannot read {path} at {rev}: {msg}; if this is a partial clone, fetch its objects \
+                 first (git fetch --refetch, or a full clone)"
+            ))),
+            Err(other) => Err(other),
+        }
     }
 }
 
 impl ContentSource for RevisionSource<'_> {
+    /// # Errors
+    ///
+    /// [`ReviewError::Git`] when git fails (a missing blob names the path and the partial-clone
+    /// remedy), [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`], and
+    /// [`ReviewError::GitOutputTooLarge`] when the path list itself passes the git output cap.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        let _ = path;
-        Err(ReviewError::Io("not implemented".into()))
+        self.read_at(&self.new_rev, path)
     }
 
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        let _ = path;
-        Err(ReviewError::Io("not implemented".into()))
+        match &self.old_rev {
+            Some(rev) => self.read_at(rev, path),
+            None => Ok(None),
+        }
     }
 }
 

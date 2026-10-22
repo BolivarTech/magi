@@ -2,53 +2,344 @@
 // Version: 0.24.3
 // Date: 2026-10-22
 
-//! The git runner of `code-review`: an untrusted repository's config and environment never run code.
+//! The git runner of `code-review`: an untrusted repository's config and environment never run
+//! code, and no git output takes more memory than its cap.
+//!
+//! Every call runs `git -C <workdir>` with [`NEUTRAL_GIT_CONFIG`] and, when the reviewed
+//! repository's own config defines filter drivers, `-c` overrides that disable them; the child
+//! gets only the tool environment allowlist plus `GIT_NO_LAZY_FETCH=1` (a partial clone never
+//! downloads during a review) and `GIT_LITERAL_PATHSPECS=1` (a path is never a glob).
+// Consumer: the code-review runner wiring is this module's first production caller and removes
+// this attribute.
+#![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{mpsc, Mutex, PoisonError};
+use std::time::Duration;
 
 use magi_rs::review::error::ReviewError;
-use magi_rs::review::source::GitCommand;
+use magi_rs::review::source::{
+    read_bounded, GitCommand, MAX_GIT_OUTPUT_BYTES, MAX_GIT_STDERR_BYTES,
+};
 
-/// git runner with the reviewed repository's config neutralized.
-#[allow(dead_code)] // Red stub
+use crate::tools::proc_group::tool_child_env;
+
+/// `-c` settings every call carries, against the reviewed repository's config.
+///
+/// No hook, fsmonitor, external diff or pager runs; paths come back in UTF-8 and unquoted when
+/// possible; the `a/`/`b/` prefixes and three lines of context the diff split relies on are fixed
+/// (a repository's `diff.context=0` would silently shrink what the review sees); and
+/// `protocol.allow=never` cuts every transport. On Git for Windows `/dev/null` names a directory
+/// that does not exist, which disables hooks the same way.
+pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
+    "core.fsmonitor=false",
+    "core.hooksPath=/dev/null",
+    "diff.external=",
+    "core.pager=cat",
+    "core.quotePath=false",
+    "diff.noprefix=false",
+    "diff.mnemonicPrefix=false",
+    "diff.srcPrefix=a/",
+    "diff.dstPrefix=b/",
+    "diff.context=3",
+    "diff.interHunkContext=0",
+    "protocol.allow=never",
+];
+
+/// The longest a git call may run: a git hung on a foreign lock or a network file system must
+/// not hang the preparation, which runs before the review's clock starts.
+pub(crate) const GIT_CALL_TIMEOUT_SECS: u64 = 300;
+
+/// Total bytes the filter `-c` overrides may take: Windows caps a command line near 32 KiB, and a
+/// repository with thousands of drivers would push every call past it and fail opaquely.
+pub(crate) const MAX_FILTER_OVERRIDE_BYTES: usize = 8 * 1024;
+
+/// The probe of the filter drivers git sees, with the scope of each entry (git 2.26 or later).
+const FILTER_PROBE: &[&str] = &[
+    "config",
+    "--null",
+    "--show-scope",
+    "--get-regexp",
+    "^filter\\.",
+];
+
+/// Scopes that belong to the reviewed repository, not to the operator.
+const REPOSITORY_SCOPES: &[&str] = &["local", "worktree"];
+
+/// What each neutralized driver is set to.
+const NEUTRALIZED_FILTER_SETTINGS: &[&str] = &["clean=", "smudge=", "process=", "required=false"];
+
+/// The exit code of `git config --get-regexp` when nothing matches.
+const CONFIG_NO_MATCH_EXIT: i32 = 1;
+
+/// Size of each read while draining stderr.
+const DRAIN_CHUNK_BYTES: usize = 8 * 1024;
+
+/// git runner with the reviewed repository's config and the caller's environment neutralized.
+///
+/// # Examples
+///
+/// ```ignore
+/// let git = ScrubbedGit::new(workspace.to_path_buf());
+/// let head = git.run(&["rev-parse", "--verify", "HEAD^{commit}"])?;
+/// ```
 pub(crate) struct ScrubbedGit {
+    /// The directory every call runs in (`-C`).
     workdir: PathBuf,
+    /// The stdout cap of each call.
+    output_cap: u64,
+    /// The filter overrides, probed once before the first command.
+    filters: Mutex<Option<Vec<String>>>,
 }
 
-#[allow(dead_code)] // Red stub
+/// What a finished git call produced.
+struct Finished {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
 impl ScrubbedGit {
-    /// A runner over `workdir`.
+    /// A runner over `workdir`, with stdout capped at [`MAX_GIT_OUTPUT_BYTES`].
     pub(crate) fn new(workdir: PathBuf) -> Self {
-        Self { workdir }
+        Self {
+            workdir,
+            output_cap: MAX_GIT_OUTPUT_BYTES,
+            filters: Mutex::new(None),
+        }
     }
 
-    /// A runner with a custom stdout cap (tests only).
+    /// A runner with a custom stdout cap, so a test need not write 64 MiB.
     #[cfg(test)]
     fn with_output_cap(workdir: PathBuf, cap: u64) -> Self {
-        let _ = cap;
-        Self { workdir }
+        Self {
+            output_cap: cap,
+            ..Self::new(workdir)
+        }
     }
 
-    /// The command line for `args`.
+    /// The full command line for `args`: `-C <workdir>`, [`NEUTRAL_GIT_CONFIG`], the filter
+    /// overrides probed so far, then `args` unchanged.
     pub(crate) fn argv(&self, args: &[&str]) -> Vec<OsString> {
-        let _ = args;
-        Vec::new()
+        let filters = self
+            .filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut argv: Vec<OsString> = vec!["-C".into(), self.workdir.clone().into_os_string()];
+        for setting in NEUTRAL_GIT_CONFIG
+            .iter()
+            .copied()
+            .map(str::to_string)
+            .chain(filters.into_iter().flatten())
+        {
+            argv.push("-c".into());
+            argv.push(setting.into());
+        }
+        argv.extend(args.iter().map(OsString::from));
+        argv
+    }
+
+    /// Probes the reviewed repository's filter drivers once (exit 1 is "none"); any other
+    /// failure fails closed, so no command runs with a repository filter still active.
+    fn ensure_filters(&self) -> Result<(), ReviewError> {
+        if self
+            .filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(());
+        }
+        let probe = self.execute(FILTER_PROBE)?;
+        let overrides = match probe.code {
+            Some(0) => filter_overrides(&probe.stdout)?,
+            Some(CONFIG_NO_MATCH_EXIT) => Vec::new(),
+            _ => return Err(failure("config", &probe)),
+        };
+        *self.filters.lock().unwrap_or_else(PoisonError::into_inner) = Some(overrides);
+        Ok(())
+    }
+
+    /// Runs git with `args`, draining stdout (capped) and stderr (kept up to
+    /// [`MAX_GIT_STDERR_BYTES`], read to the end) in parallel, within [`GIT_CALL_TIMEOUT_SECS`].
+    fn execute(&self, args: &[&str]) -> Result<Finished, ReviewError> {
+        let command = args.first().copied().unwrap_or_default();
+        let mut child = Command::new("git")
+            .args(self.argv(args))
+            .env_clear()
+            .envs(tool_child_env())
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| ReviewError::Git(format!("cannot run git: {e}")))?;
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            kill(&mut child);
+            return Err(ReviewError::Git("cannot read git's output".to_string()));
+        };
+        let stderr_reader = std::thread::spawn(move || drain_bounded(stderr, MAX_GIT_STDERR_BYTES));
+        let (tx, rx) = mpsc::channel();
+        let cap = self.output_cap;
+        std::thread::spawn(move || {
+            let _ = tx.send(read_bounded(stdout, cap));
+        });
+        let stdout = match rx.recv_timeout(Duration::from_secs(GIT_CALL_TIMEOUT_SECS)) {
+            Ok(Ok(Some(bytes))) => bytes,
+            Ok(Ok(None)) => {
+                kill(&mut child);
+                return Err(ReviewError::GitOutputTooLarge { limit: cap });
+            }
+            Ok(Err(e)) => {
+                kill(&mut child);
+                return Err(ReviewError::Git(format!("cannot read git's output: {e}")));
+            }
+            Err(_) => {
+                kill(&mut child);
+                return Err(ReviewError::Git(format!(
+                    "git {command} did not finish in {GIT_CALL_TIMEOUT_SECS} s"
+                )));
+            }
+        };
+        let status = child
+            .wait()
+            .map_err(|e| ReviewError::Git(format!("cannot wait for git: {e}")))?;
+        let stderr = stderr_reader.join().unwrap_or_default();
+        Ok(Finished {
+            code: status.code(),
+            stdout,
+            stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+        })
     }
 }
 
 impl GitCommand for ScrubbedGit {
+    /// # Errors
+    ///
+    /// [`ReviewError::Git`] when git cannot run, exits with an error (the message is its bounded
+    /// stderr), or does not finish in time; [`ReviewError::GitOutputTooLarge`] past the cap.
     fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
-        let _ = args;
-        Err(ReviewError::Io("not implemented".into()))
+        self.ensure_filters()?;
+        let finished = self.execute(args)?;
+        if finished.code == Some(0) {
+            Ok(finished.stdout)
+        } else {
+            Err(failure(
+                args.first().copied().unwrap_or_default(),
+                &finished,
+            ))
+        }
     }
 }
 
-/// The `-c` values that neutralize the reviewed repository's filter drivers.
-#[allow(dead_code)] // Red stub
+/// The error of a failed call: its bounded stderr, or the exit code when stderr is empty.
+fn failure(command: &str, finished: &Finished) -> ReviewError {
+    if finished.stderr.is_empty() {
+        let code = finished
+            .code
+            .map_or_else(|| "a signal".to_string(), |c| c.to_string());
+        ReviewError::Git(format!("git {command} exited with {code}"))
+    } else {
+        ReviewError::Git(finished.stderr.clone())
+    }
+}
+
+/// Kills a child and reaps it; both are best effort (it may already have exited).
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Reads `reader` to the end, keeping at most `cap` bytes: stopping early would kill the writer
+/// with a broken pipe, and not draining would let it block on a full pipe.
+fn drain_bounded(mut reader: impl Read, cap: u64) -> Vec<u8> {
+    let cap = usize::try_from(cap).unwrap_or(usize::MAX);
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; DRAIN_CHUNK_BYTES];
+    while let Ok(n) = reader.read(&mut chunk) {
+        if n == 0 {
+            break;
+        }
+        let room = cap.saturating_sub(kept.len());
+        kept.extend_from_slice(chunk.get(..n.min(room)).unwrap_or_default());
+    }
+    kept
+}
+
+/// The `-c` values that neutralize the filter drivers the reviewed repository's own config
+/// (scope `local` or `worktree`) defines, sorted by driver.
+///
+/// Reads the output of `git config --null --show-scope --get-regexp ^filter\.`: records of
+/// `<scope> NUL <key>` followed by `LF <value> NUL`, or by `NUL` alone for a key without value.
+/// The key ends at the first `LF` (a value may hold more). A name with a local entry is
+/// neutralized whole, including what the operator's own config defines under it: the safe
+/// direction. The operator's filters (`global`, `system`) keep running. O(n) in the input.
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] for a truncated record, a key outside `filter.<name>.<variable>`, a
+/// repository driver name with `=` (which `-c` cannot express), or overrides over
+/// [`MAX_FILTER_OVERRIDE_BYTES`].
 pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewError> {
-    let _ = config_z;
-    Ok(Vec::new())
+    let unreadable = |what: String| {
+        ReviewError::Git(format!(
+            "cannot read the repository's filter configuration: {what}"
+        ))
+    };
+    let mut names = BTreeSet::new();
+    let mut rest = config_z;
+    while !rest.is_empty() {
+        let (scope, after) =
+            split_at_nul(rest).ok_or_else(|| unreadable("a truncated record".into()))?;
+        let (entry, after) =
+            split_at_nul(after).ok_or_else(|| unreadable("a truncated record".into()))?;
+        rest = after;
+        let key = entry.split(|b| *b == b'\n').next().unwrap_or_default();
+        let key = String::from_utf8_lossy(key);
+        let name = key
+            .strip_prefix("filter.")
+            .and_then(|tail| tail.rsplit_once('.'))
+            .filter(|(name, variable)| !name.is_empty() && !variable.is_empty())
+            .map(|(name, _)| name)
+            .ok_or_else(|| unreadable(format!("unexpected key {key:?}")))?;
+        if REPOSITORY_SCOPES.iter().any(|s| s.as_bytes() == scope) {
+            if name.contains('=') {
+                return Err(unreadable(format!(
+                    "a filter driver name with '=': {name:?}"
+                )));
+            }
+            names.insert(name.to_string());
+        }
+    }
+    let overrides: Vec<String> = names
+        .iter()
+        .flat_map(|name| {
+            NEUTRALIZED_FILTER_SETTINGS
+                .iter()
+                .map(move |s| format!("filter.{name}.{s}"))
+        })
+        .collect();
+    if overrides.iter().map(String::len).sum::<usize>() > MAX_FILTER_OVERRIDE_BYTES {
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        return Err(ReviewError::Git(format!(
+            "the repository defines more filter drivers than a review can disable ({} drivers: {})",
+            listed.len(),
+            listed.join(", ")
+        )));
+    }
+    Ok(overrides)
+}
+
+/// Splits at the first NUL: the bytes before it and after it.
+fn split_at_nul(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let at = bytes.iter().position(|b| *b == 0)?;
+    Some((bytes.get(..at)?, bytes.get(at + 1..)?))
 }
 
 #[cfg(test)]
