@@ -17,6 +17,7 @@ changes and the **patch** position signals backward-compatible fixes.
 
 ### Changed
 
+- **`decide` rotates to the next model on HTTP 400.** A 400 used to end the call at once. It now moves the chain on, because a refusal often belongs to the model and not to the request (an unsupported model format, a cloud model on an older daemon, a context window too small for the state). The attempt is still reported with the cause `rejected`. HTTP 401, 403, 413 and 422 still stop the chain, and a chain with a single model fails on a 400 as before, with the same `invalid_input` error. This applies to `magi decide`, `/decide`, the `decide` tool and the internal classifiers.
 - **`consult --allow-system-override` now applies the `system`.** Before, the JSON reported the override as applied although the text never reached a mage. Now the text is added to each mage's prompt under `## Additional instructions`, just before `## Output format`, and `system_override_applied` is `true` only when it got there. `query` with the flag behaves as before, except that a blank `system` no longer replaces the operator's prompt.
 - **`consult` rejects a reserved line in the applied `system`.** With the flag, a `system` containing a verdict-marker line or a line that is `## Output format` (surrounding whitespace ignored) is rejected with exit code 2. See the README for what this does and does not protect against.
 

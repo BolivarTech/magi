@@ -120,7 +120,7 @@ Ollama enforces its own limits, and `magi-rs` passes its rejection back to you:
 - 2 to 26 options per `choice`;
 - a request body of at most 64 KiB.
 
-A rejected request (HTTP 400, 413 or 422) is reported as `invalid_input` and the chain does not move on, because every model on the endpoint would reject it the same way. Locally, `magi-rs` refuses a request with no questions, a question without `instructions`, a `choice` or `score` without `criteria`, or fewer than 2 options or levels.
+An HTTP 400 means this model refused the request, so the chain moves on to the next model: the refusal often belongs to the model (an unsupported model format, a cloud model on an older daemon, a context window too small for the state). A request that every model refuses ends as `invalid_input`, with the last provider's message and the whole chain. HTTP 413 and 422 are reported as `invalid_input` right away and the chain does not move on, because every model on the endpoint would reject them the same way. Locally, `magi-rs` refuses a request with no questions, a question without `instructions`, a `choice` or `score` without `criteria`, or fewer than 2 options or levels.
 
 ## Timeouts
 
@@ -201,7 +201,8 @@ Rejected answers appear only inside `chain`, never in the top-level `answers`, s
 | `cause` | Situation | Does the chain move on? |
 |---|---|---|
 | `unauthorized` | HTTP 401 or 403 | no |
-| `rejected` | HTTP 400, 413 or 422 | no |
+| `rejected` | HTTP 400 | yes |
+| `rejected` | HTTP 413 or 422 | no |
 | `model_not_found` | HTTP 404, model does not exist | yes |
 | `account_policy` | HTTP 404, refused by the account's policy | yes |
 | `not_found` | HTTP 404, anything else | yes |
