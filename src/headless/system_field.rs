@@ -32,8 +32,9 @@ const ADDITIONAL_INSTRUCTIONS_PREAMBLE: &str = "## Additional instructions\n\n\
 /// included) counts as absent, and the value comes back **untrimmed**, because what is inserted
 /// into a prompt is the caller's exact `system`.
 ///
-/// The same rule exists in `config::non_blank` (bin crate, out of the lib's reach) and in
-/// `endpoint_key::non_blank` (private to key selection); unifying the three is a backlog item.
+/// The same rule (`trim()` empty means absent) exists in `config::non_blank` (bin crate, out of
+/// the lib's reach; it returns the trimmed value) and in `endpoint_key::non_blank` (private to
+/// key selection); unifying the three is a backlog item.
 ///
 /// # Arguments
 /// * `raw` - The optional text.

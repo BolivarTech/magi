@@ -88,6 +88,9 @@ pub fn origin_url(raw: &str) -> Option<String> {
 }
 
 /// Keeps a key only when it is not blank.
+///
+/// Same rule as `config::non_blank` and `headless::system_field::non_blank` (`trim()` empty means
+/// absent); this copy returns the value untrimmed. Unifying the three is a backlog item.
 fn non_blank(key: Option<&str>) -> Option<&str> {
     key.filter(|k| !k.trim().is_empty())
 }

@@ -2127,6 +2127,10 @@ pub fn resolve_effective_provider_kind(
 ///
 /// `pub(crate)`, not private: `main.rs` reuses it for `MagiEnvModelOverrides::from_raw`
 /// rather than writing a third copy of the same trim-and-filter predicate.
+///
+/// The same rule (`trim()` empty means absent) exists in `headless::system_field::non_blank`
+/// and `endpoint_key::non_blank`; this copy also returns the trimmed value, the others return it
+/// untrimmed. Unifying the three is a backlog item.
 pub(crate) fn non_blank(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
 }

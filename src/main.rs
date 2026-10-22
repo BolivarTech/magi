@@ -1368,28 +1368,13 @@ fn run_logout(passphrase_flag: Option<Zeroizing<String>>, workspace_root: &std::
     }
 }
 
-/// Maps a [`magi_rs::headless::HeadlessError`] to the CLI's process exit code,
-/// mirroring the headless exit taxonomy (REQ-H23): input/misuse ⇒ 2, every
-/// other class ⇒ 1.
+/// Maps a [`magi_rs::headless::HeadlessError`] to the CLI's process exit code
+/// (REQ-H23): input/misuse ⇒ 2, every other class ⇒ 1.
 ///
-/// The library's `headless::exit::exit_code` is `pub(crate)` and thus
-/// unreachable from this bin crate, so the `magi init` edges map directly here;
-/// the exhaustive `match` (no `_` arm) keeps the two taxonomies from drifting —
-/// a new variant breaks the build instead of defaulting silently.
+/// Delegates to the library's single exhaustive map, so the `magi init` edges
+/// and the headless runner can never disagree on a variant.
 fn headless_error_exit_code(e: &magi_rs::headless::HeadlessError) -> i32 {
-    use magi_rs::headless::HeadlessError;
-    match e {
-        HeadlessError::InputInvalid(_)
-        | HeadlessError::InputTooLarge(_)
-        | HeadlessError::SystemTooLarge { .. }
-        | HeadlessError::SystemReservedLine => 2,
-        HeadlessError::Io(_)
-        | HeadlessError::Storage(_)
-        | HeadlessError::Aborted
-        | HeadlessError::PassphraseUnavailable
-        | HeadlessError::Db(_)
-        | HeadlessError::SystemAnchor { .. } => 1,
-    }
+    magi_rs::headless::exit::exit_code_for_error(e)
 }
 
 /// Resolves the passphrase used to bootstrap the vault envelope during

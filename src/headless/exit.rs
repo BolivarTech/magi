@@ -67,8 +67,15 @@ pub fn exit_code(
 /// Translates a concrete [`HeadlessError`] to its exit-code class.
 ///
 /// The `match` is **exhaustive with no `_` wildcard**: adding a variant to [`HeadlessError`]
-/// forces its mapping to be decided here instead of silently defaulting to [`EXIT_RUNTIME`].
-fn exit_code_for_error(err: &HeadlessError) -> i32 {
+/// forces its mapping to be decided here instead of silently defaulting to `EXIT_RUNTIME`.
+/// It is the only such map: the binary's edges (`magi init`, `vault`) call it too.
+///
+/// # Arguments
+/// * `err` - The headless error to classify.
+///
+/// # Returns
+/// `EXIT_MISUSE` (2) for operator input errors, `EXIT_RUNTIME` (1) for the rest.
+pub fn exit_code_for_error(err: &HeadlessError) -> i32 {
     match err {
         HeadlessError::InputInvalid(_)
         | HeadlessError::InputTooLarge(_)
