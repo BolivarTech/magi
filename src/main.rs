@@ -5980,6 +5980,12 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
 /// Subcommands whose override appends the caller's system to each mage's default prompt (SY04, SY05).
 const SYSTEM_ADJUSTED_COMMANDS: &[&str] = &["consult"];
 /// Subcommands whose override replaces the operator's system prompt (SY07).
+///
+/// Test-only on purpose: the replacement itself happens in `resolve`, which needs no list, so no
+/// production code reads this. It exists so
+/// `every_command_with_the_override_flag_is_classified` can require every subcommand that takes
+/// `--allow-system-override` to be classified here or in [`SYSTEM_ADJUSTED_COMMANDS`].
+#[cfg(test)]
 const SYSTEM_REPLACED_COMMANDS: &[&str] = &["query"];
 
 /// Discovers state, unlocks the vault (fail-closed), loads config, reads and
@@ -6256,17 +6262,12 @@ async fn prepare_headless(
             return Err(headless_error_exit_code(&e));
         }
     };
-    // Only a subcommand that declared what its override does may report one as applied: an
-    // unclassified subcommand that accepted the flag reads as "ignored" and raises the three
-    // signals, instead of claiming an override nothing installs.
-    let override_classified =
-        SYSTEM_ADJUSTED_COMMANDS.contains(&command) || SYSTEM_REPLACED_COMMANDS.contains(&command);
     let resolved = resolve_params(
         envelope,
         &defaults,
         &overrides,
         operator_ceiling,
-        allow_system_override && override_classified,
+        allow_system_override,
     );
     // Task 4.1: no more `legacy_backend_label` mutation — `resolved.provider` already
     // carries the unified REQ-A01b vocabulary end to end (whatever `h.provider`/
@@ -14377,6 +14378,9 @@ model = \"nimble\"
             );
         }
 
+        // A second copy lives in `tests/headless_system_field.rs` (an integration binary cannot
+        // import this bin's test helpers). The two change together: both follow the shape of
+        // magi-core's native `/api/chat` reply.
         fn verdict_body(agent: &str) -> String {
             use magi_core::verdict_markers::{VERDICT_CLOSE, VERDICT_OPEN};
             let verdict = format!(
