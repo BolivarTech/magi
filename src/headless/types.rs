@@ -122,6 +122,11 @@ pub struct AppliedCaps {
     /// Wall-clock cap in seconds, if one was set.
     pub timeout_secs: Option<u64>,
     /// `true` if the envelope's `system` was applied (requires the operator flag).
+    ///
+    /// Its source depends on the subcommand. In `consult` it comes from the trio build: `true`
+    /// only when the caller's adjustment was installed on every mage's prompt, never from what
+    /// `resolve` computed. In `query` it comes from `resolve`: the caller's `system` replaced the
+    /// operator's.
     pub system_override_applied: bool,
     /// `true` when the envelope carried a non-blank `system` that was not applied because the
     /// operator flag was off.
