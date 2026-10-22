@@ -166,6 +166,25 @@ mod tests {
     }
 
     #[test]
+    fn the_system_rejections_display_the_documented_text() {
+        assert_eq!(
+            HeadlessError::SystemTooLarge { limit: 16_384 }.to_string(),
+            "the request's \"system\" field exceeds [headless] max_system_bytes = 16384 bytes"
+        );
+        assert_eq!(
+            HeadlessError::SystemReservedLine.to_string(),
+            concat!(
+                "the request's \"system\" field contains a line reserved for the mages' verdict ",
+                "format (<MAGI_VERDICT>, </MAGI_VERDICT> or ## Output format); remove it"
+            )
+        );
+        assert_eq!(
+            HeadlessError::SystemAnchor { found: 2 }.to_string(),
+            "a default mage prompt has 2 \"## Output format\" sections; exactly one is required"
+        );
+    }
+
+    #[test]
     fn test_from_vault_storage_maps_to_dedicated_variant() {
         let e: HeadlessError = VaultError::Storage("disk full".into()).into();
         assert!(matches!(e, HeadlessError::Storage(_)));
