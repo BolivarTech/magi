@@ -5934,6 +5934,7 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
         // and this function can no longer read it from its own section.
         tool_result_cap,
         full_auto_timeout_secs: cfg.timeout_secs.unwrap_or(d.full_auto_timeout_secs),
+        max_system_bytes: d.max_system_bytes, // Red stub: Green reads the declared value
     }
 }
 
@@ -21534,5 +21535,24 @@ mod headless_system_exit_tests {
             let lib = magi_rs::headless::exit::exit_code(Some(e), StopReason::Done, false, false);
             assert_eq!(headless_error_exit_code(e), lib, "{e:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod headless_system_cap_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_headless_limits_uses_the_declared_system_cap() {
+        let cap = magi_rs::headless::limits::TOOL_RESULT_CAP;
+        let cfg = HeadlessConfig {
+            max_system_bytes: Some(4096),
+            ..HeadlessConfig::default()
+        };
+        assert_eq!(resolve_headless_limits(&cfg, cap).max_system_bytes, 4096);
+        assert_eq!(
+            resolve_headless_limits(&HeadlessConfig::default(), cap).max_system_bytes,
+            16_384
+        );
     }
 }

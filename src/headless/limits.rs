@@ -35,6 +35,11 @@ pub const NORMAL_MAX_TOOL_CALLS: u32 = 15;
 /// (REQ-H08). 50.
 pub const FULL_AUTO_MAX_TOOL_CALLS: u32 = 50;
 
+/// Cap on the envelope's `system` field, in bytes (not chars) — roughly 12 000
+/// tokens across the three seats. Applies to `query` and `consult`, with or
+/// without `--allow-system-override`. 16 KiB.
+pub const MAX_SYSTEM_BYTES: usize = 16_384;
+
 /// Effective headless numeric caps for one run, after the `[headless]`
 /// `magi.toml` overrides are applied over the built-in constant defaults
 /// (spec §11).
@@ -54,6 +59,8 @@ pub struct HeadlessLimits {
     /// Effective default wall-clock timeout secs for tool-executing tiers
     /// (default [`FULL_AUTO_TIMEOUT_SECS`]).
     pub full_auto_timeout_secs: u64,
+    /// Effective byte cap on the envelope `system` field (default [`MAX_SYSTEM_BYTES`]).
+    pub max_system_bytes: usize,
 }
 
 impl Default for HeadlessLimits {
@@ -63,6 +70,7 @@ impl Default for HeadlessLimits {
             full_auto_max_tool_calls: FULL_AUTO_MAX_TOOL_CALLS,
             tool_result_cap: TOOL_RESULT_CAP,
             full_auto_timeout_secs: FULL_AUTO_TIMEOUT_SECS,
+            max_system_bytes: MAX_SYSTEM_BYTES,
         }
     }
 }
@@ -82,5 +90,12 @@ mod tests {
         assert_eq!(FULL_AUTO_MAX_TOOL_CALLS, 50);
         // Elevated cap is a genuine elevation over the normal cap (50 > 15),
         // never a silent downgrade — pinned by the two values above.
+    }
+
+    /// The built-in `system` cap is 16 KiB, counted in bytes.
+    #[test]
+    fn the_default_system_cap_is_16_kib() {
+        assert_eq!(HeadlessLimits::default().max_system_bytes, 16_384);
+        assert_eq!(MAX_SYSTEM_BYTES, 16_384);
     }
 }

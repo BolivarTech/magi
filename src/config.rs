@@ -647,6 +647,9 @@ pub struct HeadlessConfig {
     /// Whether the envelope may override the operator `system` prompt (REQ-H12b). Defaults to
     /// `false` (the envelope `system` is ignored unless enabled).
     pub allow_system_override: Option<bool>,
+    /// Byte cap on the envelope `system` field (must be at least 1). Overrides
+    /// `MAX_SYSTEM_BYTES`.
+    pub max_system_bytes: Option<usize>,
 }
 
 /// `[openai]` section. Shared by `provider = "ollama"` and `provider = "openai-compat"` — the
@@ -4960,6 +4963,31 @@ max_state_bytes = 500
         )
         .expect("valid");
         assert_eq!(c.effective_decision().max_state_bytes, Some(500));
+    }
+
+    #[test]
+    fn a_zero_max_system_bytes_fails_load_naming_the_field() {
+        let err = MagiConfig::from_toml_str(
+            "[headless]
+max_system_bytes = 0
+",
+        )
+        .expect_err("0 is below the minimum");
+        assert!(
+            err.to_string().contains("[headless].max_system_bytes"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_declared_max_system_bytes_is_read_as_written() {
+        let c = MagiConfig::from_toml_str(
+            "[headless]
+max_system_bytes = 4096
+",
+        )
+        .expect("valid");
+        assert_eq!(c.headless().max_system_bytes, Some(4096));
     }
 
     #[test]
