@@ -23,7 +23,10 @@ pub const NOT_FOUND_BODY_READ_CAP: usize = 64 * 1024;
 /// A System One answer for a few questions is a few KiB; anything past this is not read and is an
 /// invalid response.
 pub const RESPONSE_BODY_CAP: usize = 1024 * 1024;
-/// Ollama 0.35.0, captured 2026-10-01: `{"error":"model \"<m>\" not found, try pulling it first"}`.
+/// Ollama before 0.40 (captured on 0.35.0, 2026-10-01):
+/// `{"error":"model \"<m>\" not found, try pulling it first"}`. Later versions answer
+/// `{"error":"model '<m>' not found"}`, which names the model and is matched by
+/// [`names_missing_model`] instead.
 pub const MODEL_NOT_FOUND_MARKERS: &[&str] = &["not found, try pulling it first"];
 /// OpenRouter, E4: "0 endpoints out of 1 requested are available matching your guardrail
 /// restrictions and data policy...".
@@ -248,7 +251,7 @@ impl SystemOneClient {
                 }
             }
             404 => {
-                let (cause, detail) = if contains_any(&body, MODEL_NOT_FOUND_MARKERS) {
+                let (cause, detail) = if names_missing_model(&body, model) {
                     (
                         Cause::ModelNotFound,
                         format!("model '{model}' is not available on this endpoint"),
@@ -280,6 +283,16 @@ impl SystemOneClient {
             ..failure
         }
     }
+}
+
+/// Whether a 404 `body` says that `model`, the one requested in this call, is missing.
+///
+/// Matches the pre-0.40 Ollama text, or the 0.40 form `model '<model>' not found` with the
+/// requested name between the quotes: a generic 404 (a proxy, another model's name) is not
+/// this model missing.
+fn names_missing_model(body: &str, model: &str) -> bool {
+    contains_any(body, MODEL_NOT_FOUND_MARKERS)
+        || body.contains(&format!("model '{model}' not found"))
 }
 
 /// Whether `body` contains any of the `markers`.

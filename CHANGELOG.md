@@ -21,6 +21,10 @@ changes and the **patch** position signals backward-compatible fixes.
 - **`consult --allow-system-override` now applies the `system`.** Before, the JSON reported the override as applied although the text never reached a mage. Now the text is added to each mage's prompt under `## Additional instructions`, just before `## Output format`, and `system_override_applied` is `true` only when it got there. `query` with the flag behaves as before, except that a blank `system` no longer replaces the operator's prompt.
 - **`consult` rejects a reserved line in the applied `system`.** With the flag, a `system` containing a verdict-marker line or a line that is `## Output format` (surrounding whitespace ignored) is rejected with exit code 2. See the README for what this does and does not protect against.
 
+### Fixed
+
+- **`decide` reports a model missing from Ollama 0.40 or later as `model_not_found` again,** with the pull hint, instead of an unreachable endpoint. Ollama 0.40 changed the 404 text to `model '<name>' not found`; it is matched only when the name is the one the call requested, so a generic 404 still reads as a wrong URL.
+
 ### Security
 
 - **Dependencies:** `rustls-webpki` is updated to 0.103.16 and `webpki-root-certs` to 1.0.10, which clears RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
