@@ -14,9 +14,14 @@ use crate::decision::protocol::Answer;
 pub enum Cause {
     /// HTTP 401 or 403.
     Unauthorized,
-    /// HTTP 400.
+    /// HTTP 400: this model refused the request. Unlike [`Cause::Rejected`] the chain moves on
+    /// to the next model, because the refusal may belong to the model and not to the request
+    /// (a cloud model on an old daemon, a model in an unsupported format, a tiny context
+    /// window). It shares the serialized token `rejected` with [`Cause::Rejected`]: they are
+    /// told apart by whether the chain continues, and a consumer decides by the variant, never
+    /// by the token.
     BadRequest,
-    /// HTTP 413 or 422.
+    /// HTTP 413 or 422: the request itself is at fault, so the chain stops.
     Rejected,
     /// HTTP 404 whose body names a missing model.
     ModelNotFound,
@@ -44,11 +49,12 @@ impl Cause {
     ///
     /// # Returns
     /// `false` for the two causes every model of the endpoint would repeat
-    /// (`unauthorized`, `rejected`), `true` otherwise.
+    /// ([`Cause::Unauthorized`], [`Cause::Rejected`]), `true` otherwise (a 400 included).
     pub fn rotates(self) -> bool {
         match self {
-            Cause::Unauthorized | Cause::Rejected | Cause::BadRequest => false, // Red stub
-            Cause::ModelNotFound
+            Cause::Unauthorized | Cause::Rejected => false,
+            Cause::BadRequest
+            | Cause::ModelNotFound
             | Cause::AccountPolicy
             | Cause::NotFound
             | Cause::RateLimited

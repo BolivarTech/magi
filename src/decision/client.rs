@@ -232,6 +232,11 @@ impl SystemOneClient {
         let failure = match status {
             401 | 403 => Failure::http(Cause::Unauthorized, None, status),
             400 | 413 | 422 => {
+                let cause = if status == 400 {
+                    Cause::BadRequest
+                } else {
+                    Cause::Rejected
+                };
                 let mut detail =
                     format!("provider rejected the request as invalid (HTTP {status})");
                 if self.settings.keep_alive.is_some() && status != 413 {
@@ -239,7 +244,7 @@ impl SystemOneClient {
                 }
                 Failure {
                     provider_message: redact_foreign_text(&body).to_string(),
-                    ..Failure::http(Cause::Rejected, Some(detail), status)
+                    ..Failure::http(cause, Some(detail), status)
                 }
             }
             404 => {
@@ -407,12 +412,15 @@ impl SystemOneClient {
 impl DecisionClient for SystemOneClient {
     /// Walks the chain in order (or tries only the explicit model). An answer whose lowest
     /// confidence is under that model's `min_confidence` is recorded and the chain rotates; a
-    /// rejected answer is never returned (REQ-D20).
+    /// rejected answer is never returned (REQ-D20). An HTTP 400 rotates too; a chain whose last
+    /// attempt was a 400 ends as [`DecisionError::Rejected`] with status 400.
     ///
     /// Complexity: O(m) attempts for m models.
     async fn decide(&self, request: &DecisionRequest) -> Result<Decision, DecisionError> {
         let started = Instant::now();
         let mut trace = Trace::default();
+        // The provider message of the last attempt when it was a 400; any later attempt resets it.
+        let mut last_bad_request: Option<String> = None;
         for spec in self.plan(request) {
             let attempt_started = Instant::now();
             // A serialization failure ends the call as an explicit error: no empty body is sent.
@@ -421,6 +429,7 @@ impl DecisionClient for SystemOneClient {
             let latency_ms = elapsed_ms(attempt_started);
             match result {
                 Ok(parsed) => {
+                    last_bad_request = None;
                     let lowest = lowest_confidence(&parsed.answers);
                     let below = spec.min_confidence.filter(|min| lowest < *min);
                     let outcome = match below {
@@ -447,6 +456,8 @@ impl DecisionClient for SystemOneClient {
                     }
                 }
                 Err(failure) => {
+                    last_bad_request = (failure.cause == Cause::BadRequest)
+                        .then(|| failure.provider_message.clone());
                     let attempt = Attempt {
                         model: spec.model.clone(),
                         outcome: AttemptOutcome::Failed {
@@ -474,6 +485,14 @@ impl DecisionClient for SystemOneClient {
             }
         }
         self.log_close(None, &trace, started);
+        // A chain that ended on a 400 is still an invalid request, with the last message.
+        if let Some(provider_message) = last_bad_request {
+            return Err(DecisionError::Rejected {
+                status: 400,
+                provider_message,
+                trace,
+            });
+        }
         Err(match request.model() {
             Some(model) => DecisionError::ModelUnavailable {
                 model: model.to_owned(),
