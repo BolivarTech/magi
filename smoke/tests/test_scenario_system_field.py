@@ -90,3 +90,10 @@ class SystemFieldScenarioTests(unittest.TestCase):
     def test_s46_fails_when_the_run_succeeded(self) -> None:
         r = _result("R11", 0, _caps())
         self.assertEqual(Outcome.FAIL, _outcomes("S46", r)[system_field.S46_ASSERTIONS[0]])
+
+    def test_s46_fails_when_stdout_carries_model_output(self) -> None:
+        for key in system_field.OUTPUT_KEYS:
+            with self.subTest(key=key):
+                r = _result("R11", 2, {key: {"text": "x"}},
+                            b"error: the request's \"system\" field exceeds [headless] max_system_bytes = 16384 bytes\n")
+                self.assertEqual(Outcome.FAIL, _outcomes("S46", r)[system_field.S46_ASSERTIONS[2]])
