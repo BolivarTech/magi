@@ -42,14 +42,8 @@ impl LanguageExtractor for BraceFamilyExtractor {
     }
 
     fn extensions(&self) -> &[&str] {
-        // Return references to owned strings. Since the extractor
-        // owns the Vec<String>, we need a static slice. We work
-        // around this by leaking — acceptable since extractors are
-        // created once and live for the program's duration.
-        // Actually, let's use a simpler approach matching the trait.
-        // We'll store &'static str slices in the constructors.
-        // For now, this is a known limitation — we return leaked refs.
-        // In practice the registry calls extensions() once at startup.
+        // The trait wants `&[&str]` but the extensions are owned `String`s, so this is empty.
+        // The registry reads the inherent `BraceFamilyExtractor::extensions` instead.
         &[]
     }
 
@@ -173,29 +167,18 @@ impl BraceFamilyExtractor {
             let trimmed = line.trim();
             let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
 
-            // Check function keywords
-            if let Some(kind) = self.match_function_keyword(trimmed) {
-                let name = extract_name_from_line(trimmed, &self.function_keywords);
+            // Check function keywords, then block keywords
+            let keyword = self
+                .match_function_keyword(trimmed)
+                .map(|kind| (kind, &self.function_keywords))
+                .or_else(|| {
+                    self.match_block_keyword(trimmed)
+                        .map(|kind| (kind, &self.block_keywords))
+                });
+            if let Some((kind, keywords)) = keyword {
+                let name = extract_name_from_line(trimmed, keywords);
                 let start = self.scan_back_for_docs(lines, i);
-                let end = if scanned.get(i).is_some_and(|s| s.brace_delta > 0) {
-                    let close_idx = find_closing_brace(scanned, i);
-                    u32::try_from(close_idx + 1).unwrap_or(line_num)
-                } else {
-                    // Opening brace might be on the next line
-                    let mut brace_line = i;
-                    for j in (i + 1)..lines.len().min(i + 3) {
-                        if scanned.get(j).is_some_and(|s| s.brace_delta > 0) {
-                            brace_line = j;
-                            break;
-                        }
-                    }
-                    if brace_line != i {
-                        let close_idx = find_closing_brace(scanned, brace_line);
-                        u32::try_from(close_idx + 1).unwrap_or(line_num)
-                    } else {
-                        line_num // single-line or no brace found
-                    }
-                };
+                let end = brace_block_end(scanned, i, lines.len(), line_num);
                 constructs.push(Construct {
                     kind,
                     name,
@@ -203,38 +186,6 @@ impl BraceFamilyExtractor {
                     end_line: end,
                 });
                 // Skip past this construct
-                i = (end as usize).max(i + 1);
-                continue;
-            }
-
-            // Check block keywords
-            if let Some(kind) = self.match_block_keyword(trimmed) {
-                let name = extract_name_from_line(trimmed, &self.block_keywords);
-                let start = self.scan_back_for_docs(lines, i);
-                let end = if scanned.get(i).is_some_and(|s| s.brace_delta > 0) {
-                    let close_idx = find_closing_brace(scanned, i);
-                    u32::try_from(close_idx + 1).unwrap_or(line_num)
-                } else {
-                    let mut brace_line = i;
-                    for j in (i + 1)..lines.len().min(i + 3) {
-                        if scanned.get(j).is_some_and(|s| s.brace_delta > 0) {
-                            brace_line = j;
-                            break;
-                        }
-                    }
-                    if brace_line != i {
-                        let close_idx = find_closing_brace(scanned, brace_line);
-                        u32::try_from(close_idx + 1).unwrap_or(line_num)
-                    } else {
-                        line_num
-                    }
-                };
-                constructs.push(Construct {
-                    kind,
-                    name,
-                    start_line: u32::try_from(start + 1).unwrap_or(1),
-                    end_line: end,
-                });
                 i = (end as usize).max(i + 1);
                 continue;
             }
@@ -399,6 +350,27 @@ impl BraceFamilyExtractor {
             }
         }
         end
+    }
+}
+
+/// Find the 1-indexed line where the construct starting at line index `i` ends.
+///
+/// The opening brace is on line `i` or, failing that, within the next two lines. A construct
+/// with no brace in that window (a single-line declaration) ends on `line_num`.
+fn brace_block_end(scanned: &[ScannedLine], i: usize, line_count: usize, line_num: u32) -> u32 {
+    let opens = |idx: usize| scanned.get(idx).is_some_and(|s| s.brace_delta > 0);
+    let brace_line = if opens(i) {
+        Some(i)
+    } else {
+        // Opening brace might be on the next line
+        ((i + 1)..line_count.min(i + 3)).find(|&j| opens(j))
+    };
+    match brace_line {
+        Some(open_idx) => {
+            let close_idx = find_closing_brace(scanned, open_idx);
+            u32::try_from(close_idx + 1).unwrap_or(line_num)
+        }
+        None => line_num,
     }
 }
 
