@@ -267,6 +267,10 @@ pub(crate) struct MagiRuntimeParams<'a> {
     /// next to `timeout_secs`, the same override the `run_query` path applies via
     /// [`RunWiring::budget`].
     pub(crate) budget: BudgetTelemetry,
+    /// Whether the trio was built with the caller's `system` adjustment installed on every mage
+    /// (REQ-SY04). `run_consult` publishes THIS as `applied_caps.system_override_applied`, never
+    /// the value `resolve` computed: in `consult` the flag reports what the build did.
+    pub(crate) system_override_applied: bool,
     /// REQ-EE-5's per-activation clock-coverage announcer (S-9), assessed once for the whole
     /// run against the SAME ceiling `budget` describes. [`analyze_direct`] announces it before
     /// launching the analysis.
@@ -1023,6 +1027,9 @@ pub async fn run_consult(
             // here (MS2 gate S6 finding 1).
             timeout_secs: timeout.map(|d| d.as_secs()),
             budget: runtime.budget,
+            // Red stub: still believes `resolve`.
+            system_override_applied: resolved.applied_caps.system_override_applied
+                || runtime.system_override_applied,
             ..resolved.applied_caps
         },
         error,
@@ -1637,6 +1644,7 @@ mod tests {
             auditor: test_auditor(),
             structured_verdicts: StructuredVerdicts::Omit,
             budget: BudgetTelemetry::default(),
+            system_override_applied: false,
             clock_coverage: clock,
         }
     }
@@ -3762,6 +3770,30 @@ mod tests {
         .await;
 
         assert_eq!(outcome.applied_caps.budget, expected);
+    }
+
+    /// In `consult` the published flag comes from the trio build, never from `resolve` (E9, CP2 loop 2).
+    #[tokio::test]
+    async fn run_consult_publishes_the_installed_adjustment_not_the_resolved_flag() {
+        let clock_coverage = dummy_clock_coverage();
+        let mut resolved = resolved_stub();
+        resolved.applied_caps.system_override_applied = true; // what `resolve` would claim
+        let outcome = run_consult(
+            resolved,
+            canned_magi(),
+            "should we migrate X to Y?",
+            None,
+            Some(Mode::Analysis),
+            &MagiRuntimeParams {
+                system_override_applied: false,
+                ..runtime_params_for_tests(&clock_coverage)
+            },
+        )
+        .await;
+        assert!(
+            !outcome.applied_caps.system_override_applied,
+            "an adjustment that was not installed must read false"
+        );
     }
 
     /// Dropping the `run_consult` future itself — NOT via the `--timeout`

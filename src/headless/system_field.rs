@@ -18,6 +18,10 @@ use super::HeadlessError;
 pub const SYSTEM_IGNORED_WARNING: &str = "warning: the request's \"system\" field was ignored; \
      pass --allow-system-override or set [headless] allow_system_override = true to apply it";
 
+/// Run-log message (level WARN, target `magi_rs::headless`) for an ignored `system` field
+/// (REQ-SY02). Like [`SYSTEM_IGNORED_WARNING`], it never repeats the ignored content.
+pub const SYSTEM_IGNORED_LOG: &str = "the request's system field was ignored (operator flag off)";
+
 /// Heading line that opens the output-format section of every default mage prompt; the caller's
 /// adjustment is inserted right before it.
 const OUTPUT_FORMAT_ANCHOR: &str = "## Output format";

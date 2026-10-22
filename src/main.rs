@@ -5938,6 +5938,13 @@ fn resolve_headless_limits(cfg: &HeadlessConfig, tool_result_cap: usize) -> Head
     }
 }
 
+/// Subcommands whose override appends the caller's system to each mage's default prompt (SY04, SY05).
+#[allow(dead_code)] // Red stub
+const SYSTEM_ADJUSTED_COMMANDS: &[&str] = &["consult"];
+/// Subcommands whose override replaces the operator's system prompt (SY07).
+#[allow(dead_code)] // Red stub
+const SYSTEM_REPLACED_COMMANDS: &[&str] = &["query"];
+
 /// Discovers state, unlocks the vault (fail-closed), loads config, reads and
 /// parses the input, resolves the effective parameters, and builds the
 /// principal provider — the shared prelude of `query` and `consult` (REQ-H02).
@@ -7077,6 +7084,8 @@ async fn run_consult_subcommand(
             crate::tools::consult::StructuredVerdicts::Omit
         },
         budget,
+        // Red stub: wired to the build in Green.
+        system_override_applied: false,
         clock_coverage: &clock_coverage_announcer,
     };
     let outcome = run_consult(resolved, magi, &prompt, timeout, explicit_mode, &runtime).await;
@@ -21554,5 +21563,107 @@ mod headless_system_cap_tests {
             resolve_headless_limits(&HeadlessConfig::default(), cap).max_system_bytes,
             16_384
         );
+    }
+}
+
+#[cfg(test)]
+mod adjustment_source_tests {
+    use std::path::{Path, PathBuf};
+
+    /// Every `.rs` file under `dir`, recursively. An unreadable entry panics: "could not read" must never look like
+    /// "found nothing" (the can't-fail-guardian class).
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("readable source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The adjustment is the only custom prompt on the trio's build path: a prompt installed elsewhere would be
+    /// silently overwritten by `default + block` while `system_override_applied` said true (CP2 loop 2). The whole
+    /// production tree is walked, not two named files (CP2 loop 6). The needle is the method CALL (leading dot): a
+    /// rustdoc or comment naming the method is not an install (Red dry run after CP2 loop 6, D14).
+    #[test]
+    fn the_adjustment_is_the_only_custom_prompt_installed_on_the_trio() {
+        let needle = concat!(".with_custom", "_prompt");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        assert!(
+            files.len() > 50,
+            "the walk must reach the tree, found {} files",
+            files.len()
+        );
+        let hits: Vec<(String, usize)> = files
+            .iter()
+            .map(|p| {
+                let text = std::fs::read_to_string(p)
+                    .expect("readable source")
+                    .replace('\r', "");
+                (
+                    p.strip_prefix(&src)
+                        .expect("under src")
+                        .display()
+                        .to_string(),
+                    text.matches(needle).count(),
+                )
+            })
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        assert_eq!(
+            hits,
+            vec![("main.rs".to_string(), 1)],
+            "exactly one custom-prompt install, in main.rs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod system_override_command_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Every subcommand that accepts `--allow-system-override` decides what the override does: append to each mage
+    /// (`SYSTEM_ADJUSTED_COMMANDS`) or replace the operator's system (`SYSTEM_REPLACED_COMMANDS`). A new subcommand
+    /// with the flag and no entry would drop the caller's system silently, the defect this milestone fixes
+    /// (CP2 loop 6).
+    #[test]
+    fn every_command_with_the_override_flag_is_classified() {
+        let cmd = Args::command();
+        let with_flag: Vec<String> = cmd
+            .get_subcommands()
+            .filter(|s| {
+                s.get_arguments()
+                    .any(|a| a.get_id() == "allow_system_override")
+            })
+            .map(|s| s.get_name().to_string())
+            .collect();
+        assert!(
+            !with_flag.is_empty(),
+            "the flag must be found on some subcommand"
+        );
+        for name in &with_flag {
+            let lists = [SYSTEM_ADJUSTED_COMMANDS, SYSTEM_REPLACED_COMMANDS]
+                .iter()
+                .filter(|l| l.contains(&name.as_str()))
+                .count();
+            assert_eq!(
+                lists, 1,
+                "{name}: must be in exactly one of the two override lists"
+            );
+        }
+        for listed in SYSTEM_ADJUSTED_COMMANDS
+            .iter()
+            .chain(SYSTEM_REPLACED_COMMANDS)
+        {
+            assert!(
+                with_flag.iter().any(|n| n == listed),
+                "{listed}: listed but takes no override flag"
+            );
+        }
     }
 }

@@ -257,5 +257,5 @@
 heavy = { max-threads = 3 }
 
 [[profile.default.overrides]]
-filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag) | binary(bootstrap_strength_floor)'
+filter = 'test(/vault::/) | test(/system::/) | test(/agent::/) | test(/memory::/) | test(/tools::/) | test(/headless_runner::/) | binary(workdir_flag) | binary(bootstrap_strength_floor) | binary(headless_system_field)'
 test-group = "heavy"
