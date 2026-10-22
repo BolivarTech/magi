@@ -337,7 +337,7 @@ Two checks run before any model is called, and both exit with code 2:
 - `[headless] max_system_bytes` (default 16384, at least 1) caps the size of `system` in bytes.
   It applies to `query` and `consult`, with or without the flag.
 - With `consult` and the flag, a `system` that has a line holding a verdict marker
-  (`<MAGI_VERDICT>` or `</MAGI_VERDICT>`) or a line that is exactly `## Output format` is
+  (`<MAGI_VERDICT>` or `</MAGI_VERDICT>`) or a line that is `## Output format` (surrounding whitespace ignored) is
   rejected, never rewritten.
 
 Rejecting marker lines stops a forged verdict block, not a `system` that asks a mage for a

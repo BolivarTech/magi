@@ -18,7 +18,7 @@ changes and the **patch** position signals backward-compatible fixes.
 ### Changed
 
 - **`consult --allow-system-override` now applies the `system`.** Before, the JSON reported the override as applied although the text never reached a mage. Now the text is added to each mage's prompt under `## Additional instructions`, just before `## Output format`, and `system_override_applied` is `true` only when it got there. `query` with the flag behaves as before, except that a blank `system` no longer replaces the operator's prompt.
-- **`consult` rejects a reserved line in the applied `system`.** With the flag, a `system` containing a verdict-marker line or a line that is exactly `## Output format` is rejected with exit code 2. See the README for what this does and does not protect against.
+- **`consult` rejects a reserved line in the applied `system`.** With the flag, a `system` containing a verdict-marker line or a line that is `## Output format` (surrounding whitespace ignored) is rejected with exit code 2. See the README for what this does and does not protect against.
 
 ### Security
 
