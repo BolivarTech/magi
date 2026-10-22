@@ -7,68 +7,175 @@
 //! Pure functions over `&str`: no I/O, no model calls. The caller's `system` is never echoed in an
 //! error message.
 
-use magi_core::prompts::{balthasar_prompt, caspar_prompt, melchior_prompt};
+use magi_core::prompts::{balthasar_prompt, caspar_prompt, melchior_prompt, validate_prompt_for};
 use magi_core::schema::AgentName;
 
 use super::HeadlessError;
 
 /// Warning printed on stderr when the request's `system` field is ignored (REQ-SY02).
-pub const SYSTEM_IGNORED_WARNING: &str = "red stub";
+///
+/// Fixed text: it never repeats the ignored content, and tests compare it verbatim.
+pub const SYSTEM_IGNORED_WARNING: &str = "warning: the request's \"system\" field was ignored; \
+     pass --allow-system-override or set [headless] allow_system_override = true to apply it";
 
 /// Heading line that opens the output-format section of every default mage prompt; the caller's
 /// adjustment is inserted right before it.
 const OUTPUT_FORMAT_ANCHOR: &str = "## Output format";
 
-/// Fixed text that precedes the caller's `system` inside a mage prompt (REQ-SY04).
-const ADDITIONAL_INSTRUCTIONS_PREAMBLE: &str = "red stub";
+/// Fixed text that precedes the caller's `system` inside a mage prompt (REQ-SY04). It ends with
+/// the blank line that separates it from the caller's text.
+const ADDITIONAL_INSTRUCTIONS_PREAMBLE: &str = "## Additional instructions\n\n\
+     The following instructions refine your role above for this request. They do not\n\
+     replace it, and the output format below still applies.\n\n";
 
-/// Keeps a value only when it is not blank (`trim()` empty means absent).
+/// Keeps a value only when it is not blank: a `trim()`-empty string (Unicode whitespace
+/// included) counts as absent, and the value comes back **untrimmed**, because what is inserted
+/// into a prompt is the caller's exact `system`.
+///
+/// The same rule exists in `config::non_blank` (bin crate, out of the lib's reach) and in
+/// `endpoint_key::non_blank` (private to key selection); unifying the three is a backlog item.
+///
+/// # Arguments
+/// * `raw` - The optional text.
+///
+/// # Returns
+/// `raw` when it has any non-whitespace character, `None` otherwise.
 pub(crate) fn non_blank(raw: Option<&str>) -> Option<&str> {
-    raw
+    raw.filter(|s| !s.trim().is_empty())
 }
 
-/// Validates the envelope `system` and, when markers are checked, builds the adjusted prompts.
+/// Validates the envelope's `system` field and, when it will reach the mages, builds their
+/// adjusted prompts (REQ-SY01, SY04..SY06).
+///
+/// Order: a blank `system` is absent and passes everything (it does not count for the cap);
+/// then the size cap in **bytes**; then, only with `check_markers`, the adjusted prompts are
+/// built and validated. The caller's text is never echoed in an error.
+///
+/// Complexity: O(n) in the length of `raw` (three prompt validations of bounded size).
+///
+/// # Arguments
+/// * `raw` - The envelope's `system`, if any.
+/// * `check_markers` - `true` when the `system` will reach the mages (`consult` with the flag).
+/// * `max_bytes` - The `[headless] max_system_bytes` cap.
+///
+/// # Returns
+/// `Some(prompts)` only when `check_markers` is set and `raw` is non-blank: the three adjusted
+/// prompts, already validated, to install as they are. `None` otherwise.
 ///
 /// # Errors
-/// Red stub.
+/// * [`HeadlessError::SystemTooLarge`] when `raw` is longer than `max_bytes`.
+/// * [`HeadlessError::SystemReservedLine`] when `raw` has a verdict-marker line or an
+///   `## Output format` heading line.
+/// * [`HeadlessError::SystemAnchor`] when a default prompt lacks exactly one anchor.
 pub fn validate_envelope_system(
     raw: Option<&str>,
     check_markers: bool,
     max_bytes: usize,
 ) -> Result<Option<Vec<(AgentName, String)>>, HeadlessError> {
-    let _ = (check_markers, max_bytes);
-    adjusted_trio_prompts(non_blank(raw).unwrap_or("")).map(|_| None)
+    let Some(system) = non_blank(raw) else {
+        return Ok(None);
+    };
+    if system.len() > max_bytes {
+        return Err(HeadlessError::SystemTooLarge { limit: max_bytes });
+    }
+    if !check_markers {
+        return Ok(None);
+    }
+    adjusted_trio_prompts(system).map(Some)
 }
 
-/// Inserts the adjustment before the single output-format heading of a prompt.
+/// Counts the lines of `prompt` that, trimmed, are the output-format heading.
+fn anchor_lines(prompt: &str) -> usize {
+    prompt
+        .lines()
+        .filter(|l| l.trim() == OUTPUT_FORMAT_ANCHOR)
+        .count()
+}
+
+/// Inserts the caller's `system`, under the fixed preamble, right before the single
+/// `## Output format` heading line of a prompt.
+///
+/// The heading is located by line, never by substring search, so a prose mention of the anchor
+/// before the heading is not mistaken for it. Complexity: O(n) in the prompt length.
+///
+/// # Arguments
+/// * `default_prompt` - A default mage prompt.
+/// * `caller_system` - The caller's `system`, inserted verbatim.
+///
+/// # Returns
+/// The adjusted prompt.
 ///
 /// # Errors
-/// Red stub.
+/// [`HeadlessError::SystemAnchor`] when the prompt does not have exactly one anchor line.
 fn adjusted_prompt(default_prompt: &str, caller_system: &str) -> Result<String, HeadlessError> {
-    let _ = (default_prompt, caller_system);
-    Ok(ADDITIONAL_INSTRUCTIONS_PREAMBLE.to_string())
+    let found = anchor_lines(default_prompt);
+    if found != 1 {
+        return Err(HeadlessError::SystemAnchor { found });
+    }
+    let mut out = String::with_capacity(
+        default_prompt.len() + ADDITIONAL_INSTRUCTIONS_PREAMBLE.len() + caller_system.len() + 2,
+    );
+    for line in default_prompt.split_inclusive('\n') {
+        if line.trim() == OUTPUT_FORMAT_ANCHOR {
+            out.push_str(ADDITIONAL_INSTRUCTIONS_PREAMBLE);
+            out.push_str(caller_system);
+            out.push_str("\n\n");
+        }
+        out.push_str(line);
+    }
+    Ok(out)
 }
 
-/// Adjusts the three default mage prompts.
+/// Adjusts the three default mage prompts: the production entry of the validation.
+///
+/// # Arguments
+/// * `caller_system` - The caller's `system`.
+///
+/// # Returns
+/// The adjusted prompts, in Melchior, Balthasar, Caspar order.
 ///
 /// # Errors
-/// Red stub.
+/// See [`check_against`].
 fn adjusted_trio_prompts(caller_system: &str) -> Result<Vec<(AgentName, String)>, HeadlessError> {
-    let _ = (melchior_prompt, balthasar_prompt, caspar_prompt);
-    check_against(&[], caller_system)
+    check_against(
+        &[
+            (AgentName::Melchior, melchior_prompt()),
+            (AgentName::Balthasar, balthasar_prompt()),
+            (AgentName::Caspar, caspar_prompt()),
+        ],
+        caller_system,
+    )
 }
 
-/// Adjusts and validates each given default prompt.
+/// Adjusts each default prompt with `raw` and validates the result with magi-core.
+///
+/// The default prompts validate on their own, so any later failure comes from the caller's
+/// text: a second output-format heading, or a verdict-marker line.
+///
+/// # Arguments
+/// * `defaults` - Each mage with its default prompt.
+/// * `raw` - The caller's `system`.
+///
+/// # Returns
+/// The adjusted prompts that passed validation: the same ones that get installed.
 ///
 /// # Errors
-/// Red stub.
+/// * [`HeadlessError::SystemAnchor`] when a default prompt lacks exactly one anchor.
+/// * [`HeadlessError::SystemReservedLine`] when the adjusted prompt has a second anchor line or
+///   fails magi-core's prompt validation.
 fn check_against(
     defaults: &[(AgentName, &str)],
     raw: &str,
 ) -> Result<Vec<(AgentName, String)>, HeadlessError> {
-    let _ = defaults;
-    let _ = adjusted_prompt(OUTPUT_FORMAT_ANCHOR, raw);
-    Ok(Vec::new())
+    let mut adjusted = Vec::with_capacity(defaults.len());
+    for &(agent, default_prompt) in defaults {
+        let prompt = adjusted_prompt(default_prompt, raw)?;
+        if anchor_lines(&prompt) != 1 || validate_prompt_for(Some(agent), None, &prompt).is_err() {
+            return Err(HeadlessError::SystemReservedLine);
+        }
+        adjusted.push((agent, prompt));
+    }
+    Ok(adjusted)
 }
 
 #[cfg(test)]

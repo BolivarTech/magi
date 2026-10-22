@@ -70,14 +70,15 @@ pub fn exit_code(
 /// forces its mapping to be decided here instead of silently defaulting to [`EXIT_RUNTIME`].
 fn exit_code_for_error(err: &HeadlessError) -> i32 {
     match err {
-        HeadlessError::InputInvalid(_) | HeadlessError::InputTooLarge(_) => EXIT_MISUSE,
+        HeadlessError::InputInvalid(_)
+        | HeadlessError::InputTooLarge(_)
+        | HeadlessError::SystemTooLarge { .. }
+        | HeadlessError::SystemReservedLine => EXIT_MISUSE,
         HeadlessError::Io(_)
         | HeadlessError::Storage(_)
         | HeadlessError::Aborted
         | HeadlessError::PassphraseUnavailable
         | HeadlessError::Db(_)
-        | HeadlessError::SystemTooLarge { .. } // Red stub
-        | HeadlessError::SystemReservedLine // Red stub
         | HeadlessError::SystemAnchor { .. } => EXIT_RUNTIME,
     }
 }

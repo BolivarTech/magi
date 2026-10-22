@@ -1379,14 +1379,15 @@ fn run_logout(passphrase_flag: Option<Zeroizing<String>>, workspace_root: &std::
 fn headless_error_exit_code(e: &magi_rs::headless::HeadlessError) -> i32 {
     use magi_rs::headless::HeadlessError;
     match e {
-        HeadlessError::InputInvalid(_) | HeadlessError::InputTooLarge(_) => 2,
+        HeadlessError::InputInvalid(_)
+        | HeadlessError::InputTooLarge(_)
+        | HeadlessError::SystemTooLarge { .. }
+        | HeadlessError::SystemReservedLine => 2,
         HeadlessError::Io(_)
         | HeadlessError::Storage(_)
         | HeadlessError::Aborted
         | HeadlessError::PassphraseUnavailable
         | HeadlessError::Db(_)
-        | HeadlessError::SystemTooLarge { .. } // Red stub
-        | HeadlessError::SystemReservedLine // Red stub
         | HeadlessError::SystemAnchor { .. } => 1,
     }
 }
