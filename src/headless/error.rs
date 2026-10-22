@@ -81,7 +81,7 @@ pub enum HeadlessError {
     /// The request's `system` field has a line that would break a mage's verdict format: a
     /// verdict marker or an `## Output format` heading. The text is never echoed. Maps to exit 2.
     #[error(
-        "the request's \"system\" field contains a line reserved for the mages' verdict format          (<MAGI_VERDICT>, </MAGI_VERDICT> or ## Output format); remove it"
+        "the request's \"system\" field contains a line reserved for the mages' verdict format (<MAGI_VERDICT>, </MAGI_VERDICT> or ## Output format); remove it"
     )]
     SystemReservedLine,
 
