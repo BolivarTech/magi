@@ -337,9 +337,10 @@ impl DecisionError {
 mod tests {
     use super::*;
 
-    const ALL: [Cause; 11] = [
+    const ALL: [Cause; 12] = [
         Cause::Unauthorized,
         Cause::Rejected,
+        Cause::BadRequest,
         Cause::ModelNotFound,
         Cause::AccountPolicy,
         Cause::NotFound,
@@ -508,6 +509,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&a).expect("ser"),
             serde_json::json!({"model": "tev1", "outcome": "failed", "cause": "timeout"})
+        );
+    }
+
+    #[test]
+    fn a_bad_request_attempt_serializes_the_rejected_token() {
+        let a = Attempt {
+            model: "a".into(),
+            outcome: AttemptOutcome::Failed {
+                cause: Cause::BadRequest,
+                detail: None,
+            },
+            usage: Usage::default(),
+        };
+        assert_eq!(
+            serde_json::to_value(&a).expect("ser"),
+            serde_json::json!({"model": "a", "outcome": "failed", "cause": "rejected"})
         );
     }
 
