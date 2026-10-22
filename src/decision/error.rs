@@ -14,7 +14,9 @@ use crate::decision::protocol::Answer;
 pub enum Cause {
     /// HTTP 401 or 403.
     Unauthorized,
-    /// HTTP 400, 413 or 422.
+    /// HTTP 400.
+    BadRequest,
+    /// HTTP 413 or 422.
     Rejected,
     /// HTTP 404 whose body names a missing model.
     ModelNotFound,
@@ -45,7 +47,7 @@ impl Cause {
     /// (`unauthorized`, `rejected`), `true` otherwise.
     pub fn rotates(self) -> bool {
         match self {
-            Cause::Unauthorized | Cause::Rejected => false,
+            Cause::Unauthorized | Cause::Rejected | Cause::BadRequest => false, // Red stub
             Cause::ModelNotFound
             | Cause::AccountPolicy
             | Cause::NotFound
@@ -72,6 +74,7 @@ impl Cause {
             | Cause::Redirected => true,
             Cause::Unauthorized
             | Cause::Rejected
+            | Cause::BadRequest
             | Cause::ModelNotFound
             | Cause::AccountPolicy
             | Cause::NotFound
@@ -86,7 +89,7 @@ impl Cause {
     pub fn as_str(self) -> &'static str {
         match self {
             Cause::Unauthorized => "unauthorized",
-            Cause::Rejected => "rejected",
+            Cause::Rejected | Cause::BadRequest => "rejected",
             Cause::ModelNotFound => "model_not_found",
             Cause::AccountPolicy => "account_policy",
             Cause::NotFound => "not_found",

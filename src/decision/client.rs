@@ -488,7 +488,7 @@ impl DecisionClient for SystemOneClient {
 mod tests {
     use super::*;
     use crate::decision::config::{KeepAlive, ModelSpec};
-    use crate::decision::error::{AttemptOutcome, Cause, DecisionError};
+    use crate::decision::error::{AttemptOutcome, Cause, DecisionError, ErrorKind};
     use crate::decision::protocol::{DecisionRequest, Questions};
     use mockito::Matcher;
     use serde_json::json;
@@ -1060,7 +1060,7 @@ mod tests {
 
     #[tokio::test]
     async fn caller_and_credential_errors_stop_the_chain() {
-        for (status, is_rejected) in [(400usize, true), (401, false)] {
+        for (status, is_rejected) in [(413usize, true), (422, true), (401, false)] {
             let mut server = mockito::Server::new_async().await;
             mock_model(&mut server, "a", status, "{}".to_string()).await;
             let never = server
@@ -1082,6 +1082,98 @@ mod tests {
             );
             never.assert_async().await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_rotates_to_the_next_model() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(
+            &mut server,
+            "a",
+            400,
+            r#"{"error":"System One requires a local decision model"}"#.into(),
+        )
+        .await;
+        mock_model(&mut server, "b", 200, noul_body("b", 0.9, 5, None)).await;
+        let d = decide(settings(&server.url(), &["a", "b"]), &request())
+            .await
+            .expect("b answers");
+        assert_eq!(d.model, "b");
+        assert_eq!(outcomes(&d.trace), vec!["a:rejected", "b:answered"]);
+    }
+
+    #[tokio::test]
+    async fn a_chain_of_bad_requests_is_invalid_input_with_the_whole_trace() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 400, r#"{"error":"a refuses"}"#.into()).await;
+        mock_model(&mut server, "b", 400, r#"{"error":"b refuses"}"#.into()).await;
+        let r = decide(settings(&server.url(), &["a", "b"]), &request()).await;
+        match r {
+            Err(e @ DecisionError::Rejected { status: 400, .. }) => {
+                assert_eq!(e.kind(), ErrorKind::InvalidInput);
+                assert_eq!(
+                    outcomes(e.trace().expect("trace")),
+                    vec!["a:rejected", "b:rejected"]
+                );
+                // DE-S1: the message is the last provider's, never the first one's.
+                assert!(
+                    matches!(&e, DecisionError::Rejected { provider_message, .. }
+                    if provider_message.contains("b refuses")
+                        && !provider_message.contains("a refuses"))
+                );
+            }
+            other => panic!("expected Rejected 400, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn too_large_and_unprocessable_still_stop_the_chain() {
+        for status in [413usize, 422] {
+            let mut server = mockito::Server::new_async().await;
+            mock_model(&mut server, "a", status, "{}".into()).await;
+            let never = server
+                .mock("POST", "/v1/systemone")
+                .match_body(Matcher::PartialJson(json!({"model": "b"})))
+                .expect(0)
+                .create_async()
+                .await;
+            let r = decide(settings(&server.url(), &["a", "b"]), &request()).await;
+            assert!(
+                matches!(r, Err(DecisionError::Rejected { .. })),
+                "{status}: {r:?}"
+            );
+            never.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_model_that_answers_400_is_rejected_400() {
+        // The gate asks one model at a time and remembers a 400 by this typed status only.
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "b", 400, "{}".into()).await;
+        let r = decide(
+            settings(&server.url(), &["a", "b"]),
+            &request().with_model("b"),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(DecisionError::Rejected { status: 400, .. })),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_bad_request_is_not_transport_class_so_the_distiller_keeps_judging() {
+        // The distiller's judge cuts decide for the pass only after a transport-class failure;
+        // a model-level 400 must not trip it.
+        assert!(!Cause::BadRequest.is_transport_class());
+    }
+
+    #[test]
+    fn bad_request_rotates_and_rejected_does_not() {
+        assert!(Cause::BadRequest.rotates());
+        assert!(!Cause::Rejected.rotates());
+        assert_eq!(Cause::BadRequest.as_str(), "rejected");
     }
 
     #[tokio::test]
