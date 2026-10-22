@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex, PoisonError};
 use std::time::Duration;
@@ -26,6 +26,7 @@ use magi_rs::review::source::{
     read_bounded, GitCommand, MAX_GIT_OUTPUT_BYTES, MAX_GIT_STDERR_BYTES,
 };
 
+use crate::system::path_guard::PathGuard;
 use crate::tools::proc_group::tool_child_env;
 
 /// `-c` settings every call carries, against the reviewed repository's config.
@@ -281,6 +282,13 @@ fn drain_bounded(mut reader: impl Read, cap: u64) -> Vec<u8> {
         kept.extend_from_slice(chunk.get(..n.min(room)).unwrap_or_default());
     }
     kept
+}
+
+/// The sandbox check of a review's `File`/`Directory` paths.
+#[allow(dead_code)] // wired by the code-review subcommand (T2.10)
+pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBuf, ReviewError> {
+    let _ = guard;
+    Ok(path.to_path_buf()) // Red stub
 }
 
 /// The `-c` values that neutralize the filter drivers the reviewed repository's own config
@@ -602,6 +610,59 @@ mod tests {
             interpret_filter_probe(&probe(None, b"", "")),
             Err(ReviewError::Git(_))
         ));
+    }
+
+    #[test]
+    fn the_review_guard_maps_an_escaping_path_to_outside_workspace() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        std::fs::write(outer.path().join("secret.txt"), "outside\n").expect("write");
+        let ws = outer.path().join("ws");
+        std::fs::create_dir_all(ws.join("src")).expect("mkdir");
+        std::fs::write(ws.join("src").join("a.rs"), "fn a() {}\n").expect("write");
+        let guard = PathGuard::new(ws.clone()).expect("guard");
+        for escaping in [
+            ws.join("..").join("fuera"),
+            ws.join("../secret.txt"),
+            outer.path().join("secret.txt"),
+        ] {
+            assert!(
+                matches!(
+                    review_path_guard(&guard, &escaping),
+                    Err(ReviewError::OutsideWorkspace(_))
+                ),
+                "{}",
+                escaping.display()
+            );
+        }
+        let inside = review_path_guard(&guard, &ws.join("src").join("a.rs")).expect("inside");
+        assert!(
+            inside.starts_with(guard.workspace_root()),
+            "{}",
+            inside.display()
+        );
+    }
+
+    #[cfg(unix)] // creating a symlink needs Developer Mode on Windows; the `..` cases above run everywhere.
+    #[test]
+    fn the_review_guard_refuses_a_symlinked_directory_that_escapes() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(outer.path().join("elsewhere")).expect("mkdir");
+        std::fs::write(outer.path().join("elsewhere").join("secret.rs"), "x\n").expect("write");
+        let ws = outer.path().join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        std::os::unix::fs::symlink(outer.path().join("elsewhere"), ws.join("link"))
+            .expect("symlink");
+        let guard = PathGuard::new(ws.clone()).expect("guard");
+        for escaping in [ws.join("link"), ws.join("link").join("secret.rs")] {
+            assert!(
+                matches!(
+                    review_path_guard(&guard, &escaping),
+                    Err(ReviewError::OutsideWorkspace(_))
+                ),
+                "{}",
+                escaping.display()
+            );
+        }
     }
 
     #[test]
