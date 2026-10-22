@@ -28,8 +28,14 @@
 )]
 
 pub mod context;
+pub mod error;
 pub mod hunk;
+pub mod input;
 pub mod languages;
+pub mod source;
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod tests {

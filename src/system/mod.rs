@@ -10,4 +10,5 @@ pub mod git;
 pub mod grep;
 pub mod model_cache;
 pub mod path_guard;
+pub mod review_git;
 pub mod workspace;
