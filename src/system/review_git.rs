@@ -238,6 +238,12 @@ impl GitCommand for ScrubbedGit {
     }
 }
 
+/// What the filter probe means: the overrides to apply, or a fail-closed error.
+fn interpret_filter_probe(probe: &Finished) -> Result<Vec<String>, ReviewError> {
+    let _ = probe;
+    Ok(Vec::new()) // Red stub
+}
+
 /// The error of a failed call: its bounded stderr, or the exit code when stderr is empty.
 fn failure(command: &str, finished: &Finished) -> ReviewError {
     if finished.stderr.is_empty() {
@@ -553,6 +559,44 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+    }
+
+    #[test]
+    fn the_filter_probe_reads_exit_one_as_no_drivers_and_fails_closed_on_any_other_failure() {
+        // `git config --get-regexp` exits 1 when nothing matches: a host with no filter config at all.
+        let probe = |code: Option<i32>, stdout: &[u8], stderr: &str| Finished {
+            code,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_string(),
+        };
+        let none = interpret_filter_probe(&probe(Some(1), b"", "")).expect("exit 1 is no entries");
+        assert!(none.is_empty());
+        let local = probe(Some(0), b"local\0filter.evil.clean\nsh x\0", "");
+        assert_eq!(interpret_filter_probe(&local).expect("parses").len(), 4);
+        let operator = probe(
+            Some(0),
+            b"system\0filter.lfs.clean\ngit-lfs clean -- %f\0",
+            "",
+        );
+        assert!(interpret_filter_probe(&operator)
+            .expect("parses")
+            .is_empty());
+        let truncated = probe(Some(0), b"local\0filter.evil.clean\nsh x", "");
+        assert!(interpret_filter_probe(&truncated).is_err());
+        match interpret_filter_probe(&probe(Some(128), b"", "fatal: bad config line 1")) {
+            Err(ReviewError::Git(msg)) => assert!(msg.contains("bad config line 1"), "{msg}"),
+            other => panic!("expected a Git error, got {other:?}"),
+        }
+        match interpret_filter_probe(&probe(Some(3), b"", "")) {
+            Err(ReviewError::Git(msg)) => {
+                assert!(msg.contains("config") && msg.contains('3'), "{msg}")
+            }
+            other => panic!("expected a Git error, got {other:?}"),
+        }
+        assert!(matches!(
+            interpret_filter_probe(&probe(None, b"", "")),
+            Err(ReviewError::Git(_))
+        ));
     }
 
     #[test]
