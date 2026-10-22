@@ -1196,6 +1196,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_ollama_0_40_missing_model_is_model_not_found() {
+        // Ollama 0.40.6 body, measured 2026-10-21: no "try pulling it first" any more.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(404)
+            .with_body(r#"{"error":"model 'nimble' not found"}"#)
+            .create_async()
+            .await;
+        let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+        assert_eq!(
+            first_failure(&r).map(|(c, _)| c),
+            Some(Cause::ModelNotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn another_models_name_in_a_404_is_not_this_model_missing() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(404)
+            .with_body(r#"{"error":"model 'other' not found"}"#)
+            .create_async()
+            .await;
+        let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+        assert_eq!(first_failure(&r).map(|(c, _)| c), Some(Cause::NotFound));
+    }
+
+    #[tokio::test]
+    async fn the_pre_0_40_ollama_body_is_still_model_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(404)
+            .with_body(r#"{"error":"model \"nimble\" not found, try pulling it first"}"#)
+            .create_async()
+            .await;
+        let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+        assert_eq!(
+            first_failure(&r).map(|(c, _)| c),
+            Some(Cause::ModelNotFound)
+        );
+    }
+
+    #[tokio::test]
     async fn a_low_confidence_answer_rotates_and_keeps_its_answers_in_the_attempt() {
         let mut server = mockito::Server::new_async().await;
         mock_model(&mut server, "a", 200, noul_body("a", 0.6, 3, None)).await; // confidence 0.2
