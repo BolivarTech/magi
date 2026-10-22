@@ -20,6 +20,7 @@ pub enum Cause {
     /// window). It shares the serialized token `rejected` with [`Cause::Rejected`]: they are
     /// told apart by whether the chain continues, and a consumer decides by the variant, never
     /// by the token.
+    #[serde(rename = "rejected")]
     BadRequest,
     /// HTTP 413 or 422: the request itself is at fault, so the chain stops.
     Rejected,
