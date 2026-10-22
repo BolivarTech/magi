@@ -68,6 +68,32 @@ pub enum HeadlessError {
     /// mapper (T9) can distinguish the concrete class.
     #[error(transparent)]
     Db(VaultError),
+
+    /// The request's `system` field is larger than `[headless] max_system_bytes`.
+    ///
+    /// Carries the limit in bytes, never the content. Maps to exit 2.
+    #[error("the request's \"system\" field exceeds [headless] max_system_bytes = {limit} bytes")]
+    SystemTooLarge {
+        /// The configured limit, in bytes.
+        limit: usize,
+    },
+
+    /// The request's `system` field has a line that would break a mage's verdict format: a
+    /// verdict marker or an `## Output format` heading. The text is never echoed. Maps to exit 2.
+    #[error(
+        "the request's \"system\" field contains a line reserved for the mages' verdict format          (<MAGI_VERDICT>, </MAGI_VERDICT> or ## Output format); remove it"
+    )]
+    SystemReservedLine,
+
+    /// A default mage prompt does not have exactly one `## Output format` section, so the
+    /// adjustment has no anchor. Only a magi-core upgrade can cause it. Maps to exit 1.
+    #[error(
+        "a default mage prompt has {found} \"## Output format\" sections; exactly one is required"
+    )]
+    SystemAnchor {
+        /// How many anchor lines the prompt has.
+        found: usize,
+    },
 }
 
 /// Translates a [`VaultError`] to its corresponding [`HeadlessError`].

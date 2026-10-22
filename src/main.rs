@@ -1384,7 +1384,10 @@ fn headless_error_exit_code(e: &magi_rs::headless::HeadlessError) -> i32 {
         | HeadlessError::Storage(_)
         | HeadlessError::Aborted
         | HeadlessError::PassphraseUnavailable
-        | HeadlessError::Db(_) => 1,
+        | HeadlessError::Db(_)
+        | HeadlessError::SystemTooLarge { .. } // Red stub
+        | HeadlessError::SystemReservedLine // Red stub
+        | HeadlessError::SystemAnchor { .. } => 1,
     }
 }
 
@@ -21495,5 +21498,50 @@ model = \"nimble\"
         let mut without = Agent::new(Arc::new(StaticProvider));
         register_decide_tool_if_available(&mut without, None, true, "e".into());
         assert!(!without.has_tool("decide"));
+    }
+}
+
+#[cfg(test)]
+mod headless_system_exit_tests {
+    use super::*;
+
+    #[test]
+    fn the_bin_maps_system_rejections_to_misuse_and_a_broken_anchor_to_runtime() {
+        use magi_rs::headless::HeadlessError;
+        assert_eq!(
+            headless_error_exit_code(&HeadlessError::SystemTooLarge { limit: 1 }),
+            2
+        );
+        assert_eq!(
+            headless_error_exit_code(&HeadlessError::SystemReservedLine),
+            2
+        );
+        assert_eq!(
+            headless_error_exit_code(&HeadlessError::SystemAnchor { found: 0 }),
+            1
+        );
+    }
+
+    /// The two maps agree on every variant, so the Refactor's delegation cannot move an exit code (CP2 loop 4).
+    #[test]
+    fn the_bin_and_lib_exit_maps_agree_on_every_variant() {
+        use magi_rs::headless::types::StopReason;
+        use magi_rs::headless::HeadlessError;
+        let every = [
+            HeadlessError::InputInvalid("x".into()),
+            HeadlessError::InputTooLarge(1),
+            HeadlessError::Io("x".into()),
+            HeadlessError::Storage("x".into()),
+            HeadlessError::Aborted,
+            HeadlessError::PassphraseUnavailable,
+            HeadlessError::Db(magi_rs::vault::VaultError::WrongPassphrase),
+            HeadlessError::SystemTooLarge { limit: 1 },
+            HeadlessError::SystemReservedLine,
+            HeadlessError::SystemAnchor { found: 0 },
+        ];
+        for e in &every {
+            let lib = magi_rs::headless::exit::exit_code(Some(e), StopReason::Done, false, false);
+            assert_eq!(headless_error_exit_code(e), lib, "{e:?}");
+        }
     }
 }

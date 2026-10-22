@@ -75,7 +75,10 @@ fn exit_code_for_error(err: &HeadlessError) -> i32 {
         | HeadlessError::Storage(_)
         | HeadlessError::Aborted
         | HeadlessError::PassphraseUnavailable
-        | HeadlessError::Db(_) => EXIT_RUNTIME,
+        | HeadlessError::Db(_)
+        | HeadlessError::SystemTooLarge { .. } // Red stub
+        | HeadlessError::SystemReservedLine // Red stub
+        | HeadlessError::SystemAnchor { .. } => EXIT_RUNTIME,
     }
 }
 
@@ -97,7 +100,9 @@ pub fn decide_exit_code(kind: Option<crate::decision::ErrorKind>) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_code, EXIT_MISUSE, EXIT_OK, EXIT_RUNTIME, EXIT_TIER_DENIED};
+    use super::{
+        exit_code, exit_code_for_error, EXIT_MISUSE, EXIT_OK, EXIT_RUNTIME, EXIT_TIER_DENIED,
+    };
     use crate::headless::types::StopReason;
     use crate::headless::HeadlessError;
     use crate::vault::VaultError;
@@ -231,5 +236,18 @@ mod tests {
     #[test]
     fn test_tier_denied_without_empty_response_is_success() {
         assert_eq!(exit_code(None, StopReason::Denied, false, true), EXIT_OK);
+    }
+
+    #[test]
+    fn system_rejections_are_misuse_and_a_broken_anchor_is_runtime() {
+        assert_eq!(
+            exit_code_for_error(&HeadlessError::SystemTooLarge { limit: 1 }),
+            2
+        );
+        assert_eq!(exit_code_for_error(&HeadlessError::SystemReservedLine), 2);
+        assert_eq!(
+            exit_code_for_error(&HeadlessError::SystemAnchor { found: 0 }),
+            1
+        );
     }
 }
