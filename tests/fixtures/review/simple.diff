@@ -1,0 +1,13 @@
+diff --git a/src/main.c b/src/main.c
+index abc1234..def5678 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -10,6 +10,8 @@ int main(int argc, char *argv[]) {
+     int result = 0;
+     char buffer[256];
+
++    // Validate input before processing
++    if (argc < 2) return -1;
+     result = process(argv[1]);
+     return result;
+ }
