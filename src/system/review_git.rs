@@ -530,8 +530,9 @@ mod tests {
     fn filter_overrides_reads_every_shape_git_prints_and_refuses_what_it_cannot_parse() {
         // [CP2 MS2 S1a loop 11, measured with git 2.56] a multi-line value, one key twice, an included file (reported with
         // the including file's scope) and a value-less boolean key (`[filter "b"] clean`: no LF before its NUL).
+        // A value with a `.` before its last LF: a key cut at the last LF would name another driver.
         let z = b"local\0filter.a.clean\nline1\nline2\0local\0filter.a.clean\nsecond\0local\0filter.inc.clean\nx\0\
-                  local\0filter.b.clean\0";
+                  local\0filter.b.clean\0local\0filter.a.clean\nx.y\nline2\0";
         let want: Vec<String> = ["a", "b", "inc"]
             .iter()
             .flat_map(|n| {
@@ -564,30 +565,10 @@ mod tests {
         assert!(filter_overrides(&z).is_err());
     }
 
-    #[test]
-    fn a_failing_git_call_keeps_only_a_bounded_stderr() {
-        // [CP2 MS2 S1a loop 10] stderr is piped (the TUI owns the terminal) and cut at the cap; git echoes the long path.
-        let d = repo();
-        std::fs::write(d.path().join("a.rs"), "x\n").expect("write");
-        git(d.path(), &["add", "a.rs"]);
-        git(d.path(), &["commit", "-q", "-m", "x"]);
-        let long = format!("HEAD:./{}", "x".repeat(10_000));
-        let cap = usize::try_from(MAX_GIT_STDERR_BYTES).expect("fits");
-        match ScrubbedGit::new(d.path().to_path_buf()).run_bytes(&["show", &long]) {
-            Err(ReviewError::Git(msg)) => assert!(
-                !msg.is_empty() && msg.len() <= cap + 64,
-                "{} bytes",
-                msg.len()
-            ),
-            other => panic!("expected a Git error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_succeeding_command_with_more_stderr_than_a_pipe_holds_neither_deadlocks_nor_fails() {
-        // [CP2 MS2 S1a loop 15, measured with git 2.56] 800 LF files under a repo-local core.autocrlf=true make
-        // `git diff <sha>` print ~107 KB of warnings on stderr with exit 0, over the ~64 KiB pipe buffer: a serial drain
-        // deadlocks, and a drain that stops reading at the cap gets git killed by EPIPE.
+    /// 800 LF files committed, then rewritten under a repo-local `core.autocrlf=true`: every git call
+    /// that compares them with the worktree prints one warning per file, far over a pipe buffer.
+    /// Returns the repository and the SHA of its commit.
+    fn crlf_warning_repo() -> (tempfile::TempDir, String) {
         let d = repo();
         let name = |i: usize| format!("file_with_a_reasonably_long_name_{i:04}.txt");
         for i in 0..800 {
@@ -607,6 +588,65 @@ mod tests {
             .expect("git runs")
             .stdout;
         let sha = String::from_utf8(head).expect("utf-8").trim().to_string();
+        (d, sha)
+    }
+
+    #[test]
+    fn a_failing_git_call_keeps_only_a_bounded_stderr() {
+        // [CP2 MS2 S1a loop 10] stderr is piped (the TUI owns the terminal) and cut at the cap; git echoes the long path.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "x\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "x"]);
+        let long = format!("HEAD:./{}", "x".repeat(10_000));
+        let cap = usize::try_from(MAX_GIT_STDERR_BYTES).expect("fits");
+        match ScrubbedGit::new(d.path().to_path_buf()).run_bytes(&["show", &long]) {
+            Err(ReviewError::Git(msg)) => assert!(
+                !msg.is_empty() && msg.len() <= cap + 64,
+                "{} bytes",
+                msg.len()
+            ),
+            other => panic!("expected a Git error, got {other:?}"),
+        }
+        // git cuts a single `fatal:` line at 4096 bytes itself, so the call above cannot tell a capped
+        // stderr from a whole one. This failing call prints one warning per file, many lines past the cap.
+        let (crlf, sha) = crlf_warning_repo();
+        let args = [
+            "diff",
+            "--exit-code",
+            "--no-ext-diff",
+            "--no-textconv",
+            sha.as_str(),
+        ];
+        let pre = std::process::Command::new("git")
+            .arg("-C")
+            .arg(crlf.path())
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            pre.status.code() == Some(1) && pre.stderr.len() > 4 * cap,
+            "precondition: exit {:?}, {} bytes of stderr",
+            pre.status.code(),
+            pre.stderr.len()
+        );
+        match ScrubbedGit::new(crlf.path().to_path_buf()).run_bytes(&args) {
+            Err(ReviewError::Git(msg)) => assert!(
+                !msg.is_empty() && msg.len() <= cap + 64,
+                "{} bytes",
+                msg.len()
+            ),
+            Err(other) => panic!("expected a Git error, got {other:?}"),
+            Ok(_) => panic!("expected a Git error, got a successful diff"),
+        }
+    }
+
+    #[test]
+    fn a_succeeding_command_with_more_stderr_than_a_pipe_holds_neither_deadlocks_nor_fails() {
+        // [CP2 MS2 S1a loop 15, measured with git 2.56] 800 LF files under a repo-local core.autocrlf=true make
+        // `git diff <sha>` print ~107 KB of warnings on stderr with exit 0, over the ~64 KiB pipe buffer: a serial drain
+        // deadlocks, and a drain that stops reading at the cap gets git killed by EPIPE.
+        let (d, sha) = crlf_warning_repo();
         // [CP2 MS2 S1a loop 16] precondition: if git stopped printing these warnings the test would pass vacuously.
         let pre = std::process::Command::new("git")
             .arg("-C")
