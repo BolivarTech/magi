@@ -155,12 +155,7 @@ impl ScrubbedGit {
         {
             return Ok(());
         }
-        let probe = self.execute(FILTER_PROBE)?;
-        let overrides = match probe.code {
-            Some(0) => filter_overrides(&probe.stdout)?,
-            Some(CONFIG_NO_MATCH_EXIT) => Vec::new(),
-            _ => return Err(failure("config", &probe)),
-        };
+        let overrides = interpret_filter_probe(&self.execute(FILTER_PROBE)?)?;
         *self.filters.lock().unwrap_or_else(PoisonError::into_inner) = Some(overrides);
         Ok(())
     }
@@ -239,9 +234,19 @@ impl GitCommand for ScrubbedGit {
 }
 
 /// What the filter probe means: the overrides to apply, or a fail-closed error.
+///
+/// Exit 0 is parsed by [`filter_overrides`]; exit 1 is "no filter entry anywhere"; any other exit
+/// (or a signal) is an error, so no command runs with a repository filter left active.
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] for a failing probe, and whatever [`filter_overrides`] refuses.
 fn interpret_filter_probe(probe: &Finished) -> Result<Vec<String>, ReviewError> {
-    let _ = probe;
-    Ok(Vec::new()) // Red stub
+    match probe.code {
+        Some(0) => filter_overrides(&probe.stdout),
+        Some(CONFIG_NO_MATCH_EXIT) => Ok(Vec::new()),
+        _ => Err(failure("config", probe)),
+    }
 }
 
 /// The error of a failed call: its bounded stderr, or the exit code when stderr is empty.
