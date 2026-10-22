@@ -123,6 +123,9 @@ pub struct AppliedCaps {
     pub timeout_secs: Option<u64>,
     /// `true` if the envelope's `system` was applied (requires the operator flag).
     pub system_override_applied: bool,
+    /// `true` when the envelope carried a non-blank `system` that was not applied because the
+    /// operator flag was off.
+    pub system_ignored: bool,
     /// How this run's per-mage budget was decided (REQ-EB02b/EB04).
     ///
     /// **Flattened**: its five fields serialize as siblings of the ones above, not as a nested
@@ -240,7 +243,7 @@ mod tests {
         /// `AppliedCaps`' OWN serialized fields, excluding the flattened `budget`. The one value
         /// that must move by hand — and only when `AppliedCaps` itself gains or loses a field,
         /// never when `BudgetTelemetry` does.
-        const APPLIED_CAPS_OWN_FIELDS: usize = 4;
+        const APPLIED_CAPS_OWN_FIELDS: usize = 5;
 
         let budget = BudgetTelemetry::default();
         let inner = serde_json::to_value(budget).expect("BudgetTelemetry serializes");
@@ -255,6 +258,7 @@ mod tests {
             max_tool_calls: 15,
             max_tool_calls_clamped: false,
             timeout_secs: Some(1800),
+            system_ignored: false,
             system_override_applied: false,
             budget,
         };

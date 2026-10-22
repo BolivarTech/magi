@@ -806,6 +806,7 @@ impl RunOutcome {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,
                 timeout_secs: None,
+                system_ignored: false,
                 system_override_applied: false,
                 // Realistic values (unlike the zeroed `BudgetTelemetry::default()` used
                 // elsewhere as a placeholder): `sample()` stands in for a FINISHED run whose

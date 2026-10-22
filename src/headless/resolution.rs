@@ -147,6 +147,7 @@ pub fn resolve(
             max_tool_calls,
             max_tool_calls_clamped,
             timeout_secs: None,
+            system_ignored: false, // Red stub
             system_override_applied,
             // Placeholder: this layer cannot know the ceiling (it is resolved in main.rs). The
             // runner stamps the real one, exactly as it does for timeout_secs.
@@ -325,5 +326,75 @@ mod tests {
 
         assert_eq!(r.max_tool_calls, 15);
         assert!(!r.applied_caps.max_tool_calls_clamped);
+    }
+
+    #[test]
+    fn a_non_blank_system_without_the_flag_is_marked_ignored() {
+        let mut env = base_env();
+        env.system = Some("caller-sys".to_string());
+        let r = resolve(env, &base_defaults(), &CliOverrides::default(), 15, false);
+        assert!(r.applied_caps.system_ignored);
+        assert!(!r.applied_caps.system_override_applied);
+    }
+
+    #[test]
+    fn an_absent_system_is_not_marked_ignored() {
+        let r = resolve(
+            base_env(),
+            &base_defaults(),
+            &CliOverrides::default(),
+            15,
+            false,
+        );
+        assert!(!r.applied_caps.system_ignored);
+    }
+
+    #[test]
+    fn a_blank_system_without_the_flag_is_not_marked_ignored() {
+        let mut env = base_env();
+        env.system = Some("   ".to_string());
+        let r = resolve(env, &base_defaults(), &CliOverrides::default(), 15, false);
+        assert!(!r.applied_caps.system_ignored);
+    }
+
+    #[test]
+    fn a_blank_system_with_the_flag_is_not_an_override() {
+        let mut env = base_env();
+        env.system = Some(
+            " 
+ "
+            .to_string(),
+        );
+        let r = resolve(env, &base_defaults(), &CliOverrides::default(), 15, true);
+        assert!(matches!(r.system, SystemPolicy::Operator(ref s) if s == "operator-system"));
+        assert!(!r.applied_caps.system_override_applied);
+        assert!(!r.applied_caps.system_ignored);
+    }
+
+    #[test]
+    fn an_applied_override_is_not_marked_ignored() {
+        let mut env = base_env();
+        env.system = Some("caller-sys".to_string());
+        let r = resolve(env, &base_defaults(), &CliOverrides::default(), 15, true);
+        assert!(r.applied_caps.system_override_applied);
+        assert!(!r.applied_caps.system_ignored);
+    }
+
+    /// The two flags describe disjoint outcomes: a system is either applied or ignored, never
+    /// both.
+    #[test]
+    fn system_ignored_and_override_applied_are_never_both_true() {
+        for system in [None, Some(""), Some("   "), Some("caller-sys")] {
+            for flag in [false, true] {
+                let mut env = base_env();
+                env.system = system.map(str::to_string);
+                let caps =
+                    resolve(env, &base_defaults(), &CliOverrides::default(), 15, flag).applied_caps;
+                assert!(
+                    !(caps.system_ignored && caps.system_override_applied),
+                    "system={system:?} flag={flag}: both flags true"
+                );
+            }
+        }
     }
 }

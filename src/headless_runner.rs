@@ -2093,6 +2093,7 @@ mod tests {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,
                 timeout_secs: None,
+                system_ignored: false,
                 system_override_applied: false,
                 budget: BudgetTelemetry::default(),
             },
