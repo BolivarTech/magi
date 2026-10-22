@@ -55,8 +55,35 @@ pub struct FileContext {
 /// assert_eq!(detect_language("app.py"), "python");
 /// assert_eq!(detect_language("Makefile"), "unknown");
 /// ```
-pub fn detect_language(_file_path: &str) -> String {
-    String::new() // Red stub
+pub fn detect_language(file_path: &str) -> String {
+    let ext = file_path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "rs" => "rust",
+        "c" | "h" => "c",
+        "cpp" | "cxx" | "cc" | "hpp" | "hxx" => "cpp",
+        "py" | "pyi" => "python",
+        "js" | "jsx" | "mjs" => "javascript",
+        "ts" | "tsx" | "mts" => "typescript",
+        "go" => "go",
+        "java" => "java",
+        "cs" => "csharp",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "rb" => "ruby",
+        "php" => "php",
+        "sh" | "bash" => "shell",
+        "ps1" => "powershell",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "json" => "json",
+        "md" | "markdown" => "markdown",
+        "xml" => "xml",
+        "html" | "htm" => "html",
+        "css" | "scss" | "sass" => "css",
+        "sql" => "sql",
+        _ => "unknown",
+    }
+    .to_string()
 }
 
 #[cfg(test)]

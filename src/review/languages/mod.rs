@@ -150,19 +150,41 @@ impl LanguageExtractor for ExtractorKind {
 /// assert!(registry.get("unknown.xyz").is_none());
 /// ```
 pub struct LanguageRegistry {
-    #[allow(dead_code)] // Red stub
     extractors: HashMap<String, ExtractorKind>,
 }
 
 impl LanguageRegistry {
     /// Create a registry with all built-in extractors.
     pub fn new() -> Self {
-        todo!() // Red stub
+        let mut registry = Self {
+            extractors: HashMap::new(),
+        };
+
+        // Register brace-family extractors
+        for extractor in brace_family::all_extractors() {
+            for ext in extractor.extensions() {
+                registry.extractors.insert(
+                    ext.to_string(),
+                    ExtractorKind::BraceFamily(extractor.clone()),
+                );
+            }
+        }
+
+        // Register Python
+        let py = python::PythonExtractor;
+        for ext in py.extensions() {
+            registry
+                .extractors
+                .insert(ext.to_string(), ExtractorKind::Python(py));
+        }
+
+        registry
     }
 
     /// Get the extractor for a file path, or `None` for unknown extensions.
-    pub fn get(&self, _file_path: &str) -> Option<&ExtractorKind> {
-        None // Red stub
+    pub fn get(&self, file_path: &str) -> Option<&ExtractorKind> {
+        let ext = file_path.rsplit('.').next()?;
+        self.extractors.get(ext)
     }
 }
 
@@ -183,12 +205,47 @@ impl Default for LanguageRegistry {
 /// * `changed_lines` - Set of changed line numbers.
 /// * `context` - File context metadata.
 pub fn fallback_extract(
-    _content: &str,
-    _file_path: &str,
-    _changed_lines: &HashSet<u32>,
-    _context: &FileContext,
+    content: &str,
+    file_path: &str,
+    changed_lines: &HashSet<u32>,
+    context: &FileContext,
 ) -> Vec<SemanticUnit> {
-    Vec::new() // Red stub
+    if changed_lines.is_empty() {
+        return vec![];
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+
+    let min_line = *changed_lines.iter().min().unwrap_or(&1);
+    let max_line = *changed_lines.iter().max().unwrap_or(&total);
+
+    let start = min_line.saturating_sub(20).max(1);
+    let end = max_line.saturating_add(20).min(total);
+
+    let start_idx = start.saturating_sub(1) as usize;
+    let end_idx = end as usize;
+    let unit_content = lines
+        .get(start_idx..end_idx.min(lines.len()))
+        .unwrap_or(&[])
+        .join("\n");
+
+    let mut sorted_changed: Vec<u32> = changed_lines
+        .iter()
+        .copied()
+        .filter(|&l| l >= start && l <= end)
+        .collect();
+    sorted_changed.sort_unstable();
+
+    vec![SemanticUnit {
+        kind: UnitKind::TopLevel,
+        name: format!("lines {}-{}", start, end),
+        file: file_path.to_string(),
+        start_line: start,
+        end_line: end,
+        content: unit_content,
+        changed_lines: sorted_changed,
+        context: context.clone(),
+    }]
 }
 
 #[cfg(test)]

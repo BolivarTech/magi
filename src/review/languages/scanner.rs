@@ -21,6 +21,40 @@
 //! assert_eq!(results[2].brace_delta, -1); // closing }
 //! ```
 
+/// Character at `i`, or NUL past the end of the line.
+///
+/// Reads never index: release builds abort on panic (`panic = "abort"`), so the scanner reads
+/// through `.get()`. Every call site is guarded by the loop bounds, so the NUL fallback is
+/// never observed on a path that previously indexed in range.
+fn char_at(chars: &[char], i: usize) -> char {
+    chars.get(i).copied().unwrap_or('\0')
+}
+
+/// Lexical context states for the code scanner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LexicalState {
+    /// Normal code — braces are structural.
+    Code,
+    /// Inside a line comment (until end of line).
+    LineComment,
+    /// Inside a block comment (`/* ... */`).
+    /// `depth` tracks nesting (Rust supports nested block comments).
+    BlockComment { depth: u32 },
+    /// Inside a string literal (regular or byte string).
+    /// `quote` is the delimiter (`"` or `'` or `` ` ``).
+    /// `escapable` is `false` for raw strings.
+    StringLiteral { quote: char, escapable: bool },
+    /// Inside a Rust raw string: `r###"..."###`.
+    /// `hashes` is the number of `#` delimiters.
+    RawString { hashes: u32 },
+    /// Inside a Python triple-quoted string (`"""` or `'''`).
+    TripleQuote { quote: char },
+    /// Inside a character literal (`'...'` in C/Rust/Java).
+    CharLiteral,
+    /// Inside a JS/TS template literal (`` `...` ``).
+    TemplateLiteral,
+}
+
 /// Raw string syntax variants across languages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawStringSyntax {
@@ -178,14 +212,19 @@ pub struct ScannedLine {
 /// assert_eq!(results[2].brace_delta, -1); // closing }
 /// ```
 pub struct CodeScanner {
-    #[allow(dead_code)] // Red stub
     rules: LexicalRules,
+    state: LexicalState,
+    depth: u32,
 }
 
 impl CodeScanner {
     /// Create a new scanner with language-specific lexical rules.
-    pub fn new(_rules: LexicalRules) -> Self {
-        todo!() // Red stub
+    pub fn new(rules: LexicalRules) -> Self {
+        Self {
+            rules,
+            state: LexicalState::Code,
+            depth: 0,
+        }
     }
 
     /// Scan a single line, updating internal state.
@@ -193,21 +232,343 @@ impl CodeScanner {
     /// Must be called in order (line 1, line 2, ...) because the
     /// scanner carries context across lines (e.g., multi-line strings,
     /// block comments).
-    pub fn scan_line(&mut self, _line_number: u32, _line: &str) -> ScannedLine {
-        todo!() // Red stub
+    pub fn scan_line(&mut self, line_number: u32, line: &str) -> ScannedLine {
+        let chars: Vec<char> = line.chars().collect();
+        let len = chars.len();
+        let mut i = 0;
+        let mut delta: i32 = 0;
+        let was_code_at_start = self.state == LexicalState::Code;
+        let mut entered_code = false;
+
+        while i < len {
+            match &self.state {
+                LexicalState::Code => {
+                    entered_code = true;
+
+                    // Check for line comment
+                    if !self.rules.line_comment.is_empty() {
+                        let lc = self.rules.line_comment;
+                        if lc == "//"
+                            && i + 1 < len
+                            && char_at(&chars, i) == '/'
+                            && char_at(&chars, i + 1) == '/'
+                        {
+                            self.state = LexicalState::LineComment;
+                            break; // rest of line is comment
+                        }
+                        if lc == "#" && char_at(&chars, i) == '#' {
+                            self.state = LexicalState::LineComment;
+                            break;
+                        }
+                    }
+
+                    // Check for block comment
+                    if self.rules.block_comments
+                        && i + 1 < len
+                        && char_at(&chars, i) == '/'
+                        && char_at(&chars, i + 1) == '*'
+                    {
+                        self.state = LexicalState::BlockComment { depth: 1 };
+                        i += 2;
+                        continue;
+                    }
+
+                    // Check for Rust raw string: r#"..."# or br#"..."#
+                    if self.rules.raw_strings == RawStringSyntax::RustHashes {
+                        if let Some(hashes) = self.try_rust_raw_string(&chars, i) {
+                            self.state = LexicalState::RawString { hashes };
+                            // Skip past r[b]###"
+                            let mut skip = if char_at(&chars, i) == 'b' { 2 } else { 1 }; // b?r
+                            skip += hashes as usize; // #'s
+                            skip += 1; // opening "
+                            i += skip;
+                            continue;
+                        }
+                    }
+
+                    // Check for triple-quote strings (Python)
+                    if self.rules.raw_strings == RawStringSyntax::TripleQuote
+                        && i + 2 < len
+                        && (char_at(&chars, i) == '"' || char_at(&chars, i) == '\'')
+                        && char_at(&chars, i + 1) == char_at(&chars, i)
+                        && char_at(&chars, i + 2) == char_at(&chars, i)
+                    {
+                        let q = char_at(&chars, i);
+                        self.state = LexicalState::TripleQuote { quote: q };
+                        i += 3;
+                        continue;
+                    }
+
+                    // Check for Go backtick raw string
+                    if self.rules.raw_strings == RawStringSyntax::GoBacktick
+                        && char_at(&chars, i) == '`'
+                    {
+                        self.state = LexicalState::StringLiteral {
+                            quote: '`',
+                            escapable: false,
+                        };
+                        i += 1;
+                        continue;
+                    }
+
+                    // Check for template literal (JS/TS)
+                    if self.rules.template_literals && char_at(&chars, i) == '`' {
+                        self.state = LexicalState::TemplateLiteral;
+                        i += 1;
+                        continue;
+                    }
+
+                    // Check for character literal (Rust/C/Java)
+                    if self.rules.char_literals && char_at(&chars, i) == '\'' {
+                        if self.is_char_literal(&chars, i) {
+                            self.state = LexicalState::CharLiteral;
+                            i += 1; // skip opening quote, content handled in CharLiteral state
+                            continue;
+                        }
+                        // Not a char literal (e.g., Rust lifetime) — stay in Code
+                        i += 1;
+                        continue;
+                    }
+
+                    // Check for string literal with "
+                    if char_at(&chars, i) == '"' {
+                        self.state = LexicalState::StringLiteral {
+                            quote: '"',
+                            escapable: true,
+                        };
+                        i += 1;
+                        continue;
+                    }
+
+                    // Check for single-quote string (non-char-literal languages like JS/Python)
+                    if !self.rules.char_literals && char_at(&chars, i) == '\'' {
+                        self.state = LexicalState::StringLiteral {
+                            quote: '\'',
+                            escapable: true,
+                        };
+                        i += 1;
+                        continue;
+                    }
+
+                    // Check for byte string: b"..."
+                    if char_at(&chars, i) == 'b' && i + 1 < len && char_at(&chars, i + 1) == '"' {
+                        self.state = LexicalState::StringLiteral {
+                            quote: '"',
+                            escapable: true,
+                        };
+                        i += 2;
+                        continue;
+                    }
+
+                    // Count braces
+                    if char_at(&chars, i) == '{' {
+                        delta += 1;
+                        self.depth = self.depth.saturating_add(1);
+                    } else if char_at(&chars, i) == '}' {
+                        delta -= 1;
+                        self.depth = self.depth.saturating_sub(1);
+                    }
+
+                    i += 1;
+                }
+
+                LexicalState::LineComment => {
+                    // Consume rest of line (handled by break above)
+                    break;
+                }
+
+                LexicalState::BlockComment { depth: d } => {
+                    let d = *d;
+                    if i + 1 < len && char_at(&chars, i) == '*' && char_at(&chars, i + 1) == '/' {
+                        if d <= 1 {
+                            self.state = LexicalState::Code;
+                        } else {
+                            self.state = LexicalState::BlockComment {
+                                depth: d.saturating_sub(1),
+                            };
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if self.rules.nested_comments
+                        && i + 1 < len
+                        && char_at(&chars, i) == '/'
+                        && char_at(&chars, i + 1) == '*'
+                    {
+                        self.state = LexicalState::BlockComment {
+                            depth: d.saturating_add(1),
+                        };
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                }
+
+                LexicalState::StringLiteral { quote, escapable } => {
+                    let q = *quote;
+                    let esc = *escapable;
+                    if esc && char_at(&chars, i) == '\\' {
+                        i += 2; // skip escaped char
+                        continue;
+                    }
+                    if char_at(&chars, i) == q {
+                        self.state = LexicalState::Code;
+                        i += 1;
+                        continue;
+                    }
+                    i += 1;
+                }
+
+                LexicalState::RawString { hashes } => {
+                    let h = *hashes;
+                    // Look for closing " followed by h #'s
+                    if char_at(&chars, i) == '"' {
+                        let mut count = 0u32;
+                        let mut j = i + 1;
+                        while j < len && char_at(&chars, j) == '#' && count < h {
+                            count += 1;
+                            j += 1;
+                        }
+                        if count == h {
+                            self.state = LexicalState::Code;
+                            i = j;
+                            continue;
+                        }
+                    }
+                    i += 1;
+                }
+
+                LexicalState::TripleQuote { quote } => {
+                    let q = *quote;
+                    if i + 2 < len
+                        && char_at(&chars, i) == q
+                        && char_at(&chars, i + 1) == q
+                        && char_at(&chars, i + 2) == q
+                    {
+                        self.state = LexicalState::Code;
+                        i += 3;
+                        continue;
+                    }
+                    i += 1;
+                }
+
+                LexicalState::CharLiteral => {
+                    if char_at(&chars, i) == '\\' {
+                        i += 2; // skip escaped char
+                        continue;
+                    }
+                    if char_at(&chars, i) == '\'' {
+                        self.state = LexicalState::Code;
+                        i += 1;
+                        continue;
+                    }
+                    i += 1;
+                }
+
+                LexicalState::TemplateLiteral => {
+                    if char_at(&chars, i) == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if char_at(&chars, i) == '`' {
+                        self.state = LexicalState::Code;
+                        i += 1;
+                        continue;
+                    }
+                    i += 1;
+                }
+            }
+        }
+
+        // Reset line comment at end of line
+        if self.state == LexicalState::LineComment {
+            self.state = LexicalState::Code;
+        }
+
+        let is_non_code = !was_code_at_start && !entered_code;
+
+        ScannedLine {
+            line_number,
+            brace_delta: delta,
+            depth_after: self.depth,
+            is_non_code,
+        }
     }
 
     /// Scan all lines of a source file.
     ///
     /// Convenience method that splits on `\n` and calls
     /// [`scan_line`](Self::scan_line) for each line.
-    pub fn scan_all(&mut self, _content: &str) -> Vec<ScannedLine> {
-        Vec::new() // Red stub
+    pub fn scan_all(&mut self, content: &str) -> Vec<ScannedLine> {
+        content
+            .lines()
+            .enumerate()
+            .map(|(i, line)| self.scan_line(u32::try_from(i + 1).unwrap_or(u32::MAX), line))
+            .collect()
     }
 
     /// Current cumulative brace depth.
     pub fn current_depth(&self) -> u32 {
-        0 // Red stub
+        self.depth
+    }
+
+    /// Check if `char_at(chars, i)` starts a Rust raw string (`r"`, `r#"`, `br"`, `br#"`).
+    /// Returns the hash count if it does.
+    fn try_rust_raw_string(&self, chars: &[char], i: usize) -> Option<u32> {
+        let len = chars.len();
+        let mut pos = i;
+
+        // Optional 'b' prefix
+        if pos < len && char_at(chars, pos) == 'b' {
+            pos += 1;
+        }
+
+        // Must have 'r'
+        if pos >= len || char_at(chars, pos) != 'r' {
+            return None;
+        }
+        pos += 1;
+
+        // Count '#' characters
+        let mut hashes = 0u32;
+        while pos < len && char_at(chars, pos) == '#' {
+            hashes = hashes.saturating_add(1);
+            pos += 1;
+        }
+
+        // Must end with '"'
+        if pos < len && char_at(chars, pos) == '"' {
+            // Disambiguation: r"..." is a raw string (0 hashes).
+            // But we need at least 'r' followed by '"' or '#'s then '"'.
+            Some(hashes)
+        } else {
+            None
+        }
+    }
+
+    /// Heuristic to distinguish character literal `'x'` from Rust lifetime `'a`.
+    ///
+    /// Returns `true` if this looks like a char literal, `false` for lifetime.
+    fn is_char_literal(&self, chars: &[char], i: usize) -> bool {
+        let len = chars.len();
+        // Need at least 3 chars: 'x' (quote, char, quote)
+        if i + 2 >= len {
+            return false;
+        }
+
+        let next = char_at(chars, i + 1);
+
+        // Escaped char: '\n', '\\'
+        if next == '\\' && i + 3 < len && char_at(chars, i + 3) == '\'' {
+            return true;
+        }
+        // Simple char: 'a'
+        if char_at(chars, i + 2) == '\'' {
+            return true;
+        }
+
+        // Otherwise it's a lifetime or label
+        false
     }
 }
 
@@ -227,8 +588,19 @@ impl CodeScanner {
 ///
 /// Index into `scanned` of the line containing the matching closing brace.
 /// If no closing brace is found, returns the last line index (graceful degradation).
-pub fn find_closing_brace(_scanned: &[ScannedLine], _open_idx: usize) -> usize {
-    0 // Red stub
+pub fn find_closing_brace(scanned: &[ScannedLine], open_idx: usize) -> usize {
+    let Some(open_line) = scanned.get(open_idx) else {
+        return scanned.len().saturating_sub(1);
+    };
+
+    let target_depth = open_line.depth_after.saturating_sub(1);
+    for (i, line) in scanned.iter().enumerate().skip(open_idx + 1) {
+        if line.depth_after == target_depth && line.brace_delta < 0 {
+            return i;
+        }
+    }
+    // Unclosed brace — return last line (graceful degradation)
+    scanned.len().saturating_sub(1)
 }
 
 #[cfg(test)]

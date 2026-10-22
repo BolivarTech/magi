@@ -41,20 +41,60 @@ pub struct Hunk {
 /// let hunks = parse_hunks("f.c", diff);
 /// assert_eq!(hunks.len(), 1);
 /// ```
-pub fn parse_hunks(_file: &str, _diff: &str) -> Vec<Hunk> {
-    Vec::new() // Red stub
+pub fn parse_hunks(file: &str, diff: &str) -> Vec<Hunk> {
+    if diff.is_empty() {
+        return vec![];
+    }
+    let header = extract_header(diff);
+    let bodies = split_on_hunk_markers(diff);
+    if bodies.is_empty() {
+        return vec![Hunk {
+            file: file.to_string(),
+            content: diff.to_string(),
+            lines: diff.lines().count(),
+        }];
+    }
+    bodies
+        .into_iter()
+        .map(|body| {
+            let content = format!("{}\n{}", header, body);
+            let lines = content.lines().count();
+            Hunk {
+                file: file.to_string(),
+                content,
+                lines,
+            }
+        })
+        .collect()
 }
 
 /// Extract the file header lines (before the first `@@` marker).
-#[allow(dead_code)] // Red stub
-fn extract_header(_diff: &str) -> String {
-    String::new() // Red stub
+fn extract_header(diff: &str) -> String {
+    diff.lines()
+        .take_while(|line| !line.starts_with("@@"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Split diff into hunk bodies starting at each `@@` marker.
-#[allow(dead_code)] // Red stub
-fn split_on_hunk_markers(_diff: &str) -> Vec<String> {
-    Vec::new() // Red stub
+fn split_on_hunk_markers(diff: &str) -> Vec<String> {
+    let mut bodies = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            if let Some(chunk) = current.take() {
+                bodies.push(chunk.join("\n"));
+            }
+            current = Some(vec![line]);
+        } else if let Some(ref mut chunk) = current {
+            chunk.push(line);
+        }
+    }
+    if let Some(chunk) = current {
+        bodies.push(chunk.join("\n"));
+    }
+    bodies
 }
 
 #[cfg(test)]
