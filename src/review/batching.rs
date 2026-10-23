@@ -254,16 +254,16 @@ pub fn plan_batches_with(
 ) -> Result<Vec<ReviewBatch>, ReviewError> {
     let mut packer = Packer::new(limit_tokens, companion);
     for file in files {
+        let header = file_header(&file.path);
+        let header_tokens = estimate_tokens(&header);
         let items = match &file.diff {
             Some(diff) => hunk_items(&file.path, diff)?,
-            None => whole_file_items(&file.path, source, registry, limit_tokens)?,
+            None => whole_file_items(&file.path, source, registry, limit_tokens, header_tokens)?,
         };
         if items.is_empty() {
             continue;
         }
-        let header = file_header(&file.path);
         scan(&file.path, &header)?;
-        let header_tokens = estimate_tokens(&header);
         for item in items {
             packer.add(item, header_tokens)?;
         }
@@ -332,12 +332,13 @@ fn side_range(side: &str) -> Option<(u32, u32)> {
 }
 
 /// The items of a file reviewed whole: none when empty, the whole file when it fits in an empty
-/// batch with its header, otherwise its non-blank units.
+/// batch with its header (`header_tokens`), otherwise its non-blank units.
 fn whole_file_items(
     path: &str,
     source: &dyn ContentSource,
     registry: &LanguageRegistry,
     limit_tokens: usize,
+    header_tokens: usize,
 ) -> Result<Vec<BatchItem>, ReviewError> {
     let bytes = source.read(path)?.ok_or_else(|| {
         ReviewError::Io(format!(
@@ -358,7 +359,7 @@ fn whole_file_items(
         text,
         lines,
     };
-    let alone = estimate_tokens(whole.text()).saturating_add(estimate_tokens(&file_header(path)));
+    let alone = estimate_tokens(whole.text()).saturating_add(header_tokens);
     if alone <= limit_tokens {
         return Ok(vec![whole]);
     }
