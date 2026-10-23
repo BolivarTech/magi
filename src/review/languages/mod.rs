@@ -181,6 +181,11 @@ impl LanguageRegistry {
         registry
     }
 
+    /// File extensions (without the dot) that have a registered extractor.
+    pub fn extensions(&self) -> impl Iterator<Item = &str> {
+        self.extractors.keys().map(String::as_str)
+    }
+
     /// Get the extractor for a file path, or `None` for unknown extensions.
     pub fn get(&self, file_path: &str) -> Option<&ExtractorKind> {
         let ext = file_path.rsplit('.').next()?;

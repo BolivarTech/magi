@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use magi_core::schema::{AgentName, AgentOutput, Finding};
+use magi_core::schema::{AgentName, AgentOutput, Finding, Severity};
 
 use super::index::{LexicalIndex, Reviewed};
 
@@ -48,21 +48,162 @@ pub struct Validation {
     pub symbol_unverified: Vec<Discarded>,
 }
 
-/// Identifier-shaped spans between single backticks.
-pub fn cited_identifiers(text: &str) -> Vec<String> {
-    todo!("{text}")
+/// Separator of a qualified citation, as in `Baz::qux`.
+const PATH_SEPARATOR: &str = "::";
+
+/// Whether `s` is `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Normalizes a reported location to a workspace-relative path with `/`.
-pub fn normalize_location(
+/// Whether `s` is identifiers joined by `::` or `.`.
+fn is_citation(s: &str) -> bool {
+    s.split(PATH_SEPARATOR)
+        .all(|part| part.split('.').all(is_identifier))
+}
+
+/// The code spans of `text` that look like a symbol: identifiers joined by `::` or `.`, between a
+/// pair of single backticks (`Baz::qux`, `self.helper`). A run of two or more backticks is never
+/// a delimiter, so ``` ``x`` ``` is not a citation.
+///
+/// Complexity: O(len of `text`).
+pub(crate) fn cited_identifiers(text: &str) -> Vec<String> {
+    // Runs of consecutive backticks as (start byte, length); a backtick is one byte.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (pos, c) in text.char_indices() {
+        if c != '`' {
+            continue;
+        }
+        match runs.last_mut() {
+            Some((start, len)) if *start + *len == pos => *len += 1,
+            _ => runs.push((pos, 1)),
+        }
+    }
+    let mut cited = Vec::new();
+    let mut i = 0;
+    while let Some(&(open, open_len)) = runs.get(i) {
+        match runs.get(i + 1) {
+            Some(&(close, close_len)) if open_len == 1 && close_len == 1 => {
+                if let Some(span) = text.get(open + 1..close).filter(|s| is_citation(s)) {
+                    cited.push(span.to_string());
+                }
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    cited
+}
+
+/// `path` with `\` replaced by `/`.
+fn slashed(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+/// Whether `head` is `workspace` once a drive letter's case is ignored.
+fn same_prefix(head: &str, workspace: &str) -> bool {
+    if head == workspace {
+        return true;
+    }
+    let is_drive = workspace.get(1..2) == Some(":");
+    is_drive
+        && head
+            .get(..1)
+            .zip(workspace.get(..1))
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        && head.get(1..) == workspace.get(1..)
+}
+
+/// Normalizes a reported location to a workspace-relative path with `/` and `line = 0` to `None`.
+///
+/// Works on the text, not on `Path`, so the result is the same on every platform: `\` becomes `/`
+/// in both arguments, the workspace is removed as a prefix only at a component boundary (`/w2/a.rs`
+/// does not start with `/w`), the drive letter is compared ignoring case, and a leading `/` left
+/// by that removal and any leading `./` are dropped. An absolute path outside the workspace stays
+/// absolute.
+///
+/// Complexity: O(len of `file` + len of `workspace`).
+pub(crate) fn normalize_location(
     workspace: &Path,
     file: &str,
     line: Option<u32>,
 ) -> (String, Option<u32>) {
-    todo!("{} {file} {line:?}", workspace.display())
+    let workspace = slashed(&workspace.to_string_lossy());
+    let workspace = workspace.trim_end_matches('/');
+    let mut path = slashed(file);
+    if !workspace.is_empty() {
+        let relative = path
+            .get(..workspace.len())
+            .filter(|head| same_prefix(head, workspace))
+            .and_then(|_| path.get(workspace.len()..))
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+            .map(|rest| rest.trim_start_matches('/').to_string());
+        if let Some(relative) = relative {
+            path = relative;
+        }
+    }
+    while let Some(rest) = path.strip_prefix("./") {
+        path = rest.to_string();
+    }
+    (path, line.filter(|&l| l != 0))
 }
 
-/// Removes from `agents` every finding the review cannot support.
+/// The first cited symbol of `finding` that the index lacks, reading `title` then `detail`.
+/// File names (`consts.rs`) are not symbols and are skipped.
+fn first_missing_symbol(finding: &Finding, index: &LexicalIndex) -> Option<String> {
+    cited_identifiers(&finding.title)
+        .into_iter()
+        .chain(cited_identifiers(&finding.detail))
+        .find(|c| !index.is_file_name(c) && !index.contains(c))
+}
+
+/// The failed check of one finding, if any: file, then range, then symbol (the first to fail
+/// names the cause). The symbol is set only for `UnknownSymbol`.
+fn check(
+    finding: &Finding,
+    location: &(String, Option<u32>),
+    reviewed: &Reviewed,
+    index: &LexicalIndex,
+) -> Option<(DiscardCause, Option<String>)> {
+    finding.file.as_ref()?;
+    let (file, line) = location;
+    if !reviewed.has_file(file) {
+        return Some((DiscardCause::FileNotReviewed, None));
+    }
+    if line.is_some_and(|l| !reviewed.contains_line(file, l)) {
+        return Some((DiscardCause::LineOutOfRange, None));
+    }
+    if index.is_complete() && index.has_extractor(file) {
+        return first_missing_symbol(finding, index)
+            .map(|s| (DiscardCause::UnknownSymbol, Some(s)));
+    }
+    None
+}
+
+/// Removes from `agents` every finding the review cannot support and returns what was removed.
+///
+/// Runs per batch **after** every completed batch filled `reviewed` (U24: "reviewed" is the union
+/// of all batches). Checks are independent and run in this order, the first failure naming the
+/// cause: the file was shown, the line lies in a shown range, every symbol cited in backticks in
+/// `title` and `detail` occurs in the code (only for files with a language extractor, and only
+/// with a complete index). A finding without `file` skips the first two; one without `line`, the
+/// range check.
+///
+/// A reported `critical` whose only failure is the symbol check stays in `agents` for the gate
+/// (U21) and is recorded in [`Validation::symbol_unverified`]; file and range failures discard it.
+///
+/// # Side effects
+///
+/// Discarded findings are removed from `agents[i].findings`. Every finding that stays leaves with
+/// the `file`/`line` of [`normalize_location`], the one point of normalization, so later stages
+/// see the same path as `reviewed`. A discarded finding is returned as the mage reported it.
+///
+/// Complexity: O(f log r + c) for f findings, r ranges per file and c characters of title and
+/// detail.
 pub fn validate_batch(
     agents: &mut [AgentOutput],
     batch: usize,
@@ -70,8 +211,48 @@ pub fn validate_batch(
     index: &LexicalIndex,
     workspace: &Path,
 ) -> Validation {
-    let _ = (reviewed, index);
-    todo!("{} {batch} {}", agents.len(), workspace.display())
+    let mut validation = Validation::default();
+    for agent in agents.iter_mut() {
+        let name = agent.agent;
+        let mut kept = Vec::with_capacity(agent.findings.len());
+        for finding in std::mem::take(&mut agent.findings) {
+            let location = normalize_location(
+                workspace,
+                finding.file.as_deref().unwrap_or_default(),
+                finding.line,
+            );
+            let verdict = check(&finding, &location, reviewed, index);
+            let record = |cause, symbol| Discarded {
+                agent: name,
+                batch,
+                finding: finding.clone(),
+                cause,
+                symbol,
+            };
+            match verdict {
+                Some((DiscardCause::UnknownSymbol, symbol))
+                    if finding.severity == Severity::Critical =>
+                {
+                    validation
+                        .symbol_unverified
+                        .push(record(DiscardCause::UnknownSymbol, symbol));
+                }
+                Some((cause, symbol)) => {
+                    validation.discarded.push(record(cause, symbol));
+                    continue;
+                }
+                None => {}
+            }
+            let mut finding = finding;
+            if finding.file.is_some() {
+                finding.file = Some(location.0);
+            }
+            finding.line = location.1;
+            kept.push(finding);
+        }
+        agent.findings = kept;
+    }
+    validation
 }
 
 #[cfg(test)]
