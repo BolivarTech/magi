@@ -1028,6 +1028,40 @@ mod tests {
     }
 
     #[test]
+    fn history_inputs_ignore_nothing_even_inside_a_repository_whose_rules_match() {
+        // The test above cannot see a git call for a history input: its empty FakeGit fails the
+        // call, and outside a repository that failure reads as "ignore nothing". Here git
+        // answers, and would name an ignored file, so only skipping git keeps the set empty.
+        use crate::review::input::ReviewInput;
+        use crate::review::test_support::FakeGit;
+        let answering = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            (
+                "ls-files --cached --ignored --exclude-standard -z -- .",
+                Ok(".env\0"),
+            ),
+            (
+                "ls-files --cached --others --ignored --exclude-standard -z -- .",
+                Ok(".env\0"),
+            ),
+        ]);
+        for input in [
+            ReviewInput::Commit(None),
+            ReviewInput::Range {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            ReviewInput::Branches {
+                base: "a".into(),
+                head: "b".into(),
+            },
+        ] {
+            let ignored = ignored_paths(&input, ".", Path::new("/w"), &answering).expect("no git");
+            assert!(ignored.is_empty(), "{input:?}: {ignored:?}");
+        }
+    }
+
+    #[test]
     fn a_git_failure_inside_a_repository_is_an_error_not_an_empty_ignore_set() {
         // [CP2 MS2 S1a loop 11] an empty set here would review an explicitly requested ignored `.env`.
         use crate::review::input::ReviewInput;
