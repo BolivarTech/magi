@@ -196,7 +196,7 @@ fn check(
 /// # Side effects
 ///
 /// Discarded findings are removed from `agents[i].findings`. Every finding that stays leaves with
-/// the `file`/`line` of [`normalize_location`], the one point of normalization, so later stages
+/// the `file`/`line` of `normalize_location`, the one point of normalization, so later stages
 /// see the same path as `reviewed`. A discarded finding is returned as the mage reported it.
 ///
 /// Complexity: O(f log r + c) for f findings, r ranges per file and c characters of title and
