@@ -42,6 +42,7 @@ pub enum ReviewInput {
 }
 
 /// One file to review.
+#[derive(Debug)]
 pub struct ReviewFile {
     /// Path relative to the workspace, with `/` separators.
     pub path: String,

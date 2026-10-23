@@ -869,4 +869,110 @@ mod tests {
             Some(b"fn f() {}\n".to_vec())
         );
     }
+
+    #[test]
+    fn a_tracked_ignored_file_in_a_subdirectory_is_named_like_the_enumeration_names_it() {
+        // The workspace is below the repo root and .gitignore lives at the root: both functions must speak `sub/x`.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("ws").join("sub")).expect("mkdir");
+        std::fs::write(d.path().join(".gitignore"), "*.env\n").expect("write");
+        std::fs::write(d.path().join("ws/sub/tracked.env"), "HOST=internal\n").expect("write");
+        std::fs::write(d.path().join("ws/sub/a.rs"), "fn a() {}\n").expect("write");
+        git(
+            d.path(),
+            &[
+                "add",
+                "-f",
+                ".gitignore",
+                "ws/sub/tracked.env",
+                "ws/sub/a.rs",
+            ],
+        );
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let ws = d.path().join("ws");
+        let g = ScrubbedGit::new(ws.clone());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let input = ReviewInput::Directory("sub".into());
+        let listed =
+            magi_rs::review::input::resolve_input(&input, &ws, &g, &allow).expect("resolves");
+        let ignored =
+            magi_rs::review::filter::ignored_paths(&input, "sub", &ws, &g).expect("one git call");
+        assert_eq!(
+            ignored.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["sub/tracked.env"]
+        );
+        let paths: Vec<&str> = listed.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"sub/tracked.env"), "{paths:?}");
+    }
+
+    #[test]
+    fn an_uncommitted_review_in_a_sub_workspace_lists_nothing_outside_it() {
+        // [CP2 MS2 S1a loop 12, pins T2.3's measured claim] `ls-files --others` without a pathspec stays in the cwd's subtree.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("ws")).expect("mkdir");
+        std::fs::write(d.path().join("ws/a.rs"), "fn a() {}\n").expect("write");
+        git(d.path(), &["add", "ws/a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join("ws/new.rs"), "fn n() {}\n").expect("write");
+        std::fs::write(d.path().join("outside.rs"), "fn o() {}\n").expect("write");
+        let ws = d.path().join("ws");
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let input = magi_rs::review::input::ReviewInput::Uncommitted;
+        let r = magi_rs::review::input::resolve_input(
+            &input,
+            &ws,
+            &ScrubbedGit::new(ws.clone()),
+            &allow,
+        )
+        .expect("resolves");
+        assert_eq!(
+            r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["new.rs"]
+        );
+    }
+
+    #[test]
+    fn the_ignored_query_takes_a_glob_character_literally() {
+        // [CP2 MS2 S1b loop 14, measured with git 2.56] as a glob, `src[0]` named the tracked-and-ignored `src0`.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("src[0]")).expect("mkdir");
+        std::fs::write(d.path().join("src[0]/f.rs"), "fn f() {}\n").expect("write");
+        std::fs::write(d.path().join(".gitignore"), "src0\n").expect("write");
+        std::fs::write(d.path().join("src0"), "x\n").expect("write");
+        git(d.path(), &["add", "-f", "."]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let input = magi_rs::review::input::ReviewInput::Directory("src[0]".into());
+        let ignored = magi_rs::review::filter::ignored_paths(
+            &input,
+            "src[0]",
+            d.path(),
+            &ScrubbedGit::new(d.path().to_path_buf()),
+        )
+        .expect("one git call");
+        assert!(ignored.is_empty(), "{ignored:?}");
+    }
+
+    #[test]
+    fn a_file_requested_by_name_is_ignored_whether_tracked_or_not() {
+        // [CP2 MS2 S1b loop 12, measured with git 2.56] the File query returns tracked-ignored AND untracked-ignored.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("ws").join("sub")).expect("mkdir");
+        std::fs::write(d.path().join(".gitignore"), "*.env\n").expect("write");
+        std::fs::write(d.path().join("ws/sub/tracked.env"), "HOST=internal\n").expect("write");
+        std::fs::write(d.path().join("ws/sub/untracked.env"), "HOST=internal\n").expect("write");
+        git(d.path(), &["add", "-f", ".gitignore", "ws/sub/tracked.env"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let ws = d.path().join("ws");
+        let g = ScrubbedGit::new(ws.clone());
+        for p in ["sub/tracked.env", "sub/untracked.env"] {
+            let ignored =
+                magi_rs::review::filter::ignored_paths(&ReviewInput::File(p.into()), p, &ws, &g)
+                    .expect("one git call");
+            assert!(ignored.contains(p), "{p}: {ignored:?}");
+        }
+    }
 }
