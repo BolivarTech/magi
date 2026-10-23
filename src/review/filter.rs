@@ -13,17 +13,13 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::error::ReviewError;
-use super::input::{in_work_tree, split_nul, ReviewFile, ReviewInput};
+use super::input::{in_work_tree, is_binary_section, split_nul, ReviewFile, ReviewInput};
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
 use super::source::{is_never_reviewed, ContentSource, GitCommand};
 
 /// Bytes git inspects for a NUL to call a file binary; the same heuristic here.
 const BINARY_SNIFF_BYTES: usize = 8_000;
-/// The opening of git's line for a binary diff section.
-const BINARY_MARKER_START: &str = "Binary files ";
-/// The end of git's line for a binary diff section.
-const BINARY_MARKER_END: &str = " differ";
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
 const MISSING: &str = "missing";
 /// The tracing target of the filter's run-log entries.
@@ -123,7 +119,8 @@ enum Verdict {
 /// secret → `secret`, without reading it; a file that does not exist → an error, never a skip;
 /// over the byte cap → `too large`; a NUL in the first 8 000 bytes → `binary`; not UTF-8 →
 /// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
-/// A diff section that is only git's `Binary files … differ` line is `binary` without reading.
+/// A diff section whose header lines (before the first `@@`) carry git's binary marker is
+/// `binary` without reading anything ([`is_binary_section`]).
 /// The binary and UTF-8 checks run on the new side, or on the old one for a deleted file. The
 /// secret scan covers both whole sides, not only what is sent: the safe direction.
 ///
@@ -279,15 +276,6 @@ fn read_side(read: Result<Option<Vec<u8>>, ReviewError>) -> Result<Side, ReviewE
         Err(ReviewError::Protected(_)) => Ok(Side::Skip(SkipCause::Ignored)),
         Err(other) => Err(other),
     }
-}
-
-/// Whether a diff section is only git's `Binary files … differ` line (a line inside a hunk is
-/// text).
-fn is_binary_section(diff: &str) -> bool {
-    let line = diff.trim_end_matches(['\n', '\r']);
-    !line.contains('\n')
-        && line.starts_with(BINARY_MARKER_START)
-        && line.ends_with(BINARY_MARKER_END)
 }
 
 /// The paths `.gitignore` excludes that a review can still reach.

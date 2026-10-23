@@ -88,6 +88,10 @@ const LS_FILES_ALL: &[&str] = &[
     "--exclude-standard",
     "-z",
 ];
+/// The opening of git's header line for a binary section (`Binary files … differ`).
+const BINARY_MARKER: &str = "Binary files ";
+/// git's header line for a binary section of a `--binary` diff.
+const BINARY_PATCH_MARKER: &str = "GIT binary patch";
 /// The mode of a gitlink (a submodule): its "content" is a commit id, never reviewed.
 const GITLINK_MODE: &str = "160000";
 
@@ -485,6 +489,24 @@ pub(crate) fn split_diff(bytes: &[u8]) -> (Vec<ReviewFile>, Vec<String>) {
     (files, not_utf8)
 }
 
+/// Whether git marks a diff section binary: a `Binary files … differ` or `GIT binary patch`
+/// line among its header lines, before the first `@@`. The same line inside a hunk is text.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::input::is_binary_section;
+///
+/// assert!(is_binary_section("diff --git a/x b/x\nBinary files a/x and b/x differ\n"));
+/// assert!(!is_binary_section("@@ -1 +1 @@\n+Binary files a/x and b/x differ\n"));
+/// ```
+pub fn is_binary_section(section: &str) -> bool {
+    section
+        .lines()
+        .take_while(|l| !l.starts_with("@@"))
+        .any(|l| l.starts_with(BINARY_MARKER) || l == BINARY_PATCH_MARKER)
+}
+
 /// The path of a section worth reviewing (it has hunks, or it is binary and gets listed), or
 /// `None` for a gitlink, a header-only section with nothing to review, or an unparseable header.
 fn reviewable_path(section: &str) -> Option<String> {
@@ -496,10 +518,7 @@ fn reviewable_path(section: &str) -> Option<String> {
         (l.starts_with("index ") || l.contains("mode "))
             && l.split(' ').next_back() == Some(GITLINK_MODE)
     });
-    let binary = header
-        .iter()
-        .any(|l| l.starts_with("Binary files ") || *l == "GIT binary patch");
-    if gitlink || !(has_hunk || binary) {
+    if gitlink || !(has_hunk || is_binary_section(section)) {
         return None;
     }
     section_path(first, &header).filter(|p| !p.is_empty())
