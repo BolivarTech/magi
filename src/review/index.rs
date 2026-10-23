@@ -259,4 +259,14 @@ mod tests {
         r.add_lines("a.rs", 1, 2);
         assert!(r.contains_line("a.rs", u32::MAX) && r.contains_line("a.rs", 2));
     }
+
+    #[test]
+    fn a_range_that_ends_at_u32_max_merges_with_a_later_one_without_overflow() {
+        let mut r = Reviewed::default();
+        r.add_lines("a.rs", 5, u32::MAX);
+        r.add_lines("a.rs", 10, 20);
+        r.add_lines("a.rs", u32::MAX, u32::MAX);
+        assert!(r.contains_line("a.rs", 5) && r.contains_line("a.rs", u32::MAX));
+        assert!(!r.contains_line("a.rs", 4));
+    }
 }

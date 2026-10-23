@@ -689,4 +689,22 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn a_kept_finding_whose_line_is_zero_leaves_without_a_line() {
+        // A finding built in memory can carry line 0 (deserialization already maps it to None).
+        let mut reviewed = Reviewed::default();
+        reviewed.add_lines("src/a.rs", 1, 5);
+        let index = LexicalIndex::build(&[], &LanguageRegistry::new());
+        let mut agents = vec![agent(serde_json::json!([
+            {"severity":"warning","title":"t","detail":"d","file":"src/a.rs","line":3}
+        ]))];
+        agents[0].findings[0].line = Some(0);
+        assert!(
+            validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w"))
+                .discarded
+                .is_empty()
+        );
+        assert_eq!(agents[0].findings[0].line, None);
+    }
 }
