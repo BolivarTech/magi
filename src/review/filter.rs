@@ -565,6 +565,58 @@ mod tests {
     }
 
     #[test]
+    fn an_armored_pgp_private_key_skips_the_file_and_logs_only_its_pattern_name() {
+        // Split so tests/no_hardcoded_secrets.rs (which flags the literal `-----BEGIN`) reads no
+        // header here; the body is obviously fake.
+        let begin = concat!("-----", "BEGIN PGP PRIVATE KEY BLOCK-----");
+        let end = concat!("-----", "END PGP PRIVATE KEY BLOCK-----");
+        let body = "lQOYBGZ0FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE";
+        let text = format!("const K: &str = r\"\n{begin}\n\n{body}\n=FAKE\n{end}\n\";\n");
+        let public = concat!("-----", "BEGIN PGP PUBLIC KEY BLOCK-----");
+        let pubtext = format!("{public}\n\n{body}\n");
+        let src = MapSource::new(
+            &[
+                ("key.rs", text.as_str()),
+                ("pub.asc", pubtext.as_str()),
+                ("a.rs", "fn f() {}\n"),
+            ],
+            &[],
+        );
+        let files = vec![
+            ReviewFile {
+                path: "key.rs".into(),
+                diff: None,
+            },
+            ReviewFile {
+                path: "pub.asc".into(),
+                diff: None,
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let line = crate::logging::testutil::capture(|| {
+            let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+                .expect("a.rs kept");
+            assert_eq!(
+                f.skipped,
+                vec![Skipped {
+                    path: "key.rs".into(),
+                    cause: SkipCause::Secret
+                }]
+            );
+            // A public key is not a secret.
+            assert!(f.kept.iter().any(|k| k.path == "pub.asc"), "{f:?}");
+        });
+        assert!(
+            line.contains("key.rs") && line.contains("pgp-private-key"),
+            "{line}"
+        );
+        assert!(!line.contains(body), "{line}");
+    }
+
+    #[test]
     fn a_secret_omission_logs_the_path_and_the_pattern_name_never_the_value() {
         // [CP2 MS2 S1b loop 9] the consumer of SecretPattern.name (loop 8), pinned.
         let key = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
