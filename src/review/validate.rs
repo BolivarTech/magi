@@ -8,7 +8,7 @@ use std::path::Path;
 
 use magi_core::schema::{AgentName, AgentOutput, Finding, Severity};
 
-use super::index::{LexicalIndex, Reviewed};
+use super::index::{LexicalIndex, Reviewed, PATH_SEPARATOR};
 
 /// Why a finding left the main list.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -47,9 +47,6 @@ pub struct Validation {
     /// Reported `critical` whose only failed check is the symbol one: kept for the gate (U21).
     pub symbol_unverified: Vec<Discarded>,
 }
-
-/// Separator of a qualified citation, as in `Baz::qux`.
-const PATH_SEPARATOR: &str = "::";
 
 /// Whether `s` is `[A-Za-z_][A-Za-z0-9_]*`.
 fn is_identifier(s: &str) -> bool {

@@ -23,7 +23,7 @@ const KNOWN_FILE_EXTENSIONS: [&str; 14] = [
 ];
 
 /// Separator of a qualified citation (`Baz::qux`).
-const PATH_SEPARATOR: &str = "::";
+pub(crate) const PATH_SEPARATOR: &str = "::";
 
 /// Last segment of a citation joined by `::` or `.`.
 fn last_segment(citation: &str) -> &str {
