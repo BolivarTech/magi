@@ -3,25 +3,42 @@
 // Date: 2026-10-22
 
 //! What never leaves the process and what is not code: the per-file filter of a review.
+//!
+//! Every file of a review is classified here before any byte of it is batched: a path a review
+//! never reads or `.gitignore` excludes, a path or content that holds a secret, a file over the
+//! byte cap, a binary and a text that is not UTF-8 are left out with their cause; everything
+//! else is kept, and a kept file with no language extractor is declared.
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use super::error::ReviewError;
-use super::input::{ReviewFile, ReviewInput};
+use super::input::{inside_a_repository, split_nul, ReviewFile, ReviewInput};
 use super::languages::LanguageRegistry;
-use super::source::{ContentSource, GitCommand};
+use super::secrets::{display_path, find_secret};
+use super::source::{is_never_reviewed, ContentSource, GitCommand};
+
+/// Bytes git inspects for a NUL to call a file binary; the same heuristic here.
+const BINARY_SNIFF_BYTES: usize = 8_000;
+/// The opening of git's line for a binary diff section.
+const BINARY_MARKER_START: &str = "Binary files ";
+/// The end of git's line for a binary diff section.
+const BINARY_MARKER_END: &str = " differ";
+/// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
+const MISSING: &str = "missing";
+/// The tracing target of the filter's run-log entries.
+const LOG_TARGET: &str = "magi_rs::review";
 
 /// A file left out of a review, with why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Skipped {
-    /// The path, as it may leave the process.
+    /// The path, as it may leave the process ([`display_path`]).
     pub path: String,
     /// Why it was left out.
     pub cause: SkipCause,
 }
 
-/// Why a file was left out of a review.
+/// Why a file was left out of a review; serialized with the texts the report shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum SkipCause {
     /// A binary file.
@@ -30,7 +47,7 @@ pub enum SkipCause {
     /// Text that is not valid UTF-8.
     #[serde(rename = "not utf-8")]
     NotUtf8,
-    /// A file that holds a secret.
+    /// A file whose path or content holds a secret.
     #[serde(rename = "secret")]
     Secret,
     /// A file `.gitignore` excludes, or one a review never reads.
@@ -44,18 +61,73 @@ pub enum SkipCause {
     TooLarge,
 }
 
+impl SkipCause {
+    /// The cause's text, as [`ReviewError::NotReviewable`] carries it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::NotUtf8 => "not utf-8",
+            Self::Secret => "secret",
+            Self::Ignored => "ignored",
+            Self::OutsideWorkspace => "outside workspace",
+            Self::TooLarge => "too large",
+        }
+    }
+}
+
 /// The outcome of filtering.
 #[derive(Debug)]
 pub struct Filtered {
-    /// The files that are reviewed.
+    /// The files that are reviewed, in input order.
     pub kept: Vec<ReviewFile>,
-    /// The files left out, with their cause.
+    /// The files left out, with their cause, in input order.
     pub skipped: Vec<Skipped>,
-    /// Kept files with no language extractor.
+    /// Kept files with no language extractor, as [`display_path`] shows them.
     pub no_extractor: Vec<String>,
 }
 
+/// What classifying one file decided.
+enum Verdict {
+    /// Reviewed.
+    Keep,
+    /// Left out, with its cause.
+    Skip(SkipCause),
+}
+
 /// Splits the files of a review into what is reviewed and what is left out.
+///
+/// For each file, in this order, the first cause that applies wins: a path a review never
+/// reads (a `.git` or `.magi` component, or a name that starts with `.magi-rs-memory.db`,
+/// whatever `is_ignored` says) or one `is_ignored` names → `ignored`; a path that holds a
+/// secret → `secret`, without reading it; a file that does not exist → an error, never a skip;
+/// over the byte cap → `too large`; a NUL in the first 8 000 bytes → `binary`; not UTF-8 →
+/// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
+/// A diff section that is only git's `Binary files … differ` line is `binary` without reading.
+/// The binary and UTF-8 checks run on the new side, or on the old one for a deleted file. The
+/// secret scan covers both whole sides, not only what is sent: the safe direction.
+///
+/// # Arguments
+///
+/// * `files` - The files the input resolved to.
+/// * `source` - The review's single content source.
+/// * `registry` - The language extractors, to declare kept files with none.
+/// * `explicit` - Whether the file was requested by name: then a skip is an error.
+/// * `is_ignored` - A positive set: whether `.gitignore` excludes a path (built by the caller
+///   from [`ignored_paths`], once per review).
+///
+/// # Returns
+///
+/// The kept files, the skipped ones and the kept ones with no extractor. Every path that
+/// leaves the process goes through [`display_path`]. Each `secret` skip writes one INFO entry
+/// with the shown path and the pattern's name, never the value.
+///
+/// # Errors
+///
+/// [`ReviewError::NotReviewable`] when `explicit` and the file is skipped or missing,
+/// [`ReviewError::Io`] when an enumerated file disappeared, [`ReviewError::NothingToReview`]
+/// when no file is kept, and any other error of `source`.
+///
+/// O(total bytes read) time.
 pub fn filter_files(
     files: Vec<ReviewFile>,
     source: &dyn ContentSource,
@@ -63,19 +135,209 @@ pub fn filter_files(
     explicit: bool,
     is_ignored: &dyn Fn(&str) -> bool,
 ) -> Result<Filtered, ReviewError> {
-    let _ = (files, source, registry, explicit, is_ignored);
-    todo!()
+    let mut filtered = Filtered {
+        kept: Vec::new(),
+        skipped: Vec::new(),
+        no_extractor: Vec::new(),
+    };
+    for file in files {
+        match classify(&file, source, is_ignored, explicit)? {
+            Verdict::Keep => {
+                if registry.get(&file.path).is_none() {
+                    filtered.no_extractor.push(display_path(&file.path));
+                }
+                filtered.kept.push(file);
+            }
+            Verdict::Skip(cause) if explicit => {
+                return Err(ReviewError::NotReviewable {
+                    path: display_path(&file.path),
+                    cause: cause.as_str(),
+                })
+            }
+            Verdict::Skip(cause) => filtered.skipped.push(Skipped {
+                path: display_path(&file.path),
+                cause,
+            }),
+        }
+    }
+    if filtered.kept.is_empty() {
+        return Err(ReviewError::NothingToReview);
+    }
+    Ok(filtered)
+}
+
+/// Classifies one file (see [`filter_files`] for the order).
+fn classify(
+    file: &ReviewFile,
+    source: &dyn ContentSource,
+    is_ignored: &dyn Fn(&str) -> bool,
+    explicit: bool,
+) -> Result<Verdict, ReviewError> {
+    let path = file.path.as_str();
+    if is_never_reviewed(path) || is_ignored(path) {
+        return Ok(Verdict::Skip(SkipCause::Ignored));
+    }
+    if let Some(name) = find_secret(path) {
+        return Ok(secret(path, name));
+    }
+    if file.diff.as_deref().is_some_and(is_binary_section) {
+        return Ok(Verdict::Skip(SkipCause::Binary));
+    }
+    let new = match read_side(source.read(path))? {
+        Side::Content(bytes) => bytes,
+        Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
+    };
+    let old = match &file.diff {
+        Some(_) => match read_side(source.read_old(path))? {
+            Side::Content(bytes) => bytes,
+            Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
+        },
+        None => None,
+    };
+    if new.is_none() && file.diff.is_none() {
+        return Err(if explicit {
+            ReviewError::NotReviewable {
+                path: display_path(path),
+                cause: MISSING,
+            }
+        } else {
+            ReviewError::Io(format!(
+                "{} disappeared during the review",
+                display_path(path)
+            ))
+        });
+    }
+    if let Some(primary) = new.as_deref().or(old.as_deref()) {
+        if primary.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
+            return Ok(Verdict::Skip(SkipCause::Binary));
+        }
+        if std::str::from_utf8(primary).is_err() {
+            return Ok(Verdict::Skip(SkipCause::NotUtf8));
+        }
+    }
+    let faces = [
+        new.as_deref(),
+        old.as_deref(),
+        file.diff.as_deref().map(str::as_bytes),
+    ];
+    for face in faces.into_iter().flatten() {
+        if let Some(name) = find_secret(&String::from_utf8_lossy(face)) {
+            return Ok(secret(path, name));
+        }
+    }
+    Ok(Verdict::Keep)
+}
+
+/// A `secret` skip, logged with the shown path and the pattern's name (never the value).
+fn secret(path: &str, pattern: &'static str) -> Verdict {
+    let shown = display_path(path);
+    tracing::event!(
+        target: LOG_TARGET,
+        tracing::Level::INFO,
+        path = shown.as_str(),
+        pattern = pattern,
+        "a file was left out of the review because it holds a secret"
+    );
+    Verdict::Skip(SkipCause::Secret)
+}
+
+/// What reading one side gave.
+enum Side {
+    /// The content, or `None` when the side has no such file.
+    Content(Option<Vec<u8>>),
+    /// A refusal of the source that is a skip.
+    Skip(SkipCause),
+}
+
+/// Maps a read to its content or to the skip its refusal stands for.
+fn read_side(read: Result<Option<Vec<u8>>, ReviewError>) -> Result<Side, ReviewError> {
+    match read {
+        Ok(bytes) => Ok(Side::Content(bytes)),
+        Err(ReviewError::OutsideWorkspace(_)) => Ok(Side::Skip(SkipCause::OutsideWorkspace)),
+        Err(ReviewError::TooLarge { .. }) => Ok(Side::Skip(SkipCause::TooLarge)),
+        Err(ReviewError::Protected(_)) => Ok(Side::Skip(SkipCause::Ignored)),
+        Err(other) => Err(other),
+    }
+}
+
+/// Whether a diff section is only git's `Binary files … differ` line (a line inside a hunk is
+/// text).
+fn is_binary_section(diff: &str) -> bool {
+    let line = diff.trim_end_matches(['\n', '\r']);
+    !line.contains('\n')
+        && line.starts_with(BINARY_MARKER_START)
+        && line.ends_with(BINARY_MARKER_END)
 }
 
 /// The paths `.gitignore` excludes that a review can still reach.
+///
+/// Paths are relative to `workspace` with `/` separators, the same space as
+/// [`ReviewFile::path`]: the production git runs with `-C <workspace>`. History inputs
+/// (`Commit`, `Range`, `Branches`) ignore nothing and call no git: `.gitignore` is a worktree
+/// rule. Otherwise one `rev-parse --is-inside-work-tree`, then one `ls-files` call: for `File`,
+/// tracked and untracked files a rule excludes (a file that does not exist is not listed, so it
+/// stays `missing`); for `Directory` and `Uncommitted` (`pathspec` `.`), the tracked ones a rule
+/// excludes, which the enumeration lists (untracked ignored files are never enumerated).
+/// Outside any repository the set is empty.
+///
+/// # Arguments
+///
+/// * `input` - What the caller asked to review.
+/// * `pathspec` - The workspace-relative path the query is limited to.
+/// * `workspace` - Where the `.git` search starts when `rev-parse` fails.
+/// * `git` - The review's git.
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] when git fails while a `.git` exists in `workspace` or an ancestor (an
+/// empty set there would send an ignored file), and any error of `git`.
+///
+/// O(output bytes) time.
 pub fn ignored_paths(
     input: &ReviewInput,
     pathspec: &str,
     workspace: &Path,
     git: &dyn GitCommand,
 ) -> Result<HashSet<String>, ReviewError> {
-    let _ = (input, pathspec, workspace, git);
-    todo!()
+    let query: &[&str] = match input {
+        ReviewInput::Commit(_) | ReviewInput::Range { .. } | ReviewInput::Branches { .. } => {
+            return Ok(HashSet::new())
+        }
+        ReviewInput::File(_) => &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        ReviewInput::Directory(_) | ReviewInput::Uncommitted => &[
+            "ls-files",
+            "--cached",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+    };
+    match git.run(&["rev-parse", "--is-inside-work-tree"]) {
+        Ok(out) if out.trim() == "true" => {}
+        Ok(out) => {
+            return Err(ReviewError::Git(format!(
+                "{} is not inside a git work tree (git answered {:?})",
+                workspace.display(),
+                out.trim()
+            )))
+        }
+        Err(ReviewError::Git(msg)) if inside_a_repository(workspace) => {
+            return Err(ReviewError::Git(msg))
+        }
+        Err(ReviewError::Git(_)) => return Ok(HashSet::new()),
+        Err(other) => return Err(other),
+    }
+    let mut args = query.to_vec();
+    args.extend_from_slice(&["--", pathspec]);
+    let (names, _not_utf8) = split_nul(&git.run_bytes(&args)?);
+    Ok(names.into_iter().collect())
 }
 
 #[cfg(test)]

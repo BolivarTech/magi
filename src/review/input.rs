@@ -375,7 +375,7 @@ fn resolve_uncommitted(git: &dyn GitCommand) -> Result<ResolvedInput, ReviewErro
 }
 
 /// Splits NUL-separated names; the ones that are not UTF-8 come back apart, decoded lossily.
-fn split_nul(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
+pub(crate) fn split_nul(bytes: &[u8]) -> (Vec<String>, Vec<String>) {
     let mut names = Vec::new();
     let mut not_utf8 = Vec::new();
     for name in bytes.split(|b| *b == 0).filter(|n| !n.is_empty()) {

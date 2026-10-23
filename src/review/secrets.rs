@@ -3,26 +3,316 @@
 // Date: 2026-10-22
 
 //! The product's secret detector: what a review never sends out of the process.
+//!
+//! Every byte a review sends to a model passes through [`find_secret`] first. The patterns are
+//! matched without dependencies (a prefix, a character class and a minimum length), in time
+//! linear in the text. Not covered, by design: JWTs (any base64url JSON looks like one), Azure
+//! keys, high-entropy strings with no prefix, and the base64 body of a PEM key without its
+//! `BEGIN` line. The minimum lengths can miss a shorter real key; that is the trade-off with
+//! false positives on ordinary code.
 
-/// One named secret pattern.
-pub struct SecretPattern {
-    /// The pattern's name, as the run log and a redacted path show it.
-    pub name: &'static str,
+/// What may follow a token prefix.
+#[derive(Clone, Copy)]
+enum Tail {
+    /// `[A-Za-z0-9_-]`.
+    Word,
+    /// `[A-Z0-9]`.
+    UpperDigit,
+    /// `[A-Za-z0-9]`.
+    Alnum,
+    /// `[A-Za-z0-9/+]`.
+    Base64,
 }
 
-/// The patterns, in the order that decides the name of a match.
-pub const SECRET_PATTERNS: &[SecretPattern] = &[];
+impl Tail {
+    /// Whether `b` belongs to the class.
+    fn admits(self, b: u8) -> bool {
+        match self {
+            Self::Word => is_word(b),
+            Self::UpperDigit => b.is_ascii_uppercase() || b.is_ascii_digit(),
+            Self::Alnum => b.is_ascii_alphanumeric(),
+            Self::Base64 => b.is_ascii_alphanumeric() || b == b'/' || b == b'+',
+        }
+    }
+}
 
-/// The name of the first pattern that matches `text`, if any.
+/// How a pattern matches.
+enum Matcher {
+    /// A prefix with a left boundary, then a tail of at least `min` characters of a class.
+    Token {
+        /// The prefixes, any of which opens the token.
+        prefixes: &'static [&'static str],
+        /// The tail's character class.
+        tail: Tail,
+        /// The tail's minimum length.
+        min: usize,
+        /// What may not follow the prefix (the Anthropic prefix inside the OpenAI one).
+        not_followed_by: Option<&'static str>,
+    },
+    /// A PEM private-key header.
+    PemPrivateKey,
+    /// The AWS secret access key, recognized by its name and an assignment.
+    AwsSecretKey,
+}
+
+/// One named secret pattern.
+pub(crate) struct SecretPattern {
+    /// The pattern's name, as the run log and a redacted path show it.
+    pub name: &'static str,
+    /// How it matches.
+    matcher: Matcher,
+}
+
+/// The opening of a PEM block (split so the source holds no PEM header).
+const PEM_BEGIN: &str = concat!("-----", "BEGIN ");
+/// The key types a PEM private-key header may name, each followed by a space.
+const PEM_KEY_TYPES: &[&str] = &["RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED "];
+/// The end of a PEM private-key header.
+const PEM_PRIVATE_KEY: &str = "PRIVATE KEY-----";
+/// The words of the AWS secret access key's name, in order.
+const AWS_SECRET_WORDS: &[&str] = &["aws", "secret", "access", "key"];
+/// The minimum length of the AWS secret access key.
+const AWS_SECRET_MIN: usize = 40;
+/// The blanks allowed around the `=` or `:` of an AWS secret key assignment.
+const BLANKS: &[u8] = b" \t";
+/// The quotes allowed before an AWS secret key.
+const QUOTES: &[u8] = b"\"'";
+
+/// The patterns, in the order that decides the name of a match: `anthropic-key` comes before
+/// `openai-key` because an Anthropic key also starts with `sk-`.
+pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
+    SecretPattern {
+        name: "anthropic-key",
+        matcher: Matcher::Token {
+            prefixes: &["sk-ant-"],
+            tail: Tail::Word,
+            min: 20,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "openai-key",
+        matcher: Matcher::Token {
+            prefixes: &["sk-"],
+            tail: Tail::Word,
+            min: 20,
+            not_followed_by: Some("ant-"),
+        },
+    },
+    SecretPattern {
+        name: "github-token",
+        matcher: Matcher::Token {
+            prefixes: &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+            tail: Tail::Word,
+            min: 36,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "github-token",
+        matcher: Matcher::Token {
+            prefixes: &["github_pat_"],
+            tail: Tail::Word,
+            min: 22,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "aws-access-key",
+        matcher: Matcher::Token {
+            prefixes: &["AKIA", "ASIA"],
+            tail: Tail::UpperDigit,
+            min: 16,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "pem-private-key",
+        matcher: Matcher::PemPrivateKey,
+    },
+    SecretPattern {
+        name: "stripe-key",
+        matcher: Matcher::Token {
+            prefixes: &["sk_live_", "rk_live_"],
+            tail: Tail::Alnum,
+            min: 24,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "google-api-key",
+        matcher: Matcher::Token {
+            prefixes: &["AIza"],
+            tail: Tail::Word,
+            min: 35,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "slack-token",
+        matcher: Matcher::Token {
+            prefixes: &["xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-"],
+            tail: Tail::Word,
+            min: 10,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "gitlab-token",
+        matcher: Matcher::Token {
+            prefixes: &["glpat-"],
+            tail: Tail::Word,
+            min: 20,
+            not_followed_by: None,
+        },
+    },
+    SecretPattern {
+        name: "aws-secret-key",
+        matcher: Matcher::AwsSecretKey,
+    },
+];
+
+/// `[A-Za-z0-9_-]`: the characters of a token, and the ones a left boundary may not be.
+fn is_word(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+/// Whether at least `min` bytes of class `tail` start at `at`. O(min).
+fn tail_at_least(bytes: &[u8], at: usize, tail: Tail, min: usize) -> bool {
+    bytes
+        .get(at..)
+        .unwrap_or_default()
+        .iter()
+        .take(min)
+        .take_while(|b| tail.admits(**b))
+        .count()
+        >= min
+}
+
+/// Whether `bytes` holds `word` at `at`, ignoring ASCII case.
+fn word_at(bytes: &[u8], at: usize, word: &str) -> bool {
+    bytes
+        .get(at..at.saturating_add(word.len()))
+        .is_some_and(|s| s.eq_ignore_ascii_case(word.as_bytes()))
+}
+
+/// The first index at or after `at` whose byte is not in `skip`.
+fn skip_bytes(bytes: &[u8], mut at: usize, skip: &[u8]) -> usize {
+    while bytes.get(at).is_some_and(|b| skip.contains(b)) {
+        at += 1;
+    }
+    at
+}
+
+impl Matcher {
+    /// Whether the pattern occurs anywhere in `text`.
+    ///
+    /// Linear in the text: an occurrence of a token prefix inside another token fails its left
+    /// boundary before its tail is read, and a tail is read for at most its minimum length.
+    fn matches(&self, text: &str) -> bool {
+        let bytes = text.as_bytes();
+        match self {
+            Self::Token {
+                prefixes,
+                tail,
+                min,
+                not_followed_by,
+            } => prefixes.iter().any(|prefix| {
+                text.match_indices(prefix).any(|(at, _)| {
+                    let bounded = at
+                        .checked_sub(1)
+                        .and_then(|before| bytes.get(before))
+                        .is_none_or(|b| !is_word(*b));
+                    let end = at + prefix.len();
+                    let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
+                    bounded && !excluded && tail_at_least(bytes, end, *tail, *min)
+                })
+            }),
+            Self::PemPrivateKey => text.match_indices(PEM_BEGIN).any(|(at, _)| {
+                let mut rest = at + PEM_BEGIN.len();
+                if let Some(kind) = PEM_KEY_TYPES.iter().find(|k| word_at(bytes, rest, k)) {
+                    rest += kind.len();
+                }
+                bytes
+                    .get(rest..)
+                    .is_some_and(|r| r.starts_with(PEM_PRIVATE_KEY.as_bytes()))
+            }),
+            Self::AwsSecretKey => (0..bytes.len()).any(|at| aws_secret_at(bytes, at)),
+        }
+    }
+}
+
+/// Whether the AWS secret access key's name opens at `at`, followed by an assignment and a
+/// 40-character key: the four words in any case with at most one `_` or `-` between them, then
+/// blanks, `=` or `:`, blanks, an optional quote, and the key.
+fn aws_secret_at(bytes: &[u8], at: usize) -> bool {
+    let mut pos = at;
+    for (i, word) in AWS_SECRET_WORDS.iter().enumerate() {
+        if i > 0 && bytes.get(pos).is_some_and(|b| *b == b'_' || *b == b'-') {
+            pos += 1;
+        }
+        if !word_at(bytes, pos, word) {
+            return false;
+        }
+        pos += word.len();
+    }
+    pos = skip_bytes(bytes, pos, BLANKS);
+    if !bytes.get(pos).is_some_and(|b| *b == b'=' || *b == b':') {
+        return false;
+    }
+    pos = skip_bytes(bytes, pos + 1, BLANKS);
+    if bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
+        pos += 1;
+    }
+    tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN)
+}
+
+/// The name of the first pattern of [`SECRET_PATTERNS`] that matches `text`, if any.
+///
+/// Patterns are tried in table order, so the name is the first pattern's, not the first
+/// position's. O(n · p) for a text of n bytes and p prefixes.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::find_secret;
+///
+/// assert_eq!(find_secret("let x = 1;"), None);
+/// ```
 pub fn find_secret(text: &str) -> Option<&'static str> {
-    let _ = text;
-    todo!()
+    SECRET_PATTERNS
+        .iter()
+        .find(|p| p.matcher.matches(text))
+        .map(|p| p.name)
 }
 
 /// The path as it may leave the process.
+///
+/// A path in which [`find_secret`] finds a pattern becomes `<path redacted: <pattern name>>`;
+/// any other path keeps its text with its control characters escaped
+/// ([`char::escape_default`]), so a file name never replays a terminal escape.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::display_path;
+///
+/// assert_eq!(display_path("src/a.rs"), "src/a.rs");
+/// assert_eq!(display_path("a\u{7}.rs"), "a\\u{7}.rs");
+/// ```
 pub fn display_path(path: &str) -> String {
-    let _ = path;
-    todo!()
+    if let Some(name) = find_secret(path) {
+        return format!("<path redacted: {name}>");
+    }
+    path.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
