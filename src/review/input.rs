@@ -450,7 +450,7 @@ fn from_diff(bytes: &[u8], new_rev: String, old_rev: Option<String>) -> Resolved
 /// Splits a diff into one [`ReviewFile`] per `diff --git` section, on bytes. Sections that are
 /// not UTF-8 go to the second list by their lossy path; sections with nothing to review (a mode
 /// change, a pure rename, a submodule) are dropped. O(n) in the diff.
-fn split_diff(bytes: &[u8]) -> (Vec<ReviewFile>, Vec<String>) {
+pub(crate) fn split_diff(bytes: &[u8]) -> (Vec<ReviewFile>, Vec<String>) {
     let mut starts = Vec::new();
     let mut offset = 0;
     for line in bytes.split_inclusive(|b| *b == b'\n') {

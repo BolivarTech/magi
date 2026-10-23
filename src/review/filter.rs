@@ -829,6 +829,119 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_section_as_git_prints_it_is_binary_without_reading_the_file() {
+        // The section comes from real `git diff` output through the input's own splitter, so it
+        // carries its `diff --git` and `index` header lines. `.gitattributes` makes git call the
+        // file binary although its bytes are valid UTF-8 with no NUL: only the marker can say so.
+        fn git(dir: &Path, args: &[&str]) -> Vec<u8> {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}");
+            out.stdout
+        }
+        let d = tempfile::tempdir().expect("tempdir");
+        git(d.path(), &["init", "-q", "-b", "main"]);
+        for (k, v) in [
+            ("user.email", "t@example.invalid"),
+            ("user.name", "t"),
+            ("commit.gpgsign", "false"),
+            ("core.autocrlf", "false"),
+        ] {
+            git(d.path(), &["config", k, v]);
+        }
+        std::fs::write(d.path().join(".gitattributes"), "*.dat binary\n").expect("write");
+        std::fs::write(d.path().join("a.dat"), "hello\n").expect("write");
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join("a.dat"), "world\n").expect("write");
+        let diff = git(
+            d.path(),
+            &["diff", "--no-color", "--no-ext-diff", "--no-textconv"],
+        );
+        let (sections, _) = crate::review::input::split_diff(&diff);
+        let section = sections
+            .into_iter()
+            .find(|f| f.path == "a.dat")
+            .expect("git lists the binary file");
+        assert!(
+            section
+                .diff
+                .as_deref()
+                .is_some_and(|s| s.starts_with("diff --git ")),
+            "{section:?}"
+        );
+        let both = || {
+            vec![
+                ReviewFile {
+                    path: section.path.clone(),
+                    diff: section.diff.clone(),
+                },
+                ReviewFile {
+                    path: "a.rs".into(),
+                    diff: None,
+                },
+            ]
+        };
+        let binary = vec![Skipped {
+            path: "a.dat".into(),
+            cause: SkipCause::Binary,
+        }];
+        // Never read: a read of a.dat fails the whole review.
+        struct Unreadable(SkipOrFail);
+        #[derive(Clone, Copy)]
+        enum SkipOrFail {
+            Fail,
+            TooLarge,
+        }
+        impl ContentSource for Unreadable {
+            fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                match (path, self.0) {
+                    ("a.dat", SkipOrFail::Fail) => Err(ReviewError::Io("a.dat was read".into())),
+                    ("a.dat", SkipOrFail::TooLarge) => Err(ReviewError::TooLarge {
+                        path: path.into(),
+                        limit: 1,
+                    }),
+                    _ => Ok(Some(b"fn f() {}\n".to_vec())),
+                }
+            }
+            fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.read(path)
+            }
+        }
+        let reg = LanguageRegistry::new();
+        let f = filter_files(both(), &Unreadable(SkipOrFail::Fail), &reg, false, &|_| {
+            false
+        })
+        .expect("a.dat is not read");
+        assert_eq!(f.skipped, binary);
+        // Over the cap, it is still `binary`, not `too large`.
+        let f = filter_files(
+            both(),
+            &Unreadable(SkipOrFail::TooLarge),
+            &reg,
+            false,
+            &|_| false,
+        )
+        .expect("a.rs kept");
+        assert_eq!(f.skipped, binary);
+        // Valid UTF-8 with no NUL: git's marker still decides.
+        let src = MapSource::new(
+            &[("a.dat", "world\n"), ("a.rs", "fn f() {}\n")],
+            &[("a.dat", "hello\n")],
+        );
+        let f = filter_files(both(), &src, &reg, false, &|_| false).expect("a.rs kept");
+        assert_eq!(f.skipped, binary);
+        assert_eq!(
+            f.kept.iter().map(|k| k.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs"]
+        );
+    }
+
+    #[test]
     fn a_binary_section_of_a_diff_is_skipped_as_binary() {
         let files = vec![
             ReviewFile {
