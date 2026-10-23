@@ -7,8 +7,8 @@
 //! Every byte a review sends to a model passes through [`find_secret`] first. The patterns are
 //! matched without dependencies (a prefix, a character class and a minimum length), in time
 //! linear in the text. Not covered, by design: JWTs (any base64url JSON looks like one), Azure
-//! keys, high-entropy strings with no prefix, and the base64 body of a PEM key without its
-//! `BEGIN` line. The minimum lengths can miss a shorter real key; that is the trade-off with
+//! keys, high-entropy strings with no prefix, and the base64 body of a PEM or armored OpenPGP
+//! private key without its `BEGIN` line. The minimum lengths can miss a shorter real key; that is the trade-off with
 //! false positives on ordinary code.
 
 /// What may follow a token prefix.
@@ -51,6 +51,8 @@ enum Matcher {
     },
     /// A PEM private-key header.
     PemPrivateKey,
+    /// A fixed header, found anywhere in the text (an armored OpenPGP private key).
+    Header(&'static str),
     /// The AWS secret access key, recognized by its name and an assignment.
     AwsSecretKey,
 }
@@ -69,6 +71,8 @@ const PEM_BEGIN: &str = concat!("-----", "BEGIN ");
 const PEM_KEY_TYPES: &[&str] = &["RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED "];
 /// The end of a PEM private-key header.
 const PEM_PRIVATE_KEY: &str = "PRIVATE KEY-----";
+/// The header of an armored OpenPGP private key (split so the source holds no such header).
+const PGP_PRIVATE_KEY: &str = concat!("-----", "BEGIN PGP PRIVATE KEY BLOCK-----");
 /// The words of the AWS secret access key's name, in order.
 const AWS_SECRET_WORDS: &[&str] = &["aws", "secret", "access", "key"];
 /// The minimum length of the AWS secret access key.
@@ -129,6 +133,10 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
     SecretPattern {
         name: "pem-private-key",
         matcher: Matcher::PemPrivateKey,
+    },
+    SecretPattern {
+        name: "pgp-private-key",
+        matcher: Matcher::Header(PGP_PRIVATE_KEY),
     },
     SecretPattern {
         name: "stripe-key",
@@ -237,6 +245,7 @@ impl Matcher {
                     .get(rest..)
                     .is_some_and(|r| r.starts_with(PEM_PRIVATE_KEY.as_bytes()))
             }),
+            Self::Header(header) => text.contains(header),
             Self::AwsSecretKey => (0..bytes.len()).any(|at| aws_secret_at(bytes, at)),
         }
     }
