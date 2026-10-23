@@ -32,10 +32,12 @@ pub mod context;
 pub mod error;
 pub mod filter;
 pub mod hunk;
+pub mod index;
 pub mod input;
 pub mod languages;
 pub mod secrets;
 pub mod source;
+pub mod validate;
 pub mod window;
 
 #[cfg(test)]

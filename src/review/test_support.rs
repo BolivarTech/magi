@@ -78,3 +78,22 @@ impl ContentSource for MapSource {
         Ok(self.old.get(path).cloned())
     }
 }
+
+/// Builds an `AgentOutput` through `Deserialize`, the only constructor magi-core offers.
+pub(crate) fn out(
+    agent: &str,
+    verdict: &str,
+    confidence: f64,
+    findings: serde_json::Value,
+) -> magi_core::schema::AgentOutput {
+    serde_json::from_value(serde_json::json!({
+        "agent": agent,
+        "verdict": verdict,
+        "confidence": confidence,
+        "summary": "s",
+        "reasoning": "r",
+        "findings": findings,
+        "recommendation": "x"
+    }))
+    .expect("a valid agent output")
+}
