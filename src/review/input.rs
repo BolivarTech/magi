@@ -186,9 +186,45 @@ pub fn resolve_input(
 
 /// Whether `dir` or one of its ancestors holds a `.git` entry (a directory, or a file as in a
 /// linked worktree). Decides "no repository" by the disk, never by the text of a git error.
-pub(crate) fn inside_a_repository(dir: &Path) -> bool {
+fn inside_a_repository(dir: &Path) -> bool {
     dir.ancestors()
         .any(|a| std::fs::symlink_metadata(a.join(".git")).is_ok())
+}
+
+/// Whether the review's git runs inside a work tree (`rev-parse --is-inside-work-tree`).
+///
+/// # Arguments
+///
+/// * `git` - The review's git.
+/// * `workspace` - The workspace, named in the error.
+/// * `probe` - Where the `.git` search starts when git fails.
+///
+/// # Returns
+///
+/// `true` inside a work tree, `false` when git fails and no `.git` exists in `probe` or an
+/// ancestor (there is no repository).
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] when git answers anything but `true`, or fails while a `.git` exists
+/// (treating that as "no repository" would bypass the repository's rules), and any other error
+/// of `git`.
+pub(crate) fn in_work_tree(
+    git: &dyn GitCommand,
+    workspace: &Path,
+    probe: &Path,
+) -> Result<bool, ReviewError> {
+    match git.run(&["rev-parse", "--is-inside-work-tree"]) {
+        Ok(out) if out.trim() == "true" => Ok(true),
+        Ok(out) => Err(ReviewError::Git(format!(
+            "{} is not inside a git work tree (git answered {:?})",
+            workspace.display(),
+            out.trim()
+        ))),
+        Err(ReviewError::Git(msg)) if inside_a_repository(probe) => Err(ReviewError::Git(msg)),
+        Err(ReviewError::Git(_)) => Ok(false),
+        Err(other) => Err(other),
+    }
 }
 
 /// `rev-parse --verify <r>^{commit}`, trimmed: the SHA every later call uses.
@@ -271,42 +307,28 @@ fn resolve_directory(
         source_kind: SourceKind::Worktree { old_rev: None },
         not_utf8: Vec::new(),
     };
-    match git.run(&["rev-parse", "--is-inside-work-tree"]) {
-        Ok(out) if out.trim() == "true" => {
-            let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
-            let mut args = LS_FILES_ALL.to_vec();
-            args.extend_from_slice(&["--", pathspec]);
-            let (names, not_utf8) = split_nul(&git.run_bytes(&args)?);
-            resolved.not_utf8 = not_utf8;
-            // A tracked file deleted from the tree, or a submodule (a directory), is not read.
-            resolved.files = names
-                .into_iter()
-                .filter(|name| {
-                    std::fs::symlink_metadata(workspace.join(name)).is_ok_and(|m| !m.is_dir())
-                })
-                .map(|path| ReviewFile { path, diff: None })
-                .collect();
-        }
-        Ok(out) => {
-            return Err(ReviewError::Git(format!(
-                "{} is not inside a git work tree (git answered {:?})",
-                workspace.display(),
-                out.trim()
-            )))
-        }
-        Err(ReviewError::Git(msg)) if inside_a_repository(&dir) => {
-            return Err(ReviewError::Git(msg));
-        }
-        Err(ReviewError::Git(_)) => {
-            let mut found = Vec::new();
-            walk(&dir, &rel, &mut found, &mut resolved.not_utf8)?;
-            found.sort();
-            resolved.files = found
-                .into_iter()
-                .map(|path| ReviewFile { path, diff: None })
-                .collect();
-        }
-        Err(other) => return Err(other),
+    if in_work_tree(git, workspace, &dir)? {
+        let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
+        let mut args = LS_FILES_ALL.to_vec();
+        args.extend_from_slice(&["--", pathspec]);
+        let (names, not_utf8) = split_nul(&git.run_bytes(&args)?);
+        resolved.not_utf8 = not_utf8;
+        // A tracked file deleted from the tree, or a submodule (a directory), is not read.
+        resolved.files = names
+            .into_iter()
+            .filter(|name| {
+                std::fs::symlink_metadata(workspace.join(name)).is_ok_and(|m| !m.is_dir())
+            })
+            .map(|path| ReviewFile { path, diff: None })
+            .collect();
+    } else {
+        let mut found = Vec::new();
+        walk(&dir, &rel, &mut found, &mut resolved.not_utf8)?;
+        found.sort();
+        resolved.files = found
+            .into_iter()
+            .map(|path| ReviewFile { path, diff: None })
+            .collect();
     }
     Ok(resolved)
 }

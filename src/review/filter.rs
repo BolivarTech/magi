@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::error::ReviewError;
-use super::input::{inside_a_repository, split_nul, ReviewFile, ReviewInput};
+use super::input::{in_work_tree, split_nul, ReviewFile, ReviewInput};
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
 use super::source::{is_never_reviewed, ContentSource, GitCommand};
@@ -28,6 +28,24 @@ const BINARY_MARKER_END: &str = " differ";
 const MISSING: &str = "missing";
 /// The tracing target of the filter's run-log entries.
 const LOG_TARGET: &str = "magi_rs::review";
+/// `ls-files` for a file named by the caller: tracked or untracked, when a rule excludes it.
+const LS_FILES_IGNORED_ANY: &[&str] = &[
+    "ls-files",
+    "--cached",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "-z",
+];
+/// `ls-files` for a directory or uncommitted changes: the tracked files a rule excludes (the
+/// enumeration lists them; untracked ignored files are never enumerated).
+const LS_FILES_IGNORED_TRACKED: &[&str] = &[
+    "ls-files",
+    "--cached",
+    "--ignored",
+    "--exclude-standard",
+    "-z",
+];
 
 /// A file left out of a review, with why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -38,31 +56,34 @@ pub struct Skipped {
     pub cause: SkipCause,
 }
 
-/// Why a file was left out of a review; serialized with the texts the report shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+/// Why a file was left out of a review.
+///
+/// Serialized as the text the report shows (`"binary"`, `"not utf-8"`, `"secret"`, `"ignored"`,
+/// `"outside workspace"`, `"too large"`), the same text [`ReviewError::NotReviewable`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipCause {
     /// A binary file.
-    #[serde(rename = "binary")]
     Binary,
     /// Text that is not valid UTF-8.
-    #[serde(rename = "not utf-8")]
     NotUtf8,
     /// A file whose path or content holds a secret.
-    #[serde(rename = "secret")]
     Secret,
     /// A file `.gitignore` excludes, or one a review never reads.
-    #[serde(rename = "ignored")]
     Ignored,
     /// A file that resolves outside the workspace.
-    #[serde(rename = "outside workspace")]
     OutsideWorkspace,
     /// A file over the per-file byte cap.
-    #[serde(rename = "too large")]
     TooLarge,
 }
 
+impl serde::Serialize for SkipCause {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 impl SkipCause {
-    /// The cause's text, as [`ReviewError::NotReviewable`] carries it.
+    /// The cause's text: the one place it is spelled.
     fn as_str(self) -> &'static str {
         match self {
             Self::Binary => "binary",
@@ -299,43 +320,20 @@ pub fn ignored_paths(
     workspace: &Path,
     git: &dyn GitCommand,
 ) -> Result<HashSet<String>, ReviewError> {
-    let query: &[&str] = match input {
+    let query = match input {
         ReviewInput::Commit(_) | ReviewInput::Range { .. } | ReviewInput::Branches { .. } => {
             return Ok(HashSet::new())
         }
-        ReviewInput::File(_) => &[
-            "ls-files",
-            "--cached",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-        ],
-        ReviewInput::Directory(_) | ReviewInput::Uncommitted => &[
-            "ls-files",
-            "--cached",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-        ],
+        ReviewInput::File(_) => LS_FILES_IGNORED_ANY,
+        ReviewInput::Directory(_) | ReviewInput::Uncommitted => LS_FILES_IGNORED_TRACKED,
     };
-    match git.run(&["rev-parse", "--is-inside-work-tree"]) {
-        Ok(out) if out.trim() == "true" => {}
-        Ok(out) => {
-            return Err(ReviewError::Git(format!(
-                "{} is not inside a git work tree (git answered {:?})",
-                workspace.display(),
-                out.trim()
-            )))
-        }
-        Err(ReviewError::Git(msg)) if inside_a_repository(workspace) => {
-            return Err(ReviewError::Git(msg))
-        }
-        Err(ReviewError::Git(_)) => return Ok(HashSet::new()),
-        Err(other) => return Err(other),
+    if !in_work_tree(git, workspace, workspace)? {
+        return Ok(HashSet::new());
     }
     let mut args = query.to_vec();
     args.extend_from_slice(&["--", pathspec]);
+    // A name that is not UTF-8 is never enumerated as a file to review (the input sets it
+    // aside), so it needs no entry here.
     let (names, _not_utf8) = split_nul(&git.run_bytes(&args)?);
     Ok(names.into_iter().collect())
 }
