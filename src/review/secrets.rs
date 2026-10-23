@@ -267,7 +267,7 @@ fn aws_secret_at(bytes: &[u8], at: usize) -> bool {
     tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN)
 }
 
-/// The name of the first pattern of [`SECRET_PATTERNS`] that matches `text`, if any.
+/// The name of the first secret pattern (in table order) that matches `text`, if any.
 ///
 /// Patterns are tried in table order, so the name is the first pattern's, not the first
 /// position's. O(n · p) for a text of n bytes and p prefixes.
