@@ -3,11 +3,28 @@
 // Date: 2026-10-22
 
 //! Packs the reviewed content into batches that fit the pool window.
+//!
+//! Each batch is what one `consult code-review` receives: hunks of a diff, whole files, or the
+//! units of a whole file too large for one batch, each file preceded by its [`file_header`].
+//! Packing is greedy in input order. This is also the egress point of the review: every byte a
+//! batch carries passes the secret detector here, whatever an earlier filter decided.
 
+use std::collections::HashSet;
+
+use crate::review::context::detect_language;
 use crate::review::error::ReviewError;
+use crate::review::hunk::parse_hunks;
 use crate::review::input::ReviewFile;
-use crate::review::languages::LanguageRegistry;
+use crate::review::languages::{LanguageExtractor, LanguageRegistry};
+use crate::review::secrets::{display_path, find_secret};
 use crate::review::source::ContentSource;
+use crate::review::window::estimate_tokens;
+
+/// The language name [`detect_language`] gives a file it does not recognise.
+const UNKNOWN_LANGUAGE: &str = "unknown";
+
+/// The marker that opens a hunk header line (`@@ -a,b +c,d @@`).
+const HUNK_MARKER: &str = "@@";
 
 /// One batch: what one `consult code-review` receives.
 #[derive(Debug)]
@@ -16,81 +33,218 @@ pub struct ReviewBatch {
     pub index: usize,
     /// What the batch reviews, in input order.
     pub items: Vec<BatchItem>,
-    /// Estimated tokens of the items plus one header per distinct file.
+    /// Estimated tokens of the items plus one [`file_header`] per distinct file of the batch.
+    /// Companions ([`plan_batches_with`]) are not included: whoever adds them charges them.
     pub tokens: usize,
 }
 
 /// One piece of reviewed content.
 #[derive(Debug)]
 pub enum BatchItem {
-    /// One diff hunk with its file header.
+    /// One diff hunk, with the diff's file header lines before it.
     Hunk {
-        /// File path.
+        /// File path, relative to the workspace.
         file: String,
-        /// The hunk text.
+        /// The hunk text as it is sent.
         text: String,
-        /// First line on the new side.
+        /// First line on the new side (`c` of `+c,d`).
         first_line: u32,
-        /// Last line on the new side.
+        /// Last line on the new side (`c + d − 1`); below `first_line` when the side is empty.
         last_line: u32,
-        /// First line on the old side.
+        /// First line on the old side (`a` of `-a,b`).
         old_first_line: u32,
-        /// Last line on the old side.
+        /// Last line on the old side (`a + b − 1`); below `old_first_line` when the side is
+        /// empty.
         old_last_line: u32,
     },
-    /// One unit of a whole file that did not fit.
+    /// One unit (function, struct, class, …) of a whole file that did not fit in one batch.
     Unit {
-        /// File path.
+        /// File path, relative to the workspace.
         file: String,
-        /// Unit name.
+        /// The unit's name, as the language extractor reports it.
         name: String,
-        /// Unit text.
+        /// The unit text.
         text: String,
-        /// First line.
+        /// First line of the unit (1-based, inclusive).
         first_line: u32,
-        /// Last line.
+        /// Last line of the unit (1-based, inclusive).
         last_line: u32,
     },
     /// A whole file.
     WholeFile {
-        /// File path.
+        /// File path, relative to the workspace.
         file: String,
-        /// File text.
+        /// The file text.
         text: String,
-        /// Number of lines.
+        /// Its line count, `text.lines().count()`: a last line without `'\n'` counts.
         lines: u32,
     },
 }
 
-/// What an item drags into its batch, as `(key, tokens)`.
-pub type Companion = (String, usize);
+impl BatchItem {
+    /// The file the item belongs to.
+    fn file(&self) -> &str {
+        match self {
+            Self::Hunk { file, .. } | Self::Unit { file, .. } | Self::WholeFile { file, .. } => {
+                file
+            }
+        }
+    }
 
-/// The per-file header every batch prompt carries.
-pub fn file_header(path: &str) -> String {
-    let _ = path;
-    todo!()
+    /// The text the item sends.
+    fn text(&self) -> &str {
+        match self {
+            Self::Hunk { text, .. } | Self::Unit { text, .. } | Self::WholeFile { text, .. } => {
+                text
+            }
+        }
+    }
+
+    /// How a [`ReviewError::TooLargeForBatch`] names the item: the path for a whole file,
+    /// `<path>:<first>-<last>` for a hunk (new side), and the same plus the name for a unit.
+    fn describe(&self) -> String {
+        match self {
+            Self::Hunk {
+                file,
+                first_line,
+                last_line,
+                ..
+            } => format!("{}:{first_line}-{last_line}", display_path(file)),
+            Self::Unit {
+                file,
+                name,
+                first_line,
+                last_line,
+                ..
+            } => format!("{}:{first_line}-{last_line} ({name})", display_path(file)),
+            Self::WholeFile { file, .. } => display_path(file),
+        }
+    }
 }
 
-/// Packs `files` into batches of at most `limit_tokens`.
+/// What an item drags into its batch, as `(key, tokens)`: charged once per batch per key.
+pub type Companion = (String, usize);
+
+/// The per-file header every batch prompt carries: `### <path> (<language>)\n`, or
+/// `### <path>\n` when [`detect_language`] does not know the language.
+///
+/// # Arguments
+///
+/// * `path` - The file path, relative to the workspace.
+///
+/// # Returns
+///
+/// The header line, newline included.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::batching::file_header;
+///
+/// assert_eq!(file_header("src/a.rs"), "### src/a.rs (rust)\n");
+/// assert_eq!(file_header("notes.txt"), "### notes.txt\n");
+/// ```
+pub fn file_header(path: &str) -> String {
+    let language = detect_language(path);
+    if language == UNKNOWN_LANGUAGE {
+        format!("### {path}\n")
+    } else {
+        format!("### {path} ({language})\n")
+    }
+}
+
+/// Packs `files` into batches of at most `limit_tokens`, with no companion.
+///
+/// Equivalent to [`plan_batches_with`] with a companion that is always `None`.
+///
+/// # Arguments
+///
+/// * `files` - The files to review, in review order.
+/// * `source` - The single content source of the review (the one the filters read).
+/// * `registry` - The language extractors, to split a whole file that does not fit.
+/// * `limit_tokens` - The per-batch limit in tokens.
+///
+/// # Returns
+///
+/// The batches, numbered from 0, never empty.
 ///
 /// # Errors
 ///
-/// See [`plan_batches_with`].
+/// As [`plan_batches_with`].
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::batching::plan_batches;
+/// use magi_rs::review::error::ReviewError;
+/// use magi_rs::review::input::ReviewFile;
+/// use magi_rs::review::languages::LanguageRegistry;
+/// use magi_rs::review::source::ContentSource;
+///
+/// struct OneFile;
+/// impl ContentSource for OneFile {
+///     fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+///         Ok(Some(b"fn f() {}\n".to_vec()))
+///     }
+///     fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+///         Ok(None)
+///     }
+/// }
+///
+/// let files = vec![ReviewFile { path: "a.rs".into(), diff: None }];
+/// let batches = plan_batches(&files, &OneFile, &LanguageRegistry::new(), 1_000)?;
+/// assert_eq!((batches.len(), batches[0].items.len()), (1, 1));
+/// # Ok::<(), ReviewError>(())
+/// ```
 pub fn plan_batches(
     files: &[ReviewFile],
     source: &dyn ContentSource,
     registry: &LanguageRegistry,
     limit_tokens: usize,
 ) -> Result<Vec<ReviewBatch>, ReviewError> {
-    let _ = (files, source, registry, limit_tokens);
-    todo!()
+    plan_batches_with(files, source, registry, limit_tokens, &|_| Ok(None))
 }
 
-/// Packs `files` into batches, charging each item's companion once per batch.
+/// Packs `files` into batches of at most `limit_tokens`, charging each item's companion once
+/// per batch.
+///
+/// Items are packed greedily in input order: a diff gives one item per hunk; a file reviewed
+/// whole gives one item, or, when it does not fit in an empty batch, one item per non-blank
+/// unit its language extractor finds. An item fits when the batch's tokens, plus the companions
+/// already charged, plus the item, plus its file's header (if the file is new to the batch),
+/// plus its companion (if its key is new to the batch) stay within `limit_tokens`; otherwise a
+/// new batch starts. The invariant is `tokens + Σ distinct companions ≤ limit_tokens`.
+///
+/// Every item text and every file header is passed through the secret detector before it joins
+/// a batch. That scan repeats the filter's on purpose: it is the egress net of the review, it
+/// costs one more O(bytes) pass, and it must not be removed to save it.
+///
+/// O(n) in items (plus O(bytes) for the scan), with one key set per batch.
+///
+/// # Arguments
+///
+/// * `files` - The files to review, in review order.
+/// * `source` - The single content source of the review (the one the filters read).
+/// * `registry` - The language extractors, to split a whole file that does not fit.
+/// * `limit_tokens` - The per-batch limit in tokens.
+/// * `companion` - What an item drags into its batch, as `(key, tokens)`, or `None`.
+///
+/// # Returns
+///
+/// The batches, numbered from 0, never empty.
 ///
 /// # Errors
 ///
-/// Stub.
+/// * [`ReviewError::EgressSecret`] when an item or a header holds a secret.
+/// * [`ReviewError::TooLargeForBatch`] when an item, its header and its companion do not fit
+///   in an empty batch, or a whole file without an extractor (or without units) does not.
+/// * [`ReviewError::Io`] when a file reviewed whole has disappeared from the source.
+/// * [`ReviewError::NotReviewable`] when a file reviewed whole is no longer UTF-8.
+/// * [`ReviewError::Git`] when a hunk header cannot be parsed.
+/// * [`ReviewError::NothingToReview`] when no file produces an item.
+/// * Any error of `source` or `companion`, unchanged.
+///
+/// See [`plan_batches`] for an example; it is this function with no companion.
 pub fn plan_batches_with(
     files: &[ReviewFile],
     source: &dyn ContentSource,
@@ -98,8 +252,244 @@ pub fn plan_batches_with(
     limit_tokens: usize,
     companion: &dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
 ) -> Result<Vec<ReviewBatch>, ReviewError> {
-    let _ = (files, source, registry, limit_tokens, companion);
-    todo!()
+    let mut packer = Packer::new(limit_tokens, companion);
+    for file in files {
+        let items = match &file.diff {
+            Some(diff) => hunk_items(&file.path, diff)?,
+            None => whole_file_items(&file.path, source, registry, limit_tokens)?,
+        };
+        if items.is_empty() {
+            continue;
+        }
+        let header = file_header(&file.path);
+        scan(&file.path, &header)?;
+        let header_tokens = estimate_tokens(&header);
+        for item in items {
+            packer.add(item, header_tokens)?;
+        }
+    }
+    packer.finish()
+}
+
+/// Fails with [`ReviewError::EgressSecret`] when `text`, about to leave in a batch, holds a
+/// secret. O(n) in the text.
+fn scan(path: &str, text: &str) -> Result<(), ReviewError> {
+    match find_secret(text) {
+        Some(_) => Err(ReviewError::EgressSecret {
+            path: display_path(path),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// One item per hunk of `diff`; a diff without hunks gives none. The new side is not read: a
+/// deletion has an empty new side and its hunks are built all the same.
+fn hunk_items(path: &str, diff: &str) -> Result<Vec<BatchItem>, ReviewError> {
+    let mut items = Vec::new();
+    for hunk in parse_hunks(path, diff) {
+        let Some(marker) = hunk.content.lines().find(|l| l.starts_with(HUNK_MARKER)) else {
+            continue;
+        };
+        let ((old_first_line, old_last_line), (first_line, last_line)) = hunk_ranges(marker)
+            .ok_or_else(|| {
+                ReviewError::Git(format!("malformed hunk header in {}", display_path(path)))
+            })?;
+        items.push(BatchItem::Hunk {
+            file: path.to_string(),
+            text: hunk.content,
+            first_line,
+            last_line,
+            old_first_line,
+            old_last_line,
+        });
+    }
+    Ok(items)
+}
+
+/// The `(first, last)` ranges of the old and new sides of a `@@ -a,b +c,d @@` line.
+///
+/// A side `s,n` gives `(s, s + n − 1)`; an omitted count is 1. An empty side (`n = 0`, where git
+/// writes the line BEFORE the change) gives `(s + 1, s)`. `None` on a malformed line or an
+/// overflow.
+fn hunk_ranges(line: &str) -> Option<((u32, u32), (u32, u32))> {
+    let mut parts = line.strip_prefix(HUNK_MARKER)?.split_whitespace();
+    let old = side_range(parts.next()?.strip_prefix('-')?)?;
+    let new = side_range(parts.next()?.strip_prefix('+')?)?;
+    Some((old, new))
+}
+
+/// The `(first, last)` range of one side, `start[,count]`, of a hunk header.
+fn side_range(side: &str) -> Option<(u32, u32)> {
+    let (start, count) = match side.split_once(',') {
+        Some((s, n)) => (s.parse::<u32>().ok()?, n.parse::<u32>().ok()?),
+        None => (side.parse::<u32>().ok()?, 1),
+    };
+    if count == 0 {
+        Some((start.checked_add(1)?, start))
+    } else {
+        Some((start, start.checked_add(count - 1)?))
+    }
+}
+
+/// The items of a file reviewed whole: none when empty, the whole file when it fits in an empty
+/// batch with its header, otherwise its non-blank units.
+fn whole_file_items(
+    path: &str,
+    source: &dyn ContentSource,
+    registry: &LanguageRegistry,
+    limit_tokens: usize,
+) -> Result<Vec<BatchItem>, ReviewError> {
+    let bytes = source.read(path)?.ok_or_else(|| {
+        ReviewError::Io(format!(
+            "{} disappeared during the review",
+            display_path(path)
+        ))
+    })?;
+    let text = String::from_utf8(bytes).map_err(|_| ReviewError::NotReviewable {
+        path: display_path(path),
+        cause: "not utf-8",
+    })?;
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let lines = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
+    let whole = BatchItem::WholeFile {
+        file: path.to_string(),
+        text,
+        lines,
+    };
+    let alone = estimate_tokens(whole.text()).saturating_add(estimate_tokens(&file_header(path)));
+    if alone <= limit_tokens {
+        return Ok(vec![whole]);
+    }
+    let too_large = || ReviewError::TooLargeForBatch {
+        what: whole.describe(),
+        tokens: alone,
+        limit: limit_tokens,
+    };
+    let extractor = registry.get(path).ok_or_else(too_large)?;
+    let every_line: HashSet<u32> = (1..=lines).collect();
+    let units: Vec<BatchItem> = extractor
+        .extract_units(whole.text(), path, &every_line)
+        .into_iter()
+        // The extractor also emits an empty `TopLevel` unit for each gap between constructs.
+        .filter(|u| !u.content.trim().is_empty())
+        .map(|u| BatchItem::Unit {
+            file: path.to_string(),
+            name: u.name,
+            text: u.content,
+            first_line: u.start_line,
+            last_line: u.end_line,
+        })
+        .collect();
+    if units.is_empty() {
+        return Err(too_large());
+    }
+    Ok(units)
+}
+
+/// The greedy packer: the open batch, the finished ones, and what the open batch already holds.
+struct Packer<'c> {
+    limit: usize,
+    companion: &'c dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
+    done: Vec<ReviewBatch>,
+    items: Vec<BatchItem>,
+    tokens: usize,
+    companion_tokens: usize,
+    files: HashSet<String>,
+    keys: HashSet<String>,
+}
+
+impl<'c> Packer<'c> {
+    /// An empty packer for batches of at most `limit` tokens.
+    fn new(
+        limit: usize,
+        companion: &'c dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
+    ) -> Self {
+        Self {
+            limit,
+            companion,
+            done: Vec::new(),
+            items: Vec::new(),
+            tokens: 0,
+            companion_tokens: 0,
+            files: HashSet::new(),
+            keys: HashSet::new(),
+        }
+    }
+
+    /// Scans `item` and adds it to the open batch, or to a new one when it does not fit.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::EgressSecret`], [`ReviewError::TooLargeForBatch`], or the companion's.
+    fn add(&mut self, item: BatchItem, header_tokens: usize) -> Result<(), ReviewError> {
+        scan(item.file(), item.text())?;
+        let item_tokens = estimate_tokens(item.text());
+        let companion = (self.companion)(&item)?;
+        let companion_tokens = companion.as_ref().map_or(0, |(_, t)| *t);
+        let alone = item_tokens
+            .saturating_add(header_tokens)
+            .saturating_add(companion_tokens);
+        if alone > self.limit {
+            return Err(ReviewError::TooLargeForBatch {
+                what: item.describe(),
+                tokens: alone,
+                limit: self.limit,
+            });
+        }
+        let new_file = !self.files.contains(item.file());
+        let new_key = companion
+            .as_ref()
+            .is_some_and(|(k, _)| !self.keys.contains(k));
+        let need = item_tokens
+            .saturating_add(if new_file { header_tokens } else { 0 })
+            .saturating_add(if new_key { companion_tokens } else { 0 });
+        let used = self.tokens.saturating_add(self.companion_tokens);
+        if used.saturating_add(need) > self.limit {
+            self.close();
+        }
+        if self.files.insert(item.file().to_string()) {
+            self.tokens = self.tokens.saturating_add(header_tokens);
+        }
+        if let Some((key, tokens)) = companion {
+            if self.keys.insert(key) {
+                self.companion_tokens = self.companion_tokens.saturating_add(tokens);
+            }
+        }
+        self.tokens = self.tokens.saturating_add(item_tokens);
+        self.items.push(item);
+        Ok(())
+    }
+
+    /// Closes the open batch, if it holds anything, and opens an empty one.
+    fn close(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        self.done.push(ReviewBatch {
+            index: self.done.len(),
+            items: std::mem::take(&mut self.items),
+            tokens: self.tokens,
+        });
+        self.tokens = 0;
+        self.companion_tokens = 0;
+        self.files.clear();
+        self.keys.clear();
+    }
+
+    /// The finished batches.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::NothingToReview`] when no item was added.
+    fn finish(mut self) -> Result<Vec<ReviewBatch>, ReviewError> {
+        self.close();
+        if self.done.is_empty() {
+            return Err(ReviewError::NothingToReview);
+        }
+        Ok(self.done)
+    }
 }
 
 #[cfg(test)]
