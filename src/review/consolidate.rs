@@ -1032,4 +1032,96 @@ mod tests {
             (Severity::Critical, vec![FindingMark::PartialTrio])
         );
     }
+
+    #[test]
+    fn an_empty_file_with_a_line_is_keyed_by_title_not_by_id() {
+        // Mutation guard: magi-core id-keys only a non-empty file (consensus.rs:203-216). Two
+        // different titles on `"" : 3` are two findings there; id-keying the empty file here
+        // would merge them into one with two sources.
+        let m = serde_json::json!([{"severity":"warning","title":"alpha","detail":"d","file":"","line":3}]);
+        let c2 = serde_json::json!([{"severity":"warning","title":"beta","detail":"d","file":"","line":3}]);
+        let c = consolidate(&[batch(
+            0,
+            vec![
+                out("melchior", "approve", 0.9, m),
+                out("caspar", "approve", 0.9, c2),
+            ],
+        )])
+        .expect("consolidates");
+        assert_eq!(c.findings.len(), 2, "{:?}", c.findings);
+        assert!(
+            c.findings.iter().all(|f| f.sources.len() == 1),
+            "{:?}",
+            c.findings
+        );
+    }
+
+    #[test]
+    fn a_worst_verdict_in_an_early_batch_outlives_a_later_approval() {
+        // Mutation guard: the worst verdict wins wherever it appears, not the last batch's.
+        let quiet = || out("caspar", "approve", 0.9, serde_json::json!([]));
+        let c = consolidate(&[
+            batch(
+                0,
+                vec![
+                    out("melchior", "reject", 0.6, serde_json::json!([])),
+                    quiet(),
+                ],
+            ),
+            batch(
+                1,
+                vec![
+                    out("melchior", "approve", 0.9, serde_json::json!([])),
+                    quiet(),
+                ],
+            ),
+        ])
+        .expect("consolidates");
+        let m = c
+            .agents
+            .iter()
+            .find(|a| a.agent == AgentName::Melchior)
+            .expect("melchior");
+        assert_eq!(m.verdict, Verdict::Reject);
+        assert!((m.confidence - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn agreement_counts_every_batch_where_the_finding_appeared() {
+        // Mutation guard: who answered is the union over ALL the finding's batches. Melchior
+        // alone answered batch 0, all three answered batch 1, and only Melchior reported the
+        // finding: two or more answered, so it is a single-mage finding.
+        let f = serde_json::json!([{"severity":"critical","title":"c","detail":"d","file":"b.rs","line":2}]);
+        let mut c = consolidate(&[
+            batch(0, vec![out("melchior", "approve", 0.9, f.clone())]),
+            batch(
+                1,
+                vec![
+                    out("melchior", "approve", 0.9, f),
+                    out("balthasar", "approve", 0.9, serde_json::json!([])),
+                    out("caspar", "approve", 0.9, serde_json::json!([])),
+                ],
+            ),
+        ])
+        .expect("consolidates");
+        assert_eq!(c.findings[0].batches, vec![0, 1]);
+        let answered = c.answered.clone();
+        apply_agreement(&mut c.findings, &answered);
+        assert_eq!(
+            (c.findings[0].severity, c.findings[0].marks.clone()),
+            (Severity::Warning, vec![FindingMark::SingleMage])
+        );
+    }
+
+    #[test]
+    fn the_consensus_itself_holds_one_finding_when_categories_differ_on_a_line() {
+        // Mutation guard: the neutral category reaches magi-core, so its consensus (the
+        // report's verdict section) holds the one finding with both sources, like the list.
+        let c = consolidate(&[batch(0, vec![
+            out("melchior", "approve", 0.9, serde_json::json!([{"severity":"warning","title":"a","detail":"da","file":"src/a.rs","line":10,"category":"logic-error"}])),
+            out("caspar", "approve", 0.9, serde_json::json!([{"severity":"warning","title":"b","detail":"db","file":"src/a.rs","line":10,"category":"error-handling"}])),
+        ])]).expect("consolidates");
+        assert_eq!(c.consensus.findings.len(), 1, "{:?}", c.consensus.findings);
+        assert_eq!(c.consensus.findings[0].sources.len(), 2);
+    }
 }
