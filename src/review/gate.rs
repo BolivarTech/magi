@@ -250,6 +250,13 @@ fn last_cause(error: &DecisionError) -> Option<Cause> {
     }
 }
 
+/// Records `model` as skipped by a 400 once, in chain order. O(m) for m models.
+fn note_skip(skipped: &mut Vec<String>, model: &str) {
+    if !skipped.iter().any(|s| s == model) {
+        skipped.push(model.to_string());
+    }
+}
+
 /// What one question (one pair of a finding) came to.
 struct Outcome {
     state: GateState,
@@ -489,9 +496,7 @@ impl<'a> Gate<'a> {
         let chain = self.chain.clone();
         for spec in &chain {
             if self.rejected.contains(&spec.model) {
-                if !skipped.contains(&spec.model) {
-                    skipped.push(spec.model.clone());
-                }
+                note_skip(skipped, &spec.model);
                 continue;
             }
             let left = match deadline {
@@ -552,9 +557,7 @@ impl<'a> Gate<'a> {
                     // the model is skipped for the rest of this review.
                     all_transport = false;
                     self.rejected.insert(spec.model.clone());
-                    if !skipped.contains(&spec.model) {
-                        skipped.push(spec.model.clone());
-                    }
+                    note_skip(skipped, &spec.model);
                 }
                 Err(DecisionError::Rejected { status, .. }) => {
                     // 413/422: the request itself is at fault; every model would repeat it.
