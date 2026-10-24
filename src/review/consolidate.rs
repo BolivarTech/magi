@@ -4,22 +4,38 @@
 
 //! Consolidation of the batch reports of one review into a single report (REQ-RV12), and the
 //! agreement weight applied after the gate (REQ-RV11).
+//!
+//! Consensus, deduplication and the highest severity all come from magi-core's
+//! [`ConsensusEngine`]; this module only builds its input (one synthetic output per mage) and
+//! maps every reported finding back to the group magi-core put it in, so no title, detail or
+//! category is lost when findings merge.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use magi_core::consensus::ConsensusResult;
-use magi_core::schema::{AgentName, AgentOutput, Category, Severity};
+use magi_core::consensus::{ConsensusEngine, ConsensusResult, DedupFinding};
+use magi_core::finding_id::generate_finding_id;
+use magi_core::schema::{AgentName, AgentOutput, Category, Finding, Severity, Verdict};
 
 use super::error::ReviewError;
+use crate::redact::redact_foreign_text;
+
+/// Run-log target of the consolidation WARN entries.
+const LOG_TARGET: &str = "magi_rs::review";
+
+/// The category every located finding carries into the consensus engine, so its key is
+/// file + line alone: a mage-reported category is unverified and must not split one defect
+/// into two single-mage findings.
+const NEUTRAL_CATEGORY: Category = Category::Other;
 
 /// What one batch's `consult` returned: the mages that answered and their outputs.
 #[derive(Debug, Clone)]
 pub struct BatchOutcome {
     /// Zero-based batch index.
     pub batch: usize,
-    /// The outputs of the mages that answered, as the batch report carried them.
+    /// The outputs of the mages that answered, as the batch report carried them (raw).
     pub agents: Vec<AgentOutput>,
-    /// The mages that answered in this batch.
+    /// The mages that answered in this batch (the `agent` of each report entry).
     pub answered: BTreeSet<AgentName>,
 }
 
@@ -30,21 +46,21 @@ pub struct ConsolidatedFinding {
     pub file: Option<String>,
     /// The reported 1-based line, if any.
     pub line: Option<u32>,
-    /// The severity after the agreement weight.
+    /// The severity after the agreement weight ([`apply_agreement`]).
     pub severity: Severity,
-    /// The highest severity the trio reported.
+    /// The highest severity the trio reported; what the gate and the critical rule read.
     pub reported_severity: Severity,
-    /// Every title merged into this finding, in order of appearance.
+    /// Every title merged into this finding, redacted, in order of appearance.
     pub titles: Vec<String>,
-    /// Every detail merged into this finding, in order of appearance.
+    /// Every detail merged into this finding, redacted, in order of appearance.
     pub details: Vec<String>,
-    /// Every original category merged into this finding, in order of appearance.
+    /// Every category the mages reported, in order of appearance.
     pub categories: Vec<Category>,
-    /// The mages that reported it.
+    /// The mages that reported it, each once.
     pub sources: Vec<AgentName>,
     /// Marks set by consolidation and by the agreement weight.
     pub marks: Vec<FindingMark>,
-    /// The batches where it appeared, in order.
+    /// The batches where it appeared, ascending.
     pub batches: Vec<usize>,
 }
 
@@ -52,40 +68,78 @@ pub struct ConsolidatedFinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingMark {
-    /// Only one mage reported it while two or more answered; one level lower.
+    /// Only one mage reported it while two or more answered; one severity level lower.
     SingleMage,
-    /// Only one mage answered where it appeared; nothing to weigh.
+    /// Only one mage answered where it appeared; there was no disagreement to weigh.
     PartialTrio,
-    /// Grouped without asking the consensus engine, past [`MAX_UNLOCATED_PROBES`].
+    /// An unlocated finding grouped without asking the consensus engine, because the review
+    /// spent [`MAX_UNLOCATED_PROBES`]; its agreement was never measured, so it is not lowered.
     Ungrouped,
 }
 
 /// The consolidated review.
 #[derive(Debug, Clone)]
 pub struct Consolidated {
-    /// One synthetic output per mage.
+    /// One synthetic output per mage, in order of first appearance.
     pub agents: Vec<AgentOutput>,
-    /// The consensus over those outputs.
+    /// The consensus magi-core computed over [`Consolidated::agents`].
     pub consensus: ConsensusResult,
-    /// The consolidated findings.
+    /// The consolidated findings, in the consensus order (highest severity first), followed
+    /// by any group formed outside it.
     pub findings: Vec<ConsolidatedFinding>,
     /// Which mages answered in each batch.
     pub answered: BTreeMap<usize, BTreeSet<AgentName>>,
-    /// Unlocated findings that formed their own group because the probe budget was spent.
+    /// Unlocated findings that formed their own group because the probe budget was spent
+    /// (declared, never dropped).
     pub ungrouped_unlocated: usize,
 }
 
-/// Probes one review may spend grouping unlocated findings.
+/// Probes (`determine` on two one-finding outputs) one review may spend grouping unlocated
+/// findings: about 0.9 s in release at the measured ~9.3 µs a probe. A starting point, not a
+/// measurement of need.
 pub const MAX_UNLOCATED_PROBES: usize = 100_000;
 
-/// Merges the batch reports of one review into one report.
+/// Merges the batch reports of one review into one report (REQ-RV12).
+///
+/// Per mage, one output is built from a clone of its worst-verdict batch output (`reject` >
+/// `conditional` > `approve`; the first such batch wins a tie) with the lowest confidence
+/// across batches, every batch's summary and reasoning labelled `[batch k]` (1-based) in
+/// order, and the union of its findings. Every located finding (non-empty `file` and
+/// `line > 0`, the same split magi-core's key makes) carries the neutral category, so two
+/// mages that place a defect on the same line are one finding. The outputs go to
+/// [`ConsensusEngine::determine`], which gives the consensus, the dedup and the highest
+/// severity. Model text (titles, details, summaries, reasoning, recommendations) is redacted
+/// on the way in.
+///
+/// Each reported finding is then mapped to its group without a local key: a located one by
+/// [`generate_finding_id`] with the neutral category, an unlocated one by asking magi-core
+/// whether its title and a group's title are one finding (a probe), with identical titles
+/// decided without a call and each pair probed once. Every title, detail and original
+/// category is kept, in order of appearance.
+///
+/// # Complexity
+///
+/// O(n) to build the outputs and map located findings (n reported findings), plus magi-core's
+/// own O(n²) dedup, plus O(u·g) probes for u unlocated findings over g unlocated groups. The
+/// probes are per review, not per batch (u and g grow with the batches), and bounded by
+/// [`MAX_UNLOCATED_PROBES`]: past it an unlocated finding whose title matches no group
+/// verbatim forms its own group, is counted in [`Consolidated::ungrouped_unlocated`], and
+/// every single-source unlocated finding is marked [`FindingMark::Ungrouped`].
+///
+/// # Arguments
+///
+/// * `batches` - The outcome of every batch that ran, in batch order.
+///
+/// # Returns
+///
+/// The consolidated review.
 ///
 /// # Errors
 ///
-/// [`ReviewError::Consolidation`] when the consensus cannot be computed.
+/// [`ReviewError::Consolidation`] when magi-core refuses the consensus: no batch, or fewer
+/// mages across the review than its `min_agents` (2).
 pub fn consolidate(batches: &[BatchOutcome]) -> Result<Consolidated, ReviewError> {
-    let _ = batches;
-    todo!("T2.7 Green")
+    consolidate_capped(batches, MAX_UNLOCATED_PROBES)
 }
 
 /// [`consolidate`] with an explicit probe budget.
@@ -94,24 +148,418 @@ pub(crate) fn consolidate_with_probe_cap(
     batches: &[BatchOutcome],
     cap: usize,
 ) -> Result<Consolidated, ReviewError> {
-    let _ = (batches, cap);
-    todo!("T2.7 Green")
+    consolidate_capped(batches, cap)
 }
 
-/// Applies the agreement weight (REQ-RV11).
+/// One reported finding, redacted, with where it came from.
+struct Reported {
+    /// The batch it came from.
+    batch: usize,
+    /// The mage that reported it.
+    agent: AgentName,
+    /// The finding with redacted text and its original category.
+    finding: Finding,
+}
+
+/// The per-mage accumulator behind one synthetic output.
+struct MageAcc {
+    /// A clone of the mage's worst-verdict output; supplies every field not set below.
+    base: AgentOutput,
+    /// The lowest confidence across batches.
+    confidence: f64,
+    /// `[batch k] summary`, in batch order.
+    summaries: Vec<String>,
+    /// `[batch k] reasoning`, in batch order.
+    reasoning: Vec<String>,
+    /// The union of the mage's findings, with the neutral category when located.
+    findings: Vec<Finding>,
+}
+
+/// A group of reported findings that are one consolidated finding.
+struct Group {
+    /// The magi-core group it stands for, if any.
+    dedup: Option<usize>,
+    /// The stable id, for a located group.
+    id: Option<String>,
+    /// The representative title an unlocated finding is compared against.
+    rep: String,
+    /// Indices into the reported findings, in order of appearance.
+    members: Vec<usize>,
+}
+
+/// The body of [`consolidate`], with the probe budget as a parameter.
+fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidated, ReviewError> {
+    let (agents, reported) = synthesize(batches);
+    let engine = ConsensusEngine::default();
+    let consensus = engine
+        .determine(&agents)
+        .map_err(|e| ReviewError::Consolidation(redacted(&e.to_string())))?;
+    let probe = Prober::new(&engine, agents.first(), cap);
+    let mut groups: Vec<Group> = consensus
+        .findings
+        .iter()
+        .enumerate()
+        .map(|(i, d)| Group {
+            dedup: Some(i),
+            id: d.id.clone(),
+            rep: d.title.clone(),
+            members: Vec::new(),
+        })
+        .collect();
+    let mut by_id: HashMap<String, usize> = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(i, g)| g.id.clone().map(|id| (id, i)))
+        .collect();
+    let mut ungrouped_unlocated = 0usize;
+    for (k, r) in reported.iter().enumerate() {
+        let located = located(&r.finding);
+        let slot = match located {
+            Some((file, line)) => {
+                let id = generate_finding_id(file, line, NEUTRAL_CATEGORY);
+                by_id.get(&id).copied().ok_or(Some(id))
+            }
+            None => {
+                let candidates: Vec<usize> = (0..groups.len())
+                    .filter(|&i| groups.get(i).is_some_and(|g| g.id.is_none()))
+                    .collect();
+                let reps: Vec<String> = candidates
+                    .iter()
+                    .filter_map(|&i| groups.get(i).map(|g| g.rep.clone()))
+                    .collect();
+                probe.refused.set(false);
+                group_of(&r.finding.title, &reps, &|a, b| probe.same(a, b))
+                    .and_then(|j| candidates.get(j).copied())
+                    .ok_or(None)
+            }
+        };
+        match slot {
+            Ok(i) => {
+                if let Some(g) = groups.get_mut(i) {
+                    g.members.push(k);
+                }
+            }
+            Err(id) => {
+                if located.is_none() && probe.refused.get() {
+                    ungrouped_unlocated += 1;
+                } else {
+                    tracing::event!(
+                        target: LOG_TARGET,
+                        tracing::Level::WARN,
+                        "a finding no consolidated group claimed was kept as its own finding"
+                    );
+                }
+                if let Some(id) = &id {
+                    by_id.insert(id.clone(), groups.len());
+                }
+                groups.push(Group {
+                    dedup: None,
+                    id,
+                    rep: r.finding.title.clone(),
+                    members: vec![k],
+                });
+            }
+        }
+    }
+    let exhausted = probe.exhausted.get();
+    let findings = groups
+        .iter()
+        .filter(|g| !g.members.is_empty())
+        .map(|g| finding_of(g, &reported, &consensus.findings, exhausted))
+        .collect();
+    let answered = batches
+        .iter()
+        .map(|b| (b.batch, b.answered.clone()))
+        .collect();
+    Ok(Consolidated {
+        agents,
+        consensus,
+        findings,
+        answered,
+        ungrouped_unlocated,
+    })
+}
+
+/// Builds one synthetic output per mage and the list of reported findings.
+fn synthesize(batches: &[BatchOutcome]) -> (Vec<AgentOutput>, Vec<Reported>) {
+    let mut mages: Vec<(AgentName, MageAcc)> = Vec::new();
+    let mut reported = Vec::new();
+    for b in batches {
+        for a in &b.agents {
+            let label = b.batch + 1;
+            let mut neutral = Vec::with_capacity(a.findings.len());
+            for f in &a.findings {
+                let mut clean = f.clone();
+                clean.title = redacted(&f.title);
+                clean.detail = redacted(&f.detail);
+                let mut keyed = clean.clone();
+                if located(&keyed).is_some() {
+                    keyed.category = NEUTRAL_CATEGORY;
+                }
+                neutral.push(keyed);
+                reported.push(Reported {
+                    batch: b.batch,
+                    agent: a.agent,
+                    finding: clean,
+                });
+            }
+            let summary = format!("[batch {label}] {}", redacted(&a.summary));
+            let reasoning = format!("[batch {label}] {}", redacted(&a.reasoning));
+            match mages.iter_mut().find(|(n, _)| *n == a.agent) {
+                Some((_, acc)) => {
+                    if rank(a.verdict) > rank(acc.base.verdict) {
+                        acc.base = a.clone();
+                    }
+                    acc.confidence = acc.confidence.min(a.confidence);
+                    acc.summaries.push(summary);
+                    acc.reasoning.push(reasoning);
+                    acc.findings.extend(neutral);
+                }
+                None => mages.push((
+                    a.agent,
+                    MageAcc {
+                        base: a.clone(),
+                        confidence: a.confidence,
+                        summaries: vec![summary],
+                        reasoning: vec![reasoning],
+                        findings: neutral,
+                    },
+                )),
+            }
+        }
+    }
+    let agents = mages
+        .into_iter()
+        .map(|(_, acc)| {
+            let mut out = acc.base;
+            out.confidence = acc.confidence;
+            out.summary = acc.summaries.join("\n");
+            out.reasoning = acc.reasoning.join("\n");
+            out.recommendation = redacted(&out.recommendation);
+            out.findings = acc.findings;
+            out
+        })
+        .collect();
+    (agents, reported)
+}
+
+/// Builds the consolidated finding of one group.
+fn finding_of(
+    g: &Group,
+    reported: &[Reported],
+    dedup: &[DedupFinding],
+    exhausted: bool,
+) -> ConsolidatedFinding {
+    let members: Vec<&Reported> = g.members.iter().filter_map(|&k| reported.get(k)).collect();
+    let present: BTreeSet<AgentName> = members.iter().map(|r| r.agent).collect();
+    let from_core = g.dedup.and_then(|i| dedup.get(i));
+    // magi-core's sources as they are; a group the probe cap split keeps only the mages whose
+    // findings it still holds, so no source counts in two groups.
+    let sources: Vec<AgentName> = match from_core {
+        Some(d) => d
+            .sources
+            .iter()
+            .copied()
+            .filter(|a| present.contains(a))
+            .collect(),
+        None => {
+            let mut s = Vec::new();
+            for r in &members {
+                if !s.contains(&r.agent) {
+                    s.push(r.agent);
+                }
+            }
+            s
+        }
+    };
+    let reported_severity = members
+        .iter()
+        .map(|r| r.finding.severity)
+        .max()
+        .unwrap_or(Severity::Info);
+    let first = members.first().map(|r| &r.finding);
+    let (file, line) = match from_core {
+        Some(d) => (d.file.clone(), d.line),
+        None => (
+            first.and_then(|f| f.file.clone()),
+            first.and_then(|f| f.line),
+        ),
+    };
+    let unlocated = first.is_some_and(|f| located(f).is_none());
+    let marks = if exhausted && unlocated && sources.len() == 1 {
+        vec![FindingMark::Ungrouped]
+    } else {
+        Vec::new()
+    };
+    let mut batches: Vec<usize> = members.iter().map(|r| r.batch).collect();
+    batches.sort_unstable();
+    batches.dedup();
+    ConsolidatedFinding {
+        file,
+        line,
+        severity: reported_severity,
+        reported_severity,
+        titles: members.iter().map(|r| r.finding.title.clone()).collect(),
+        details: members.iter().map(|r| r.finding.detail.clone()).collect(),
+        categories: members.iter().map(|r| r.finding.category).collect(),
+        sources,
+        marks,
+        batches,
+    }
+}
+
+/// Asks magi-core whether two unlocated titles are one finding, within a budget.
+struct Prober<'a> {
+    /// The engine whose private title key decides.
+    engine: &'a ConsensusEngine,
+    /// An empty output both probe outputs are cloned from; `None` with no mage at all.
+    template: Option<AgentOutput>,
+    /// Probes left.
+    left: Cell<usize>,
+    /// Pairs already probed.
+    memo: RefCell<HashMap<(String, String), bool>>,
+    /// Whether the current lookup was refused a probe.
+    refused: Cell<bool>,
+    /// Whether any lookup of the review was refused a probe.
+    exhausted: Cell<bool>,
+}
+
+impl<'a> Prober<'a> {
+    /// A prober over `engine` with `cap` probes, cloning its outputs from `any`.
+    fn new(engine: &'a ConsensusEngine, any: Option<&AgentOutput>, cap: usize) -> Self {
+        let template = any.map(|a| {
+            let mut t = a.clone();
+            t.summary.clear();
+            t.reasoning.clear();
+            t.recommendation.clear();
+            t.findings.clear();
+            t
+        });
+        Self {
+            engine,
+            template,
+            left: Cell::new(cap),
+            memo: RefCell::new(HashMap::new()),
+            refused: Cell::new(false),
+            exhausted: Cell::new(false),
+        }
+    }
+
+    /// Whether magi-core keys `title` and `rep` as one finding; `false` once the budget is
+    /// spent (recorded in `refused` and `exhausted`).
+    fn same(&self, title: &str, rep: &str) -> bool {
+        let key = (title.to_string(), rep.to_string());
+        if let Some(&known) = self.memo.borrow().get(&key) {
+            return known;
+        }
+        let left = self.left.get();
+        if left == 0 {
+            self.refused.set(true);
+            self.exhausted.set(true);
+            return false;
+        }
+        self.left.set(left - 1);
+        let answer = self.probe(title, rep);
+        self.memo.borrow_mut().insert(key, answer);
+        answer
+    }
+
+    /// One probe: `determine` over two one-finding outputs gives one finding iff one key.
+    fn probe(&self, title: &str, rep: &str) -> bool {
+        let Some(template) = &self.template else {
+            return false;
+        };
+        let one = |agent: AgentName, t: &str| {
+            let mut o = template.clone();
+            o.agent = agent;
+            o.findings = vec![Finding::new(Severity::Info, t, "")];
+            o
+        };
+        let pair = [
+            one(AgentName::Melchior, title),
+            one(AgentName::Balthasar, rep),
+        ];
+        self.engine
+            .determine(&pair)
+            .is_ok_and(|c| c.findings.len() == 1)
+    }
+}
+
+/// The location magi-core keys by id: a non-empty file and a positive line.
+fn located(f: &Finding) -> Option<(&str, u32)> {
+    match (f.file.as_deref(), f.line) {
+        (Some(file), Some(line)) if !file.is_empty() && line > 0 => Some((file, line)),
+        _ => None,
+    }
+}
+
+/// How bad a verdict is: `approve` < `conditional` < `reject`.
+fn rank(v: Verdict) -> u8 {
+    match v {
+        Verdict::Approve => 0,
+        Verdict::Conditional => 1,
+        Verdict::Reject => 2,
+    }
+}
+
+/// Model text with credentials redacted, as `consult` writes it.
+fn redacted(raw: &str) -> String {
+    redact_foreign_text(raw).as_str().to_string()
+}
+
+/// Applies the agreement weight (REQ-RV11); runs after the gate.
+///
+/// Who answered is the union of `answered` over the batches where the finding appeared. With
+/// one mage or none there is no disagreement to weigh: the finding keeps its severity and is
+/// marked [`FindingMark::PartialTrio`]. With two or more and a single source, it drops one
+/// level (`critical` → `warning` → `info`; `info` stays) and is marked
+/// [`FindingMark::SingleMage`]. A finding marked [`FindingMark::Ungrouped`] is left as it is:
+/// its agreement was never measured. Nothing is ever removed.
+///
+/// # Arguments
+///
+/// * `findings` - The consolidated findings, changed in place.
+/// * `answered` - Which mages answered in each batch ([`Consolidated::answered`]).
 pub fn apply_agreement(
     findings: &mut [ConsolidatedFinding],
     answered: &BTreeMap<usize, BTreeSet<AgentName>>,
 ) {
-    let _ = (findings, answered);
-    todo!("T2.7 Green")
+    for f in findings.iter_mut() {
+        if f.marks.contains(&FindingMark::Ungrouped) {
+            continue;
+        }
+        let responders: BTreeSet<AgentName> = f
+            .batches
+            .iter()
+            .filter_map(|b| answered.get(b))
+            .flatten()
+            .copied()
+            .collect();
+        if responders.len() < 2 {
+            f.marks.push(FindingMark::PartialTrio);
+        } else if f.sources.len() == 1 {
+            f.severity = lower(f.severity);
+            f.marks.push(FindingMark::SingleMage);
+        }
+    }
 }
 
-/// The group an unlocated title belongs to.
-#[allow(dead_code)] // Red stub
+/// One severity level lower; `info` stays `info`.
+fn lower(s: Severity) -> Severity {
+    match s {
+        Severity::Critical => Severity::Warning,
+        Severity::Warning | Severity::Info => Severity::Info,
+    }
+}
+
+/// The group an unlocated title belongs to, by index into `reps`.
+///
+/// An identical representative decides without calling `same`; otherwise the first
+/// representative `same` accepts. `None` when none does.
 fn group_of(title: &str, reps: &[String], same: &dyn Fn(&str, &str) -> bool) -> Option<usize> {
-    let _ = (title, reps, same);
-    todo!("T2.7 Green")
+    reps.iter()
+        .position(|r| r == title)
+        .or_else(|| reps.iter().position(|r| same(title, r)))
 }
 
 #[cfg(test)]
