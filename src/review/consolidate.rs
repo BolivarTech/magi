@@ -95,8 +95,8 @@ pub struct Consolidated {
 }
 
 /// Probes (`determine` on two one-finding outputs) one review may spend grouping unlocated
-/// findings: about 0.9 s in release at the measured ~9.3 µs a probe. A starting point, not a
-/// measurement of need.
+/// findings. A probe measured ~7.3 µs in release (~64 µs in debug) on this implementation, so
+/// the whole budget costs about 0.7 s. A starting point, not a measurement of need.
 pub const MAX_UNLOCATED_PROBES: usize = 100_000;
 
 /// Merges the batch reports of one review into one report (REQ-RV12).
@@ -219,19 +219,7 @@ fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidat
                 let id = generate_finding_id(file, line, NEUTRAL_CATEGORY);
                 by_id.get(&id).copied().ok_or(Some(id))
             }
-            None => {
-                let candidates: Vec<usize> = (0..groups.len())
-                    .filter(|&i| groups.get(i).is_some_and(|g| g.id.is_none()))
-                    .collect();
-                let reps: Vec<String> = candidates
-                    .iter()
-                    .filter_map(|&i| groups.get(i).map(|g| g.rep.clone()))
-                    .collect();
-                probe.refused.set(false);
-                group_of(&r.finding.title, &reps, &|a, b| probe.same(a, b))
-                    .and_then(|j| candidates.get(j).copied())
-                    .ok_or(None)
-            }
+            None => unlocated_slot(&groups, &r.finding.title, &probe).ok_or(None),
         };
         match slot {
             Ok(i) => {
@@ -278,6 +266,19 @@ fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidat
         answered,
         ungrouped_unlocated,
     })
+}
+
+/// The group (index into `groups`) an unlocated title belongs to, among the groups without an
+/// id; resets `probe.refused` so the caller can tell a refused probe from no match.
+fn unlocated_slot(groups: &[Group], title: &str, probe: &Prober<'_>) -> Option<usize> {
+    let (candidates, reps): (Vec<usize>, Vec<String>) = groups
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.id.is_none())
+        .map(|(i, g)| (i, g.rep.clone()))
+        .unzip();
+    probe.refused.set(false);
+    group_of(title, &reps, &|a, b| probe.same(a, b)).and_then(|j| candidates.get(j).copied())
 }
 
 /// Builds one synthetic output per mage and the list of reported findings.
