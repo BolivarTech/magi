@@ -5004,6 +5004,18 @@ api_key = \"k\"
     }
 
     #[test]
+    fn an_api_key_next_to_a_valid_model_in_code_review_is_a_load_error() {
+        // Without `model` the section fails for the missing key anyway; with it, only
+        // `deny_unknown_fields` stands between an `api_key` and a silent load.
+        let t = "[decision]\nmodel=\"x\"\n[code_review]\nmodel = \"m\"\napi_key = \"k\"\n";
+        let err = MagiConfig::from_toml_str(t).expect_err("api_key never lives in the toml");
+        assert!(err.to_string().contains("api_key"), "{err}");
+        let t = "[decision]\nmodel=\"x\"\n[code_review]\nmodel = \"m\"\n\
+                 [[code_review.fallback]]\nmodel = \"f\"\napi_key = \"k\"\n";
+        assert!(MagiConfig::from_toml_str(t).is_err(), "nor in a fallback");
+    }
+
+    #[test]
     fn an_invalid_code_review_section_is_a_load_error() {
         // [CP2 MS2 S2a1 loop 10] one case per `validate` rule: a blank model (an empty chain), a zero timeout or state cap,
         // and a threshold outside [0, 1] (above 1 the gate would filter nothing).
