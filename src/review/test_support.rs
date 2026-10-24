@@ -97,3 +97,51 @@ pub(crate) fn out(
     }))
     .expect("a valid agent output")
 }
+
+/// One mage's verdict block, as a real seat emits it.
+pub(crate) fn verdict(
+    agent: &str,
+    verdict: &str,
+    confidence: f64,
+    findings: serde_json::Value,
+) -> String {
+    let body = serde_json::json!({
+        "agent": agent,
+        "verdict": verdict,
+        "confidence": confidence,
+        "summary": format!("{agent} s"),
+        "reasoning": "r",
+        "recommendation": "go",
+        "findings": findings
+    });
+    format!(
+        "{}\n{body}\n{}",
+        magi_core::verdict_markers::VERDICT_OPEN,
+        magi_core::verdict_markers::VERDICT_CLOSE
+    )
+}
+
+/// A REAL `MagiReport`, produced by magi-core's orchestrator over its no-network provider.
+pub(crate) async fn real_report(
+    findings: [serde_json::Value; 3],
+) -> magi_core::reporting::MagiReport {
+    use magi_core::schema::AgentName;
+    let [m, b, c] = findings;
+    let provider = magi_core::test_support::RoutingMockProvider::new()
+        .with_agent_responses(
+            AgentName::Melchior,
+            vec![Ok(verdict("melchior", "approve", 0.9, m))],
+        )
+        .with_agent_responses(
+            AgentName::Balthasar,
+            vec![Ok(verdict("balthasar", "approve", 0.9, b))],
+        )
+        .with_agent_responses(
+            AgentName::Caspar,
+            vec![Ok(verdict("caspar", "approve", 0.9, c))],
+        );
+    magi_core::orchestrator::Magi::new(std::sync::Arc::new(provider))
+        .analyze(&magi_core::schema::Mode::CodeReview, "review")
+        .await
+        .expect("a canned report")
+}

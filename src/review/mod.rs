@@ -28,6 +28,7 @@
 )]
 
 pub mod batching;
+pub mod consolidate;
 pub mod context;
 pub mod error;
 pub mod filter;
