@@ -1119,6 +1119,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_configured_call_timeout_each_call_uses_the_default_one() {
+        // A gate built without `with_call_timeout` must still cap each call by its own timeout,
+        // or a slow model would be read as the review clock running out.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .withf(|r| {
+                r.timeout()
+                    == Some(std::time::Duration::from_secs(
+                        crate::review::config::DEFAULT_CALL_TIMEOUT_SECS,
+                    ))
+            })
+            .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\n"),
+                Some(std::time::Duration::from_secs(5_000)),
+            )
+            .await;
+        assert_eq!(v.state, GateState::Kept);
+    }
+
+    #[tokio::test]
+    async fn after_a_401_a_finding_without_a_line_is_still_no_location() {
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().times(1).returning(|_| {
+            Err(DecisionError::Unauthorized {
+                status: 401,
+                trace: Trace::default(),
+            })
+        });
+        let mut g = Gate::new(&c, chain(), 61_000);
+        g.judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+            .await;
+        let v = g.judge(&finding(Severity::Warning, None), None, None).await;
+        assert_eq!(
+            (v.state, v.cause, g.stopped()),
+            (
+                GateState::Unfiltered,
+                Some("no location"),
+                Some("unauthorized")
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn with_time_to_spare_each_call_uses_the_configured_timeout() {
         let mut c = MockDecisionClient::new();
         c.expect_decide()

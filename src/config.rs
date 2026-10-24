@@ -5283,6 +5283,39 @@ base_url = \"nope nope\"
     }
 
     #[test]
+    fn a_literal_credential_in_code_review_base_url_is_a_load_error_without_echoing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_toml(
+            &dir,
+            "[decision]\nmodel = \"m\"\n[code_review]\nmodel = \"m\"\n\
+             base_url = \"https://alice:s3cr3t@host/v1\"\n",
+        );
+        let msg = MagiConfig::load(&path)
+            .expect_err("a literal credential must not load")
+            .to_string();
+        assert!(
+            !msg.contains("s3cr3t") && !msg.contains("alice"),
+            "leaked: {msg}"
+        );
+        assert!(msg.contains("CODE_REVIEW_BASE_URL_USER"), "{msg}");
+        assert!(msg.contains("magi-rs vault set"), "{msg}");
+    }
+
+    #[test]
+    fn a_code_review_base_url_without_a_host_is_a_load_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_toml(
+            &dir,
+            "[decision]\nmodel = \"m\"\n[code_review]\nmodel = \"m\"\nbase_url = \"http://\"\n",
+        );
+        let msg = MagiConfig::load(&path)
+            .expect_err("a base_url with no host must not load")
+            .to_string();
+        assert!(msg.contains("[code_review].base_url"), "{msg}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+    }
+
+    #[test]
     fn a_decision_base_url_without_a_host_is_a_load_error() {
         // MAGI gate loop 2: the load-time URL parse is the gate that catches what the placeholder
         // template accepts but no client could use; removing it moved the failure to runtime.

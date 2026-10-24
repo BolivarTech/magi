@@ -2019,6 +2019,7 @@ mod tests {
             ("magi", "MAGI_API_KEY"),
             ("embedding", "EMBEDDING_API_KEY"),
             ("decision", "DECISION_API_KEY"),
+            ("code_review", "CODE_REVIEW_API_KEY"),
         ] {
             let text = own_section_lines(&scaffold, name).join("\n");
             for needle in [own, "OPENAI_API_KEY", "magi-rs vault set"] {

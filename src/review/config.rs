@@ -12,6 +12,11 @@
 
 use crate::decision::ModelSpec;
 
+/// HTTP timeout of each gate call, in seconds, when `[code_review].timeout_secs` is absent:
+/// sized like `[decision]` to cover a local cold model load. The single literal: the bin's
+/// default and [`crate::review::gate::Gate`] both read it from here.
+pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 120;
+
 /// The `[code_review]` section as written in `magi.toml`.
 ///
 /// # Examples
