@@ -24,6 +24,7 @@ use crate::decision::{
     ModelSpec, Question, Questions,
 };
 
+use super::config::DEFAULT_CALL_TIMEOUT_SECS;
 use super::consolidate::ConsolidatedFinding;
 use super::secrets::find_secret;
 
@@ -325,7 +326,7 @@ pub struct Gate<'a> {
     client: &'a dyn DecisionClient,
     chain: Vec<ModelSpec>,
     max_state_bytes: usize,
-    call_timeout: Option<Duration>,
+    call_timeout: Duration,
     rejected: BTreeSet<String>,
     stopped: Option<&'static str>,
     per_model: BTreeMap<String, usize>,
@@ -340,8 +341,9 @@ impl<'a> Gate<'a> {
     /// * `max_state_bytes` - the largest serialized state sent, in bytes.
     ///
     /// # Returns
-    /// The gate. Without [`Self::with_call_timeout`] a call carries no timeout of its own beyond
-    /// what is left of the review clock, and the client's configured timeout applies.
+    /// The gate. Until [`Self::with_call_timeout`] sets another, each call's timeout is
+    /// [`DEFAULT_CALL_TIMEOUT_SECS`]: a call always carries a timeout of its own, so a slow
+    /// model is never read as the review clock running out.
     pub fn new(
         client: &'a dyn DecisionClient,
         chain: Vec<ModelSpec>,
@@ -351,7 +353,7 @@ impl<'a> Gate<'a> {
             client,
             chain,
             max_state_bytes,
-            call_timeout: None,
+            call_timeout: Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS),
             rejected: BTreeSet::new(),
             stopped: None,
             per_model: BTreeMap::new(),
@@ -367,13 +369,13 @@ impl<'a> Gate<'a> {
     /// # Returns
     /// The gate.
     pub fn with_call_timeout(mut self, timeout: Duration) -> Self {
-        self.call_timeout = Some(timeout);
+        self.call_timeout = timeout;
         self
     }
 
     /// Judges one finding, never failing: what cannot be judged passes as `unfiltered`.
     ///
-    /// In order: a cause that already stopped the gate; no line or no code (`no location`); a
+    /// In order: no line or no code (`no location`); a cause that already stopped the gate; a
     /// spent review clock (`timeout`); a state over `max_state_bytes` (`state too large`, never
     /// truncated) or carrying a secret (`secret`, never sent). Then each distinct (title,
     /// detail) pair is asked once, walking the chain: a confident `false_positive` filters it
@@ -421,9 +423,15 @@ impl<'a> Gate<'a> {
 
     /// Answers counted per deciding model.
     ///
+    /// One answer counts per question asked, and only the answer that decided that question's
+    /// state (`kept`, `filtered` or `low_confidence` for a critical). An answer under its
+    /// threshold that passed the question to the next model does not count, nor does a chain
+    /// that ended with every model under its threshold. A merged finding asks one question per
+    /// distinct (title, detail) pair until one is not `filtered`, so it adds one count for each
+    /// pair asked: two `filtered` pairs count twice, and a first pair `kept` counts once.
+    ///
     /// # Returns
-    /// Model name to the number of answers that decided a state; an answer under the threshold
-    /// that passed the question on does not count.
+    /// Model name to the number of answers that decided a state.
     pub fn per_model(&self) -> &BTreeMap<String, usize> {
         &self.per_model
     }
@@ -450,12 +458,14 @@ impl<'a> Gate<'a> {
         deadline: Option<Instant>,
         skipped: &mut Vec<String>,
     ) -> Outcome {
-        if let Some(cause) = self.stopped {
-            return Outcome::unfiltered(cause);
-        }
+        // A finding with nothing to show is `no location` whatever stopped the gate: no call is
+        // made either way, and the cause says what the finding lacks.
         let (Some(_), Some(code)) = (finding.line, code) else {
             return Outcome::unfiltered(CAUSE_NO_LOCATION);
         };
+        if let Some(cause) = self.stopped {
+            return Outcome::unfiltered(cause);
+        }
         if deadline.is_some_and(|d| d <= Instant::now()) {
             return self.stop(CAUSE_TIMEOUT);
         }
@@ -509,21 +519,15 @@ impl<'a> Gate<'a> {
                 }
                 None => None,
             };
-            let (cap, cut_by_clock) = match (self.call_timeout, left) {
-                (Some(call), Some(left)) if left < call => (Some(left), true),
-                (Some(call), _) => (Some(call), false),
-                (None, Some(left)) => (Some(left), true),
-                (None, None) => (None, false),
+            let (cap, cut_by_clock) = match left {
+                Some(left) if left < self.call_timeout => (left, true),
+                _ => (self.call_timeout, false),
             };
             // `new` only fails on a malformed state or question set; both are built here.
             let Ok(request) = DecisionRequest::new(state.clone(), gate_questions()) else {
                 return Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
             };
-            let request = request.with_model(spec.model.clone());
-            let request = match cap {
-                Some(cap) => request.with_timeout(cap),
-                None => request,
-            };
+            let request = request.with_model(spec.model.clone()).with_timeout(cap);
             called = true;
             match self.client.decide(&request).await {
                 Ok(decision) => {

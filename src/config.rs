@@ -206,6 +206,17 @@ pub enum ConfigError {
         /// The `magi.toml` that declares the URL.
         config_path: std::path::PathBuf,
     },
+
+    /// `[code_review].base_url` (or the root URL it inherits) is not a valid URL. The text
+    /// names the file and never repeats the value.
+    #[error(
+        "{}: [code_review].base_url is not a valid URL (scheme://host/...)",
+        config_path.display()
+    )]
+    CodeReviewBaseUrl {
+        /// The `magi.toml` that declares the URL.
+        config_path: std::path::PathBuf,
+    },
 }
 
 /// The last magi-rs version whose scaffold wrote a `magi.toml` without `[decision]`. A
@@ -1940,13 +1951,21 @@ impl MagiConfig {
         cfg.effective_base_url()?;
         cfg.effective_magi_base_url()?;
         cfg.effective_embedding_base_url()?;
-        cfg.effective_code_review_base_url()?;
         // D-P4: the placeholders `[user]:[password]` parse as userinfo, so the template itself
         // can be checked here without resolving any secret.
         match cfg.effective_decision_base_url() {
             Ok(t) if reqwest::Url::parse(t.as_str()).is_ok() => {}
             Ok(_) | Err(EndpointError::Unparseable) => {
                 return Err(ConfigError::DecisionBaseUrl {
+                    config_path: path.to_path_buf(),
+                })
+            }
+            Err(e) => return Err(e.into()),
+        }
+        match cfg.effective_code_review_base_url() {
+            Ok(t) if reqwest::Url::parse(t.as_str()).is_ok() => {}
+            Ok(_) | Err(EndpointError::Unparseable) => {
+                return Err(ConfigError::CodeReviewBaseUrl {
                     config_path: path.to_path_buf(),
                 })
             }

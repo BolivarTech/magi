@@ -132,7 +132,8 @@ pub const DEFAULT_CODE_REVIEW_MIN_CONFIDENCE: f64 = 0.40;
 pub const DEFAULT_CODE_REVIEW_FALLBACKS: [(&str, f64); 2] =
     [("clef-flash", 0.32), ("nimble", 0.80)];
 /// HTTP timeout of each gate call, in seconds; sized like `[decision]` to cover a cold load.
-pub const DEFAULT_CODE_REVIEW_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_CODE_REVIEW_TIMEOUT_SECS: u64 =
+    magi_rs::review::config::DEFAULT_CALL_TIMEOUT_SECS;
 /// Largest serialized gate `state`, in bytes: the request-size cap measured with the local
 /// `clef-flash` model (as [`SCAFFOLD_DECISION_MAX_STATE_BYTES`]). A larger state is never
 /// truncated: the finding passes unjudged.
