@@ -1170,4 +1170,37 @@ mod tests {
         let all = serde_json::to_string(&c.agents).expect("serializes");
         assert!(!all.contains("hunter2"), "{all}");
     }
+
+    #[test]
+    fn a_file_without_a_line_is_grouped_by_probing_the_title_alone() {
+        // The titles differ in case only, so membership needs a probe (with no probe allowed
+        // they stay apart); the probe asks magi-core about the titles alone, never the files.
+        let a = serde_json::json!([{"severity":"warning","title":"Leaks A Handle","detail":"da","file":"a.rs"}]);
+        let b = serde_json::json!([{"severity":"warning","title":"leaks a handle","detail":"db","file":"b.rs"}]);
+        let input = [batch(
+            0,
+            vec![
+                out("melchior", "approve", 0.9, a),
+                out("caspar", "approve", 0.9, b),
+            ],
+        )];
+        let c = consolidate(&input).expect("consolidates");
+        assert_eq!(
+            c.consensus.findings.len(),
+            1,
+            "magi-core keys them by title"
+        );
+        assert_eq!(c.findings.len(), 1, "{:?}", c.findings);
+        assert_eq!(
+            c.findings[0].sources,
+            vec![AgentName::Melchior, AgentName::Caspar]
+        );
+        assert_eq!(c.ungrouped_unlocated, 0);
+        let unprobed = consolidate_with_probe_cap(&input, 0).expect("consolidates");
+        assert_eq!(
+            unprobed.findings.len(),
+            2,
+            "without a probe the second title is not claimed"
+        );
+    }
 }
