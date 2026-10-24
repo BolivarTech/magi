@@ -1125,4 +1125,49 @@ mod tests {
         assert_eq!(c.consensus.findings.len(), 1, "{:?}", c.consensus.findings);
         assert_eq!(c.consensus.findings[0].sources.len(), 2);
     }
+
+    #[test]
+    fn per_mage_text_is_labelled_in_batch_order_redacted_and_follows_the_worst_batch() {
+        // RV12: summary and reasoning of every batch, labelled and in batch order; the
+        // recommendation from the worst-verdict batch; no model text kept unredacted.
+        let secret = "https://user:hunter2@example.invalid/x";
+        let mage = |verdict: &str, k: usize| {
+            let mut o = out("melchior", verdict, 0.9, serde_json::json!([]));
+            o.summary = format!("sum{k} {secret}");
+            o.reasoning = format!("why{k} {secret}");
+            o.recommendation = format!("rec{k} {secret}");
+            o
+        };
+        let quiet = || out("caspar", "approve", 0.9, serde_json::json!([]));
+        let c = consolidate(&[
+            batch(0, vec![mage("approve", 1), quiet()]),
+            batch(1, vec![mage("reject", 2), quiet()]),
+        ])
+        .expect("consolidates");
+        let red = |s: String| crate::redact::redact_foreign_text(&s).as_str().to_string();
+        let m = c
+            .agents
+            .iter()
+            .find(|a| a.agent == AgentName::Melchior)
+            .expect("melchior");
+        assert_eq!(
+            m.summary,
+            format!(
+                "[batch 1] {}\n[batch 2] {}",
+                red(format!("sum1 {secret}")),
+                red(format!("sum2 {secret}"))
+            )
+        );
+        assert_eq!(
+            m.reasoning,
+            format!(
+                "[batch 1] {}\n[batch 2] {}",
+                red(format!("why1 {secret}")),
+                red(format!("why2 {secret}"))
+            )
+        );
+        assert_eq!(m.recommendation, red(format!("rec2 {secret}")));
+        let all = serde_json::to_string(&c.agents).expect("serializes");
+        assert!(!all.contains("hunter2"), "{all}");
+    }
 }
