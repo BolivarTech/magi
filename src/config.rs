@@ -361,6 +361,10 @@ pub struct MagiConfig {
     /// error at parse time: the load-time check for a missing section is a separate step.
     #[serde(default)]
     decision: Option<magi_rs::decision::DecisionSection>,
+    /// `[code_review]` section — see [`magi_rs::review::config::CodeReviewSection`]. Optional:
+    /// absent means the built-in gate chain.
+    #[serde(default)]
+    code_review: Option<magi_rs::review::config::CodeReviewSection>,
 }
 
 /// The `[logging]` section of `magi.toml`.
@@ -1812,6 +1816,16 @@ impl MagiConfig {
             .max_state_bytes
             .get_or_insert(crate::defaults::DEFAULT_DECISION_MAX_STATE_BYTES);
         section
+    }
+
+    /// The `[code_review]` section as the run uses it.
+    ///
+    /// # Returns
+    /// An owned section.
+    #[allow(dead_code)] // Red stub
+    #[must_use]
+    pub fn effective_code_review(&self) -> magi_rs::review::config::CodeReviewSection {
+        todo!()
     }
 
     /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
@@ -4910,6 +4924,89 @@ api_key = \"sk-x\"
         let path = dir.path().join("magi.toml");
         std::fs::write(&path, text).expect("write magi.toml");
         path
+    }
+
+    #[test]
+    fn without_a_code_review_section_the_default_chain_applies() {
+        let c = MagiConfig::from_toml_str(
+            "[decision]
+model = \"x\"
+",
+        )
+        .expect("valid");
+        let s = c.effective_code_review();
+        assert_eq!(s.model, "clef:cloud");
+        assert_eq!(
+            s.chain()
+                .iter()
+                .map(|m| (m.model.as_str(), m.min_confidence))
+                .collect::<Vec<_>>(),
+            vec![
+                ("clef:cloud", Some(0.40)),
+                ("clef-flash", Some(0.32)),
+                ("nimble", Some(0.80))
+            ]
+        );
+        assert_eq!(s.auto_approve, Some(false));
+    }
+
+    /// Passes before the section exists, by design: `deny_unknown_fields` already rejects it.
+    #[test]
+    fn an_api_key_in_code_review_is_a_load_error() {
+        assert!(MagiConfig::from_toml_str(
+            "[decision]
+model=\"x\"
+[code_review]
+api_key = \"k\"
+"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn an_invalid_code_review_section_is_a_load_error() {
+        // [CP2 MS2 S2a1 loop 10] one case per `validate` rule: a blank model (an empty chain), a zero timeout or state cap,
+        // and a threshold outside [0, 1] (above 1 the gate would filter nothing).
+        for bad in [
+            "model = \"\"",
+            "model = \"m\"
+timeout_secs = 0",
+            "model = \"m\"
+max_state_bytes = 0",
+            "model = \"m\"
+min_confidence = 1.5",
+            "model = \"m\"
+min_confidence = -0.1",
+            "model = \"m\"
+[[code_review.fallback]]
+model = \"f\"
+min_confidence = 2.0",
+        ] {
+            let t = format!(
+                "[decision]
+model=\"x\"
+[code_review]
+{bad}
+"
+            );
+            assert!(MagiConfig::from_toml_str(&t).is_err(), "{bad}");
+        }
+        assert!(MagiConfig::from_toml_str(
+            "[decision]
+model=\"x\"
+[code_review]
+model = \"m\"
+"
+        )
+        .is_ok());
+    }
+
+    /// Passes before the feature exists, by design: a regression guard on the tool allowlist.
+    #[test]
+    fn the_code_review_key_never_reaches_a_tool_child() {
+        assert!(!crate::tools::proc_group::TOOL_ENV_ALLOWLIST
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case("CODE_REVIEW_API_KEY")));
     }
 
     /// S6: a v0.22.0 file is refused with the whole upgrade procedure.

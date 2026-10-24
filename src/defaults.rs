@@ -1037,6 +1037,29 @@ pub fn no_config_startup_notice() -> magi_rs::notices::Notice {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_scaffold_writes_the_default_chain_and_the_private_alternative_commented() {
+        let t = render_default_magi_toml();
+        let parsed: toml::Table = toml::from_str(&t).expect("scaffold parses");
+        assert_eq!(parsed["code_review"]["model"].as_str(), Some("clef:cloud"));
+        assert!(
+            t.contains("# model = \"clef\""),
+            "private alternative missing"
+        );
+        assert!(
+            t.contains("openai/gpt-6-luna-decisions"),
+            "optional OpenRouter chain missing"
+        );
+        assert!(
+            parsed["code_review"].get("base_url").is_none(),
+            "base_url must be commented: the section inherits the root"
+        );
+        assert!(
+            t.contains("# base_url ="),
+            "the commented base_url line is missing"
+        );
+    }
+
     // ── Task 3d (E-E): the new [magi] keys in the scaffold ──────────────────────────────────
 
     /// The four new keys are SHOWN in the scaffold's [magi] section, commented, with their

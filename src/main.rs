@@ -820,6 +820,9 @@ struct ConsumedSecrets {
     magi_key: Option<String>,
     /// The embedder's own key (`EMBEDDING_API_KEY`), if it was set (REQ-K02).
     embedding_key: Option<String>,
+    /// The code-review gate's own key (`CODE_REVIEW_API_KEY`), if it was set.
+    #[allow(dead_code)] // Red stub
+    code_review_key: Option<String>,
 }
 
 /// Reads the six secret env vars into a [`ConsumedSecrets`], then removes all
@@ -858,6 +861,7 @@ fn read_then_scrub_secret_env() -> ConsumedSecrets {
         decision_key,
         magi_key,
         embedding_key,
+        code_review_key: None,
     }
 }
 
@@ -2096,6 +2100,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             magi_endpoint: Some(endpoints.magi.as_str()),
             embedding_endpoint: embedding_endpoint.as_deref(),
             decision_endpoint: decision_endpoint.as_deref(),
+            code_review_endpoint: None,
         });
     // A withheld key is a run-log diagnostic (REQ-K09), never screen text.
     startup_notices.extend(section_keys.startup_notices());
@@ -6342,6 +6347,7 @@ async fn prepare_headless(
             magi_endpoint: Some(endpoints.magi.as_str()),
             embedding_endpoint: embedding_endpoint.as_deref(),
             decision_endpoint: decision_endpoint.as_deref(),
+            code_review_endpoint: None,
         });
 
     // Read ONCE and shared by the probe AND the builder below — see `run()`'s comment for why
@@ -7183,6 +7189,7 @@ fn api_keys(consumed: &ConsumedSecrets) -> ApiKeys {
         decision_key: consumed.decision_key.clone(),
         magi_key: consumed.magi_key.clone(),
         embedding_key: consumed.embedding_key.clone(),
+        code_review_key: None,
     }
 }
 
@@ -7553,6 +7560,7 @@ async fn run_decide_subcommand(
             magi_endpoint: None,
             embedding_endpoint: None,
             decision_endpoint: decision_endpoint.as_deref(),
+            code_review_endpoint: None,
         });
     let openai_key = resolve_openai_key(secrets.openai_key.as_deref(), secret_store.as_ref());
     let mut armed = secrets_to_arm(secrets.anthropic_key.as_deref(), openai_key.as_deref());
@@ -10865,6 +10873,21 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn the_code_review_key_is_read_then_scrubbed_from_the_process_env() {
+        use magi_rs::section_keys::CODE_REVIEW_KEY_ENV;
+        with_var(CODE_REVIEW_KEY_ENV, Some("cr-env-key"), || {
+            let consumed = read_then_scrub_secret_env();
+            assert_eq!(consumed.code_review_key.as_deref(), Some("cr-env-key"));
+            assert!(env::var(CODE_REVIEW_KEY_ENV).is_err());
+            assert_eq!(
+                api_keys(&consumed).code_review_key.as_deref(),
+                Some("cr-env-key")
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn a_tool_child_never_inherits_a_section_key() {
         use magi_rs::section_keys::{EMBEDDING_KEY_ENV, MAGI_KEY_ENV};
         with_var(MAGI_KEY_ENV, Some("magi-env-key"), || {
@@ -10889,6 +10912,7 @@ mod tests {
             decision_key: Some("dec-key".into()),
             magi_key: None,
             embedding_key: None,
+            code_review_key: None,
         };
         let keys = api_keys(&consumed);
         assert_eq!(keys.decision_key.as_deref(), Some("dec-key"));
@@ -16442,6 +16466,7 @@ model = \"nimble\"
                     anthropic_key: None,
                     decision_key: None,
                     embedding_key: None,
+                    code_review_key: None,
                 };
                 let keys = SectionKeys::resolve(&KeyInputs {
                     env: &env,
@@ -16451,6 +16476,7 @@ model = \"nimble\"
                     magi_endpoint: Some(&trio),
                     embedding_endpoint: None,
                     decision_endpoint: None,
+                    code_review_endpoint: None,
                 });
                 let provider = build_native_provider(
                     ProviderKind::OpenAiCompat,
@@ -16481,6 +16507,7 @@ model = \"nimble\"
                 anthropic_key: None,
                 decision_key: None,
                 embedding_key: None,
+                code_review_key: None,
             };
             let keys = SectionKeys::resolve(&KeyInputs {
                 env: &env,
@@ -16490,6 +16517,7 @@ model = \"nimble\"
                 magi_endpoint: Some(lan),
                 embedding_endpoint: None,
                 decision_endpoint: None,
+                code_review_endpoint: None,
             });
             assert!(build_native_provider(
                 ProviderKind::OpenAiCompat,
@@ -16619,6 +16647,7 @@ dim = 3
                     magi_key: None,
                     anthropic_key: None,
                     decision_key: None,
+                    code_review_key: None,
                 };
                 let keys = SectionKeys::resolve(&KeyInputs {
                     env: &env,
@@ -16628,6 +16657,7 @@ dim = 3
                     magi_endpoint: None,
                     embedding_endpoint: Some(&server.url()),
                     decision_endpoint: None,
+                    code_review_endpoint: None,
                 });
                 let emb = build_embedder(&cfg, &server.url(), keys.embedding()).expect("builds");
                 emb.embed(&["x".to_string()]).await.expect("embeds");
@@ -18070,6 +18100,7 @@ base_url = \"http://192.168.0.30:11434/v1\"
                 magi_key: Some("mk".into()),
                 embedding_key: None,
                 decision_key: None,
+                code_review_key: None,
             };
             let resolve = |kind: ProviderKind, magi: Option<&str>| {
                 SectionKeys::resolve(&KeyInputs {
@@ -18080,6 +18111,7 @@ base_url = \"http://192.168.0.30:11434/v1\"
                     magi_endpoint: magi,
                     embedding_endpoint: None,
                     decision_endpoint: None,
+                    code_review_endpoint: None,
                 })
             };
             let k = resolve(ProviderKind::OpenAiCompat, Some("http://127.0.0.1:1"));
@@ -20132,6 +20164,7 @@ model = \"nimble\"
             anthropic_key: anthropic_key.map(str::to_string),
             magi_key: None,
             embedding_key: None,
+            code_review_key: None,
         }
     }
 

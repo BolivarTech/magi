@@ -98,8 +98,15 @@ fn the_env_then_vault_precedence_is_defined_once_and_its_former_copies_delegate(
         definitions("env_or_vault"),
         vec!["section_keys.rs".to_string()]
     );
+    // A misspelt name would be skipped by the loop below: the gate key reader must exist once.
+    assert_eq!(definitions("code_review_api_key").len(), 1);
     for (path, text) in production_sources() {
-        for former in ["resolve_openai_key", "discover_config", "decision_api_key"] {
+        for former in [
+            "resolve_openai_key",
+            "discover_config",
+            "decision_api_key",
+            "code_review_api_key",
+        ] {
             if let Some(body) = fn_body(&text, former) {
                 assert!(
                     !body.contains(".get("),

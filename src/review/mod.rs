@@ -28,10 +28,12 @@
 )]
 
 pub mod batching;
+pub mod config;
 pub mod consolidate;
 pub mod context;
 pub mod error;
 pub mod filter;
+pub mod gate;
 pub mod hunk;
 pub mod index;
 pub mod input;

@@ -50,6 +50,9 @@ pub const EMBEDDING_KEY_ENV: &str = "EMBEDDING_API_KEY";
 /// Environment variable and vault entry of the decision endpoint's own key (REQ-D04).
 pub const DECISION_KEY_ENV: &str = "DECISION_API_KEY";
 
+/// Environment variable and vault entry of the code-review gate's own key.
+pub const CODE_REVIEW_KEY_ENV: &str = "CODE_REVIEW_API_KEY";
+
 /// The OpenAI-compatible key every OpenAI-compatible section may inherit on the root's origin.
 pub const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
 
@@ -74,6 +77,8 @@ pub struct ApiKeys {
     pub magi_key: Option<String>,
     /// The embedder's own key (`EMBEDDING_API_KEY`).
     pub embedding_key: Option<String>,
+    /// The code-review gate's own key (`CODE_REVIEW_API_KEY`).
+    pub code_review_key: Option<String>,
 }
 
 /// Resolves a key: the consumed env value if non-blank (trimmed), else the vault entry `name` if
@@ -233,6 +238,7 @@ pub struct SectionKeys {
     magi: SectionKey,
     embedding: SectionKey,
     decision: SectionKey,
+    code_review: SectionKey,
     retained: Vec<RetainedKey>,
     /// The trio kind to name in the shape warning, set when `MAGI_API_KEY` contradicts it (REQ-K10).
     shape_mismatch: Option<crate::magi::kind::ProviderKind>,
@@ -258,6 +264,8 @@ pub struct KeyInputs<'a> {
     pub embedding_endpoint: Option<&'a str>,
     /// The resolved `[decision]` endpoint, or `None` when it did not resolve.
     pub decision_endpoint: Option<&'a str>,
+    /// The resolved `[code_review]` endpoint, or `None` when it did not resolve.
+    pub code_review_endpoint: Option<&'a str>,
 }
 
 impl SectionKeys {
@@ -283,6 +291,7 @@ impl SectionKeys {
     ///     decision_key: None,
     ///     magi_key: None,
     ///     embedding_key: None,
+    ///     code_review_key: None,
     /// };
     /// let keys = SectionKeys::resolve(&KeyInputs {
     ///     env: &env,
@@ -292,6 +301,7 @@ impl SectionKeys {
     ///     magi_endpoint: Some("http://localhost:11434/v1"),
     ///     embedding_endpoint: Some("http://192.168.0.30:11434/v1"),
     ///     decision_endpoint: None,
+    ///     code_review_endpoint: None,
     /// });
     /// assert_eq!(keys.magi().source(), KeySource::Inherited); // same origin as the root
     /// assert_eq!(keys.embedding().value(), None); // another origin: no key is sent
@@ -386,6 +396,7 @@ impl SectionKeys {
             magi,
             embedding,
             decision,
+            code_review: SectionKey::absent(),
             retained,
             shape_mismatch,
             magi_kind: inputs.magi_kind,
@@ -431,6 +442,14 @@ impl SectionKeys {
     /// The [`SectionKey`] of `[decision]`.
     pub fn decision(&self) -> &SectionKey {
         &self.decision
+    }
+
+    /// The code-review gate's key.
+    ///
+    /// # Returns
+    /// The [`SectionKey`] of `[code_review]`.
+    pub fn code_review(&self) -> &SectionKey {
+        &self.code_review
     }
 
     /// The sections that did not inherit `OPENAI_API_KEY` because of their origin.
@@ -693,6 +712,7 @@ mod tests {
             magi_key: s(magi),
             embedding_key: s(embedding),
             decision_key: s(decision),
+            code_review_key: None,
         }
     }
 
@@ -711,6 +731,7 @@ mod tests {
             magi_endpoint: magi,
             embedding_endpoint: embedding,
             decision_endpoint: decision,
+            code_review_endpoint: None,
         })
     }
 
@@ -887,6 +908,7 @@ mod tests {
             magi_endpoint: Some(ROOT),
             embedding_endpoint: Some(ROOT),
             decision_endpoint: Some(ROOT),
+            code_review_endpoint: None,
         });
         assert_eq!(
             (k.magi().value(), k.magi().source()),
@@ -1203,6 +1225,44 @@ mod tests {
                 && !text.contains("pw-canary")
                 && !text.contains("alice"),
             "{text}"
+        );
+    }
+
+    fn resolve_cr(e: &ApiKeys, code_review: Option<&str>) -> SectionKeys {
+        SectionKeys::resolve(&KeyInputs {
+            env: e,
+            secret_store: None,
+            magi_kind: ProviderKind::OpenAiCompat,
+            root_endpoint: ROOT,
+            magi_endpoint: None,
+            embedding_endpoint: None,
+            decision_endpoint: None,
+            code_review_endpoint: code_review,
+        })
+    }
+
+    #[test]
+    fn the_code_review_key_follows_the_same_origin_rule_as_every_section() {
+        let mut e = env(Some("prin"), None, None, None, None);
+        let k = resolve_cr(&e, Some("https://openrouter.ai/api/v1"));
+        assert_eq!(
+            (k.code_review().value(), k.code_review().source()),
+            (None, KeySource::Absent)
+        );
+        assert!(k
+            .retained()
+            .iter()
+            .any(|r| r.variable() == "CODE_REVIEW_API_KEY"));
+        let k = resolve_cr(&e, Some(ROOT));
+        assert_eq!(
+            (k.code_review().value(), k.code_review().source()),
+            (Some("prin"), KeySource::Inherited)
+        );
+        e.code_review_key = Some("crk".into());
+        let k = resolve_cr(&e, Some("https://openrouter.ai/api/v1"));
+        assert_eq!(
+            (k.code_review().value(), k.code_review().source()),
+            (Some("crk"), KeySource::Own)
         );
     }
 }
