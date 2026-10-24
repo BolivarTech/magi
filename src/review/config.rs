@@ -94,20 +94,71 @@ pub enum CodeReviewConfigError {
 impl CodeReviewSection {
     /// Checks the section's values.
     ///
+    /// Models are compared after `trim`, as the server sees them: a repeated model would make a
+    /// fallback retry what just failed. O(m) for m models.
+    ///
     /// # Returns
     /// `Ok(())` when every rule holds.
     ///
     /// # Errors
     /// The first violated rule as a [`CodeReviewConfigError`].
     pub fn validate(&self) -> Result<(), CodeReviewConfigError> {
-        todo!()
+        const PRIMARY_POSITION: &str = "[code_review].model";
+        const FALLBACK_POSITION_PREFIX: &str = "[[code_review.fallback]] #";
+        const CONFIDENCE_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1.0;
+
+        if self.model.trim().is_empty() {
+            return Err(CodeReviewConfigError::BlankModel {
+                position: PRIMARY_POSITION.into(),
+            });
+        }
+        for (idx, fb) in self.fallback.iter().enumerate() {
+            if fb.model.trim().is_empty() {
+                return Err(CodeReviewConfigError::BlankModel {
+                    position: format!("{FALLBACK_POSITION_PREFIX}{}", idx + 1),
+                });
+            }
+        }
+        if self.timeout_secs == Some(0) {
+            return Err(CodeReviewConfigError::TimeoutBelowOne);
+        }
+        if self.max_state_bytes == Some(0) {
+            return Err(CodeReviewConfigError::MaxStateBytesBelowOne);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for spec in self.chain() {
+            // `nan` parses from TOML and compares false with everything: finiteness is explicit.
+            if spec
+                .min_confidence
+                .is_some_and(|v| !v.is_finite() || !CONFIDENCE_RANGE.contains(&v))
+            {
+                return Err(CodeReviewConfigError::MinConfidenceOutOfRange { model: spec.model });
+            }
+            if !seen.insert(spec.model.clone()) {
+                return Err(CodeReviewConfigError::DuplicateModel { model: spec.model });
+            }
+        }
+        Ok(())
     }
 
-    /// The gate's chain: the primary model first, then the fallbacks in order.
+    /// The gate's chain: the primary model first, then the fallbacks in order, names trimmed.
+    ///
+    /// The gate applies the thresholds itself, so the client it builds gets this chain with
+    /// every `min_confidence` cleared (the answer and its lean are what the gate needs).
     ///
     /// # Returns
     /// One [`ModelSpec`] per model, in declaration order.
     pub fn chain(&self) -> Vec<ModelSpec> {
-        todo!()
+        std::iter::once((&self.model, self.min_confidence))
+            .chain(
+                self.fallback
+                    .iter()
+                    .map(|fb| (&fb.model, fb.min_confidence)),
+            )
+            .map(|(model, min_confidence)| ModelSpec {
+                model: model.trim().to_owned(),
+                min_confidence,
+            })
+            .collect()
     }
 }

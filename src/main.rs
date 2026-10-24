@@ -787,7 +787,9 @@ fn resolve_openai_key(
 }
 
 // The secret variable names are defined once, in the lib (REQ-H37, REQ-D04).
-use magi_rs::section_keys::{ANTHROPIC_KEY_ENV, DECISION_KEY_ENV, OPENAI_KEY_ENV};
+use magi_rs::section_keys::{
+    ANTHROPIC_KEY_ENV, CODE_REVIEW_KEY_ENV, DECISION_KEY_ENV, OPENAI_KEY_ENV,
+};
 
 /// Warning emitted at startup when loose legacy state files sit in the working
 /// directory but no `.magi/` exists (REQ-H17/H31). The pre-headless layout is no
@@ -821,12 +823,11 @@ struct ConsumedSecrets {
     /// The embedder's own key (`EMBEDDING_API_KEY`), if it was set (REQ-K02).
     embedding_key: Option<String>,
     /// The code-review gate's own key (`CODE_REVIEW_API_KEY`), if it was set.
-    #[allow(dead_code)] // Red stub
     code_review_key: Option<String>,
 }
 
-/// Reads the six secret env vars into a [`ConsumedSecrets`], then removes all
-/// six from the process environment (REQ-H37).
+/// Reads the seven secret env vars into a [`ConsumedSecrets`], then removes all
+/// seven from the process environment (REQ-H37).
 ///
 /// The removal is **symmetric** — passphrase *and* every API key — so that a
 /// later in-workspace interpreter (`python`/`node`) cannot exfiltrate them by
@@ -848,12 +849,14 @@ fn read_then_scrub_secret_env() -> ConsumedSecrets {
     let decision_key = env::var(DECISION_KEY_ENV).ok();
     let magi_key = env::var(MAGI_KEY_ENV).ok();
     let embedding_key = env::var(EMBEDDING_KEY_ENV).ok();
+    let code_review_key = env::var(CODE_REVIEW_KEY_ENV).ok();
     env::remove_var(PASSPHRASE_ENV);
     env::remove_var(ANTHROPIC_KEY_ENV);
     env::remove_var(OPENAI_KEY_ENV);
     env::remove_var(DECISION_KEY_ENV);
     env::remove_var(MAGI_KEY_ENV);
     env::remove_var(EMBEDDING_KEY_ENV);
+    env::remove_var(CODE_REVIEW_KEY_ENV);
     ConsumedSecrets {
         passphrase,
         anthropic_key,
@@ -861,7 +864,7 @@ fn read_then_scrub_secret_env() -> ConsumedSecrets {
         decision_key,
         magi_key,
         embedding_key,
-        code_review_key: None,
+        code_review_key,
     }
 }
 
@@ -2089,7 +2092,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     // Every section's key is chosen ONCE, here, by origin (REQ-K01..K03): the trio takes its
     // credentials from these keys and never re-reads the environment or the vault.
-    let (embedding_endpoint, decision_endpoint) =
+    let (embedding_endpoint, decision_endpoint, code_review_endpoint) =
         section_endpoints(&magi_config, secret_store.as_ref());
     let section_keys =
         magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
@@ -2100,7 +2103,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             magi_endpoint: Some(endpoints.magi.as_str()),
             embedding_endpoint: embedding_endpoint.as_deref(),
             decision_endpoint: decision_endpoint.as_deref(),
-            code_review_endpoint: None,
+            code_review_endpoint: code_review_endpoint.as_deref(),
         });
     // A withheld key is a run-log diagnostic (REQ-K09), never screen text.
     startup_notices.extend(section_keys.startup_notices());
@@ -2553,11 +2556,11 @@ fn resolve_magi_kind(
 /// # Returns
 /// The kind every downstream consumer of the trio should report/use.
 #[must_use]
-/// The resolved `[embedding]` and `[decision]` endpoints, in that order, as the key selection
-/// sees them (REQ-K01..K03, D1).
+/// The resolved `[embedding]`, `[decision]` and `[code_review]` endpoints, in that order, as the
+/// key selection sees them (REQ-K01..K03, D1).
 ///
 /// Each is resolved by the SAME function its consumer uses: the embedder's
-/// [`resolve_effective_embedding_endpoint`] and the decision client's [`resolve_decision_endpoint`],
+/// [`resolve_effective_embedding_endpoint`] and the System One clients' [`resolve_section_endpoint`],
 /// so the origin [`SectionKeys`](magi_rs::section_keys::SectionKeys) compares is exactly the host
 /// that receives the key. An endpoint that does not resolve is `None` (the section gets no key).
 ///
@@ -2566,18 +2569,23 @@ fn resolve_magi_kind(
 /// * `secret_store` - the open vault, for `[user]`/`[password]` placeholders.
 ///
 /// # Returns
-/// `(embedding, decision)`.
+/// `(embedding, decision, code_review)`.
 fn section_endpoints(
     cfg: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     let embedding = resolve_effective_embedding_endpoint(cfg, secret_store).ok();
     let decision = cfg
         .effective_decision_base_url()
         .ok()
         .and_then(|t| resolve_decision_endpoint(&t, secret_store).ok())
         .map(|e| e.as_str().to_string());
-    (embedding, decision)
+    let code_review = cfg
+        .effective_code_review_base_url()
+        .ok()
+        .and_then(|t| resolve_section_endpoint(&t, Scope::CodeReview, secret_store).ok())
+        .map(|e| e.as_str().to_string());
+    (embedding, decision, code_review)
 }
 
 fn registered_magi_kind(cfg: &MagiConfig, principal_kind: ProviderKind) -> ProviderKind {
@@ -6336,7 +6344,7 @@ async fn prepare_headless(
         }
     };
     // Same single key selection as the TUI (REQ-K01..K03): see `run()`.
-    let (embedding_endpoint, decision_endpoint) =
+    let (embedding_endpoint, decision_endpoint, code_review_endpoint) =
         section_endpoints(&magi_config, secret_store.as_ref());
     let section_keys =
         magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
@@ -6347,7 +6355,7 @@ async fn prepare_headless(
             magi_endpoint: Some(endpoints.magi.as_str()),
             embedding_endpoint: embedding_endpoint.as_deref(),
             decision_endpoint: decision_endpoint.as_deref(),
-            code_review_endpoint: None,
+            code_review_endpoint: code_review_endpoint.as_deref(),
         });
 
     // Read ONCE and shared by the probe AND the builder below — see `run()`'s comment for why
@@ -7189,8 +7197,23 @@ fn api_keys(consumed: &ConsumedSecrets) -> ApiKeys {
         decision_key: consumed.decision_key.clone(),
         magi_key: consumed.magi_key.clone(),
         embedding_key: consumed.embedding_key.clone(),
-        code_review_key: None,
+        code_review_key: consumed.code_review_key.clone(),
     }
+}
+
+/// The key the code-review gate's client sends, as [`SectionKeys`](magi_rs::section_keys::SectionKeys)
+/// chose it at startup: never re-read from the environment or the vault.
+///
+/// # Arguments
+/// * `keys` - The section keys resolved once at startup.
+///
+/// # Returns
+/// The `[code_review]` key, wiped on drop, or `None` for no authentication header.
+#[allow(dead_code)] // consumer: the code-review gate client, built with the subcommand and tool
+fn code_review_api_key(keys: &magi_rs::section_keys::SectionKeys) -> Option<Zeroizing<String>> {
+    keys.code_review()
+        .value()
+        .map(|k| Zeroizing::new(k.to_string()))
 }
 
 /// The opened encrypted store of a headless run and the vault wired over it.
@@ -7260,12 +7283,34 @@ fn resolve_decision_endpoint(
     template: &EndpointTemplate,
     secret_store: Option<&SharedSecretStore>,
 ) -> Result<ResolvedEndpoint, DecisionError> {
+    resolve_section_endpoint(template, Scope::Decision, secret_store)
+}
+
+/// Resolves the endpoint template of a System One section (`[decision]`, `[code_review]`)
+/// against the vault, reading the placeholder entries of `scope`.
+///
+/// # Arguments
+/// * `template` - The configured `base_url`, possibly with `[user]:[password]` placeholders.
+/// * `scope` - Whose vault entries fill the placeholders.
+/// * `secret_store` - The open vault, if any.
+///
+/// # Returns
+/// The endpoint with the credentials substituted in memory.
+///
+/// # Errors
+/// [`DecisionError::MissingVaultEntry`] naming the entry a placeholder needs when the vault
+/// is closed or lacks it; [`DecisionError::ClientUnavailable`] for any other template fault.
+fn resolve_section_endpoint(
+    template: &EndpointTemplate,
+    scope: Scope,
+    secret_store: Option<&SharedSecretStore>,
+) -> Result<ResolvedEndpoint, DecisionError> {
     let resolution = match secret_store {
         Some(ss) => {
             let mut guard = ss.lock().unwrap_or_else(|p| p.into_inner());
-            template.resolve(&mut *guard, Scope::Decision)
+            template.resolve(&mut *guard, scope)
         }
-        None => template.resolve(&mut NoVaultInScope, Scope::Decision),
+        None => template.resolve(&mut NoVaultInScope, scope),
     };
     resolution.map_err(|e| match e {
         magi_rs::magi::endpoint::EndpointError::MissingVaultEntry { entry } => {
@@ -7543,7 +7588,7 @@ async fn run_decide_subcommand(
     )
     .map(|e| e.as_str().to_string())
     .unwrap_or_default();
-    let (_, decision_endpoint) = section_endpoints(&magi_config, secret_store.as_ref());
+    let (_, decision_endpoint, _) = section_endpoints(&magi_config, secret_store.as_ref());
     // The trio takes no part here (no endpoint, so no key), but its kind is the real one so the
     // key-shape check judges `MAGI_API_KEY` the way the TUI and headless runs do (REQ-K10). An
     // unresolvable principal falls back to Ollama, as the decide path always did for the trio.

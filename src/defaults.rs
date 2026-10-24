@@ -119,6 +119,59 @@ pub fn default_decision_section() -> magi_rs::decision::DecisionSection {
             .collect(),
     }
 }
+/// Primary model of the code-review false-positive gate, built in and written by the scaffold.
+///
+/// `clef:cloud` runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`, it
+/// spends the Ollama account's quota, and each judged finding leaves with its code for
+/// ollama.com. The private alternative is the local `clef` model (commented in the scaffold).
+pub const DEFAULT_CODE_REVIEW_MODEL: &str = "clef:cloud";
+/// Threshold of [`DEFAULT_CODE_REVIEW_MODEL`], from the maintainer's calibration of the gate's
+/// question (a post hoc choice on the verify half; see the calibration notes).
+pub const DEFAULT_CODE_REVIEW_MIN_CONFIDENCE: f64 = 0.40;
+/// Ordered fallbacks of the gate, on the same endpoint, each with its calibrated threshold.
+pub const DEFAULT_CODE_REVIEW_FALLBACKS: [(&str, f64); 2] =
+    [("clef-flash", 0.32), ("nimble", 0.80)];
+/// HTTP timeout of each gate call, in seconds; sized like `[decision]` to cover a cold load.
+pub const DEFAULT_CODE_REVIEW_TIMEOUT_SECS: u64 = 120;
+/// Largest serialized gate `state`, in bytes: the request-size cap measured with the local
+/// `clef-flash` model (as [`SCAFFOLD_DECISION_MAX_STATE_BYTES`]). A larger state is never
+/// truncated: the finding passes unjudged.
+pub const DEFAULT_CODE_REVIEW_MAX_STATE_BYTES: usize = 61_000;
+/// Whether the agent's `code-review` tool runs without asking: a review costs one consult per
+/// batch, so it asks by default, like `consult`.
+pub const DEFAULT_CODE_REVIEW_AUTO_APPROVE: bool = false;
+
+/// The `[code_review]` section applied when the file declares none (the section is optional).
+///
+/// `base_url` stays `None` (inherit the root `base_url`); unlike `[decision]`, the built-in
+/// chain carries its calibrated thresholds, because the gate is only meaningful with them.
+///
+/// # Returns
+/// A valid section naming [`DEFAULT_CODE_REVIEW_MODEL`] and [`DEFAULT_CODE_REVIEW_FALLBACKS`].
+///
+/// # Examples
+/// ```ignore
+/// let chain = default_code_review_section().chain();
+/// assert_eq!(chain.len(), 3);
+/// ```
+pub fn default_code_review_section() -> magi_rs::review::config::CodeReviewSection {
+    magi_rs::review::config::CodeReviewSection {
+        base_url: None,
+        model: DEFAULT_CODE_REVIEW_MODEL.to_string(),
+        timeout_secs: Some(DEFAULT_CODE_REVIEW_TIMEOUT_SECS),
+        max_state_bytes: Some(DEFAULT_CODE_REVIEW_MAX_STATE_BYTES),
+        auto_approve: Some(DEFAULT_CODE_REVIEW_AUTO_APPROVE),
+        min_confidence: Some(DEFAULT_CODE_REVIEW_MIN_CONFIDENCE),
+        fallback: DEFAULT_CODE_REVIEW_FALLBACKS
+            .iter()
+            .map(|(model, min)| magi_rs::review::config::CodeReviewFallback {
+                model: (*model).to_string(),
+                min_confidence: Some(*min),
+            })
+            .collect(),
+    }
+}
+
 /// Default Anthropic model on the opt-in path (RF-5). Was `main.rs::DEFAULT_MODEL`.
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 /// Default embedding model (Ollama-first, local). Single source of truth — also
@@ -244,12 +297,13 @@ pub fn no_config_notice() -> String {
 /// # Layout
 /// Sections are grouped with their own sub-tables, in this order: the root keys, `[openai]`,
 /// `[anthropic]`, `[magi]` followed by its `[[magi.fallback]]` pool, `[memory]`, `[embedding]`,
-/// and `[decision]` followed by its `[[decision.fallback]]` chain.
+/// `[decision]` followed by its `[[decision.fallback]]` chain, and `[code_review]` followed by
+/// its `[[code_review.fallback]]` chain.
 /// - **Active**: `provider` and the root `base_url`, `[openai]`, `[anthropic]`, `[magi]`, the
 ///   five `[memory]` essentials (`mode`, `context_budget_tokens`, `distill_enabled`,
 ///   `evicted_retention_days`, `max_records`), the `[embedding]` essentials (`model`, `dim`)
-///   and the `[decision]` chain.
-/// - **Commented**: the `base_url` of `[magi]`, `[embedding]` and `[decision]`, whose whole
+///   and the `[decision]` and `[code_review]` chains.
+/// - **Commented**: the `base_url` of `[magi]`, `[embedding]`, `[decision]` and `[code_review]`, whose whole
 ///   purpose is to be ABSENT so each section inherits the root endpoint (REQ-A21); emitting one
 ///   active pins a value and silently ends that inheritance. Each sits next to the name of the
 ///   section's API key. Plus all remaining `[memory]`/`[embedding]` fields with inline
@@ -955,7 +1009,131 @@ pub fn render_default_magi_toml() -> String {
 ",
     ));
 
+    render_code_review_section(&mut out);
     out
+}
+
+/// Appends the `[code_review]` section: the default gate chain, active, with the private
+/// alternative and the optional OpenRouter chain commented.
+fn render_code_review_section(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(concat!(
+        "# ---------------------------------------------------------------------------
+",
+        "# [code_review] - the false-positive gate of `magi code-review`: a System One model judges
+",
+        "# each finding with the code around it. Optional: without it this same chain applies.
+",
+        "[code_review]
+",
+        "# Endpoint of the gate's models. Commented = the root base_url; uncomment and edit it to
+",
+        "# use another one. The protocol path is derived as in [decision].
+",
+    ));
+    writeln!(out, "# base_url = \"{}\"", DEFAULT_OPENAI_BASE_URL).unwrap();
+    out.push_str(concat!(
+        "# API key of the gate's models: CODE_REVIEW_API_KEY, from the environment or
+",
+        "# `magi-rs vault set CODE_REVIEW_API_KEY`; never in this file. Without it the gate uses the
+",
+        "# main key, OPENAI_API_KEY, only when its endpoint has the root base_url's origin.
+",
+        "# clef:cloud runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`,
+",
+        "# spends your Ollama account's quota, and sends each judged finding with its code to
+",
+        "# ollama.com. To keep the code local, use the private alternative below.
+",
+    ));
+    writeln!(out, "model          = \"{}\"", DEFAULT_CODE_REVIEW_MODEL).unwrap();
+    out.push_str(concat!(
+        "# A false_positive answer filters a finding only at or above this confidence. The values
+",
+        "# come from the maintainer's calibration of the gate's question and may not fit your code.
+",
+    ));
+    writeln!(
+        out,
+        "min_confidence = {}",
+        toml_f64(DEFAULT_CODE_REVIEW_MIN_CONFIDENCE)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# HTTP timeout of each gate call, in seconds. Optional, default {}.",
+        DEFAULT_CODE_REVIEW_TIMEOUT_SECS
+    )
+    .unwrap();
+    writeln!(out, "timeout_secs   = {}", DEFAULT_CODE_REVIEW_TIMEOUT_SECS).unwrap();
+    out.push_str(concat!(
+        "# Largest state sent per finding, in bytes. A larger one (a minified file, say) is never
+",
+        "# truncated: that finding passes unjudged.
+",
+    ));
+    writeln!(
+        out,
+        "max_state_bytes = {}",
+        DEFAULT_CODE_REVIEW_MAX_STATE_BYTES
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# Approval of the agent's `code-review` tool. Optional, default {}.",
+        DEFAULT_CODE_REVIEW_AUTO_APPROVE
+    )
+    .unwrap();
+    writeln!(out, "auto_approve   = {}", DEFAULT_CODE_REVIEW_AUTO_APPROVE).unwrap();
+    out.push_str(
+        "
+# Ordered fallbacks on the SAME endpoint, tried after the primary fails.
+",
+    );
+    for (model, min) in DEFAULT_CODE_REVIEW_FALLBACKS {
+        writeln!(out, "[[code_review.fallback]]").unwrap();
+        writeln!(out, "model = \"{}\"", model).unwrap();
+        writeln!(out, "min_confidence = {}", toml_f64(min)).unwrap();
+        writeln!(out).unwrap();
+    }
+    out.push_str(concat!(
+        "# --- Private alternative: the local `clef` model (about 18 GB) at the head, same quality,
+",
+        "# --- nothing leaves the machine. Replace the model line above with:
+",
+        "# model = \"clef\"
+",
+        "#
+",
+        "# --- Optional: OpenRouter (hosted), suited to high demand. Needs CODE_REVIEW_API_KEY.
+",
+        "# --- Comment out the [code_review] section above before uncommenting this one.
+",
+        "# [code_review]
+",
+        "# base_url       = \"https://openrouter.ai/api/v1\"
+",
+        "# model          = \"openai/gpt-6-luna-decisions\"
+",
+        "# min_confidence = 0.88
+",
+        "#
+",
+        "# [[code_review.fallback]]
+",
+        "# model = \"nace-ai/drex-v1.5\"
+",
+        "# min_confidence = 0.17
+",
+        "#
+",
+        "# [[code_review.fallback]]
+",
+        "# model = \"microsoft/microsoft-decision-1\"
+",
+        "# min_confidence = 0.68
+",
+    ));
 }
 
 /// Formats an `f64` for TOML, ensuring a decimal point is always present.

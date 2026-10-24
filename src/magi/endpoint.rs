@@ -65,6 +65,8 @@ pub enum Scope {
     Embedding,
     /// `[decision].base_url` ⇒ `DECISION_BASE_URL_*`.
     Decision,
+    /// `[code_review].base_url` ⇒ `CODE_REVIEW_BASE_URL_*`.
+    CodeReview,
 }
 
 impl Scope {
@@ -76,6 +78,7 @@ impl Scope {
             Self::Magi => "MAGI_BASE_URL_USER",
             Self::Embedding => "EMBEDDING_BASE_URL_USER",
             Self::Decision => "DECISION_BASE_URL_USER",
+            Self::CodeReview => "CODE_REVIEW_BASE_URL_USER",
         }
     }
 
@@ -87,6 +90,7 @@ impl Scope {
             Self::Magi => "MAGI_BASE_URL_PASSWORD",
             Self::Embedding => "EMBEDDING_BASE_URL_PASSWORD",
             Self::Decision => "DECISION_BASE_URL_PASSWORD",
+            Self::CodeReview => "CODE_REVIEW_BASE_URL_PASSWORD",
         }
     }
 }

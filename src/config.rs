@@ -55,6 +55,10 @@ pub enum ConfigError {
     #[error("{0}")]
     Decision(#[from] magi_rs::decision::DecisionConfigError),
 
+    /// The `[code_review]` section is invalid.
+    #[error("{0}")]
+    CodeReview(#[from] magi_rs::review::config::CodeReviewConfigError),
+
     /// The declared lineages do not satisfy `enforce_diversity` (REQ-R29).
     ///
     /// A load error and not a notice because the evidence is **declarative**: three distinct seat
@@ -1358,6 +1362,9 @@ impl MagiConfig {
         if let Some(decision) = &self.decision {
             decision.validate()?;
         }
+        if let Some(code_review) = &self.code_review {
+            code_review.validate()?;
+        }
         Ok(())
     }
 
@@ -1818,14 +1825,46 @@ impl MagiConfig {
         section
     }
 
+    /// Code-review gate endpoint: override of `[code_review].base_url` (blank is absent), or
+    /// inheritance from the system.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::effective_base_url`].
+    pub fn effective_code_review_base_url(&self) -> Result<EndpointTemplate, EndpointError> {
+        self.override_or_inherit_base_url(
+            self.code_review
+                .as_ref()
+                .and_then(|s| s.base_url.as_deref()),
+            magi_rs::magi::endpoint::Scope::CodeReview,
+        )
+    }
+
     /// The `[code_review]` section as the run uses it.
     ///
+    /// No section resolves to the built-in gate chain, thresholds included. A declared section
+    /// is used as written, with only `timeout_secs`, `max_state_bytes` and `auto_approve`
+    /// completed from `defaults.rs`; its fallbacks are never completed.
+    ///
     /// # Returns
-    /// An owned section.
-    #[allow(dead_code)] // Red stub
+    /// An owned section whose `timeout_secs`, `max_state_bytes` and `auto_approve` are `Some`.
+    #[allow(dead_code)] // consumer: the code-review subcommand and tool wiring
     #[must_use]
     pub fn effective_code_review(&self) -> magi_rs::review::config::CodeReviewSection {
-        todo!()
+        let mut section = match &self.code_review {
+            Some(declared) => declared.clone(),
+            None => return crate::defaults::default_code_review_section(),
+        };
+        section
+            .timeout_secs
+            .get_or_insert(crate::defaults::DEFAULT_CODE_REVIEW_TIMEOUT_SECS);
+        section
+            .max_state_bytes
+            .get_or_insert(crate::defaults::DEFAULT_CODE_REVIEW_MAX_STATE_BYTES);
+        section
+            .auto_approve
+            .get_or_insert(crate::defaults::DEFAULT_CODE_REVIEW_AUTO_APPROVE);
+        section
     }
 
     /// Loads `magi.toml` from its **path** (not its directory) — Task 1.4 finally consumes
@@ -1901,6 +1940,7 @@ impl MagiConfig {
         cfg.effective_base_url()?;
         cfg.effective_magi_base_url()?;
         cfg.effective_embedding_base_url()?;
+        cfg.effective_code_review_base_url()?;
         // D-P4: the placeholders `[user]:[password]` parse as userinfo, so the template itself
         // can be checked here without resolving any secret.
         match cfg.effective_decision_base_url() {

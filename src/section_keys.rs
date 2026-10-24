@@ -135,7 +135,8 @@ fn trimmed_non_blank(text: Option<&str>) -> Option<&str> {
 /// (REQ-K06).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySource {
-    /// The section's own variable (`MAGI_API_KEY`, `EMBEDDING_API_KEY`, `DECISION_API_KEY`).
+    /// The section's own variable (`MAGI_API_KEY`, `EMBEDDING_API_KEY`, `DECISION_API_KEY`,
+    /// `CODE_REVIEW_API_KEY`).
     Own,
     /// `OPENAI_API_KEY` on the root endpoint's origin, or `ANTHROPIC_API_KEY` for an Anthropic
     /// trio.
@@ -215,7 +216,7 @@ impl RetainedKey {
     /// The variable that would carry the section's own key.
     ///
     /// # Returns
-    /// `MAGI_API_KEY`, `EMBEDDING_API_KEY` or `DECISION_API_KEY`.
+    /// `MAGI_API_KEY`, `EMBEDDING_API_KEY`, `DECISION_API_KEY` or `CODE_REVIEW_API_KEY`.
     pub fn variable(&self) -> &'static str {
         self.variable
     }
@@ -392,11 +393,16 @@ impl SectionKeys {
             read(DECISION_KEY_ENV, &env.decision_key),
             inputs.decision_endpoint,
         );
+        let code_review = openai_section(
+            CODE_REVIEW_KEY_ENV,
+            read(CODE_REVIEW_KEY_ENV, &env.code_review_key),
+            inputs.code_review_endpoint,
+        );
         SectionKeys {
             magi,
             embedding,
             decision,
-            code_review: SectionKey::absent(),
+            code_review,
             retained,
             shape_mismatch,
             magi_kind: inputs.magi_kind,
@@ -455,7 +461,7 @@ impl SectionKeys {
     /// The sections that did not inherit `OPENAI_API_KEY` because of their origin.
     ///
     /// # Returns
-    /// One entry per such section, in the order magi, embedding, decision.
+    /// One entry per such section, in the order magi, embedding, decision, code review.
     pub fn retained(&self) -> &[RetainedKey] {
         &self.retained
     }
@@ -463,7 +469,8 @@ impl SectionKeys {
     /// The startup notices of the section keys.
     ///
     /// # Returns
-    /// One `INFO` notice per retained section, in the order magi, embedding, decision (REQ-K09),
+    /// One `INFO` notice per retained section, in the order magi, embedding, decision, code review
+    /// (REQ-K09),
     /// then one `WARN` notice when `MAGI_API_KEY` is shaped for another provider than
     /// `[magi].kind` (REQ-K10). The warning never carries the key and never changes what is sent.
     pub fn startup_notices(&self) -> Vec<crate::notices::Notice> {
@@ -496,7 +503,7 @@ impl SectionKeys {
     ///
     /// # Returns
     /// One `(name, value)` pair per section whose source is [`KeySource::Own`], in the order
-    /// magi, embedding, decision.
+    /// magi, embedding, decision, code review.
     ///
     /// Complexity: O(1).
     pub fn own_secrets(&self) -> Vec<(crate::logging::auditor::SecretName, &str)> {
@@ -505,6 +512,7 @@ impl SectionKeys {
             (MAGI_KEY_ENV, &self.magi),
             (EMBEDDING_KEY_ENV, &self.embedding),
             (DECISION_KEY_ENV, &self.decision),
+            (CODE_REVIEW_KEY_ENV, &self.code_review),
         ]
         .into_iter()
         .filter(|(_, key)| key.source == KeySource::Own)
