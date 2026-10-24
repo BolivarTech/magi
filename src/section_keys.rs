@@ -1250,6 +1250,23 @@ mod tests {
     }
 
     #[test]
+    fn an_own_code_review_key_is_armed_by_its_variable_name() {
+        // The log auditor's exact pass must know the gate's own key, like every section's.
+        let mut e = env(Some("prin"), None, None, None, None);
+        e.code_review_key = Some("cr-own".into());
+        let k = resolve_cr(&e, Some(ROOT));
+        let armed: Vec<(String, String)> = k
+            .own_secrets()
+            .into_iter()
+            .map(|(n, v)| (n.as_str().to_string(), v.to_string()))
+            .collect();
+        assert_eq!(
+            armed,
+            vec![("CODE_REVIEW_API_KEY".to_string(), "cr-own".to_string())]
+        );
+    }
+
+    #[test]
     fn the_code_review_key_follows_the_same_origin_rule_as_every_section() {
         let mut e = env(Some("prin"), None, None, None, None);
         let k = resolve_cr(&e, Some("https://openrouter.ai/api/v1"));

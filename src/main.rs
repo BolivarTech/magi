@@ -16752,6 +16752,25 @@ base_url = \"http://192.168.0.30:11434/v1\"
             }
         }
 
+        #[test]
+        fn the_keys_see_the_code_review_endpoint_its_own_or_the_root() {
+            // The origin the gate's key is chosen for is the endpoint the gate will call.
+            let own = MagiConfig::from_toml_str(
+                "[code_review]\nmodel = \"m\"\nbase_url = \"https://openrouter.ai/api/v1\"\n",
+            )
+            .expect("fixture parses");
+            assert_eq!(
+                section_endpoints(&own, None).2.as_deref(),
+                Some("https://openrouter.ai/api/v1")
+            );
+            let inherited = MagiConfig::from_toml_str("base_url = \"http://127.0.0.1:11434/v1\"\n") // allow-secret-scan
+                .expect("fixture parses");
+            assert_eq!(
+                section_endpoints(&inherited, None).2.as_deref(),
+                Some("http://127.0.0.1:11434/v1") // allow-secret-scan
+            );
+        }
+
         fn cfg_anthropic_without_credentials() -> MagiConfig {
             MagiConfig::from_toml_str("provider = \"anthropic\"\n").unwrap()
         }
