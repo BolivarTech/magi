@@ -1886,10 +1886,9 @@ mod tests {
         // path an editor shows: the location must still fall in what was reviewed.
         let dir = workspace(1);
         let canonical = std::fs::canonicalize(dir.path()).expect("canonical");
-        let reported = without_verbatim_prefix(&canonical)
-            .join("f0.rs")
-            .to_string_lossy()
-            .into_owned();
+        // Built by hand, not with the helper under test: a mutated helper must not move both sides.
+        let text = canonical.to_string_lossy().into_owned();
+        let reported = format!("{}/f0.rs", text.strip_prefix(r"\\?\").unwrap_or(&text));
         let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":reported,"line":3}]);
         let consult =
             FakeConsult::new(vec![Ok(
