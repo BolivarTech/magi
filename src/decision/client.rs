@@ -425,15 +425,19 @@ impl SystemOneClient {
 impl DecisionClient for SystemOneClient {
     /// Walks the chain in order (or tries only the explicit model). An answer whose lowest
     /// confidence is under that model's `min_confidence` is recorded and the chain rotates; a
-    /// rejected answer is never returned (REQ-D20). An HTTP 400 rotates too; a chain whose last
-    /// attempt was a 400 ends as [`DecisionError::Rejected`] with status 400.
+    /// rejected answer is never returned (REQ-D20). An HTTP 400 rotates too; a chain in which
+    /// every attempt was a 400 ends as [`DecisionError::Rejected`] with status 400 and the last
+    /// provider's message (DE01); any other ending is [`DecisionError::ChainExhausted`] (or
+    /// [`DecisionError::ModelUnavailable`] for an explicit model).
     ///
     /// Complexity: O(m) attempts for m models.
     async fn decide(&self, request: &DecisionRequest) -> Result<Decision, DecisionError> {
         let started = Instant::now();
         let mut trace = Trace::default();
-        // The provider message of the last attempt when it was a 400; any later attempt resets it.
+        // The last provider message while every attempt so far was a 400; any other outcome
+        // clears it for good.
         let mut last_bad_request: Option<String> = None;
+        let mut only_bad_requests = true;
         for spec in self.plan(request) {
             let attempt_started = Instant::now();
             // A serialization failure ends the call as an explicit error: no empty body is sent.
@@ -442,7 +446,7 @@ impl DecisionClient for SystemOneClient {
             let latency_ms = elapsed_ms(attempt_started);
             match result {
                 Ok(parsed) => {
-                    last_bad_request = None;
+                    only_bad_requests = false;
                     let lowest = lowest_confidence(&parsed.answers);
                     let below = spec.min_confidence.filter(|min| lowest < *min);
                     let outcome = match below {
@@ -469,8 +473,11 @@ impl DecisionClient for SystemOneClient {
                     }
                 }
                 Err(failure) => {
-                    last_bad_request = (failure.cause == Cause::BadRequest)
-                        .then(|| failure.provider_message.clone());
+                    if failure.cause == Cause::BadRequest {
+                        last_bad_request = Some(failure.provider_message.clone());
+                    } else {
+                        only_bad_requests = false;
+                    }
                     let attempt = Attempt {
                         model: spec.model.clone(),
                         outcome: AttemptOutcome::Failed {
@@ -498,8 +505,8 @@ impl DecisionClient for SystemOneClient {
             }
         }
         self.log_close(None, &trace, started);
-        // A chain that ended on a 400 is still an invalid request, with the last message.
-        if let Some(provider_message) = last_bad_request {
+        // A chain entirely in 400 is still an invalid request, with the last message.
+        if let Some(provider_message) = last_bad_request.filter(|_| only_bad_requests) {
             return Err(DecisionError::Rejected {
                 status: 400,
                 provider_message,
