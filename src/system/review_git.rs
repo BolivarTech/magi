@@ -14,9 +14,9 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use magi_rs::review::error::ReviewError;
 use magi_rs::review::source::{
@@ -273,9 +273,7 @@ impl ScrubbedGit {
                 )));
             }
         };
-        let status = child
-            .wait()
-            .map_err(|e| ReviewError::Git(format!("cannot wait for git: {e}")))?;
+        let status = wait_within(&mut child, Instant::now())?;
         let stderr = stderr_reader.join().unwrap_or_default();
         Ok(Finished {
             code: status.code(),
@@ -362,6 +360,17 @@ fn failure(command: &str, finished: &Finished) -> ReviewError {
     } else {
         ReviewError::Git(finished.stderr.clone())
     }
+}
+
+/// Waits for `child` to exit, killing it at `deadline`.
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] when waiting fails or the deadline passes.
+fn wait_within(child: &mut Child, _deadline: Instant) -> Result<ExitStatus, ReviewError> {
+    child
+        .wait()
+        .map_err(|e| ReviewError::Git(format!("cannot wait for git: {e}")))
 }
 
 /// Kills a child and reaps it; both are best effort (it may already have exited).
@@ -589,6 +598,32 @@ mod tests {
             resolve(ReviewInput::Commit(None)),
             Err(ReviewError::Git(_))
         ));
+    }
+
+    #[test]
+    fn a_git_that_keeps_running_after_its_output_is_killed_at_the_deadline() {
+        // [MAGI §6 MS2 A loop 1] the call's time limit covered only stdout: a git that closed its output and then
+        // hung (on a lock, say) blocked the preparation forever. `hash-object --stdin` waits on a stdin kept open.
+        let mut child = std::process::Command::new("git")
+            .args(["hash-object", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("git runs");
+        let stdin = child.stdin.take();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let waited = wait_within(&mut child, Instant::now() + Duration::from_millis(200));
+            let _ = tx.send(waited.is_err());
+        });
+        let outcome = rx.recv_timeout(Duration::from_secs(30));
+        drop(stdin);
+        match outcome {
+            Ok(true) => {}
+            Ok(false) => panic!("a child that never exits was reported as finished"),
+            Err(_) => panic!("the wait did not end at its deadline"),
+        }
     }
 
     #[test]
