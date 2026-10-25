@@ -2215,7 +2215,8 @@ impl App {
     ) {
         if !cmd.ignored_flags.is_empty() {
             let inert = format!(
-                "System: Accepted but not applied in the TUI: {}; the review runs on this                  session's workspace and the report goes to the transcript.",
+                "System: Accepted but not applied in the TUI: {}; the review runs on this \
+                 session's workspace and the report goes to the transcript.",
                 cmd.ignored_flags.join(", ")
             );
             for line in audit_for_transcript(&inert) {
