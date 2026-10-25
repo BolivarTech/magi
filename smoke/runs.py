@@ -430,11 +430,11 @@ class RunDefinition:
             back. Declared rather than inferred from the run id, for the same
             reason ``planted`` is: an id comparison is a second source of truth
             that disagrees the first time somebody renames a row.
-        files: Workspace-relative files written under the environment root
-            before the run, as ordered ``(path, content)`` pairs. A review run
-            reads its input from disk, so the input has to exist first; the
-            pairs are deterministic, and a file already holding the same bytes
-            is left alone so a rerun touches nothing.
+        files: Workspace-relative files written into the review workspace
+            (``smoke/scratch/review-ws``) before the run, as ordered
+            ``(path, content)`` pairs. A review run reads its input from disk,
+            so the input has to exist first. The workspace is rebuilt from
+            nothing on every run, so the pairs are always written fresh.
     """
 
     run_id: str
@@ -540,11 +540,13 @@ LARGE_CONSULT_CEILING_S = 20184
 #: R10 carries R8's figure PROVISIONALLY: it is the same kind of run (a small
 #: consult) and has not been measured yet. Replace it with R10's own wall clock
 #: at the next run against a real backend.
-#: R12 carries PROVISIONAL figures too: four batches at R4's 283 s each (the
-#: input is sized for at least three) plus the gate. Replace it with R12's own
-#: wall clock at the first run against a real backend.
+#: R12 carries PROVISIONAL figures too: the generated input is about 72 000
+#: tokens and the product fills a batch to 50 % of the 32 768-token default
+#: window (16 384 tokens), so a review plans at least five batches. Five times
+#: R4's 283 s plus the gate is about 1 500 s. Replace it with R12's own wall
+#: clock at the first run against a real backend.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
-                                        "R10": 67, "R12": 1200}
+                                        "R10": 67, "R12": 1500}
 
 #: The factor a trio run's ``timeout_s`` must clear over its measurement in
 #: :data:`TRIO_RUNS_MEASURED_S`. The cloud endpoint's pace varies by time
@@ -610,8 +612,11 @@ GIT_VISIBLE_QUERY = ("ls-files", "--others", "--exclude-standard", "-z")
 #: Seconds the harness gives each git command it runs.
 GIT_TIMEOUT_S = 60
 
-#: A path outside the workspace, for the hostile-path run.
-REVIEW_OUTSIDE_PATH = "../outside"
+#: A path outside the workspace, for the hostile-path run. Its last component
+#: appears in no fixed product text, so S48 can require it in stderr without
+#: the product's own phrase satisfying the check.
+REVIEW_OUTSIDE_COMPONENT = "smoke-hostile-target"
+REVIEW_OUTSIDE_PATH = "../" + REVIEW_OUTSIDE_COMPONENT
 
 #: The total R15 asks for: three batches cannot each get the product's floor
 #: out of it.
@@ -944,7 +949,7 @@ DEFINITIONS: dict[str, RunDefinition] = {
         argv=("code-review",) + REVIEW_FLAGS + ("--structured-verdicts",
                                                 REVIEW_GEN_DIR),
         stdin=b"",
-        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=2400,
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=3000,
         files=review_input_files()),
     "R13": RunDefinition(
         run_id="R13",
@@ -1050,7 +1055,8 @@ class RunExecutor:
 
         Raises:
             HarnessError: If the run rotates a credential and there is none to
-                put back afterwards.
+                put back afterwards, or if its review workspace cannot be
+                built or git cannot see the files it declares.
             ProductOutputError: If the product could not be started. That is
                 not a hang and not a verdict, so it is not folded into the
                 result.
@@ -1134,9 +1140,6 @@ class RunExecutor:
                      root: pathlib.Path) -> None:
         """Write the files a run reads under *root*.
 
-        A file already holding the same bytes is left untouched, so a rerun
-        does not change a modification time the product might read.
-
         Args:
             definition: The run about to execute.
             root: The directory the paths are relative to.
@@ -1155,8 +1158,6 @@ class RunExecutor:
                     "run %s declares a file outside its workspace: %s"
                     % (definition.run_id, relative))
             try:
-                if target.is_file() and target.read_bytes() == body:
-                    continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(body)
             except OSError as exc:

@@ -289,6 +289,10 @@ def a_large_review_yields_one_report(run):
 def a_hostile_path_is_refused(run):
     """Check that a path outside the workspace is refused with exit 2.
 
+    Both the product's fixed phrase and the hostile path's last component must
+    appear: the component is the separator-independent part of the path the
+    product prints, and it occurs in no fixed text.
+
     Args:
         run: R13's ``RunResult``, or ``None`` when the run produced no capture.
 
@@ -296,8 +300,10 @@ def a_hostile_path_is_refused(run):
         Finding: One per entry of :data:`S48_ASSERTIONS`, in that order.
     """
     yield from _refusal(S48_ASSERTIONS, "R13", run,
-                        lambda text: OUTSIDE_WORKSPACE_TEXT in text,
-                        "stderr does not say the path is outside the workspace")
+                        lambda text: OUTSIDE_WORKSPACE_TEXT in text
+                        and runs.REVIEW_OUTSIDE_COMPONENT in text,
+                        "stderr does not name %s as outside the workspace"
+                        % runs.REVIEW_OUTSIDE_COMPONENT)
 
 
 @scenario("S49", assertions=S49_ASSERTIONS, run="R14")
