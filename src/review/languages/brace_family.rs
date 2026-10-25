@@ -34,6 +34,9 @@ pub struct BraceFamilyExtractor {
     attribute_prefixes: Vec<String>,
     /// Lexical rules for the CodeScanner.
     lexical_rules: LexicalRules,
+    /// Whether an unindented signature line (`int main(void) {`) starts a function: C and C++
+    /// have no function keyword.
+    signature_functions: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -146,10 +149,11 @@ impl BraceFamilyExtractor {
                     self.match_block_keyword(trimmed)
                         .map(|kind| (kind, &self.block_keywords))
                 });
+            let stops = |j: usize| self.starts_construct(lines, scanned, j);
             if let Some((kind, keywords)) = keyword {
                 let name = extract_name_from_line(trimmed, keywords);
                 let start = self.scan_back_for_docs(lines, i);
-                let end = brace_block_end(scanned, i, lines.len(), line_num);
+                let end = brace_block_end(scanned, i, lines.len(), line_num, &stops);
                 constructs.push(Construct {
                     kind,
                     name,
@@ -160,7 +164,21 @@ impl BraceFamilyExtractor {
                 i = (end as usize).max(i + 1);
                 continue;
             }
-
+            if let Some(name) = self.signature_name(line) {
+                let opens = open_brace_line(scanned, i, lines.len(), &stops).is_some();
+                if opens || trimmed.ends_with('}') {
+                    let start = self.scan_back_for_docs(lines, i);
+                    let end = brace_block_end(scanned, i, lines.len(), line_num, &stops);
+                    constructs.push(Construct {
+                        kind: UnitKind::Function,
+                        name,
+                        start_line: u32::try_from(start + 1).unwrap_or(1),
+                        end_line: end,
+                    });
+                    i = (end as usize).max(i + 1);
+                    continue;
+                }
+            }
             // Check declaration keywords
             if self.match_declaration_keyword(trimmed) {
                 let group_start = i;
@@ -210,6 +228,62 @@ impl BraceFamilyExtractor {
             }
         }
         None
+    }
+
+    /// Whether line `j` (0-based) is code that opens a construct: a function, block or
+    /// declaration keyword, or a signature where [`Self::signature_name`] applies. O(k) in the
+    /// keywords.
+    fn starts_construct(&self, lines: &[&str], scanned: &[ScannedLine], j: usize) -> bool {
+        if scanned.get(j).is_none_or(|s| s.is_non_code) {
+            return false;
+        }
+        let Some(line) = lines.get(j) else {
+            return false;
+        };
+        let trimmed = line.trim();
+        self.match_function_keyword(trimmed).is_some()
+            || self.match_block_keyword(trimmed).is_some()
+            || self.match_declaration_keyword(trimmed)
+            || self.signature_name(line).is_some()
+    }
+
+    /// The function name of a C-family signature line, for extractors with
+    /// `signature_functions`: an unindented line that holds `(`, does not end in `;` (a
+    /// prototype), does not open with `#`, a comment or `}`, has no `=` before its `(`, and
+    /// names an identifier, not a control keyword, just before the `(` (`int *parse(` gives
+    /// `parse`, `void Foo::bar(` gives `bar`). O(n) in the line.
+    fn signature_name(&self, line: &str) -> Option<String> {
+        if !self.signature_functions || line.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let trimmed = line.trim_end();
+        if trimmed.ends_with(';')
+            || ["#", "//", "/*", "*", "}"]
+                .iter()
+                .any(|p| trimmed.starts_with(p))
+        {
+            return None;
+        }
+        let (before, _) = trimmed.split_once('(')?;
+        if before.contains('=') {
+            return None;
+        }
+        let name: String = before
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let control = [
+            "if", "for", "while", "switch", "return", "sizeof", "else", "do",
+        ];
+        if name.is_empty() || control.contains(&name.as_str()) {
+            return None;
+        }
+        Some(name)
     }
 
     /// Check if the line starts a block declaration.
@@ -302,19 +376,38 @@ impl BraceFamilyExtractor {
     }
 }
 
+/// The 0-based line holding the opening brace of the construct that starts at line `i`: line
+/// `i` when it opens one, else the first of the next two lines that does, scanning no further
+/// than a line where `stops` holds (the next construct's start). A line whose braces balance
+/// (`fn a() { x(); }`) opens nothing, so a one-line construct never takes the brace of the
+/// construct after it.
+fn open_brace_line(
+    scanned: &[ScannedLine],
+    i: usize,
+    line_count: usize,
+    stops: &dyn Fn(usize) -> bool,
+) -> Option<usize> {
+    let opens = |idx: usize| scanned.get(idx).is_some_and(|s| s.brace_delta > 0);
+    if opens(i) {
+        return Some(i);
+    }
+    ((i + 1)..line_count.min(i + 3))
+        .take_while(|&j| !stops(j))
+        .find(|&j| opens(j))
+}
+
 /// Find the 1-indexed line where the construct starting at line index `i` ends.
 ///
-/// The opening brace is on line `i` or, failing that, within the next two lines. A construct
-/// with no brace in that window (a single-line declaration) ends on `line_num`.
-fn brace_block_end(scanned: &[ScannedLine], i: usize, line_count: usize, line_num: u32) -> u32 {
-    let opens = |idx: usize| scanned.get(idx).is_some_and(|s| s.brace_delta > 0);
-    let brace_line = if opens(i) {
-        Some(i)
-    } else {
-        // Opening brace might be on the next line
-        ((i + 1)..line_count.min(i + 3)).find(|&j| opens(j))
-    };
-    match brace_line {
+/// The opening brace is the one [`open_brace_line`] finds. A construct with no brace (a
+/// single-line declaration) ends on `line_num`.
+fn brace_block_end(
+    scanned: &[ScannedLine],
+    i: usize,
+    line_count: usize,
+    line_num: u32,
+    stops: &dyn Fn(usize) -> bool,
+) -> u32 {
+    match open_brace_line(scanned, i, line_count, stops) {
         Some(open_idx) => {
             let close_idx = find_closing_brace(scanned, open_idx);
             u32::try_from(close_idx + 1).unwrap_or(line_num)
@@ -405,6 +498,7 @@ impl BraceFamilyExtractor {
             doc_comment_prefixes: vec!["///".to_string(), "//!".to_string()],
             attribute_prefixes: vec!["#[".to_string()],
             lexical_rules: LexicalRules::rust(),
+            signature_functions: false,
         }
     }
 
@@ -428,6 +522,7 @@ impl BraceFamilyExtractor {
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec![],
             lexical_rules: LexicalRules::c(),
+            signature_functions: true,
         }
     }
 
@@ -457,6 +552,7 @@ impl BraceFamilyExtractor {
             doc_comment_prefixes: vec!["//".to_string()],
             attribute_prefixes: vec![],
             lexical_rules: LexicalRules::go(),
+            signature_functions: false,
         }
     }
 
@@ -483,6 +579,7 @@ impl BraceFamilyExtractor {
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec!["@".to_string()],
             lexical_rules: LexicalRules::java(),
+            signature_functions: false,
         }
     }
 
@@ -513,6 +610,7 @@ impl BraceFamilyExtractor {
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec!["@".to_string()],
             lexical_rules: LexicalRules::javascript(),
+            signature_functions: false,
         }
     }
 

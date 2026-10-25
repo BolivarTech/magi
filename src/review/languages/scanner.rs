@@ -593,9 +593,12 @@ pub fn find_closing_brace(scanned: &[ScannedLine], open_idx: usize) -> usize {
         return scanned.len().saturating_sub(1);
     };
 
-    let target_depth = open_line.depth_after.saturating_sub(1);
+    // The depth before the line: a line that opens several blocks (`fn f() { if x {`) closes
+    // when the depth falls back to it, not after its innermost block.
+    let opened = u32::try_from(open_line.brace_delta.max(0)).unwrap_or(0);
+    let target_depth = open_line.depth_after.saturating_sub(opened);
     for (i, line) in scanned.iter().enumerate().skip(open_idx + 1) {
-        if line.depth_after == target_depth && line.brace_delta < 0 {
+        if line.depth_after <= target_depth && line.brace_delta < 0 {
             return i;
         }
     }
