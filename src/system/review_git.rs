@@ -594,6 +594,59 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_commit_is_reviewed_against_its_first_parent() {
+        // [MAGI §6 MS2 A loop 2] `diff-tree <merge>` prints no diff, so a HEAD reached through
+        // `git merge` used to be "nothing to review"; what the merge brought in is reviewed.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "root"]);
+        git(d.path(), &["checkout", "-q", "-b", "topic"]);
+        std::fs::write(d.path().join("b.rs"), "fn b() {}\n").expect("write");
+        git(d.path(), &["add", "b.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "topic"]);
+        git(d.path(), &["checkout", "-q", "main"]);
+        std::fs::write(d.path().join("c.rs"), "fn c() {}\n").expect("write");
+        git(d.path(), &["add", "c.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "main"]);
+        git(
+            d.path(),
+            &["merge", "-q", "--no-ff", "-m", "merge", "topic"],
+        );
+        let first_parent = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args(["rev-parse", "HEAD^1"])
+                .output()
+                .expect("git runs")
+                .stdout,
+        )
+        .expect("utf-8");
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        for input in [
+            ReviewInput::Commit(None),
+            ReviewInput::Commit(Some("HEAD".into())),
+        ] {
+            let r = magi_rs::review::input::resolve_input(&input, d.path(), &g, &allow)
+                .expect("a merge commit is reviewable");
+            assert_eq!(
+                r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+                vec!["b.rs"],
+                "{input:?}"
+            );
+            assert!(
+                matches!(&r.source_kind, magi_rs::review::input::SourceKind::Revision { old_rev, .. }
+                    if old_rev.as_deref() == Some(first_parent.trim())),
+                "{input:?}: old side is not the first parent"
+            );
+        }
+    }
+
+    #[test]
     fn git_tells_a_missing_ref_and_a_root_commit_apart_from_a_broken_repository() {
         // [MAGI §6 MS2 A loop 1, measured with git 2.56] `rev-parse --verify --quiet` exits 1 with nothing on stderr
         // for a name that is no commit (and for a root commit's parent); a broken repository exits 128 with a message.

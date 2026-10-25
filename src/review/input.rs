@@ -825,8 +825,7 @@ mod tests {
                     Ok("p\n".to_string()),
                 ),
                 (
-                    "diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative abc"
-                        .to_string(),
+                    "diff --no-color --no-ext-diff --no-textconv --relative p..abc".to_string(),
                     Ok(
                         "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n"
                             .to_string(),
@@ -1210,24 +1209,25 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_commit_with_an_empty_diff_is_nothing_to_review() {
+    fn a_commit_with_a_parent_is_diffed_against_that_pinned_parent() {
+        // [MAGI §6 MS2 A loop 2] `diff-tree <merge>` prints nothing for a merge commit; the diff
+        // against the pinned first parent is what the review reads (`old_rev`), merge or not.
         let git = FakeGit::from(&[
             ("rev-parse --verify --quiet M^{commit}", Ok("m\n")),
             ("rev-parse --verify --quiet m^^{commit}", Ok("p\n")),
             (
-                "diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative m",
-                Ok(""),
+                "diff --no-color --no-ext-diff --no-textconv --relative p..m",
+                Ok(ONE_HUNK),
             ),
         ]);
-        assert!(matches!(
-            resolve_input(
-                &ReviewInput::Commit(Some("M".into())),
-                Path::new("/w"),
-                &git,
-                &allow_all
-            ),
-            Err(ReviewError::NothingToReview)
-        ));
+        let r = resolve_input(
+            &ReviewInput::Commit(Some("M".into())),
+            Path::new("/w"),
+            &git,
+            &allow_all,
+        )
+        .expect("resolves");
+        assert_eq!(r.files.len(), 1);
     }
 
     #[test]
