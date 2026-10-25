@@ -70,8 +70,13 @@ class CodeReviewScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]])
 
     def test_s48_passes_on_a_misuse_exit_naming_the_path(self) -> None:
-        r = _result("R13", 2, None, b"error: path is outside the workspace: ../fuera\n")
+        r = _result("R13", 2, None, b"error: path is outside the workspace: C:\\ws\\..\\smoke-hostile-target\n")
         self.assertEqual({Outcome.PASS}, set(_outcomes("S48", r).values()))
+
+    def test_s48_fails_when_stderr_has_the_phrase_but_not_the_path(self) -> None:
+        # The fixed phrase alone must not satisfy "names the outside path".
+        r = _result("R13", 2, None, b"error: path is outside the workspace: ?\n")
+        self.assertEqual(Outcome.FAIL, _outcomes("S48", r)[code_review.S48_ASSERTIONS[1]])
 
     def test_s49_passes_on_nothing_to_review(self) -> None:
         r = _result("R14", 2, None, b"error: nothing to review: no reviewable file in the input\n")

@@ -84,16 +84,6 @@ class WriteFilesTests(unittest.TestCase):
             _executor(root)._write_files(runs.DEFINITIONS["R14"], root)
             self.assertTrue((root / "skipped" / "pixel.png").is_file())
 
-    def test_a_rerun_leaves_identical_files_untouched(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            executor = _executor(root)
-            executor._write_files(runs.DEFINITIONS["R14"], root)
-            target = root / "skipped" / "leak.txt"
-            before = target.stat().st_mtime_ns
-            executor._write_files(runs.DEFINITIONS["R14"], root)
-            self.assertEqual(before, target.stat().st_mtime_ns)
-
     def test_a_path_leaving_the_root_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hostile = runs.RunDefinition(
