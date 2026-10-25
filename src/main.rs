@@ -9845,8 +9845,9 @@ mod tests {
             code_lines_only(production)
                 .matches("register_process_secrets")
                 .count(),
-            // TUI, query/consult (`prepare_headless`) and decide (`run_decide_subcommand`).
-            3,
+            // TUI, query/consult (`prepare_headless`), decide (`run_decide_subcommand`) and
+            // code-review (`run_code_review_subcommand`).
+            4,
             "expected exactly one arming per surface"
         );
     }
