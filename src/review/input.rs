@@ -1239,6 +1239,25 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_that_does_not_exist_is_missing_not_nothing_to_review() {
+        // [MAGI §6 MS2 A loop 2] a typo in a directory name says what is wrong, like a file's does.
+        let d = tempfile::tempdir().expect("tempdir");
+        let git = FakeGit(Default::default());
+        assert!(matches!(
+            resolve_input(
+                &ReviewInput::Directory("nope".into()),
+                d.path(),
+                &git,
+                &allow_all
+            ),
+            Err(ReviewError::NotReviewable {
+                cause: "missing",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn a_file_input_that_names_a_directory_is_not_reviewable() {
         // [CP2 MS2 S1a loop 11] the T2.3/T2.4 seam: a directory sent as a file is typed, not an opaque I/O error.
         let d = tempfile::tempdir().expect("tempdir");
