@@ -587,6 +587,77 @@ enum TopCmd {
     /// model that answered. The decision models listed in the configuration are tried in
     /// order until one answers. No language model is involved.
     Decide(DecideArgs),
+
+    /// Review code with the MAGI trio and print one report.
+    ///
+    /// Reviews a file, a directory, a commit (by default the last one), the changes between two
+    /// commits or two branches, or the uncommitted changes. Large reviews are split into
+    /// batches that the three reviewers analyze one after another; their findings are checked
+    /// against what was reviewed, filtered for false positives by a decision model and merged
+    /// into a single report. The reviewed code is sent to the configured model endpoints.
+    CodeReview(CodeReviewArgs),
+}
+
+/// Arguments of the code-review subcommand: the review flags of consult, and what to review.
+// Fourth declaration of -w in this CLI, after WorkdirArgs, HeadlessArgs and DecideArgs. It is not
+// global, for the reasons given on WorkdirArgs; rename it in every place or in none.
+#[derive(clap::Args, Debug)]
+struct CodeReviewArgs {
+    /// Working directory: the root of the review and the place where the search for the .magi
+    /// directory starts (default: the current directory).
+    #[arg(short = 'w', long)]
+    workdir: Option<PathBuf>,
+    /// Maximum time in seconds the whole review may take, counted from the first model call.
+    #[arg(long)]
+    timeout: Option<u64>,
+    /// Write the result to this file, atomically; without it, print it on standard output.
+    #[arg(short = 'o', long)]
+    output: Option<PathBuf>,
+    /// Output format; without it, text.
+    #[arg(long, value_enum)]
+    output_format: Option<CliOutputFormat>,
+    /// Refuse to overwrite the -o file if it already exists.
+    #[arg(long)]
+    no_clobber: bool,
+    /// Log file verbosity; without it, info.
+    #[arg(long, value_enum)]
+    log_level: Option<CliLogLevel>,
+    /// Directory for the run log (default: .magi/logs).
+    #[arg(long)]
+    log_dir: Option<PathBuf>,
+    /// Accepted for parity with consult; a review runs no tool loop, so it changes nothing.
+    #[arg(long)]
+    auto: bool,
+    /// Accepted for parity with consult; a review runs no tool loop, so it changes nothing.
+    #[arg(long)]
+    full_auto: bool,
+    /// Stateless run: do not open the encrypted database; keys come from the environment only.
+    #[arg(long)]
+    no_memory: bool,
+    /// Add the consolidated agents and consensus to the JSON output. Requires
+    /// --output-format json.
+    #[arg(long)]
+    structured_verdicts: bool,
+    /// A file or directory to review whole.
+    path: Option<PathBuf>,
+    /// The commit to review against its parent (default: the last commit).
+    #[arg(long)]
+    commit: Option<String>,
+    /// The old end of a range of commits; needs --to.
+    #[arg(long)]
+    from: Option<String>,
+    /// The new end of a range of commits; needs --from.
+    #[arg(long)]
+    to: Option<String>,
+    /// The base branch; the review covers what --head added since they diverged.
+    #[arg(long)]
+    base: Option<String>,
+    /// The reviewed branch; needs --base.
+    #[arg(long)]
+    head: Option<String>,
+    /// Review the staged, unstaged and untracked changes.
+    #[arg(long)]
+    uncommitted: bool,
 }
 
 /// Arguments of the decide subcommand.
@@ -1706,6 +1777,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 run_decide_subcommand(d, passphrase_flag, &workspace_root, decide_secrets).await,
             ));
         }
+        Some(TopCmd::CodeReview(_)) => return Ok(exit_code(1)),
         // No subcommand ⇒ fall through to the TUI launch below.
         None => {}
     }
@@ -4772,6 +4844,39 @@ fn register_decide_tool_if_available(
             endpoint,
         )));
     }
+}
+
+/// Registers the `code-review` tool on `agent`.
+#[allow(dead_code)] // Red stub
+fn register_code_review_tool(
+    _agent: &mut Agent,
+    _runner: Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+    _auto_approve: bool,
+    _run_deadline: Option<std::time::Instant>,
+) {
+}
+
+/// The run's deadline, when the run has a wall clock.
+#[allow(dead_code)] // Red stub
+fn run_deadline(
+    _start: std::time::Instant,
+    _timeout: Option<Duration>,
+) -> Option<std::time::Instant> {
+    None
+}
+
+/// Run-log target of a review error.
+#[allow(dead_code)] // Red stub
+const CODE_REVIEW_LOG_TARGET: &str = "magi_rs::code_review";
+
+/// Reports a review error on stderr and in the run log.
+#[allow(dead_code)] // Red stub
+fn emit_review_error(_e: &magi_rs::review::error::ReviewError) {}
+
+/// The exit code of a review error.
+#[allow(dead_code)] // Red stub
+fn review_error_exit(_e: &magi_rs::review::error::ReviewError) -> i32 {
+    0
 }
 
 /// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.
@@ -8154,6 +8259,7 @@ mod tests {
             "magi-rs query",
             "magi-rs consult",
             "magi-rs decide",
+            "magi-rs code-review",
             "magi-rs vault",
             "magi-rs vault ls",
             "magi-rs vault set",
@@ -21846,5 +21952,360 @@ mod system_override_command_tests {
                 "{listed}: listed but takes no override flag"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod code_review_surface_tests {
+    use super::*;
+    use crate::tools::code_review::review_error_cause_name;
+    use magi_rs::review::error::ReviewError;
+    use magi_rs::review::input::ReviewInput;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn code_review_with_no_git_argument_parses_to_head() {
+        let a = Args::try_parse_from(["magi-rs", "code-review"]).expect("parses");
+        assert!(
+            matches!(a.command, Some(TopCmd::CodeReview(ref c)) if c.commit.is_none() && c.path.is_none() && !c.uncommitted)
+        );
+    }
+
+    // D24 (user, 2026-10-17): exactly the eleven review flags, none of the envelope/agent ones.
+    #[test]
+    fn code_review_accepts_the_review_flags_and_nothing_from_the_envelope() {
+        let ok = Args::try_parse_from([
+            "magi-rs",
+            "code-review",
+            "-w",
+            ".",
+            "--timeout",
+            "600",
+            "-o",
+            "r.json",
+            "--output-format",
+            "json",
+            "--no-clobber",
+            "--log-level",
+            "debug",
+            "--log-dir",
+            "logs",
+            "--auto",
+            "--no-memory",
+            "--structured-verdicts",
+        ]);
+        assert!(ok.is_ok(), "{:?}", ok.err());
+        assert!(Args::try_parse_from(["magi-rs", "code-review", "--full-auto"]).is_ok());
+        for foreign in [
+            &["--allow-system-override"][..],
+            &["-i", "x"],
+            &["--input-format", "json"],
+            &["--consult"],
+            &["--model", "m"],
+            &["--provider", "anthropic"],
+            &["--max-tool-calls", "3"],
+            &["--mode", "design"],
+            &["--untrusted-content"],
+        ] {
+            let mut argv = vec!["magi-rs", "code-review"];
+            argv.extend_from_slice(foreign);
+            assert!(
+                Args::try_parse_from(argv).is_err(),
+                "code-review must reject {foreign:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_review_rejects_a_half_pair_of_refs() {
+        // [CP2 MS2 cierre (sin MAGI); S2b loop 12] clap `requires` pairs from/to and base/head: exit 2, as in the tool.
+        for half in [
+            ["--from", "a"],
+            ["--to", "b"],
+            ["--base", "main"],
+            ["--head", "x"],
+        ] {
+            let argv = ["magi-rs", "code-review", half[0], half[1]];
+            assert!(
+                Args::try_parse_from(argv).is_err(),
+                "code-review must reject {half:?} alone"
+            );
+        }
+    }
+
+    #[test]
+    fn code_review_rejects_two_inputs_at_once() {
+        assert!(Args::try_parse_from(["magi-rs", "code-review", "src", "--uncommitted"]).is_err());
+        assert!(Args::try_parse_from([
+            "magi-rs",
+            "code-review",
+            "--commit",
+            "HEAD",
+            "--base",
+            "main",
+            "--head",
+            "x"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn code_review_is_registered_as_a_tool() {
+        // [CP2 MS2 S2 loop 3] RV02's third surface: a missed registration leaves the tool dead with every other test green.
+        struct NoRun;
+        #[async_trait::async_trait]
+        impl crate::tools::code_review::CodeReviewRunner for NoRun {
+            fn plan(
+                &self,
+                _i: &ReviewInput,
+            ) -> Result<crate::tools::code_review::ReviewPlan, ReviewError> {
+                Err(ReviewError::NothingToReview)
+            }
+            async fn run(
+                &self,
+                _i: ReviewInput,
+                _t: Option<std::time::Duration>,
+                _c: &CancellationToken,
+            ) -> Result<crate::tools::code_review::Rendered, ReviewError> {
+                Err(ReviewError::NothingToReview)
+            }
+        }
+        let mut agent = Agent::new(Arc::new(StaticProvider));
+        register_code_review_tool(
+            &mut agent,
+            Arc::new(NoRun),
+            false,
+            Some(std::time::Instant::now()),
+        );
+        assert!(agent.has_tool("code-review"));
+        // [CP2 MS2 S2 loop 5] both surfaces call it: the TUI agent (`run`) and `magi query` (`run_query_subcommand`).
+        // The needle is built, not written, so this test does not count its own text (CLAUDE.md: needles that match
+        // the guarding line). rustfmt never splits an identifier from its `(`.
+        let src = include_str!("main.rs").replace('\r', "");
+        let needle = ["register_code_review_tool", "("].concat();
+        assert_eq!(
+            src.matches(needle.as_str()).count(),
+            4,
+            "definition + two call sites + this test's call"
+        );
+        // [CP2 MS2 S2b loop 8] RV17: only the TUI registers without a run deadline; headless passes its --timeout's.
+        let calls: Vec<&str> = src
+            .match_indices(needle.as_str())
+            .map(|(i, _)| {
+                let rest = &src[i..];
+                &rest[..rest.find(';').unwrap_or(rest.len())]
+            })
+            .collect();
+        assert_eq!(
+            calls.iter().filter(|c| c.contains("None")).count(),
+            1,
+            "{calls:?}"
+        );
+        // [CP2 MS2 S2b loop 10] and headless passes the run's deadline as a value, never a literal.
+        let deadline = ["run_deadline", "("].concat();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.contains(deadline.as_str()))
+                .count(),
+            1,
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn the_run_deadline_exists_only_when_the_run_has_a_clock() {
+        // [CP2 MS2 S2b loop 10] RV17's invariant as a value: Some iff the run has a wall clock (REQ-H36's).
+        let t = std::time::Instant::now();
+        assert_eq!(run_deadline(t, None), None);
+        assert_eq!(
+            run_deadline(t, Some(std::time::Duration::from_secs(5))),
+            Some(t + std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn a_budget_error_goes_to_the_run_log_as_well() {
+        // [CP2 MS2 S2 loop 3] RV-S7: the run-log half (stderr is unconditional by construction and S50 checks it with --log-level error).
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if e.metadata().target() == CODE_REVIEW_LOG_TARGET
+                    && *e.metadata().level() == tracing::Level::ERROR
+                {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let count = Count::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(count.clone()));
+        emit_review_error(&ReviewError::Budget {
+            batches: 3,
+            per_batch_wall_clock_secs: 10,
+            min_per_batch_secs: 783,
+            per_batch_ceiling_secs: 0,
+            floor_secs: 15,
+            min_timeout_secs: 2349,
+        });
+        assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_review_error_reaches_the_run_log_redacted() {
+        // [CP2 MS2 S2b loop 9] git's stderr can echo a credential URL; stderr is audited, the run log is not.
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Text(std::sync::Arc<std::sync::Mutex<String>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Text {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct V<'a>(&'a mut String);
+                impl tracing::field::Visit for V<'_> {
+                    fn record_debug(&mut self, _: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                        self.0.push_str(&format!("{v:?}"));
+                    }
+                }
+                if e.metadata().target() == CODE_REVIEW_LOG_TARGET {
+                    e.record(&mut V(&mut self.0.lock().expect("lock")));
+                }
+            }
+        }
+        let text = Text::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(text.clone()));
+        emit_review_error(&ReviewError::Git(
+            "fatal: https://user:hunter2@example.invalid/r.git".into(), // allow-secret-scan
+        ));
+        let got = text.0.lock().expect("lock").clone();
+        assert!(got.contains("git failed"), "{got}");
+        assert!(!got.contains("hunter2"), "{got}");
+        // [CP2 MS2 S2b loop 10] every variant that can carry foreign text, not only Git.
+        emit_review_error(&ReviewError::Io(
+            "read https://user:hunter2@example.invalid/x".into(), // allow-secret-scan
+        ));
+        emit_review_error(&ReviewError::Consolidation(
+            "https://user:hunter2@example.invalid/x".into(), // allow-secret-scan
+        ));
+        let got = text.0.lock().expect("lock").clone();
+        assert!(!got.contains("hunter2"), "{got}");
+    }
+
+    #[test]
+    fn every_review_error_maps_to_the_declared_exit_code() {
+        // [CP2 MS2 S2b loop 7] the caller's request → 2 (EXIT_MISUSE); the environment → 1 (EXIT_RUNTIME).
+        assert_eq!(review_error_exit(&ReviewError::NothingToReview), 2);
+        assert_eq!(
+            review_error_exit(&ReviewError::InputTooLarge { limit: 1 }),
+            2
+        );
+        assert_eq!(
+            review_error_exit(&ReviewError::NotReviewable {
+                path: "a".into(),
+                cause: "missing"
+            }),
+            2
+        );
+        assert_eq!(review_error_exit(&ReviewError::Git("x".into())), 1);
+        assert_eq!(review_error_exit(&ReviewError::Io("x".into())), 1);
+        assert_eq!(review_error_exit(&ReviewError::Cancelled), 1);
+        // [CP2 MS2 S2b loop 9] every variant, so a moved arm turns this red.
+        for e in [
+            ReviewError::OutsideWorkspace("a".into()),
+            ReviewError::InvalidRef("-x".into()),
+            ReviewError::RefNotFound("x".into()),
+            ReviewError::TooLargeForBatch {
+                what: "a".into(),
+                tokens: 2,
+                limit: 1,
+            },
+            ReviewError::Budget {
+                batches: 3,
+                per_batch_wall_clock_secs: 10,
+                min_per_batch_secs: 783,
+                per_batch_ceiling_secs: 0,
+                floor_secs: 15,
+                min_timeout_secs: 2349,
+            },
+            ReviewError::TooLarge {
+                path: "a".into(),
+                limit: 1,
+            },
+        ] {
+            assert_eq!(review_error_exit(&e), 2, "{e}");
+        }
+        for e in [
+            ReviewError::GitOutputTooLarge { limit: 1 },
+            ReviewError::Consolidation("x".into()),
+            ReviewError::EgressSecret { path: "a".into() },
+        ] {
+            // [S1b2 loop 16]
+            assert_eq!(review_error_exit(&e), 1, "{e}");
+        }
+        assert_eq!(review_error_exit(&ReviewError::Protected("a".into())), 2); // [S1b1 loop 16]
+    }
+
+    #[test]
+    fn each_review_error_logs_its_own_cause_name() {
+        // [CP2 MS2 S2b loop 11] the run log named every error "budget".
+        assert_eq!(
+            review_error_cause_name(&ReviewError::Git("x".into())),
+            "git"
+        );
+        assert_eq!(review_error_cause_name(&ReviewError::Io("x".into())), "io");
+        assert_eq!(
+            review_error_cause_name(&ReviewError::Cancelled),
+            "cancelled"
+        );
+        assert_eq!(
+            review_error_cause_name(&ReviewError::EgressSecret { path: "a".into() }),
+            "egress_secret"
+        );
+        assert_eq!(
+            review_error_cause_name(&ReviewError::Budget {
+                batches: 3,
+                per_batch_wall_clock_secs: 10,
+                min_per_batch_secs: 783,
+                per_batch_ceiling_secs: 0,
+                floor_secs: 15,
+                min_timeout_secs: 2349
+            }),
+            "budget"
+        );
+    }
+
+    /// The `[code_review]` endpoint reaches the section keys on every production surface that
+    /// resolves them with the trio: the TUI (`run`), `prepare_headless` and `code-review`. Only
+    /// `decide`, which builds no trio and no gate, passes none.
+    #[test]
+    fn every_production_key_resolution_sees_the_code_review_endpoint() {
+        let src = include_str!("main.rs").replace('\r', "");
+        let production = src
+            .split(["\n#[cfg(test)]", "\nmod "].concat().as_str())
+            .next()
+            .expect("production code precedes the first test module");
+        let inputs = ["KeyInputs", " {"].concat();
+        let passed = ["code_review_endpoint: ", "code_review_endpoint.as_deref()"].concat();
+        let none = ["code_review_endpoint: ", "None"].concat();
+        assert_eq!(
+            production.matches(inputs.as_str()).count(),
+            4,
+            "four resolutions"
+        );
+        assert_eq!(
+            production.matches(passed.as_str()).count(),
+            3,
+            "run, prepare_headless and code-review"
+        );
+        assert_eq!(production.matches(none.as_str()).count(), 1, "decide only");
     }
 }

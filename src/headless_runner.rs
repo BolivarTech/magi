@@ -2982,6 +2982,29 @@ mod tests {
             }
         }
 
+        /// Never called: only `Tool::name()` is read from the `CodeReviewTool` built on it.
+        struct UnusedReviewRunner;
+
+        #[async_trait::async_trait]
+        impl crate::tools::code_review::CodeReviewRunner for UnusedReviewRunner {
+            fn plan(
+                &self,
+                _input: &magi_rs::review::input::ReviewInput,
+            ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
+            {
+                unimplemented!("not exercised by this test")
+            }
+            async fn run(
+                &self,
+                _input: magi_rs::review::input::ReviewInput,
+                _timeout: Option<std::time::Duration>,
+                _cancel: &CancellationToken,
+            ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
+            {
+                unimplemented!("not exercised by this test")
+            }
+        }
+
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
         let fs: Arc<dyn FileSystem> = Arc::new(RealFileSystem);
@@ -2998,6 +3021,10 @@ mod tests {
                 Arc::new(UnusedDecisionClient),
                 true,
                 String::new(),
+            )),
+            Box::new(crate::tools::code_review::CodeReviewTool::new(
+                Arc::new(UnusedReviewRunner),
+                false,
             )),
         ];
         let mut real_names: Vec<&str> = real_tools.iter().map(|t| t.name()).collect();

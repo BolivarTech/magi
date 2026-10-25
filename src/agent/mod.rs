@@ -433,6 +433,9 @@ pub struct ApprovalRequest {
     #[allow(dead_code)]
     pub input: serde_json::Value,
     pub tx: oneshot::Sender<bool>,
+    /// What the call would cost, from [`Tool::approval_detail`], shown under the prompt.
+    #[allow(dead_code)] // Red stub
+    pub detail: Option<String>,
 }
 
 /// A piece of a streamed assistant turn forwarded to the UI.
@@ -1055,6 +1058,7 @@ impl Agent {
                             tool_name: name.to_string(),
                             input: input.clone(),
                             tx: oneshot_tx,
+                            detail: None,
                         })
                         .await;
                     match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx).await {
@@ -3376,6 +3380,54 @@ mod tests {
             !has_notice,
             "auto-approved tool with approval_notice=None must NOT emit StreamPiece::Notice; \
              pieces: {pieces:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_approval_request_carries_the_tool_detail() {
+        // [CP2 MS2 S2b loop 8] the agent fills the detail from Tool::approval_detail when it asks for approval.
+        use tokio::sync::mpsc;
+        struct DetailTool;
+        #[async_trait::async_trait]
+        impl Tool for DetailTool {
+            fn name(&self) -> &str {
+                "detailed_op"
+            }
+            fn description(&self) -> &str {
+                "d"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _a: serde_json::Value,
+                _c: &CancellationToken,
+            ) -> ToolResult<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+            fn approval_detail(&self, _args: &serde_json::Value) -> Option<String> {
+                Some("3 batches; worst case 42030 s".into())
+            }
+        }
+        let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
+        let seen = tokio::spawn(async move {
+            let req = approval_rx.recv().await.expect("a request");
+            let _ = req.tx.send(false);
+            req.detail
+        });
+        let (provider, _count) = SingleToolCallProvider::new("detailed_op");
+        let mut agent = Agent::new(Arc::new(provider));
+        agent.register_tool(Box::new(DetailTool));
+        agent.set_approval_channel(approval_tx);
+        let (chunk_tx, _rx) = mpsc::channel::<StreamPiece>(8);
+        agent
+            .query_streaming("go", chunk_tx, AgentRunConfig::default())
+            .await
+            .expect("runs");
+        assert_eq!(
+            seen.await.expect("joins").as_deref(),
+            Some("3 batches; worst case 42030 s")
         );
     }
 

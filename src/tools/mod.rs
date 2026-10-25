@@ -11,6 +11,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 pub mod bash;
+pub mod code_review;
 pub mod consult;
 pub mod decide;
 pub mod grep;
@@ -102,6 +103,19 @@ pub trait Tool: Send + Sync {
     /// `None` (default) for fast or silent tools;  `Some(notice_text)` for tools
     /// that want to announce their auto-launch (e.g. a 3-LLM consensus call).
     fn approval_notice(&self) -> Option<String> {
+        None
+    }
+
+    /// Optional line shown under the approval prompt, saying what the call would cost before
+    /// the user answers. `None` (default) shows the prompt alone.
+    ///
+    /// # Parameters
+    /// * `args` - The arguments the call would run with.
+    ///
+    /// # Returns
+    /// The detail, or `None`.
+    #[allow(dead_code)] // Red stub
+    fn approval_detail(&self, _args: &Value) -> Option<String> {
         None
     }
 }

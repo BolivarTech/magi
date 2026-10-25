@@ -230,12 +230,19 @@ mod tests {
         "consult",
         "project_knowledge",
         "decide",
+        "code-review",
     ];
 
     /// The per-tier approval matrix is exhaustive over the known tools and fail-closed over any
     /// unknown name, in ALL tiers (REQ-H06/H07/H09; MS2.md Task 1 Step 1 verbatim).
     fn policy(tier: Tier) -> Policy {
         Policy::new(tier, NORMAL_MAX_TOOL_CALLS, None)
+    }
+
+    #[test]
+    fn code_review_is_denied_in_the_default_tier_and_allowed_with_auto() {
+        assert!(READ_WRITE_TOOLS.contains(&"code-review"));
+        assert!(!READ_ONLY_TOOLS.contains(&"code-review"));
     }
 
     #[test]

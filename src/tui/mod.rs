@@ -1351,6 +1351,56 @@ pub(crate) enum TuiDecideParseError {
     UnsupportedFlag(String),
 }
 
+/// A `/code-review` command, parsed with the subcommand's own arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TuiCodeReviewCommand {
+    /// What to review.
+    pub input: magi_rs::review::input::ReviewInput,
+    /// The review's total, when `--timeout` was given.
+    pub timeout: Option<u64>,
+}
+
+impl Default for TuiCodeReviewCommand {
+    /// A bare `/code-review`: the `HEAD` commit, no total.
+    fn default() -> Self {
+        Self {
+            input: magi_rs::review::input::ReviewInput::Commit(None),
+            timeout: None,
+        }
+    }
+}
+
+/// Why a line did not parse as a `/code-review` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TuiCodeReviewParseError {
+    /// The line is not a `/code-review` command at all.
+    NotACodeReviewCommand,
+    /// The arguments did not parse; the message says why.
+    #[allow(dead_code)] // Red stub
+    Invalid(String),
+}
+
+/// Parses a trimmed input line as a `/code-review` command.
+///
+/// # Errors
+/// [`TuiCodeReviewParseError`].
+#[allow(dead_code)] // Red stub
+pub(crate) fn parse_tui_code_review(
+    _trimmed: &str,
+) -> Result<TuiCodeReviewCommand, TuiCodeReviewParseError> {
+    Err(TuiCodeReviewParseError::NotACodeReviewCommand)
+}
+
+/// The confirmation `/code-review` shows before it spends anything.
+#[allow(dead_code)] // Red stub
+pub(crate) fn tui_code_review_confirmation(
+    _batches: usize,
+    _max_rotations: u32,
+    _agent_timeout_secs: u64,
+) -> String {
+    String::new()
+}
+
 /// Flag naming the request file of `/decide`.
 const DECIDE_FLAG_REQUEST: &str = "-i";
 /// Flag naming the questions file of `/decide`.
@@ -2008,6 +2058,15 @@ pub struct App {
     /// sees one delta cannot recognise a value that spans three. Cleared by
     /// [`App::finalize_stream`], so the buffer is one turn wide.
     pub stream_raw: String,
+    /// The review runner of this session, if one could be built.
+    #[allow(dead_code)] // Red stub
+    pub code_review_runner: Option<std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
+    /// A `/code-review` waiting for `y` (run) or `c`/`Esc` (cancel).
+    #[allow(dead_code)] // Red stub
+    pub pending_code_review: Option<(
+        TuiCodeReviewCommand,
+        std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+    )>,
 }
 
 impl App {
@@ -2040,8 +2099,25 @@ impl App {
             spinner_frame: 0,
             status_row: StatusRow::new(),
             stream_raw: String::new(),
+            code_review_runner: None,
+            pending_code_review: None,
         }
     }
+
+    /// Shows the `/code-review` confirmation and keeps the command pending.
+    #[allow(dead_code)] // Red stub
+    pub(crate) fn begin_code_review_confirmation(
+        &mut self,
+        _cmd: TuiCodeReviewCommand,
+        _runner: std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+        _batches: usize,
+        _worst_case_secs: u64,
+    ) {
+    }
+
+    /// Answers the pending `/code-review` confirmation.
+    #[allow(dead_code)] // Red stub
+    pub(crate) async fn answer_code_review_confirmation(&mut self, _approved: bool) {}
 
     /// Toggles between the compact thinking indicator (mode B, default) and the
     /// verbose reasoning stream (mode A, for debugging). Returns the new value.
@@ -6221,6 +6297,7 @@ mod tests {
                 tool_name: format!("mcp__{DELTA_SECRET}__run"),
                 input: serde_json::Value::Null,
                 tx: decided,
+                detail: None,
             })
             .expect("the fixture's channel has room");
 
@@ -8725,6 +8802,161 @@ end"
         assert!(
             production.contains("\"  /decide "),
             "the /help arm must document /decide"
+        );
+    }
+
+    impl App {
+        fn new_for_test() -> Self {
+            let (event_tx, _e) = mpsc::channel(8);
+            let (_r, response_rx) = mpsc::channel(8);
+            let (_a, approval_rx) = mpsc::channel(8);
+            App::new(event_tx, response_rx, approval_rx)
+        }
+        // [CP2 MS2 S2b loop 8] keeps the approval sender, so the drain path can be exercised.
+        fn new_for_test_with_approvals() -> (Self, mpsc::Sender<crate::agent::ApprovalRequest>) {
+            let (event_tx, _e) = mpsc::channel(8);
+            let (_r, response_rx) = mpsc::channel(8);
+            let (approval_tx, approval_rx) = mpsc::channel(8);
+            (App::new(event_tx, response_rx, approval_rx), approval_tx)
+        }
+        fn last_message_text(&self) -> String {
+            self.messages.last().cloned().unwrap_or_default()
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeTuiRunner(std::sync::atomic::AtomicUsize);
+    impl FakeTuiRunner {
+        fn calls(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::tools::code_review::CodeReviewRunner for FakeTuiRunner {
+        fn plan(
+            &self,
+            _input: &magi_rs::review::input::ReviewInput,
+        ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
+        {
+            Ok(crate::tools::code_review::ReviewPlan {
+                batches: 3,
+                worst_case_secs: 42_030,
+            })
+        }
+        async fn run(
+            &self,
+            _i: magi_rs::review::input::ReviewInput,
+            _t: Option<std::time::Duration>,
+            _c: &tokio_util::sync::CancellationToken,
+        ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
+        {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::tools::code_review::Rendered {
+                text: String::new(),
+                json: serde_json::Value::Null,
+                consult: serde_json::Value::Null,
+                failure: None,
+            })
+        }
+    }
+
+    #[test]
+    fn parse_tui_code_review_reads_the_same_flags_as_the_subcommand() {
+        assert!(matches!(
+            parse_tui_code_review("/code-review"),
+            Ok(TuiCodeReviewCommand { .. })
+        ));
+        // [CP2 MS2 S2b loop 8] `code-review` is clap's program name: a bare command is HEAD, not a path of that name.
+        let bare = parse_tui_code_review("/code-review").expect("parses");
+        assert_eq!(bare, TuiCodeReviewCommand::default());
+        assert_ne!(
+            parse_tui_code_review("/code-review src").expect("parses"),
+            bare
+        );
+        // [RED-DRYRUN 2026-10-17, D28] `matches!(.., Err(_))` is clippy::redundant_pattern_matching.
+        assert!(parse_tui_code_review("/code-review src --uncommitted").is_err());
+    }
+
+    #[tokio::test]
+    async fn without_y_the_tui_never_starts_the_review() {
+        // The pending confirmation is answered with 'c': the runner is never called and the transcript says so.
+        let mut app = App::new_for_test();
+        let runner = Arc::new(FakeTuiRunner::default());
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            runner.clone(),
+            3,
+            42_030,
+        );
+        app.answer_code_review_confirmation(false).await;
+        assert_eq!(runner.calls(), 0);
+        assert!(
+            app.last_message_text().contains("cancelled"),
+            "{}",
+            app.last_message_text()
+        );
+    }
+
+    #[tokio::test]
+    async fn with_y_the_tui_runs_the_review_once() {
+        // [CP2 MS2 S2b loop 6] the positive path: 'y' calls the runner exactly once; a second 'y' has nothing pending.
+        let mut app = App::new_for_test();
+        let runner = Arc::new(FakeTuiRunner::default());
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            runner.clone(),
+            3,
+            42_030,
+        );
+        app.answer_code_review_confirmation(true).await;
+        assert_eq!(runner.calls(), 1);
+        app.answer_code_review_confirmation(true).await;
+        assert_eq!(runner.calls(), 1);
+    }
+
+    #[test]
+    fn the_tui_command_parses_every_review_flag_of_the_subcommand() {
+        // [CP2 MS2 S2b loop 6] RV18 «los mismos argumentos»: the TUI parses through the subcommand's own clap args.
+        let all = "/code-review src -w . --timeout 600 -o r.json --output-format json --no-clobber --log-level debug \
+                   --log-dir logs --auto --no-memory --structured-verdicts";
+        assert!(
+            parse_tui_code_review(all).is_ok(),
+            "{:?}",
+            parse_tui_code_review(all).err()
+        );
+        assert!(parse_tui_code_review("/code-review --full-auto").is_ok());
+        assert!(parse_tui_code_review("/code-review --allow-system-override").is_err());
+    }
+
+    #[test]
+    fn the_tui_confirmation_shows_the_worst_case_labelled_as_a_maximum() {
+        let text = tui_code_review_confirmation(3, 2, 2335);
+        assert!(text.contains("3 batches"), "{text}");
+        assert!(text.contains("42030"), "{text}");
+        assert!(text.contains("maximum"), "{text}");
+        assert!(text.contains("not the expected duration"), "{text}"); // [CP2 MS2 S2 loop 4] RV18: an upper bound, said as such
+    }
+
+    #[test]
+    fn the_approval_prompt_shows_the_tool_detail() {
+        // [CP2 MS2 S2b loop 8] C-8/RV17: the batches and the worst case reach the transcript before 'y'.
+        let (mut app, approvals) = App::new_for_test_with_approvals();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        approvals
+            .try_send(crate::agent::ApprovalRequest {
+                tool_name: "code-review".into(),
+                input: serde_json::json!({"path": "src"}),
+                tx,
+                detail: Some("3 batches; worst case 42030 s".into()),
+            })
+            .expect("queued");
+        drain_approval_requests(&mut app);
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.contains("3 batches; worst case 42030 s")),
+            "{:?}",
+            app.messages
         );
     }
 }
