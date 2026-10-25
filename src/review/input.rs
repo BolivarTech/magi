@@ -1467,6 +1467,29 @@ mod tests {
     }
 
     #[test]
+    fn a_section_whose_path_is_not_utf8_is_listed_in_every_shape_git_writes() {
+        // [MAGI §6 MS2 A loop 1, bytes as git 2.47 writes them with core.quotePath=false] a name byte that is not UTF-8
+        // is raw, never an octal escape, in a plain, a quoted (it holds a tab) and a header-only binary section.
+        let mut diff = b"diff --git a/caf\xe9.rs b/caf\xe9.rs\n--- a/caf\xe9.rs\n+++ b/caf\xe9.rs\n@@ -1 +1 @@\n-x\n+y\n".to_vec();
+        diff.extend_from_slice(
+            b"diff --git \"a/t\\tb\xe9.rs\" \"b/t\\tb\xe9.rs\"\n--- \"a/t\\tb\xe9.rs\"\n+++ \"b/t\\tb\xe9.rs\"\n@@ -1 +1 @@\n-x\n+y\n",
+        );
+        diff.extend_from_slice(
+            b"diff --git a/bin\xe9.so b/bin\xe9.so\nindex 1..2 100644\nBinary files a/bin\xe9.so and b/bin\xe9.so differ\n",
+        );
+        let (files, not_utf8) = split_diff(&diff);
+        assert!(files.is_empty());
+        assert_eq!(
+            not_utf8,
+            vec![
+                "caf\u{fffd}.rs".to_string(),
+                "t\tb\u{fffd}.rs".to_string(),
+                "bin\u{fffd}.so".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn a_header_only_section_takes_its_path_from_the_symmetric_split() {
         // [CP2 MS2 S1a loop 10, headers as git 2.56 writes them] binary sections carry only `diff --git`; the halves are equal.
         let diff = concat!(

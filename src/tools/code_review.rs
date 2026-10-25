@@ -1683,6 +1683,35 @@ mod tests {
         assert_explicit_is_refused(&ws, "dangling", "missing");
     }
 
+    /// Every surface (`magi code-review`, `/code-review`, the tool) plans through the runner, so a
+    /// link to a directory of the workspace named as the input is reviewed as that directory.
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_junction_named_as_the_input_is_planned_as_that_directory() {
+        let (_tmp, ws) = guarded_workspace();
+        junction(&ws.join("link"), &ws.join("src"));
+        let runner = production_runner(&ws, Arc::new(CountingConsult::default()));
+        let plan = runner
+            .plan(&ReviewInput::File("link".into()))
+            .expect("plans");
+        assert_eq!(plan.input, ReviewInput::Directory("link".into()));
+        assert_eq!(plan.batches, 1);
+    }
+
+    /// The Unix twin of the case above, with a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_symlink_named_as_the_input_is_planned_as_that_directory() {
+        let (_tmp, ws) = guarded_workspace();
+        std::os::unix::fs::symlink("src", ws.join("link")).expect("dir link");
+        let runner = production_runner(&ws, Arc::new(CountingConsult::default()));
+        let plan = runner
+            .plan(&ReviewInput::File("link".into()))
+            .expect("plans");
+        assert_eq!(plan.input, ReviewInput::Directory("link".into()));
+        assert_eq!(plan.batches, 1);
+    }
+
     /// The Windows twin of the explicit case: a junction to a directory, read by name.
     #[cfg(windows)]
     #[test]
