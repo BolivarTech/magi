@@ -441,8 +441,10 @@ pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBu
 ///
 /// Reads the output of `git config --null --show-scope --get-regexp ^filter\.`: records of
 /// `<scope> NUL <key>` followed by `LF <value> NUL`, or by `NUL` alone for a key without value.
-/// The key ends at the first `LF` (a value may hold more). A name with a local entry is
-/// neutralized whole, including what the operator's own config defines under it: the safe
+/// The key ends at the first `LF` (a value may hold more). This shape is git's output, not a
+/// documented format: `--show-scope` needs git 2.26 or later, the parser was measured against
+/// git 2.56 (the tests pin each shape), and a record it cannot parse fails closed. A name with a
+/// local entry is neutralized whole, including what the operator's own config defines under it: the safe
 /// direction. The operator's filters (`global`, `system`) keep running. O(n) in the input.
 ///
 /// # Errors
