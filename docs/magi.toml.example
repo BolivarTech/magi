@@ -145,7 +145,9 @@ model = "nimble"
 min_confidence = 0.80
 
 # --- Private alternative: the local `clef` model (about 18 GB) at the head, same quality,
-# --- nothing leaves the machine. `ollama pull clef`, then replace the model line above with:
+# --- and the gate's excerpts stay on this machine (the trio still gets each batch at its own
+# --- endpoint: keeping all reviewed code local also needs a local [magi] trio).
+# --- `ollama pull clef`, then replace the model line above with:
 # model = "clef"
 #
 # --- Optional: OpenRouter (hosted), suited to high demand. Needs CODE_REVIEW_API_KEY.

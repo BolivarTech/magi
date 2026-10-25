@@ -1100,7 +1100,11 @@ fn render_code_review_section(out: &mut String) {
     out.push_str(concat!(
         "# --- Private alternative: the local `clef` model (about 18 GB) at the head, same quality,
 ",
-        "# --- nothing leaves the machine. Replace the model line above with:
+        "# --- and the gate's excerpts stay on this machine (the trio still gets each batch at its own
+",
+        "# --- endpoint: keeping all reviewed code local also needs a local [magi] trio).
+",
+        "# --- Replace the model line above with:
 ",
         "# model = \"clef\"
 ",
