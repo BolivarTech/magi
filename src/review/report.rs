@@ -497,6 +497,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_paid_batch_reports_redact_a_credential_in_a_finding_title() {
+        // magi-core's report prints titles, never details: a credential in a detail cannot show
+        // that this backstop redacts; one in a title can.
+        let f = serde_json::json!([{"severity":"warning","title":"see https://user:hunter2@example.invalid/x","detail":"d","file":"a.rs","line":1}]);
+        let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        let text = render_batch_reports(&[report]);
+        assert!(text.contains("## [batch 0]"), "{text}");
+        assert!(
+            text.contains("example.invalid"),
+            "the title is rendered: {text}"
+        );
+        assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    #[tokio::test]
     async fn the_text_report_redacts_model_text_too() {
         // [CP2 MS2 S2 loop 2] the subcommand's stdout is render_text: a credential echoed by a mage never reaches it.
         let f = serde_json::json!([{"severity":"warning","title":"t","detail":"see https://user:hunter2@example.invalid/x","file":"a.rs","line":1}]);
