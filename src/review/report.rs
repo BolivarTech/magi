@@ -9,9 +9,10 @@
 //! before it leaves the process, so the redaction here is a backstop over the one consolidation
 //! already applied.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use magi_core::consensus::DedupFinding;
 use magi_core::reporting::{MagiReport, ReportFormatter};
 use serde_json::{json, Map, Value};
 
@@ -23,6 +24,8 @@ use crate::redact::redact_foreign_text;
 
 /// The key under which a finding of the JSON form carries its gate verdict.
 const GATE_KEY: &str = "gate";
+/// How the titles of a merged finding are joined on one line.
+const TITLE_JOINER: &str = " / ";
 
 /// What every stage of a review declared.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -85,11 +88,12 @@ pub struct BatchMetrics {
 
 /// The text report of a consolidated review.
 ///
-/// magi-core's report over the consolidated outputs, then the review's own sections: batches
-/// and their failures, the gate's counts (and, once, what stopped it), every consolidated
-/// finding with its gate verdict, the discarded and symbol-unverified findings, the skipped
-/// files and the other declarations of the summary. The whole text is redacted as it is
-/// returned.
+/// magi-core's report over the consolidated outputs, its `Key Findings` limited to the findings
+/// the gate did not filter and at their severity after the agreement weight; then the review's
+/// own sections: batches and their failures, the gate's counts (and, once, what stopped it),
+/// the findings of the main list with their gate verdict, the filtered ones listed apart, the
+/// discarded and symbol-unverified findings, the skipped files and the other declarations of
+/// the summary. The whole text is redacted as it is returned.
 ///
 /// # Arguments
 ///
@@ -100,17 +104,42 @@ pub struct BatchMetrics {
 ///
 /// The report. O(findings + summary).
 pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
-    let mut out = ReportFormatter::new().format_report(&c.agents, &c.consensus);
+    let mut consensus = c.consensus.clone();
+    consensus.findings = s
+        .findings
+        .iter()
+        .filter_map(|(f, _)| key_finding(f))
+        .collect();
+    let unshown = s.findings.len().saturating_sub(consensus.findings.len());
+    let mut out = ReportFormatter::new().format_report(&c.agents, &consensus);
     if !out.ends_with('\n') {
         out.push('\n');
     }
     // Writing into a `String` cannot fail.
-    let _ = write_review_section(&mut out, c, s);
+    let _ = write_review_section(&mut out, s, unshown);
     redacted(&out)
 }
 
+/// The finding as magi-core's `Key Findings` lists it: the review's severity (after the
+/// agreement weight), its titles, its first detail and its sources.
+///
+/// Built through `Deserialize`, the only constructor magi-core offers; `None` when that shape
+/// stops deserializing, which [`render_text`] declares instead of dropping the finding silently.
+fn key_finding(f: &ConsolidatedFinding) -> Option<DedupFinding> {
+    serde_json::from_value(json!({
+        "severity": f.severity,
+        "title": f.titles.join(TITLE_JOINER),
+        "detail": f.details.first().cloned().unwrap_or_default(),
+        "sources": f.sources,
+        "file": f.file,
+        "line": f.line,
+        "category": f.categories.first().cloned().unwrap_or_default(),
+    }))
+    .ok()
+}
+
 /// Writes the review's own sections of [`render_text`].
-fn write_review_section(out: &mut String, c: &Consolidated, s: &ReviewSummary) -> std::fmt::Result {
+fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> std::fmt::Result {
     writeln!(out, "\n## Review")?;
     writeln!(
         out,
@@ -163,34 +192,20 @@ fn write_review_section(out: &mut String, c: &Consolidated, s: &ReviewSummary) -
             s.ungrouped_unlocated
         )?;
     }
-    let verdicts: HashMap<FindingKey, &GateVerdict> = s
-        .findings
-        .iter()
-        .chain(&s.filtered)
-        .map(|(f, v)| (key_of(f), v))
-        .collect();
-    writeln!(out, "\n## Findings")?;
-    for f in &c.findings {
-        write!(
+    if unshown > 0 {
+        writeln!(
             out,
-            "- [{}] {} {}",
-            name(&f.severity),
-            location(f.file.as_deref(), f.line),
-            f.titles.join(" / ")
+            "{unshown} findings could not be listed under Key Findings; they are listed below"
         )?;
-        if !f.marks.is_empty() {
-            let marks: Vec<String> = f.marks.iter().map(name).collect();
-            write!(out, " ({})", marks.join(", "))?;
-        }
-        if let Some(v) = verdicts.get(&key_of(f)) {
-            write!(out, "; gate: {}", name(&v.state))?;
-            if let Some(cause) = v.cause {
-                write!(out, " ({cause})")?;
-            }
-        }
-        writeln!(out)?;
-        for detail in &f.details {
-            writeln!(out, "  {detail}")?;
+    }
+    writeln!(out, "\n## Findings")?;
+    for (f, v) in &s.findings {
+        write_finding(out, f, v)?;
+    }
+    if !s.filtered.is_empty() {
+        writeln!(out, "\n## Filtered by the gate")?;
+        for (f, v) in &s.filtered {
+            write_finding(out, f, v)?;
         }
     }
     write_discarded(out, "Discarded", &s.discarded)?;
@@ -210,6 +225,30 @@ fn write_review_section(out: &mut String, c: &Consolidated, s: &ReviewSummary) -
         for path in &s.no_extractor {
             writeln!(out, "- {path}")?;
         }
+    }
+    Ok(())
+}
+
+/// Writes one finding with its gate verdict: severity, location, titles, marks, then its details.
+fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> std::fmt::Result {
+    write!(
+        out,
+        "- [{}] {} {}",
+        name(&f.severity),
+        location(f.file.as_deref(), f.line),
+        f.titles.join(TITLE_JOINER)
+    )?;
+    if !f.marks.is_empty() {
+        let marks: Vec<String> = f.marks.iter().map(name).collect();
+        write!(out, " ({})", marks.join(", "))?;
+    }
+    write!(out, "; gate: {}", name(&v.state))?;
+    if let Some(cause) = v.cause {
+        write!(out, " ({cause})")?;
+    }
+    writeln!(out)?;
+    for detail in &f.details {
+        writeln!(out, "  {detail}")?;
     }
     Ok(())
 }
@@ -296,14 +335,6 @@ pub fn render_batch_reports(reports: &[MagiReport]) -> String {
         }
     }
     redacted(&out)
-}
-
-/// `(file, line, titles)`: how a finding of the summary is matched with the consolidated one.
-type FindingKey = (Option<String>, Option<u32>, Vec<String>);
-
-/// The key of a finding.
-fn key_of(f: &ConsolidatedFinding) -> FindingKey {
-    (f.file.clone(), f.line, f.titles.clone())
 }
 
 /// The findings with their verdict under [`GATE_KEY`].
