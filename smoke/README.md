@@ -307,7 +307,7 @@ prompt to a closed port. Neither has an expected red.
 
 ### The envelope `system` field scenarios (v0.25.0)
 
-S44 to S46 add ten assertions (4 + 3 + 3). The harness now promises 46 scenarios and 137
+S44 to S46 add ten assertions (4 + 3 + 3), taking the harness to 46 scenarios and 137
 assertions.
 
 | Id | Invariant | Without its environment |
@@ -322,6 +322,37 @@ harness timeout. Its wall clock has not been measured yet: `TRIO_RUNS_MEASURED_S
 R8's 67 s provisionally. It is measured twice, once with the cheap profile on the first
 real-backend run and once with the product defaults on the run that certifies, and both
 figures are written here when they exist.
+
+### The code-review scenarios (v0.25.0)
+
+S47 to S50 add twelve assertions (6 + 2 + 2 + 2). The harness now promises 50 scenarios and 149
+assertions.
+
+| Id | Invariant | Without its environment |
+|---|---|---|
+| S47 | `code-review gen` over a generated tree that plans at least three batches exits 0, prints a JSON document with `code_review.batches_planned` of at least 3 and one `consult.consensus`, keeps every located main finding inside the generated files, and gives every discarded finding a cause | `CANNOT_TEST` with no reachable backend. Fewer than three batches is `CANNOT_TEST` when every model of the pool measured a window (the input is sized for the 32 768-token default of an unmeasured model), else `FAIL`. No located finding, or nothing discarded, is `CANNOT_TEST`: a real trio cannot be forced to invent a location. A missing `findings` or `discarded` key is `FAIL`, never an empty list that passes |
+| S48 | a path outside the workspace exits 2 and `stderr` says so | none: the refusal comes before any model is reached |
+| S49 | a directory holding only a binary and a file with a key-shaped toy secret exits 2 and `stderr` says there is nothing to review | none |
+| S50 | `--timeout 30 --log-level error` over the S47 tree exits 2 and `stderr` names the 15 s floor and a minimum `--timeout`. The numbers are the product's formula and are not compared | none |
+
+**How the input exists.** A review reads files from disk, so each run declares the files it needs
+(`RunDefinition.files`) and the executor writes them under the environment root before the run,
+leaving a file alone when it already holds the same bytes. R12 and R15 share one deterministic
+tree (`gen/a.rs`, `gen/b.rs`, `gen/c.rs`, about 288 kB). `review_input_files()` raises a harness
+error if that tree is smaller than three batches of 60 % of the 32 768-token default window at
+four bytes per token, so a shortfall is reported as the harness's, not as the product's. R14
+writes `skipped/pixel.png` (NUL bytes) and `skipped/leak.txt` (a toy `sk-ant-` key).
+
+**Cost.** R13, R14 and R15 never reach a model. R12 is a review of at least three batches by the
+real trio plus the gate. Its harness timeout is 2 400 s and `TRIO_RUNS_MEASURED_S["R12"]` carries
+four of R4's 283 s provisionally, plus the gate. It has not been measured yet; the figure is
+written here when it is.
+
+**Known limitation.** The files land under the environment root, whose own `.gitignore` is `*`.
+The product leaves out what `.gitignore` excludes when it reviews a directory inside a git
+repository, which this tree is. Until the input is placed where the product can see it, S47,
+S49 and S50 can fail for that reason and not for a product defect; the first real-backend run
+settles it.
 
 ## Out of scope
 
@@ -369,6 +400,10 @@ assumes is the exact failure this harness exists to avoid.
 | S44 | an envelope `system` field that is ignored is announced on `stderr` and in `applied_caps` |
 | S45 | `consult --allow-system-override` reports the adjustment as installed |
 | S46 | a `system` over `max_system_bytes` is refused with exit 2 before any model runs |
+| S47 | a review that plans three or more batches yields one report with located findings and caused discards |
+| S48 | a path outside the workspace is refused with exit 2 |
+| S49 | a directory of only a binary and a secret has nothing to review |
+| S50 | a `--timeout` too short for the batches is refused naming the floor and a minimum |
 
 The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 
