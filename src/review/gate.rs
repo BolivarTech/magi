@@ -66,7 +66,10 @@ const CAUSE_CHAIN_EXHAUSTED: &str = "chain exhausted";
 /// Cause of a critical finding judged a false positive: it stays in the main list.
 const CAUSE_CRITICAL_NEVER_FILTERED: &str = "critical never filtered";
 
-/// The most (title, detail) pairs of one finding put to the chain.
+/// The most distinct (title, detail) pairs of one finding put to the chain: one per mage of the
+/// trio. Each pair is a walk of the chain, so a finding merged from many rewordings (several
+/// batches, several mages) would otherwise spend the review clock on itself; pairs past the cap
+/// are not asked, and the finding is `filtered` only when every pair asked is.
 pub const MAX_GATE_QUESTIONS_PER_FINDING: usize = 3;
 
 /// What the gate made of a finding.
@@ -270,6 +273,8 @@ struct Outcome {
     confidence: Option<f64>,
     /// The provider's HTTP status, for the WARN entry of a 413/422.
     status: Option<u16>,
+    /// Whether `model`'s answer reached its threshold and decided the state.
+    decided: bool,
 }
 
 impl Outcome {
@@ -282,6 +287,7 @@ impl Outcome {
             lean: None,
             confidence: None,
             status: None,
+            decided: false,
         }
     }
 
@@ -300,6 +306,7 @@ impl Outcome {
             lean: Some(lean.to_string()),
             confidence: Some(confidence),
             status: None,
+            decided: false,
         }
     }
 }
@@ -333,6 +340,7 @@ pub struct Gate<'a> {
     rejected: BTreeSet<String>,
     stopped: Option<&'static str>,
     per_model: BTreeMap<String, usize>,
+    questions: usize,
 }
 
 impl<'a> Gate<'a> {
@@ -360,6 +368,7 @@ impl<'a> Gate<'a> {
             rejected: BTreeSet::new(),
             stopped: None,
             per_model: BTreeMap::new(),
+            questions: 0,
         }
     }
 
@@ -381,11 +390,11 @@ impl<'a> Gate<'a> {
     /// In order: no line or no code (`no location`); a cause that already stopped the gate; a
     /// spent review clock (`timeout`); a state over `max_state_bytes` (`state too large`, never
     /// truncated) or carrying a secret (`secret`, never sent). Then each distinct (title,
-    /// detail) pair is asked once, walking the chain: a confident `false_positive` filters it
+    /// detail) pair, up to [`MAX_GATE_QUESTIONS_PER_FINDING`], is asked once, walking the chain: a confident `false_positive` filters it
     /// (a `critical` stays `low_confidence` instead), a confident `real_defect` keeps it, an
     /// answer under the threshold passes to the next model, a 400 rotates and is remembered, a
     /// 413/422 ends the chain, a 401/403 stops the gate, and a call cut by the review clock stops
-    /// it as `timeout`. A merged finding is `filtered` only when every pair is. Every
+    /// it as `timeout`. A merged finding is `filtered` only when every pair asked is. Every
     /// `unfiltered` writes one WARN entry. At most one call per model per pair.
     ///
     /// # Arguments
@@ -424,27 +433,26 @@ impl<'a> Gate<'a> {
         }
     }
 
-    /// Answers counted per deciding model.
+    /// Findings counted per deciding model.
     ///
-    /// One answer counts per question asked, and only the answer that decided that question's
-    /// state (`kept`, `filtered` or `low_confidence` for a critical). An answer under its
-    /// threshold that passed the question to the next model does not count, nor does a chain
-    /// that ended with every model under its threshold. A merged finding asks one question per
-    /// distinct (title, detail) pair until one is not `filtered`, so it adds one count for each
-    /// pair asked: two `filtered` pairs count twice, and a first pair `kept` counts once.
+    /// A finding counts once, for the model whose answer decided its final state (`kept`,
+    /// `filtered`, or `low_confidence` for a critical), however many of its (title, detail)
+    /// pairs were asked. A finding whose chain ended with every model under its threshold, or
+    /// that passed `unfiltered`, counts for no model. [`Self::questions`] counts the questions.
     ///
     /// # Returns
-    /// Model name to the number of answers that decided a state.
+    /// Model name to the number of findings whose state its answer decided.
     pub fn per_model(&self) -> &BTreeMap<String, usize> {
         &self.per_model
     }
 
-    /// Questions asked in this review: one per (title, detail) pair put to the chain.
+    /// Questions asked in this review: one per (title, detail) pair put to the chain, at most
+    /// [`MAX_GATE_QUESTIONS_PER_FINDING`] per finding.
     ///
     /// # Returns
     /// The count.
     pub fn questions(&self) -> usize {
-        0
+        self.questions
     }
 
     /// The cause that stopped the gate for the rest of the review, if any.
@@ -480,7 +488,10 @@ impl<'a> Gate<'a> {
         if deadline.is_some_and(|d| d <= Instant::now()) {
             return self.stop(CAUSE_TIMEOUT);
         }
-        let states: Vec<Value> = (0..constituents(finding).len())
+        let asked = constituents(finding)
+            .len()
+            .min(MAX_GATE_QUESTIONS_PER_FINDING);
+        let states: Vec<Value> = (0..asked)
             .map(|i| gate_state_of(finding, i, code))
             .collect();
         if states
@@ -495,9 +506,15 @@ impl<'a> Gate<'a> {
         let critical = finding.reported_severity == Severity::Critical;
         let mut outcome = Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
         for state in states {
+            self.questions += 1;
             outcome = self.ask(state, critical, deadline, skipped).await;
             if outcome.state != GateState::Filtered {
                 break;
+            }
+        }
+        if outcome.decided {
+            if let Some(model) = &outcome.model {
+                *self.per_model.entry(model.clone()).or_default() += 1;
             }
         }
         outcome
@@ -556,7 +573,6 @@ impl<'a> Gate<'a> {
                         ));
                         continue;
                     }
-                    *self.per_model.entry(spec.model.clone()).or_default() += 1;
                     let (state, cause) = match (choice, critical) {
                         (FALSE_POSITIVE, true) => (
                             GateState::LowConfidence,
@@ -565,7 +581,10 @@ impl<'a> Gate<'a> {
                         (FALSE_POSITIVE, false) => (GateState::Filtered, None),
                         _ => (GateState::Kept, None),
                     };
-                    return Outcome::answered(state, cause, &spec.model, choice, confidence);
+                    return Outcome {
+                        decided: true,
+                        ..Outcome::answered(state, cause, &spec.model, choice, confidence)
+                    };
                 }
                 Err(DecisionError::Rejected { status, .. }) if status == BAD_REQUEST => {
                     // A 400 is this model's refusal, classified by status and never by its text:
