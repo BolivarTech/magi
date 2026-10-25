@@ -1294,4 +1294,46 @@ mod tests {
             assert!(ignored.contains(p), "{p}: {ignored:?}");
         }
     }
+
+    #[test]
+    fn file_and_directory_inputs_refuse_a_work_tree_moved_out_of_the_workspace() {
+        // [MAGI §6 MS2 A loop 2] every working-tree read that asks git needs the workspace inside
+        // git's work tree; with `core.worktree` elsewhere, git's answers describe another tree.
+        let d = repo();
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let target = elsewhere.path().to_str().expect("utf-8 tempdir");
+        git(d.path(), &["config", "core.worktree", target]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        for input in [
+            ReviewInput::File("a.rs".into()),
+            ReviewInput::Directory(".".into()),
+        ] {
+            let pathspec = match &input {
+                ReviewInput::File(_) => "a.rs",
+                _ => ".",
+            };
+            assert!(
+                matches!(
+                    magi_rs::review::filter::ignored_paths(&input, pathspec, d.path(), &g),
+                    Err(ReviewError::Git(_))
+                ),
+                "{input:?}: the ignore query ran against another tree"
+            );
+        }
+        assert!(matches!(
+            magi_rs::review::input::resolve_input(
+                &ReviewInput::Directory(".".into()),
+                d.path(),
+                &g,
+                &allow
+            ),
+            Err(ReviewError::Git(_))
+        ));
+    }
 }
