@@ -66,6 +66,9 @@ const CAUSE_CHAIN_EXHAUSTED: &str = "chain exhausted";
 /// Cause of a critical finding judged a false positive: it stays in the main list.
 const CAUSE_CRITICAL_NEVER_FILTERED: &str = "critical never filtered";
 
+/// The most (title, detail) pairs of one finding put to the chain.
+pub const MAX_GATE_QUESTIONS_PER_FINDING: usize = 3;
+
 /// What the gate made of a finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -436,6 +439,14 @@ impl<'a> Gate<'a> {
         &self.per_model
     }
 
+    /// Questions asked in this review: one per (title, detail) pair put to the chain.
+    ///
+    /// # Returns
+    /// The count.
+    pub fn questions(&self) -> usize {
+        0
+    }
+
     /// The cause that stopped the gate for the rest of the review, if any.
     ///
     /// # Returns
@@ -694,6 +705,44 @@ mod tests {
             g2.judge(&f, Some("x\n"), None).await.state,
             GateState::Filtered
         );
+    }
+
+    #[tokio::test]
+    async fn a_merged_finding_asks_at_most_the_question_cap() {
+        // Each distinct (title, detail) pair is a walk of the chain; a finding merged from many
+        // rewordings must not spend the review clock on all of them.
+        let mut f = finding(Severity::Warning, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING + 2;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(MAX_GATE_QUESTIONS_PER_FINDING)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        assert_eq!(
+            g.judge(&f, Some("x\n"), None).await.state,
+            GateState::Filtered
+        );
+        assert_eq!(g.questions(), MAX_GATE_QUESTIONS_PER_FINDING);
+    }
+
+    #[tokio::test]
+    async fn per_model_counts_findings_not_questions() {
+        let mut f = finding(Severity::Warning, Some(1));
+        f.titles = vec!["a".into(), "b".into()];
+        f.details = vec!["da".into(), "db".into()];
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(2)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        assert_eq!(
+            g.judge(&f, Some("x\n"), None).await.state,
+            GateState::Filtered
+        );
+        assert_eq!(g.per_model().get("clef:cloud"), Some(&1));
+        assert_eq!(g.questions(), 2);
     }
 
     #[test]
