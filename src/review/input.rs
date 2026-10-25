@@ -1295,15 +1295,23 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_outside_a_repo_is_walked_in_order() {
+    fn a_directory_outside_a_repo_is_listed_by_git_without_a_repository() {
+        // [MAGI §6 MS2 A loop 1] outside a repository git still lists what `.gitignore` does not exclude.
         let d = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(d.path().join("src/sub")).expect("mkdir");
         std::fs::write(d.path().join("src/b.rs"), "b\n").expect("write");
         std::fs::write(d.path().join("src/sub/a.rs"), "a\n").expect("write");
-        let git = FakeGit::from(&[(
-            "rev-parse --is-inside-work-tree",
-            Err("fatal: not a git repository"),
-        )]);
+        std::fs::write(d.path().join("src/c.env"), "c\n").expect("write");
+        let git = FakeGit::from(&[
+            (
+                "rev-parse --is-inside-work-tree",
+                Err("fatal: not a git repository"),
+            ),
+            (
+                "ls-files --others --exclude-standard -z -- src",
+                Ok("src/b.rs\0src/sub/a.rs\0"),
+            ),
+        ]);
         // [CP2 MS2 S1b loop 13] a `.git` above TMPDIR would make the production rule (correctly) fail closed.
         assert!(
             d.path().ancestors().all(|a| !a.join(".git").exists()),

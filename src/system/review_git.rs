@@ -918,6 +918,37 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_outside_any_repository_still_honors_its_gitignore() {
+        // [MAGI §6 MS2 A loop 1] RV22: a directory respects `.gitignore`, repository or not. Outside one, git
+        // itself reads the rules (root and nested) through an empty repository of the review's own.
+        let d = tempfile::tempdir().expect("tempdir");
+        assert!(
+            d.path().ancestors().all(|a| !a.join(".git").exists()),
+            "TMPDIR sits inside a git repository"
+        );
+        std::fs::create_dir_all(d.path().join("src/deep")).expect("mkdir");
+        std::fs::write(d.path().join(".gitignore"), "*.env\n").expect("write");
+        std::fs::write(d.path().join("src/.gitignore"), "deep/\n").expect("write");
+        std::fs::write(d.path().join("src/a.rs"), "fn a() {}\n").expect("write");
+        std::fs::write(d.path().join("src/b.env"), "HOST=internal\n").expect("write");
+        std::fs::write(d.path().join("src/deep/c.rs"), "fn c() {}\n").expect("write");
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let r = magi_rs::review::input::resolve_input(
+            &ReviewInput::Directory("src".into()),
+            d.path(),
+            &ScrubbedGit::new(d.path().to_path_buf()),
+            &allow,
+        )
+        .expect("lists");
+        assert_eq!(
+            r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["src/.gitignore", "src/a.rs"]
+        );
+    }
+
+    #[test]
     fn a_directory_name_with_glob_characters_is_matched_literally() {
         // [CP2 MS2 S1a loop 14, measured with git 2.56] without GIT_LITERAL_PATHSPECS `src[0]` is a glob that also
         // matches the sibling file `src0`. [S1a loop 15] Here, with T2.3's enumeration, not in T2.4.
