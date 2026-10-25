@@ -36,7 +36,7 @@ from smoke.registry import scenario
 S47_ASSERTIONS = (
     "exit 0",
     "stdout parses as JSON",
-    "code_review.batches_planned is at least 3",
+    "code_review.batches_planned is at least 3, every one completed",
     "consult has one consensus",
     "every main finding points inside the reviewed files",
     "every discarded finding carries its cause",
@@ -174,19 +174,28 @@ def _list_under(section, key):
 
 
 def _batches_finding(section, run_id):
-    """Judge ``code_review.batches_planned``.
+    """Judge ``code_review.batches_planned`` and ``code_review.batches_completed``.
 
     Args:
         section: The ``code_review`` object.
         run_id: The shared run.
 
     Returns:
-        Finding: ``PASS`` at three batches or more. Below that, ``CANNOT_TEST``
-        when the whole pool measured a window (the input is sized for the
-        unmeasured default, so fewer batches is the environment's doing), else
-        ``FAIL``. An absent ``unmeasured_models`` counts as unmeasured.
+        Finding: ``FAIL`` when ``batches_completed`` is not an integer equal to
+        ``batches_planned`` (one report over batches that never ran is not the
+        multi-batch report RV-S2 asks for). Otherwise ``PASS`` at three batches
+        or more; below that, ``CANNOT_TEST`` when the whole pool measured a
+        window (the input is sized for the unmeasured default, so fewer batches
+        is the environment's doing), else ``FAIL``. An absent
+        ``unmeasured_models`` counts as unmeasured.
     """
     planned = section.get("batches_planned")
+    completed = section.get("batches_completed")
+    if not isinstance(completed, int) or completed != planned:
+        return _finding(
+            S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
+            "batches_completed is %r, expected every one of the %r planned"
+            % (completed, planned))
     if isinstance(planned, int) and planned >= MIN_BATCHES:
         return _finding(S47_ASSERTIONS, 2, Outcome.PASS, run_id)
     detail = "batches_planned is %r, expected at least %d" % (planned, MIN_BATCHES)
