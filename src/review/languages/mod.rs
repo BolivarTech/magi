@@ -382,4 +382,17 @@ mod tests {
         }
         assert_eq!(crate::review::context::detect_language("src/a.rs"), "rust");
     }
+
+    #[test]
+    fn every_extractor_reports_its_extensions_through_the_trait() {
+        let registry = LanguageRegistry::new();
+        for ext in registry.extensions() {
+            let ex = registry.get(&format!("a.{ext}")).expect("registered");
+            assert!(
+                ex.extensions().contains(&ext),
+                "{ext}: {:?}",
+                ex.extensions()
+            );
+        }
+    }
 }
