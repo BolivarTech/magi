@@ -188,8 +188,9 @@ pub struct ScannedLine {
     pub brace_delta: i32,
     /// Cumulative brace depth AFTER this line (saturates at 0).
     pub depth_after: u32,
-    /// `true` if the entire line is inside a comment or string
-    /// (no code tokens on this line). Used to skip keyword detection.
+    /// `true` when the line starts inside a multi-line comment or string and never returns to
+    /// code. A line that starts in code is `false` even when it is all comment (`// note`):
+    /// keyword detection does not need to skip it, since no keyword opens with a comment.
     pub is_non_code: bool,
 }
 
