@@ -304,3 +304,43 @@ pub(crate) fn build_code_review_runner(
     .map_err(|e| redact_foreign_text(&e.to_string()).to_string())?;
     Ok(Arc::new(runner))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NoVaultInScope;
+    use magi_rs::magi::endpoint::EndpointTemplate;
+    use magi_rs::review::window::pool_window;
+
+    #[test]
+    fn a_seat_repeated_as_a_non_adjacent_fallback_is_listed_once() {
+        // `bal` is the second seat and the second fallback: the repeat is not next to it.
+        let cfg = MagiConfig::from_toml_str(
+            "provider = \"ollama\"\n\
+             [magi]\n\
+             melchior_model = \"mel\"\nmelchior_lineage = \"lin-m\"\n\
+             balthasar_model = \"bal\"\nbalthasar_lineage = \"lin-b\"\n\
+             caspar_model = \"cas\"\ncaspar_lineage = \"lin-c\"\n\
+             [[magi.fallback]]\n\
+             model = \"other\"\nlineage = \"lin-o\"\n\
+             [[magi.fallback]]\n\
+             model = \"bal\"\nlineage = \"lin-r\"\n",
+        )
+        .expect("valid");
+        let tpl = EndpointTemplate::parse("http://localhost:11434/v1", Scope::Root).expect("url");
+        let endpoints = ResolvedEndpoints {
+            root: tpl.resolve(&mut NoVaultInScope, Scope::Root).expect("root"),
+            magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).expect("magi"),
+        };
+        let pool = review_pool(
+            &cfg,
+            ProviderKind::Ollama,
+            &endpoints,
+            &MagiEnvModelOverrides::default(),
+            &ProbeOutcome::default(),
+        )
+        .expect("pool");
+        let unmeasured = pool_window(&pool).unmeasured;
+        assert_eq!(unmeasured, vec!["mel", "bal", "cas", "other"]);
+    }
+}
