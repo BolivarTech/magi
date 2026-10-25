@@ -284,9 +284,14 @@ fn redacted_json(value: Value) -> Value {
 /// * `r` - The rendered review.
 ///
 /// # Returns
-/// `(response, consult, code_review)`: the text, the `consult` object, the summary.
+/// `(response, consult, code_review)`: the text, the `consult` object, the summary, each with
+/// every string redacted (a backstop over the runner's own redaction, whatever runner it was).
 pub(crate) fn envelope_fields(r: &Rendered) -> (String, Value, Value) {
-    (r.text.clone(), r.consult.clone(), r.json.clone())
+    (
+        redact_foreign_text(&r.text).as_str().to_string(),
+        redacted_json(r.consult.clone()),
+        redacted_json(r.json.clone()),
+    )
 }
 
 /// The envelope's `usage` of a rendered review: the token totals of its batches, as the
@@ -561,7 +566,7 @@ impl Tool for CodeReviewTool {
         };
         Ok(json!({
             "report": redact_foreign_text(&report).as_str(),
-            "code_review": rendered.json,
+            "code_review": redacted_json(rendered.json),
         }))
     }
 
