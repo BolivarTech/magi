@@ -631,7 +631,7 @@ Exit codes:
 
 **Limits to know.**
 
-- A merge commit has no diff of its own, so `--commit <merge>` finds nothing to review; review it as a range from its first parent.
+- A commit is reviewed against its first parent, so a merge commit shows what the merge brought into the branch it landed on. To see what one side of the merge changed, review that side as a range.
 - Mode-only changes, pure renames and submodule bumps are not reviewed. Submodule contents are never read.
 - The reviewed repository's own git configuration runs nothing: hooks, fsmonitor, external diff and textconv drivers, and the filter drivers it defines (`clean`, `smudge`, `process`) are disabled for every call. Filters from your global or system git configuration do run. A `clean` filter of yours that changes the number of lines makes the diff's line numbers disagree with the file as read. Detecting the repository's filters needs git 2.26 or later, and a repository defining more filter drivers than fit on one command line is refused.
 - A partial clone never downloads during a review; fetch the objects first. Every git call stops after 300 s.
