@@ -1498,6 +1498,39 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // Windows cannot name a file with bytes that are not UTF-8.
+    #[test]
+    fn a_top_level_name_that_is_not_utf8_is_set_aside_without_a_leading_slash() {
+        // [MAGI §6 MS2 A loop 1] the walk joined an empty parent with `/`: `/caf�.rs`, where a UTF-8 name reads `a.rs`.
+        use std::os::unix::ffi::OsStrExt;
+        let d = tempfile::tempdir().expect("tempdir");
+        assert!(
+            d.path().ancestors().all(|a| !a.join(".git").exists()),
+            "TMPDIR sits inside a git repository"
+        );
+        let name = std::ffi::OsStr::from_bytes(b"caf\xe9.rs");
+        std::fs::write(d.path().join(name), "x\n").expect("write");
+        std::fs::write(d.path().join("a.rs"), "x\n").expect("write");
+        let git = FakeGit::from(&[
+            (
+                "rev-parse --is-inside-work-tree",
+                Err("fatal: not a git repository"),
+            ),
+            (
+                "ls-files --others --ignored --exclude-standard --directory -z -- .",
+                Ok(""),
+            ),
+        ]);
+        let r = resolve_input(
+            &ReviewInput::Directory(".".into()),
+            d.path(),
+            &git,
+            &allow_all,
+        )
+        .expect("resolves");
+        assert_eq!(r.not_utf8, vec!["caf\u{fffd}.rs".to_string()]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn only_a_link_whose_target_is_gone_is_dangling() {
