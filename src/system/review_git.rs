@@ -343,7 +343,8 @@ impl GitCommand for ScrubbedGit {
 
 /// What the filter probe means: the overrides to apply, or a fail-closed error.
 ///
-/// Exit 0 is parsed by [`filter_overrides`]; exit 1 is "no filter entry anywhere"; any other exit
+/// Exit 0 is parsed by [`filter_overrides`]; exit 1 with nothing on stderr is "no filter entry
+/// anywhere" (decided by the status, as in `query`, never by the text); any other exit
 /// (or a signal) is an error, so no command runs with a repository filter left active.
 ///
 /// # Errors
@@ -352,7 +353,7 @@ impl GitCommand for ScrubbedGit {
 fn interpret_filter_probe(probe: &Finished) -> Result<Vec<String>, ReviewError> {
     match probe.code {
         Some(0) => filter_overrides(&probe.stdout),
-        Some(CONFIG_NO_MATCH_EXIT) => Ok(Vec::new()),
+        Some(CONFIG_NO_MATCH_EXIT) if probe.stderr.is_empty() => Ok(Vec::new()),
         _ => Err(failure("config", probe)),
     }
 }
