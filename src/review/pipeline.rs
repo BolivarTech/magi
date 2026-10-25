@@ -18,10 +18,12 @@ use magi_core::reporting::MagiReport;
 
 use super::batching::{file_header, plan_batches, BatchItem, ReviewBatch};
 use super::clock::{batch_wall_clock_secs, pre_budget};
-use super::consolidate::{apply_agreement, consolidate, BatchOutcome, Consolidated};
+use super::consolidate::{
+    apply_agreement, consolidate, BatchOutcome, Consolidated, ConsolidatedFinding,
+};
 use super::error::ReviewError;
 use super::filter::{filter_files, SkipCause, Skipped};
-use super::gate::{Gate, GateState};
+use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
 use super::input::{resolve_input, ReviewFile, ReviewInput, SourceKind};
 use super::languages::LanguageRegistry;
@@ -261,21 +263,7 @@ pub async fn run_review(
     let prep = Instant::now();
     let mut summary = ReviewSummary::default();
     let resolved = resolve_input(&req.input, req.workspace, deps.git, deps.guard)?;
-    let inner: Box<dyn ContentSource + '_> = match resolved.source_kind {
-        SourceKind::Worktree { old_rev: None } => {
-            Box::new(WorktreeSource::new(req.workspace.to_path_buf()))
-        }
-        SourceKind::Worktree {
-            old_rev: Some(old_rev),
-        } => Box::new(WorktreeSource::with_old(
-            req.workspace.to_path_buf(),
-            deps.git,
-            old_rev,
-        )),
-        SourceKind::Revision { new_rev, old_rev } => {
-            Box::new(RevisionSource::new(deps.git, new_rev, old_rev))
-        }
-    };
+    let inner = content_source(resolved.source_kind, req.workspace, deps.git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(req.input, ReviewInput::File(_));
     let filtered = filter_files(
@@ -318,38 +306,12 @@ pub async fn run_review(
     }
     summary.prep_ms = millis(prep.elapsed());
 
-    let t0 = deps.clock.elapsed_secs();
-    let elapsed = |clock: &dyn ReviewClock| clock.elapsed_secs().saturating_sub(t0);
-    let mut finished = Vec::new();
-    for batch in &batches {
-        let wall = req.timeout_secs.map(|total| {
-            let left = total.saturating_sub(elapsed(deps.clock));
-            let pending = planned.saturating_sub(batch.index);
-            Duration::from_secs(batch_wall_clock_secs(left, pending))
-        });
-        let started = Instant::now();
-        match deps.consult.consult(&prompt_of(batch), wall).await {
-            Ok(report) => {
-                summary
-                    .batches
-                    .push(metrics(batch.index, &report, started.elapsed()));
-                finished.push(Finished {
-                    batch: batch.index,
-                    report,
-                });
-            }
-            Err(ConsultFailure::ClockExpired) => {
-                summary
-                    .failed_batches
-                    .extend((batch.index..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
-                break;
-            }
-            Err(ConsultFailure::Other(message)) => {
-                summary.failed_batches.push((batch.index, message));
-            }
-        }
-    }
-    summary.batches_completed = finished.len();
+    let clock = ReviewTimer {
+        clock: deps.clock,
+        t0: deps.clock.elapsed_secs(),
+        total: req.timeout_secs,
+    };
+    let finished = run_batches(&batches, deps.consult, &clock, &mut summary).await;
 
     if finished.is_empty() {
         let message = format!(
@@ -409,15 +371,126 @@ pub async fn run_review(
     let mut verdicts = Vec::with_capacity(consolidated.findings.len());
     for finding in &consolidated.findings {
         let code = gate_code(finding.file.as_deref(), finding.line, &faces, &source);
-        let remaining = req
-            .timeout_secs
-            .map(|total| Duration::from_secs(total.saturating_sub(elapsed(deps.clock))));
-        verdicts.push(deps.gate.judge(finding, code.as_deref(), remaining).await);
+        verdicts.push(
+            deps.gate
+                .judge(finding, code.as_deref(), clock.remaining())
+                .await,
+        );
     }
     summary.per_model = deps.gate.per_model().clone();
     summary.gate_stopped = deps.gate.stopped().map(str::to_string);
 
     apply_agreement(&mut consolidated.findings, &consolidated.answered);
+    record_verdicts(&mut summary, &consolidated.findings, verdicts);
+
+    Ok(ReviewOutcome {
+        consolidated: Some(consolidated),
+        batch_reports: Vec::new(),
+        summary,
+        consolidation_error: None,
+    })
+}
+
+/// The single content source an input resolved to: the worktree (with its old side, if any) or
+/// a git revision.
+fn content_source<'g>(
+    kind: SourceKind,
+    workspace: &Path,
+    git: &'g dyn GitCommand,
+) -> Box<dyn ContentSource + 'g> {
+    match kind {
+        SourceKind::Worktree { old_rev: None } => {
+            Box::new(WorktreeSource::new(workspace.to_path_buf()))
+        }
+        SourceKind::Worktree {
+            old_rev: Some(old_rev),
+        } => Box::new(WorktreeSource::with_old(
+            workspace.to_path_buf(),
+            git,
+            old_rev,
+        )),
+        SourceKind::Revision { new_rev, old_rev } => {
+            Box::new(RevisionSource::new(git, new_rev, old_rev))
+        }
+    }
+}
+
+/// The review clock from the first trio call: every elapsed time is relative to `t0`, so the
+/// preparation is never charged to the `--timeout`, and every subtraction saturates.
+struct ReviewTimer<'c> {
+    /// The review clock.
+    clock: &'c dyn ReviewClock,
+    /// Its reading just before the first batch.
+    t0: u64,
+    /// The explicit `--timeout`, if any.
+    total: Option<u64>,
+}
+
+impl ReviewTimer<'_> {
+    /// What is left of the `--timeout` in seconds, or `None` without one.
+    fn left_secs(&self) -> Option<u64> {
+        let elapsed = self.clock.elapsed_secs().saturating_sub(self.t0);
+        self.total.map(|total| total.saturating_sub(elapsed))
+    }
+
+    /// What is left of the `--timeout`, or `None` without one.
+    fn remaining(&self) -> Option<Duration> {
+        self.left_secs().map(Duration::from_secs)
+    }
+}
+
+/// Runs every batch in series (§5.0 step 5), recording metrics and failures in `summary`.
+///
+/// Each batch's wall clock is recomputed from what is left, split over the pending batches; a
+/// batch whose wall clock ran out cuts it and every pending one, each declared as
+/// `clock expired`.
+async fn run_batches(
+    batches: &[ReviewBatch],
+    consult: &dyn BatchConsult,
+    clock: &ReviewTimer<'_>,
+    summary: &mut ReviewSummary,
+) -> Vec<Finished> {
+    let planned = batches.len();
+    let mut finished = Vec::new();
+    for batch in batches {
+        let wall = clock.left_secs().map(|left| {
+            let pending = planned.saturating_sub(batch.index);
+            Duration::from_secs(batch_wall_clock_secs(left, pending))
+        });
+        let started = Instant::now();
+        match consult.consult(&prompt_of(batch), wall).await {
+            Ok(report) => {
+                summary
+                    .batches
+                    .push(metrics(batch.index, &report, started.elapsed()));
+                finished.push(Finished {
+                    batch: batch.index,
+                    report,
+                });
+            }
+            Err(ConsultFailure::ClockExpired) => {
+                summary
+                    .failed_batches
+                    .extend((batch.index..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
+                break;
+            }
+            Err(ConsultFailure::Other(message)) => {
+                summary.failed_batches.push((batch.index, message));
+            }
+        }
+    }
+    summary.batches_completed = finished.len();
+    finished
+}
+
+/// Records the gate's verdicts in `summary`: the counts per state and cause, the fraction
+/// judged (every `unfiltered` counts as not judged; 1.0 with no finding), and each finding in
+/// the main list or, when filtered, apart.
+fn record_verdicts(
+    summary: &mut ReviewSummary,
+    findings: &[ConsolidatedFinding],
+    verdicts: Vec<GateVerdict>,
+) {
     let judged = verdicts
         .iter()
         .filter(|v| v.state != GateState::Unfiltered)
@@ -427,7 +500,7 @@ pub async fn run_review(
     } else {
         ratio(judged, verdicts.len())
     };
-    for (finding, verdict) in consolidated.findings.iter().zip(verdicts) {
+    for (finding, verdict) in findings.iter().zip(verdicts) {
         *summary
             .gate_states
             .entry(state_name(verdict.state))
@@ -442,13 +515,6 @@ pub async fn run_review(
         };
         list.push((finding.clone(), verdict));
     }
-
-    Ok(ReviewOutcome {
-        consolidated: Some(consolidated),
-        batch_reports: Vec::new(),
-        summary,
-        consolidation_error: None,
-    })
 }
 
 /// The prompt of a batch: its items in order, each file's first item preceded by its header.
