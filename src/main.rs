@@ -5227,8 +5227,9 @@ async fn run_code_review_subcommand(
         }
     };
 
-    // The token is the user's interruption only: `--timeout` is the review's total (RV06),
-    // which delivers what finished instead of cancelling.
+    // Nothing fires this token: `run` takes one, and Ctrl+C ends the process through the
+    // default signal handler. `--timeout` is the review's total (RV06), which delivers what
+    // finished instead of cancelling.
     let cancel = tokio_util::sync::CancellationToken::new();
     let input = review_input_of(&args);
     let plan = match runner.plan(&input) {
