@@ -28,6 +28,9 @@ const GATE_KEY: &str = "gate";
 const TITLE_JOINER: &str = " / ";
 
 /// What every stage of a review declared.
+///
+/// Batch indices are 0-based here; the text and JSON forms show them 1-based ([`shown`]), the
+/// same base as the `[batch k]` labels of the consolidated summaries.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ReviewSummary {
     /// Findings per gate state (`kept`, `filtered`, `low_confidence`, `unfiltered`).
@@ -147,7 +150,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
         s.batches_completed, s.batches_planned
     )?;
     for (k, why) in &s.failed_batches {
-        writeln!(out, "batch {k} did not complete: {why}")?;
+        writeln!(out, "batch {} did not complete: {why}", shown(*k))?;
     }
     if let Some(cause) = &s.gate_stopped {
         writeln!(out, "gate stopped: {cause}")?;
@@ -266,7 +269,7 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
             location(d.finding.file.as_deref(), d.finding.line),
             name(&d.cause),
             d.finding.title,
-            d.batch,
+            shown(d.batch),
             name(&d.agent)
         )?;
     }
@@ -305,6 +308,7 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
             }
         }
         fields.insert("rejected_skips".into(), json!(skips));
+        number_batches_from_one(fields);
     }
     redact_strings(&mut v);
     v
@@ -313,12 +317,12 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
 /// The paid batch reports, when consolidation failed (M-9).
 ///
 /// Each report as its `consult` produced it, magi-core's report under `## [batch k]`, with `k`
-/// the report's position in `reports`. The whole text is redacted, since the reports are held
-/// raw.
+/// its 1-based batch number. The whole text is redacted, since the reports are held raw.
 ///
 /// # Arguments
 ///
-/// * `reports` - The reports of the completed batches, in batch order.
+/// * `reports` - The reports of the completed batches, each with its 0-based batch index, in
+///   batch order.
 ///
 /// # Returns
 ///
@@ -326,15 +330,59 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
 pub fn render_batch_reports(reports: &[(usize, MagiReport)]) -> String {
     let formatter = ReportFormatter::new();
     let mut out = String::new();
-    for (k, (_, report)) in reports.iter().enumerate() {
+    for (batch, report) in reports {
         // Writing into a `String` cannot fail.
-        let _ = writeln!(out, "## [batch {k}]");
+        let _ = writeln!(out, "## [batch {}]", shown(*batch));
         out.push_str(&formatter.format_report(&report.agents, &report.consensus));
         if !out.ends_with('\n') {
             out.push('\n');
         }
     }
     redacted(&out)
+}
+
+/// The 1-based number a reader sees for a 0-based batch index: the one base every output uses,
+/// the same as the `[batch k]` labels of the consolidated summaries.
+fn shown(batch: usize) -> usize {
+    batch.saturating_add(1)
+}
+
+/// Rewrites every batch index of the JSON form 1-based ([`shown`]): `failed_batches[][0]`,
+/// `batches[].index`, `discarded[].batch`, `symbol_unverified[].batch` and the `batches` of
+/// each finding of `findings` and `filtered`.
+fn number_batches_from_one(fields: &mut Map<String, Value>) {
+    let renumber = |value: &mut Value| {
+        if let Some(n) = value.as_u64().and_then(|n| usize::try_from(n).ok()) {
+            *value = json!(shown(n));
+        }
+    };
+    for (list, key) in [
+        ("batches", "index"),
+        ("discarded", "batch"),
+        ("symbol_unverified", "batch"),
+    ] {
+        if let Some(Value::Array(items)) = fields.get_mut(list) {
+            items
+                .iter_mut()
+                .filter_map(|item| item.get_mut(key))
+                .for_each(renumber);
+        }
+    }
+    if let Some(Value::Array(items)) = fields.get_mut("failed_batches") {
+        items
+            .iter_mut()
+            .filter_map(|pair| pair.get_mut(0))
+            .for_each(renumber);
+    }
+    for list in ["findings", "filtered"] {
+        if let Some(Value::Array(items)) = fields.get_mut(list) {
+            for batches in items.iter_mut().filter_map(|f| f.get_mut("batches")) {
+                if let Value::Array(numbers) = batches {
+                    numbers.iter_mut().for_each(renumber);
+                }
+            }
+        }
+    }
 }
 
 /// The findings with their verdict under [`GATE_KEY`].

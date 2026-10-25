@@ -185,7 +185,8 @@ pub struct ReviewDeps<'a> {
 pub struct ReviewOutcome {
     /// The consolidated report; `None` when no batch completed or consolidation failed.
     pub consolidated: Option<Consolidated>,
-    /// The paid batch reports, raw, when consolidation failed (empty otherwise).
+    /// The paid batch reports, raw, each with its 0-based batch index, when consolidation failed
+    /// (empty otherwise).
     pub batch_reports: Vec<(usize, MagiReport)>,
     /// What every stage declared.
     pub summary: ReviewSummary,
