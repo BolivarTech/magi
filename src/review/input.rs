@@ -177,10 +177,18 @@ pub fn resolve_input(
                     &format!("{sha}^^{{commit}}"),
                 ])?
                 .map(|parent| parent.trim().to_string());
-            let mut args = vec!["diff-tree", "-p", "-r", "--root"];
-            args.extend_from_slice(DIFF_FLAGS);
-            args.push(&sha);
-            from_diff(&git.run_bytes(&args)?, sha.clone(), old_rev)
+            // The diff is taken against that pinned parent, so it matches `old_rev`: `diff-tree
+            // <sha>` prints nothing for a merge commit. Only a root commit needs `--root`.
+            let text = match &old_rev {
+                Some(parent) => diff(git, &format!("{parent}..{sha}"))?,
+                None => {
+                    let mut args = vec!["diff-tree", "-p", "-r", "--root"];
+                    args.extend_from_slice(DIFF_FLAGS);
+                    args.push(&sha);
+                    git.run_bytes(&args)?
+                }
+            };
+            from_diff(&text, sha.clone(), old_rev)
         }
         ReviewInput::Range { from, to } => {
             validate_ref(from)?;
