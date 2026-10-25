@@ -289,17 +289,19 @@ pub(crate) fn envelope_fields(r: &Rendered) -> (String, Value, Value) {
     (r.text.clone(), r.consult.clone(), r.json.clone())
 }
 
-/// The envelope's `usage` of a rendered review: the token totals of its batches.
+/// The envelope's `usage` of a rendered review: the token totals of its batches, as the
+/// summary's `batch_totals` reports them (zero when the summary has none).
 ///
 /// # Arguments
 /// * `r` - The rendered review.
 ///
 /// # Returns
 /// The usage.
-pub(crate) fn envelope_usage(_r: &Rendered) -> magi_rs::headless::types::Usage {
+pub(crate) fn envelope_usage(r: &Rendered) -> magi_rs::headless::types::Usage {
+    let total = |key: &str| r.json["batch_totals"][key].as_u64().unwrap_or(0);
     magi_rs::headless::types::Usage {
-        input_tokens: 0,
-        output_tokens: 0,
+        input_tokens: total("input_tokens"),
+        output_tokens: total("output_tokens"),
     }
 }
 
