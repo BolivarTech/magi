@@ -417,3 +417,53 @@ fn the_envelope_usage_carries_the_batch_token_totals() {
         "{out}"
     );
 }
+
+/// The `[code_review]` key, given only as `CODE_REVIEW_API_KEY`. Not a real key.
+const GATE_KEY: &str = "cr-gate-test-key-4f1d7"; // allow-secret-scan
+
+/// The section's own key reaches the gate's client: the gate stand-in answers only a request
+/// that carries it, so a client built without the key leaves the finding unjudged.
+#[test]
+fn the_code_review_key_reaches_the_gate() {
+    let mut server = mockito::Server::new();
+    let _trio = server
+        .mock("POST", "/api/chat")
+        .with_status(200)
+        .with_body_from_request(|req| {
+            let body = req.utf8_lossy_body().unwrap_or_default().to_string();
+            let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            verdict_body(seat_of_model(parsed["model"].as_str().unwrap_or(""))).into_bytes()
+        })
+        .create();
+    let gate = server
+        .mock("POST", "/v1/systemone")
+        .match_header("authorization", format!("Bearer {GATE_KEY}").as_str())
+        .with_status(200)
+        .with_body(gate_body())
+        .expect(1)
+        .create();
+    let ws = workspace(&review_toml(&server.url()));
+    let out = magi(&ws.root)
+        .env("CODE_REVIEW_API_KEY", GATE_KEY)
+        .args([
+            "-p",
+            TEST_PASSPHRASE,
+            "code-review",
+            "--no-memory",
+            "--commit",
+            "HEAD",
+        ])
+        .args(["--output-format", "json"])
+        .output()
+        .expect("spawn code-review");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(EXIT_OK),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+    assert_eq!(v["code_review"]["gate_states"]["kept"], 1, "{v}");
+    gate.assert();
+}
