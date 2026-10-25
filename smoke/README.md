@@ -352,9 +352,10 @@ skipped, as binary and as secret, and not from their being invisible. The produc
 from the review on its own, and the harness does nothing to help it.
 
 **Cost.** R13, R14 and R15 never reach a model. R12 is a review of at least three batches by the
-real trio plus the gate. Its harness timeout is 2 400 s and `TRIO_RUNS_MEASURED_S["R12"]` carries
-four of R4's 283 s provisionally, plus the gate. It has not been measured yet; the figure is
-written here when it is.
+real trio plus the gate. The tree is about 72 000 tokens and the product fills a batch to 50 % of
+the 32 768-token default window (16 384 tokens), so it plans at least five batches. Its harness
+timeout is 3 000 s and `TRIO_RUNS_MEASURED_S["R12"]` carries 1 500 s provisionally: five of R4's
+283 s plus the gate. It has not been measured yet; the figure is written here when it is.
 
 ## Out of scope
 
