@@ -96,6 +96,9 @@ pub enum ReviewError {
     /// A worktree path whose resolved target is a path a review never reads.
     #[error("{0} resolves to a path a review never reads")]
     Protected(String),
+    /// A worktree path whose resolved target is not a regular file (a link to a directory).
+    #[error("{0} is not a regular file")]
+    NotRegularFile(String),
     /// The review no longer splits into the batches that were approved: the working tree moved
     /// between the approval and the run. Raised before any trio call.
     #[error(

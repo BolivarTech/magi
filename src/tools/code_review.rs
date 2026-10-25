@@ -399,6 +399,7 @@ pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
         ReviewError::InputTooLarge { .. } => "input_too_large",
         ReviewError::Cancelled => "cancelled",
         ReviewError::Protected(_) => "protected",
+        ReviewError::NotRegularFile(_) => "not_regular_file",
         ReviewError::EgressSecret { .. } => "egress_secret",
         ReviewError::PlanChanged { .. } => "plan_changed",
     }

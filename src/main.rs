@@ -4975,7 +4975,8 @@ fn review_error_exit(e: &magi_rs::review::error::ReviewError) -> i32 {
         | E::Budget { .. }
         | E::TooLarge { .. }
         | E::InputTooLarge { .. }
-        | E::Protected(_) => EXIT_CONFIG_REFUSED,
+        | E::Protected(_)
+        | E::NotRegularFile(_) => EXIT_CONFIG_REFUSED,
         E::Git(_)
         | E::GitOutputTooLarge { .. }
         | E::Io(_)

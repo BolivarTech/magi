@@ -55,7 +55,7 @@ pub struct Skipped {
 /// Why a file was left out of a review.
 ///
 /// Serialized as the text the report shows (`"binary"`, `"not utf-8"`, `"secret"`, `"ignored"`,
-/// `"outside workspace"`, `"too large"`), the same text [`ReviewError::NotReviewable`] carries.
+/// `"outside workspace"`, `"too large"`, `"not a regular file"`), the same text [`ReviewError::NotReviewable`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipCause {
     /// A binary file.
@@ -70,6 +70,8 @@ pub enum SkipCause {
     OutsideWorkspace,
     /// A file over the per-file byte cap.
     TooLarge,
+    /// A link whose target is not a regular file (a directory inside the workspace).
+    NotRegularFile,
 }
 
 impl serde::Serialize for SkipCause {
@@ -88,6 +90,7 @@ impl SkipCause {
             Self::Ignored => "ignored",
             Self::OutsideWorkspace => "outside workspace",
             Self::TooLarge => "too large",
+            Self::NotRegularFile => "not a regular file",
         }
     }
 }
@@ -274,6 +277,7 @@ fn read_side(read: Result<Option<Vec<u8>>, ReviewError>) -> Result<Side, ReviewE
         Err(ReviewError::OutsideWorkspace(_)) => Ok(Side::Skip(SkipCause::OutsideWorkspace)),
         Err(ReviewError::TooLarge { .. }) => Ok(Side::Skip(SkipCause::TooLarge)),
         Err(ReviewError::Protected(_)) => Ok(Side::Skip(SkipCause::Ignored)),
+        Err(ReviewError::NotRegularFile(_)) => Ok(Side::Skip(SkipCause::NotRegularFile)),
         Err(other) => Err(other),
     }
 }
@@ -462,6 +466,7 @@ mod tests {
             SkipCause::Ignored,
             SkipCause::OutsideWorkspace,
             SkipCause::TooLarge,
+            SkipCause::NotRegularFile,
         ]
         .iter()
         .map(|c| serde_json::to_string(c).expect("serializes"))
@@ -474,7 +479,8 @@ mod tests {
                 "\"secret\"",
                 "\"ignored\"",
                 "\"outside workspace\"",
-                "\"too large\""
+                "\"too large\"",
+                "\"not a regular file\""
             ]
         );
     }

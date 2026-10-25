@@ -184,8 +184,10 @@ impl ContentSource for WorktreeSource<'_> {
     ///
     /// [`ReviewError::Io`] when the root did not resolve or a read fails,
     /// [`ReviewError::OutsideWorkspace`] when the path resolves outside the root,
-    /// [`ReviewError::Protected`] when it resolves to a never-reviewed path, and
-    /// [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
+    /// [`ReviewError::Protected`] when it resolves to a never-reviewed path,
+    /// [`ReviewError::NotRegularFile`] when it resolves to something other than a regular file
+    /// (a link to a directory), and [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
+    /// A link whose target does not exist is `Ok(None)`, like a file that does not exist.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
         let io = |e: std::io::Error| ReviewError::Io(format!("{path}: {e}"));
         let canonical_root = self
@@ -198,12 +200,19 @@ impl ContentSource for WorktreeSource<'_> {
             Err(e) => return Err(io(e)),
             Ok(_) => {}
         }
-        let canonical = std::fs::canonicalize(&joined).map_err(io)?;
+        // A link whose target is gone reads as a file that does not exist.
+        let canonical = match std::fs::canonicalize(&joined) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            other => other.map_err(io)?,
+        };
         let Ok(relative) = canonical.strip_prefix(canonical_root) else {
             return Err(ReviewError::OutsideWorkspace(path.to_string()));
         };
         if is_never_reviewed(&relative.to_string_lossy()) {
             return Err(ReviewError::Protected(path.to_string()));
+        }
+        if !std::fs::metadata(&canonical).map_err(io)?.is_file() {
+            return Err(ReviewError::NotRegularFile(path.to_string()));
         }
         let file = std::fs::File::open(&canonical).map_err(io)?;
         match read_bounded(file, MAX_REVIEW_FILE_BYTES).map_err(io)? {

@@ -180,7 +180,7 @@ pub fn resolve_input(
             let text = diff(git, &format!("{merge_base}..{head_sha}"))?;
             from_diff(&text, head_sha, Some(merge_base))
         }
-        ReviewInput::Uncommitted => resolve_uncommitted(git)?,
+        ReviewInput::Uncommitted => resolve_uncommitted(git, workspace)?,
     };
     if resolved.files.is_empty() && resolved.not_utf8.is_empty() {
         return Err(ReviewError::NothingToReview);
@@ -354,11 +354,14 @@ fn resolve_directory(
         args.extend_from_slice(&["--", pathspec]);
         let (names, not_utf8) = split_nul(&git.run_bytes(&args)?);
         resolved.not_utf8 = not_utf8;
-        // A tracked file deleted from the tree, or a submodule (a directory), is not read.
+        // A tracked file deleted from the tree, a link whose target is gone (which reads the
+        // same) or a submodule (a directory) is not read.
         resolved.files = names
             .into_iter()
             .filter(|name| {
-                std::fs::symlink_metadata(workspace.join(name)).is_ok_and(|m| !m.is_dir())
+                let path = workspace.join(name);
+                std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir())
+                    && !is_dangling_link(&path)
             })
             .map(|path| ReviewFile { path, diff: None })
             .collect();
@@ -375,7 +378,7 @@ fn resolve_directory(
 }
 
 /// Walks `dir` (whose workspace-relative path is `rel`) without following symlinks, collecting
-/// every non-directory entry. O(entries).
+/// every non-directory entry except a link whose target is gone. O(entries).
 fn walk(
     dir: &Path,
     rel: &str,
@@ -396,7 +399,7 @@ fn walk(
         };
         if entry.file_type().map_err(io)?.is_dir() {
             walk(&entry.path(), &path, found, not_utf8)?;
-        } else {
+        } else if !is_dangling_link(&entry.path()) {
             found.push(path);
         }
     }
@@ -405,7 +408,14 @@ fn walk(
 
 /// Uncommitted changes: the diff against the SHA of `HEAD` plus untracked files whole, or, in a
 /// repository without commits, every tracked and untracked file whole.
-fn resolve_uncommitted(git: &dyn GitCommand) -> Result<ResolvedInput, ReviewError> {
+///
+/// An untracked link whose target is gone is not listed: it reads as a file that does not
+/// exist (`workspace` is where the names resolve).
+fn resolve_uncommitted(
+    git: &dyn GitCommand,
+    workspace: &Path,
+) -> Result<ResolvedInput, ReviewError> {
+    let present = |name: &String| !is_dangling_link(&workspace.join(name));
     match verify(git, "HEAD") {
         Ok(head) => {
             let mut resolved = from_diff(&diff(git, &head)?, String::new(), None);
@@ -418,6 +428,7 @@ fn resolve_uncommitted(git: &dyn GitCommand) -> Result<ResolvedInput, ReviewErro
             resolved.files.extend(
                 names
                     .into_iter()
+                    .filter(present)
                     .map(|path| ReviewFile { path, diff: None }),
             );
             Ok(resolved)
@@ -427,6 +438,7 @@ fn resolve_uncommitted(git: &dyn GitCommand) -> Result<ResolvedInput, ReviewErro
             Ok(ResolvedInput {
                 files: names
                     .into_iter()
+                    .filter(present)
                     .map(|path| ReviewFile { path, diff: None })
                     .collect(),
                 source_kind: SourceKind::Worktree { old_rev: None },
@@ -435,6 +447,14 @@ fn resolve_uncommitted(git: &dyn GitCommand) -> Result<ResolvedInput, ReviewErro
         }
         Err(other) => Err(other),
     }
+}
+
+/// Whether `path` is a link (or a junction) whose target does not exist. Such a link reads as a
+/// file that does not exist, so an enumeration leaves it out the way it leaves out a tracked
+/// file deleted from the tree. A path that does not exist at all is not a dangling link.
+fn is_dangling_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+        && std::fs::metadata(path).is_err()
 }
 
 /// Splits NUL-separated names; the ones that are not UTF-8 come back apart, decoded lossily.
