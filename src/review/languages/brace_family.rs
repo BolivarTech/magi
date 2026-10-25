@@ -714,4 +714,50 @@ mod tests {
         let units = extract(&rust_extractor(), code, &[1, 2, 3]);
         assert_each_line_in_one_unit(&units, 3);
     }
+
+    #[test]
+    fn c_extracts_a_function_by_its_signature() {
+        // C has no function keyword: a definition is an unindented signature whose block
+        // opens on its line or the next two; a prototype ends in `;` and is not one.
+        let code = "#include <stdio.h>\n\nint main(int argc, char *argv[]) {\n    return 0;\n}\n\nint validate(const char *input)\n{\n    return input != NULL;\n}\n\nint prototype(void);\n";
+        let units = extract(&c_extractor(), code, &[4, 9, 12]);
+        let found: Vec<(&str, UnitKind, u32, u32)> = units
+            .iter()
+            .map(|u| (u.name.as_str(), u.kind, u.start_line, u.end_line))
+            .collect();
+        assert!(
+            found.contains(&("main", UnitKind::Function, 3, 5)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&("validate", UnitKind::Function, 7, 10)),
+            "{found:?}"
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(n, k, ..)| *n == "prototype" && *k == UnitKind::Function),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_function_opening_two_blocks_on_one_line_ends_at_its_own_brace() {
+        let code = "fn f() { if x {\n        a();\n    }\n    b();\n}\n\nfn g() {\n    c();\n}\n";
+        let units = extract(&rust_extractor(), code, &[4]);
+        let f = units
+            .iter()
+            .find(|u| u.name == "f")
+            .expect("f holds line 4");
+        assert_eq!((f.start_line, f.end_line), (1, 5));
+    }
+
+    #[test]
+    fn a_one_line_function_does_not_take_the_next_construct() {
+        let code = "fn a() { x(); }\nfn b() {\n    y();\n}\n";
+        let units = extract(&rust_extractor(), code, &[3]);
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert_eq!(units[0].name, "b");
+        assert_eq!((units[0].start_line, units[0].end_line), (2, 4));
+    }
 }
