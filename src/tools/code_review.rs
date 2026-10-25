@@ -1596,6 +1596,41 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_loop_is_reported_and_never_silently_dropped() {
+        // `a -> b` and `b -> a` do not resolve (ELOOP), which is not "the target is gone": the
+        // review must either fail naming the link or list it as skipped, never pass over it.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::write(ws.join("ok.rs"), "fn ok() {}").expect("ok.rs");
+        std::os::unix::fs::symlink("b", ws.join("a")).expect("a");
+        std::os::unix::fs::symlink("a", ws.join("b")).expect("b");
+        git_in(&ws, &["init", "-q"]);
+        git_in(&ws, &["add", "-A"]);
+        git_in(&ws, &["commit", "-q", "-m", "loop"]);
+        let runner = production_runner_with(
+            &ws,
+            Arc::new(RecordingConsult::default()),
+            vec![("m".into(), None)],
+        );
+        let outcome = match runner.plan(&ReviewInput::Directory(".".into())) {
+            Err(e) => Err(e.to_string()),
+            Ok(plan) => runner
+                .run(plan, None, &CancellationToken::new())
+                .await
+                .map(|rendered| skipped_of(&rendered))
+                .map_err(|e| e.to_string()),
+        };
+        match outcome {
+            Err(message) => assert!(
+                message.contains('a') && message.to_lowercase().contains("symbolic"),
+                "{message}"
+            ),
+            Ok(skipped) => assert!(skipped.iter().any(|(p, _)| p == "a"), "{skipped:?}"),
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_dangling_link_named_explicitly_is_missing() {
         // A link whose target is gone reads as a file that does not exist: named, it is missing.

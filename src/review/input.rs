@@ -1360,4 +1360,21 @@ mod tests {
             vec!["lib b/util.so", "my file.bin", "q\tz.bin", "new name.rs"]
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_link_whose_target_is_gone_is_dangling() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        std::fs::write(dir.join("real.rs"), "fn f() {}").expect("real");
+        std::os::unix::fs::symlink("real.rs", dir.join("ok")).expect("ok");
+        std::os::unix::fs::symlink("gone.rs", dir.join("dangling")).expect("dangling");
+        std::os::unix::fs::symlink("b", dir.join("a")).expect("a");
+        std::os::unix::fs::symlink("a", dir.join("b")).expect("b");
+        assert!(is_dangling_link(&dir.join("dangling")));
+        assert!(!is_dangling_link(&dir.join("ok")));
+        assert!(!is_dangling_link(&dir.join("real.rs")));
+        assert!(!is_dangling_link(&dir.join("missing")));
+        assert!(!is_dangling_link(&dir.join("a")), "a loop is not dangling");
+    }
 }
