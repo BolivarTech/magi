@@ -839,4 +839,13 @@ mod tests {
             "Should skip brace in string and find actual closing brace"
         );
     }
+
+    #[test]
+    fn balanced_braces_inside_a_template_expression_leave_the_depth_unchanged() {
+        let mut scanner = CodeScanner::new(LexicalRules::javascript());
+        let r = scanner.scan_all("const s = `x ${ {a: 1} } y`;\nfunction f() {\n}\n");
+        assert_eq!(r[0].depth_after, 0);
+        assert_eq!(r[1].depth_after, 1);
+        assert_eq!(r[2].depth_after, 0);
+    }
 }
