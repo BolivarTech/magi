@@ -50,7 +50,8 @@ pub struct CodeReviewSection {
     pub max_state_bytes: Option<usize>,
     /// Approval policy of the agent's `code-review` tool.
     pub auto_approve: Option<bool>,
-    /// Confidence threshold of the primary model; absent means no threshold.
+    /// Confidence threshold of the primary model, required ([`CodeReviewSection::validate`]
+    /// rejects a section without it): the gate's thresholds were calibrated per model.
     pub min_confidence: Option<f64>,
     /// Ordered fallbacks, on the same endpoint.
     #[serde(default)]
@@ -63,7 +64,7 @@ pub struct CodeReviewSection {
 pub struct CodeReviewFallback {
     /// Fallback model.
     pub model: String,
-    /// Confidence threshold of this model; absent means no threshold.
+    /// Confidence threshold of this model, required like the primary's.
     pub min_confidence: Option<f64>,
 }
 
@@ -80,6 +81,15 @@ pub enum CodeReviewConfigError {
     #[error("model '{model}' appears more than once in [code_review] and its fallbacks")]
     DuplicateModel {
         /// The repeated model.
+        model: String,
+    },
+    /// A model of the chain declares no threshold.
+    #[error(
+        "model '{model}' in [code_review] needs a min_confidence (a number between 0 and 1); \
+         every gate model carries its own threshold"
+    )]
+    MissingMinConfidence {
+        /// The model without a threshold.
         model: String,
     },
     /// A threshold is not a finite number in [0, 1].
@@ -99,7 +109,8 @@ pub enum CodeReviewConfigError {
 impl CodeReviewSection {
     /// Checks the section's values.
     ///
-    /// Models are compared after `trim`, as the server sees them: a repeated model would make a
+    /// Every model, the primary and each fallback, needs a finite `min_confidence` in [0, 1]
+    /// (REQ-RV14). Models are compared after `trim`, as the server sees them: a repeated model would make a
     /// fallback retry what just failed. O(m) for m models.
     ///
     /// # Returns
@@ -133,11 +144,16 @@ impl CodeReviewSection {
         let mut seen = std::collections::HashSet::new();
         for spec in self.chain() {
             // `nan` parses from TOML and compares false with everything: finiteness is explicit.
-            if spec
-                .min_confidence
-                .is_some_and(|v| !v.is_finite() || !CONFIDENCE_RANGE.contains(&v))
-            {
-                return Err(CodeReviewConfigError::MinConfidenceOutOfRange { model: spec.model });
+            match spec.min_confidence {
+                None => {
+                    return Err(CodeReviewConfigError::MissingMinConfidence { model: spec.model })
+                }
+                Some(v) if !v.is_finite() || !CONFIDENCE_RANGE.contains(&v) => {
+                    return Err(CodeReviewConfigError::MinConfidenceOutOfRange {
+                        model: spec.model,
+                    })
+                }
+                Some(_) => {}
             }
             if !seen.insert(spec.model.clone()) {
                 return Err(CodeReviewConfigError::DuplicateModel { model: spec.model });
