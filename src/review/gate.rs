@@ -65,11 +65,15 @@ const CAUSE_UNAUTHORIZED: &str = "unauthorized";
 const CAUSE_CHAIN_EXHAUSTED: &str = "chain exhausted";
 /// Cause of a critical finding judged a false positive: it stays in the main list.
 const CAUSE_CRITICAL_NEVER_FILTERED: &str = "critical never filtered";
+/// Cause of a finding whose asked pairs were all judged false positives while pairs past
+/// [`MAX_GATE_QUESTIONS_PER_FINDING`] went unasked: what was never judged is never filtered.
+const CAUSE_NOT_EVERY_CLAIM_JUDGED: &str = "not every claim judged";
 
 /// The most distinct (title, detail) pairs of one finding put to the chain: one per mage of the
 /// trio. Each pair is a walk of the chain, so a finding merged from many rewordings (several
 /// batches, several mages) would otherwise spend the review clock on itself; pairs past the cap
-/// are not asked, and the finding is `filtered` only when every pair asked is.
+/// are not asked. A finding is `filtered` only when it has no unasked pair and every pair is;
+/// with pairs left unasked it stays `low_confidence`.
 pub const MAX_GATE_QUESTIONS_PER_FINDING: usize = 3;
 
 /// What the gate made of a finding.
@@ -80,7 +84,8 @@ pub enum GateState {
     Kept,
     /// A model judged it a false positive with enough confidence; listed apart, never deleted.
     Filtered,
-    /// No model reached its threshold, or a critical finding was judged a false positive.
+    /// No model reached its threshold, a critical finding was judged a false positive, or every
+    /// pair asked was judged one while pairs past the question cap went unasked.
     LowConfidence,
     /// The gate could not judge it; it passes with its cause.
     Unfiltered,
@@ -394,8 +399,9 @@ impl<'a> Gate<'a> {
     /// (a `critical` stays `low_confidence` instead), a confident `real_defect` keeps it, an
     /// answer under the threshold passes to the next model, a 400 rotates and is remembered, a
     /// 413/422 ends the chain, a 401/403 stops the gate, and a call cut by the review clock stops
-    /// it as `timeout`. A merged finding is `filtered` only when every pair asked is. Every
-    /// `unfiltered` writes one WARN entry. At most one call per model per pair.
+    /// it as `timeout`. A merged finding is `filtered` only when every pair was asked and judged a
+    /// false positive; with pairs past the cap unasked it is `low_confidence` (`not every claim
+    /// judged`). Every `unfiltered` writes one WARN entry. At most one call per model per pair.
     ///
     /// # Arguments
     /// * `finding` - the consolidated finding.
@@ -488,9 +494,8 @@ impl<'a> Gate<'a> {
         if deadline.is_some_and(|d| d <= Instant::now()) {
             return self.stop(CAUSE_TIMEOUT);
         }
-        let asked = constituents(finding)
-            .len()
-            .min(MAX_GATE_QUESTIONS_PER_FINDING);
+        let pairs = constituents(finding).len();
+        let asked = pairs.min(MAX_GATE_QUESTIONS_PER_FINDING);
         let states: Vec<Value> = (0..asked)
             .map(|i| gate_state_of(finding, i, code))
             .collect();
@@ -511,6 +516,10 @@ impl<'a> Gate<'a> {
             if outcome.state != GateState::Filtered {
                 break;
             }
+        }
+        if outcome.state == GateState::Filtered && asked < pairs {
+            outcome.state = GateState::LowConfidence;
+            outcome.cause = Some(CAUSE_NOT_EVERY_CLAIM_JUDGED);
         }
         if outcome.decided {
             if let Some(model) = &outcome.model {
