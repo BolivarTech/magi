@@ -454,6 +454,39 @@ mod tests {
     }
 
     #[test]
+    fn git_tells_a_missing_ref_and_a_root_commit_apart_from_a_broken_repository() {
+        // [MAGI §6 MS2 A loop 1, measured with git 2.56] `rev-parse --verify --quiet` exits 1 with nothing on stderr
+        // for a name that is no commit (and for a root commit's parent); a broken repository exits 128 with a message.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "root"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let resolve = |input: ReviewInput| {
+            magi_rs::review::input::resolve_input(&input, d.path(), &g, &allow)
+        };
+        assert!(matches!(
+            resolve(ReviewInput::Commit(Some("nope".into()))),
+            Err(ReviewError::RefNotFound(_))
+        ));
+        match resolve(ReviewInput::Commit(None)) {
+            Ok(r) => assert!(matches!(
+                r.source_kind,
+                magi_rs::review::input::SourceKind::Revision { old_rev: None, .. }
+            )),
+            Err(e) => panic!("a root commit is reviewable: {e:?}"),
+        }
+        std::fs::write(d.path().join(".git").join("HEAD"), "garbage\n").expect("write");
+        assert!(matches!(
+            resolve(ReviewInput::Commit(None)),
+            Err(ReviewError::Git(_))
+        ));
+    }
+
+    #[test]
     fn a_workspace_below_the_repo_root_reviews_only_its_own_subtree() {
         // [CP2 MS2 S1 loop 4] the workspace need not be the repo root.
         let d = repo();

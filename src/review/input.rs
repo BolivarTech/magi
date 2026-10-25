@@ -703,20 +703,21 @@ mod tests {
     fn pinning_turns_every_ref_into_its_commit_and_leaves_the_working_tree_alone() {
         let git = FakeGit::from(&[
             (
-                "rev-parse --verify HEAD^{commit}",
+                "rev-parse --verify --quiet HEAD^{commit}",
                 Ok("aaa
 "),
             ),
             (
-                "rev-parse --verify main^{commit}",
+                "rev-parse --verify --quiet main^{commit}",
                 Ok("bbb
 "),
             ),
             (
-                "rev-parse --verify x^{commit}",
+                "rev-parse --verify --quiet x^{commit}",
                 Ok("ccc
 "),
             ),
+            ("rev-parse --verify --quiet gone^{commit}", Err("")),
         ]);
         let pinned = |i: ReviewInput| pin_refs(&i, &git).expect("pins");
         assert_eq!(
@@ -779,11 +780,11 @@ mod tests {
         let git = FakeGit(
             [
                 (
-                    "rev-parse --verify HEAD^{commit}".to_string(),
+                    "rev-parse --verify --quiet HEAD^{commit}".to_string(),
                     Ok("abc\n".to_string()),
                 ),
                 (
-                    "rev-parse --verify HEAD^^{commit}".to_string(),
+                    "rev-parse --verify --quiet abc^^{commit}".to_string(),
                     Ok("p\n".to_string()),
                 ),
                 (
@@ -816,8 +817,8 @@ mod tests {
     #[test]
     fn a_root_commit_is_reviewed_against_the_empty_tree() {
         let git = FakeGit::from(&[
-            ("rev-parse --verify HEAD^{commit}", Ok("r\n")),
-            ("rev-parse --verify HEAD^^{commit}", Err("fatal: no parent")),
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("r\n")),
+            ("rev-parse --verify --quiet r^^{commit}", Err("")),
             ("diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative r",
              Ok("diff --git a/a.rs b/a.rs\nnew file mode 100644\n--- /dev/null\n+++ b/a.rs\n@@ -0,0 +1 @@\n+fn f() {}\n")),
         ]);
@@ -838,8 +839,8 @@ mod tests {
     fn an_unknown_ref_is_a_typed_error() {
         let git = FakeGit(
             [(
-                "rev-parse --verify nope^{commit}".to_string(),
-                Err("fatal".to_string()),
+                "rev-parse --verify --quiet nope^{commit}".to_string(),
+                Err(String::new()),
             )]
             .into_iter()
             .collect(),
@@ -852,6 +853,80 @@ mod tests {
                 &allow_all
             ),
             Err(ReviewError::RefNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_git_that_fails_while_resolving_a_ref_is_a_git_error_not_a_missing_ref() {
+        // [MAGI §6 MS2 A loop 1] only git's "no such commit" answer (exit 1, nothing on stderr) is a missing ref;
+        // a timeout or a corrupt repository is reported as what it is.
+        let git = FakeGit::from(&[(
+            "rev-parse --verify --quiet main^{commit}",
+            Err("fatal: unable to read refs/heads/main"),
+        )]);
+        for input in [
+            ReviewInput::Commit(Some("main".into())),
+            ReviewInput::Range {
+                from: "main".into(),
+                to: "main".into(),
+            },
+        ] {
+            assert!(
+                matches!(
+                    resolve_input(&input, Path::new("/w"), &git, &allow_all),
+                    Err(ReviewError::Git(_))
+                ),
+                "{input:?}"
+            );
+        }
+        assert!(matches!(
+            pin_refs(&ReviewInput::Commit(Some("main".into())), &git),
+            Err(ReviewError::Git(_))
+        ));
+    }
+
+    #[test]
+    fn a_failing_parent_lookup_is_an_error_not_a_root_commit() {
+        // A root commit is git's "no such commit" for `<sha>^`; anything else must not drop the old side.
+        let git = FakeGit::from(&[
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
+            (
+                "rev-parse --verify --quiet abc^^{commit}",
+                Err("fatal: git rev-parse did not finish in 300 s"),
+            ),
+            (
+                "diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative abc",
+                Ok(ONE_HUNK),
+            ),
+        ]);
+        assert!(matches!(
+            resolve_input(
+                &ReviewInput::Commit(None),
+                Path::new("/w"),
+                &git,
+                &allow_all
+            ),
+            Err(ReviewError::Git(_))
+        ));
+    }
+
+    #[test]
+    fn a_git_failure_on_head_never_falls_back_to_reviewing_every_file_whole() {
+        // [MAGI §6 MS2 A loop 1] the unborn-repository fallback is for git's "no such commit" answer only.
+        let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            (
+                "rev-parse --verify --quiet HEAD^{commit}",
+                Err("fatal: git rev-parse did not finish in 300 s"),
+            ),
+            (
+                "ls-files --cached --others --exclude-standard -z",
+                Ok("a.rs\0b.rs\0"),
+            ),
+        ]);
+        assert!(matches!(
+            resolve_input(&ReviewInput::Uncommitted, Path::new("/w"), &git, &allow_all),
+            Err(ReviewError::Git(_))
         ));
     }
 
@@ -879,8 +954,8 @@ mod tests {
     #[test]
     fn a_range_is_reviewed_from_its_right_end_against_its_left_end() {
         let git = FakeGit::from(&[
-            ("rev-parse --verify v1^{commit}", Ok("a\n")),
-            ("rev-parse --verify v2^{commit}", Ok("b\n")),
+            ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
+            ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative a..b",
                 Ok(ONE_HUNK),
@@ -910,8 +985,8 @@ mod tests {
     #[test]
     fn branches_are_reviewed_from_their_merge_base() {
         let git = FakeGit::from(&[
-            ("rev-parse --verify main^{commit}", Ok("a\n")),
-            ("rev-parse --verify feature/x^{commit}", Ok("b\n")),
+            ("rev-parse --verify --quiet main^{commit}", Ok("a\n")),
+            ("rev-parse --verify --quiet feature/x^{commit}", Ok("b\n")),
             ("merge-base a b", Ok("mb1\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative mb1..b",
@@ -939,8 +1014,8 @@ mod tests {
     fn branches_without_a_common_ancestor_are_a_typed_error_that_says_what_to_do() {
         // [CP2 MS2 S1a loop 11] unrelated histories: `merge-base` exits 1 with no output, never an empty message.
         let git = FakeGit::from(&[
-            ("rev-parse --verify main^{commit}", Ok("a\n")),
-            ("rev-parse --verify orphan^{commit}", Ok("b\n")),
+            ("rev-parse --verify --quiet main^{commit}", Ok("a\n")),
+            ("rev-parse --verify --quiet orphan^{commit}", Ok("b\n")),
             ("merge-base a b", Err("")),
         ]);
         match resolve_input(
@@ -965,8 +1040,8 @@ mod tests {
     #[test]
     fn an_unknown_range_end_is_a_typed_error() {
         let git = FakeGit::from(&[
-            ("rev-parse --verify v1^{commit}", Ok("a\n")),
-            ("rev-parse --verify nope^{commit}", Err("fatal")),
+            ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
+            ("rev-parse --verify --quiet nope^{commit}", Err("")),
         ]);
         assert!(matches!(
             resolve_input(
@@ -986,7 +1061,7 @@ mod tests {
     fn uncommitted_changes_are_the_diff_against_head_plus_untracked_files_whole() {
         let git = FakeGit::from(&[
             ("rev-parse --is-inside-work-tree", Ok("true\n")),
-            ("rev-parse --verify HEAD^{commit}", Ok("abc\n")),
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative abc",
                 Ok(ONE_HUNK),
@@ -1017,10 +1092,7 @@ mod tests {
     fn uncommitted_changes_in_a_repo_without_commits_have_no_old_side() {
         let git = FakeGit::from(&[
             ("rev-parse --is-inside-work-tree", Ok("true\n")),
-            (
-                "rev-parse --verify HEAD^{commit}",
-                Err("fatal: needed a single revision"),
-            ),
+            ("rev-parse --verify --quiet HEAD^{commit}", Err("")),
             // [CP2 MS2 S1 loop 3] staged files (`git add`, no commit yet) are --cached, and must not be lost.
             (
                 "ls-files --cached --others --exclude-standard -z",
@@ -1072,9 +1144,8 @@ mod tests {
         impl GitCommand for BytesGit {
             fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
                 match args.join(" ").as_str() {
-                    "rev-parse --verify v1^{commit}" | "rev-parse --verify v2^{commit}" => {
-                        Ok(b"x\n".to_vec())
-                    }
+                    "rev-parse --verify --quiet v1^{commit}"
+                    | "rev-parse --verify --quiet v2^{commit}" => Ok(b"x\n".to_vec()),
                     "diff --no-color --no-ext-diff --no-textconv --relative x..x" => {
                         Ok(self.0.clone())
                     }
@@ -1104,8 +1175,8 @@ mod tests {
     #[test]
     fn a_merge_commit_with_an_empty_diff_is_nothing_to_review() {
         let git = FakeGit::from(&[
-            ("rev-parse --verify M^{commit}", Ok("m\n")),
-            ("rev-parse --verify M^^{commit}", Ok("p\n")),
+            ("rev-parse --verify --quiet M^{commit}", Ok("m\n")),
+            ("rev-parse --verify --quiet m^^{commit}", Ok("p\n")),
             (
                 "diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative m",
                 Ok(""),
@@ -1278,8 +1349,8 @@ mod tests {
             "diff --git \"a/b\\vc.rs\" \"b/b\\vc.rs\"\n--- \"a/b\\vc.rs\"\n+++ \"b/b\\vc.rs\"\n@@ -1 +1 @@\n-x\n+y\n",
         );
         let git = FakeGit::from(&[
-            ("rev-parse --verify v1^{commit}", Ok("a\n")),
-            ("rev-parse --verify v2^{commit}", Ok("b\n")),
+            ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
+            ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative a..b",
                 Ok(diff),
@@ -1331,8 +1402,8 @@ mod tests {
             .chain([hostile.len()])
         {
             let git = FakeGit::from(&[
-                ("rev-parse --verify v1^{commit}", Ok("a\n")),
-                ("rev-parse --verify v2^{commit}", Ok("b\n")),
+                ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
+                ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
                 (
                     "diff --no-color --no-ext-diff --no-textconv --relative a..b",
                     Ok(&hostile[..end]),
@@ -1362,8 +1433,8 @@ mod tests {
             "diff --git a/x b/y\nBinary files a/x and b/y differ\n", // asymmetric, no rename: git never writes it
         );
         let git = FakeGit::from(&[
-            ("rev-parse --verify v1^{commit}", Ok("a\n")),
-            ("rev-parse --verify v2^{commit}", Ok("b\n")),
+            ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
+            ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative a..b",
                 Ok(diff),
