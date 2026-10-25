@@ -39,6 +39,9 @@ pub struct RunOutcome {
     pub transcript: Vec<TranscriptEntry>,
     /// Opaque MAGI object from a `consult` pass; `None` if there was none.
     pub consult: Option<serde_json::Value>,
+    /// Opaque `code-review` object (the review's summary); `None` for every other command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_review: Option<serde_json::Value>,
     /// Effective limits after applying operator caps and envelope clamps.
     pub applied_caps: AppliedCaps,
     /// Error detail if the run failed; `None` on success.

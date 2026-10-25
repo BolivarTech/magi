@@ -28,6 +28,7 @@
 )]
 
 pub mod batching;
+pub mod clock;
 pub mod config;
 pub mod consolidate;
 pub mod context;
@@ -38,6 +39,8 @@ pub mod hunk;
 pub mod index;
 pub mod input;
 pub mod languages;
+pub mod pipeline;
+pub mod report;
 pub mod secrets;
 pub mod source;
 pub mod validate;

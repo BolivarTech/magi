@@ -312,10 +312,118 @@ impl ContentSource for RevisionSource<'_> {
     }
 }
 
+/// Memoizes each successful read of an inner source, by side and path, for one review.
+pub struct CachedSource<'a> {
+    inner: &'a dyn ContentSource,
+    cap: u64,
+}
+
+impl<'a> CachedSource<'a> {
+    /// A cache over `inner`, bounded by [`MAX_REVIEW_TOTAL_BYTES`].
+    pub fn new(inner: &'a dyn ContentSource) -> Self {
+        Self::with_total_cap(inner, MAX_REVIEW_TOTAL_BYTES)
+    }
+
+    /// A cache over `inner` with an explicit total cap.
+    pub(crate) fn with_total_cap(inner: &'a dyn ContentSource, cap: u64) -> Self {
+        Self { inner, cap }
+    }
+}
+
+impl ContentSource for CachedSource<'_> {
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+        let _ = self.cap;
+        self.inner.read(path)
+    }
+
+    fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+        self.inner.read_old(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::review::test_support::FakeGit;
+
+    #[test]
+    fn a_cached_source_reads_each_side_of_a_path_once() {
+        // [CP2 MS2 S1 loop 8] several stages read the same file; RevisionSource pays a `git show` per read.
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        struct Counting(AtomicUsize);
+        impl ContentSource for Counting {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.0.fetch_add(1, SeqCst);
+                Ok(Some(b"x".to_vec()))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.0.fetch_add(1, SeqCst);
+                Ok(None)
+            }
+        }
+        let inner = Counting(AtomicUsize::new(0));
+        let cached = CachedSource::new(&inner);
+        for _ in 0..3 {
+            assert_eq!(cached.read("a.rs").expect("read"), Some(b"x".to_vec()));
+            assert_eq!(cached.read_old("a.rs").expect("read_old"), None);
+        }
+        assert_eq!(inner.0.load(SeqCst), 2);
+    }
+
+    #[test]
+    fn a_cached_source_keeps_the_bytes_it_first_read_even_if_the_file_changes() {
+        // [CP2 MS2 S1b loop 10] RV22: the filter scanned the first read; later stages must see those same bytes.
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        struct Changing(AtomicUsize);
+        impl ContentSource for Changing {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(if self.0.fetch_add(1, SeqCst) == 0 {
+                    b"clean".to_vec()
+                } else {
+                    b"changed".to_vec()
+                }))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let inner = Changing(AtomicUsize::new(0));
+        let cached = CachedSource::new(&inner);
+        assert_eq!(cached.read("a.rs").expect("first"), Some(b"clean".to_vec()));
+        assert_eq!(
+            cached.read("a.rs").expect("second"),
+            Some(b"clean".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_cached_source_refuses_to_hold_more_than_the_total_cap() {
+        // [CP2 MS2 S1a loop 10] the per-file cap bounds a file; this bounds the review, before any model call.
+        struct Three;
+        impl ContentSource for Three {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(b"abc".to_vec()))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(b"abc".to_vec()))
+            }
+        }
+        let cached = CachedSource::with_total_cap(&Three, 5);
+        assert_eq!(cached.read("a.rs").expect("fits"), Some(b"abc".to_vec()));
+        // [CP2 MS2 cierre (sin MAGI)] the old side is held too, so it counts toward the same cap.
+        assert!(matches!(
+            cached.read_old("a.rs"),
+            Err(ReviewError::InputTooLarge { limit: 5 })
+        ));
+        assert!(matches!(
+            cached.read("b.rs"),
+            Err(ReviewError::InputTooLarge { limit: 5 })
+        ));
+        assert_eq!(
+            cached.read("a.rs").expect("already held: adds nothing"),
+            Some(b"abc".to_vec())
+        );
+    }
 
     // [CP2 MS2 S1 loop 4: absent vs failed, decided by ls-tree, never by error text]
     #[test]

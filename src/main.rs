@@ -7746,6 +7746,7 @@ mod envelope_audit_guard {
             }],
             transcript: Vec::new(),
             consult: None,
+            code_review: None,
             applied_caps: AppliedCaps {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,
@@ -7815,6 +7816,7 @@ mod envelope_audit_guard {
                 "cause": format!("endpoint {VALUE}"),
                 format!("host-{VALUE}"): "reachable",
             })),
+            code_review: None,
             applied_caps: AppliedCaps {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,
@@ -7890,6 +7892,7 @@ mod envelope_audit_guard {
             tool_calls: Vec::new(),
             transcript: Vec::new(),
             consult: Some(consult),
+            code_review: None,
             applied_caps: AppliedCaps {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,
@@ -11888,6 +11891,7 @@ mod tests {
             tool_calls: Vec::new(),
             transcript: Vec::new(),
             consult: None,
+            code_review: None,
             applied_caps: AppliedCaps {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,
@@ -18547,6 +18551,7 @@ base_url = \"http://192.168.0.30:11434/v1\"
                 tool_calls: Vec::new(),
                 transcript: Vec::new(),
                 consult: Some(consult),
+                code_review: None,
                 applied_caps: AppliedCaps {
                     max_tool_calls: 15,
                     max_tool_calls_clamped: false,

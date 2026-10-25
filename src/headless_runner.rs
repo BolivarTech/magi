@@ -1020,6 +1020,7 @@ pub async fn run_consult(
         tool_calls: Vec::new(),
         transcript,
         consult,
+        code_review: None,
         applied_caps: AppliedCaps {
             // Same reasoning as `run_query`: `resolved.applied_caps.timeout_secs` is a
             // static `None` from `resolution::resolve`; the direct consult route knows
@@ -1302,6 +1303,7 @@ pub async fn run_query(
         // `--auto`+ call); `None` when none ran or it was denied by the tier. The run's
         // deadline verdict is stamped in here (SC-A04d) because only the run knows it.
         consult: apply_timeout_verdict(extract_consult_value(&calls), wiring.timeout_below_formula),
+        code_review: None,
         applied_caps: AppliedCaps {
             // `resolution::resolve` cannot know the caller's wall-clock ceiling (it is
             // resolved separately, into `wiring.timeout`); stamp the effective one here

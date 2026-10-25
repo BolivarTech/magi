@@ -802,6 +802,7 @@ impl RunOutcome {
                 },
             ],
             consult: None,
+            code_review: None,
             applied_caps: AppliedCaps {
                 max_tool_calls: 15,
                 max_tool_calls_clamped: false,
