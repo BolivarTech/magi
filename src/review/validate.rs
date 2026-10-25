@@ -187,8 +187,8 @@ fn check(
 /// of all batches). Checks are independent and run in this order, the first failure naming the
 /// cause: the file was shown, the line lies in a shown range, every symbol cited in backticks in
 /// `title` and `detail` occurs in the code (only for files with a language extractor, and only
-/// with a complete index). A finding without `file` skips the first two; one without `line`, the
-/// range check.
+/// with a complete index). A finding without `file`, or with a blank one, skips the first two and
+/// leaves with no `file`; one without `line`, the range check.
 ///
 /// A reported `critical` whose only failure is the symbol check stays in `agents` for the gate
 /// (U21) and is recorded in [`Validation::symbol_unverified`]; file and range failures discard it.
@@ -212,7 +212,11 @@ pub fn validate_batch(
     for agent in agents.iter_mut() {
         let name = agent.agent;
         let mut kept = Vec::with_capacity(agent.findings.len());
-        for finding in std::mem::take(&mut agent.findings) {
+        for mut finding in std::mem::take(&mut agent.findings) {
+            // A blank file is no location, as consolidation and magi-core's key read it.
+            if finding.file.as_deref().is_some_and(|f| f.trim().is_empty()) {
+                finding.file = None;
+            }
             let location = normalize_location(
                 workspace,
                 finding.file.as_deref().unwrap_or_default(),
@@ -240,7 +244,6 @@ pub fn validate_batch(
                 }
                 None => {}
             }
-            let mut finding = finding;
             if finding.file.is_some() {
                 finding.file = Some(location.0);
             }
