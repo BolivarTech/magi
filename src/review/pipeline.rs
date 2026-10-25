@@ -40,8 +40,10 @@ const LOG_TARGET: &str = "magi_rs::review";
 const CLOCK_EXPIRED: &str = "clock expired";
 /// Windows' verbatim path prefix, which a reported location never carries.
 const VERBATIM_PREFIX: &str = r"\\?\";
-/// The verbatim prefix of a UNC path, left as it is.
+/// What follows [`VERBATIM_PREFIX`] in a verbatim UNC path (`\\?\UNC\srv\share`).
 const VERBATIM_UNC: &str = r"UNC\";
+/// The prefix of a UNC path as an editor writes it (`\\srv\share`).
+const UNC_PREFIX: &str = r"\\";
 
 /// Why one batch's `consult` gave no report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -733,14 +735,17 @@ fn gate_code(
     }
 }
 
-/// `path` without Windows' verbatim prefix (`\\?\C:\w` becomes `C:\w`), so a reported absolute
-/// location compares with the workspace as an editor writes it. A verbatim UNC path is left as
-/// it is.
+/// `path` without Windows' verbatim prefix, so a reported absolute location compares with the
+/// workspace as an editor writes it: `\\?\C:\w` becomes `C:\w` and `\\?\UNC\srv\share\w` becomes
+/// `\\srv\share\w`. Any other path is returned as it is.
 fn without_verbatim_prefix(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     match text.strip_prefix(VERBATIM_PREFIX) {
-        Some(rest) if !rest.starts_with(VERBATIM_UNC) => PathBuf::from(rest),
-        _ => path.to_path_buf(),
+        Some(rest) => match rest.strip_prefix(VERBATIM_UNC) {
+            Some(share) => PathBuf::from(format!("{UNC_PREFIX}{share}")),
+            None => PathBuf::from(rest),
+        },
+        None => path.to_path_buf(),
     }
 }
 
