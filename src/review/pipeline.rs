@@ -1767,6 +1767,52 @@ mod tests {
         assert_eq!(out.summary.judged_fraction, 1.0);
     }
 
+    #[test]
+    fn a_verbatim_prefix_is_dropped_and_a_verbatim_unc_path_is_kept() {
+        // Windows canonicalizes to `\\?\C:\..`; a mage reports `C:\..`.
+        let plain = |p: &str| {
+            without_verbatim_prefix(Path::new(p))
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(plain(r"\\?\C:\w"), r"C:\w");
+        assert_eq!(plain(r"\\?\UNC\srv\share"), r"\\?\UNC\srv\share");
+        assert_eq!(plain("/w"), "/w");
+    }
+
+    #[tokio::test]
+    async fn an_absolute_location_under_a_verbatim_workspace_is_kept_and_made_relative() {
+        // The workspace may arrive canonical (a verbatim path on Windows) while the mage writes the
+        // path an editor shows: the location must still fall in what was reviewed.
+        let dir = workspace(1);
+        let canonical = std::fs::canonicalize(dir.path()).expect("canonical");
+        let reported = without_verbatim_prefix(&canonical)
+            .join("f0.rs")
+            .to_string_lossy()
+            .into_owned();
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":reported,"line":3}]);
+        let consult =
+            FakeConsult::new(vec![Ok(
+                real_report([f.clone(), f, serde_json::json!([])]).await
+            )]);
+        let out = review(
+            &canonical,
+            None,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("runs");
+        assert!(
+            out.summary.discarded.is_empty(),
+            "{:?}",
+            out.summary.discarded
+        );
+        assert_eq!(out.summary.findings.len(), 1);
+        assert_eq!(out.summary.findings[0].0.file.as_deref(), Some("f0.rs"));
+    }
+
     #[tokio::test]
     async fn a_ceiling_below_the_configured_agent_timeout_is_declared() {
         // [CP2 MS2 S2 loop 2] RV06: 10 000 s over one batch derives a ceiling (≈1 388 s) below agent_timeout_secs (2 335).
