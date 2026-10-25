@@ -70,7 +70,8 @@ pub enum SkipCause {
     OutsideWorkspace,
     /// A file over the per-file byte cap.
     TooLarge,
-    /// A link whose target is not a regular file (a directory inside the workspace).
+    /// A path whose target is not a regular file: a link to a directory inside the workspace, a
+    /// FIFO, a socket or a device file.
     NotRegularFile,
 }
 

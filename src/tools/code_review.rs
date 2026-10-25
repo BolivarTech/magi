@@ -1446,17 +1446,7 @@ mod tests {
     async fn the_production_runner_refuses_a_junction_that_escapes() {
         let (tmp, ws) = guarded_workspace();
         let base = dunce::canonicalize(tmp.path()).expect("canonical");
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(ws.join("link"))
-            .arg(base.join("fuera"))
-            .output()
-            .expect("spawn mklink");
-        assert!(
-            made.status.success(),
-            "mklink /J: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
+        junction(&ws.join("link"), &base.join("fuera"));
         let consult = Arc::new(CountingConsult::default());
         let runner = production_runner(&ws, Arc::clone(&consult));
         for escaping in ["link", "link/x.rs"] {
