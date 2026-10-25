@@ -1382,6 +1382,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_text_report_lists_filtered_findings_apart_and_prints_the_lowered_severity() {
+        // RV10: a filtered finding is listed apart, never among the findings; RV11: a single-mage
+        // critical is a warning everywhere the text names its severity.
+        let dir = workspace(1);
+        let fp = serde_json::json!({"severity":"warning","title":"fp-title","detail":"d","file":"f0.rs","line":3});
+        let crit = serde_json::json!({"severity":"critical","title":"crit-title","detail":"d","file":"f0.rs","line":5});
+        let consult = FakeConsult::new(vec![Ok(real_report([
+            serde_json::json!([fp.clone()]),
+            serde_json::json!([fp]),
+            serde_json::json!([crit]),
+        ])
+        .await)]);
+        let mut client = MockDecisionClient::new();
+        client.expect_decide().returning(|r| {
+            let line = r.state()["finding"]["line"].as_u64().unwrap_or(0);
+            let choice = if line == 3 {
+                "false_positive"
+            } else {
+                "real_defect"
+            };
+            answer(r.model().unwrap_or(""), choice, 0.95)
+        });
+        let mut out = review(dir.path(), None, &consult, &client, &FakeClock::default())
+            .await
+            .expect("runs");
+        // render_text's own redaction: a raw credential injected after the pipeline.
+        out.summary.findings[0].0.details =
+            vec!["see https://user:hunter2@example.invalid/x".into()];
+        let text = render_text(
+            out.consolidated.as_ref().expect("consolidated"),
+            &out.summary,
+        );
+        let (main, apart) = text
+            .split_once("## Filtered by the gate")
+            .expect("a filtered section");
+        assert!(!main.contains("fp-title"), "{text}");
+        assert!(apart.contains("fp-title"), "{text}");
+        let key = main
+            .split_once("## Key Findings")
+            .expect("key findings")
+            .1
+            .split_once("\n## ")
+            .expect("next section")
+            .0;
+        assert!(
+            key.contains("[WARNING]") && key.contains("crit-title"),
+            "{key}"
+        );
+        let findings = main.split_once("## Findings").expect("findings").1;
+        assert!(
+            findings.contains("[warning] f0.rs:5 crit-title (single_mage)"),
+            "{findings}"
+        );
+        assert!(
+            !text.contains("CRITICAL") && !text.contains("[critical]"),
+            "{text}"
+        );
+        assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    #[tokio::test]
     async fn the_pipeline_runs_validation_then_consolidation_then_gate_then_agreement() {
         // RV-S33. f0.rs has 26 lines: line 999 is out of range; line 3 is seen by two mages and is a false
         // positive for the gate; line 5 is a critical seen by Caspar alone and is real.
