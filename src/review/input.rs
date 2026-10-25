@@ -373,8 +373,8 @@ fn resolve_directory(
         source_kind: SourceKind::Worktree { old_rev: None },
         not_utf8: Vec::new(),
     };
+    let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
     if in_work_tree(git, workspace, &dir)? {
-        let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
         let mut args = LS_FILES_ALL.to_vec();
         args.extend_from_slice(&["--", pathspec]);
         let (names, not_utf8) = split_nul(&git.run_bytes(&args)?);
@@ -391,7 +391,6 @@ fn resolve_directory(
             .map(|path| ReviewFile { path, diff: None })
             .collect();
     } else {
-        let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
         let mut args = LS_FILES_IGNORED_DIRECTORIES.to_vec();
         args.extend_from_slice(&["--", pathspec]);
         let (ignored, _not_utf8) = split_nul(&git.run_bytes_without_repository(&args)?);
