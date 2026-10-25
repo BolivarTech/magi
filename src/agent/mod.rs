@@ -434,7 +434,6 @@ pub struct ApprovalRequest {
     pub input: serde_json::Value,
     pub tx: oneshot::Sender<bool>,
     /// What the call would cost, from [`Tool::approval_detail`], shown under the prompt.
-    #[allow(dead_code)] // Red stub
     pub detail: Option<String>,
 }
 
@@ -1052,13 +1051,18 @@ impl Agent {
 
             if needs_approval {
                 if let Some(ref tx) = self.approval_tx {
+                    let detail = self
+                        .tools
+                        .iter()
+                        .find(|t| t.name() == name)
+                        .and_then(|t| t.approval_detail(input));
                     let (oneshot_tx, oneshot_rx) = oneshot::channel();
                     let _ = tx
                         .send(ApprovalRequest {
                             tool_name: name.to_string(),
                             input: input.clone(),
                             tx: oneshot_tx,
-                            detail: None,
+                            detail,
                         })
                         .await;
                     match timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), oneshot_rx).await {

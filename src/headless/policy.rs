@@ -24,14 +24,22 @@ pub const READ_ONLY_TOOLS: &[&str] = &["ls", "view", "grep", "decide"];
 
 /// Names of tools that mutate state or run additional processes/LLMs — approved only in
 /// `Auto`/`FullAuto` (REQ-H07). Verified against the real registry in `main.rs`
-/// (`FileWriteTool`/`BashTool`/`ConsultTool`/`ProjectFactTool`, whose `Tool::name()` returns
-/// these four literals — see `src/tools/{write,bash,consult,knowledge}.rs`).
+/// (`FileWriteTool`/`BashTool`/`ConsultTool`/`ProjectFactTool`/`CodeReviewTool`, whose
+/// `Tool::name()` returns these five literals — see
+/// `src/tools/{write,bash,consult,knowledge,code_review}.rs`). A review runs one MAGI consult per
+/// batch and sends the reviewed code to the model endpoints, so it is never read-only.
 ///
 /// `pub` (not `pub(crate)`, which would not cross the lib/bin crate boundary): the binary
 /// crate's `headless_runner.rs` — which, unlike this pure `headless` module, CAN reach
 /// `crate::tools` — cross-checks this list against the real `Tool::name()` implementations
 /// (MAGI S6 gate finding 8, `test_policy_tool_lists_match_real_tool_name_implementations`).
-pub const READ_WRITE_TOOLS: &[&str] = &["edit", "bash", "consult", "project_knowledge"];
+pub const READ_WRITE_TOOLS: &[&str] = &[
+    "edit",
+    "bash",
+    "consult",
+    "project_knowledge",
+    "code-review",
+];
 
 /// Tool authorization tier for a headless run.
 ///

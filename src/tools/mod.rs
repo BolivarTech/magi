@@ -114,7 +114,6 @@ pub trait Tool: Send + Sync {
     ///
     /// # Returns
     /// The detail, or `None`.
-    #[allow(dead_code)] // Red stub
     fn approval_detail(&self, _args: &Value) -> Option<String> {
         None
     }

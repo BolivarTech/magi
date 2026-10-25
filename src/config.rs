@@ -1859,7 +1859,6 @@ impl MagiConfig {
     ///
     /// # Returns
     /// An owned section whose `timeout_secs`, `max_state_bytes` and `auto_approve` are `Some`.
-    #[allow(dead_code)] // consumer: the code-review subcommand and tool wiring
     #[must_use]
     pub fn effective_code_review(&self) -> magi_rs::review::config::CodeReviewSection {
         let mut section = match &self.code_review {

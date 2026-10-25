@@ -1376,30 +1376,90 @@ pub(crate) enum TuiCodeReviewParseError {
     /// The line is not a `/code-review` command at all.
     NotACodeReviewCommand,
     /// The arguments did not parse; the message says why.
-    #[allow(dead_code)] // Red stub
     Invalid(String),
 }
 
+/// The command word of `/code-review`, which is also clap's program name for its arguments.
+const CODE_REVIEW_COMMAND: &str = "/code-review";
+
 /// Parses a trimmed input line as a `/code-review` command.
 ///
+/// The words after the command go through the subcommand's own clap arguments
+/// ([`crate::CodeReviewArgs`]), so the TUI accepts exactly the flags of `magi code-review`; the
+/// program name clap reads first is the command itself, never a path. Words are split on spaces,
+/// so a path with spaces cannot be written here. The output flags parse and are ignored: the
+/// report goes to the transcript.
+///
+/// # Arguments
+/// * `trimmed` - The input line, trimmed.
+///
+/// # Returns
+/// The command; with no arguments, the last commit.
+///
 /// # Errors
-/// [`TuiCodeReviewParseError`].
-#[allow(dead_code)] // Red stub
+/// [`TuiCodeReviewParseError::NotACodeReviewCommand`] for any other line;
+/// [`TuiCodeReviewParseError::Invalid`] with clap's first line for arguments that do not parse.
 pub(crate) fn parse_tui_code_review(
-    _trimmed: &str,
+    trimmed: &str,
 ) -> Result<TuiCodeReviewCommand, TuiCodeReviewParseError> {
-    Err(TuiCodeReviewParseError::NotACodeReviewCommand)
+    use clap::{Args as _, FromArgMatches as _};
+    let rest = match trimmed.strip_prefix(CODE_REVIEW_COMMAND) {
+        Some(rest) if rest.is_empty() || rest.starts_with(' ') => rest,
+        _ => return Err(TuiCodeReviewParseError::NotACodeReviewCommand),
+    };
+    let program = CODE_REVIEW_COMMAND.trim_start_matches('/');
+    let argv = std::iter::once(program).chain(rest.split_whitespace());
+    let invalid = |e: clap::Error| {
+        let text = e.to_string();
+        TuiCodeReviewParseError::Invalid(text.lines().next().unwrap_or_default().to_string())
+    };
+    let command = crate::CodeReviewArgs::augment_args(clap::Command::new(program));
+    let matches = command.try_get_matches_from(argv).map_err(invalid)?;
+    let args = crate::CodeReviewArgs::from_arg_matches(&matches).map_err(invalid)?;
+    Ok(TuiCodeReviewCommand {
+        input: crate::review_input_of(&args),
+        timeout: args.timeout,
+    })
 }
 
-/// The confirmation `/code-review` shows before it spends anything.
-#[allow(dead_code)] // Red stub
-pub(crate) fn tui_code_review_confirmation(
-    _batches: usize,
-    _max_rotations: u32,
-    _agent_timeout_secs: u64,
-) -> String {
-    String::new()
+/// The confirmation text for `batches` batches and a worst case of `worst_case_secs`, labelled
+/// as the maximum it is (REQ-RV18), never as the expected duration.
+fn code_review_confirmation_text(batches: usize, worst_case_secs: u64) -> String {
+    format!(
+        "Code review: {batches} batches; worst case {worst_case_secs} s, the maximum with every \
+         retry and rotation, not the expected duration. It cannot be cancelled once started. \
+         Press 'y' to run it, 'c' or 'Esc' to cancel."
+    )
 }
+
+/// The confirmation `/code-review` shows, from the configured clock.
+///
+/// # Arguments
+/// * `batches` - The batches of the review.
+/// * `max_rotations` - `[magi].max_rotations`, resolved.
+/// * `agent_timeout_secs` - `[magi].agent_timeout_secs`, resolved.
+///
+/// # Returns
+/// The text, with `batches × (1 + max_rotations) × 2 × agent_timeout_secs` as the maximum.
+#[cfg(test)]
+pub(crate) fn tui_code_review_confirmation(
+    batches: usize,
+    max_rotations: u32,
+    agent_timeout_secs: u64,
+) -> String {
+    code_review_confirmation_text(
+        batches,
+        magi_rs::review::clock::tui_worst_case_secs(batches, max_rotations, agent_timeout_secs),
+    )
+}
+
+/// What `/code-review` answers when this session has no review runner.
+const CODE_REVIEW_UNAVAILABLE: &str = "code review is unavailable in this session: the trio or \
+     the gate's decision client could not be built (see the startup notices)";
+/// What the transcript says when the confirmation is answered with 'c' or 'Esc'.
+const CODE_REVIEW_CANCELLED: &str = "code review cancelled; nothing was sent to any model.";
+/// What the transcript says when the review starts.
+const CODE_REVIEW_RUNNING: &str = "running the code review; it cannot be cancelled.";
 
 /// Flag naming the request file of `/decide`.
 const DECIDE_FLAG_REQUEST: &str = "-i";
@@ -2059,10 +2119,8 @@ pub struct App {
     /// [`App::finalize_stream`], so the buffer is one turn wide.
     pub stream_raw: String,
     /// The review runner of this session, if one could be built.
-    #[allow(dead_code)] // Red stub
     pub code_review_runner: Option<std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
     /// A `/code-review` waiting for `y` (run) or `c`/`Esc` (cancel).
-    #[allow(dead_code)] // Red stub
     pub pending_code_review: Option<(
         TuiCodeReviewCommand,
         std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
@@ -2104,20 +2162,63 @@ impl App {
         }
     }
 
-    /// Shows the `/code-review` confirmation and keeps the command pending.
-    #[allow(dead_code)] // Red stub
+    /// Shows the `/code-review` confirmation (the batches and the worst case, as a maximum)
+    /// and keeps the command pending until it is answered; nothing is spent before that.
+    ///
+    /// # Arguments
+    /// * `cmd` - The parsed command.
+    /// * `runner` - The session's review runner.
+    /// * `batches` - The batches its plan counted.
+    /// * `worst_case_secs` - Its worst case.
     pub(crate) fn begin_code_review_confirmation(
         &mut self,
-        _cmd: TuiCodeReviewCommand,
-        _runner: std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
-        _batches: usize,
-        _worst_case_secs: u64,
+        cmd: TuiCodeReviewCommand,
+        runner: std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+        batches: usize,
+        worst_case_secs: u64,
     ) {
+        let text = code_review_confirmation_text(batches, worst_case_secs);
+        for line in audit_for_transcript(&format!("System: {text}")) {
+            self.push_message(line);
+        }
+        self.pending_code_review = Some((cmd, runner));
     }
 
-    /// Answers the pending `/code-review` confirmation.
-    #[allow(dead_code)] // Red stub
-    pub(crate) async fn answer_code_review_confirmation(&mut self, _approved: bool) {}
+    /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
+    /// in line, as `/consult` does (no key is read meanwhile); `false` cancels it. Without a
+    /// pending confirmation it does nothing. Every reply is sanitized and audited.
+    ///
+    /// # Arguments
+    /// * `approved` - Whether the user answered 'y'.
+    pub(crate) async fn answer_code_review_confirmation(&mut self, approved: bool) {
+        let Some((cmd, runner)) = self.pending_code_review.take() else {
+            return;
+        };
+        if !approved {
+            apply_response(self, AgentResponse::Info(CODE_REVIEW_CANCELLED.to_string()));
+            return;
+        }
+        apply_response(self, AgentResponse::Info(CODE_REVIEW_RUNNING.to_string()));
+        let timeout = cmd.timeout.map(std::time::Duration::from_secs);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        match runner.run(cmd.input, timeout, &cancel).await {
+            Ok(rendered) => {
+                let body = crate::agent::Agent::sanitize_text(&rendered.text);
+                apply_response(self, AgentResponse::Text(body));
+                if let Some(failure) = rendered.failure {
+                    let failure = crate::agent::Agent::sanitize_text(&failure);
+                    apply_response(self, AgentResponse::Error(failure));
+                }
+            }
+            Err(e) => {
+                let text = magi_rs::redact::redact_foreign_text(&e.to_string()).to_string();
+                apply_response(
+                    self,
+                    AgentResponse::Error(crate::agent::Agent::sanitize_text(&text)),
+                );
+            }
+        }
+    }
 
     /// Toggles between the compact thinking indicator (mode B, default) and the
     /// verbose reasoning stream (mode A, for debugging). Returns the new value.
@@ -2437,6 +2538,8 @@ pub struct TuiMagiRuntimeConfig {
     /// trio's own key, never inherited, never another provider's). The post-`/login` rebuild,
     /// which is always Anthropic, prefers it to the login key.
     pub magi_own_key: Option<String>,
+    /// The session's review runner for `/code-review`, `None` when it could not be built.
+    pub code_review: Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
 }
 
 /// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
@@ -2697,6 +2800,7 @@ pub async fn run_tui_ext(
         decision_client,
         decision_build_error,
         magi_own_key,
+        code_review,
     } = magi_runtime;
 
     let original_hook = std::panic::take_hook();
@@ -3212,6 +3316,7 @@ pub async fn run_tui_ext(
 
     let mut app = App::new(event_tx, response_rx, approval_rx);
     app.status_row = status_row;
+    app.code_review_runner = code_review;
     let res = run_app(&mut terminal, app).await;
 
     // `run_app` returning — by ANY exit path — means the user is done with the terminal.
@@ -3552,6 +3657,11 @@ fn drain_approval_requests(app: &mut App) {
         for line in audit_for_transcript("Press 'y' to approve, 'c' or 'Esc' to deny.") {
             app.push_message(line);
         }
+        if let Some(detail) = &req.detail {
+            for line in audit_for_transcript(detail) {
+                app.push_message(line);
+            }
+        }
         app.pending_approval = Some(req);
     }
 }
@@ -3876,6 +3986,23 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                             _ => {}
                         }
 
+                        if app.pending_code_review.is_some() {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    app.push_message("User: Approved".to_string());
+                                    // Drawn first: the review is awaited in line and the
+                                    // screen does not move until it ends.
+                                    terminal.draw(|f| ui(f, &mut app))?;
+                                    app.answer_code_review_confirmation(true).await;
+                                }
+                                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+                                    app.answer_code_review_confirmation(false).await;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         if let Some(req) = app.pending_approval.take() {
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -3967,6 +4094,50 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             continue;
                                         }
                                     }
+                                    match parse_tui_code_review(trimmed) {
+                                        Ok(cmd) => {
+                                            app.push_message(format!("User: {trimmed}"));
+                                            match app.code_review_runner.clone() {
+                                                Some(runner) => match runner.plan(&cmd.input) {
+                                                    Ok(plan) => app.begin_code_review_confirmation(
+                                                        cmd,
+                                                        runner,
+                                                        plan.batches,
+                                                        plan.worst_case_secs,
+                                                    ),
+                                                    Err(e) => apply_response(
+                                                        &mut app,
+                                                        AgentResponse::Error(
+                                                            crate::agent::Agent::sanitize_text(
+                                                                magi_rs::redact::redact_foreign_text(
+                                                                    &e.to_string(),
+                                                                )
+                                                                .as_str(),
+                                                            ),
+                                                        ),
+                                                    ),
+                                                },
+                                                None => apply_response(
+                                                    &mut app,
+                                                    AgentResponse::Error(
+                                                        CODE_REVIEW_UNAVAILABLE.to_string(),
+                                                    ),
+                                                ),
+                                            }
+                                            continue;
+                                        }
+                                        Err(TuiCodeReviewParseError::NotACodeReviewCommand) => {}
+                                        Err(TuiCodeReviewParseError::Invalid(reason)) => {
+                                            apply_response(
+                                                &mut app,
+                                                AgentResponse::Error(format!(
+                                                    "/code-review: {}",
+                                                    crate::agent::Agent::sanitize_text(&reason)
+                                                )),
+                                            );
+                                            continue;
+                                        }
+                                    }
                                     match parse_tui_decide(trimmed) {
                                         Ok(cmd) => {
                                             app.push_message(format!("User: {trimmed}"));
@@ -4030,6 +4201,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             );
                                             app.push_message(
                                                 "  /consult <q>    - Force MAGI multi-perspective analysis (3 model calls)"
+                                                    .to_string(),
+                                            );
+                                            app.push_message(
+                                                "  /code-review [path | --commit <ref> | --from <a> --to <b> | --base <b> --head <h> | --uncommitted] - Review code with MAGI (asks before it runs)"
                                                     .to_string(),
                                             );
                                             app.push_message(
@@ -4423,7 +4598,9 @@ fn ui(f: &mut Frame, app: &mut App) {
             "SELECT MESSAGE (Enter to select text, 'y' to copy whole, Esc to exit)"
         }
         AppMode::Visual => "VISUAL SELECTION MODE",
-        _ if app.pending_approval.is_some() => "WAITING FOR APPROVAL (y/c)",
+        _ if app.pending_approval.is_some() || app.pending_code_review.is_some() => {
+            "WAITING FOR APPROVAL (y/c)"
+        }
         _ => "Input (↑↓/PgUp/PgDn/Home/End Scroll, Ctrl+S Copy, Shift+←→ Select)",
     };
     let input_block = Block::default().borders(Borders::ALL).title(input_title);

@@ -394,6 +394,55 @@ pub async fn run_review(
     })
 }
 
+/// Counts the batches a review would run, without calling any model (§5.0 steps 1-3).
+///
+/// The same resolution, filter and batching [`run_review`] applies, so the count shown before a
+/// review (the TUI confirmation, the tool's approval prompt) is the count it runs with.
+///
+/// # Arguments
+///
+/// * `input` - What to review.
+/// * `workspace` - The workspace root.
+/// * `git` - The review's git.
+/// * `guard` - The sandbox check of `File`/`Directory` paths.
+/// * `is_ignored` - Whether `.gitignore` excludes a path.
+/// * `registry` - The language extractors.
+/// * `pool` - The pool, as `(model, measured window)`.
+///
+/// # Returns
+///
+/// The number of batches.
+///
+/// # Errors
+///
+/// The errors of [`run_review`]'s preparation before the budget check: the input, the filter,
+/// the batching and [`ReviewError::InputTooLarge`].
+///
+/// O(bytes reviewed).
+pub fn plan_review(
+    input: &ReviewInput,
+    workspace: &Path,
+    git: &dyn GitCommand,
+    guard: &(dyn Fn(&Path) -> Result<PathBuf, ReviewError> + Sync),
+    is_ignored: &(dyn Fn(&str) -> bool + Sync),
+    registry: &LanguageRegistry,
+    pool: &[(String, Option<usize>)],
+) -> Result<usize, ReviewError> {
+    let resolved = resolve_input(input, workspace, git, guard)?;
+    let inner = content_source(resolved.source_kind, workspace, git);
+    let source = CachedSource::new(inner.as_ref());
+    let explicit = matches!(input, ReviewInput::File(_));
+    let filtered = filter_files(resolved.files, &source, registry, explicit, is_ignored)?;
+    let window = pool_window(pool);
+    let batches = plan_batches(
+        &filtered.kept,
+        &source,
+        registry,
+        batch_limit_tokens(&window),
+    )?;
+    Ok(batches.len())
+}
+
 /// The single content source an input resolved to: the worktree (with its old side, if any) or
 /// a git revision.
 fn content_source<'g>(

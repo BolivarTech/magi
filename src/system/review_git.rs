@@ -9,9 +9,6 @@
 //! repository's own config defines filter drivers, `-c` overrides that disable them; the child
 //! gets only the tool environment allowlist plus `GIT_NO_LAZY_FETCH=1` (a partial clone never
 //! downloads during a review) and `GIT_LITERAL_PATHSPECS=1` (a path is never a glob).
-// Consumer: the code-review runner wiring is this module's first production caller and removes
-// this attribute.
-#![allow(dead_code)]
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -295,7 +292,6 @@ fn drain_bounded(mut reader: impl Read, cap: u64) -> Vec<u8> {
 /// # Errors
 ///
 /// [`ReviewError::OutsideWorkspace`] for any path the guard refuses.
-#[allow(dead_code)] // wired by the code-review subcommand (T2.10)
 pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBuf, ReviewError> {
     guard
         .validate(path)

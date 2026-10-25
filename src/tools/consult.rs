@@ -1153,7 +1153,7 @@ pub(crate) fn report_to_consult_json(
 /// the same line already drawn for `report`, which is why it needs no new machinery — but it needs
 /// saying, because a foreign crate's string reaching output unredacted is this codebase's most
 /// recurrent defect.
-fn agents_json(agents: &[magi_core::schema::AgentOutput]) -> Value {
+pub(crate) fn agents_json(agents: &[magi_core::schema::AgentOutput]) -> Value {
     Value::Array(
         agents
             .iter()
@@ -1210,7 +1210,7 @@ fn findings_json(findings: &[magi_core::schema::Finding]) -> Value {
 /// `sanitize_text` applies to the entire reply text. If a future version of magi-core synthesizes
 /// dissent text rather than forwarding the agents' own strings, this exemption must be revisited
 /// with a `redact_foreign_text` call.
-fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
+pub(crate) fn consensus_json(c: &magi_core::consensus::ConsensusResult) -> Value {
     // Map dissent field-by-field rather than with to_value: Dissent is #[non_exhaustive],
     // so a field added in a future minor release would reach the JSON public object with no
     // code change and no review — the same reason agents_json maps AgentOutput by hand.

@@ -207,6 +207,9 @@ struct WireOutcome<'a> {
     transcript: Vec<TranscriptEntry>,
     /// Opaque MAGI object from a `consult` pass, if any.
     consult: &'a Option<serde_json::Value>,
+    /// Opaque `code-review` summary; absent for every other command.
+    #[serde(skip_serializing_if = "is_absent")]
+    code_review: &'a Option<serde_json::Value>,
     /// Effective limits applied to the run.
     applied_caps: &'a AppliedCaps,
     /// Error detail if the run failed.
@@ -264,10 +267,15 @@ fn truncate_transcript_entry(entry: &TranscriptEntry, cap: usize) -> TranscriptE
     truncated
 }
 
+/// Whether an optional envelope object is absent, for `skip_serializing_if` on a borrowed field.
+fn is_absent(v: &&Option<serde_json::Value>) -> bool {
+    v.is_none()
+}
+
 /// Writes a single **buffered** JSON object (REQ-H14) to `out`, with `schema_version` as the
 /// first physical field, followed by `response`, `model`, `provider`, `usage`, `timings`,
-/// `stop_reason`, `tool_calls`, `transcript`, `consult`, `applied_caps`, `error` — in exactly
-/// that order.
+/// `stop_reason`, `tool_calls`, `transcript`, `consult`, `code_review` (present only on a
+/// `code-review` run), `applied_caps`, `error` — in exactly that order.
 ///
 /// Each `result` in `tool_calls[]` and each `content` in `transcript[]` are truncated to
 /// `tool_result_cap` (the effective cap for this run, spec §11) before serializing (see
@@ -302,6 +310,7 @@ pub fn write_json(
             .map(|e| truncate_transcript_entry(e, tool_result_cap))
             .collect(),
         consult: &o.consult,
+        code_review: &o.code_review,
         applied_caps: &o.applied_caps,
         error: &o.error,
     };

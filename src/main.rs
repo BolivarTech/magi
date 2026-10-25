@@ -4,6 +4,7 @@
 // Date: 2026-10-13
 
 mod agent;
+mod code_review_runner;
 mod config;
 mod cut_log;
 mod defaults;
@@ -602,6 +603,11 @@ enum TopCmd {
 // Fourth declaration of -w in this CLI, after WorkdirArgs, HeadlessArgs and DecideArgs. It is not
 // global, for the reasons given on WorkdirArgs; rename it in every place or in none.
 #[derive(clap::Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("review_input")
+        .args(["path", "commit", "from", "base", "uncommitted"])
+        .multiple(false)
+))]
 struct CodeReviewArgs {
     /// Working directory: the root of the review and the place where the search for the .magi
     /// directory starts (default: the current directory).
@@ -644,16 +650,16 @@ struct CodeReviewArgs {
     #[arg(long)]
     commit: Option<String>,
     /// The old end of a range of commits; needs --to.
-    #[arg(long)]
+    #[arg(long, requires = "to")]
     from: Option<String>,
     /// The new end of a range of commits; needs --from.
-    #[arg(long)]
+    #[arg(long, requires = "from")]
     to: Option<String>,
     /// The base branch; the review covers what --head added since they diverged.
-    #[arg(long)]
+    #[arg(long, requires = "head")]
     base: Option<String>,
     /// The reviewed branch; needs --base.
-    #[arg(long)]
+    #[arg(long, requires = "base")]
     head: Option<String>,
     /// Review the staged, unstaged and untracked changes.
     #[arg(long)]
@@ -1777,7 +1783,18 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
                 run_decide_subcommand(d, passphrase_flag, &workspace_root, decide_secrets).await,
             ));
         }
-        Some(TopCmd::CodeReview(_)) => return Ok(exit_code(1)),
+        Some(TopCmd::CodeReview(c)) => {
+            return Ok(exit_code(
+                run_code_review_subcommand(
+                    headless_args_of(&c),
+                    c,
+                    passphrase_flag,
+                    &workspace_root,
+                    decide_secrets,
+                )
+                .await,
+            ));
+        }
         // No subcommand ⇒ fall through to the TUI launch below.
         None => {}
     }
@@ -2388,6 +2405,31 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             .unwrap_or(crate::defaults::DEFAULT_DECISION_AUTO_APPROVE),
         tui_tool_endpoint,
     );
+    let tui_code_review = optional_code_review_runner(crate::code_review_runner::CodeReviewBuild {
+        workspace: workspace_root.clone(),
+        cfg: magi_config.clone(),
+        principal_kind: provider_kind,
+        endpoints,
+        keys: &section_keys,
+        warn_tokens,
+        env_overrides,
+        capability_cache: capability_cache.clone(),
+        probe,
+        secret_store: secret_store.clone(),
+        structured: false,
+        trio_checked: consult_magi.is_some(),
+    });
+    if let Some(runner) = &tui_code_review {
+        register_code_review_tool(
+            &mut agent,
+            Arc::clone(runner),
+            magi_config
+                .effective_code_review()
+                .auto_approve
+                .unwrap_or(crate::defaults::DEFAULT_CODE_REVIEW_AUTO_APPROVE),
+            None,
+        );
+    }
 
     // The notices are HANDED OVER rather than announced here. They go to the logging layer,
     // which decides the mouth — `WARN` and above to the screen sink, `INFO` to the day's file
@@ -2427,6 +2469,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             decision_client: tui_slash_decision,
             decision_build_error: tui_build_error,
             magi_own_key: section_keys.post_login_own_key().map(str::to_string),
+            code_review: tui_code_review,
         },
         // The chat loop's SELF-ROUTED consults (REQ-A20/A07d) — a different surface from the
         // explicit `/consult` above, which is what `TuiMagiRuntimeConfig` serves.
@@ -4846,37 +4889,404 @@ fn register_decide_tool_if_available(
     }
 }
 
-/// Registers the `code-review` tool on `agent`.
-#[allow(dead_code)] // Red stub
+/// Registers the `code-review` tool on `agent` (REQ-RV17), shared by the TUI (`run`) and
+/// `magi query`, like [`register_decide_tool_if_available`].
+///
+/// # Arguments
+/// * `agent` - The agent to extend.
+/// * `runner` - The session's review runner.
+/// * `auto_approve` - `[code_review].auto_approve`.
+/// * `run_deadline` - The calling run's deadline: `None` in the TUI, the `--timeout` deadline in
+///   `magi query` (see [`run_deadline`]), so a review run as a tool gets only what is left.
 fn register_code_review_tool(
-    _agent: &mut Agent,
-    _runner: Arc<dyn crate::tools::code_review::CodeReviewRunner>,
-    _auto_approve: bool,
-    _run_deadline: Option<std::time::Instant>,
+    agent: &mut Agent,
+    runner: Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+    auto_approve: bool,
+    run_deadline: Option<std::time::Instant>,
 ) {
+    let tool = crate::tools::code_review::CodeReviewTool::new(runner, auto_approve);
+    let tool = match run_deadline {
+        Some(deadline) => tool.with_run_deadline(deadline),
+        None => tool,
+    };
+    agent.register_tool(Box::new(tool));
 }
 
-/// The run's deadline, when the run has a wall clock.
-#[allow(dead_code)] // Red stub
+/// The run's deadline, when the run has a wall clock (REQ-H36).
+///
+/// # Arguments
+/// * `start` - When the run's clock started.
+/// * `timeout` - The run's wall clock, if any.
+///
+/// # Returns
+/// `Some(start + timeout)` exactly when the run has a wall clock.
 fn run_deadline(
-    _start: std::time::Instant,
-    _timeout: Option<Duration>,
+    start: std::time::Instant,
+    timeout: Option<Duration>,
 ) -> Option<std::time::Instant> {
-    None
+    timeout.and_then(|t| start.checked_add(t))
 }
 
 /// Run-log target of a review error.
-#[allow(dead_code)] // Red stub
 const CODE_REVIEW_LOG_TARGET: &str = "magi_rs::code_review";
 
-/// Reports a review error on stderr and in the run log.
-#[allow(dead_code)] // Red stub
-fn emit_review_error(_e: &magi_rs::review::error::ReviewError) {}
+/// Reports a review error on stderr, whatever `--log-level` says, and in the run log, with one
+/// redacted text for both (git's stderr can echo a credential URL, and the run log does not
+/// pass through the stderr auditor).
+///
+/// # Arguments
+/// * `e` - The error.
+fn emit_review_error(e: &magi_rs::review::error::ReviewError) {
+    let text = redact_foreign_text(&e.to_string());
+    magi_rs::notices::eprint_audited(&format!("error: {}", text.as_str()));
+    tracing::event!(
+        target: CODE_REVIEW_LOG_TARGET,
+        tracing::Level::ERROR,
+        cause.subsystem = "code_review",
+        cause.name = crate::tools::code_review::review_error_cause_name(e),
+        "{}",
+        text.as_str()
+    );
+}
 
-/// The exit code of a review error.
-#[allow(dead_code)] // Red stub
-fn review_error_exit(_e: &magi_rs::review::error::ReviewError) -> i32 {
-    0
+/// The exit code of a review error: 2 for what the caller asked, 1 for the environment.
+///
+/// An exhaustive `match`: a new variant has to be decided here.
+///
+/// # Arguments
+/// * `e` - The error.
+///
+/// # Returns
+/// `2` or `1`.
+fn review_error_exit(e: &magi_rs::review::error::ReviewError) -> i32 {
+    use magi_rs::review::error::ReviewError as E;
+    match e {
+        E::OutsideWorkspace(_)
+        | E::InvalidRef(_)
+        | E::RefNotFound(_)
+        | E::NotReviewable { .. }
+        | E::NothingToReview
+        | E::TooLargeForBatch { .. }
+        | E::Budget { .. }
+        | E::TooLarge { .. }
+        | E::InputTooLarge { .. }
+        | E::Protected(_) => EXIT_CONFIG_REFUSED,
+        E::Git(_)
+        | E::GitOutputTooLarge { .. }
+        | E::Io(_)
+        | E::Consolidation(_)
+        | E::Cancelled
+        | E::EgressSecret { .. } => 1,
+    }
+}
+
+/// What a `code-review` invocation asks to review, from its arguments (clap already refused two
+/// forms at once and half a pair).
+///
+/// # Arguments
+/// * `a` - The arguments.
+///
+/// # Returns
+/// The input; with no form, the last commit.
+fn review_input_of(a: &CodeReviewArgs) -> magi_rs::review::input::ReviewInput {
+    use magi_rs::review::input::ReviewInput;
+    match (&a.path, &a.commit, &a.from, &a.to, &a.base, &a.head) {
+        (Some(p), ..) => ReviewInput::File(p.clone()),
+        (_, Some(c), ..) => ReviewInput::Commit(Some(c.clone())),
+        (_, _, Some(from), Some(to), ..) => ReviewInput::Range {
+            from: from.clone(),
+            to: to.clone(),
+        },
+        (.., Some(base), Some(head)) => ReviewInput::Branches {
+            base: base.clone(),
+            head: head.clone(),
+        },
+        _ if a.uncommitted => ReviewInput::Uncommitted,
+        _ => ReviewInput::Commit(None),
+    }
+}
+
+/// The output and log flags of `code-review` as the headless writers and the log bring-up take
+/// them.
+fn headless_args_of(a: &CodeReviewArgs) -> HeadlessArgs {
+    HeadlessArgs {
+        output: a.output.clone(),
+        output_format: a.output_format,
+        workdir: a.workdir.clone(),
+        no_memory: a.no_memory,
+        auto: a.auto,
+        full_auto: a.full_auto,
+        timeout: a.timeout,
+        log_level: a.log_level,
+        log_dir: a.log_dir.clone(),
+        no_clobber: a.no_clobber,
+        ..HeadlessArgs::default()
+    }
+}
+
+/// Builds the review runner of a surface, logging why when it cannot be built: the surface
+/// then offers no review (the tool is not registered, `/code-review` says it is unavailable).
+fn optional_code_review_runner(
+    build: crate::code_review_runner::CodeReviewBuild<'_>,
+) -> Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>> {
+    match crate::code_review_runner::build_code_review_runner(build) {
+        Ok(runner) => Some(runner),
+        Err(reason) => {
+            tracing::event!(
+                target: CODE_REVIEW_LOG_TARGET,
+                tracing::Level::INFO,
+                "code review unavailable: {reason}"
+            );
+            None
+        }
+    }
+}
+
+/// Runs `magi code-review`: resolves the workspace, the vault, the configuration, the keys and
+/// the trio, runs one review and prints one report (REQ-RV02, REQ-RV13).
+///
+/// A review error before any model call goes to stderr and to the run log
+/// ([`emit_review_error`]); a failed consolidation prints the paid batch reports and exits 1.
+///
+/// # Arguments
+/// * `h` - The output and log flags, as [`headless_args_of`] maps them: taking them as
+///   `HeadlessArgs` keeps this funnel under the scan that every headless funnel passes.
+/// * `args` - The review's own arguments.
+/// * `passphrase_flag` - The folded `-p` and consumed `MAGI_PASSPHRASE`.
+/// * `cwd` - The process's working directory.
+/// * `secrets` - The keys consumed from the environment at startup.
+///
+/// # Returns
+/// The process exit code.
+async fn run_code_review_subcommand(
+    h: HeadlessArgs,
+    args: CodeReviewArgs,
+    passphrase_flag: Option<Zeroizing<String>>,
+    cwd: &Path,
+    secrets: ApiKeys,
+) -> i32 {
+    let started = std::time::Instant::now();
+    let out_json = matches!(args.output_format, Some(CliOutputFormat::Json));
+    // As in `consult`: before any setup, so a mistyped invocation costs nothing.
+    if args.structured_verdicts && !out_json {
+        magi_rs::notices::eprint_audited(
+            "error: --structured-verdicts needs --output-format json; \
+             the structured verdicts have nowhere to go in text output",
+        );
+        return EXIT_CONFIG_REFUSED;
+    }
+    let workdir = match resolve_workspace_root(args.workdir.clone(), cwd) {
+        Ok(root) => root,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return headless_error_exit_code(&e);
+        }
+    };
+    let workspace = match crate::system::workspace::discover(&workdir) {
+        Ok(ws) => ws,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return headless_error_exit_code(&e);
+        }
+    };
+    if let Some(code) = refuse_unusable_config(&workdir) {
+        return code;
+    }
+    if workspace.is_none() && !args.no_memory {
+        magi_rs::notices::eprint_audited(
+            "error: no .magi/ state directory found in this directory or any \
+             parent; run `magi init` to create one",
+        );
+        return 1;
+    }
+    let (memory, secret_store) =
+        match open_headless_vault(workspace.as_ref(), passphrase_flag, args.no_memory) {
+            Ok(opened) => opened,
+            Err(code) => return code,
+        };
+    let (magi_config, cfg_notices) = match workspace.as_ref() {
+        Some(ws) => match MagiConfig::load(&ws.config_path()) {
+            Ok(v) => v,
+            Err(e) => {
+                magi_rs::notices::eprint_audited(&format!("error: {e}"));
+                return EXIT_CONFIG_REFUSED;
+            }
+        },
+        None => (MagiConfig::default(), Vec::new()),
+    };
+    let provider_kind = match resolve_effective_provider_kind(
+        &magi_config,
+        env::var("MAGI_PROVIDER").ok().as_deref(),
+    ) {
+        Ok(kind) => kind,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return EXIT_CONFIG_REFUSED;
+        }
+    };
+    let endpoints = match resolve_endpoints(
+        &magi_config,
+        env::var("OPENAI_BASE_URL").ok().as_deref(),
+        secret_store.as_ref(),
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            magi_rs::notices::eprint_audited(&format!("error: {e}"));
+            return 1;
+        }
+    };
+    let (embedding_endpoint, decision_endpoint, code_review_endpoint) =
+        section_endpoints(&magi_config, secret_store.as_ref());
+    let section_keys =
+        magi_rs::section_keys::SectionKeys::resolve(&magi_rs::section_keys::KeyInputs {
+            env: &secrets,
+            secret_store: secret_store.as_ref(),
+            magi_kind: registered_magi_kind(&magi_config, provider_kind),
+            root_endpoint: endpoints.root.as_str(),
+            magi_endpoint: Some(endpoints.magi.as_str()),
+            embedding_endpoint: embedding_endpoint.as_deref(),
+            decision_endpoint: decision_endpoint.as_deref(),
+            code_review_endpoint: code_review_endpoint.as_deref(),
+        });
+    let openai_key = resolve_openai_key(secrets.openai_key.as_deref(), secret_store.as_ref());
+    let mut armed = secrets_to_arm(secrets.anthropic_key.as_deref(), openai_key.as_deref());
+    armed.extend(section_keys.own_secrets());
+    let short_secrets = magi_rs::logging::register_process_secrets(&armed);
+    let (cfg_screen, mut cfg_file) = magi_rs::notices::partition_by_mouth(cfg_notices);
+    cfg_file.extend(short_secrets.into_iter().map(short_secret_notice));
+    cfg_file.extend(section_keys.startup_notices());
+    emit_notices(cfg_screen);
+    let logging = match workspace.as_ref() {
+        Some(ws) => bring_up_headless_logging(&h, &magi_config, ws, "code-review"),
+        None => Ok(()),
+    };
+    emit_notices(cfg_file);
+    if let Err(code) = logging {
+        return code;
+    }
+
+    let env_overrides = MagiEnvModelOverrides::from_env();
+    let mut trio_notices: Vec<Notice> = Vec::new();
+    let capability_cache = open_capability_cache(memory.as_ref(), &mut trio_notices);
+    let (warn_tokens, probe) = probe_and_report(
+        &magi_config,
+        &endpoints,
+        provider_kind,
+        &OllamaProbeFactory,
+        &env_overrides,
+        &stateless_extra_models(&magi_config, capability_cache.as_ref()),
+        &mut trio_notices,
+    )
+    .await;
+    emit_notices(trio_notices);
+    let (configured_ceiling, max_rotations, retry_disabled) = timeout_scale(&magi_config);
+    let (_, budget) =
+        BudgetTelemetry::derive(None, configured_ceiling, max_rotations, retry_disabled);
+    // The envelope's model and provider name the trio: its seat models, and its kind.
+    let trio_kind = registered_magi_kind(&magi_config, provider_kind);
+    let model = seats_with_env_overrides(
+        &magi_config,
+        resolve_backend_model(&magi_config, trio_kind),
+        &env_overrides,
+    )
+    .into_iter()
+    .map(|(_, m)| m)
+    .collect::<Vec<_>>()
+    .join(",");
+    let limits = resolve_headless_limits(
+        magi_config.headless(),
+        magi_config.effective_tool_result_cap(),
+    );
+    let runner = match crate::code_review_runner::build_code_review_runner(
+        crate::code_review_runner::CodeReviewBuild {
+            workspace: workdir.clone(),
+            cfg: magi_config,
+            principal_kind: provider_kind,
+            endpoints,
+            keys: &section_keys,
+            warn_tokens,
+            env_overrides,
+            capability_cache,
+            probe,
+            secret_store,
+            structured: args.structured_verdicts,
+            trio_checked: false,
+        },
+    ) {
+        Ok(r) => r,
+        Err(reason) => {
+            magi_rs::notices::eprint_audited(&format!("error: code review unavailable: {reason}"));
+            return 1;
+        }
+    };
+
+    // The token is the user's interruption only: `--timeout` is the review's total (RV06),
+    // which delivers what finished instead of cancelling.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let input = review_input_of(&args);
+    let rendered = match runner
+        .run(input, args.timeout.map(Duration::from_secs), &cancel)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            emit_review_error(&e);
+            return review_error_exit(&e);
+        }
+    };
+    let (code, _, stderr_line) = crate::tools::code_review::finish_code_review(&rendered);
+    let (response, consult, code_review) = crate::tools::code_review::envelope_fields(&rendered);
+    let outcome = RunOutcome {
+        response: Some(response),
+        model,
+        provider: trio_kind.to_string(),
+        usage: magi_rs::headless::types::Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+        timings: magi_rs::headless::types::Timings {
+            total_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ttfb_ms: None,
+            per_turn_ms: Vec::new(),
+        },
+        stop_reason: if rendered.failure.is_some() {
+            StopReason::Error
+        } else {
+            StopReason::Done
+        },
+        tool_calls: Vec::new(),
+        transcript: Vec::new(),
+        consult: (!consult.is_null()).then_some(consult),
+        code_review: Some(code_review),
+        applied_caps: magi_rs::headless::types::AppliedCaps {
+            max_tool_calls: 0,
+            max_tool_calls_clamped: false,
+            timeout_secs: args.timeout,
+            system_override_applied: false,
+            system_ignored: false,
+            budget,
+        },
+        error: rendered
+            .failure
+            .as_ref()
+            .map(|f| magi_rs::headless::types::ErrorPayload {
+                message: f.clone(),
+                kind: ErrorKind::Runtime,
+            }),
+    };
+    if let Err(e) = write_headless_output(
+        &h,
+        &AuditedOutcome::new(&outcome),
+        out_json,
+        limits.tool_result_cap,
+    ) {
+        magi_rs::notices::eprint_audited(&format!("error: {e}"));
+        return headless_error_exit_code(&e);
+    }
+    if let Some(line) = stderr_line {
+        magi_rs::notices::eprint_audited(&line);
+    }
+    code
 }
 
 /// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.
@@ -5790,6 +6200,7 @@ impl AuditedOutcome {
             })
             .collect();
         out.consult = out.consult.as_ref().map(|v| mask_json(v, &mask));
+        out.code_review = out.code_review.as_ref().map(|v| mask_json(v, &mask));
         // `model` and `provider` are resolved at startup from what the operator
         // wrote, so they are runtime-composed like the rest.
         out.model = mask(&out.model);
@@ -6049,6 +6460,9 @@ struct HeadlessContext {
     /// (REQ-SY04): the adjustment was passed to the build and the build returned `Ok`. Only
     /// `consult` reads it, as the source of its published `system_override_applied`.
     system_adjustment_installed: bool,
+    /// The review runner `query` registers as the `code-review` tool; `None` for `consult`, or
+    /// when it could not be built (the reason is in the run log).
+    code_review: Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
 }
 
 /// Resolves the effective `allow_system_override` gate (REQ-H12b, spec §11):
@@ -6617,6 +7031,25 @@ async fn prepare_headless(
     }
 
     let magi_auth = trio_auth(&magi_config, provider_kind, &section_keys, &endpoints);
+    // Only `query` offers the review as a tool; `consult` would build it for nothing.
+    let code_review = if command == "query" {
+        optional_code_review_runner(crate::code_review_runner::CodeReviewBuild {
+            workspace: workdir.clone(),
+            cfg: magi_config.clone(),
+            principal_kind: provider_kind,
+            endpoints,
+            keys: &section_keys,
+            warn_tokens,
+            env_overrides,
+            capability_cache,
+            probe,
+            secret_store: secret_store.clone(),
+            structured: false,
+            trio_checked: consult_magi.is_ok(),
+        })
+    } else {
+        None
+    };
     Ok(HeadlessContext {
         workdir,
         memory,
@@ -6631,6 +7064,7 @@ async fn prepare_headless(
         tier,
         embedding_key: section_keys.embedding().clone(),
         decision_key: section_keys.decision().clone(),
+        code_review,
         secret_store,
         limits,
         env_mode,
@@ -6832,6 +7266,7 @@ async fn run_query_subcommand(
         limits,
         budget,
         clock_coverage,
+        code_review,
         ..
     } = ctx;
     // S-9/REQ-EE-5: one assessment for the run, wrapped in its own announcer — headless has no
@@ -6920,6 +7355,18 @@ async fn run_query_subcommand(
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
     let timeout = resolve_tier_timeout_default(&policy, limits.full_auto_timeout_secs);
+    // RV17: a review run as a tool gets what is left of this run's wall clock.
+    if let Some(runner) = code_review {
+        register_code_review_tool(
+            &mut agent,
+            runner,
+            magi_config
+                .effective_code_review()
+                .auto_approve
+                .unwrap_or(crate::defaults::DEFAULT_CODE_REVIEW_AUTO_APPROVE),
+            run_deadline(std::time::Instant::now(), timeout),
+        );
+    }
     // SC-A04c/d: this route shares its single deadline with a forced/proactive consult
     // (REQ-H22), so REQ-A04's minimum applies here too. The deadline is obeyed either way;
     // what the check adds is the heads-up on stderr and the flag in the JSON.
@@ -7314,7 +7761,6 @@ fn api_keys(consumed: &ConsumedSecrets) -> ApiKeys {
 ///
 /// # Returns
 /// The `[code_review]` key, wiped on drop, or `None` for no authentication header.
-#[allow(dead_code)] // consumer: the code-review gate client, built with the subcommand and tool
 fn code_review_api_key(keys: &magi_rs::section_keys::SectionKeys) -> Option<Zeroizing<String>> {
     keys.code_review()
         .value()
