@@ -22,7 +22,7 @@ use super::consolidate::{
     apply_agreement, consolidate, BatchOutcome, Consolidated, ConsolidatedFinding,
 };
 use super::error::ReviewError;
-use super::filter::{filter_files, SkipCause, Skipped};
+use super::filter::{filter_files, Filtered, SkipCause, Skipped};
 use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
 use super::input::{resolve_input, ReviewFile, ReviewInput, SourceKind};
@@ -31,7 +31,7 @@ use super::report::{name, BatchMetrics, ReviewSummary};
 use super::secrets::display_path;
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
-use super::window::{batch_limit_tokens, pool_window};
+use super::window::{batch_limit_tokens, pool_window, PoolWindow};
 use crate::redact::redact_foreign_text;
 
 /// Run-log target of the pipeline's WARN entries.
@@ -269,12 +269,13 @@ pub async fn run_review(
     let inner = content_source(resolved.source_kind, req.workspace, deps.git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(req.input, ReviewInput::File(_));
-    let filtered = filter_files(
+    let (filtered, window, batches) = filter_and_plan(
         resolved.files,
         &source,
-        deps.registry,
         explicit,
+        deps.registry,
         deps.is_ignored,
+        deps.pool,
     )?;
     summary.skipped = filtered.skipped;
     summary
@@ -284,14 +285,7 @@ pub async fn run_review(
             cause: SkipCause::NotUtf8,
         }));
     summary.no_extractor = filtered.no_extractor;
-    let window = pool_window(deps.pool);
-    summary.unmeasured_models = window.unmeasured.clone();
-    let batches = plan_batches(
-        &filtered.kept,
-        &source,
-        deps.registry,
-        batch_limit_tokens(&window),
-    )?;
+    summary.unmeasured_models = window.unmeasured;
     let planned = batches.len();
     summary.batches_planned = planned;
     if let Some(total) = req.timeout_secs {
@@ -432,15 +426,36 @@ pub fn plan_review(
     let inner = content_source(resolved.source_kind, workspace, git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(input, ReviewInput::File(_));
-    let filtered = filter_files(resolved.files, &source, registry, explicit, is_ignored)?;
+    let (_, _, batches) = filter_and_plan(
+        resolved.files,
+        &source,
+        explicit,
+        registry,
+        is_ignored,
+        pool,
+    )?;
+    Ok(batches.len())
+}
+
+/// Steps 2-3 of §5.0 over the resolved files, shared by [`run_review`] and [`plan_review`]: the
+/// filter, the pool window and the batches. O(bytes reviewed).
+fn filter_and_plan(
+    files: Vec<ReviewFile>,
+    source: &dyn ContentSource,
+    explicit: bool,
+    registry: &LanguageRegistry,
+    is_ignored: &dyn Fn(&str) -> bool,
+    pool: &[(String, Option<usize>)],
+) -> Result<(Filtered, PoolWindow, Vec<ReviewBatch>), ReviewError> {
+    let filtered = filter_files(files, source, registry, explicit, is_ignored)?;
     let window = pool_window(pool);
     let batches = plan_batches(
         &filtered.kept,
-        &source,
+        source,
         registry,
         batch_limit_tokens(&window),
     )?;
-    Ok(batches.len())
+    Ok((filtered, window, batches))
 }
 
 /// The single content source an input resolved to: the worktree (with its old side, if any) or

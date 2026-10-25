@@ -2423,10 +2423,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         register_code_review_tool(
             &mut agent,
             Arc::clone(runner),
-            magi_config
-                .effective_code_review()
-                .auto_approve
-                .unwrap_or(crate::defaults::DEFAULT_CODE_REVIEW_AUTO_APPROVE),
+            code_review_auto_approve(&magi_config),
             None,
         );
     }
@@ -4912,6 +4909,14 @@ fn register_code_review_tool(
     agent.register_tool(Box::new(tool));
 }
 
+/// `[code_review].auto_approve`, completed from the defaults: whether the tool runs without a
+/// prompt.
+fn code_review_auto_approve(cfg: &MagiConfig) -> bool {
+    cfg.effective_code_review()
+        .auto_approve
+        .unwrap_or(crate::defaults::DEFAULT_CODE_REVIEW_AUTO_APPROVE)
+}
+
 /// The run's deadline, when the run has a wall clock (REQ-H36).
 ///
 /// # Arguments
@@ -7360,10 +7365,7 @@ async fn run_query_subcommand(
         register_code_review_tool(
             &mut agent,
             runner,
-            magi_config
-                .effective_code_review()
-                .auto_approve
-                .unwrap_or(crate::defaults::DEFAULT_CODE_REVIEW_AUTO_APPROVE),
+            code_review_auto_approve(&magi_config),
             run_deadline(std::time::Instant::now(), timeout),
         );
     }
