@@ -1159,6 +1159,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chain_ending_on_a_400_after_another_failure_is_exhausted_not_invalid_input() {
+        // DE01: only a chain entirely in 400 is an invalid request; a 400 that only closes a
+        // chain whose head failed otherwise leaves the chain exhausted.
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 503, "{}".into()).await;
+        mock_model(&mut server, "b", 400, r#"{"error":"b refuses"}"#.into()).await;
+        let r = decide(settings(&server.url(), &["a", "b"]), &request()).await;
+        assert!(
+            matches!(r, Err(DecisionError::ChainExhausted { .. })),
+            "{r:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn too_large_and_unprocessable_still_stop_the_chain() {
         for status in [413usize, 422] {
             let mut server = mockito::Server::new_async().await;
