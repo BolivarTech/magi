@@ -2165,6 +2165,17 @@ pub struct App {
     )>,
 }
 
+/// A `/code-review` the user approved, between its notice and its run.
+#[allow(dead_code)] // Red stub
+pub(crate) struct ApprovedCodeReview {
+    /// The parsed command.
+    cmd: TuiCodeReviewCommand,
+    /// The session's runner.
+    runner: std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+    /// The plan the confirmation showed.
+    plan: crate::tools::code_review::ReviewPlan,
+}
+
 impl App {
     pub fn new(
         event_tx: mpsc::Sender<UiEvent>,
@@ -2228,6 +2239,15 @@ impl App {
             self.push_message(line);
         }
         self.pending_code_review = Some((cmd, runner, plan));
+    }
+
+    /// Takes the approved `/code-review` and pushes the "running, cannot be cancelled" notice,
+    /// so the caller can draw it before awaiting [`Self::run_approved_code_review`], which holds
+    /// the event loop for the whole review. `None` without a pending confirmation.
+    #[allow(dead_code)] // Red stub
+    pub(crate) fn approve_code_review(&mut self) -> Option<ApprovedCodeReview> {
+        let (cmd, runner, plan) = self.pending_code_review.take()?;
+        Some(ApprovedCodeReview { cmd, runner, plan })
     }
 
     /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
@@ -9132,6 +9152,27 @@ end"
             "{}",
             app.last_message_text()
         );
+    }
+
+    #[tokio::test]
+    async fn the_running_notice_is_on_screen_before_the_review_runs() {
+        // [MAGI §6 MS2 E loop 1] the review holds the event loop until it ends: the notice that
+        // it cannot be cancelled must be in the transcript when the screen is drawn, before it.
+        let mut app = App::new_for_test();
+        let runner = Arc::new(FakeTuiRunner::default());
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            runner.clone(),
+            shown_plan(),
+        );
+        let approved = app.approve_code_review().expect("a pending review");
+        assert_eq!(runner.calls(), 0, "nothing runs before the draw");
+        assert!(
+            app.last_message_text().contains(CODE_REVIEW_RUNNING),
+            "{}",
+            app.last_message_text()
+        );
+        drop(approved);
     }
 
     #[tokio::test]
