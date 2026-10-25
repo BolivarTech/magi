@@ -8,7 +8,7 @@
 //! ([`RevisionSource`], `git show <rev>:./<path>`) or the worktree ([`WorktreeSource`]), with an
 //! optional old side for deleted lines. Nothing mixes the worktree with another revision.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
@@ -313,31 +313,109 @@ impl ContentSource for RevisionSource<'_> {
 }
 
 /// Memoizes each successful read of an inner source, by side and path, for one review.
+///
+/// Every stage of a review (the filter, the batches, the index and the gate) reads through one
+/// cache, so a file is read once per side and every stage sees the bytes the filter scanned,
+/// even if the file changes on disk meanwhile. An `Err` is never kept. The bytes held are
+/// bounded by [`MAX_REVIEW_TOTAL_BYTES`]: a read that would pass it is refused and not kept,
+/// while a read of what is already held costs nothing. Memory is O(bytes reviewed); a lookup is
+/// O(1) expected plus the copy it returns.
 pub struct CachedSource<'a> {
     inner: &'a dyn ContentSource,
     cap: u64,
+    held: Mutex<Held>,
+}
+
+/// What a [`CachedSource`] holds.
+#[derive(Default)]
+struct Held {
+    /// New-side reads by path.
+    new: HashMap<String, Option<Vec<u8>>>,
+    /// Old-side reads by path.
+    old: HashMap<String, Option<Vec<u8>>>,
+    /// Bytes held across both sides.
+    bytes: u64,
+}
+
+/// Which side of a file a read is for.
+#[derive(Clone, Copy)]
+enum Face {
+    /// The new side, or the worktree.
+    New,
+    /// The old side.
+    Old,
 }
 
 impl<'a> CachedSource<'a> {
     /// A cache over `inner`, bounded by [`MAX_REVIEW_TOTAL_BYTES`].
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The review's single content source.
+    ///
+    /// # Returns
+    ///
+    /// An empty cache.
     pub fn new(inner: &'a dyn ContentSource) -> Self {
-        Self::with_total_cap(inner, MAX_REVIEW_TOTAL_BYTES)
+        Self::capped(inner, MAX_REVIEW_TOTAL_BYTES)
     }
 
     /// A cache over `inner` with an explicit total cap.
+    #[cfg(test)]
     pub(crate) fn with_total_cap(inner: &'a dyn ContentSource, cap: u64) -> Self {
-        Self { inner, cap }
+        Self::capped(inner, cap)
+    }
+
+    fn capped(inner: &'a dyn ContentSource, cap: u64) -> Self {
+        Self {
+            inner,
+            cap,
+            held: Mutex::new(Held::default()),
+        }
+    }
+
+    /// Reads one side of `path`, from the cache or from the inner source.
+    fn get(&self, face: Face, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let side = match face {
+            Face::New => &held.new,
+            Face::Old => &held.old,
+        };
+        if let Some(bytes) = side.get(path) {
+            return Ok(bytes.clone());
+        }
+        let read = match face {
+            Face::New => self.inner.read(path)?,
+            Face::Old => self.inner.read_old(path)?,
+        };
+        let len = read
+            .as_ref()
+            .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX));
+        let total = held.bytes.saturating_add(len);
+        if total > self.cap {
+            return Err(ReviewError::InputTooLarge { limit: self.cap });
+        }
+        held.bytes = total;
+        let side = match face {
+            Face::New => &mut held.new,
+            Face::Old => &mut held.old,
+        };
+        side.insert(path.to_string(), read.clone());
+        Ok(read)
     }
 }
 
 impl ContentSource for CachedSource<'_> {
+    /// # Errors
+    ///
+    /// The inner source's error (never kept), and [`ReviewError::InputTooLarge`] when keeping
+    /// the read would pass the total cap.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        let _ = self.cap;
-        self.inner.read(path)
+        self.get(Face::New, path)
     }
 
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        self.inner.read_old(path)
+        self.get(Face::Old, path)
     }
 }
 

@@ -6,6 +6,13 @@
 //! budget check before the first trio call, and the worst case the TUI shows.
 
 use super::error::ReviewError;
+use crate::magi::{
+    attempt_factor, derive_ceiling_from_timeout, headless_consult_timeout_secs,
+    raw_ceiling_from_factor, AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+};
+
+/// Attempts per model in the worst case of the TUI: the call and its schema revalidation.
+const CALLS_PER_MODEL: u64 = 2;
 
 /// The wall clock of the next batch: what is left of the review, split over the batches still
 /// pending.
@@ -19,31 +26,118 @@ use super::error::ReviewError;
 ///
 /// `remaining_secs / pending`; with no pending batch (a defensive case the pipeline never
 /// reaches), `remaining_secs`.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::clock::batch_wall_clock_secs;
+///
+/// assert_eq!(batch_wall_clock_secs(3_000, 3), 1_000);
+/// ```
 pub fn batch_wall_clock_secs(remaining_secs: u64, pending: usize) -> u64 {
-    let _ = (remaining_secs, pending);
-    todo!()
+    match u64::try_from(pending) {
+        Ok(0) => remaining_secs,
+        Ok(n) => remaining_secs / n,
+        Err(_) => 0,
+    }
 }
 
-/// The budget check of an explicit `--timeout`, before any trio call.
+/// The budget check of an explicit `--timeout`, before any trio call (REQ-RV06).
+///
+/// The `--timeout` is split evenly over the batches; each batch needs at least the wall clock
+/// [`headless_consult_timeout_secs`] gives at [`AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`]. The check is
+/// on the wall clock, not on the derived ceiling: [`derive_ceiling_from_timeout`] never returns
+/// less than the floor, so a ceiling check could not fail.
+///
+/// # Arguments
+///
+/// * `total_secs` - The explicit `--timeout`.
+/// * `batches` - The batches the review was split into.
+/// * `max_rotations` - `[magi].max_rotations`, resolved.
+/// * `retry_disabled` - `[magi].retry_disabled`, resolved.
+///
+/// # Returns
+///
+/// The ceiling derived from the initial per-batch wall clock.
 ///
 /// # Errors
 ///
 /// [`ReviewError::NothingToReview`] for zero batches and [`ReviewError::Budget`] when the wall
-/// clock per batch is below what a batch needs at the floor.
+/// clock per batch is below what a batch needs at the floor, naming the batches, the per-batch
+/// ceiling, the floor and the smallest `--timeout` that would be enough.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::clock::pre_budget;
+///
+/// assert!(pre_budget(60, 4, 2, false).is_err());
+/// assert!(pre_budget(100_000, 4, 2, false).is_ok());
+/// ```
 pub fn pre_budget(
     total_secs: u64,
     batches: usize,
     max_rotations: u32,
     retry_disabled: bool,
 ) -> Result<u64, ReviewError> {
-    let _ = (total_secs, batches, max_rotations, retry_disabled);
-    todo!()
+    if batches == 0 {
+        return Err(ReviewError::NothingToReview);
+    }
+    let per_batch = batch_wall_clock_secs(total_secs, batches);
+    let min_per_batch = headless_consult_timeout_secs(
+        AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+        max_rotations,
+        retry_disabled,
+    );
+    if per_batch < min_per_batch {
+        return Err(ReviewError::Budget {
+            batches,
+            per_batch_wall_clock_secs: per_batch,
+            min_per_batch_secs: min_per_batch,
+            per_batch_ceiling_secs: raw_ceiling_from_factor(
+                per_batch,
+                attempt_factor(max_rotations, retry_disabled),
+            ),
+            floor_secs: AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+            min_timeout_secs: u64::try_from(batches)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(min_per_batch),
+        });
+    }
+    Ok(derive_ceiling_from_timeout(
+        per_batch,
+        max_rotations,
+        retry_disabled,
+    ))
 }
 
-/// The worst case of a review in the TUI.
+/// The worst case of a review in the TUI (REQ-RV18), a bound and never an expected duration:
+/// every batch runs each seat's full chain, `(1 + max_rotations)` models with two calls each,
+/// every call up to `agent_timeout_secs`.
+///
+/// # Arguments
+///
+/// * `batches` - The batches the review was split into.
+/// * `max_rotations` - `[magi].max_rotations`, resolved.
+/// * `agent_timeout_secs` - `[magi].agent_timeout_secs`, resolved.
+///
+/// # Returns
+///
+/// `batches × (1 + max_rotations) × 2 × agent_timeout_secs`, saturating.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::clock::tui_worst_case_secs;
+///
+/// assert_eq!(tui_worst_case_secs(1, 2, 2_335), 14_010);
+/// ```
 pub fn tui_worst_case_secs(batches: usize, max_rotations: u32, agent_timeout_secs: u64) -> u64 {
-    let _ = (batches, max_rotations, agent_timeout_secs);
-    todo!()
+    u64::try_from(batches)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::from(max_rotations).saturating_add(1))
+        .saturating_mul(CALLS_PER_MODEL)
+        .saturating_mul(agent_timeout_secs)
 }
 
 #[cfg(test)]

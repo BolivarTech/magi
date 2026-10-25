@@ -2,20 +2,44 @@
 // Version: 0.24.3
 // Date: 2026-10-24
 
-//! The review pipeline: one `consult code-review` per batch, then one report.
+//! The review pipeline (REQ-RV05, REQ-RV06, §5.0): one `consult code-review` per batch, in
+//! series, then one report.
+//!
+//! [`run_review`] is the only entry. It resolves the input, filters it, plans the batches, checks
+//! an explicit `--timeout` before any trio call, runs the batches, validates each against what
+//! the whole review showed, consolidates, runs the false-positive gate and applies the agreement
+//! weight, in that order.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use magi_core::reporting::MagiReport;
 
-use super::consolidate::Consolidated;
+use super::batching::{file_header, plan_batches, BatchItem, ReviewBatch};
+use super::clock::{batch_wall_clock_secs, pre_budget};
+use super::consolidate::{apply_agreement, consolidate, BatchOutcome, Consolidated};
 use super::error::ReviewError;
-use super::gate::Gate;
-use super::input::ReviewInput;
+use super::filter::{filter_files, SkipCause, Skipped};
+use super::gate::{Gate, GateState};
+use super::index::{LexicalIndex, Reviewed};
+use super::input::{resolve_input, ReviewFile, ReviewInput, SourceKind};
 use super::languages::LanguageRegistry;
-use super::report::ReviewSummary;
-use super::source::GitCommand;
+use super::report::{BatchMetrics, ReviewSummary};
+use super::secrets::display_path;
+use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
+use super::validate::validate_batch;
+use super::window::{batch_limit_tokens, pool_window};
+use crate::redact::redact_foreign_text;
+
+/// Run-log target of the pipeline's WARN entries.
+const LOG_TARGET: &str = "magi_rs::review";
+/// Why a batch did not run, or stopped, when its wall clock ran out.
+const CLOCK_EXPIRED: &str = "clock expired";
+/// Windows' verbatim path prefix, which a reported location never carries.
+const VERBATIM_PREFIX: &str = r"\\?\";
+/// The verbatim prefix of a UNC path, left as it is.
+const VERBATIM_UNC: &str = r"UNC\";
 
 /// Why one batch's `consult` gave no report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,9 +51,22 @@ pub enum ConsultFailure {
 }
 
 /// One `consult code-review` over the trio.
+///
+/// The production implementation, in the binary, calls the trio with the code-review mode as
+/// an argument (never written into the prompt) and maps its error with
+/// [`run_with_wall_clock`].
 #[async_trait::async_trait]
 pub trait BatchConsult: Send + Sync {
     /// Runs the trio over `prompt`, under `wall_clock` when there is one.
+    ///
+    /// # Arguments
+    ///
+    /// * `prompt` - The batch: its items, each file preceded by its header.
+    /// * `wall_clock` - The batch's wall clock; `None` runs it on the normal `consult` clock.
+    ///
+    /// # Returns
+    ///
+    /// The batch report.
     ///
     /// # Errors
     ///
@@ -48,33 +85,48 @@ pub trait ReviewClock: Send + Sync {
     fn elapsed_secs(&self) -> u64;
 }
 
-/// The production [`ReviewClock`], over an [`std::time::Instant`].
+/// The production [`ReviewClock`], over an [`Instant`].
 pub struct SystemReviewClock {
-    start: std::time::Instant,
+    start: Instant,
 }
 
 impl SystemReviewClock {
     /// A clock that starts now.
+    ///
+    /// # Returns
+    ///
+    /// The clock.
     pub fn start() -> Self {
         Self {
-            start: std::time::Instant::now(),
+            start: Instant::now(),
         }
     }
 }
 
 impl ReviewClock for SystemReviewClock {
     fn elapsed_secs(&self) -> u64 {
-        let _ = self.start;
-        todo!()
+        self.start.elapsed().as_secs()
     }
 }
 
 /// Runs one batch under its wall clock.
 ///
+/// When the wall clock elapses, `fut` is dropped, and with it every request it owns: nothing is
+/// left running on this side (a backend may still finish a generation nobody reads).
+///
+/// # Arguments
+///
+/// * `wall` - The batch's wall clock; `None` waits for `fut` however long it takes.
+/// * `fut` - The analysis, whose error is already redacted.
+///
+/// # Returns
+///
+/// The batch report.
+///
 /// # Errors
 ///
 /// [`ConsultFailure::ClockExpired`] when the wall clock elapsed, [`ConsultFailure::Other`]
-/// with the future's error otherwise.
+/// with the future's error otherwise (a timeout inside the analysis included).
 pub async fn run_with_wall_clock<F>(
     wall: Option<Duration>,
     fut: F,
@@ -82,8 +134,13 @@ pub async fn run_with_wall_clock<F>(
 where
     F: std::future::Future<Output = Result<MagiReport, String>> + Send,
 {
-    let _ = (wall, fut);
-    todo!()
+    let result = match wall {
+        Some(wall) => tokio::time::timeout(wall, fut)
+            .await
+            .map_err(|_| ConsultFailure::ClockExpired)?,
+        None => fut.await,
+    };
+    result.map_err(ConsultFailure::Other)
 }
 
 /// What to review and under which clock.
@@ -92,13 +149,13 @@ pub struct ReviewRequest<'a> {
     pub input: ReviewInput,
     /// The workspace root.
     pub workspace: &'a Path,
-    /// The explicit `--timeout`, the total of the review.
+    /// The explicit `--timeout`, the total of the review, counted from the first trio call.
     pub timeout_secs: Option<u64>,
     /// `[magi].max_rotations`, resolved.
     pub max_rotations: u32,
     /// `[magi].retry_disabled`, resolved.
     pub retry_disabled: bool,
-    /// `[magi].agent_timeout_secs`, resolved.
+    /// `[magi].agent_timeout_secs`, resolved: what the derived ceiling is compared with.
     pub agent_timeout_secs: u64,
 }
 
@@ -107,9 +164,9 @@ pub struct ReviewDeps<'a> {
     /// The review's git.
     pub git: &'a dyn GitCommand,
     /// The sandbox check of `File`/`Directory` paths.
-    pub guard: &'a dyn Fn(&Path) -> Result<PathBuf, ReviewError>,
+    pub guard: &'a (dyn Fn(&Path) -> Result<PathBuf, ReviewError> + Sync),
     /// Whether `.gitignore` excludes a path.
-    pub is_ignored: &'a dyn Fn(&str) -> bool,
+    pub is_ignored: &'a (dyn Fn(&str) -> bool + Sync),
     /// The language extractors.
     pub registry: &'a LanguageRegistry,
     /// The pool, as `(model, measured window)`.
@@ -124,27 +181,500 @@ pub struct ReviewDeps<'a> {
 
 /// What a review produced.
 pub struct ReviewOutcome {
-    /// The consolidated report.
+    /// The consolidated report; `None` when no batch completed or consolidation failed.
     pub consolidated: Option<Consolidated>,
-    /// The paid batch reports, when consolidation failed.
+    /// The paid batch reports, raw, when consolidation failed (empty otherwise).
     pub batch_reports: Vec<MagiReport>,
     /// What every stage declared.
     pub summary: ReviewSummary,
-    /// Why there is no consolidated report.
+    /// Why there is no consolidated report, redacted.
     pub consolidation_error: Option<String>,
 }
 
-/// Runs a review.
+/// Where a file split by units stands: whether every batch holding one of its units completed,
+/// and the line ranges of the units that did.
+struct UnitProgress {
+    /// Every batch holding one of its units completed.
+    all_done: bool,
+    /// The ranges of its finished units.
+    finished: Vec<(u32, u32)>,
+}
+
+/// One batch that the trio answered.
+struct Finished {
+    /// Zero-based batch index.
+    batch: usize,
+    /// Its report, raw.
+    report: MagiReport,
+}
+
+/// The faces of a file that the completed batches showed, to pick the code the gate sees.
+#[derive(Default)]
+struct Faces {
+    /// The file was shown whole or by units: its new side covers every line.
+    whole: bool,
+    /// New-side ranges of its hunks.
+    new: Vec<(u32, u32)>,
+    /// Old-side ranges of its hunks.
+    old: Vec<(u32, u32)>,
+}
+
+/// Runs a review, in the order of the spec's §5.0.
+///
+/// 1. Resolve the input and its single content source, wrapped in [`CachedSource`] so every
+///    stage reads the same bytes, once.
+/// 2. Filter what never leaves the process and what is not code.
+/// 3. Plan the batches against the pool window.
+/// 4. With an explicit `--timeout`, check the budget ([`pre_budget`]) before any trio call; then
+///    build the lexical index. Steps 1-4 are the preparation, measured apart and never charged
+///    to the `--timeout`.
+/// 5. Run one `consult` per batch, in series. Without `--timeout` each batch runs on the normal
+///    `consult` clock; with it, each gets what is left split over the pending batches, counted
+///    from the first trio call. A batch whose wall clock ran out stops the review's batches
+///    (the cut ones are declared); any other failure is declared and the next batch runs.
+/// 6. Validate each completed batch against what all completed batches showed.
+/// 7. Consolidate.
+/// 8. Run the gate once per consolidated finding, within what is left of the `--timeout`.
+/// 9. Apply the agreement weight.
+///
+/// # Arguments
+///
+/// * `req` - What to review and under which clock.
+/// * `deps` - Git, sandbox, extractors, pool, trio, gate and clock.
+///
+/// # Returns
+///
+/// The outcome. When no batch completed, or consolidation failed, it carries no consolidated
+/// report, the reason, and (for a failed consolidation) the paid batch reports.
 ///
 /// # Errors
 ///
-/// Any [`ReviewError`] before the first trio call.
+/// Any [`ReviewError`] of steps 1-4, all before the first trio call: those of the input, the
+/// filter and the batching, [`ReviewError::InputTooLarge`] from the cache and
+/// [`ReviewError::Budget`].
+///
+/// O(bytes reviewed) for the preparation, plus the consolidation's own bound.
 pub async fn run_review(
     req: ReviewRequest<'_>,
-    deps: ReviewDeps<'_>,
+    mut deps: ReviewDeps<'_>,
 ) -> Result<ReviewOutcome, ReviewError> {
-    let _ = (req, deps);
-    todo!()
+    let prep = Instant::now();
+    let mut summary = ReviewSummary::default();
+    let resolved = resolve_input(&req.input, req.workspace, deps.git, deps.guard)?;
+    let inner: Box<dyn ContentSource + '_> = match resolved.source_kind {
+        SourceKind::Worktree { old_rev: None } => {
+            Box::new(WorktreeSource::new(req.workspace.to_path_buf()))
+        }
+        SourceKind::Worktree {
+            old_rev: Some(old_rev),
+        } => Box::new(WorktreeSource::with_old(
+            req.workspace.to_path_buf(),
+            deps.git,
+            old_rev,
+        )),
+        SourceKind::Revision { new_rev, old_rev } => {
+            Box::new(RevisionSource::new(deps.git, new_rev, old_rev))
+        }
+    };
+    let source = CachedSource::new(inner.as_ref());
+    let explicit = matches!(req.input, ReviewInput::File(_));
+    let filtered = filter_files(
+        resolved.files,
+        &source,
+        deps.registry,
+        explicit,
+        deps.is_ignored,
+    )?;
+    summary.skipped = filtered.skipped;
+    summary
+        .skipped
+        .extend(resolved.not_utf8.iter().map(|path| Skipped {
+            path: display_path(path),
+            cause: SkipCause::NotUtf8,
+        }));
+    summary.no_extractor = filtered.no_extractor;
+    let window = pool_window(deps.pool);
+    summary.unmeasured_models = window.unmeasured.clone();
+    let batches = plan_batches(
+        &filtered.kept,
+        &source,
+        deps.registry,
+        batch_limit_tokens(&window),
+    )?;
+    let planned = batches.len();
+    summary.batches_planned = planned;
+    if let Some(total) = req.timeout_secs {
+        let ceiling = pre_budget(total, planned, req.max_rotations, req.retry_disabled)?;
+        summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
+    }
+    let index = build_index(&filtered.kept, &source, deps.registry)?;
+    summary.symbol_check_skipped = !index.is_complete();
+    if summary.symbol_check_skipped {
+        tracing::event!(
+            target: LOG_TARGET,
+            tracing::Level::WARN,
+            "the lexical index hit its cap: the symbol check is off for this review"
+        );
+    }
+    summary.prep_ms = millis(prep.elapsed());
+
+    let t0 = deps.clock.elapsed_secs();
+    let elapsed = |clock: &dyn ReviewClock| clock.elapsed_secs().saturating_sub(t0);
+    let mut finished = Vec::new();
+    for batch in &batches {
+        let wall = req.timeout_secs.map(|total| {
+            let left = total.saturating_sub(elapsed(deps.clock));
+            let pending = planned.saturating_sub(batch.index);
+            Duration::from_secs(batch_wall_clock_secs(left, pending))
+        });
+        let started = Instant::now();
+        match deps.consult.consult(&prompt_of(batch), wall).await {
+            Ok(report) => {
+                summary
+                    .batches
+                    .push(metrics(batch.index, &report, started.elapsed()));
+                finished.push(Finished {
+                    batch: batch.index,
+                    report,
+                });
+            }
+            Err(ConsultFailure::ClockExpired) => {
+                summary
+                    .failed_batches
+                    .extend((batch.index..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
+                break;
+            }
+            Err(ConsultFailure::Other(message)) => {
+                summary.failed_batches.push((batch.index, message));
+            }
+        }
+    }
+    summary.batches_completed = finished.len();
+
+    if finished.is_empty() {
+        let message = format!(
+            "no batch completed: {} of {planned} failed",
+            summary.failed_batches.len()
+        );
+        return Ok(ReviewOutcome {
+            consolidated: None,
+            batch_reports: Vec::new(),
+            summary,
+            consolidation_error: Some(message),
+        });
+    }
+
+    let completed: BTreeSet<usize> = finished.iter().map(|f| f.batch).collect();
+    let reviewed = reviewed_of(&batches, &completed, &source)?;
+    let workspace = without_verbatim_prefix(req.workspace);
+    let mut outcomes = Vec::with_capacity(finished.len());
+    for f in &finished {
+        let mut agents = f.report.agents.clone();
+        let answered = agents.iter().map(|a| a.agent).collect();
+        let validation = validate_batch(&mut agents, f.batch, &reviewed, &index, &workspace);
+        summary.discarded.extend(validation.discarded);
+        summary
+            .symbol_unverified
+            .extend(validation.symbol_unverified);
+        outcomes.push(BatchOutcome {
+            batch: f.batch,
+            agents,
+            answered,
+        });
+    }
+
+    let mut consolidated = match consolidate(&outcomes) {
+        Ok(c) => c,
+        Err(e) => {
+            let message = redact_foreign_text(&e.to_string()).as_str().to_string();
+            return Ok(ReviewOutcome {
+                consolidated: None,
+                batch_reports: finished.into_iter().map(|f| f.report).collect(),
+                summary,
+                consolidation_error: Some(message),
+            });
+        }
+    };
+    summary.ungrouped_unlocated = consolidated.ungrouped_unlocated;
+    if summary.ungrouped_unlocated > 0 {
+        tracing::event!(
+            target: LOG_TARGET,
+            tracing::Level::WARN,
+            ungrouped = summary.ungrouped_unlocated,
+            "unlocated findings were grouped without the consensus engine"
+        );
+    }
+
+    let faces = faces_of(&batches, &completed);
+    let mut verdicts = Vec::with_capacity(consolidated.findings.len());
+    for finding in &consolidated.findings {
+        let code = gate_code(finding.file.as_deref(), finding.line, &faces, &source);
+        let remaining = req
+            .timeout_secs
+            .map(|total| Duration::from_secs(total.saturating_sub(elapsed(deps.clock))));
+        verdicts.push(deps.gate.judge(finding, code.as_deref(), remaining).await);
+    }
+    summary.per_model = deps.gate.per_model().clone();
+    summary.gate_stopped = deps.gate.stopped().map(str::to_string);
+
+    apply_agreement(&mut consolidated.findings, &consolidated.answered);
+    let judged = verdicts
+        .iter()
+        .filter(|v| v.state != GateState::Unfiltered)
+        .count();
+    summary.judged_fraction = if verdicts.is_empty() {
+        1.0
+    } else {
+        ratio(judged, verdicts.len())
+    };
+    for (finding, verdict) in consolidated.findings.iter().zip(verdicts) {
+        *summary
+            .gate_states
+            .entry(state_name(verdict.state))
+            .or_insert(0) += 1;
+        if let Some(cause) = verdict.cause {
+            *summary.gate_causes.entry(cause.to_string()).or_insert(0) += 1;
+        }
+        let list = if verdict.state == GateState::Filtered {
+            &mut summary.filtered
+        } else {
+            &mut summary.findings
+        };
+        list.push((finding.clone(), verdict));
+    }
+
+    Ok(ReviewOutcome {
+        consolidated: Some(consolidated),
+        batch_reports: Vec::new(),
+        summary,
+        consolidation_error: None,
+    })
+}
+
+/// The prompt of a batch: its items in order, each file's first item preceded by its header.
+/// The mode is an argument of the trio call, never part of this text.
+fn prompt_of(batch: &ReviewBatch) -> String {
+    let mut prompt = String::new();
+    let mut previous: Option<&str> = None;
+    for item in &batch.items {
+        let (file, text) = match item {
+            BatchItem::Hunk { file, text, .. }
+            | BatchItem::Unit { file, text, .. }
+            | BatchItem::WholeFile { file, text, .. } => (file.as_str(), text.as_str()),
+        };
+        if previous != Some(file) {
+            prompt.push_str(&file_header(file));
+            previous = Some(file);
+        }
+        prompt.push_str(text);
+        if !text.ends_with('\n') {
+            prompt.push('\n');
+        }
+    }
+    prompt
+}
+
+/// The metrics of a completed batch: every completion record's tokens, summed over the seats.
+fn metrics(index: usize, report: &MagiReport, took: Duration) -> BatchMetrics {
+    let (input_tokens, output_tokens) =
+        report
+            .completions
+            .values()
+            .flatten()
+            .fold((0u64, 0u64), |(i, o), r| {
+                (
+                    i.saturating_add(u64::from(r.prompt_tokens.unwrap_or(0))),
+                    o.saturating_add(u64::from(r.completion_tokens.unwrap_or(0))),
+                )
+            });
+    BatchMetrics {
+        index,
+        input_tokens,
+        output_tokens,
+        ms: millis(took),
+    }
+}
+
+/// A duration in whole milliseconds, saturating.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// `part / whole` as a fraction; `whole > 0`.
+fn ratio(part: usize, whole: usize) -> f64 {
+    let as_f64 = |n: usize| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+    as_f64(part) / as_f64(whole)
+}
+
+/// The JSON name of a gate state (`kept`, `filtered`, `low_confidence`, `unfiltered`), from its
+/// serialization: the one place it is spelled.
+fn state_name(state: GateState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// The lexical index over both sides of every reviewed file. O(bytes reviewed).
+fn build_index(
+    files: &[ReviewFile],
+    source: &dyn ContentSource,
+    registry: &LanguageRegistry,
+) -> Result<LexicalIndex, ReviewError> {
+    let mut texts = Vec::new();
+    for file in files {
+        let mut sides = vec![source.read(&file.path)?];
+        if file.diff.is_some() {
+            sides.push(source.read_old(&file.path)?);
+        }
+        for bytes in sides.into_iter().flatten() {
+            texts.push((
+                file.path.clone(),
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ));
+        }
+    }
+    Ok(LexicalIndex::build(&texts, registry))
+}
+
+/// What the completed batches showed (U24): both ranges of each hunk, each whole file, and each
+/// file split by units whole when every batch holding one completed, else only its finished
+/// units. O(items · log r).
+fn reviewed_of(
+    batches: &[ReviewBatch],
+    completed: &BTreeSet<usize>,
+    source: &dyn ContentSource,
+) -> Result<Reviewed, ReviewError> {
+    let mut reviewed = Reviewed::default();
+    let mut units: BTreeMap<&str, UnitProgress> = BTreeMap::new();
+    for batch in batches {
+        let done = completed.contains(&batch.index);
+        for item in &batch.items {
+            match item {
+                BatchItem::Hunk {
+                    file,
+                    first_line,
+                    last_line,
+                    old_first_line,
+                    old_last_line,
+                    ..
+                } if done => {
+                    reviewed.add_lines(file, *first_line, *last_line);
+                    reviewed.add_lines(file, *old_first_line, *old_last_line);
+                }
+                BatchItem::WholeFile { file, lines, .. } if done => {
+                    reviewed.add_whole_file(file, *lines);
+                }
+                BatchItem::Unit {
+                    file,
+                    first_line,
+                    last_line,
+                    ..
+                } => {
+                    let progress = units.entry(file.as_str()).or_insert(UnitProgress {
+                        all_done: true,
+                        finished: Vec::new(),
+                    });
+                    progress.all_done &= done;
+                    if done {
+                        progress.finished.push((*first_line, *last_line));
+                    }
+                }
+                BatchItem::Hunk { .. } | BatchItem::WholeFile { .. } => {}
+            }
+        }
+    }
+    for (file, UnitProgress { all_done, finished }) in units {
+        if all_done {
+            let lines = source
+                .read(file)?
+                .map(|bytes| String::from_utf8_lossy(&bytes).lines().count())
+                .unwrap_or(0);
+            reviewed.add_whole_file(file, u32::try_from(lines).unwrap_or(u32::MAX));
+        } else {
+            for (first, last) in finished {
+                reviewed.add_lines(file, first, last);
+            }
+        }
+    }
+    Ok(reviewed)
+}
+
+/// The faces each file showed in the completed batches. O(items).
+fn faces_of<'b>(
+    batches: &'b [ReviewBatch],
+    completed: &BTreeSet<usize>,
+) -> HashMap<&'b str, Faces> {
+    let mut faces: HashMap<&str, Faces> = HashMap::new();
+    for batch in batches.iter().filter(|b| completed.contains(&b.index)) {
+        for item in &batch.items {
+            match item {
+                BatchItem::Hunk {
+                    file,
+                    first_line,
+                    last_line,
+                    old_first_line,
+                    old_last_line,
+                    ..
+                } => {
+                    let f = faces.entry(file.as_str()).or_default();
+                    f.new.push((*first_line, *last_line));
+                    f.old.push((*old_first_line, *old_last_line));
+                }
+                BatchItem::Unit { file, .. } | BatchItem::WholeFile { file, .. } => {
+                    faces.entry(file.as_str()).or_default().whole = true;
+                }
+            }
+        }
+    }
+    faces
+}
+
+/// The code the gate sees for a finding (RV10 + RV21): the new side when the line lies in a new
+/// range or the file was shown whole, else the old side when it lies in an old range, numbered
+/// as that side. `None` (the gate's `no location`) without a line, without a face that holds
+/// it, or when the read fails, with a WARN; with the cache that read is unreachable, because
+/// every face of a reviewed file was read during the preparation.
+fn gate_code(
+    file: Option<&str>,
+    line: Option<u32>,
+    faces: &HashMap<&str, Faces>,
+    source: &dyn ContentSource,
+) -> Option<String> {
+    let (file, line) = (file?, line?);
+    let face = faces.get(file)?;
+    let holds = |ranges: &[(u32, u32)]| ranges.iter().any(|&(a, b)| a <= line && line <= b);
+    let read = if face.whole || holds(&face.new) {
+        source.read(file)
+    } else if holds(&face.old) {
+        source.read_old(file)
+    } else {
+        return None;
+    };
+    match read {
+        Ok(bytes) => bytes.map(|b| String::from_utf8_lossy(&b).into_owned()),
+        Err(e) => {
+            let error = redact_foreign_text(&e.to_string());
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                error = error.as_str(),
+                "the gate could not read the code of a finding"
+            );
+            None
+        }
+    }
+}
+
+/// `path` without Windows' verbatim prefix (`\\?\C:\w` becomes `C:\w`), so a reported absolute
+/// location compares with the workspace as an editor writes it. A verbatim UNC path is left as
+/// it is.
+fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(VERBATIM_PREFIX) {
+        Some(rest) if !rest.starts_with(VERBATIM_UNC) => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 #[cfg(test)]

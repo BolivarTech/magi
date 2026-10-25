@@ -542,16 +542,17 @@ pub fn derived_retry_config(ceiling_secs: u64) -> magi_core::provider::RetryConf
 
 /// The derived ceiling BEFORE the floor is applied, from an already-computed factor.
 ///
-/// Private, and factor-level rather than rotation-level, for two reasons: the floor is not
-/// optional on any public path (see [`derive_ceiling_from_timeout`]), and taking the factor
-/// directly lets the property tests sweep the whole factor space — covering every slack percentage
-/// the constant could hold — without a parallel slack-parameterized copy of each public function.
+/// Crate-private (the code-review budget check reads it), and factor-level rather than
+/// rotation-level, for two reasons: the floor is not optional on any public path (see
+/// [`derive_ceiling_from_timeout`]), and taking the factor directly lets the property tests sweep
+/// the whole factor space — covering every slack percentage the constant could hold — without a
+/// parallel slack-parameterized copy of each public function.
 ///
 /// `factor` must be non-zero (undocumented, not guarded — a division by it follows below).
 /// Every production caller reaches this through [`attempt_factor`], whose minimum output is
 /// `120` (`1 * 1 * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`), so the precondition is documentation
 /// for a reader, not a guard against a value this module can actually produce.
-fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
+pub(crate) fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
     // `saturating_sub` is the load-bearing guard: with `timeout <= CLASSIFY_TIMEOUT_SECS` a plain
     // subtraction underflows in u64 and yields an ASTRONOMICAL ceiling instead of a minimal one —
     // the error pointing at the opposite of the safe side. The `* 100` undoes the hundredths

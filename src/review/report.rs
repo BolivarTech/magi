@@ -3,15 +3,26 @@
 // Date: 2026-10-24
 
 //! What a review reports (REQ-RV13): the summary of every stage, its JSON form and its text form.
+//!
+//! Both forms pass every string through [`redact_foreign_text`] as they are written: the
+//! summary holds model text (titles, details, failure messages) and this is the last point
+//! before it leaves the process, so the redaction here is a backstop over the one consolidation
+//! already applied.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 
-use magi_core::reporting::MagiReport;
+use magi_core::reporting::{MagiReport, ReportFormatter};
+use serde_json::{json, Map, Value};
 
 use super::consolidate::{Consolidated, ConsolidatedFinding};
 use super::filter::Skipped;
 use super::gate::GateVerdict;
 use super::validate::Discarded;
+use crate::redact::redact_foreign_text;
+
+/// The key under which a finding of the JSON form carries its gate verdict.
+const GATE_KEY: &str = "gate";
 
 /// What every stage of a review declared.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -20,13 +31,13 @@ pub struct ReviewSummary {
     pub gate_states: BTreeMap<String, usize>,
     /// Findings per gate cause.
     pub gate_causes: BTreeMap<String, usize>,
-    /// Findings each model of the gate chain decided.
+    /// Answers each model of the gate chain decided.
     pub per_model: BTreeMap<String, usize>,
-    /// Fraction of the findings that reached the gate and got an answer.
+    /// Fraction of the findings that reached the gate and got an answer; 1.0 with none.
     pub judged_fraction: f64,
-    /// Findings removed by the deterministic validation.
+    /// Findings removed by the deterministic validation, with their cause.
     pub discarded: Vec<Discarded>,
-    /// Files left out of the review.
+    /// Files left out of the review, with their cause.
     pub skipped: Vec<Skipped>,
     /// Reviewed files with no language extractor.
     pub no_extractor: Vec<String>,
@@ -42,9 +53,10 @@ pub struct ReviewSummary {
     pub batches_planned: usize,
     /// The findings of the main list, with their gate verdict.
     pub findings: Vec<(ConsolidatedFinding, GateVerdict)>,
-    /// The findings the gate filtered, listed apart.
+    /// The findings the gate filtered, listed apart and never deleted.
     pub filtered: Vec<(ConsolidatedFinding, GateVerdict)>,
-    /// Whether the ceiling derived from `--timeout` is below `[magi].agent_timeout_secs`.
+    /// Whether the ceiling of the initial split of `--timeout` is below
+    /// `[magi].agent_timeout_secs` (a declaration of that split, not of each batch).
     pub ceiling_below_configured: bool,
     /// Batches that did not complete, with why.
     pub failed_batches: Vec<(usize, String)>,
@@ -52,7 +64,7 @@ pub struct ReviewSummary {
     pub gate_stopped: Option<String>,
     /// Whether the symbol check was off because the lexical index hit its cap.
     pub symbol_check_skipped: bool,
-    /// Critical findings whose only failed check was the symbol one.
+    /// Critical findings whose only failed check was the symbol one; they reached the gate.
     pub symbol_unverified: Vec<Discarded>,
     /// Unlocated findings grouped without the consensus engine.
     pub ungrouped_unlocated: usize,
@@ -63,30 +75,307 @@ pub struct ReviewSummary {
 pub struct BatchMetrics {
     /// Zero-based batch index.
     pub index: usize,
-    /// Prompt tokens of every completion of the batch.
+    /// Prompt tokens of every completion of the batch (0 where the backend did not count).
     pub input_tokens: u64,
-    /// Completion tokens of every completion of the batch.
+    /// Completion tokens of every completion of the batch (0 where the backend did not count).
     pub output_tokens: u64,
     /// Wall clock of the batch's `consult`, in milliseconds.
     pub ms: u64,
 }
 
 /// The text report of a consolidated review.
+///
+/// magi-core's report over the consolidated outputs, then the review's own sections: batches
+/// and their failures, the gate's counts (and, once, what stopped it), every consolidated
+/// finding with its gate verdict, the discarded and symbol-unverified findings, the skipped
+/// files and the other declarations of the summary. The whole text is redacted as it is
+/// returned.
+///
+/// # Arguments
+///
+/// * `c` - The consolidated review.
+/// * `s` - Its summary.
+///
+/// # Returns
+///
+/// The report. O(findings + summary).
 pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
-    let _ = (c, s);
-    todo!()
+    let mut out = ReportFormatter::new().format_report(&c.agents, &c.consensus);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    // Writing into a `String` cannot fail.
+    let _ = write_review_section(&mut out, c, s);
+    redacted(&out)
+}
+
+/// Writes the review's own sections of [`render_text`].
+fn write_review_section(out: &mut String, c: &Consolidated, s: &ReviewSummary) -> std::fmt::Result {
+    writeln!(out, "\n## Review")?;
+    writeln!(
+        out,
+        "batches: {} of {} completed",
+        s.batches_completed, s.batches_planned
+    )?;
+    for (k, why) in &s.failed_batches {
+        writeln!(out, "batch {k} did not complete: {why}")?;
+    }
+    if let Some(cause) = &s.gate_stopped {
+        writeln!(out, "gate stopped: {cause}")?;
+    }
+    writeln!(out, "gate states: {}", counts(&s.gate_states))?;
+    if !s.gate_causes.is_empty() {
+        writeln!(out, "gate causes: {}", counts(&s.gate_causes))?;
+    }
+    if !s.per_model.is_empty() {
+        writeln!(out, "decided by: {}", counts(&s.per_model))?;
+    }
+    writeln!(out, "judged: {:.0} %", s.judged_fraction * 100.0)?;
+    let (input, output, ms) = totals(s);
+    writeln!(
+        out,
+        "tokens: {input} in, {output} out; batches {ms} ms; preparation {} ms",
+        s.prep_ms
+    )?;
+    if !s.unmeasured_models.is_empty() {
+        writeln!(
+            out,
+            "models without a measured window: {}",
+            s.unmeasured_models.join(", ")
+        )?;
+    }
+    if s.ceiling_below_configured {
+        writeln!(
+            out,
+            "the --timeout leaves each batch a ceiling below [magi].agent_timeout_secs"
+        )?;
+    }
+    if s.symbol_check_skipped {
+        writeln!(
+            out,
+            "the symbol check was off: the lexical index hit its cap"
+        )?;
+    }
+    if s.ungrouped_unlocated > 0 {
+        writeln!(
+            out,
+            "{} unlocated findings were grouped without the consensus engine",
+            s.ungrouped_unlocated
+        )?;
+    }
+    let verdicts: HashMap<FindingKey, &GateVerdict> = s
+        .findings
+        .iter()
+        .chain(&s.filtered)
+        .map(|(f, v)| (key_of(f), v))
+        .collect();
+    writeln!(out, "\n## Findings")?;
+    for f in &c.findings {
+        write!(
+            out,
+            "- [{}] {} {}",
+            name(&f.severity),
+            location(f.file.as_deref(), f.line),
+            f.titles.join(" / ")
+        )?;
+        if !f.marks.is_empty() {
+            let marks: Vec<String> = f.marks.iter().map(name).collect();
+            write!(out, " ({})", marks.join(", "))?;
+        }
+        if let Some(v) = verdicts.get(&key_of(f)) {
+            write!(out, "; gate: {}", name(&v.state))?;
+            if let Some(cause) = v.cause {
+                write!(out, " ({cause})")?;
+            }
+        }
+        writeln!(out)?;
+        for detail in &f.details {
+            writeln!(out, "  {detail}")?;
+        }
+    }
+    write_discarded(out, "Discarded", &s.discarded)?;
+    write_discarded(
+        out,
+        "Critical with an unverified symbol",
+        &s.symbol_unverified,
+    )?;
+    if !s.skipped.is_empty() {
+        writeln!(out, "\n## Skipped")?;
+        for skip in &s.skipped {
+            writeln!(out, "- {} ({})", skip.path, name(&skip.cause))?;
+        }
+    }
+    if !s.no_extractor.is_empty() {
+        writeln!(out, "\n## Reviewed without language context")?;
+        for path in &s.no_extractor {
+            writeln!(out, "- {path}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes one list of discarded findings under `title`, nothing when it is empty.
+fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fmt::Result {
+    if list.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "\n## {title}")?;
+    for d in list {
+        writeln!(
+            out,
+            "- {} [{}] {} (batch {}, {})",
+            location(d.finding.file.as_deref(), d.finding.line),
+            name(&d.cause),
+            d.finding.title,
+            d.batch,
+            name(&d.agent)
+        )?;
+    }
+    Ok(())
 }
 
 /// The JSON form of a summary.
-pub fn summary_json(s: &ReviewSummary) -> serde_json::Value {
-    let _ = s;
-    todo!()
+///
+/// Every field of [`ReviewSummary`], with `findings` and `filtered` as
+/// `[{<fields of the finding>, "gate": <verdict>}]`, plus `batch_totals`
+/// (`{input_tokens, output_tokens, ms}` summed over `batches`) and `rejected_skips`
+/// (`{model: n}`, the models skipped after an HTTP 400). Every string is redacted.
+///
+/// # Arguments
+///
+/// * `s` - The summary.
+///
+/// # Returns
+///
+/// The JSON object. O(size of the summary).
+pub fn summary_json(s: &ReviewSummary) -> Value {
+    // Serializing these types cannot fail: every map key is a string.
+    let mut v = serde_json::to_value(s).unwrap_or_default();
+    if let Value::Object(fields) = &mut v {
+        fields.insert("findings".into(), with_gate(&s.findings));
+        fields.insert("filtered".into(), with_gate(&s.filtered));
+        let (input, output, ms) = totals(s);
+        fields.insert(
+            "batch_totals".into(),
+            json!({"input_tokens": input, "output_tokens": output, "ms": ms}),
+        );
+        let mut skips: BTreeMap<&str, usize> = BTreeMap::new();
+        for (_, verdict) in s.findings.iter().chain(&s.filtered) {
+            for model in &verdict.skipped {
+                *skips.entry(model.as_str()).or_insert(0) += 1;
+            }
+        }
+        fields.insert("rejected_skips".into(), json!(skips));
+    }
+    redact_strings(&mut v);
+    v
 }
 
-/// The paid batch reports, when consolidation failed.
+/// The paid batch reports, when consolidation failed (M-9).
+///
+/// Each report as its `consult` produced it, magi-core's report under `## [batch k]`, with `k`
+/// the report's position in `reports`. The whole text is redacted, since the reports are held
+/// raw.
+///
+/// # Arguments
+///
+/// * `reports` - The reports of the completed batches, in batch order.
+///
+/// # Returns
+///
+/// The text.
 pub fn render_batch_reports(reports: &[MagiReport]) -> String {
-    let _ = reports;
-    todo!()
+    let formatter = ReportFormatter::new();
+    let mut out = String::new();
+    for (k, report) in reports.iter().enumerate() {
+        // Writing into a `String` cannot fail.
+        let _ = writeln!(out, "## [batch {k}]");
+        out.push_str(&formatter.format_report(&report.agents, &report.consensus));
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    redacted(&out)
+}
+
+/// `(file, line, titles)`: how a finding of the summary is matched with the consolidated one.
+type FindingKey = (Option<String>, Option<u32>, Vec<String>);
+
+/// The key of a finding.
+fn key_of(f: &ConsolidatedFinding) -> FindingKey {
+    (f.file.clone(), f.line, f.titles.clone())
+}
+
+/// The findings with their verdict under [`GATE_KEY`].
+fn with_gate(list: &[(ConsolidatedFinding, GateVerdict)]) -> Value {
+    Value::Array(
+        list.iter()
+            .map(|(finding, verdict)| {
+                let mut entry = match serde_json::to_value(finding) {
+                    Ok(Value::Object(fields)) => fields,
+                    _ => Map::new(),
+                };
+                entry.insert(
+                    GATE_KEY.into(),
+                    serde_json::to_value(verdict).unwrap_or_default(),
+                );
+                Value::Object(entry)
+            })
+            .collect(),
+    )
+}
+
+/// Input tokens, output tokens and milliseconds summed over the batches, saturating.
+fn totals(s: &ReviewSummary) -> (u64, u64, u64) {
+    s.batches.iter().fold((0, 0, 0), |(i, o, ms), b| {
+        (
+            i.saturating_add(b.input_tokens),
+            o.saturating_add(b.output_tokens),
+            ms.saturating_add(b.ms),
+        )
+    })
+}
+
+/// `k1 n1, k2 n2`, in key order.
+fn counts(map: &BTreeMap<String, usize>) -> String {
+    let parts: Vec<String> = map.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// `file:line`, `file`, or `(no location)`.
+fn location(file: Option<&str>, line: Option<u32>) -> String {
+    match (file, line) {
+        (Some(f), Some(l)) => format!("{f}:{l}"),
+        (Some(f), None) => f.to_string(),
+        (None, _) => "(no location)".to_string(),
+    }
+}
+
+/// The serialized name of a unit enum value (`warning`, `kept`, `file not reviewed`, ...).
+fn name<T: serde::Serialize + std::fmt::Debug>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(Value::String(text)) => text,
+        _ => format!("{value:?}"),
+    }
+}
+
+/// `text` with every credential in an embedded URL redacted.
+fn redacted(text: &str) -> String {
+    redact_foreign_text(text).as_str().to_string()
+}
+
+/// Redacts every string of `value` in place (keys are field names, model names, states and causes). O(bytes).
+fn redact_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = redacted(text),
+        Value::Array(items) => items.iter_mut().for_each(redact_strings),
+        Value::Object(fields) => fields.values_mut().for_each(redact_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 #[cfg(test)]
