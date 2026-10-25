@@ -165,6 +165,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     if !s.per_model.is_empty() {
         writeln!(out, "decided by: {}", counts(&s.per_model))?;
     }
+    writeln!(out, "gate questions: {}", s.gate_questions)?;
     writeln!(out, "judged: {:.0} %", s.judged_fraction * 100.0)?;
     let (input, output, ms) = totals(s);
     writeln!(

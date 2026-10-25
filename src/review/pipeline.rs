@@ -384,6 +384,7 @@ pub async fn run_review(
         );
     }
     summary.per_model = deps.gate.per_model().clone();
+    summary.gate_questions = deps.gate.questions();
     summary.gate_stopped = deps.gate.stopped().map(str::to_string);
 
     apply_agreement(&mut consolidated.findings, &consolidated.answered);
