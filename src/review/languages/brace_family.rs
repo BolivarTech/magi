@@ -21,7 +21,7 @@ use crate::review::context::FileContext;
 #[derive(Clone)]
 pub struct BraceFamilyExtractor {
     language: String,
-    exts: Vec<String>,
+    exts: &'static [&'static str],
     /// Keywords that start a function/method declaration.
     function_keywords: Vec<String>,
     /// Keywords that start a block declaration (struct, class, enum, etc.).
@@ -42,9 +42,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
     }
 
     fn extensions(&self) -> &[&str] {
-        // The trait wants `&[&str]` but the extensions are owned `String`s, so this is empty.
-        // The registry reads the inherent `BraceFamilyExtractor::extensions` instead.
-        &[]
+        self.exts
     }
 
     fn extract_units(
@@ -367,7 +365,7 @@ impl BraceFamilyExtractor {
     pub fn rust() -> Self {
         Self {
             language: "rust".to_string(),
-            exts: vec!["rs".to_string()],
+            exts: &["rs"],
             function_keywords: vec![
                 "pub async fn ".to_string(),
                 "pub(crate) async fn ".to_string(),
@@ -414,7 +412,7 @@ impl BraceFamilyExtractor {
     pub fn c() -> Self {
         Self {
             language: "c".to_string(),
-            exts: vec!["c".to_string(), "h".to_string()],
+            exts: &["c", "h"],
             function_keywords: vec![],
             block_keywords: vec![
                 "struct ".to_string(),
@@ -437,13 +435,7 @@ impl BraceFamilyExtractor {
     pub fn cpp() -> Self {
         let mut ext = Self::c();
         ext.language = "cpp".to_string();
-        ext.exts = vec![
-            "cpp".to_string(),
-            "cxx".to_string(),
-            "cc".to_string(),
-            "hpp".to_string(),
-            "hxx".to_string(),
-        ];
+        ext.exts = &["cpp", "cxx", "cc", "hpp", "hxx"];
         ext.block_keywords
             .extend(["class ".to_string(), "namespace ".to_string()]);
         ext.lexical_rules = LexicalRules::cpp();
@@ -454,7 +446,7 @@ impl BraceFamilyExtractor {
     pub fn go() -> Self {
         Self {
             language: "go".to_string(),
-            exts: vec!["go".to_string()],
+            exts: &["go"],
             function_keywords: vec!["func ".to_string()],
             block_keywords: vec!["type ".to_string()],
             declaration_keywords: vec![
@@ -472,7 +464,7 @@ impl BraceFamilyExtractor {
     pub fn java() -> Self {
         Self {
             language: "java".to_string(),
-            exts: vec!["java".to_string()],
+            exts: &["java"],
             function_keywords: vec![
                 "public ".to_string(),
                 "private ".to_string(),
@@ -498,7 +490,7 @@ impl BraceFamilyExtractor {
     pub fn javascript() -> Self {
         Self {
             language: "javascript".to_string(),
-            exts: vec!["js".to_string(), "jsx".to_string(), "mjs".to_string()],
+            exts: &["js", "jsx", "mjs"],
             function_keywords: vec![
                 "function ".to_string(),
                 "async function ".to_string(),
@@ -528,18 +520,13 @@ impl BraceFamilyExtractor {
     pub fn typescript() -> Self {
         let mut ext = Self::javascript();
         ext.language = "typescript".to_string();
-        ext.exts = vec!["ts".to_string(), "tsx".to_string(), "mts".to_string()];
+        ext.exts = &["ts", "tsx", "mts"];
         ext.block_keywords.push("interface ".to_string());
         ext.block_keywords.push("export interface ".to_string());
         ext.declaration_keywords.push("type ".to_string());
         ext.declaration_keywords.push("export type ".to_string());
         ext.lexical_rules = LexicalRules::typescript();
         ext
-    }
-
-    /// Return the file extensions (used by the registry).
-    pub fn extensions(&self) -> &[String] {
-        &self.exts
     }
 }
 

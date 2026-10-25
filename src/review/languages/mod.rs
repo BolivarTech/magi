@@ -118,9 +118,7 @@ impl LanguageExtractor for ExtractorKind {
 
     fn extensions(&self) -> &[&str] {
         match self {
-            // BraceFamilyExtractor stores extensions as Vec<String> (non-trait method).
-            // The registry has already registered by extension, so this is unused at runtime.
-            Self::BraceFamily(_) => &[],
+            Self::BraceFamily(e) => e.extensions(),
             Self::Python(e) => e.extensions(),
         }
     }
