@@ -9445,7 +9445,9 @@ mod tests {
             vec![
                 "bring_up_headless_logging".to_string(),
                 "finish_headless".to_string(),
+                "headless_args_of".to_string(),
                 "prepare_headless".to_string(),
+                "run_code_review_subcommand".to_string(),
                 "run_consult_subcommand".to_string(),
                 "run_query_subcommand".to_string(),
                 "write_headless_output".to_string(),
