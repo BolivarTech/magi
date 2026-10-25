@@ -728,4 +728,55 @@ mod tests {
             "Group should include all consecutive defines"
         );
     }
+
+    /// Asserts each line `1..=total` lies in exactly one unit.
+    fn assert_each_line_in_one_unit(units: &[SemanticUnit], total: u32) {
+        for line in 1..=total {
+            let holders: Vec<&str> = units
+                .iter()
+                .filter(|u| u.start_line <= line && line <= u.end_line)
+                .map(|u| u.name.as_str())
+                .collect();
+            assert_eq!(holders.len(), 1, "line {line} is in {holders:?}");
+        }
+    }
+
+    #[test]
+    fn every_gap_between_constructs_is_its_own_fallback_unit() {
+        // Blank lines and comments between functions are orphans; one
+        // fallback unit spanning the first to the last of them swallowed the functions between.
+        let code = "use a::b;
+
+fn one() {
+    x();
+}
+// note
+
+fn two() {
+    y();
+}
+
+fn three() {
+    z();
+}
+";
+        let every: Vec<u32> = (1..=14).collect();
+        let units = extract(&rust_extractor(), code, &every);
+        assert_each_line_in_one_unit(&units, 14);
+        let gaps: Vec<(u32, u32)> = units
+            .iter()
+            .filter(|u| u.kind == UnitKind::TopLevel)
+            .map(|u| (u.start_line, u.end_line))
+            .collect();
+        assert_eq!(gaps, vec![(2, 2), (6, 7), (11, 11)]);
+    }
+
+    #[test]
+    fn a_gap_before_a_construct_on_the_last_line_stops_before_it() {
+        let code = "fn a() {}
+
+fn b() {}";
+        let units = extract(&rust_extractor(), code, &[1, 2, 3]);
+        assert_each_line_in_one_unit(&units, 3);
+    }
 }

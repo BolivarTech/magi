@@ -748,6 +748,54 @@ mod tests {
     }
 
     #[test]
+    fn a_realistically_formatted_file_that_does_not_fit_is_split_by_units() {
+        // Imports, comments and blank lines between functions: every gap is its own unit, so
+        // no unit holds the functions around it and each fits.
+        let body = |v: &str| {
+            format!(
+                "    let _{v} = 1;
+"
+            )
+            .repeat(14)
+        };
+        let text = format!(
+            "use a::b;
+
+// first
+fn f() {{
+{}}}
+
+// second
+fn g() {{
+{}}}
+
+fn h() {{
+{}}}
+",
+            body("a"),
+            body("b"),
+            body("c")
+        );
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: None,
+        }];
+        let src = MapSource::new(&[("a.rs", &text)], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 100).expect("plans");
+        let names: Vec<&str> = b
+            .iter()
+            .flat_map(|x| x.items.iter())
+            .filter_map(|i| match i {
+                BatchItem::Unit { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        for f in ["f", "g", "h"] {
+            assert!(names.contains(&f), "{names:?}");
+        }
+    }
+
+    #[test]
     fn a_single_unit_larger_than_the_limit_is_a_typed_error() {
         let text = format!("fn big() {{\n{}}}\n", "    let _x = 1;\n".repeat(50)); // ~200 tokens
         let files = vec![ReviewFile {

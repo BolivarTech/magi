@@ -364,4 +364,35 @@ mod tests {
         assert_eq!(units[0].kind, UnitKind::DeclarationGroup);
         assert_eq!(units[0].name, "imports");
     }
+
+    #[test]
+    fn every_gap_between_constructs_is_its_own_fallback_unit() {
+        // Orphans around several constructs gave one window from the first to the last of
+        // them, which held every construct in between.
+        let code = "import os
+
+
+def f():
+    pass
+
+# note
+
+def g():
+    pass
+
+
+def h():
+    pass
+";
+        let every: Vec<u32> = (1..=14).collect();
+        let units = extract(code, &every);
+        for line in 1..=14u32 {
+            let holders: Vec<&str> = units
+                .iter()
+                .filter(|u| u.start_line <= line && line <= u.end_line)
+                .map(|u| u.name.as_str())
+                .collect();
+            assert_eq!(holders.len(), 1, "line {line} is in {holders:?}");
+        }
+    }
 }
