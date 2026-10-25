@@ -1476,4 +1476,193 @@ mod tests {
         }
         assert_eq!(consult.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+
+    /// The skipped entries of a rendered review, as `(path, cause)`.
+    fn skipped_of(rendered: &Rendered) -> Vec<(String, String)> {
+        rendered.json["skipped"]
+            .as_array()
+            .expect("skipped is a list")
+            .iter()
+            .map(|s| {
+                (
+                    s["path"].as_str().unwrap_or_default().to_string(),
+                    s["cause"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Filters `path` from the worktree of `ws` as a file named by the caller and asserts it is
+    /// refused with `cause` (the pipeline's `File` path after the guard).
+    fn assert_explicit_is_refused(ws: &Path, path: &str, cause: &str) {
+        let source = magi_rs::review::source::WorktreeSource::new(ws.to_path_buf());
+        let files = vec![magi_rs::review::input::ReviewFile {
+            path: path.into(),
+            diff: None,
+        }];
+        let got = magi_rs::review::filter::filter_files(
+            files,
+            &source,
+            &LanguageRegistry::new(),
+            true,
+            &|_| false,
+        );
+        assert!(
+            matches!(got, Err(ReviewError::NotReviewable { cause: c, .. }) if c == cause),
+            "{got:?}"
+        );
+    }
+
+    /// A git repository with `src/a.rs` and `sub/b.rs`, a tracked link to the directory `sub`
+    /// and a tracked link whose target does not exist, all committed.
+    #[cfg(unix)]
+    fn repo_with_links() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        std::fs::create_dir_all(ws.join("sub")).expect("sub");
+        std::fs::write(ws.join("src").join("a.rs"), "fn a() {}\n").expect("a.rs");
+        std::fs::write(ws.join("sub").join("b.rs"), "fn b() {}\n").expect("b.rs");
+        std::os::unix::fs::symlink("sub", ws.join("link")).expect("dir link");
+        std::os::unix::fs::symlink("nowhere.rs", ws.join("dangling")).expect("dangling");
+        git_in(&ws, &["init", "-q"]);
+        git_in(&ws, &["add", "-A"]);
+        git_in(&ws, &["commit", "-q", "-m", "links"]);
+        (tmp, ws)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_directory_review_skips_a_directory_link_and_passes_over_a_dangling_one() {
+        // A link to a directory is not a file: skipped with its cause, never an IO failure that
+        // aborts the review. A dangling link is what a deleted tracked file is: not listed.
+        let (_tmp, ws) = repo_with_links();
+        let runner = production_runner_with(
+            &ws,
+            Arc::new(RecordingConsult::default()),
+            vec![("m".into(), None)],
+        );
+        let plan = runner
+            .plan(&ReviewInput::Directory(".".into()))
+            .expect("plans");
+        let rendered = runner
+            .run(plan, None, &CancellationToken::new())
+            .await
+            .expect("the review runs");
+        let skipped = skipped_of(&rendered);
+        assert!(
+            skipped.contains(&("link".to_string(), "not a regular file".to_string())),
+            "{skipped:?}"
+        );
+        assert!(!skipped.iter().any(|(p, _)| p == "dangling"), "{skipped:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uncommitted_untracked_links_neither_abort_nor_send_a_directory() {
+        let (_tmp, ws) = repo_with_links();
+        std::fs::write(ws.join("src").join("a.rs"), "fn a2() {}\n").expect("edit");
+        std::os::unix::fs::symlink("src", ws.join("new_link")).expect("dir link");
+        std::os::unix::fs::symlink("gone.rs", ws.join("new_dangling")).expect("dangling");
+        let runner = production_runner_with(
+            &ws,
+            Arc::new(RecordingConsult::default()),
+            vec![("m".into(), None)],
+        );
+        let plan = runner.plan(&ReviewInput::Uncommitted).expect("plans");
+        let rendered = runner
+            .run(plan, None, &CancellationToken::new())
+            .await
+            .expect("the review runs");
+        let skipped = skipped_of(&rendered);
+        assert!(
+            skipped.contains(&("new_link".to_string(), "not a regular file".to_string())),
+            "{skipped:?}"
+        );
+        assert!(
+            !skipped.iter().any(|(p, _)| p == "new_dangling"),
+            "{skipped:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_link_named_explicitly_is_an_error_not_a_skip() {
+        // The pipeline's File path: a file requested by name that is not a regular file is
+        // refused, the way an explicit binary is.
+        let (_tmp, ws) = repo_with_links();
+        assert_explicit_is_refused(&ws, "link", "not a regular file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_named_explicitly_is_missing() {
+        // A link whose target is gone reads as a file that does not exist: named, it is missing.
+        let (_tmp, ws) = repo_with_links();
+        assert_explicit_is_refused(&ws, "dangling", "missing");
+    }
+
+    /// Makes `link` a directory junction to `target` (no privilege needed, unlike a symlink).
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("spawn mklink");
+        assert!(
+            made.status.success(),
+            "mklink /J: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+
+    /// The Windows twin, outside any repository (the disk walk): a junction to a directory of
+    /// the workspace, and one whose target does not exist.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_directory_walk_skips_a_junction_and_passes_over_a_dangling_one() {
+        let (_tmp, ws) = guarded_workspace();
+        std::fs::create_dir_all(ws.join("sub")).expect("sub");
+        std::fs::write(ws.join("sub").join("b.rs"), "fn b() {}\n").expect("b.rs");
+        junction(&ws.join("link"), &ws.join("sub"));
+        junction(&ws.join("dangling"), &ws.join("gone"));
+        let runner = production_runner_with(
+            &ws,
+            Arc::new(RecordingConsult::default()),
+            vec![("m".into(), None)],
+        );
+        let plan = runner
+            .plan(&ReviewInput::Directory(".".into()))
+            .expect("plans");
+        let rendered = runner
+            .run(plan, None, &CancellationToken::new())
+            .await
+            .expect("the review runs");
+        let skipped = skipped_of(&rendered);
+        assert!(
+            skipped.contains(&("link".to_string(), "not a regular file".to_string())),
+            "{skipped:?}"
+        );
+        assert!(!skipped.iter().any(|(p, _)| p == "dangling"), "{skipped:?}");
+    }
+
+    /// A junction named explicitly whose target is gone reads as a missing file.
+    #[cfg(windows)]
+    #[test]
+    fn a_dangling_junction_named_explicitly_is_missing() {
+        let (_tmp, ws) = guarded_workspace();
+        junction(&ws.join("dangling"), &ws.join("gone"));
+        assert_explicit_is_refused(&ws, "dangling", "missing");
+    }
+
+    /// The Windows twin of the explicit case: a junction to a directory, read by name.
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_junction_named_explicitly_is_an_error_not_a_skip() {
+        let (_tmp, ws) = guarded_workspace();
+        junction(&ws.join("link"), &ws.join("src"));
+        assert_explicit_is_refused(&ws, "link", "not a regular file");
+    }
 }
