@@ -55,6 +55,21 @@ pub trait GitCommand: Send + Sync {
         })
     }
 
+    /// Runs git with `args` against an empty repository of its own whose work tree is the
+    /// workdir, for a directory outside any repository: git's ignore rules (`.gitignore` at every
+    /// level, the operator's excludes file) then apply as they would inside one.
+    ///
+    /// The default runs `args` as [`GitCommand::run_bytes`] does, which is what a test double
+    /// answering by argument list needs.
+    ///
+    /// # Errors
+    ///
+    /// As [`GitCommand::run_bytes`], and [`ReviewError::Io`] when the empty repository cannot be
+    /// made.
+    fn run_bytes_without_repository(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+        self.run_bytes(args)
+    }
+
     /// Runs a query that git answers with exit status 1 and nothing on stderr when nothing
     /// matches (`rev-parse --verify --quiet`), and decodes its stdout as UTF-8.
     ///

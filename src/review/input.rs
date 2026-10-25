@@ -9,6 +9,7 @@
 //! commits. Diffs are split per file on bytes, so one section that is not UTF-8 is set aside
 //! without sinking the rest.
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use super::error::ReviewError;
@@ -86,6 +87,16 @@ const LS_FILES_ALL: &[&str] = &[
     "--cached",
     "--others",
     "--exclude-standard",
+    "-z",
+];
+/// What `ls-files` names of what `.gitignore` excludes, an ignored directory once with a
+/// trailing `/`, NUL-separated.
+const LS_FILES_IGNORED_DIRECTORIES: &[&str] = &[
+    "ls-files",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "--directory",
     "-z",
 ];
 /// The opening of git's header line for a binary section (`Binary files … differ`).
@@ -346,7 +357,9 @@ fn resolve_file(
 }
 
 /// A `Directory` input: what git lists (tracked and untracked, not ignored) and still exists
-/// as a non-directory, or, with no repository anywhere above it, an ordered walk of the disk.
+/// as a non-directory, or, with no repository anywhere above it, an ordered walk of the disk
+/// that leaves out what `.gitignore` excludes (git names it through an empty repository of the
+/// review's own, so the rules apply as they would inside one: RV22).
 fn resolve_directory(
     d: &Path,
     workspace: &Path,
@@ -378,8 +391,13 @@ fn resolve_directory(
             .map(|path| ReviewFile { path, diff: None })
             .collect();
     } else {
+        let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
+        let mut args = LS_FILES_IGNORED_DIRECTORIES.to_vec();
+        args.extend_from_slice(&["--", pathspec]);
+        let (ignored, _not_utf8) = split_nul(&git.run_bytes_without_repository(&args)?);
+        let ignored: HashSet<String> = ignored.into_iter().collect();
         let mut found = Vec::new();
-        walk(&dir, &rel, &mut found, &mut resolved.not_utf8)?;
+        walk(&dir, &rel, &ignored, &mut found, &mut resolved.not_utf8)?;
         found.sort();
         resolved.files = found
             .into_iter()
@@ -390,10 +408,12 @@ fn resolve_directory(
 }
 
 /// Walks `dir` (whose workspace-relative path is `rel`) without following symlinks, collecting
-/// every non-directory entry except a link whose target is gone. O(entries).
+/// every non-directory entry except a link whose target is gone and what `ignored` names (a
+/// file by its path, a directory by its path and a trailing `/`, never entered). O(entries).
 fn walk(
     dir: &Path,
     rel: &str,
+    ignored: &HashSet<String>,
     found: &mut Vec<String>,
     not_utf8: &mut Vec<String>,
 ) -> Result<(), ReviewError> {
@@ -409,8 +429,11 @@ fn walk(
                 continue;
             }
         };
+        if ignored.contains(&path) || ignored.contains(&format!("{path}/")) {
+            continue;
+        }
         if entry.file_type().map_err(io)?.is_dir() {
-            walk(&entry.path(), &path, found, not_utf8)?;
+            walk(&entry.path(), &path, ignored, found, not_utf8)?;
         } else if !is_dangling_link(&entry.path()) {
             found.push(path);
         }

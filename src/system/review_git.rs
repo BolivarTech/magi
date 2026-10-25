@@ -98,6 +98,75 @@ pub(crate) struct ScrubbedGit {
     filters: Mutex<Option<Vec<String>>>,
 }
 
+/// The prefix of an empty repository's directory name under the system temporary directory.
+const EMPTY_GIT_DIR_PREFIX: &str = "magi-review-empty-git";
+
+/// How many names [`EmptyGitDir::create`] tries before it gives up.
+const EMPTY_GIT_DIR_ATTEMPTS: u32 = 16;
+
+/// The smallest directory git accepts as a repository: `HEAD`, `objects/` and `refs/`.
+const EMPTY_GIT_HEAD: &str = "ref: refs/heads/main\n";
+
+/// An empty repository directory that lives as long as the value; nothing is ever written to
+/// it but its skeleton, and it is removed on drop (best effort).
+struct EmptyGitDir {
+    path: PathBuf,
+}
+
+impl EmptyGitDir {
+    /// Creates a fresh directory (never an existing one) and its skeleton.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::Io`] when no fresh name can be created or the skeleton cannot be written.
+    fn create() -> Result<Self, ReviewError> {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let io = |e: std::io::Error| {
+            ReviewError::Io(format!("cannot make an empty git repository: {e}"))
+        };
+        let mut last = None;
+        for _ in 0..EMPTY_GIT_DIR_ATTEMPTS {
+            let n = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("{EMPTY_GIT_DIR_PREFIX}-{}-{n}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => {
+                    let dir = Self { path };
+                    std::fs::create_dir(dir.path.join("objects")).map_err(io)?;
+                    std::fs::create_dir(dir.path.join("refs")).map_err(io)?;
+                    std::fs::write(dir.path.join("HEAD"), EMPTY_GIT_HEAD).map_err(io)?;
+                    return Ok(dir);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+                Err(e) => return Err(io(e)),
+            }
+        }
+        Err(io(last.unwrap_or_else(|| {
+            std::io::Error::other("no attempt was made")
+        })))
+    }
+
+    /// The directory as text, for `--git-dir`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::Io`] when the temporary directory's path is not UTF-8.
+    fn path_str(&self) -> Result<&str, ReviewError> {
+        self.path.to_str().ok_or_else(|| {
+            ReviewError::Io(format!(
+                "the temporary directory {} is not UTF-8",
+                self.path.display()
+            ))
+        })
+    }
+}
+
+impl Drop for EmptyGitDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 /// What a finished git call produced.
 struct Finished {
     code: Option<i32>,
@@ -232,6 +301,21 @@ impl GitCommand for ScrubbedGit {
                 &finished,
             ))
         }
+    }
+
+    /// Runs `args` with `--git-dir` set to a fresh empty repository under the system temporary
+    /// directory (removed afterwards) and `--work-tree=.`, the workdir.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::Io`] when the empty repository cannot be made or its path is not UTF-8, and
+    /// those of [`GitCommand::run_bytes`].
+    fn run_bytes_without_repository(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+        let empty = EmptyGitDir::create()?;
+        let git_dir = format!("--git-dir={}", empty.path_str()?);
+        let mut full = vec![git_dir.as_str(), "--work-tree=."];
+        full.extend_from_slice(args);
+        self.run_bytes(&full)
     }
 
     /// # Errors
