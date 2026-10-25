@@ -602,7 +602,7 @@ magi-rs code-review --output-format json -o review.json --timeout 7200
 |---|---|
 | `kept` | a model judged it a real defect |
 | `filtered` | a model judged it a false positive with at least its `min_confidence`; listed apart under "Filtered by the gate", never deleted |
-| `low_confidence` | no model reached its threshold (the report shows the lean and the confidence), or a `critical` finding was judged a false positive |
+| `low_confidence` | no model reached its threshold (the report shows the lean and the confidence), a `critical` finding was judged a false positive, or some of its pairs went unasked |
 | `unfiltered` | the gate could not judge it; it passes with its cause |
 
 A finding the trio reported as `critical` is never filtered: a false-positive answer leaves it `low_confidence` with the cause `critical never filtered`, in the main list. The causes of `unfiltered` are `no location` (a finding without a line, or whose file could not be read; never sent), `state too large` (over `max_state_bytes`, never truncated), `secret` (the code shown would carry a secret pattern, never sent), `timeout`, `transport`, `unauthorized` and `chain exhausted`. A model that answers HTTP 400 is skipped for the rest of that review and its fallback answers instead; the next review asks it again. A 401 or 403 stops the gate: the remaining findings pass as `unfiltered` with `unauthorized` and no further calls, and the report says so once. A 413 or 422 ends that finding's chain. Each `unfiltered` finding writes one warning to the run log. The gate is the one stage that fails open: a finding it could not judge is shown, not dropped.
