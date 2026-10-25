@@ -948,7 +948,10 @@ mod tests {
         client: &MockDecisionClient,
         clock: &dyn ReviewClock,
     ) -> Result<ReviewOutcome, ReviewError> {
-        let git = FakeGit::from(&[]);
+        let git = FakeGit::from(&[(
+            "ls-files --others --ignored --exclude-standard --directory -z -- .",
+            Ok(""),
+        )]);
         let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
         let registry = LanguageRegistry::new();
         let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
@@ -1389,7 +1392,10 @@ mod tests {
             Ok(real_report(empty()).await),
         ]);
         let client = MockDecisionClient::new();
-        let git = FakeGit::from(&[]);
+        let git = FakeGit::from(&[(
+            "ls-files --others --ignored --exclude-standard --directory -z -- .",
+            Ok(""),
+        )]);
         let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
         let registry = LanguageRegistry::new();
         let pool = vec![
