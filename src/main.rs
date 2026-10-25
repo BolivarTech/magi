@@ -5031,6 +5031,14 @@ fn headless_args_of(a: &CodeReviewArgs) -> HeadlessArgs {
     }
 }
 
+/// What a surface says when its review runner cannot be built: the reason, redacted again (the
+/// builder redacts, and this is the backstop before a notice or the run log).
+#[allow(dead_code)] // Red stub
+fn code_review_unavailable_text(reason: &str) -> String {
+    let _ = reason;
+    String::new()
+}
+
 /// Builds the review runner of a surface, logging why when it cannot be built: the surface
 /// then offers no review (the tool is not registered, `/code-review` says it is unavailable).
 fn optional_code_review_runner(
@@ -22529,6 +22537,18 @@ mod code_review_surface_tests {
             "x"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn an_unbuildable_review_runner_says_why_with_the_reason_redacted() {
+        // [MAGI §6 MS2 E loop 1] a builder failure used to vanish into an INFO entry; it is said,
+        // and a credential in the reason never reaches a notice or the run log.
+        let text = super::code_review_unavailable_text(
+            "trio failed at https://user:hunter2@example.invalid/v1", // allow-secret-scan
+        );
+        assert!(text.starts_with("code review unavailable: "), "{text}");
+        assert!(text.contains("trio failed at"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
     }
 
     #[test]

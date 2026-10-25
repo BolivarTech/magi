@@ -1493,6 +1493,14 @@ pub(crate) fn tui_code_review_confirmation(
 /// What `/code-review` answers when this session has no review runner.
 const CODE_REVIEW_UNAVAILABLE: &str = "code review is unavailable in this session: the trio or \
      the gate's decision client could not be built (see the startup notices)";
+/// What `/code-review` answers when this session has no review runner: why, when the build
+/// said, and what to do. The runner is built once at startup, so a `/login` does not bring it
+/// back: the user restarts after fixing the cause.
+#[allow(dead_code)] // Red stub
+fn code_review_unavailable_message(reason: Option<&str>) -> String {
+    let _ = reason;
+    CODE_REVIEW_UNAVAILABLE.to_string()
+}
 /// What the transcript says when the confirmation is answered with 'c' or 'Esc'.
 const CODE_REVIEW_CANCELLED: &str = "code review cancelled; nothing was sent to any model.";
 /// What the transcript says when the review starts.
@@ -9219,6 +9227,17 @@ end"
                 "approved".into()
             )))
         );
+    }
+
+    #[test]
+    fn an_unavailable_review_says_why_and_that_a_restart_brings_it_back() {
+        // [MAGI §6 MS2 E loop 1] the runner is built once at startup; "see the startup notices"
+        // pointed at notices that did not carry the reason, and a /login does not rebuild it.
+        let text = code_review_unavailable_message(Some("code review unavailable: no trio"));
+        assert!(text.contains("no trio"), "{text}");
+        assert!(text.contains("restart"), "{text}");
+        assert!(text.contains("/login"), "{text}");
+        assert!(code_review_unavailable_message(None).contains("restart"));
     }
 
     #[test]
