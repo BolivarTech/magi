@@ -767,6 +767,7 @@ mod tests {
         batches: usize,
         worst_case_secs: u64,
         text: String,
+        json: Option<serde_json::Value>,
         calls: std::sync::atomic::AtomicUsize,
         workspace: Option<std::path::PathBuf>,
         timeout_seen: std::sync::Mutex<Option<std::time::Duration>>,
@@ -798,7 +799,10 @@ mod tests {
             *self.timeout_seen.lock().expect("lock") = timeout;
             Ok(Rendered {
                 text: self.text.clone(),
-                json: serde_json::json!({"gate_states": {}}),
+                json: self
+                    .json
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({"gate_states": {}})),
                 consult: serde_json::Value::Null,
                 failure: None,
             })
@@ -1022,6 +1026,82 @@ mod tests {
             v.get("report").is_some() && v.get("code_review").is_some(),
             "{v}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_tool_redacts_the_structured_payload_whatever_the_runner_returns() {
+        // [MAGI §6 MS2 D loop 1] RV13: model text leaves the tool redacted on both paths, so the
+        // structured `code_review` object gets the same backstop as the text report.
+        let runner = FakeRunner {
+            json: Some(serde_json::json!({
+                "findings": [{"detail": "see https://user:hunter2@example.invalid/x"}] // allow-secret-scan
+            })),
+            ..FakeRunner::default()
+        };
+        let t = CodeReviewTool::new(Arc::new(runner), true);
+        let v = t
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("runs");
+        assert!(!v.to_string().contains("hunter2"), "{v}");
+        assert!(v["code_review"]["findings"][0]["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("example.invalid")));
+    }
+
+    #[test]
+    fn the_envelope_fields_are_redacted() {
+        let leak = "see https://user:hunter2@example.invalid/x"; // allow-secret-scan
+        let r = Rendered {
+            text: leak.into(),
+            json: serde_json::json!({"findings": [{"detail": leak}]}),
+            consult: serde_json::json!({"consensus": {"summary": leak}}),
+            failure: None,
+        };
+        let (response, consult, code_review) = envelope_fields(&r);
+        for part in [response, consult.to_string(), code_review.to_string()] {
+            assert!(!part.contains("hunter2"), "{part}");
+        }
+    }
+
+    #[test]
+    fn a_rendered_review_carries_no_raw_credential_in_any_form() {
+        let finding = magi_rs::review::consolidate::ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: magi_core::schema::Severity::Warning,
+            reported_severity: magi_core::schema::Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["see https://user:hunter2@example.invalid/x".into()], // allow-secret-scan
+            categories: vec![magi_core::schema::Category::Other],
+            sources: vec![magi_core::schema::AgentName::Melchior],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let verdict = magi_rs::review::gate::GateVerdict {
+            state: magi_rs::review::gate::GateState::Kept,
+            cause: None,
+            model: Some("m".into()),
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+        };
+        let mut summary = magi_rs::review::report::ReviewSummary::default();
+        summary.findings.push((finding, verdict));
+        let o = magi_rs::review::pipeline::ReviewOutcome {
+            consolidated: None,
+            batch_reports: vec![],
+            summary,
+            consolidation_error: None,
+        };
+        let r = render_outcome(o, true);
+        assert!(!r.json.to_string().contains("hunter2"), "{}", r.json);
+        assert!(r.json["findings"][0]["details"][0]
+            .as_str()
+            .is_some_and(|d| d.contains("example.invalid")));
     }
 
     #[tokio::test]
