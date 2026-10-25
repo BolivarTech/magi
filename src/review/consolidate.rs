@@ -72,8 +72,12 @@ pub enum FindingMark {
     SingleMage,
     /// Only one mage answered where it appeared; there was no disagreement to weigh.
     PartialTrio,
-    /// An unlocated finding grouped without asking the consensus engine, because the review
-    /// spent [`MAX_UNLOCATED_PROBES`]; its agreement was never measured, so it is not lowered.
+    /// An unlocated finding seen by one mage in a review that spent [`MAX_UNLOCATED_PROBES`].
+    /// Once the probes ran out, any later unlocated finding may have belonged to its group
+    /// without being asked, so a single source no longer proves disagreement: it is not
+    /// lowered. Set on every such finding, including one grouped before the budget ran out;
+    /// [`Consolidated::ungrouped_unlocated`] counts only the findings whose own lookup was
+    /// refused.
     Ungrouped,
 }
 
