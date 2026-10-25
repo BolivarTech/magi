@@ -9337,4 +9337,27 @@ end"
             app.messages
         );
     }
+
+    #[test]
+    fn the_tool_detail_comes_before_the_key_prompt() {
+        // [MAGI §6 MS2 E loop 1] the cost (batches, worst case) is read before the keys to answer.
+        let (mut app, approvals) = App::new_for_test_with_approvals();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        approvals
+            .try_send(crate::agent::ApprovalRequest {
+                tool_name: "code-review".into(),
+                input: serde_json::json!({"path": "src"}),
+                tx,
+                detail: Some("3 batches; worst case 42030 s".into()),
+            })
+            .expect("queued");
+        drain_approval_requests(&mut app);
+        let at = |needle: &str| app.messages.iter().position(|m| m.contains(needle));
+        let (detail, keys) = (at("3 batches"), at("Press 'y' to approve"));
+        assert!(
+            detail.is_some() && keys.is_some() && detail < keys,
+            "{:?}",
+            app.messages
+        );
+    }
 }
