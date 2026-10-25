@@ -11501,16 +11501,27 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a_tool_child_never_inherits_a_section_key() {
-        use magi_rs::section_keys::{EMBEDDING_KEY_ENV, MAGI_KEY_ENV};
+        use magi_rs::section_keys::{
+            CODE_REVIEW_KEY_ENV, DECISION_KEY_ENV, EMBEDDING_KEY_ENV, MAGI_KEY_ENV,
+        };
         with_var(MAGI_KEY_ENV, Some("magi-env-key"), || {
             with_var(EMBEDDING_KEY_ENV, Some("embed-env-key"), || {
-                let child = crate::tools::proc_group::tool_child_env();
-                for name in [MAGI_KEY_ENV, EMBEDDING_KEY_ENV] {
-                    assert!(
-                        !child.iter().any(|(k, _)| k.eq_ignore_ascii_case(name)),
-                        "{name} reached a tool child"
-                    );
-                }
+                with_var(DECISION_KEY_ENV, Some("decision-env-key"), || {
+                    with_var(CODE_REVIEW_KEY_ENV, Some("cr-env-key"), || {
+                        let child = crate::tools::proc_group::tool_child_env();
+                        for name in [
+                            MAGI_KEY_ENV,
+                            EMBEDDING_KEY_ENV,
+                            DECISION_KEY_ENV,
+                            CODE_REVIEW_KEY_ENV,
+                        ] {
+                            assert!(
+                                !child.iter().any(|(k, _)| k.eq_ignore_ascii_case(name)),
+                                "{name} reached a tool child"
+                            );
+                        }
+                    });
+                });
             });
         });
     }
