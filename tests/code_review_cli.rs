@@ -239,6 +239,44 @@ fn rv_s10_a_hostile_path_or_ref_fails_with_exit_2_before_any_model_call() {
     );
 }
 
+/// [MAGI §6 MS2 E loop 1] RV01 first: a refused input never reaches the endpoints, not even the
+/// capability probe that sizes the batches.
+#[test]
+fn a_refused_input_contacts_no_endpoint_not_even_the_probe() {
+    let mut server = mockito::Server::new();
+    let (trio_bodies, gate_bodies, _t, _g) = mount(&mut server);
+    let probes = Arc::new(Mutex::new(0usize));
+    let (p1, p2) = (Arc::clone(&probes), Arc::clone(&probes));
+    let _show = server
+        .mock("POST", "/api/show")
+        .with_status(404)
+        .with_body_from_request(move |_| {
+            *p1.lock().expect("lock") += 1;
+            Vec::new()
+        })
+        .create();
+    let _tags = server
+        .mock("GET", "/api/tags")
+        .with_status(404)
+        .with_body_from_request(move |_| {
+            *p2.lock().expect("lock") += 1;
+            Vec::new()
+        })
+        .create();
+    let ws = workspace(&review_toml(&server.url()));
+    for args in [
+        &["../fuera/x.rs"][..],
+        &["--commit=--output=x"],
+        &["--commit", "nope"],
+    ] {
+        let (code, _, err) = review(&ws, args);
+        assert_eq!(code, EXIT_MISUSE, "{args:?}: {err}");
+    }
+    assert_eq!(*probes.lock().expect("lock"), 0, "the probe was contacted");
+    assert!(trio_bodies.lock().expect("lock").is_empty());
+    assert!(gate_bodies.lock().expect("lock").is_empty());
+}
+
 /// RV-S1 with an explicit commit: one magi-core report, the commit's content sent to the three seats and to the gate,
 /// and the `code_review` block (RV13) on the envelope that `RunOutcome.code_review` (T2.9) carries.
 #[test]
