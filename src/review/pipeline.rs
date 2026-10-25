@@ -1989,16 +1989,35 @@ mod tests {
     }
 
     #[test]
-    fn a_verbatim_prefix_is_dropped_and_a_verbatim_unc_path_is_kept() {
-        // Windows canonicalizes to `\\?\C:\..`; a mage reports `C:\..`.
+    fn a_verbatim_prefix_is_dropped_from_a_drive_and_from_a_unc_path() {
+        // Windows canonicalizes to `\\?\C:\..` and `\\?\UNC\srv\share\..`; a mage reports the
+        // forms an editor shows, `C:\..` and `\\srv\share\..`.
         let plain = |p: &str| {
             without_verbatim_prefix(Path::new(p))
                 .to_string_lossy()
                 .into_owned()
         };
         assert_eq!(plain(r"\\?\C:\w"), r"C:\w");
-        assert_eq!(plain(r"\\?\UNC\srv\share"), r"\\?\UNC\srv\share");
+        assert_eq!(plain(r"\\?\UNC\srv\share"), r"\\srv\share");
         assert_eq!(plain("/w"), "/w");
+    }
+
+    #[test]
+    fn a_unc_location_under_a_verbatim_unc_workspace_is_reviewed() {
+        // The workspace the validator gets and the location a mage writes name the same file.
+        let workspace = without_verbatim_prefix(Path::new(r"\\?\UNC\srv\share\w"));
+        let mut reviewed = crate::review::index::Reviewed::default();
+        reviewed.add_whole_file("f0.rs", 10);
+        let index = crate::review::index::LexicalIndex::build(&[], &LanguageRegistry::new());
+        let mut agents = vec![crate::review::test_support::out(
+            "melchior",
+            "approve",
+            0.9,
+            serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":r"\\srv\share\w\f0.rs","line":3}]),
+        )];
+        let v = validate_batch(&mut agents, 0, &reviewed, &index, &workspace);
+        assert!(v.discarded.is_empty(), "{:?}", v.discarded);
+        assert_eq!(agents[0].findings[0].file.as_deref(), Some("f0.rs"));
     }
 
     #[tokio::test]
