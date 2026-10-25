@@ -2200,10 +2200,6 @@ impl App {
         apply_response(self, AgentResponse::Info(CODE_REVIEW_RUNNING.to_string()));
         let timeout = cmd.timeout.map(std::time::Duration::from_secs);
         let cancel = tokio_util::sync::CancellationToken::new();
-        let plan = crate::tools::code_review::ReviewPlan {
-            input: cmd.input,
-            ..plan
-        };
         match runner.run(plan, timeout, &cancel).await {
             Ok(rendered) => {
                 let body = crate::agent::Agent::sanitize_text(&rendered.text);

@@ -188,6 +188,43 @@ pub fn resolve_input(
     Ok(resolved)
 }
 
+/// `input` with every ref pinned to the commit it names now, so a review approved on one plan
+/// runs on the same commits even if a branch or `HEAD` moves before it runs. A bare commit input
+/// pins `HEAD`. Working-tree inputs (`File`, `Directory`, `Uncommitted`) have no ref and come
+/// back unchanged.
+///
+/// # Arguments
+///
+/// * `input` - What the caller asked to review.
+/// * `git` - The review's git.
+///
+/// # Returns
+///
+/// The input with full SHAs in place of its refs.
+///
+/// # Errors
+///
+/// [`ReviewError::InvalidRef`] before any git call for a hostile ref,
+/// [`ReviewError::RefNotFound`] for a ref that names no commit, and any other error of `git`.
+pub fn pin_refs(input: &ReviewInput, git: &dyn GitCommand) -> Result<ReviewInput, ReviewError> {
+    let pin = |r: &str| -> Result<String, ReviewError> {
+        validate_ref(r)?;
+        verify(git, r)
+    };
+    Ok(match input {
+        ReviewInput::Commit(r) => ReviewInput::Commit(Some(pin(r.as_deref().unwrap_or("HEAD"))?)),
+        ReviewInput::Range { from, to } => ReviewInput::Range {
+            from: pin(from)?,
+            to: pin(to)?,
+        },
+        ReviewInput::Branches { base, head } => ReviewInput::Branches {
+            base: pin(base)?,
+            head: pin(head)?,
+        },
+        other => other.clone(),
+    })
+}
+
 /// Whether `dir` or one of its ancestors holds a `.git` entry (a directory, or a file as in a
 /// linked worktree). Decides "no repository" by the disk, never by the text of a git error.
 fn inside_a_repository(dir: &Path) -> bool {

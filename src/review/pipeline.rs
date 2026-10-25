@@ -291,6 +291,12 @@ pub async fn run_review(
     summary.unmeasured_models = window.unmeasured;
     let planned = batches.len();
     summary.batches_planned = planned;
+    if let Some(approved) = req.approved_batches.filter(|a| *a != planned) {
+        return Err(ReviewError::PlanChanged {
+            approved,
+            now: planned,
+        });
+    }
     if let Some(total) = req.timeout_secs {
         let ceiling = pre_budget(total, planned, req.max_rotations, req.retry_disabled)?;
         summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;

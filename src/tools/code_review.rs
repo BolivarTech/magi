@@ -26,7 +26,7 @@ use magi_rs::review::consolidate::Consolidated;
 use magi_rs::review::error::ReviewError;
 use magi_rs::review::filter::ignored_paths;
 use magi_rs::review::gate::Gate;
-use magi_rs::review::input::{validate_ref, ReviewInput};
+use magi_rs::review::input::{pin_refs, validate_ref, ReviewInput};
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{
     plan_review, run_review, BatchConsult, ReviewDeps, ReviewOutcome, ReviewRequest,
@@ -531,8 +531,7 @@ impl Tool for CodeReviewTool {
     /// review error (redacted) or a run with no time left.
     async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value> {
         let input = parse_tool_input(&args)?;
-        self.plan_for(&args, &input).map_err(|e| tool_error(&e))?;
-        let plan = self.runner.plan(&input).map_err(|e| tool_error(&e))?;
+        let plan = self.plan_for(&args, &input).map_err(|e| tool_error(&e))?;
         let total = self.review_total()?;
         let rendered = self
             .runner
@@ -672,7 +671,7 @@ impl ProductionReviewRunner {
 #[async_trait]
 impl CodeReviewRunner for ProductionReviewRunner {
     fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
-        let input = path_input(&self.workspace, input.clone());
+        let input = pin_refs(&path_input(&self.workspace, input.clone()), &self.git)?;
         let ignored = self.ignored(&input)?;
         let guard = |p: &Path| self.guard(p);
         let is_ignored = |p: &str| ignored.contains(p);
