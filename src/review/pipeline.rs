@@ -977,6 +977,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_blank_gap_between_the_units_of_a_whole_file_counts_as_reviewed() {
+        // A `// gap` comment becomes a unit of its own; blank lines between two units belong to
+        // none, so only registering the finished file whole covers them (U24).
+        let d = tempfile::tempdir().expect("tempdir");
+        let body = "    let _x = 1;\n".repeat(20);
+        std::fs::write(
+            d.path().join("big.rs"),
+            format!("fn a() {{\n{body}}}\n\n\nfn b() {{\n{body}}}\n"),
+        )
+        .expect("write");
+        let gap = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"big.rs","line":23}]);
+        let consult = FakeConsult::new(vec![
+            Ok(real_report([gap.clone(), gap, serde_json::json!([])]).await),
+            Ok(real_report(empty()).await),
+        ]);
+        let out = review(
+            d.path(),
+            None,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("reports");
+        assert_eq!(out.summary.batches_planned, 2);
+        assert!(
+            out.summary.discarded.is_empty(),
+            "{:?}",
+            out.summary.discarded
+        );
+        assert_eq!(out.summary.findings.len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_whole_file_split_by_units_is_reviewed_entire() {
         // [CP2 MS2 S1 loop 8] U24: «en archivo o directorio, el archivo entero», the lines between units included.
         let d = tempfile::tempdir().expect("tempdir");
