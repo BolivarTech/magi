@@ -657,6 +657,65 @@ mod tests {
     use super::*;
     use crate::review::test_support::FakeGit;
 
+    #[test]
+    fn pinning_turns_every_ref_into_its_commit_and_leaves_the_working_tree_alone() {
+        let git = FakeGit::from(&[
+            (
+                "rev-parse --verify HEAD^{commit}",
+                Ok("aaa
+"),
+            ),
+            (
+                "rev-parse --verify main^{commit}",
+                Ok("bbb
+"),
+            ),
+            (
+                "rev-parse --verify x^{commit}",
+                Ok("ccc
+"),
+            ),
+        ]);
+        let pinned = |i: ReviewInput| pin_refs(&i, &git).expect("pins");
+        assert_eq!(
+            pinned(ReviewInput::Commit(None)),
+            ReviewInput::Commit(Some("aaa".into()))
+        );
+        assert_eq!(
+            pinned(ReviewInput::Range {
+                from: "main".into(),
+                to: "x".into()
+            }),
+            ReviewInput::Range {
+                from: "bbb".into(),
+                to: "ccc".into()
+            }
+        );
+        assert_eq!(
+            pinned(ReviewInput::Branches {
+                base: "main".into(),
+                head: "x".into()
+            }),
+            ReviewInput::Branches {
+                base: "bbb".into(),
+                head: "ccc".into()
+            }
+        );
+        assert_eq!(pinned(ReviewInput::Uncommitted), ReviewInput::Uncommitted);
+        assert_eq!(
+            pinned(ReviewInput::File("src".into())),
+            ReviewInput::File("src".into())
+        );
+        assert!(matches!(
+            pin_refs(&ReviewInput::Commit(Some("--output=x".into())), &git),
+            Err(ReviewError::InvalidRef(_))
+        ));
+        assert!(matches!(
+            pin_refs(&ReviewInput::Commit(Some("gone".into())), &git),
+            Err(ReviewError::RefNotFound(_))
+        ));
+    }
+
     fn allow_all(p: &Path) -> Result<PathBuf, ReviewError> {
         Ok(p.to_path_buf())
     }
