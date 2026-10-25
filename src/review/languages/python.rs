@@ -361,4 +361,26 @@ mod tests {
             assert_eq!(holders.len(), 1, "line {line} is in {holders:?}");
         }
     }
+
+    #[test]
+    fn a_control_flow_block_is_not_a_declaration_group() {
+        for opener in [
+            "if __name__ == \"__main__\":",
+            "for i in range(3):",
+            "while x == 1:",
+            "with open(p) as h:",
+            "try:",
+        ] {
+            let code = format!("{opener}\n    x = 1\n");
+            let units = extract(&code, &[1]);
+            assert!(
+                units.iter().all(|u| u.kind != UnitKind::DeclarationGroup),
+                "{opener}: {units:?}"
+            );
+            assert!(
+                units.iter().any(|u| u.start_line <= 1 && u.end_line >= 2),
+                "{opener}: the block's body belongs with its line: {units:?}"
+            );
+        }
+    }
 }
