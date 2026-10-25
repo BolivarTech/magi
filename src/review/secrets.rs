@@ -503,6 +503,25 @@ mod tests {
     }
 
     #[test]
+    fn a_token_after_a_diff_line_marker_is_a_secret() {
+        // [MAGI §6 MS2 A loop 1] a removed diff line starts with `-`, a word character: without this the left boundary
+        // rejected every `sk-`, `ghp_` and `AKIA` token on a deleted line, and the diff text reached a model.
+        let removed = [
+            concat!("-", "sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA"),
+            concat!("-", "gh", "p_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            concat!("-", "AK", "IA", "ABCDEFGHIJKLMNOP"),
+        ];
+        for line in removed {
+            let hunk = format!("@@ -1,2 +1,1 @@\n context\n{line}\n");
+            assert!(find_secret(line).is_some(), "{line}");
+            assert!(find_secret(&hunk).is_some(), "{hunk}");
+        }
+        // Inside a line a `-` is still part of the word: kebab-case runs stay ordinary text.
+        let kebab = concat!("x\n", "-task", "-sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        assert_eq!(find_secret(kebab), None);
+    }
+
+    #[test]
     fn a_shown_path_escapes_control_characters() {
         // [CP2 MS2 S1b1 loop 16] a file name can carry a terminal escape; the report never replays it.
         assert_eq!(display_path("a\u{1b}[31m.rs"), "a\\u{1b}[31m.rs");

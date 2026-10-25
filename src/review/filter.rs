@@ -459,6 +459,64 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_on_the_old_side_of_a_renamed_file_skips_it() {
+        // [MAGI §6 MS2 A loop 1] a rename's old side lives under its old path: read by the new path it was empty,
+        // and a key on a removed line or outside the hunk reached a model.
+        let removed = concat!("-", "sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        let moved = format!(
+            "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\n\
+             --- a/old.rs\n+++ b/new.rs\n@@ -1,2 +1,1 @@\n fn f() {{}}\n{removed}\n"
+        );
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let old_key = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\nBBBB\n-----END PRIVATE KEY-----\n");
+        let new_key = old_key.replace("\nBBBB\n", "\nAAAA\n");
+        let body_only = "diff --git a/k_old.rs b/k_new.rs\nsimilarity index 90%\nrename from k_old.rs\n\
+                         rename to k_new.rs\n--- a/k_old.rs\n+++ b/k_new.rs\n@@ -3,1 +3,1 @@\n-BBBB\n+AAAA\n";
+        // The new side of k_new.rs has no header either: only its old side holds the `BEGIN` line.
+        let new_body = new_key.replace(begin, "");
+        let src = MapSource::new(
+            &[
+                ("new.rs", "fn f() {}\n"),
+                ("k_new.rs", new_body.as_str()),
+                ("a.rs", "fn a() {}\n"),
+            ],
+            &[
+                ("old.rs", "fn f() {}\nfn g() {}\n"),
+                ("k_old.rs", old_key.as_str()),
+            ],
+        );
+        let files = vec![
+            ReviewFile {
+                path: "new.rs".into(),
+                diff: Some(moved),
+            },
+            ReviewFile {
+                path: "k_new.rs".into(),
+                diff: Some(body_only.into()),
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![
+                Skipped {
+                    path: "new.rs".into(),
+                    cause: SkipCause::Secret
+                },
+                Skipped {
+                    path: "k_new.rs".into(),
+                    cause: SkipCause::Secret
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn skip_causes_serialize_with_the_spec_texts() {
         let got: Vec<String> = [
             SkipCause::Binary,
