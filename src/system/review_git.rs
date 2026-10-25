@@ -52,6 +52,12 @@ pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
 /// not hang the preparation, which runs before the review's clock starts.
 pub(crate) const GIT_CALL_TIMEOUT_SECS: u64 = 300;
 
+/// The first pause while waiting for a git whose output is closed to exit; it usually has.
+const WAIT_POLL_FIRST: Duration = Duration::from_millis(1);
+
+/// The longest pause between two checks of a git that has not exited yet.
+const WAIT_POLL_MAX: Duration = Duration::from_millis(50);
+
 /// Total bytes the filter `-c` overrides may take: Windows caps a command line near 32 KiB, and a
 /// repository with thousands of drivers would push every call past it and fail opaquely.
 pub(crate) const MAX_FILTER_OVERRIDE_BYTES: usize = 8 * 1024;
@@ -235,6 +241,7 @@ impl ScrubbedGit {
     /// [`MAX_GIT_STDERR_BYTES`], read to the end) in parallel, within [`GIT_CALL_TIMEOUT_SECS`].
     fn execute(&self, args: &[&str]) -> Result<Finished, ReviewError> {
         let command = args.first().copied().unwrap_or_default();
+        let deadline = Instant::now() + Duration::from_secs(GIT_CALL_TIMEOUT_SECS);
         let mut child = Command::new("git")
             .args(self.argv(args))
             .env_clear()
@@ -256,7 +263,7 @@ impl ScrubbedGit {
         std::thread::spawn(move || {
             let _ = tx.send(read_bounded(stdout, cap));
         });
-        let stdout = match rx.recv_timeout(Duration::from_secs(GIT_CALL_TIMEOUT_SECS)) {
+        let stdout = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Ok(Some(bytes))) => bytes,
             Ok(Ok(None)) => {
                 kill(&mut child);
@@ -273,7 +280,7 @@ impl ScrubbedGit {
                 )));
             }
         };
-        let status = wait_within(&mut child, Instant::now())?;
+        let status = wait_within(&mut child, deadline)?;
         let stderr = stderr_reader.join().unwrap_or_default();
         Ok(Finished {
             code: status.code(),
@@ -367,10 +374,27 @@ fn failure(command: &str, finished: &Finished) -> ReviewError {
 /// # Errors
 ///
 /// [`ReviewError::Git`] when waiting fails or the deadline passes.
-fn wait_within(child: &mut Child, _deadline: Instant) -> Result<ExitStatus, ReviewError> {
-    child
-        .wait()
-        .map_err(|e| ReviewError::Git(format!("cannot wait for git: {e}")))
+fn wait_within(child: &mut Child, deadline: Instant) -> Result<ExitStatus, ReviewError> {
+    let mut pause = WAIT_POLL_FIRST;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(e) => {
+                kill(child);
+                return Err(ReviewError::Git(format!("cannot wait for git: {e}")));
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            kill(child);
+            return Err(ReviewError::Git(format!(
+                "git did not exit in {GIT_CALL_TIMEOUT_SECS} s"
+            )));
+        }
+        std::thread::sleep(pause.min(deadline - now));
+        pause = (pause * 2).min(WAIT_POLL_MAX);
+    }
 }
 
 /// Kills a child and reaps it; both are best effort (it may already have exited).
