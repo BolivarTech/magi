@@ -51,6 +51,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
         r = _result("R12", 0, _review(2))
         self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[2]])
 
+    def test_s47_fails_when_a_planned_batch_did_not_complete(self) -> None:
+        # [MAGI §6 MS2 F loop 1] one report over five planned batches of which one ran is not a
+        # report over three batches: every planned batch must have completed.
+        doc = _review(5)
+        doc["code_review"]["batches_completed"] = 1
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+        del doc["code_review"]["batches_completed"]
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
     def test_s47_below_three_batches_with_every_model_measured_cannot_test(self) -> None:
         # [CP2 MS2 S2b loop 8] the generator is sized for the 32 768-token unmeasured window (RV04); a pool that
         # measured a larger window plans fewer batches for an environmental reason: CANNOT_TEST, never FAIL.
