@@ -2419,13 +2419,14 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         structured: false,
         trio_checked: consult_magi.is_some(),
     });
-    if let Some(runner) = &tui_code_review {
-        register_code_review_tool(
+    match &tui_code_review {
+        Ok(runner) => register_code_review_tool(
             &mut agent,
             Arc::clone(runner),
             code_review_auto_approve(&magi_config),
             None,
-        );
+        ),
+        Err(text) => startup_notices.push(Notice::warn(text.clone())),
     }
 
     // The notices are HANDED OVER rather than announced here. They go to the logging layer,
@@ -5033,28 +5034,24 @@ fn headless_args_of(a: &CodeReviewArgs) -> HeadlessArgs {
 
 /// What a surface says when its review runner cannot be built: the reason, redacted again (the
 /// builder redacts, and this is the backstop before a notice or the run log).
-#[allow(dead_code)] // Red stub
 fn code_review_unavailable_text(reason: &str) -> String {
-    let _ = reason;
-    String::new()
+    format!(
+        "code review unavailable: {}",
+        redact_foreign_text(reason).as_str()
+    )
 }
 
-/// Builds the review runner of a surface, logging why when it cannot be built: the surface
-/// then offers no review (the tool is not registered, `/code-review` says it is unavailable).
+/// Builds the review runner of a surface, or says why it cannot: the surface then offers no
+/// review (the tool is not registered, `/code-review` says it is unavailable and why), and the
+/// caller surfaces the text as a warning notice.
+///
+/// # Returns
+/// The runner, or [`code_review_unavailable_text`] of the builder's reason.
 fn optional_code_review_runner(
     build: crate::code_review_runner::CodeReviewBuild<'_>,
-) -> Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>> {
-    match crate::code_review_runner::build_code_review_runner(build) {
-        Ok(runner) => Some(runner),
-        Err(reason) => {
-            tracing::event!(
-                target: CODE_REVIEW_LOG_TARGET,
-                tracing::Level::INFO,
-                "code review unavailable: {reason}"
-            );
-            None
-        }
-    }
+) -> Result<Arc<dyn crate::tools::code_review::CodeReviewRunner>, String> {
+    crate::code_review_runner::build_code_review_runner(build)
+        .map_err(|reason| code_review_unavailable_text(&reason))
 }
 
 /// Runs `magi code-review`: resolves the workspace, the vault, the configuration, the keys and
@@ -5237,7 +5234,10 @@ async fn run_code_review_subcommand(
     ) {
         Ok(r) => r,
         Err(reason) => {
-            magi_rs::notices::eprint_audited(&format!("error: code review unavailable: {reason}"));
+            magi_rs::notices::eprint_audited(&format!(
+                "error: {}",
+                code_review_unavailable_text(&reason)
+            ));
             return 1;
         }
     };
@@ -7066,7 +7066,7 @@ async fn prepare_headless(
     let magi_auth = trio_auth(&magi_config, provider_kind, &section_keys, &endpoints);
     // Only `query` offers the review as a tool; `consult` would build it for nothing.
     let code_review = if command == "query" {
-        optional_code_review_runner(crate::code_review_runner::CodeReviewBuild {
+        match optional_code_review_runner(crate::code_review_runner::CodeReviewBuild {
             workspace: workdir.clone(),
             cfg: magi_config.clone(),
             principal_kind: provider_kind,
@@ -7079,7 +7079,13 @@ async fn prepare_headless(
             secret_store: secret_store.clone(),
             structured: false,
             trio_checked: consult_magi.is_ok(),
-        })
+        }) {
+            Ok(runner) => Some(runner),
+            Err(text) => {
+                emit_notices(vec![Notice::warn(text)]);
+                None
+            }
+        }
     } else {
         None
     };

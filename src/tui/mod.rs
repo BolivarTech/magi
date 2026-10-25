@@ -1492,14 +1492,18 @@ pub(crate) fn tui_code_review_confirmation(
 
 /// What `/code-review` answers when this session has no review runner.
 const CODE_REVIEW_UNAVAILABLE: &str = "code review is unavailable in this session: the trio or \
-     the gate's decision client could not be built (see the startup notices)";
+     the gate's decision client could not be built";
+/// What follows the reason: the runner is built once, at startup.
+const CODE_REVIEW_RESTART_HINT: &str = "the code review is built once at startup, and a /login \
+     does not rebuild it: fix the cause, then restart Magi";
 /// What `/code-review` answers when this session has no review runner: why, when the build
 /// said, and what to do. The runner is built once at startup, so a `/login` does not bring it
 /// back: the user restarts after fixing the cause.
-#[allow(dead_code)] // Red stub
 fn code_review_unavailable_message(reason: Option<&str>) -> String {
-    let _ = reason;
-    CODE_REVIEW_UNAVAILABLE.to_string()
+    format!(
+        "{}; {CODE_REVIEW_RESTART_HINT}",
+        reason.unwrap_or(CODE_REVIEW_UNAVAILABLE)
+    )
 }
 /// What the transcript says when the confirmation is answered with 'c' or 'Esc'.
 const CODE_REVIEW_CANCELLED: &str = "code review cancelled; nothing was sent to any model.";
@@ -2165,6 +2169,8 @@ pub struct App {
     pub stream_raw: String,
     /// The review runner of this session, if one could be built.
     pub code_review_runner: Option<std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
+    /// Why there is no review runner, redacted, when its build said.
+    pub code_review_unavailable: Option<String>,
     /// A `/code-review` waiting for `y` (run) or `c`/`Esc` (cancel).
     pub pending_code_review: Option<(
         TuiCodeReviewCommand,
@@ -2214,6 +2220,7 @@ impl App {
             status_row: StatusRow::new(),
             stream_raw: String::new(),
             code_review_runner: None,
+            code_review_unavailable: None,
             pending_code_review: None,
         }
     }
@@ -2625,8 +2632,8 @@ pub struct TuiMagiRuntimeConfig {
     /// trio's own key, never inherited, never another provider's). The post-`/login` rebuild,
     /// which is always Anthropic, prefers it to the login key.
     pub magi_own_key: Option<String>,
-    /// The session's review runner for `/code-review`, `None` when it could not be built.
-    pub code_review: Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
+    /// The session's review runner for `/code-review`, or why it could not be built (redacted).
+    pub code_review: Result<Arc<dyn crate::tools::code_review::CodeReviewRunner>, String>,
 }
 
 /// The MAGI `consult` tool's wiring for the TUI's whole run: whether a live
@@ -3403,7 +3410,10 @@ pub async fn run_tui_ext(
 
     let mut app = App::new(event_tx, response_rx, approval_rx);
     app.status_row = status_row;
-    app.code_review_runner = code_review;
+    match code_review {
+        Ok(runner) => app.code_review_runner = Some(runner),
+        Err(reason) => app.code_review_unavailable = Some(reason),
+    }
     let res = run_app(&mut terminal, app).await;
 
     // `run_app` returning — by ANY exit path — means the user is done with the terminal.
@@ -4203,12 +4213,12 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                                         ),
                                                     ),
                                                 },
-                                                None => apply_response(
-                                                    &mut app,
-                                                    AgentResponse::Error(
-                                                        CODE_REVIEW_UNAVAILABLE.to_string(),
-                                                    ),
-                                                ),
+                                                None => {
+    let text = code_review_unavailable_message(
+        app.code_review_unavailable.as_deref(),
+    );
+    apply_response(&mut app, AgentResponse::Error(text));
+}
                                             }
                                             continue;
                                         }
