@@ -126,6 +126,20 @@ pub(crate) struct Rendered {
     pub failure: Option<String>,
 }
 
+/// How long a review may run, counted from its first trio call (REQ-RV06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewBudget {
+    /// No total: every batch runs on the normal consult clock (the TUI and the subcommand
+    /// without `--timeout`).
+    Unbounded,
+    /// An explicit total (the subcommand's `--timeout`).
+    Total(Duration),
+    /// The calling run's end (the agent tool): the total is what is left of it when the
+    /// preparation ends, so the review finishes, and delivers, before the run is cut.
+    #[allow(dead_code)] // Red stub
+    Until(Instant),
+}
+
 /// One review, run by the subcommand, the TUI and the tool alike.
 ///
 /// The cancellation token is the run's: headless fires it when `--timeout` runs out
@@ -150,8 +164,7 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     ///
     /// # Arguments
     /// * `plan` - The plan, as [`Self::plan`] returned it.
-    /// * `timeout` - The review's total, counted from its first trio call; `None` runs every
-    ///   batch on the normal consult clock.
+    /// * `budget` - The review's total, counted from its first trio call.
     /// * `cancel` - The run's cancellation.
     ///
     /// # Returns
@@ -162,7 +175,7 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     async fn run(
         &self,
         plan: ReviewPlan,
-        timeout: Option<Duration>,
+        budget: ReviewBudget,
         cancel: &CancellationToken,
     ) -> Result<Rendered, ReviewError>;
 }
@@ -557,7 +570,11 @@ impl Tool for CodeReviewTool {
         let total = self.review_total()?;
         let rendered = self
             .runner
-            .run(plan, total, cancel)
+            .run(
+                plan,
+                total.map_or(ReviewBudget::Unbounded, ReviewBudget::Total),
+                cancel,
+            )
             .await
             .map_err(|e| tool_error(&e))?;
         let report = match &rendered.failure {
@@ -720,9 +737,14 @@ impl CodeReviewRunner for ProductionReviewRunner {
     async fn run(
         &self,
         plan: ReviewPlan,
-        timeout: Option<Duration>,
+        budget: ReviewBudget,
         cancel: &CancellationToken,
     ) -> Result<Rendered, ReviewError> {
+        let (timeout_secs, deadline) = match budget {
+            ReviewBudget::Unbounded => (None, None),
+            ReviewBudget::Total(t) => (Some(t.as_secs()), None),
+            ReviewBudget::Until(d) => (None, Some(d)),
+        };
         run_cancellable(cancel, async {
             let input = path_input(&self.workspace, plan.input);
             let ignored = self.ignored(&input)?;
@@ -739,8 +761,8 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 ReviewRequest {
                     input,
                     workspace: &self.workspace,
-                    timeout_secs: timeout.map(|t| t.as_secs()),
-                    deadline: None,
+                    timeout_secs,
+                    deadline,
                     max_rotations: self.parts.max_rotations,
                     retry_disabled: self.parts.retry_disabled,
                     agent_timeout_secs: self.parts.agent_timeout_secs,
@@ -776,7 +798,7 @@ mod tests {
         json: Option<serde_json::Value>,
         calls: std::sync::atomic::AtomicUsize,
         workspace: Option<std::path::PathBuf>,
-        timeout_seen: std::sync::Mutex<Option<std::time::Duration>>,
+        budget_seen: std::sync::Mutex<Option<ReviewBudget>>,
     }
     #[async_trait::async_trait]
     impl CodeReviewRunner for FakeRunner {
@@ -798,11 +820,11 @@ mod tests {
         async fn run(
             &self,
             _plan: ReviewPlan,
-            timeout: Option<std::time::Duration>,
+            budget: ReviewBudget,
             _c: &CancellationToken,
         ) -> Result<Rendered, ReviewError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            *self.timeout_seen.lock().expect("lock") = timeout;
+            *self.budget_seen.lock().expect("lock") = Some(budget);
             Ok(Rendered {
                 text: self.text.clone(),
                 json: self
@@ -842,8 +864,8 @@ mod tests {
     async fn as_a_tool_the_review_gets_what_is_left_of_the_run() {
         let runner = Arc::new(FakeRunner::default());
         // [CP2 MS2 S2 loop 1] a wide window: under CI load the gap between deadline and execute is far below 10 minutes.
-        let t = CodeReviewTool::new(runner.clone(), true)
-            .with_run_deadline(std::time::Instant::now() + std::time::Duration::from_secs(3_600));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3_600);
+        let t = CodeReviewTool::new(runner.clone(), true).with_run_deadline(deadline);
         t.execute(
             serde_json::json!({"path": "src"}),
             &CancellationToken::new(),
@@ -851,15 +873,19 @@ mod tests {
         .await
         .expect("runs");
         let got = runner
-            .timeout_seen
+            .budget_seen
             .lock()
             .expect("lock")
-            .expect("a timeout reached the runner");
+            .expect("the runner was called");
         // [CP2 MS2 S2b loop 8] the margin: the review's own clock ends before the run's token fires.
-        assert!(
-            got <= std::time::Duration::from_secs(3_600 - REVIEW_DEADLINE_MARGIN_SECS)
-                && got > std::time::Duration::from_secs(3_000),
-            "{got:?}"
+        // [MAGI §6 MS2 D loop 1] as the run's end, not as a total taken before the preparation:
+        // the review reads what is left when its batches start, so its end never passes the
+        // deadline whatever the preparation took.
+        assert_eq!(
+            got,
+            ReviewBudget::Until(
+                deadline - std::time::Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS)
+            )
         );
     }
 
@@ -879,7 +905,7 @@ mod tests {
             .await
             .is_err());
         assert!(
-            runner.timeout_seen.lock().expect("lock").is_none(),
+            runner.budget_seen.lock().expect("lock").is_none(),
             "the runner was not called"
         );
         // [CP2 MS2 S2b loop 7] a deadline of exactly now: saturating_duration_since gives zero, which is the same error.
@@ -893,7 +919,7 @@ mod tests {
             .await
             .is_err());
         assert!(
-            runner.timeout_seen.lock().expect("lock").is_none(),
+            runner.budget_seen.lock().expect("lock").is_none(),
             "the runner was not called"
         );
         // [CP2 MS2 S2b loop 8] less than the margin left is spent too.
@@ -908,7 +934,7 @@ mod tests {
             .await
             .is_err());
         assert!(
-            runner.timeout_seen.lock().expect("lock").is_none(),
+            runner.budget_seen.lock().expect("lock").is_none(),
             "the runner was not called"
         );
     }
@@ -1236,7 +1262,7 @@ mod tests {
         async fn run(
             &self,
             plan: ReviewPlan,
-            _t: Option<std::time::Duration>,
+            _budget: crate::tools::code_review::ReviewBudget,
             _c: &CancellationToken,
         ) -> Result<Rendered, ReviewError> {
             *self.ran.lock().expect("lock") = Some(plan);
@@ -1377,7 +1403,11 @@ mod tests {
             "plan"
         );
         let run = runner
-            .run(unchecked(hostile), None, &CancellationToken::new())
+            .run(
+                unchecked(hostile),
+                ReviewBudget::Unbounded,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(
             matches!(run, Err(ReviewError::OutsideWorkspace(ref p)) if p.contains("fuera")),
@@ -1466,7 +1496,7 @@ mod tests {
         std::fs::write(ws.join("src").join("lib.rs"), "fn moved_sentinel() {}\n").expect("v2");
         git_in(&ws, &["commit", "-q", "-am", "v2"]);
         runner
-            .run(plan, None, &CancellationToken::new())
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
             .await
             .expect("the review runs");
         let prompts = consult.0.lock().expect("lock").join("\n");
@@ -1486,7 +1516,9 @@ mod tests {
             .expect("plans");
         assert_eq!(plan.batches, 1);
         std::fs::write(ws.join("src").join("b.rs"), forty_functions("b")).expect("b.rs");
-        let run = runner.run(plan, None, &CancellationToken::new()).await;
+        let run = runner
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
+            .await;
         assert!(
             matches!(
                 run,
@@ -1544,7 +1576,11 @@ mod tests {
             assert!(
                 matches!(
                     runner
-                        .run(unchecked(input), None, &CancellationToken::new())
+                        .run(
+                            unchecked(input),
+                            ReviewBudget::Unbounded,
+                            &CancellationToken::new()
+                        )
                         .await,
                     Err(ReviewError::OutsideWorkspace(_))
                 ),
@@ -1623,7 +1659,7 @@ mod tests {
             .plan(&ReviewInput::Directory(".".into()))
             .expect("plans");
         let rendered = runner
-            .run(plan, None, &CancellationToken::new())
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
             .await
             .expect("the review runs");
         let skipped = skipped_of(&rendered);
@@ -1648,7 +1684,7 @@ mod tests {
         );
         let plan = runner.plan(&ReviewInput::Uncommitted).expect("plans");
         let rendered = runner
-            .run(plan, None, &CancellationToken::new())
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
             .await
             .expect("the review runs");
         let skipped = skipped_of(&rendered);
@@ -1692,7 +1728,7 @@ mod tests {
         let outcome = match runner.plan(&ReviewInput::Directory(".".into())) {
             Err(e) => Err(e.to_string()),
             Ok(plan) => runner
-                .run(plan, None, &CancellationToken::new())
+                .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
                 .await
                 .map(|rendered| skipped_of(&rendered))
                 .map_err(|e| e.to_string()),
@@ -1749,7 +1785,7 @@ mod tests {
             .plan(&ReviewInput::Directory(".".into()))
             .expect("plans");
         let rendered = runner
-            .run(plan, None, &CancellationToken::new())
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
             .await
             .expect("the review runs");
         let skipped = skipped_of(&rendered);

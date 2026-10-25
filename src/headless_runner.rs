@@ -2997,7 +2997,7 @@ mod tests {
             async fn run(
                 &self,
                 _plan: crate::tools::code_review::ReviewPlan,
-                _timeout: Option<std::time::Duration>,
+                _budget: crate::tools::code_review::ReviewBudget,
                 _cancel: &CancellationToken,
             ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
             {

@@ -236,9 +236,10 @@ struct Faces {
 ///    stage reads the same bytes, once.
 /// 2. Filter what never leaves the process and what is not code.
 /// 3. Plan the batches against the pool window.
-/// 4. With an explicit `--timeout`, check the budget ([`pre_budget`]) before any trio call; then
-///    build the lexical index. Steps 1-4 are the preparation, measured apart and never charged
-///    to the `--timeout`.
+/// 4. Build the lexical index; then, with an explicit `--timeout` or a caller's deadline, check
+///    the budget ([`pre_budget`]) before any trio call. The total is the `--timeout`, at most what
+///    is left of the deadline when the preparation ends. Steps 1-4 are the preparation, measured
+///    apart and never charged to the `--timeout`.
 /// 5. Run one `consult` per batch, in series. Without `--timeout` each batch runs on the normal
 ///    `consult` clock; with it, each gets what is left split over the pending batches, counted
 ///    from the first trio call. A batch whose wall clock ran out stops the review's batches
@@ -300,10 +301,6 @@ pub async fn run_review(
             now: planned,
         });
     }
-    if let Some(total) = req.timeout_secs {
-        let ceiling = pre_budget(total, planned, req.max_rotations, req.retry_disabled)?;
-        summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
-    }
     let index = build_index(&filtered.kept, &source, deps.registry)?;
     summary.symbol_check_skipped = !index.is_complete();
     if summary.symbol_check_skipped {
@@ -313,12 +310,17 @@ pub async fn run_review(
             "the lexical index hit its cap: the symbol check is off for this review"
         );
     }
+    let total = review_total(req.timeout_secs, req.deadline);
+    if let Some(total) = total {
+        let ceiling = pre_budget(total, planned, req.max_rotations, req.retry_disabled)?;
+        summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
+    }
     summary.prep_ms = millis(prep.elapsed());
 
     let clock = ReviewTimer {
         clock: deps.clock,
         t0: deps.clock.elapsed_secs(),
-        total: req.timeout_secs,
+        total,
     };
     let finished = run_batches(&batches, deps.consult, &clock, &mut summary).await;
 
@@ -469,6 +471,16 @@ fn filter_and_plan(
         batch_limit_tokens(&window),
     )?;
     Ok((filtered, window, batches))
+}
+
+/// The review's total in seconds, read when the preparation ends: the explicit `--timeout`, at
+/// most what is left of the caller's deadline; `None` when there is neither.
+fn review_total(timeout_secs: Option<u64>, deadline: Option<Instant>) -> Option<u64> {
+    let left = deadline.map(|d| d.saturating_duration_since(Instant::now()).as_secs());
+    match (timeout_secs, left) {
+        (Some(t), Some(l)) => Some(t.min(l)),
+        (t, l) => t.or(l),
+    }
 }
 
 /// The single content source an input resolved to: the worktree (with its old side, if any) or

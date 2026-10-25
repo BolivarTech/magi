@@ -5240,7 +5240,14 @@ async fn run_code_review_subcommand(
         }
     };
     let rendered = match runner
-        .run(plan, args.timeout.map(Duration::from_secs), &cancel)
+        .run(
+            plan,
+            args.timeout
+                .map_or(crate::tools::code_review::ReviewBudget::Unbounded, |t| {
+                    crate::tools::code_review::ReviewBudget::Total(Duration::from_secs(t))
+                }),
+            &cancel,
+        )
         .await
     {
         Ok(r) => r,
@@ -22533,7 +22540,7 @@ mod code_review_surface_tests {
             async fn run(
                 &self,
                 _p: crate::tools::code_review::ReviewPlan,
-                _t: Option<std::time::Duration>,
+                _budget: crate::tools::code_review::ReviewBudget,
                 _c: &CancellationToken,
             ) -> Result<crate::tools::code_review::Rendered, ReviewError> {
                 Err(ReviewError::NothingToReview)

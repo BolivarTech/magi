@@ -2245,9 +2245,13 @@ impl App {
             return;
         }
         apply_response(self, AgentResponse::Info(CODE_REVIEW_RUNNING.to_string()));
-        let timeout = cmd.timeout.map(std::time::Duration::from_secs);
+        let budget = cmd
+            .timeout
+            .map_or(crate::tools::code_review::ReviewBudget::Unbounded, |t| {
+                crate::tools::code_review::ReviewBudget::Total(std::time::Duration::from_secs(t))
+            });
         let cancel = tokio_util::sync::CancellationToken::new();
-        match runner.run(plan, timeout, &cancel).await {
+        match runner.run(plan, budget, &cancel).await {
             Ok(rendered) => {
                 let body = crate::agent::Agent::sanitize_text(&rendered.text);
                 apply_response(self, AgentResponse::Text(body));
@@ -9079,7 +9083,7 @@ end"
         async fn run(
             &self,
             plan: crate::tools::code_review::ReviewPlan,
-            _t: Option<std::time::Duration>,
+            _budget: crate::tools::code_review::ReviewBudget,
             _c: &tokio_util::sync::CancellationToken,
         ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
         {
