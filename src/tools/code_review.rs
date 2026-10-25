@@ -740,6 +740,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     input,
                     workspace: &self.workspace,
                     timeout_secs: timeout.map(|t| t.as_secs()),
+                    deadline: None,
                     max_rotations: self.parts.max_rotations,
                     retry_disabled: self.parts.retry_disabled,
                     agent_timeout_secs: self.parts.agent_timeout_secs,

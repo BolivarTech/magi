@@ -155,6 +155,9 @@ pub struct ReviewRequest<'a> {
     pub workspace: &'a Path,
     /// The explicit `--timeout`, the total of the review, counted from the first trio call.
     pub timeout_secs: Option<u64>,
+    /// The calling run's end, if it has one: the total is then at most what is left of it when
+    /// the preparation ends, so the review delivers what it finished before the run is cut.
+    pub deadline: Option<Instant>,
     /// `[magi].max_rotations`, resolved.
     pub max_rotations: u32,
     /// `[magi].retry_disabled`, resolved.
@@ -949,11 +952,27 @@ mod tests {
         client: &MockDecisionClient,
         clock: &dyn ReviewClock,
     ) -> Result<ReviewOutcome, ReviewError> {
+        review_until(dir, timeout, None, Duration::ZERO, consult, client, clock).await
+    }
+
+    /// [`review`] with a deadline, and a guard that takes `prep` per path (a slow preparation).
+    async fn review_until(
+        dir: &Path,
+        timeout: Option<u64>,
+        deadline: Option<Instant>,
+        prep: Duration,
+        consult: &FakeConsult,
+        client: &MockDecisionClient,
+        clock: &dyn ReviewClock,
+    ) -> Result<ReviewOutcome, ReviewError> {
         let git = FakeGit::from(&[(
             "ls-files --others --ignored --exclude-standard --directory -z -- .",
             Ok(""),
         )]);
-        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> {
+            std::thread::sleep(prep);
+            Ok(p.to_path_buf())
+        };
         let registry = LanguageRegistry::new();
         let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
         run_review(
@@ -961,6 +980,7 @@ mod tests {
                 input: ReviewInput::Directory(dir.to_path_buf()),
                 workspace: dir,
                 timeout_secs: timeout,
+                deadline,
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
@@ -1222,6 +1242,7 @@ mod tests {
                 input: ReviewInput::Uncommitted,
                 workspace: dir.path(),
                 timeout_secs: None,
+                deadline: None,
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
@@ -1301,6 +1322,7 @@ mod tests {
                 input: ReviewInput::Uncommitted,
                 workspace: dir.path(),
                 timeout_secs: None,
+                deadline: None,
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
@@ -1409,6 +1431,7 @@ mod tests {
                 input: ReviewInput::Directory(dir.path().to_path_buf()),
                 workspace: dir.path(),
                 timeout_secs: None,
+                deadline: None,
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
@@ -1780,6 +1803,73 @@ mod tests {
             flag.load(std::sync::atomic::Ordering::SeqCst),
             "the batch future was not dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn a_deadline_bounds_the_batches_from_where_the_preparation_ended() {
+        // [MAGI §6 MS2 D loop 1] the calling run's deadline is read when the batches start: a
+        // slow preparation shrinks the review's total instead of pushing its end past the
+        // deadline, where the caller's cancellation would drop every paid batch.
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let deadline = Instant::now() + Duration::from_secs(300);
+        review_until(
+            dir.path(),
+            None,
+            Some(deadline),
+            Duration::from_millis(1_500),
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("runs");
+        let wall = consult.clocks.lock().expect("lock")[0].expect("a deadline is a wall clock");
+        assert!(wall <= Duration::from_secs(299), "{wall:?}");
+        assert!(wall >= Duration::from_secs(290), "{wall:?}");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_under_the_deadline_is_the_total() {
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        review_until(
+            dir.path(),
+            Some(200),
+            Some(Instant::now() + Duration::from_secs(1_000)),
+            Duration::ZERO,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("runs");
+        assert_eq!(
+            consult.clocks.lock().expect("lock")[0],
+            Some(Duration::from_secs(200))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deadline_too_close_for_the_batches_fails_before_any_trio_call() {
+        let dir = workspace(4);
+        let consult = FakeConsult::new(Vec::new());
+        let r = review_until(
+            dir.path(),
+            None,
+            Some(Instant::now() + Duration::from_secs(60)),
+            Duration::ZERO,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ReviewError::Budget { batches: 4, .. })),
+            "{:?}",
+            r.err()
+        );
+        assert_eq!(consult.calls(), 0);
     }
 
     #[tokio::test]
