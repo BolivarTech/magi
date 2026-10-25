@@ -5035,40 +5035,64 @@ api_key = \"k\"
 
     #[test]
     fn an_invalid_code_review_section_is_a_load_error() {
-        // [CP2 MS2 S2a1 loop 10] one case per `validate` rule: a blank model (an empty chain), a zero timeout or state cap,
-        // and a threshold outside [0, 1] (above 1 the gate would filter nothing).
-        for bad in [
-            "model = \"\"",
-            "model = \"m\"
-timeout_secs = 0",
-            "model = \"m\"
-max_state_bytes = 0",
-            "model = \"m\"
-min_confidence = 1.5",
-            "model = \"m\"
-min_confidence = -0.1",
-            "model = \"m\"
-[[code_review.fallback]]
-model = \"f\"
-min_confidence = 2.0",
+        // One case per `validate` rule, each otherwise valid so it fails for its own rule: a
+        // blank model (an empty chain), a zero timeout or state cap, and a threshold outside
+        // [0, 1] (above 1 the gate would filter nothing).
+        for (bad, says) in [
+            ("model = \"\"\nmin_confidence = 0.4", "must name a model"),
+            (
+                "model = \"m\"\nmin_confidence = 0.4\ntimeout_secs = 0",
+                "timeout_secs",
+            ),
+            (
+                "model = \"m\"\nmin_confidence = 0.4\nmax_state_bytes = 0",
+                "max_state_bytes",
+            ),
+            ("model = \"m\"\nmin_confidence = 1.5", "between 0 and 1"),
+            ("model = \"m\"\nmin_confidence = -0.1", "between 0 and 1"),
+            (
+                "model = \"m\"\nmin_confidence = 0.4\n[[code_review.fallback]]\nmodel = \"f\"\nmin_confidence = 2.0",
+                "between 0 and 1",
+            ),
         ] {
-            let t = format!(
-                "[decision]
-model=\"x\"
-[code_review]
-{bad}
-"
-            );
-            assert!(MagiConfig::from_toml_str(&t).is_err(), "{bad}");
+            let t = format!("[decision]\nmodel=\"x\"\n[code_review]\n{bad}\n");
+            let err = MagiConfig::from_toml_str(&t).expect_err(bad);
+            assert!(err.to_string().contains(says), "{bad}: {err}");
         }
         assert!(MagiConfig::from_toml_str(
-            "[decision]
-model=\"x\"
-[code_review]
-model = \"m\"
-"
+            "[decision]\nmodel=\"x\"\n[code_review]\nmodel = \"m\"\nmin_confidence = 0.4\n"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn every_gate_model_needs_its_min_confidence() {
+        // RV14: the chain carries a threshold per model; a missing one is a load error naming
+        // the model and the key, for the primary and for each fallback.
+        for (section, model) in [
+            ("model = \"m\"", "'m'"),
+            (
+                "model = \"m\"\nmin_confidence = 0.4\n[[code_review.fallback]]\nmodel = \"f\"",
+                "'f'",
+            ),
+        ] {
+            let t = format!("[decision]\nmodel=\"x\"\n[code_review]\n{section}\n");
+            let err = MagiConfig::from_toml_str(&t).expect_err(section);
+            let msg = err.to_string();
+            assert!(
+                msg.contains(model) && msg.contains("min_confidence"),
+                "{section}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_gate_model_is_a_load_error() {
+        // Compared trimmed, as the server sees them: a fallback must not retry what just failed.
+        let t = "[decision]\nmodel=\"x\"\n[code_review]\nmodel = \"m\"\nmin_confidence = 0.4\n\
+                 [[code_review.fallback]]\nmodel = \" m \"\nmin_confidence = 0.3\n";
+        let err = MagiConfig::from_toml_str(t).expect_err("a repeated model");
+        assert!(err.to_string().contains("more than once"), "{err}");
     }
 
     /// Passes before the feature exists, by design: a regression guard on the tool allowlist.
@@ -5305,7 +5329,7 @@ base_url = \"nope nope\"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_toml(
             &dir,
-            "[decision]\nmodel = \"m\"\n[code_review]\nmodel = \"m\"\n\
+            "[decision]\nmodel = \"m\"\n[code_review]\nmodel = \"m\"\nmin_confidence = 0.4\n\
              base_url = \"https://alice:s3cr3t@host/v1\"\n",
         );
         let msg = MagiConfig::load(&path)
@@ -5324,7 +5348,7 @@ base_url = \"nope nope\"
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_toml(
             &dir,
-            "[decision]\nmodel = \"m\"\n[code_review]\nmodel = \"m\"\nbase_url = \"http://\"\n",
+            "[decision]\nmodel = \"m\"\n[code_review]\nmodel = \"m\"\nmin_confidence = 0.4\nbase_url = \"http://\"\n",
         );
         let msg = MagiConfig::load(&path)
             .expect_err("a base_url with no host must not load")

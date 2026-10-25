@@ -17324,7 +17324,7 @@ base_url = \"http://192.168.0.30:11434/v1\"
         fn the_keys_see_the_code_review_endpoint_its_own_or_the_root() {
             // The origin the gate's key is chosen for is the endpoint the gate will call.
             let own = MagiConfig::from_toml_str(
-                "[code_review]\nmodel = \"m\"\nbase_url = \"https://openrouter.ai/api/v1\"\n",
+                "[code_review]\nmodel = \"m\"\nmin_confidence = 0.4\nbase_url = \"https://openrouter.ai/api/v1\"\n",
             )
             .expect("fixture parses");
             assert_eq!(
