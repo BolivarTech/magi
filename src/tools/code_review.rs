@@ -438,6 +438,30 @@ pub(crate) fn path_input(workspace: &Path, input: ReviewInput) -> ReviewInput {
     }
 }
 
+/// Refuses a hostile or unknown input before anything that contacts an endpoint (RV01 first,
+/// RV-S10): a `File`/`Directory` path through the workspace's `PathGuard`, and every ref
+/// validated and pinned with local git. Nothing here calls a model or a probe; the full plan,
+/// which needs the probed windows, checks the rest.
+///
+/// # Arguments
+/// * `workspace` - The workspace root.
+/// * `input` - What the caller asked to review.
+///
+/// # Errors
+/// [`ReviewError::OutsideWorkspace`], [`ReviewError::InvalidRef`], [`ReviewError::RefNotFound`],
+/// a git error of the pin, or [`ReviewError::Io`] when the workspace cannot be guarded.
+pub(crate) fn check_review_input(workspace: &Path, input: &ReviewInput) -> Result<(), ReviewError> {
+    let guard =
+        PathGuard::new(workspace.to_path_buf()).map_err(|e| ReviewError::Io(e.to_string()))?;
+    let root = guard.workspace_root().to_path_buf();
+    match input {
+        ReviewInput::File(p) | ReviewInput::Directory(p) => {
+            review_path_guard(&guard, &root.join(p)).map(|_| ())
+        }
+        _ => pin_refs(input, &ScrubbedGit::new(root)).map(|_| ()),
+    }
+}
+
 /// The agent tool `code-review`.
 ///
 /// # Examples

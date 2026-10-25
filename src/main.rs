@@ -5171,6 +5171,13 @@ async fn run_code_review_subcommand(
     if let Err(code) = logging {
         return code;
     }
+    // RV01 first: a hostile path or an unknown ref is refused before the probe contacts the
+    // endpoints (RV-S10).
+    let input = review_input_of(&args);
+    if let Err(e) = crate::tools::code_review::check_review_input(&workdir, &input) {
+        emit_review_error(&e);
+        return review_error_exit(&e);
+    }
 
     let env_overrides = MagiEnvModelOverrides::from_env();
     let mut trio_notices: Vec<Notice> = Vec::new();
@@ -5231,7 +5238,6 @@ async fn run_code_review_subcommand(
     // default signal handler. `--timeout` is the review's total (RV06), which delivers what
     // finished instead of cancelling.
     let cancel = tokio_util::sync::CancellationToken::new();
-    let input = review_input_of(&args);
     let plan = match runner.plan(&input) {
         Ok(plan) => plan,
         Err(e) => {
