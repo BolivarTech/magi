@@ -32,6 +32,8 @@ import http.server
 import json
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -590,6 +592,24 @@ REVIEW_GEN_PATHS = ("gen/a.rs", "gen/b.rs", "gen/c.rs")
 REVIEW_GEN_DIR = "gen"
 REVIEW_SKIPPED_DIR = "skipped"
 
+#: The token the review runs use for ``-w``, and the directory (under the
+#: scratch area) it resolves to. The review input cannot live in the
+#: environment: its ``.gitignore`` is ``*``, and the product leaves out what
+#: ``.gitignore`` excludes. The workspace is therefore a nested git repository
+#: of its own, so git's top level is the workspace and no outer rule applies.
+REVIEW_WORKSPACE_TOKEN = "<review-workspace>"
+REVIEW_WORKSPACE_DIR = "review-ws"
+
+#: The flags of the review runs: :data:`COMMON_FLAGS` with the review workspace.
+REVIEW_FLAGS = ("--output-format", "json", "-w", REVIEW_WORKSPACE_TOKEN)
+
+#: The git query the product's own enumeration is built on; the harness runs
+#: it before a review so an input git cannot see is the harness's failure.
+GIT_VISIBLE_QUERY = ("ls-files", "--others", "--exclude-standard", "-z")
+
+#: Seconds the harness gives each git command it runs.
+GIT_TIMEOUT_S = 60
+
 #: A path outside the workspace, for the hostile-path run.
 REVIEW_OUTSIDE_PATH = "../outside"
 
@@ -646,6 +666,41 @@ def review_input_files() -> tuple[tuple[str, bytes], ...]:
             "the generated review input is %d tokens, under the %d needed for "
             "%d batches" % (tokens, needed, REVIEW_MIN_BATCHES))
     return tuple(files)
+
+
+def verify_visible(workspace, paths) -> None:
+    """Check that git, run from *workspace*, lists every path of *paths*.
+
+    The product enumerates a directory with ``git ls-files --others
+    --exclude-standard``, so a file that query does not list is invisible to a
+    review. That is a fact about the harness's workspace and not a product
+    verdict, so it raises the harness error (exit 3) instead of letting a
+    scenario report ``FAIL`` over an input the product never saw.
+
+    Complexity: ``O(output bytes)``.
+
+    Args:
+        workspace: The review workspace (a git repository of its own).
+        paths: Workspace-relative paths that must be visible, ``/``-separated.
+
+    Raises:
+        HarnessError: If git fails, or lists fewer than all of *paths*.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(workspace)] + list(GIT_VISIBLE_QUERY),
+            capture_output=True, timeout=GIT_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HarnessError("could not run git in %s: %s" % (workspace, exc)) from exc
+    if done.returncode != 0:
+        raise HarnessError("git failed in %s: %s" % (
+            workspace, done.stderr.decode("utf-8", errors="replace").strip()))
+    listed = set(done.stdout.decode("utf-8", errors="replace").split("\0"))
+    hidden = [path for path in paths if path not in listed]
+    if hidden:
+        raise HarnessError(
+            "git cannot see the review input %s in %s; an ignore rule hides "
+            "it from the product too" % (", ".join(hidden), workspace))
 
 
 def review_skipped_files() -> tuple[tuple[str, bytes], ...]:
@@ -886,25 +941,25 @@ DEFINITIONS: dict[str, RunDefinition] = {
     # any model is reached.
     "R12": RunDefinition(
         run_id="R12",
-        argv=("code-review",) + COMMON_FLAGS + ("--structured-verdicts",
+        argv=("code-review",) + REVIEW_FLAGS + ("--structured-verdicts",
                                                 REVIEW_GEN_DIR),
         stdin=b"",
         needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=2400,
         files=review_input_files()),
     "R13": RunDefinition(
         run_id="R13",
-        argv=("code-review",) + COMMON_FLAGS + (REVIEW_OUTSIDE_PATH,),
+        argv=("code-review",) + REVIEW_FLAGS + (REVIEW_OUTSIDE_PATH,),
         stdin=b"",
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60),
     "R14": RunDefinition(
         run_id="R14",
-        argv=("code-review",) + COMMON_FLAGS + (REVIEW_SKIPPED_DIR,),
+        argv=("code-review",) + REVIEW_FLAGS + (REVIEW_SKIPPED_DIR,),
         stdin=b"",
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         files=review_skipped_files()),
     "R15": RunDefinition(
         run_id="R15",
-        argv=("code-review",) + COMMON_FLAGS
+        argv=("code-review",) + REVIEW_FLAGS
         + ("--timeout", str(REVIEW_TOO_SHORT_TIMEOUT_S), "--log-level",
            "error", REVIEW_GEN_DIR),
         stdin=b"",
@@ -1001,7 +1056,7 @@ class RunExecutor:
                 result.
         """
         started = time.monotonic()
-        self._write_files(definition)
+        self._prepare_review_workspace(definition)
         stdin = self._stdin_for(definition)
         baseline = None
         try:
@@ -1031,27 +1086,73 @@ class RunExecutor:
             baseline=baseline,
         )
 
-    def _write_files(self, definition: RunDefinition) -> None:
-        """Write the files a run reads under the environment root.
+    def _review_workspace(self) -> pathlib.Path:
+        """The directory :data:`REVIEW_WORKSPACE_TOKEN` stands for.
+
+        Returns:
+            pathlib.Path: ``<scratch>/review-ws``.
+        """
+        return pathlib.Path(self._env.scratch_dir) / REVIEW_WORKSPACE_DIR
+
+    def _prepare_review_workspace(self, definition: RunDefinition):
+        """Build the nested-repository workspace a review run executes in.
+
+        It is rebuilt from nothing on every run: the environment's ``.magi``
+        (configuration and the encrypted store with its vault) is copied in,
+        ``git init`` makes the workspace its own repository, the run's files are
+        written, and git is asked whether it can see them. Nothing is committed.
+
+        Args:
+            definition: The run about to execute.
+
+        Returns:
+            pathlib.Path | None: The workspace, or ``None`` for a run that does
+            not use one.
+
+        Raises:
+            HarnessError: If the workspace cannot be built, or git cannot see
+                the run's files.
+        """
+        if REVIEW_WORKSPACE_TOKEN not in definition.argv:
+            return None
+        workspace = self._review_workspace()
+        try:
+            if workspace.exists():
+                shutil.rmtree(workspace)
+            workspace.mkdir(parents=True)
+            shutil.copytree(self._env.magi_dir, workspace / ".magi")
+            subprocess.run(["git", "init", "-q", str(workspace)], check=True,
+                           capture_output=True, timeout=GIT_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError, shutil.Error) as exc:
+            raise HarnessError("could not build the review workspace at %s: %s"
+                               % (workspace, exc)) from exc
+        self._write_files(definition, workspace)
+        verify_visible(workspace, [path for path, _ in definition.files])
+        return workspace
+
+    def _write_files(self, definition: RunDefinition,
+                     root: pathlib.Path) -> None:
+        """Write the files a run reads under *root*.
 
         A file already holding the same bytes is left untouched, so a rerun
         does not change a modification time the product might read.
 
         Args:
             definition: The run about to execute.
+            root: The directory the paths are relative to.
 
         Raises:
-            HarnessError: If a file cannot be written, or its path leaves the
-                environment root.
+            HarnessError: If a file cannot be written, or its path leaves
+                *root*.
         """
         if not definition.files:
             return
-        root = pathlib.Path(self._env.root).resolve()
+        root = pathlib.Path(root).resolve()
         for relative, body in definition.files:
             target = (root / relative).resolve()
             if root not in target.parents:
                 raise HarnessError(
-                    "run %s declares a file outside the environment: %s"
+                    "run %s declares a file outside its workspace: %s"
                     % (definition.run_id, relative))
             try:
                 if target.is_file() and target.read_bytes() == body:
@@ -1109,8 +1210,10 @@ class RunExecutor:
             list[str]: The arguments, without the program name.
         """
         root = str(self._env.root)
-        return [root if word == WORKSPACE_TOKEN else word
-                for word in definition.argv]
+        resolved = {WORKSPACE_TOKEN: root}
+        if REVIEW_WORKSPACE_TOKEN in definition.argv:
+            resolved[REVIEW_WORKSPACE_TOKEN] = str(self._review_workspace())
+        return [resolved.get(word, word) for word in definition.argv]
 
     def _invoke(self, definition: RunDefinition,
                 stdin: bytes) -> ProductOutput:
