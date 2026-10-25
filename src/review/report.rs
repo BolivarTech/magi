@@ -37,8 +37,11 @@ pub struct ReviewSummary {
     pub gate_states: BTreeMap<String, usize>,
     /// Findings per gate cause.
     pub gate_causes: BTreeMap<String, usize>,
-    /// Answers each model of the gate chain decided.
+    /// Findings whose gate state each model of the chain decided (one per finding).
     pub per_model: BTreeMap<String, usize>,
+    /// Questions the gate asked: one per (title, detail) pair put to the chain, at most
+    /// `MAX_GATE_QUESTIONS_PER_FINDING` per finding.
+    pub gate_questions: usize,
     /// Fraction of the findings that reached the gate and got an answer; 1.0 with none.
     pub judged_fraction: f64,
     /// Findings removed by the deterministic validation, with their cause.
@@ -552,6 +555,7 @@ mod tests {
             "gate_states",
             "gate_causes",
             "per_model",
+            "gate_questions",
             "judged_fraction",
             "discarded",
             "skipped",

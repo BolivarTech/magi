@@ -1493,6 +1493,9 @@ mod tests {
             out.consolidated.as_ref().expect("consolidated"),
             &out.summary,
         );
+        // One question per finding here: each has one (title, detail) pair.
+        assert_eq!(out.summary.gate_questions, 2);
+        assert!(text.contains("gate questions: 2"), "{text}");
         let (main, apart) = text
             .split_once("## Filtered by the gate")
             .expect("a filtered section");
