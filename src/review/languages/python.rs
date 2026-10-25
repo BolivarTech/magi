@@ -158,17 +158,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         }
 
         // Module-level assignment at indent 0 → DeclarationGroup
-        if indent == 0
-            && !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && !trimmed.starts_with("def ")
-            && !trimmed.starts_with("async def ")
-            && !trimmed.starts_with("class ")
-            && !trimmed.starts_with("import ")
-            && !trimmed.starts_with("from ")
-            && !trimmed.starts_with('@')
-            && (trimmed.contains('=') || trimmed.contains(':'))
-        {
+        if indent == 0 && is_module_assignment(trimmed) {
             let group_end = find_assignment_group_end(lines, i);
             let name = trimmed
                 .split(['=', ':', ' '])
@@ -189,6 +179,28 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
     }
 
     constructs
+}
+
+/// Words that open a statement which is never a module-level assignment: definitions, imports
+/// and the compound statements, whose `:` and `==` would otherwise read as an assignment.
+const NOT_ASSIGNMENT_WORDS: &[&str] = &[
+    "def", "async", "class", "import", "from", "if", "elif", "else", "for", "while", "with", "try",
+    "except", "finally", "match", "case",
+];
+
+/// Whether an unindented, trimmed line is a module-level assignment (`X = 1`, `x: int = 1`):
+/// it holds `=` or `:`, is no comment or decorator, and does not open with a word of
+/// [`NOT_ASSIGNMENT_WORDS`]. O(n) in the line.
+fn is_module_assignment(trimmed: &str) -> bool {
+    let first_word = trimmed
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or("");
+    !trimmed.is_empty()
+        && !trimmed.starts_with('#')
+        && !trimmed.starts_with('@')
+        && !NOT_ASSIGNMENT_WORDS.contains(&first_word)
+        && (trimmed.contains('=') || trimmed.contains(':'))
 }
 
 /// Get indentation level (number of leading spaces/tabs).
@@ -243,17 +255,9 @@ fn find_assignment_group_end(lines: &[&str], start: usize) -> usize {
         let trimmed = line.trim();
         let indent = indentation(line);
         if indent == 0 && !trimmed.is_empty() && !trimmed.starts_with('#') {
-            if trimmed.contains('=') || trimmed.contains(':') {
-                // Check it's not a def/class/import
-                if !trimmed.starts_with("def ")
-                    && !trimmed.starts_with("async def ")
-                    && !trimmed.starts_with("class ")
-                    && !trimmed.starts_with("import ")
-                    && !trimmed.starts_with("from ")
-                {
-                    end = j;
-                    continue;
-                }
+            if is_module_assignment(trimmed) {
+                end = j;
+                continue;
             }
             break;
         } else if trimmed.is_empty() {
