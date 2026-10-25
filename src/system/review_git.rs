@@ -414,6 +414,46 @@ mod tests {
     }
 
     #[test]
+    fn a_core_worktree_that_points_outside_the_workspace_is_never_read() {
+        // [MAGI §6 MS2 A loop 1] core.worktree is repository config: an untrusted repository can point git's work
+        // tree at a directory outside the workspace, and `git diff <HEAD>` then embeds that directory's files.
+        let d = repo();
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(elsewhere.path().join("a.rs"), "SENTINEL_OUTSIDE\n").expect("write");
+        let target = elsewhere.path().to_str().expect("utf-8 tempdir");
+        git(d.path(), &["config", "core.worktree", target]);
+        let plain = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d.path())
+            .args(["diff", "--no-color", "HEAD"])
+            .output()
+            .expect("git runs");
+        assert!(
+            String::from_utf8_lossy(&plain.stdout).contains("SENTINEL_OUTSIDE"),
+            "precondition: git reads the outside tree"
+        );
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        match magi_rs::review::input::resolve_input(
+            &ReviewInput::Uncommitted,
+            d.path(),
+            &ScrubbedGit::new(d.path().to_path_buf()),
+            &allow,
+        ) {
+            Err(ReviewError::Git(msg)) => assert!(!msg.contains("SENTINEL"), "{msg}"),
+            Err(other) => panic!("expected a Git error, got {other:?}"),
+            Ok(r) => panic!(
+                "the outside tree was read: {:?}",
+                r.files.iter().map(|f| &f.diff).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    #[test]
     fn a_workspace_below_the_repo_root_reviews_only_its_own_subtree() {
         // [CP2 MS2 S1 loop 4] the workspace need not be the repo root.
         let d = repo();
