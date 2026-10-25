@@ -54,6 +54,28 @@ pub trait GitCommand: Send + Sync {
             ))
         })
     }
+
+    /// Runs a query that git answers with exit status 1 and nothing on stderr when nothing
+    /// matches (`rev-parse --verify --quiet`), and decodes its stdout as UTF-8.
+    ///
+    /// The default reads that answer from [`GitCommand::run`] as a [`ReviewError::Git`] with an
+    /// empty message, which is how an implementation that reports git's stderr verbatim sees it;
+    /// an implementation that words its failures overrides this with the exit status.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(None)` for "no match", `Ok(Some(stdout))` on success.
+    ///
+    /// # Errors
+    ///
+    /// As [`GitCommand::run`], for every other failure.
+    fn query(&self, args: &[&str]) -> Result<Option<String>, ReviewError> {
+        match self.run(args) {
+            Ok(out) => Ok(Some(out)),
+            Err(ReviewError::Git(msg)) if msg.is_empty() => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
 }
 
 /// Reads the content of a review, as bytes (binary and non-UTF-8 files are filtered later).

@@ -156,11 +156,16 @@ pub fn resolve_input(
             let r = r.as_deref().unwrap_or("HEAD");
             validate_ref(r)?;
             let sha = verify(git, r)?;
-            let old_rev = match git.run(&["rev-parse", "--verify", &format!("{r}^^{{commit}}")]) {
-                Ok(parent) => Some(parent.trim().to_string()),
-                Err(ReviewError::Git(_)) => None,
-                Err(other) => return Err(other),
-            };
+            // `<sha>^^{commit}` is the first parent, peeled to a commit (`^` then `^{commit}`), of
+            // the pinned SHA; git's "no such commit" there is a root commit (or a shallow edge).
+            let old_rev = git
+                .query(&[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{sha}^^{{commit}}"),
+                ])?
+                .map(|parent| parent.trim().to_string());
             let mut args = vec!["diff-tree", "-p", "-r", "--root"];
             args.extend_from_slice(DIFF_FLAGS);
             args.push(&sha);
@@ -268,12 +273,19 @@ pub(crate) fn in_work_tree(
     }
 }
 
-/// `rev-parse --verify <r>^{commit}`, trimmed: the SHA every later call uses.
+/// `rev-parse --verify --quiet <r>^{commit}`, trimmed: the SHA every later call uses.
+///
+/// Only git's "no such commit" answer is [`ReviewError::RefNotFound`]; any other failure (a
+/// timeout, a broken repository) stays the error git gave.
 fn verify(git: &dyn GitCommand, r: &str) -> Result<String, ReviewError> {
-    match git.run(&["rev-parse", "--verify", &format!("{r}^{{commit}}")]) {
-        Ok(sha) if !sha.trim().is_empty() => Ok(sha.trim().to_string()),
-        Ok(_) | Err(ReviewError::Git(_)) => Err(ReviewError::RefNotFound(r.to_string())),
-        Err(other) => Err(other),
+    match git.query(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{r}^{{commit}}"),
+    ])? {
+        Some(sha) if !sha.trim().is_empty() => Ok(sha.trim().to_string()),
+        _ => Err(ReviewError::RefNotFound(r.to_string())),
     }
 }
 

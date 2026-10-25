@@ -74,6 +74,10 @@ const NEUTRALIZED_FILTER_SETTINGS: &[&str] = &["clean=", "smudge=", "process=", 
 /// The exit code of `git config --get-regexp` when nothing matches.
 const CONFIG_NO_MATCH_EXIT: i32 = 1;
 
+/// The exit code of `rev-parse --verify --quiet` for a name that is no commit (with an empty
+/// stderr); a broken repository exits 128 with a message.
+const QUERY_NO_MATCH_EXIT: i32 = 1;
+
 /// Size of each read while draining stderr.
 const DRAIN_CHUNK_BYTES: usize = 8 * 1024;
 
@@ -227,6 +231,23 @@ impl GitCommand for ScrubbedGit {
                 args.first().copied().unwrap_or_default(),
                 &finished,
             ))
+        }
+    }
+
+    /// # Errors
+    ///
+    /// As [`GitCommand::run_bytes`] for any exit but 0, or 1 with an empty stderr (`None`), and
+    /// [`ReviewError::Git`] for an output that is not UTF-8.
+    fn query(&self, args: &[&str]) -> Result<Option<String>, ReviewError> {
+        self.ensure_filters()?;
+        let finished = self.execute(args)?;
+        let command = args.first().copied().unwrap_or_default();
+        match finished.code {
+            Some(0) => String::from_utf8(finished.stdout).map(Some).map_err(|_| {
+                ReviewError::Git(format!("git {command} printed output that is not UTF-8"))
+            }),
+            Some(QUERY_NO_MATCH_EXIT) if finished.stderr.is_empty() => Ok(None),
+            _ => Err(failure(command, &finished)),
         }
     }
 }
