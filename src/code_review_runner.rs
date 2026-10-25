@@ -210,6 +210,43 @@ fn review_pool(
         .collect())
 }
 
+/// The gate's decision client: the gate's chain with every threshold removed, because the gate
+/// applies each model's `min_confidence` itself. A client that kept them would turn an answer
+/// under the threshold into a failed attempt, and the gate's `low_confidence` (with the lean and
+/// the confidence) could never be reached.
+///
+/// # Arguments
+/// * `base_url` - The `[code_review]` endpoint, resolved.
+/// * `api_key` - Its key, if any.
+/// * `chain` - The gate's chain, with its thresholds.
+/// * `timeout` - Per call.
+///
+/// # Returns
+/// The client.
+///
+/// # Errors
+/// When the client cannot be built.
+fn gate_client(
+    base_url: &str,
+    api_key: Option<zeroize::Zeroizing<String>>,
+    chain: &[ModelSpec],
+    timeout: Duration,
+) -> Result<SystemOneClient, magi_rs::decision::DecisionError> {
+    SystemOneClient::new(DecisionSettings {
+        base_url: base_url.to_string(),
+        api_key,
+        chain: chain
+            .iter()
+            .map(|m| ModelSpec {
+                model: m.model.clone(),
+                min_confidence: None,
+            })
+            .collect(),
+        timeout,
+        keep_alive: None,
+    })
+}
+
 /// Builds the review runner a surface shares.
 ///
 /// # Arguments
@@ -238,21 +275,12 @@ pub(crate) fn build_code_review_runner(
             .unwrap_or(crate::defaults::DEFAULT_CODE_REVIEW_TIMEOUT_SECS),
     );
     let gate_chain = section.chain();
-    // The gate applies each model's threshold itself, so the client's chain carries none.
-    let client_chain = gate_chain
-        .iter()
-        .map(|m| ModelSpec {
-            model: m.model.clone(),
-            min_confidence: None,
-        })
-        .collect();
-    let gate_client = SystemOneClient::new(DecisionSettings {
-        base_url: base_url.as_str().to_string(),
-        api_key: code_review_api_key(b.keys),
-        chain: client_chain,
-        timeout: call_timeout,
-        keep_alive: None,
-    })
+    let gate_client = gate_client(
+        base_url.as_str(),
+        code_review_api_key(b.keys),
+        &gate_chain,
+        call_timeout,
+    )
     .map_err(|e| redact_foreign_error(&e).to_string())?;
     let pool = review_pool(
         &b.cfg,
