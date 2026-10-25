@@ -899,6 +899,12 @@ mod tests {
             Err(ReviewError::Git(msg)) => assert!(msg.contains("bad config line 1"), "{msg}"),
             other => panic!("expected a Git error, got {other:?}"),
         }
+        // [MAGI §6 MS2 A loop 2] exit 1 is "nothing matched" only with nothing on stderr, as in
+        // `query`; anything git says there fails closed.
+        assert!(matches!(
+            interpret_filter_probe(&probe(Some(1), b"", "error: something went wrong")),
+            Err(ReviewError::Git(_))
+        ));
         match interpret_filter_probe(&probe(Some(3), b"", "")) {
             Err(ReviewError::Git(msg)) => {
                 assert!(msg.contains("config") && msg.contains('3'), "{msg}")
