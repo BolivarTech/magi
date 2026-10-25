@@ -420,13 +420,16 @@ fn walk(
     for entry in std::fs::read_dir(dir).map_err(io)? {
         let entry = entry.map_err(io)?;
         let name = entry.file_name();
-        let path = match (name.to_str(), rel.is_empty()) {
-            (Some(n), true) => n.to_string(),
-            (Some(n), false) => format!("{rel}/{n}"),
-            (None, _) => {
-                not_utf8.push(format!("{rel}/{}", name.to_string_lossy()));
-                continue;
+        let joined = |n: &str| {
+            if rel.is_empty() {
+                n.to_string()
+            } else {
+                format!("{rel}/{n}")
             }
+        };
+        let Some(path) = name.to_str().map(joined) else {
+            not_utf8.push(joined(&name.to_string_lossy()));
+            continue;
         };
         if ignored.contains(&path) || ignored.contains(&format!("{path}/")) {
             continue;
