@@ -13,7 +13,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::error::ReviewError;
-use super::input::{in_work_tree, is_binary_section, split_nul, ReviewFile, ReviewInput};
+use super::input::{
+    in_work_tree, is_binary_section, renamed_from, split_nul, ReviewFile, ReviewInput,
+};
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
 use super::source::{is_never_reviewed, ContentSource, GitCommand};
@@ -126,7 +128,8 @@ enum Verdict {
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker is
 /// `binary` without reading anything ([`is_binary_section`]).
 /// The binary and UTF-8 checks run on the new side, or on the old one for a deleted file. The
-/// secret scan covers both whole sides, not only what is sent: the safe direction.
+/// secret scan covers both whole sides, not only what is sent: the safe direction. A renamed
+/// file's old side is read under its old path (`rename from`).
 ///
 /// # Arguments
 ///
@@ -209,11 +212,14 @@ fn classify(
         Side::Content(bytes) => bytes,
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
+    // A renamed file's old side lives under its old path.
     let old = match &file.diff {
-        Some(_) => match read_side(source.read_old(path))? {
-            Side::Content(bytes) => bytes,
-            Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
-        },
+        Some(diff) => {
+            match read_side(source.read_old(renamed_from(diff).as_deref().unwrap_or(path)))? {
+                Side::Content(bytes) => bytes,
+                Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
+            }
+        }
         None => None,
     };
     if new.is_none() && file.diff.is_none() {

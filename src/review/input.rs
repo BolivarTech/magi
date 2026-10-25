@@ -592,6 +592,17 @@ fn reviewable_path(section: &str) -> Option<String> {
     section_path(first, &header).filter(|p| !p.is_empty())
 }
 
+/// The old path of a renamed file's section (its `rename from` header line), or `None` when the
+/// section is not a rename or the path does not decode.
+pub(crate) fn renamed_from(section: &str) -> Option<String> {
+    section
+        .lines()
+        .skip(1)
+        .take_while(|l| !l.starts_with("@@"))
+        .find_map(|l| l.strip_prefix("rename from "))
+        .and_then(unquote)
+}
+
 /// The path of a section: `rename to`, then `+++`, then `---` for a deletion, then the
 /// symmetric split of the `diff --git` header.
 fn section_path(first: &str, header: &[&str]) -> Option<String> {

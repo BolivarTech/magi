@@ -185,6 +185,19 @@ fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
+/// Whether the byte before `at` is a removed-line marker: a `-` that opens a line. A diff marks
+/// a removed line with `-`, which [`is_word`] counts as part of a token, so without this every
+/// token on a removed line would fail its left boundary.
+fn after_diff_marker(bytes: &[u8], at: usize) -> bool {
+    let Some(marker) = at.checked_sub(1) else {
+        return false;
+    };
+    bytes.get(marker) == Some(&b'-')
+        && marker
+            .checked_sub(1)
+            .is_none_or(|before| bytes.get(before) == Some(&b'\n'))
+}
+
 /// Whether at least `min` bytes of class `tail` start at `at`. O(min).
 fn tail_at_least(bytes: &[u8], at: usize, tail: Tail, min: usize) -> bool {
     bytes
@@ -230,7 +243,8 @@ impl Matcher {
                     let bounded = at
                         .checked_sub(1)
                         .and_then(|before| bytes.get(before))
-                        .is_none_or(|b| !is_word(*b));
+                        .is_none_or(|b| !is_word(*b))
+                        || after_diff_marker(bytes, at);
                     let end = at + prefix.len();
                     let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
                     bounded && !excluded && tail_at_least(bytes, end, *tail, *min)
