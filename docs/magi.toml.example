@@ -11,10 +11,10 @@
 #
 # Credentials NEVER live here: they travel by env or in the vault
 # (`magi-rs vault set NAME`). The main model uses OPENAI_API_KEY (ollama and
-# openai-compat) or ANTHROPIC_API_KEY (anthropic). [magi], [embedding] and
-# [decision] can each have their own key (MAGI_API_KEY, EMBEDDING_API_KEY,
-# DECISION_API_KEY); without one they use OPENAI_API_KEY only on the root
-# endpoint's origin. See docs/keys.md. An unknown
+# openai-compat) or ANTHROPIC_API_KEY (anthropic). [magi], [embedding],
+# [decision] and [code_review] can each have their own key (MAGI_API_KEY,
+# EMBEDDING_API_KEY, DECISION_API_KEY, CODE_REVIEW_API_KEY); without one they
+# use OPENAI_API_KEY only on the root endpoint's origin. See docs/keys.md. An unknown
 # field is a PARSE ERROR, and a file that exists but does not parse is FATAL.
 # `provider` accepts exactly three values:
 #   ollama         local or remote Ollama daemon (this file's default)
@@ -99,6 +99,68 @@ min_confidence = 0.75
 #
 # [[decision.fallback]]
 # model = "upstage/solar-decide"
+
+# ===========================================================================
+# [code_review] — the false-positive gate of `magi code-review`
+# ===========================================================================
+# A System One model judges each finding of a review, shown with the code around it, and a
+# finding it calls a false positive is listed apart. Optional: a file without this section
+# gets this same chain. Its thresholds are its own, never shared with [decision]: they were
+# calibrated with the gate's question.
+[code_review]
+# Endpoint of the gate's models. Commented = the root `base_url`; uncomment and edit it to use
+# another one. The protocol path is derived as in [decision]. Credentials only as [user] and
+# [password] placeholders, stored as CODE_REVIEW_BASE_URL_USER and CODE_REVIEW_BASE_URL_PASSWORD.
+# base_url = "http://localhost:11434/v1"
+# API key of the gate's models: CODE_REVIEW_API_KEY, from the environment or
+# `magi-rs vault set CODE_REVIEW_API_KEY`; never in this file. Without it the gate uses the main
+# key, OPENAI_API_KEY, only when its endpoint has the root base_url's origin.
+# clef:cloud runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`, spends
+# your Ollama account's quota, and sends each judged finding with its code (40 lines on each
+# side of the finding's line) to ollama.com. To keep the code local, use the private
+# alternative below.
+model           = "clef:cloud"
+# A false_positive answer filters a finding only at or above this confidence. The values come
+# from the maintainer's calibration of the gate's question and may not fit your code. A finding
+# the trio reported as critical is never filtered, whatever the confidence.
+min_confidence  = 0.40
+# HTTP timeout of each gate call, in seconds. Optional, default 120. With --timeout, a call
+# never waits longer than what is left of the review.
+timeout_secs    = 120
+# Largest state sent per finding, in bytes. A larger one (a minified file, say) is never
+# truncated: that finding passes unjudged. Optional, default 61000.
+max_state_bytes = 61000
+# Approval of the agent's `code-review` tool. Optional, default false: it asks, like `consult`.
+auto_approve    = false
+
+# Ordered fallbacks on the SAME endpoint, tried after the primary fails, answers HTTP 400 or
+# answers below its threshold.
+[[code_review.fallback]]
+model = "clef-flash"
+min_confidence = 0.32
+
+[[code_review.fallback]]
+model = "nimble"
+min_confidence = 0.80
+
+# --- Private alternative: the local `clef` model (about 18 GB) at the head, same quality,
+# --- nothing leaves the machine. `ollama pull clef`, then replace the model line above with:
+# model = "clef"
+#
+# --- Optional: OpenRouter (hosted), suited to high demand. Needs CODE_REVIEW_API_KEY.
+# --- Comment out the [code_review] section above before uncommenting this one: a file holds one.
+# [code_review]
+# base_url       = "https://openrouter.ai/api/v1"
+# model          = "openai/gpt-6-luna-decisions"
+# min_confidence = 0.88
+#
+# [[code_review.fallback]]
+# model = "nace-ai/drex-v1.5"
+# min_confidence = 0.17
+#
+# [[code_review.fallback]]
+# model = "microsoft/microsoft-decision-1"
+# min_confidence = 0.68
 
 # ===========================================================================
 # [magi] — the council of three perspectives

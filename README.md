@@ -33,6 +33,7 @@ Most AI coding agents are SaaS-bound and tied to a single vendor. Magi is built 
 | **Provider** | Anthropic **Messages API** with SSE streaming + `tool_use` assembly and 429 retry; `StaticProvider` fallback when no key is configured |
 | **Sandboxed tools** | `ls`, `view`, `edit`, `grep`, `bash` (strict allowlist), `project_knowledge` (persistent facts), `consult` (MAGI multi-perspective consensus) |
 | **MAGI consult** | The agent can escalate hard, trade-off-heavy decisions to a 3-perspective consensus (Melchior / Balthasar / Caspar) via the `magi-core` crate. It is invoked autonomously through the tool loop (each call passes the approval gate) or forced with `/consult` |
+| **Code review** | `magi-rs code-review`, `/code-review` and the `code-review` tool review a file, a directory, a commit, a range, a branch or the uncommitted changes with the MAGI trio, batch by batch, check every finding against the reviewed code, filter false positives with a decision model and print one report. See [Code review](#code-review-magi-rs-code-review) |
 | **Tiered memory (RAG)** | Embedding-indexed vector store (any openai-compat endpoint, default Ollama + `nomic-embed-text-v2-moe`), composite reranker (similarity + recency + salience), decay/eviction, always-injected preference profile, hard token-budget assembler. Context stays bounded regardless of history depth |
 | **Encrypted memory** | SQLite (WAL) with **one cached key derivation per session** (Argon2id + per-DB salt), AES-256-GCM-SIV, Reed-Solomon FEC; text **and** embedding vectors encrypted at rest |
 | **OAuth login** | PKCE flow against the Anthropic Console (`/login` in the TUI); the minted key is stored in the vault |
@@ -127,6 +128,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `/clear` | Clear the on-screen conversation |
 | `/consult [--mode <code-review\|design\|analysis>] <question>` | Force a MAGI 3-perspective consensus on the question (≈ 3 model calls; omitting `--mode` adds one more to classify it, see [Mode routing](#mode-routing)). Blocks the session while it runs, like a normal turn — with the default `agent_timeout_secs` (2335, no upper bound as of v0.20.0) this can block for up to about 14010 s (~3.9 h) if every seat rotates through its pool, and it cannot be cancelled mid-flight; see [`docs/REASONING-BUDGET.md`](docs/REASONING-BUDGET.md). Requires a configured LLM provider. |
 | `/decide <request>` | Put typed questions to the decision models and show the answer as a table (question, chosen option, confidence, answering model). Four forms: `/decide {json}` (a whole request pasted on the line), `/decide -i request.json`, `/decide -q questions.json <text>` (the text becomes the `state`), and `/decide -i state.json -q questions.json`. See [Typed decisions](#typed-decisions-magi-rs-decide) |
+| `/code-review [path \| --commit <ref> \| --from <a> --to <b> \| --base <b> --head <h> \| --uncommitted]` | Review code with the MAGI trio. Shows the batches and the worst-case time, and runs only after `y`; once started it cannot be cancelled. See [Code review](#code-review-magi-rs-code-review) |
 | `/help` | Show available commands |
 | `/exit`, `/quit` | Leave the app |
 
@@ -142,6 +144,7 @@ When the agent requests a tool, an inline prompt appears: **`y`** approves, **`c
 | `project_knowledge` | Persist project facts to encrypted memory |
 | `consult` | Run a MAGI 3-perspective consensus on a hard decision (via `magi-core`) |
 | `decide` | Ask the decision models a closed question (choose, yes/no, score) and get probabilities back. Needs no approval by default |
+| `code-review` | Review code with the MAGI trio and return one report (one consult per batch). Asks for approval by default, showing the batches and the worst case |
 
 The `bash` allowlist is: `ls git npm cargo rg cat echo pwd grep mkdir touch find rm diff node python pytest` (with `cargo` restricted to `test` / `build` / `check`), plus a hard ban on the shell metacharacters `` | & ; > < ` $ ( ) { } \ ``.
 
@@ -258,7 +261,7 @@ magi vault diagnose
 and `--untrusted-content` (see [Mode routing](#mode-routing)); the JSON envelope
 carries the same two as fields.
 
-**`-w` / `--workdir` works on all five subcommands** (v0.13.1; it was `query` and
+**`-w` / `--workdir` works on all six subcommands** (v0.13.1; it was `query` and
 `consult` only before). It is the base for the `.magi/` walk-up, and on the headless
 pair it is also the file-tool sandbox root:
 
@@ -268,7 +271,7 @@ magi vault ls -w /srv/project       # and -w may also precede: magi vault -w /sr
 magi query -w /srv/project -i q.txt
 ```
 
-**On all five subcommands**, a `-w` that is not an existing directory is rejected
+**On all six subcommands**, a `-w` that is not an existing directory is rejected
 up front with **exit code 2**, naming the path, and it is never created. The check
 runs before the workspace walk-up, the vault and the input read, so a mistyped path
 fails as a mistyped path rather than as a missing workspace.
@@ -570,6 +573,65 @@ A rejected `low_confidence` answer appears only inside `chain`, never in the top
 
 > **Upgrading:** a `magi.toml` without a `[decision]` section, or an empty one, no longer loads. See the [CHANGELOG](CHANGELOG.md) for the steps.
 
+### Code review: `magi-rs code-review`
+
+`magi-rs code-review` reviews code with the MAGI trio and prints one report. The three mages judge the code in `code-review` mode; around them the command splits large inputs into batches, drops findings that point outside what was reviewed, asks a decision model whether each remaining finding is a false positive, and merges every batch into a single magi-core report. The same review runs from the TUI as `/code-review` and from the agent as the `code-review` tool.
+
+```bash
+magi-rs code-review                                   # the last commit against its parent
+magi-rs code-review src/parser.rs                     # one file, whole
+magi-rs code-review src/                              # every file of a directory, whole
+magi-rs code-review --commit 3f2a1c9                  # one commit against its parent
+magi-rs code-review --from v0.24.0 --to v0.25.0       # the diff between two commits
+magi-rs code-review --base main --head feature/x      # what a branch added since it left main
+magi-rs code-review --uncommitted                     # staged, unstaged and untracked changes
+magi-rs code-review --output-format json -o review.json --timeout 7200
+```
+
+**What it reviews.** Give at most one input form; with none, the last commit is reviewed. A file or directory is reviewed whole, read from the working tree. A commit, a range and a branch pair are reviewed by their diff, read from git and never from the working tree, so reviewing a branch that is not checked out reads none of your local files. Every ref is pinned to its commit before anything else runs. `--base`/`--head` diffs from the merge base, the same base `git diff main...feature/x` uses; two branches with no common ancestor are refused with a hint to review them as a range. `--uncommitted` reviews the staged and unstaged changes by their diff against `HEAD` and each untracked file whole, unless `.gitignore` excludes it. Every path goes through the workspace sandbox: a path outside the workspace and a ref that starts with `-`, holds a space, a NUL or `..` are refused before git or any model runs.
+
+**What it never sends.** A directory follows `.gitignore` and never includes `.git/`, `.magi/` or `.magi-rs-memory.db*`. Binary files, text that is not UTF-8, files larger than 8 MiB, symlinks that resolve outside the workspace and files whose path or content matches a secret pattern are left out and listed in the report with their cause (`binary`, `not utf-8`, `too large`, `outside workspace`, `secret`, `ignored`). Naming such a file explicitly is an error instead of a skip, and an input with nothing reviewable left exits with `nothing to review`. The secret check covers both sides of a diff: a change that deletes a key is skipped whole, because the deleted line would be sent too. The patterns are named prefixes and shapes: Anthropic and OpenAI keys (`sk-ant-`, `sk-`), GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), AWS access keys (`AKIA`, `ASIA`) and an assigned AWS secret access key, PEM and armored OpenPGP private-key headers, Stripe live keys, Google API keys, Slack tokens and GitLab tokens. Not covered, by design: JWTs (any base64url JSON looks like one), Azure keys, high-entropy strings with no prefix, and the base64 body of a PEM or armored OpenPGP private key without its `BEGIN` line. The minimum lengths can miss a shorter real key. The detector does not replace your responsibility for what you send: review what is in the input before pointing it at a hosted endpoint.
+
+**Batches.** Diffs are cut into hunks, each carrying its file header, and packed greedily; a file reviewed whole that does not fit is cut at its functions, structs and classes. One batch (its code plus its context) may take 50 % of the smallest context window in the pool, the trio and its fallbacks together, with tokens estimated at four bytes each. A model whose window was not measured counts as 32 768 tokens, and the report names those models. The 50 % is provisional: it leaves room for an estimator that undercounts about twofold, and it will move to 60 % only once the estimator's error has been measured against real backends. A hunk or unit too large for a batch by itself is an error before any model call, never a silent cut. Files in a language with no extractor are reviewed without language context, and the report lists them.
+
+**The clock.** Each batch is one `consult` in `code-review` mode, run one after another. Without `--timeout` there is no total: each batch runs on the normal `consult` clock derived from `[magi].agent_timeout_secs`, and the gate then runs with only its per-call `timeout_secs`. With `--timeout`, the number is the total for the whole review, counted from the first call to the trio; reading git, splitting and indexing come before it, and the report shows that preparation time apart. Each batch gets the time left divided by the batches still pending, and its mages get the ceiling `consult` would derive from that wall clock. Before the first call, a `--timeout` that leaves a batch less than it needs at the 15 s floor is refused with exit code 2, on stderr whatever `--log-level` says and in the run log; the message names the batches, the per-batch ceiling, the floor and the smallest `--timeout` that would do. A batch that runs out of its share ends the review even if other batches might have finished: the report consolidates the batches that completed and names the ones that did not. The gate uses what the batches left, and findings it has no time to judge pass as `unfiltered` with the cause `timeout`.
+
+**The gate.** Every finding that survives the checks against the reviewed code is put to a System One decision model, once, with its file, line, the severity the trio reported, its title and detail, and the 40 lines of code on each side of its line, numbered. The question is fixed: the thresholds below were calibrated with it. Each finding ends in one of four states:
+
+| State | Meaning |
+|---|---|
+| `kept` | a model judged it a real defect |
+| `filtered` | a model judged it a false positive with at least its `min_confidence`; listed apart under "Filtered by the gate", never deleted |
+| `low_confidence` | no model reached its threshold (the report shows the lean and the confidence), or a `critical` finding was judged a false positive |
+| `unfiltered` | the gate could not judge it; it passes with its cause |
+
+A finding the trio reported as `critical` is never filtered: a false-positive answer leaves it `low_confidence` with the cause `critical never filtered`, in the main list. The causes of `unfiltered` are `no location` (a finding without a line, never sent), `state too large` (over `max_state_bytes`, never truncated), `secret` (the code shown would carry a secret pattern, never sent), `timeout`, `transport`, `unauthorized` and `chain exhausted`. A model that answers HTTP 400 is skipped for the rest of that review and its fallback answers instead; the next review asks it again. A 401 or 403 stops the gate: the remaining findings pass as `unfiltered` with `unauthorized` and no further calls, and the report says so once. A 413 or 422 ends that finding's chain. Each `unfiltered` finding writes one warning to the run log. The gate is the one stage that fails open: a finding it could not judge is shown, not dropped.
+
+The default chain is three Ollama models, tried in order, each with the threshold from the maintainer's calibration: `clef:cloud` (0.40), then `clef-flash` (0.32), then `nimble` (0.80). `clef:cloud` runs in Ollama's cloud. It needs Ollama 0.40.5 or later and `ollama signin`, it spends your Ollama account's quota, and it sends each judged finding with its 81 lines of code to ollama.com. `clef-flash` and `nimble` run locally after `ollama pull`. To keep the code on your machine, put the local `clef` model at the head of the chain: about 18 GB, the same quality in the calibration, and 7.6 s per finding at the 95th percentile on a 16 GB GPU. For high demand, an OpenRouter chain (`openai/gpt-6-luna-decisions` 0.88, `nace-ai/drex-v1.5` 0.17, `microsoft/microsoft-decision-1` 0.68) is offered as optional configuration. Both alternatives are commented in [`docs/magi.toml.example`](docs/magi.toml.example) and in the file `magi init` writes. The thresholds come from one calibration on one project's findings and may not fit your code.
+
+**What leaves your machine.** Each batch goes to the trio's endpoint (`[magi]`, or the root `base_url`), and with the default `:cloud` trio that is Ollama's cloud. Each judged finding and its code go to the `[code_review]` endpoint, ollama.com with the default chain. Nothing that matched a secret pattern is sent to either.
+
+**Agreement.** Findings from all batches are merged by file and line: two mages that place the same defect on the same line count as agreeing even if they named different categories, and every title, detail and category merged into a finding is kept. A finding only one mage reported, while two or more answered, drops one severity level (`critical` to `warning`, `warning` to `info`) and is marked `single_mage`; it is never removed. A mage's verdict in the report is its worst verdict over all batches, and the consensus is magi-core's, computed over those verdicts.
+
+**Checks before the gate.** A finding whose file was not reviewed, whose line lies outside the reviewed lines, or which cites in backticks a symbol the reviewed code does not define (only in languages with an extractor) moves to "Discarded" with its cause: `file not reviewed`, `line out of range` or `unknown symbol`. A `critical` finding whose only failed check is the symbol is not discarded: it goes to the gate and is listed under "Critical with an unverified symbol".
+
+**Output.** Text by default: magi-core's report over the consolidated verdicts, then a `## Review` section with the batches completed, the gate's counts by state, cause and model, the fraction judged, tokens, batch and preparation times, and the findings, filtered, discarded and skipped lists. With `--output-format json` the envelope is the one `consult` writes, with `consult` holding the consensus (and the consolidated agents with `--structured-verdicts`) and a `code_review` object holding the same summary. In that object batch numbers start at 1, as in the text. `usage` in the envelope is the sum of the batches' prompt and completion tokens; the gate's calls are not counted there. Exit codes: `0` for a report, `1` when no batch completed or the reports could not be merged (the paid batch reports are printed as they came), `2` for a refused input, ref or `--timeout`. The other flags (`-w`, `-o`, `--no-clobber`, `--log-level`, `--log-dir`, `--no-memory`) mean what they mean for `consult`; `--auto` and `--full-auto` are accepted and change nothing, because a review runs no tool loop.
+
+**From the TUI.** `/code-review` takes the same arguments as the subcommand. Before anything is sent it shows the number of batches and the worst case, `batches × (1 + max_rotations) × 2 × agent_timeout_secs` seconds (about 14 010 s per batch with the defaults), labelled as the maximum and not the expected duration, and waits for `y`, or `c`/`Esc` to cancel. Once started it cannot be cancelled and blocks the session, like `/consult`. `-w` is refused (the TUI reviews its own workspace); `-o`, `--output-format`, `--no-clobber`, `--log-level`, `--log-dir`, `--auto`, `--full-auto`, `--no-memory` and `--structured-verdicts` parse but are not applied, and the TUI says which; `--timeout` applies. Paths with spaces cannot be written there.
+
+**From the agent.** The `code-review` tool takes the same input forms. Like `consult`, it asks for approval by default, showing the batches and the worst case; `[code_review] auto_approve = true` skips the prompt and shows a notice instead. In `magi query` it needs `--auto` or `--full-auto`. When the calling run has a `--timeout`, the review gets what is left of it minus 30 s, so a large review needs a generous `--timeout`. The report it returns is data about the code, never instructions to the agent.
+
+**Configuration and key.** The gate lives in the optional `[code_review]` section (`model`, `min_confidence`, `[[code_review.fallback]]`, `base_url`, `timeout_secs`, `max_state_bytes`, `auto_approve`); without it the default chain applies. Its key is `CODE_REVIEW_API_KEY`, from the environment or `magi-rs vault set CODE_REVIEW_API_KEY`, and without it the main key is sent only to the root endpoint's origin. Credentials in its `base_url` use `[user]`/`[password]` placeholders stored as `CODE_REVIEW_BASE_URL_USER` and `CODE_REVIEW_BASE_URL_PASSWORD`.
+
+**Limits to know.**
+
+- A merge commit has no diff of its own, so `--commit <merge>` finds nothing to review; review it as a range from its first parent.
+- Mode-only changes, pure renames and submodule bumps are not reviewed. Submodule contents are never read.
+- The reviewed repository's own git configuration runs nothing: hooks, fsmonitor, external diff and textconv drivers, and the filter drivers it defines (`clean`, `smudge`, `process`) are disabled for every call. Filters from your global or system git configuration do run. A `clean` filter of yours that changes the number of lines makes the diff's line numbers disagree with the file as read. Detecting the repository's filters needs git 2.26 or later, and a repository defining more filter drivers than fit on one command line is refused.
+- A partial clone never downloads during a review; fetch the objects first. Every git call stops after 300 s.
+- Caps per review: 8 MiB per file, 256 MiB read in total, 64 MiB for any one git output (a listing of roughly a million paths stops the preparation with an error). Past 2 000 000 identifiers the symbol check is switched off and the report says so. Past 100 000 comparisons, findings without a location are grouped without the consensus engine and marked as such.
+- Do not review a working tree another process is changing. A tree that changes between the approval and the run, so that the batches no longer match, is refused before any trio call; a file that gains a secret after it was filtered stops the review. A file swapped for a symlink between the check and the read is an accepted window. On a shared CI runner, review a commit, a range or a branch pair, which read from git and not from the working tree.
+
 ### Authorization tiers
 
 Secure by default: a read-only CI job cannot mutate or execute:
@@ -577,7 +639,7 @@ Secure by default: a read-only CI job cannot mutate or execute:
 | Tier | Flag | Tools auto-approved | Notes |
 |------|------|---------------------|-------|
 | `default` | *(none)* | read-only: `ls` / `view` / `grep` | others are denied; the run continues and records the denial |
-| auto | `--auto` | **all** registered tools (`edit`/`bash`/`consult`) | sandboxed |
+| auto | `--auto` | **all** registered tools (`edit`/`bash`/`consult`/`code-review`) | sandboxed |
 | full-auto | `--full-auto` | all + elevated `max_tool_calls` (15 → 50) | **prints a WARNING** to stderr and the log; silences the soft repetitive-call guard and the normal cap |
 
 The **hard barriers are always active in every tier**: the `bash` allowlist, the
@@ -652,6 +714,7 @@ For a local Ollama daemon neither is needed: magi-rs falls back to a dummy value
 | `[magi]` (the trio) | `MAGI_API_KEY` |
 | `[embedding]` | `EMBEDDING_API_KEY` |
 | `[decision]` | `DECISION_API_KEY` |
+| `[code_review]` | `CODE_REVIEW_API_KEY` |
 
 Each one resolves env var first, vault entry second (`magi-rs vault set MAGI_API_KEY`, and so on). When a section has no key of its own, it inherits `OPENAI_API_KEY` only if its endpoint has the same origin as the main one: same scheme, host and port, with the path ignored. A gateway that routes by path counts as one origin and therefore receives the main key; declare the section's own key to avoid that. On any other origin no key is sent, so the main key never reaches a host you did not point it at. An endpoint that needs a key then answers `401` or `403`, and the message names the variable to set.
 
@@ -1261,6 +1324,7 @@ Override any of them per-section in `magi.toml` (`[openai]`, `[embedding]`, `[ma
 | Embedding | `nomic-embed-text-v2-moe:latest` | `magi-rs` tiered memory (`selective`) — `ollama pull` it |
 | Decision (primary) | `clef-flash` | `magi-rs decide` — `ollama pull clef-flash` (10.9 GB, Apache-2.0, Ollama 0.35.1 or later). It loaded in 16.5 s on an idle machine and 49.4 s on a busy one, measured on an RTX 5060 Ti with 16 GB; other hardware will differ |
 | Decision (fallback) | `nimble` | `magi-rs decide` — `ollama pull nimble`; tried when the primary fails or misses its threshold |
+| Code-review gate | `clef:cloud` (0.40) → `clef-flash` (0.32) → `nimble` (0.80) | `magi-rs code-review` false-positive gate — `clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`, spends the account's quota and sends each judged finding with its code to ollama.com; the other two run locally |
 | Melchior (Scientist) | `glm-5.3:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Balthasar (Pragmatist) | `kimi-k2.6:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
 | Caspar (Critic) | `deepseek-v4-pro:cloud` | `magi-core` multi-perspective consensus (`consult` tool / `/consult`) |
