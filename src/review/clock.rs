@@ -8,11 +8,8 @@
 use super::error::ReviewError;
 use crate::magi::{
     attempt_factor, derive_ceiling_from_timeout, headless_consult_timeout_secs,
-    raw_ceiling_from_factor, AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+    raw_ceiling_from_factor, AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS, CALLS_PER_MODEL,
 };
-
-/// Attempts per model in the worst case of the TUI: the call and its schema revalidation.
-const CALLS_PER_MODEL: u64 = 2;
 
 /// The wall clock of the next batch: what is left of the review, split over the batches still
 /// pending.
@@ -113,7 +110,8 @@ pub fn pre_budget(
 
 /// The worst case of a review in the TUI (REQ-RV18), a bound and never an expected duration:
 /// every batch runs each seat's full chain, `(1 + max_rotations)` models with two calls each,
-/// every call up to `agent_timeout_secs`.
+/// every call up to `agent_timeout_secs`. Like the spec's formula, it counts two calls whatever
+/// `retry_disabled` says: a bound that can only be too high.
 ///
 /// # Arguments
 ///

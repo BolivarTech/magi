@@ -29,7 +29,7 @@ const TITLE_JOINER: &str = " / ";
 
 /// What every stage of a review declared.
 ///
-/// Batch indices are 0-based here; the text and JSON forms show them 1-based ([`shown`]), the
+/// Batch indices are 0-based here; the text and JSON forms show them 1-based, the
 /// same base as the `[batch k]` labels of the consolidated summaries.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ReviewSummary {
@@ -434,8 +434,9 @@ fn location(file: Option<&str>, line: Option<u32>) -> String {
     }
 }
 
-/// The serialized name of a unit enum value (`warning`, `kept`, `file not reviewed`, ...).
-fn name<T: serde::Serialize + std::fmt::Debug>(value: &T) -> String {
+/// The serialized name of a unit enum value (`warning`, `kept`, `file not reviewed`, ...), or its
+/// `Debug` form if it does not serialize to a string: the one enum-to-text helper of the review.
+pub(crate) fn name<T: serde::Serialize + std::fmt::Debug>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(Value::String(text)) => text,
         _ => format!("{value:?}"),

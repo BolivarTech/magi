@@ -27,7 +27,7 @@ use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
 use super::input::{resolve_input, ReviewFile, ReviewInput, SourceKind};
 use super::languages::LanguageRegistry;
-use super::report::{BatchMetrics, ReviewSummary};
+use super::report::{name, BatchMetrics, ReviewSummary};
 use super::secrets::display_path;
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
@@ -504,10 +504,7 @@ fn record_verdicts(
         ratio(judged, verdicts.len())
     };
     for (finding, verdict) in findings.iter().zip(verdicts) {
-        *summary
-            .gate_states
-            .entry(state_name(verdict.state))
-            .or_insert(0) += 1;
+        *summary.gate_states.entry(name(&verdict.state)).or_insert(0) += 1;
         if let Some(cause) = verdict.cause {
             *summary.gate_causes.entry(cause.to_string()).or_insert(0) += 1;
         }
@@ -573,15 +570,6 @@ fn millis(d: Duration) -> u64 {
 fn ratio(part: usize, whole: usize) -> f64 {
     let as_f64 = |n: usize| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
     as_f64(part) / as_f64(whole)
-}
-
-/// The JSON name of a gate state (`kept`, `filtered`, `low_confidence`, `unfiltered`), from its
-/// serialization: the one place it is spelled.
-fn state_name(state: GateState) -> String {
-    serde_json::to_value(state)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
 }
 
 /// The lexical index over both sides of every reviewed file. O(bytes reviewed).

@@ -403,6 +403,11 @@ pub fn headless_consult_timeout_secs(
     )
 }
 
+/// Calls per model of a seat with retries on: one call plus the schema-revalidation call (it
+/// tracks magi-core's `retry_on_schema_error`). The single source of this 2 for
+/// [`attempt_factor`] and the code-review TUI bound.
+pub(crate) const CALLS_PER_MODEL: u64 = 2;
+
 /// The multiplier both timeout directions share, scaled by 100.
 ///
 /// Returns `attempts * models * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`, i.e. the `x1.2` of the
@@ -423,7 +428,7 @@ pub fn headless_consult_timeout_secs(
 ///
 /// # Why the number is 2, and why `limited_max_retries` must NOT move it (REQ-V4-05)
 ///
-/// The 2 is `calls_per_model`: one call, plus the schema-revalidation call. It tracks
+/// The 2 is `CALLS_PER_MODEL`: one call, plus the schema-revalidation call. It tracks
 /// magi-core's `retry_on_schema_error`, which `build_magi_orchestrator` maps from our
 /// `retry_disabled` via `with_retry_disabled()` — so this factor and the crate's own
 /// `worst_case_per_seat()` compute the same product, independently, and must agree.
@@ -447,7 +452,7 @@ pub fn headless_consult_timeout_secs(
 /// * `retry_disabled` - `[magi].retry_disabled`, resolved.
 #[must_use]
 pub fn attempt_factor(max_rotations: u32, retry_disabled: bool) -> u64 {
-    let attempts_per_model: u64 = if retry_disabled { 1 } else { 2 };
+    let attempts_per_model: u64 = if retry_disabled { 1 } else { CALLS_PER_MODEL };
     // Saturation point 1 of 3: the model count.
     let models_per_mage = u64::from(max_rotations).saturating_add(1);
     // Saturation point 2 of 3: the product. A saturated factor yields ceiling 0 in the inverse,
