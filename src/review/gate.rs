@@ -739,11 +739,44 @@ mod tests {
             .times(MAX_GATE_QUESTIONS_PER_FINDING)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        assert_eq!(
-            g.judge(&f, Some("x\n"), None).await.state,
-            GateState::Filtered
-        );
+        g.judge(&f, Some("x\n"), None).await;
         assert_eq!(g.questions(), MAX_GATE_QUESTIONS_PER_FINDING);
+    }
+
+    #[tokio::test]
+    async fn a_finding_with_unasked_pairs_is_never_filtered() {
+        // Controller ruling (MS2 §6): pairs past the cap were never judged, so a finding whose
+        // asked pairs are all false positives stays in the main list, like a critical does.
+        let mut f = finding(Severity::Warning, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING + 1;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(MAX_GATE_QUESTIONS_PER_FINDING)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause),
+            (GateState::LowConfidence, Some("not every claim judged"))
+        );
+        assert_eq!(v.lean.as_deref(), Some("false_positive"));
+    }
+
+    #[tokio::test]
+    async fn a_finding_whose_every_pair_was_asked_can_be_filtered() {
+        let mut f = finding(Severity::Warning, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(n)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\n"), None).await;
+        assert_eq!((v.state, v.cause), (GateState::Filtered, None));
     }
 
     #[tokio::test]
