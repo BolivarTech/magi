@@ -335,24 +335,26 @@ assertions.
 | S49 | a directory holding only a binary and a file with a key-shaped toy secret exits 2 and `stderr` says there is nothing to review | none |
 | S50 | `--timeout 30 --log-level error` over the S47 tree exits 2 and `stderr` names the 15 s floor and a minimum `--timeout`. The numbers are the product's formula and are not compared | none |
 
-**How the input exists.** A review reads files from disk, so each run declares the files it needs
-(`RunDefinition.files`) and the executor writes them under the environment root before the run,
-leaving a file alone when it already holds the same bytes. R12 and R15 share one deterministic
-tree (`gen/a.rs`, `gen/b.rs`, `gen/c.rs`, about 288 kB). `review_input_files()` raises a harness
-error if that tree is smaller than three batches of 60 % of the 32 768-token default window at
-four bytes per token, so a shortfall is reported as the harness's, not as the product's. R14
-writes `skipped/pixel.png` (NUL bytes) and `skipped/leak.txt` (a toy `sk-ant-` key).
+**How the input exists.** A review reads files from disk, and the product leaves out whatever
+`.gitignore` excludes when it reviews a directory inside a git repository. The environment's own
+`.gitignore` is `*`, so the review runs do not execute there. R12 to R15 name a separate workspace,
+`smoke/scratch/review-ws`, which the executor rebuilds from nothing before each of them: it copies
+the environment's `.magi`, runs `git init` so git's top level is the workspace itself and no outer
+rule applies, and writes the files the run declares (`RunDefinition.files`). Nothing is committed.
+Before the product is invoked the harness runs `git ls-files --others --exclude-standard` in the
+workspace and checks that every declared file is listed. If one is not, the harness stops with its
+own error (exit 3), because an input the product could not see says nothing about the product.
+R12 and R15 share one deterministic tree (`gen/a.rs`, `gen/b.rs`, `gen/c.rs`, about 288 kB).
+`review_input_files()` raises a harness error if that tree is smaller than three batches of 60 % of
+the 32 768-token default window at four bytes per token. R14 writes `skipped/pixel.png` (NUL bytes)
+and `skipped/leak.txt` (a toy `sk-ant-` key), so its "nothing to review" comes from both files being
+skipped, as binary and as secret, and not from their being invisible. The product excludes `.magi/`
+from the review on its own, and the harness does nothing to help it.
 
 **Cost.** R13, R14 and R15 never reach a model. R12 is a review of at least three batches by the
 real trio plus the gate. Its harness timeout is 2 400 s and `TRIO_RUNS_MEASURED_S["R12"]` carries
 four of R4's 283 s provisionally, plus the gate. It has not been measured yet; the figure is
 written here when it is.
-
-**Known limitation.** The files land under the environment root, whose own `.gitignore` is `*`.
-The product leaves out what `.gitignore` excludes when it reviews a directory inside a git
-repository, which this tree is. Until the input is placed where the product can see it, S47,
-S49 and S50 can fail for that reason and not for a product defect; the first real-backend run
-settles it.
 
 ## Out of scope
 
