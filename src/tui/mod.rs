@@ -9201,6 +9201,12 @@ end"
             shown.contains("Accepted but not applied in the TUI: -o, --log-level, --auto"),
             "{shown}"
         );
+        assert!(
+            shown.contains(
+                "the review runs on this session's workspace and the report goes to the transcript."
+            ),
+            "{shown}"
+        );
         let mut plain = App::new_for_test();
         plain.begin_code_review_confirmation(
             TuiCodeReviewCommand::default(),
