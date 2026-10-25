@@ -136,7 +136,6 @@ pub(crate) enum ReviewBudget {
     Total(Duration),
     /// The calling run's end (the agent tool): the total is what is left of it when the
     /// preparation ends, so the review finishes, and delivers, before the run is cut.
-    #[allow(dead_code)] // Red stub
     Until(Instant),
 }
 
@@ -502,21 +501,23 @@ impl CodeReviewTool {
         }
     }
 
-    /// What is left of the calling run for a review, `None` without a run deadline.
+    /// The review's budget: the calling run's deadline less the margin, which the review reads
+    /// when its batches start; [`ReviewBudget::Unbounded`] without a run deadline.
     ///
     /// # Errors
     /// [`ToolError::ExecutionError`] when nothing is left after the margin.
-    fn review_total(&self) -> Result<Option<Duration>, ToolError> {
+    fn review_budget(&self) -> Result<ReviewBudget, ToolError> {
         let Some(deadline) = self.deadline else {
-            return Ok(None);
+            return Ok(ReviewBudget::Unbounded);
         };
-        let left = deadline
-            .saturating_duration_since(Instant::now())
-            .saturating_sub(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS));
-        if left.is_zero() {
-            return Err(ToolError::ExecutionError(SPENT_RUN_MESSAGE.to_string()));
+        let spent = || ToolError::ExecutionError(SPENT_RUN_MESSAGE.to_string());
+        let end = deadline
+            .checked_sub(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS))
+            .ok_or_else(spent)?;
+        if end <= Instant::now() {
+            return Err(spent());
         }
-        Ok(Some(left))
+        Ok(ReviewBudget::Until(end))
     }
 }
 
@@ -558,23 +559,20 @@ impl Tool for CodeReviewTool {
         })
     }
 
-    /// Runs one review: arguments, then the plan (the path guard, no model), then the run's
-    /// deadline, then the runner. No step that validates calls a model.
+    /// Runs one review: arguments, then the run's deadline, then the plan (the path guard, no
+    /// model), then the runner, which reads what is left of the deadline when its batches start
+    /// (the preparation is never charged twice). No step that validates calls a model.
     ///
     /// # Errors
     /// [`ToolError::InvalidArguments`] for bad arguments; [`ToolError::ExecutionError`] for a
     /// review error (redacted) or a run with no time left.
     async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value> {
         let input = parse_tool_input(&args)?;
+        let budget = self.review_budget()?;
         let plan = self.plan_for(&args, &input).map_err(|e| tool_error(&e))?;
-        let total = self.review_total()?;
         let rendered = self
             .runner
-            .run(
-                plan,
-                total.map_or(ReviewBudget::Unbounded, ReviewBudget::Total),
-                cancel,
-            )
+            .run(plan, budget, cancel)
             .await
             .map_err(|e| tool_error(&e))?;
         let report = match &rendered.failure {
