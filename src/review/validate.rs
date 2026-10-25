@@ -306,6 +306,26 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_file_is_no_location_like_a_missing_one() {
+        // Consolidation reads an empty `file` as unlocated (magi-core's key does too); the
+        // validation must agree instead of discarding it as a file that was not reviewed.
+        let mut reviewed = Reviewed::default();
+        reviewed.add_lines("src/a.rs", 1, 5);
+        let index = LexicalIndex::build(&[], &LanguageRegistry::new());
+        let mut agents = vec![agent(serde_json::json!([
+            {"severity":"warning","title":"t1","detail":"d","file":""},
+            {"severity":"warning","title":"t2","detail":"d","file":"  ","line":3}
+        ]))];
+        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        assert!(d.is_empty(), "{d:?}");
+        assert!(
+            agents[0].findings.iter().all(|f| f.file.is_none()),
+            "{:?}",
+            agents[0].findings
+        );
+    }
+
+    #[test]
     fn a_file_reviewed_in_another_batch_counts() {
         // [CP2 MS2 S1 loop 3] the context-only half of RV-S29 moves to MS3 T3.6, where RAG context exists.
         let mut reviewed = Reviewed::default();
