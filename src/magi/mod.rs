@@ -553,10 +553,10 @@ pub fn derived_retry_config(ceiling_secs: u64) -> magi_core::provider::RetryConf
 /// the whole factor space — covering every slack percentage the constant could hold — without a
 /// parallel slack-parameterized copy of each public function.
 ///
-/// `factor` must be non-zero (undocumented, not guarded — a division by it follows below).
-/// Every production caller reaches this through [`attempt_factor`], whose minimum output is
-/// `120` (`1 * 1 * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`), so the precondition is documentation
-/// for a reader, not a guard against a value this module can actually produce.
+/// A zero `factor` gives `0`, a ceiling under every floor, so a caller refuses rather than
+/// divides by zero. Every production caller reaches this through [`attempt_factor`], whose
+/// minimum output is `120` (`1 * 1 * (100 + HEADLESS_TIMEOUT_SLACK_PCT)`), so that branch is
+/// reachable only from a future caller.
 pub(crate) fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
     // `saturating_sub` is the load-bearing guard: with `timeout <= CLASSIFY_TIMEOUT_SECS` a plain
     // subtraction underflows in u64 and yields an ASTRONOMICAL ceiling instead of a minimal one —
@@ -565,7 +565,8 @@ pub(crate) fn raw_ceiling_from_factor(timeout_secs: u64, factor: u64) -> u64 {
     timeout_secs
         .saturating_sub(CLASSIFY_TIMEOUT_SECS)
         .saturating_mul(100)
-        / factor
+        .checked_div(factor)
+        .unwrap_or(0)
 }
 
 /// The smallest `--timeout` whose derived ceiling still reaches
