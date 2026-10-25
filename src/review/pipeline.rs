@@ -161,6 +161,9 @@ pub struct ReviewRequest<'a> {
     pub retry_disabled: bool,
     /// `[magi].agent_timeout_secs`, resolved: what the derived ceiling is compared with.
     pub agent_timeout_secs: u64,
+    /// The batch count the caller approved, if any: a review that now splits otherwise fails
+    /// with [`ReviewError::PlanChanged`] before any trio call.
+    pub approved_batches: Option<usize>,
 }
 
 /// What a review runs on.
@@ -951,6 +954,7 @@ mod tests {
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
+                approved_batches: None,
             },
             ReviewDeps {
                 git: &git,
@@ -1210,6 +1214,7 @@ mod tests {
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
+                approved_batches: None,
             },
             ReviewDeps {
                 git: &git,
@@ -1287,6 +1292,7 @@ mod tests {
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
+                approved_batches: None,
             },
             ReviewDeps {
                 git: &git,
@@ -1391,6 +1397,7 @@ mod tests {
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
+                approved_batches: None,
             },
             ReviewDeps {
                 git: &git,

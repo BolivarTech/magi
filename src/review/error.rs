@@ -96,6 +96,18 @@ pub enum ReviewError {
     /// A worktree path whose resolved target is a path a review never reads.
     #[error("{0} resolves to a path a review never reads")]
     Protected(String),
+    /// The review no longer splits into the batches that were approved: the working tree moved
+    /// between the approval and the run. Raised before any trio call.
+    #[error(
+        "the review changed since it was approved: {approved} batches were approved and it now \
+         splits into {now}; ask for it again"
+    )]
+    PlanChanged {
+        /// The batches the caller approved.
+        approved: usize,
+        /// The batches it splits into now.
+        now: usize,
+    },
     /// A secret found in what was about to be sent.
     #[error(
         "{path} holds a secret at batching time: it changed during the review or was not filtered"

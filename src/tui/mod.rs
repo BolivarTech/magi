@@ -2124,6 +2124,7 @@ pub struct App {
     pub pending_code_review: Option<(
         TuiCodeReviewCommand,
         std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+        crate::tools::code_review::ReviewPlan,
     )>,
 }
 
@@ -2168,20 +2169,18 @@ impl App {
     /// # Arguments
     /// * `cmd` - The parsed command.
     /// * `runner` - The session's review runner.
-    /// * `batches` - The batches its plan counted.
-    /// * `worst_case_secs` - Its worst case.
+    /// * `plan` - Its plan: what the confirmation shows and what runs once approved.
     pub(crate) fn begin_code_review_confirmation(
         &mut self,
         cmd: TuiCodeReviewCommand,
         runner: std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
-        batches: usize,
-        worst_case_secs: u64,
+        plan: crate::tools::code_review::ReviewPlan,
     ) {
-        let text = code_review_confirmation_text(batches, worst_case_secs);
+        let text = code_review_confirmation_text(plan.batches, plan.worst_case_secs);
         for line in audit_for_transcript(&format!("System: {text}")) {
             self.push_message(line);
         }
-        self.pending_code_review = Some((cmd, runner));
+        self.pending_code_review = Some((cmd, runner, plan));
     }
 
     /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
@@ -2191,7 +2190,7 @@ impl App {
     /// # Arguments
     /// * `approved` - Whether the user answered 'y'.
     pub(crate) async fn answer_code_review_confirmation(&mut self, approved: bool) {
-        let Some((cmd, runner)) = self.pending_code_review.take() else {
+        let Some((cmd, runner, plan)) = self.pending_code_review.take() else {
             return;
         };
         if !approved {
@@ -2201,7 +2200,11 @@ impl App {
         apply_response(self, AgentResponse::Info(CODE_REVIEW_RUNNING.to_string()));
         let timeout = cmd.timeout.map(std::time::Duration::from_secs);
         let cancel = tokio_util::sync::CancellationToken::new();
-        match runner.run(cmd.input, timeout, &cancel).await {
+        let plan = crate::tools::code_review::ReviewPlan {
+            input: cmd.input,
+            ..plan
+        };
+        match runner.run(plan, timeout, &cancel).await {
             Ok(rendered) => {
                 let body = crate::agent::Agent::sanitize_text(&rendered.text);
                 apply_response(self, AgentResponse::Text(body));
@@ -4100,10 +4103,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             match app.code_review_runner.clone() {
                                                 Some(runner) => match runner.plan(&cmd.input) {
                                                     Ok(plan) => app.begin_code_review_confirmation(
-                                                        cmd,
-                                                        runner,
-                                                        plan.batches,
-                                                        plan.worst_case_secs,
+                                                        cmd, runner, plan,
                                                     ),
                                                     Err(e) => apply_response(
                                                         &mut app,
@@ -9002,7 +9002,19 @@ end"
     }
 
     #[derive(Default)]
-    struct FakeTuiRunner(std::sync::atomic::AtomicUsize);
+    struct FakeTuiRunner(
+        std::sync::atomic::AtomicUsize,
+        std::sync::Mutex<Option<magi_rs::review::input::ReviewInput>>,
+    );
+
+    /// The plan the two confirmation tests approve: 3 batches, the worst case of RV-S32.
+    fn shown_plan() -> crate::tools::code_review::ReviewPlan {
+        crate::tools::code_review::ReviewPlan {
+            input: magi_rs::review::input::ReviewInput::Commit(Some("approved".into())),
+            batches: 3,
+            worst_case_secs: 42_030,
+        }
+    }
     impl FakeTuiRunner {
         fn calls(&self) -> usize {
             self.0.load(std::sync::atomic::Ordering::SeqCst)
@@ -9016,18 +9028,20 @@ end"
         ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
         {
             Ok(crate::tools::code_review::ReviewPlan {
+                input: magi_rs::review::input::ReviewInput::Commit(Some("replanned".into())),
                 batches: 3,
                 worst_case_secs: 42_030,
             })
         }
         async fn run(
             &self,
-            _i: magi_rs::review::input::ReviewInput,
+            plan: crate::tools::code_review::ReviewPlan,
             _t: Option<std::time::Duration>,
             _c: &tokio_util::sync::CancellationToken,
         ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
         {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.1.lock().expect("lock") = Some(plan.input);
             Ok(crate::tools::code_review::Rendered {
                 text: String::new(),
                 json: serde_json::Value::Null,
@@ -9062,8 +9076,7 @@ end"
         app.begin_code_review_confirmation(
             TuiCodeReviewCommand::default(),
             runner.clone(),
-            3,
-            42_030,
+            shown_plan(),
         );
         app.answer_code_review_confirmation(false).await;
         assert_eq!(runner.calls(), 0);
@@ -9082,13 +9095,31 @@ end"
         app.begin_code_review_confirmation(
             TuiCodeReviewCommand::default(),
             runner.clone(),
-            3,
-            42_030,
+            shown_plan(),
         );
         app.answer_code_review_confirmation(true).await;
         assert_eq!(runner.calls(), 1);
         app.answer_code_review_confirmation(true).await;
         assert_eq!(runner.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn with_y_the_tui_runs_the_plan_it_showed() {
+        // What the confirmation showed is what runs: the approved plan, never a new one.
+        let mut app = App::new_for_test();
+        let runner = Arc::new(FakeTuiRunner::default());
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            runner.clone(),
+            shown_plan(),
+        );
+        app.answer_code_review_confirmation(true).await;
+        assert_eq!(
+            runner.1.lock().expect("lock").clone(),
+            Some(magi_rs::review::input::ReviewInput::Commit(Some(
+                "approved".into()
+            )))
+        );
     }
 
     #[test]

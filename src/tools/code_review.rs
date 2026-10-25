@@ -100,9 +100,12 @@ const DESCRIPTION: &str = concat!(
 const AUTO_APPROVED_NOTICE: &str =
     "code-review auto-approved: reviewing with the MAGI trio, one consult per batch";
 
-/// How many batches a review splits into, and its worst case, computed without any model call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a review was planned as, computed without any model call: the plan an approval shows
+/// and the one [`CodeReviewRunner::run`] runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewPlan {
+    /// What to review, refs pinned to the commits they named when the plan was made.
+    pub input: ReviewInput,
     /// The batches.
     pub batches: usize,
     /// `batches × (1 + max_rotations) × 2 × agent_timeout_secs`: an upper bound, never the
@@ -143,10 +146,10 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     /// Any [`ReviewError`] of the input, the filter or the batching.
     fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError>;
 
-    /// Runs the review until it ends or `cancel` fires.
+    /// Runs an approved plan until it ends or `cancel` fires.
     ///
     /// # Arguments
-    /// * `input` - What to review.
+    /// * `plan` - The plan, as [`Self::plan`] returned it.
     /// * `timeout` - The review's total, counted from its first trio call; `None` runs every
     ///   batch on the normal consult clock.
     /// * `cancel` - The run's cancellation.
@@ -158,7 +161,7 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     /// Any [`ReviewError`] before the first trio call, or [`ReviewError::Cancelled`].
     async fn run(
         &self,
-        input: ReviewInput,
+        plan: ReviewPlan,
         timeout: Option<Duration>,
         cancel: &CancellationToken,
     ) -> Result<Rendered, ReviewError>;
@@ -381,6 +384,7 @@ pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
         ReviewError::Cancelled => "cancelled",
         ReviewError::Protected(_) => "protected",
         ReviewError::EgressSecret { .. } => "egress_secret",
+        ReviewError::PlanChanged { .. } => "plan_changed",
     }
 }
 
@@ -528,10 +532,11 @@ impl Tool for CodeReviewTool {
     async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value> {
         let input = parse_tool_input(&args)?;
         self.plan_for(&args, &input).map_err(|e| tool_error(&e))?;
+        let plan = self.runner.plan(&input).map_err(|e| tool_error(&e))?;
         let total = self.review_total()?;
         let rendered = self
             .runner
-            .run(input, total, cancel)
+            .run(plan, total, cancel)
             .await
             .map_err(|e| tool_error(&e))?;
         let report = match &rendered.failure {
@@ -560,11 +565,12 @@ impl Tool for CodeReviewTool {
     fn approval_detail(&self, args: &Value) -> Option<String> {
         let input = parse_tool_input(args).ok()?;
         let plan = self.runner.plan(&input).ok()?;
-        *self.approved.lock().unwrap_or_else(PoisonError::into_inner) = Some((args.clone(), plan));
-        Some(format!(
+        let detail = format!(
             "{} batches; worst case {} s",
             plan.batches, plan.worst_case_secs
-        ))
+        );
+        *self.approved.lock().unwrap_or_else(PoisonError::into_inner) = Some((args.clone(), plan));
+        Some(detail)
     }
 }
 
@@ -680,6 +686,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
             &self.parts.pool,
         )?;
         Ok(ReviewPlan {
+            input,
             batches,
             worst_case_secs: tui_worst_case_secs(
                 batches,
@@ -691,12 +698,12 @@ impl CodeReviewRunner for ProductionReviewRunner {
 
     async fn run(
         &self,
-        input: ReviewInput,
+        plan: ReviewPlan,
         timeout: Option<Duration>,
         cancel: &CancellationToken,
     ) -> Result<Rendered, ReviewError> {
         run_cancellable(cancel, async {
-            let input = path_input(&self.workspace, input);
+            let input = path_input(&self.workspace, plan.input);
             let ignored = self.ignored(&input)?;
             let guard = |p: &Path| self.guard(p);
             let is_ignored = |p: &str| ignored.contains(p);
@@ -715,6 +722,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     max_rotations: self.parts.max_rotations,
                     retry_disabled: self.parts.retry_disabled,
                     agent_timeout_secs: self.parts.agent_timeout_secs,
+                    approved_batches: Some(plan.batches),
                 },
                 ReviewDeps {
                     git: &self.git,
@@ -759,13 +767,14 @@ mod tests {
                     .map_err(|e| ReviewError::OutsideWorkspace(e.to_string()))?;
             }
             Ok(ReviewPlan {
+                input: input.clone(),
                 batches: self.batches,
                 worst_case_secs: self.worst_case_secs,
             })
         }
         async fn run(
             &self,
-            _input: ReviewInput,
+            _plan: ReviewPlan,
             timeout: Option<std::time::Duration>,
             _c: &CancellationToken,
         ) -> Result<Rendered, ReviewError> {
@@ -1086,28 +1095,30 @@ mod tests {
         assert_eq!(runner.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
-    /// Counts its `plan` calls, for the plan the tool caches between approval and execution.
+    /// Plans a different pinned commit on every call (`sha-1`, `sha-2`, ...) and records the
+    /// plan `run` receives, so a re-plan between approval and execution is visible.
     #[derive(Default)]
     struct PlanCounter {
         plans: std::sync::atomic::AtomicUsize,
-        runs: std::sync::atomic::AtomicUsize,
+        ran: std::sync::Mutex<Option<ReviewPlan>>,
     }
     #[async_trait::async_trait]
     impl CodeReviewRunner for PlanCounter {
         fn plan(&self, _input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
-            self.plans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = self.plans.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             Ok(ReviewPlan {
-                batches: 2,
+                input: ReviewInput::Commit(Some(format!("sha-{n}"))),
+                batches: n,
                 worst_case_secs: 9,
             })
         }
         async fn run(
             &self,
-            _input: ReviewInput,
+            plan: ReviewPlan,
             _t: Option<std::time::Duration>,
             _c: &CancellationToken,
         ) -> Result<Rendered, ReviewError> {
-            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.ran.lock().expect("lock") = Some(plan);
             Ok(Rendered {
                 text: String::new(),
                 json: Value::Null,
@@ -1118,25 +1129,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_plan_shown_for_approval_is_the_plan_that_runs() {
-        // The approved arguments run on the plan computed for the prompt: git is enumerated once.
+    async fn the_tool_runs_the_plan_shown_for_approval() {
+        // What was approved is what runs: the pinned commit and the batch count of the prompt.
         let runner = Arc::new(PlanCounter::default());
         let t = CodeReviewTool::new(runner.clone(), false);
-        let args = serde_json::json!({"path": "src"});
+        let args = serde_json::json!({});
         assert_eq!(
             t.approval_detail(&args).as_deref(),
-            Some("2 batches; worst case 9 s")
+            Some("1 batches; worst case 9 s")
         );
         t.execute(args.clone(), &CancellationToken::new())
             .await
             .expect("runs");
+        let ran = runner
+            .ran
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("run was called");
+        assert_eq!(ran.input, ReviewInput::Commit(Some("sha-1".into())));
+        assert_eq!(ran.batches, 1);
         assert_eq!(runner.plans.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(runner.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
         // The cache is single-use: a second execution with the same arguments plans again.
         t.execute(args, &CancellationToken::new())
             .await
             .expect("runs");
-        assert_eq!(runner.plans.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let ran = runner
+            .ran
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("run was called");
+        assert_eq!(ran.input, ReviewInput::Commit(Some("sha-2".into())));
     }
 
     /// A trio double that counts the batches it is asked to review.
@@ -1171,6 +1195,15 @@ mod tests {
         }
     }
 
+    /// A plan that never went through `plan`, so `run`'s own guard is what refuses it.
+    fn unchecked(input: ReviewInput) -> ReviewPlan {
+        ReviewPlan {
+            input,
+            batches: 0,
+            worst_case_secs: 0,
+        }
+    }
+
     /// `<tmp>/ws` with `src/a.rs`, beside `<tmp>/fuera/x.rs`.
     fn guarded_workspace() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1184,9 +1217,17 @@ mod tests {
     }
 
     fn production_runner(ws: &Path, consult: Arc<CountingConsult>) -> ProductionReviewRunner {
+        production_runner_with(ws, consult, vec![("m".into(), None)])
+    }
+
+    fn production_runner_with(
+        ws: &Path,
+        consult: Arc<dyn BatchConsult>,
+        pool: Vec<(String, Option<usize>)>,
+    ) -> ProductionReviewRunner {
         ProductionReviewRunner::new(ReviewRunnerParts {
             workspace: ws.to_path_buf(),
-            pool: vec![("m".into(), None)],
+            pool,
             consult,
             gate_client: Arc::new(NoDecision),
             gate_chain: vec![ModelSpec {
@@ -1214,7 +1255,9 @@ mod tests {
             matches!(runner.plan(&hostile), Err(ReviewError::OutsideWorkspace(_))),
             "plan"
         );
-        let run = runner.run(hostile, None, &CancellationToken::new()).await;
+        let run = runner
+            .run(unchecked(hostile), None, &CancellationToken::new())
+            .await;
         assert!(
             matches!(run, Err(ReviewError::OutsideWorkspace(ref p)) if p.contains("fuera")),
             "{:?}",
@@ -1234,6 +1277,109 @@ mod tests {
         assert_eq!(plan.worst_case_secs, 240, "1 × (1 + 0) × 2 × 120");
     }
 
+    /// A trio double that records every batch prompt and answers none.
+    #[derive(Default)]
+    struct RecordingConsult(std::sync::Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl BatchConsult for RecordingConsult {
+        async fn consult(
+            &self,
+            prompt: &str,
+            _wall_clock: Option<std::time::Duration>,
+        ) -> Result<magi_core::reporting::MagiReport, magi_rs::review::pipeline::ConsultFailure>
+        {
+            self.0.lock().expect("lock").push(prompt.to_string());
+            Err(magi_rs::review::pipeline::ConsultFailure::Other(
+                "recorded".into(),
+            ))
+        }
+    }
+
+    /// Runs git in `dir` with a local identity and no autocrlf.
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.autocrlf=false",
+            ])
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Forty short functions: about 500 bytes, one file per batch under a 400-token window.
+    fn forty_functions(prefix: &str) -> String {
+        (0..40)
+            .map(|i| format!("fn {prefix}{i:02}() {{}}\n"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_approved_commit_is_pinned_to_the_commit_it_named() {
+        // HEAD moves between the approval and the run: the run reviews the approved commit.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        git_in(&ws, &["init", "-q"]);
+        std::fs::write(ws.join("src").join("lib.rs"), "fn approved_sentinel() {}\n").expect("v1");
+        git_in(&ws, &["add", "src/lib.rs"]);
+        git_in(&ws, &["commit", "-q", "-m", "v1"]);
+        let approved = git_in(&ws, &["rev-parse", "HEAD"]);
+        let consult = Arc::new(RecordingConsult::default());
+        let runner = production_runner_with(&ws, consult.clone(), vec![("m".into(), None)]);
+        let plan = runner.plan(&ReviewInput::Commit(None)).expect("plans");
+        assert_eq!(plan.input, ReviewInput::Commit(Some(approved)));
+        std::fs::write(ws.join("src").join("lib.rs"), "fn moved_sentinel() {}\n").expect("v2");
+        git_in(&ws, &["commit", "-q", "-am", "v2"]);
+        runner
+            .run(plan, None, &CancellationToken::new())
+            .await
+            .expect("the review runs");
+        let prompts = consult.0.lock().expect("lock").join("\n");
+        assert!(prompts.contains("approved_sentinel"), "{prompts}");
+        assert!(!prompts.contains("moved_sentinel"), "{prompts}");
+    }
+
+    #[tokio::test]
+    async fn a_working_tree_that_changed_since_approval_fails_before_any_batch() {
+        // The tree cannot be pinned: a run that now splits otherwise is a typed error, no call.
+        let (_tmp, ws) = guarded_workspace();
+        std::fs::write(ws.join("src").join("a.rs"), forty_functions("a")).expect("a.rs");
+        let consult = Arc::new(CountingConsult::default());
+        let runner = production_runner_with(&ws, consult.clone(), vec![("m".into(), Some(400))]);
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        assert_eq!(plan.batches, 1);
+        std::fs::write(ws.join("src").join("b.rs"), forty_functions("b")).expect("b.rs");
+        let run = runner.run(plan, None, &CancellationToken::new()).await;
+        assert!(
+            matches!(
+                run,
+                Err(ReviewError::PlanChanged {
+                    approved: 1,
+                    now: 2
+                })
+            ),
+            "{:?}",
+            run.err()
+        );
+        assert_eq!(consult.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
     #[cfg(unix)] // creating a symlink needs Developer Mode on Windows; the `..` case runs everywhere.
     #[tokio::test]
     async fn the_production_runner_refuses_a_symlinked_directory_that_escapes() {
@@ -1248,7 +1394,9 @@ mod tests {
             Err(ReviewError::OutsideWorkspace(_))
         ));
         assert!(matches!(
-            runner.run(link, None, &CancellationToken::new()).await,
+            runner
+                .run(unchecked(link), None, &CancellationToken::new())
+                .await,
             Err(ReviewError::OutsideWorkspace(_))
         ));
         assert_eq!(consult.0.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -1284,7 +1432,9 @@ mod tests {
             );
             assert!(
                 matches!(
-                    runner.run(input, None, &CancellationToken::new()).await,
+                    runner
+                        .run(unchecked(input), None, &CancellationToken::new())
+                        .await,
                     Err(ReviewError::OutsideWorkspace(_))
                 ),
                 "run {escaping}"

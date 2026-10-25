@@ -4981,7 +4981,8 @@ fn review_error_exit(e: &magi_rs::review::error::ReviewError) -> i32 {
         | E::Io(_)
         | E::Consolidation(_)
         | E::Cancelled
-        | E::EgressSecret { .. } => 1,
+        | E::EgressSecret { .. }
+        | E::PlanChanged { .. } => 1,
     }
 }
 
@@ -5229,8 +5230,15 @@ async fn run_code_review_subcommand(
     // which delivers what finished instead of cancelling.
     let cancel = tokio_util::sync::CancellationToken::new();
     let input = review_input_of(&args);
+    let plan = match runner.plan(&input) {
+        Ok(plan) => plan,
+        Err(e) => {
+            emit_review_error(&e);
+            return review_error_exit(&e);
+        }
+    };
     let rendered = match runner
-        .run(input, args.timeout.map(Duration::from_secs), &cancel)
+        .run(plan, args.timeout.map(Duration::from_secs), &cancel)
         .await
     {
         Ok(r) => r,
@@ -22514,7 +22522,7 @@ mod code_review_surface_tests {
             }
             async fn run(
                 &self,
-                _i: ReviewInput,
+                _p: crate::tools::code_review::ReviewPlan,
                 _t: Option<std::time::Duration>,
                 _c: &CancellationToken,
             ) -> Result<crate::tools::code_review::Rendered, ReviewError> {

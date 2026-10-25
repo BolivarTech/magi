@@ -2996,7 +2996,7 @@ mod tests {
             }
             async fn run(
                 &self,
-                _input: magi_rs::review::input::ReviewInput,
+                _plan: crate::tools::code_review::ReviewPlan,
                 _timeout: Option<std::time::Duration>,
                 _cancel: &CancellationToken,
             ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
