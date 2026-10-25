@@ -2166,7 +2166,6 @@ pub struct App {
 }
 
 /// A `/code-review` the user approved, between its notice and its run.
-#[allow(dead_code)] // Red stub
 pub(crate) struct ApprovedCodeReview {
     /// The parsed command.
     cmd: TuiCodeReviewCommand,
@@ -2244,27 +2243,19 @@ impl App {
     /// Takes the approved `/code-review` and pushes the "running, cannot be cancelled" notice,
     /// so the caller can draw it before awaiting [`Self::run_approved_code_review`], which holds
     /// the event loop for the whole review. `None` without a pending confirmation.
-    #[allow(dead_code)] // Red stub
     pub(crate) fn approve_code_review(&mut self) -> Option<ApprovedCodeReview> {
         let (cmd, runner, plan) = self.pending_code_review.take()?;
+        apply_response(self, AgentResponse::Info(CODE_REVIEW_RUNNING.to_string()));
         Some(ApprovedCodeReview { cmd, runner, plan })
     }
 
-    /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
-    /// in line, as `/consult` does (no key is read meanwhile); `false` cancels it. Without a
-    /// pending confirmation it does nothing. Every reply is sanitized and audited.
+    /// Runs an approved `/code-review` and waits for it in line, as `/consult` does (no key is
+    /// read meanwhile). Every reply is sanitized and audited.
     ///
     /// # Arguments
-    /// * `approved` - Whether the user answered 'y'.
-    pub(crate) async fn answer_code_review_confirmation(&mut self, approved: bool) {
-        let Some((cmd, runner, plan)) = self.pending_code_review.take() else {
-            return;
-        };
-        if !approved {
-            apply_response(self, AgentResponse::Info(CODE_REVIEW_CANCELLED.to_string()));
-            return;
-        }
-        apply_response(self, AgentResponse::Info(CODE_REVIEW_RUNNING.to_string()));
+    /// * `review` - What [`Self::approve_code_review`] returned.
+    pub(crate) async fn run_approved_code_review(&mut self, review: ApprovedCodeReview) {
+        let ApprovedCodeReview { cmd, runner, plan } = review;
         let budget = cmd
             .timeout
             .map_or(crate::tools::code_review::ReviewBudget::Unbounded, |t| {
@@ -2287,6 +2278,24 @@ impl App {
                     AgentResponse::Error(crate::agent::Agent::sanitize_text(&text)),
                 );
             }
+        }
+    }
+
+    /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
+    /// in line, as `/consult` does (no key is read meanwhile); `false` cancels it. Without a
+    /// pending confirmation it does nothing. Every reply is sanitized and audited.
+    ///
+    /// # Arguments
+    /// * `approved` - Whether the user answered 'y'.
+    pub(crate) async fn answer_code_review_confirmation(&mut self, approved: bool) {
+        if !approved {
+            if self.pending_code_review.take().is_some() {
+                apply_response(self, AgentResponse::Info(CODE_REVIEW_CANCELLED.to_string()));
+            }
+            return;
+        }
+        if let Some(review) = self.approve_code_review() {
+            self.run_approved_code_review(review).await;
         }
     }
 
@@ -4060,10 +4069,12 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                                     app.push_message("User: Approved".to_string());
-                                    // Drawn first: the review is awaited in line and the
-                                    // screen does not move until it ends.
-                                    terminal.draw(|f| ui(f, &mut app))?;
-                                    app.answer_code_review_confirmation(true).await;
+                                    // Drawn after the notice and before the run: the review is
+                                    // awaited in line and the screen does not move until it ends.
+                                    if let Some(review) = app.approve_code_review() {
+                                        terminal.draw(|f| ui(f, &mut app))?;
+                                        app.run_approved_code_review(review).await;
+                                    }
                                 }
                                 KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
                                     app.answer_code_review_confirmation(false).await;
