@@ -195,7 +195,9 @@ fn review_pool(
         .map(|(_, model)| model)
         .collect();
     models.extend(cfg.fallback_pool().iter().map(|f| f.model.clone()));
-    models.dedup();
+    // A model that is a seat and a fallback is one pool member: keep its first place.
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|m| seen.insert(m.clone()));
     Ok(models
         .into_iter()
         .map(|m| {
