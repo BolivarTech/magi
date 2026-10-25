@@ -373,4 +373,58 @@ mod tests {
         let unmeasured = pool_window(&pool).unmeasured;
         assert_eq!(unmeasured, vec!["mel", "bal", "cas", "other"]);
     }
+
+    #[tokio::test]
+    async fn an_answer_under_the_threshold_reaches_the_gate_as_low_confidence() {
+        // [MAGI §6 MS2 D loop 1, carried from C7] the production client, over HTTP: an answer
+        // under the model's threshold must come back as an answer for the gate to weigh, not as
+        // a failed attempt of the client's own (which would leave the finding `unfiltered`).
+        use magi_core::schema::{AgentName, Category, Severity};
+        use magi_rs::review::consolidate::ConsolidatedFinding;
+        use magi_rs::review::gate::{Gate, GateState};
+        let mut server = mockito::Server::new_async().await;
+        // Magi's confidence for two options is 2p - 1: p = 0.8 gives 0.6, under 0.9.
+        let body = serde_json::json!({"model": "a", "answers": {"gate": {"type": "choice",
+            "choice": "false_positive",
+            "probabilities": {"false_positive": 0.8, "real_defect": 0.2}}}});
+        let m = server
+            .mock("POST", "/v1/systemone")
+            .with_status(200)
+            .with_body(body.to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let chain = vec![ModelSpec {
+            model: "a".into(),
+            min_confidence: Some(0.9),
+        }];
+        let client = gate_client(
+            &format!("{}/v1", server.url()),
+            None,
+            &chain,
+            Duration::from_secs(10),
+        )
+        .expect("client");
+        let finding = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: Severity::Warning,
+            reported_severity: Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![Category::Other],
+            sources: vec![AgentName::Melchior, AgentName::Caspar],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let mut gate = Gate::new(&client, chain, 61_000);
+        let v = gate.judge(&finding, Some("fn a() {}\n"), None).await;
+        assert_eq!(v.state, GateState::LowConfidence, "{v:?}");
+        assert_eq!(v.lean.as_deref(), Some("false_positive"));
+        assert!(
+            v.confidence.is_some_and(|c| (c - 0.6).abs() < 1e-6),
+            "{v:?}"
+        );
+        m.assert_async().await;
+    }
 }
