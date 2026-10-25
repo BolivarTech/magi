@@ -4,6 +4,8 @@
 """Unit tests for the code-review runs R12-R15 and the files they write."""
 
 import pathlib
+import shutil
+import subprocess
 import tempfile
 import types
 import unittest
@@ -13,9 +15,22 @@ from smoke.errors import HarnessError
 
 
 def _executor(root: pathlib.Path) -> runs.RunExecutor:
-    """An executor over a bare environment double rooted at *root*."""
-    env = types.SimpleNamespace(root=root)
+    """An executor over an environment double rooted at *root*.
+
+    The double carries a ``.magi`` directory with a config file and a scratch
+    area, the two things the review workspace is built from.
+    """
+    magi = root / ".magi"
+    magi.mkdir(parents=True, exist_ok=True)
+    (magi / "magi.toml").write_text("# toy config\n", encoding="utf-8")
+    env = types.SimpleNamespace(root=root, magi_dir=magi,
+                                scratch_dir=root / "scratch")
     return runs.RunExecutor(binary=None, env=env, config=None)
+
+
+def _git_available() -> bool:
+    """Whether a ``git`` executable is on the path."""
+    return shutil.which("git") is not None
 
 
 class ReviewInputTests(unittest.TestCase):
@@ -63,20 +78,20 @@ class ReviewRunDefinitionTests(unittest.TestCase):
 
 class WriteFilesTests(unittest.TestCase):
 
-    def test_files_land_under_the_environment_root(self) -> None:
+    def test_files_land_under_the_given_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            _executor(root)._write_files(runs.DEFINITIONS["R14"])
+            _executor(root)._write_files(runs.DEFINITIONS["R14"], root)
             self.assertTrue((root / "skipped" / "pixel.png").is_file())
 
     def test_a_rerun_leaves_identical_files_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             executor = _executor(root)
-            executor._write_files(runs.DEFINITIONS["R14"])
+            executor._write_files(runs.DEFINITIONS["R14"], root)
             target = root / "skipped" / "leak.txt"
             before = target.stat().st_mtime_ns
-            executor._write_files(runs.DEFINITIONS["R14"])
+            executor._write_files(runs.DEFINITIONS["R14"], root)
             self.assertEqual(before, target.stat().st_mtime_ns)
 
     def test_a_path_leaving_the_root_is_refused(self) -> None:
@@ -85,13 +100,84 @@ class WriteFilesTests(unittest.TestCase):
                 run_id="RX", argv=("x",), stdin=b"", needs_trio=False,
                 payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
                 files=(("../escape.txt", b"x"),))
+            root = pathlib.Path(tmp)
             with self.assertRaises(HarnessError):
-                _executor(pathlib.Path(tmp))._write_files(hostile)
+                _executor(root)._write_files(hostile, root)
 
     def test_a_definition_without_files_writes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            _executor(pathlib.Path(tmp))._write_files(runs.DEFINITIONS["R1"])
-            self.assertEqual([], list(pathlib.Path(tmp).iterdir()))
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            before = sorted(root.iterdir())
+            executor._write_files(runs.DEFINITIONS["R1"], root)
+            self.assertEqual(before, sorted(root.iterdir()))
+
+
+class VisibilityPreflightTests(unittest.TestCase):
+    """The harness checks git can see the input before the product is paid."""
+
+    def _repo(self, tmp: str, ignore: str | None) -> pathlib.Path:
+        root = pathlib.Path(tmp)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        if ignore is not None:
+            (root / ".gitignore").write_text(ignore, encoding="utf-8")
+        (root / "gen").mkdir()
+        (root / "gen" / "a.rs").write_text("fn a() {}\n", encoding="utf-8")
+        return root
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_an_ignored_input_is_a_harness_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp, "*\n")
+            with self.assertRaises(HarnessError):
+                runs.verify_visible(root, ("gen/a.rs",))
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_visible_input_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._repo(tmp, None)
+            runs.verify_visible(root, ("gen/a.rs",))
+
+
+class ReviewWorkspaceTests(unittest.TestCase):
+    """R12-R15 run in a nested git repository under the scratch area."""
+
+    def test_the_review_runs_name_the_review_workspace(self) -> None:
+        for run_id in ("R12", "R13", "R14", "R15"):
+            argv = runs.DEFINITIONS[run_id].argv
+            self.assertEqual(runs.REVIEW_WORKSPACE_TOKEN,
+                             argv[argv.index("-w") + 1], run_id)
+
+    def test_the_token_resolves_to_a_directory_under_the_scratch_area(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            command = _executor(root)._command(runs.DEFINITIONS["R13"])
+            expected = str(root / "scratch" / runs.REVIEW_WORKSPACE_DIR)
+            self.assertEqual(expected, command[command.index("-w") + 1])
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_the_workspace_is_its_own_repo_with_the_config_and_the_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            workspace = _executor(root)._prepare_review_workspace(
+                runs.DEFINITIONS["R14"])
+            self.assertTrue((workspace / ".git").exists())
+            self.assertTrue((workspace / ".magi" / "magi.toml").is_file())
+            self.assertTrue((workspace / "skipped" / "pixel.png").is_file())
+            top = subprocess.run(
+                ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+                check=True, capture_output=True, text=True).stdout.strip()
+            self.assertEqual(workspace.resolve(), pathlib.Path(top).resolve())
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_second_preparation_starts_from_a_clean_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            workspace = executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            (workspace / "stale.rs").write_text("x", encoding="utf-8")
+            executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertFalse((workspace / "stale.rs").exists())
 
 
 if __name__ == "__main__":
