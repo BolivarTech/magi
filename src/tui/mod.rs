@@ -3751,13 +3751,13 @@ fn drain_approval_requests(app: &mut App) {
         for line in audit_for_transcript(&prompt) {
             app.push_message(line);
         }
-        for line in audit_for_transcript("Press 'y' to approve, 'c' or 'Esc' to deny.") {
-            app.push_message(line);
-        }
         if let Some(detail) = &req.detail {
             for line in audit_for_transcript(detail) {
                 app.push_message(line);
             }
+        }
+        for line in audit_for_transcript("Press 'y' to approve, 'c' or 'Esc' to deny.") {
+            app.push_message(line);
         }
         app.pending_approval = Some(req);
     }
