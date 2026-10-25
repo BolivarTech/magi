@@ -53,6 +53,7 @@ JSON_FORMAT_ARGS = ("--output-format", "json")
 MAGI_KEY_VARIABLE = "MAGI_API_KEY"
 OPENAI_KEY_VARIABLE = "OPENAI_API_KEY"
 OTHER_KEY_VARIABLES = ("EMBEDDING_API_KEY", "DECISION_API_KEY",
+                       "CODE_REVIEW_API_KEY",
                        "ANTHROPIC_API_KEY", "OPENAI_BASE_URL")
 
 #: Blank means absent to the product.
