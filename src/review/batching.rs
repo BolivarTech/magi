@@ -751,27 +751,9 @@ mod tests {
     fn a_realistically_formatted_file_that_does_not_fit_is_split_by_units() {
         // Imports, comments and blank lines between functions: every gap is its own unit, so
         // no unit holds the functions around it and each fits.
-        let body = |v: &str| {
-            format!(
-                "    let _{v} = 1;
-"
-            )
-            .repeat(14)
-        };
+        let body = |v: &str| format!("    let _{v} = 1;\n").repeat(14);
         let text = format!(
-            "use a::b;
-
-// first
-fn f() {{
-{}}}
-
-// second
-fn g() {{
-{}}}
-
-fn h() {{
-{}}}
-",
+            "use a::b;\n\n// first\nfn f() {{\n{}}}\n\n// second\nfn g() {{\n{}}}\n\nfn h() {{\n{}}}\n",
             body("a"),
             body("b"),
             body("c")

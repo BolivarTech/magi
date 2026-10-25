@@ -199,6 +199,68 @@ impl Default for LanguageRegistry {
     }
 }
 
+/// The fallback units of the changed lines no construct holds: one [`UnitKind::TopLevel`] unit
+/// per gap between constructs that holds orphans, spanning that whole gap and nothing else.
+///
+/// A gap runs from the line after the previous construct (or line 1) to the line before the
+/// next one (or the last line), so a fallback unit never holds a construct and a file split by
+/// units keeps each unit as small as its source allows.
+///
+/// # Arguments
+///
+/// * `lines` - The file's lines.
+/// * `file_path` - Path to the file.
+/// * `constructs` - `(start, end)` line ranges (1-based, inclusive) of the file's constructs,
+///   sorted by start and disjoint.
+/// * `orphans` - Changed lines outside every construct.
+///
+/// # Returns
+///
+/// The units, in line order. O(o log o + o log c) for o orphans and c constructs.
+pub(crate) fn gap_units(
+    lines: &[&str],
+    file_path: &str,
+    constructs: &[(u32, u32)],
+    mut orphans: Vec<u32>,
+) -> Vec<SemanticUnit> {
+    orphans.sort_unstable();
+    orphans.dedup();
+    let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    let mut units: Vec<SemanticUnit> = Vec::new();
+    for orphan in orphans {
+        let next = constructs.partition_point(|&(start, _)| start <= orphan);
+        let first = next
+            .checked_sub(1)
+            .and_then(|i| constructs.get(i))
+            .map_or(1, |&(_, end)| end.saturating_add(1));
+        let last = constructs
+            .get(next)
+            .map_or(total, |&(start, _)| start.saturating_sub(1));
+        if let Some(unit) = units
+            .last_mut()
+            .filter(|u| u.start_line == first && u.end_line == last)
+        {
+            unit.changed_lines.push(orphan);
+            continue;
+        }
+        let content = lines
+            .get(first.saturating_sub(1) as usize..(last as usize).min(lines.len()))
+            .unwrap_or(&[])
+            .join("\n");
+        units.push(SemanticUnit {
+            kind: UnitKind::TopLevel,
+            name: format!("lines {first}-{last}"),
+            file: file_path.to_string(),
+            start_line: first,
+            end_line: last,
+            content,
+            changed_lines: vec![orphan],
+            context: FileContext::default(),
+        });
+    }
+    units
+}
+
 /// Create a fallback semantic unit for changed lines in unknown file types.
 ///
 /// Captures ±20 lines around each changed line as a `TopLevel` unit.

@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 
 use super::scanner::{find_closing_brace, CodeScanner, LexicalRules, ScannedLine};
-use super::{LanguageExtractor, SemanticUnit, UnitKind};
+use super::{gap_units, LanguageExtractor, SemanticUnit, UnitKind};
 use crate::review::context::FileContext;
 
 /// Configuration for a brace-delimited language extractor.
@@ -101,44 +101,17 @@ impl LanguageExtractor for BraceFamilyExtractor {
             }
         }
 
-        // Orphan fallback: changed lines not covered by any construct
+        // Orphan fallback: one unit per gap between constructs that holds changed lines.
         let orphans: Vec<u32> = changed_lines
             .iter()
             .copied()
             .filter(|l| !covered_lines.contains(l))
             .collect();
-
-        if !orphans.is_empty() {
-            let total_lines = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-            let min_orphan = *orphans.iter().min().unwrap_or(&1);
-            let max_orphan = *orphans.iter().max().unwrap_or(&total_lines);
-
-            // Find surrounding construct boundaries
-            let start = self.find_gap_start(&constructs, min_orphan);
-            let end = self.find_gap_end(&constructs, max_orphan, total_lines);
-
-            let start_idx = start.saturating_sub(1);
-            let end_idx = end as usize;
-            let unit_content = lines
-                .get(start_idx..end_idx.min(lines.len()))
-                .unwrap_or(&[])
-                .join("\n");
-
-            let mut sorted_orphans = orphans;
-            sorted_orphans.sort_unstable();
-
-            let start_u32 = u32::try_from(start).unwrap_or(1);
-            units.push(SemanticUnit {
-                kind: UnitKind::TopLevel,
-                name: format!("lines {}-{}", start_u32, end),
-                file: file_path.to_string(),
-                start_line: start_u32,
-                end_line: end,
-                content: unit_content,
-                changed_lines: sorted_orphans,
-                context: FileContext::default(),
-            });
-        }
+        let ranges: Vec<(u32, u32)> = constructs
+            .iter()
+            .map(|c| (c.start_line, c.end_line))
+            .collect();
+        units.extend(gap_units(&lines, file_path, &ranges, orphans));
 
         units
     }
@@ -328,28 +301,6 @@ impl BraceFamilyExtractor {
         } else {
             "declarations".to_string()
         }
-    }
-
-    /// Find the start of the gap before `line` (end of previous construct or 1).
-    fn find_gap_start(&self, constructs: &[Construct], line: u32) -> usize {
-        let mut start = 1u32;
-        for c in constructs {
-            if c.end_line < line {
-                start = start.max(c.end_line.saturating_add(1));
-            }
-        }
-        start as usize
-    }
-
-    /// Find the end of the gap after `line` (start of next construct or total).
-    fn find_gap_end(&self, constructs: &[Construct], line: u32, total: u32) -> u32 {
-        let mut end = total;
-        for c in constructs {
-            if c.start_line > line && c.start_line < end {
-                end = c.start_line.saturating_sub(1);
-            }
-        }
-        end
     }
 }
 
@@ -745,21 +696,7 @@ mod tests {
     fn every_gap_between_constructs_is_its_own_fallback_unit() {
         // Blank lines and comments between functions are orphans; one
         // fallback unit spanning the first to the last of them swallowed the functions between.
-        let code = "use a::b;
-
-fn one() {
-    x();
-}
-// note
-
-fn two() {
-    y();
-}
-
-fn three() {
-    z();
-}
-";
+        let code = "use a::b;\n\nfn one() {\n    x();\n}\n// note\n\nfn two() {\n    y();\n}\n\nfn three() {\n    z();\n}\n";
         let every: Vec<u32> = (1..=14).collect();
         let units = extract(&rust_extractor(), code, &every);
         assert_each_line_in_one_unit(&units, 14);
@@ -773,9 +710,7 @@ fn three() {
 
     #[test]
     fn a_gap_before_a_construct_on_the_last_line_stops_before_it() {
-        let code = "fn a() {}
-
-fn b() {}";
+        let code = "fn a() {}\n\nfn b() {}";
         let units = extract(&rust_extractor(), code, &[1, 2, 3]);
         assert_each_line_in_one_unit(&units, 3);
     }

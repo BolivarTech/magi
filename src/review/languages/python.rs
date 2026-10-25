@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use super::{LanguageExtractor, SemanticUnit, UnitKind};
+use super::{gap_units, LanguageExtractor, SemanticUnit, UnitKind};
 use crate::review::context::FileContext;
 
 /// Indentation-based Python code extractor.
@@ -80,37 +80,17 @@ impl LanguageExtractor for PythonExtractor {
             }
         }
 
-        // Orphan fallback
+        // Orphan fallback: one unit per gap between constructs that holds changed lines.
         let orphans: Vec<u32> = changed_lines
             .iter()
             .copied()
             .filter(|l| !covered_lines.contains(l))
             .collect();
-        if !orphans.is_empty() {
-            let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-            let min_orphan = *orphans.iter().min().unwrap_or(&1);
-            let max_orphan = *orphans.iter().max().unwrap_or(&total);
-            let start = min_orphan.saturating_sub(5).max(1);
-            let end = max_orphan.saturating_add(5).min(total);
-            let start_idx = start.saturating_sub(1) as usize;
-            let end_idx = end as usize;
-            let unit_content = lines
-                .get(start_idx..end_idx.min(lines.len()))
-                .unwrap_or(&[])
-                .join("\n");
-            let mut sorted = orphans;
-            sorted.sort_unstable();
-            units.push(SemanticUnit {
-                kind: UnitKind::TopLevel,
-                name: format!("lines {}-{}", start, end),
-                file: file_path.to_string(),
-                start_line: start,
-                end_line: end,
-                content: unit_content,
-                changed_lines: sorted,
-                context: FileContext::default(),
-            });
-        }
+        let ranges: Vec<(u32, u32)> = constructs
+            .iter()
+            .map(|c| (c.start_line, c.end_line))
+            .collect();
+        units.extend(gap_units(&lines, file_path, &ranges, orphans));
 
         units
     }
@@ -369,21 +349,7 @@ mod tests {
     fn every_gap_between_constructs_is_its_own_fallback_unit() {
         // Orphans around several constructs gave one window from the first to the last of
         // them, which held every construct in between.
-        let code = "import os
-
-
-def f():
-    pass
-
-# note
-
-def g():
-    pass
-
-
-def h():
-    pass
-";
+        let code = "import os\n\n\ndef f():\n    pass\n\n# note\n\ndef g():\n    pass\n\n\ndef h():\n    pass\n";
         let every: Vec<u32> = (1..=14).collect();
         let units = extract(code, &every);
         for line in 1..=14u32 {
