@@ -1,6 +1,6 @@
 # API keys
 
-magi-rs can talk to four endpoints: the main model, the MAGI trio, the embedder and the decision models. Each may live at its own address, so each has its own key, and a key goes only where you mean it to go.
+magi-rs can talk to five endpoints: the main model, the MAGI trio, the embedder, the decision models and the `code-review` gate. Each may live at its own address, so each has its own key, and a key goes only where you mean it to go.
 
 | Section | Key | Used for |
 |---|---|---|
@@ -8,6 +8,7 @@ magi-rs can talk to four endpoints: the main model, the MAGI trio, the embedder 
 | `[magi]` | `MAGI_API_KEY` | the three seats of the MAGI trio |
 | `[embedding]` | `EMBEDDING_API_KEY` | the memory embedder |
 | `[decision]` | `DECISION_API_KEY` | the decision models behind `decide` |
+| `[code_review]` | `CODE_REVIEW_API_KEY` | the decision models that gate `code-review` findings |
 
 Every key is read from the environment first and from the vault second. A blank value counts as absent. Set one in the vault with:
 
@@ -15,15 +16,16 @@ Every key is read from the environment first and from the vault second. A blank 
 magi-rs vault set MAGI_API_KEY
 magi-rs vault set EMBEDDING_API_KEY
 magi-rs vault set DECISION_API_KEY
+magi-rs vault set CODE_REVIEW_API_KEY
 ```
 
 Keys are read once, at startup, after the vault is opened. A `vault set` made from another process shows up on the next start. Keys never go in `magi.toml`.
 
 ## Which key a section uses
 
-For the trio (when `[magi].kind` is `openai-compat`), the embedder and the decision models, the choice is made in this order:
+For the trio (when `[magi].kind` is `openai-compat`), the embedder, the decision models and the `code-review` gate, the choice is made in this order:
 
-1. The section's own key (`MAGI_API_KEY`, `EMBEDDING_API_KEY`, `DECISION_API_KEY`).
+1. The section's own key (`MAGI_API_KEY`, `EMBEDDING_API_KEY`, `DECISION_API_KEY`, `CODE_REVIEW_API_KEY`).
 2. `OPENAI_API_KEY`, but only if the section's endpoint has the same origin as the main endpoint.
 3. Otherwise no key is sent and the request carries no `Authorization` header.
 
