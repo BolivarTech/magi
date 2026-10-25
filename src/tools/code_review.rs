@@ -1253,4 +1253,43 @@ mod tests {
         ));
         assert_eq!(consult.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+
+    /// The Windows twin of the symlink case: a directory junction needs no privilege, so the
+    /// guard that only `PathGuard` provides (a link inside the workspace that leaves it) is
+    /// exercised on the platform CI runs. A `..` path is also refused by the input's own
+    /// relative-path check, so it cannot tell whether the runner wires the guard at all.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_production_runner_refuses_a_junction_that_escapes() {
+        let (tmp, ws) = guarded_workspace();
+        let base = dunce::canonicalize(tmp.path()).expect("canonical");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(ws.join("link"))
+            .arg(base.join("fuera"))
+            .output()
+            .expect("spawn mklink");
+        assert!(
+            made.status.success(),
+            "mklink /J: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let consult = Arc::new(CountingConsult::default());
+        let runner = production_runner(&ws, Arc::clone(&consult));
+        for escaping in ["link", "link/x.rs"] {
+            let input = ReviewInput::File(escaping.into());
+            assert!(
+                matches!(runner.plan(&input), Err(ReviewError::OutsideWorkspace(_))),
+                "plan {escaping}"
+            );
+            assert!(
+                matches!(
+                    runner.run(input, None, &CancellationToken::new()).await,
+                    Err(ReviewError::OutsideWorkspace(_))
+                ),
+                "run {escaping}"
+            );
+        }
+        assert_eq!(consult.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 }
