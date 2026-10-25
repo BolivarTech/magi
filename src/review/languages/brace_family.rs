@@ -141,13 +141,14 @@ impl BraceFamilyExtractor {
             let trimmed = line.trim();
             let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
 
-            // Check function keywords, then block keywords
+            // Check block keywords, then function keywords: Java's `public class` would
+            // otherwise read as a function named `class`.
             let keyword = self
-                .match_function_keyword(trimmed)
-                .map(|kind| (kind, &self.function_keywords))
+                .match_block_keyword(trimmed)
+                .map(|kind| (kind, &self.block_keywords))
                 .or_else(|| {
-                    self.match_block_keyword(trimmed)
-                        .map(|kind| (kind, &self.block_keywords))
+                    self.match_function_keyword(trimmed)
+                        .map(|kind| (kind, &self.function_keywords))
                 });
             let stops = |j: usize| self.starts_construct(lines, scanned, j);
             if let Some((kind, keywords)) = keyword {
@@ -460,6 +461,14 @@ impl BraceFamilyExtractor {
             language: "rust".to_string(),
             exts: &["rs"],
             function_keywords: vec![
+                "pub(crate) const fn ".to_string(),
+                "pub const fn ".to_string(),
+                "const fn ".to_string(),
+                "pub(crate) unsafe fn ".to_string(),
+                "pub unsafe fn ".to_string(),
+                "unsafe fn ".to_string(),
+                "pub extern \"C\" fn ".to_string(),
+                "extern \"C\" fn ".to_string(),
                 "pub async fn ".to_string(),
                 "pub(crate) async fn ".to_string(),
                 "async fn ".to_string(),
