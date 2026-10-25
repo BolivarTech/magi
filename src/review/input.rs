@@ -411,10 +411,19 @@ fn walk(
 ///
 /// An untracked link whose target is gone is not listed: it reads as a file that does not
 /// exist (`workspace` is where the names resolve).
+///
+/// git must place the workspace inside its work tree first: a repository's `core.worktree` can
+/// move the work tree out of the workspace, and a diff against it would read files there.
 fn resolve_uncommitted(
     git: &dyn GitCommand,
     workspace: &Path,
 ) -> Result<ResolvedInput, ReviewError> {
+    if !in_work_tree(git, workspace, workspace)? {
+        return Err(ReviewError::Git(format!(
+            "{} is not inside a git work tree; uncommitted changes need one",
+            workspace.display()
+        )));
+    }
     let present = |name: &String| !is_dangling_link(&workspace.join(name));
     match verify(git, "HEAD") {
         Ok(head) => {
@@ -965,6 +974,7 @@ mod tests {
     #[test]
     fn uncommitted_changes_are_the_diff_against_head_plus_untracked_files_whole() {
         let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
             ("rev-parse --verify HEAD^{commit}", Ok("abc\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative abc",
@@ -995,6 +1005,7 @@ mod tests {
     #[test]
     fn uncommitted_changes_in_a_repo_without_commits_have_no_old_side() {
         let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
             (
                 "rev-parse --verify HEAD^{commit}",
                 Err("fatal: needed a single revision"),

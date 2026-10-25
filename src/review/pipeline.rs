@@ -1182,6 +1182,7 @@ mod tests {
         let removed: String = (1..=10).map(|i| format!("-old{i}\n")).collect();
         let diff = format!("diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1,10 +0,0 @@\n{removed}");
         let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
             ("rev-parse --verify HEAD^{commit}", Ok("abc\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative abc",
@@ -1268,6 +1269,7 @@ mod tests {
         let removed: String = (1..=10).map(|i| format!("-old{i}\n")).collect();
         let diff = format!("diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1,10 +0,0 @@\n{removed}");
         let fake = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
             ("rev-parse --verify HEAD^{commit}", Ok("abc\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative abc",
