@@ -1358,14 +1358,18 @@ pub(crate) struct TuiCodeReviewCommand {
     pub input: magi_rs::review::input::ReviewInput,
     /// The review's total, when `--timeout` was given.
     pub timeout: Option<u64>,
+    /// The flags given that parse but that the TUI does not apply (output, log and tier
+    /// flags), named in the confirmation.
+    pub ignored_flags: Vec<&'static str>,
 }
 
 impl Default for TuiCodeReviewCommand {
-    /// A bare `/code-review`: the `HEAD` commit, no total.
+    /// A bare `/code-review`: the `HEAD` commit, no total, no ignored flag.
     fn default() -> Self {
         Self {
             input: magi_rs::review::input::ReviewInput::Commit(None),
             timeout: None,
+            ignored_flags: Vec::new(),
         }
     }
 }
@@ -1419,6 +1423,7 @@ pub(crate) fn parse_tui_code_review(
     Ok(TuiCodeReviewCommand {
         input: crate::review_input_of(&args),
         timeout: args.timeout,
+        ignored_flags: Vec::new(),
     })
 }
 
@@ -9121,7 +9126,8 @@ end"
     #[test]
     fn the_tui_command_parses_every_review_flag_of_the_subcommand() {
         // [CP2 MS2 S2b loop 6] RV18 «los mismos argumentos»: the TUI parses through the subcommand's own clap args.
-        let all = "/code-review src -w . --timeout 600 -o r.json --output-format json --no-clobber --log-level debug \
+        // `-w` left out: the TUI refuses it (`the_tui_refuses_a_workdir_and_names_the_flags_it_does_not_apply`).
+        let all = "/code-review src --timeout 600 -o r.json --output-format json --no-clobber --log-level debug \
                    --log-dir logs --auto --no-memory --structured-verdicts";
         assert!(
             parse_tui_code_review(all).is_ok(),
@@ -9130,6 +9136,41 @@ end"
         );
         assert!(parse_tui_code_review("/code-review --full-auto").is_ok());
         assert!(parse_tui_code_review("/code-review --allow-system-override").is_err());
+    }
+
+    #[test]
+    fn the_tui_refuses_a_workdir_and_names_the_flags_it_does_not_apply() {
+        // The TUI reviews its own workspace: `-w` would review and send code other than asked.
+        for argv in ["/code-review -w . src", "/code-review --workdir=../other"] {
+            match parse_tui_code_review(argv) {
+                Err(TuiCodeReviewParseError::Invalid(m)) => {
+                    assert!(m.contains("this session's workspace"), "{m}");
+                }
+                other => panic!("{argv}: {other:?}"),
+            }
+        }
+        // The other inert flags parse, and are named: nothing is ignored in silence.
+        let cmd = parse_tui_code_review("/code-review src -o r.json --auto --log-level debug")
+            .expect("parses");
+        assert_eq!(cmd.ignored_flags, vec!["-o", "--log-level", "--auto"]);
+        let mut app = App::new_for_test();
+        app.begin_code_review_confirmation(cmd, Arc::new(FakeTuiRunner::default()), shown_plan());
+        let shown = app.messages.join("\n");
+        assert!(
+            shown.contains("Accepted but not applied in the TUI: -o, --log-level, --auto"),
+            "{shown}"
+        );
+        let mut plain = App::new_for_test();
+        plain.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            Arc::new(FakeTuiRunner::default()),
+            shown_plan(),
+        );
+        assert!(
+            !plain.messages.join("\n").contains("not applied"),
+            "{:?}",
+            plain.messages
+        );
     }
 
     #[test]
