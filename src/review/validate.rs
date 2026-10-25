@@ -399,6 +399,13 @@ mod tests {
     }
 
     #[test]
+    fn a_non_ascii_citation_is_never_checked_so_it_cannot_be_discarded() {
+        // The index splits non-ASCII identifiers into fragments; the citation rule skips them,
+        // so a finding naming one is kept rather than discarded as an unknown symbol.
+        assert!(cited_identifiers("calls `h\u{e9}llo` and `\u{4f60}\u{597d}`").is_empty());
+    }
+
+    #[test]
     fn a_double_backtick_citation_is_not_taken_as_an_identifier() {
         // [CP2 MS2 S1b loop 10] the loop-7 rule was declared but no test exercised it.
         assert_eq!(
