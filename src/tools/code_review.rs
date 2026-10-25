@@ -289,6 +289,20 @@ pub(crate) fn envelope_fields(r: &Rendered) -> (String, Value, Value) {
     (r.text.clone(), r.consult.clone(), r.json.clone())
 }
 
+/// The envelope's `usage` of a rendered review: the token totals of its batches.
+///
+/// # Arguments
+/// * `r` - The rendered review.
+///
+/// # Returns
+/// The usage.
+pub(crate) fn envelope_usage(_r: &Rendered) -> magi_rs::headless::types::Usage {
+    magi_rs::headless::types::Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+    }
+}
+
 /// The tool arguments as a review input: at most one form, pairs complete, refs validated.
 ///
 /// # Arguments
@@ -927,6 +941,25 @@ mod tests {
         );
         let ok = Rendered { failure: None, ..r };
         assert_eq!(finish_code_review(&ok).0, 0);
+    }
+
+    #[test]
+    fn the_envelope_usage_is_the_batch_token_totals() {
+        // The most expensive command must not report zero tokens to a consumer that sums `usage`.
+        let r = Rendered {
+            text: String::new(),
+            json: serde_json::json!({"batch_totals": {"input_tokens": 192, "output_tokens": 384, "ms": 5}}),
+            consult: serde_json::Value::Null,
+            failure: None,
+        };
+        let u = envelope_usage(&r);
+        assert_eq!((u.input_tokens, u.output_tokens), (192, 384));
+        let none = Rendered {
+            json: serde_json::json!({}),
+            ..r
+        };
+        let u = envelope_usage(&none);
+        assert_eq!((u.input_tokens, u.output_tokens), (0, 0));
     }
 
     #[test]

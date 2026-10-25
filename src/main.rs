@@ -5253,10 +5253,7 @@ async fn run_code_review_subcommand(
         response: Some(response),
         model,
         provider: trio_kind.to_string(),
-        usage: magi_rs::headless::types::Usage {
-            input_tokens: 0,
-            output_tokens: 0,
-        },
+        usage: crate::tools::code_review::envelope_usage(&rendered),
         timings: magi_rs::headless::types::Timings {
             total_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             ttfb_ms: None,

@@ -394,3 +394,26 @@ fn structured_verdicts_need_json_and_add_the_consolidated_agents_and_consensus()
         "{out}"
     );
 }
+
+/// The envelope's `usage` carries the review's tokens (`code_review.batch_totals`), never zero.
+#[test]
+fn the_envelope_usage_carries_the_batch_token_totals() {
+    let mut server = mockito::Server::new();
+    let (_tb, _gb, _t, _g) = mount(&mut server);
+    let ws = workspace(&review_toml(&server.url()));
+    let (code, out, err) = review(&ws, &["--commit", "HEAD", "--output-format", "json"]);
+    assert_eq!(code, EXIT_OK, "{err}");
+    let totals = &out["code_review"]["batch_totals"];
+    assert!(
+        totals["input_tokens"].as_u64().is_some_and(|n| n > 0),
+        "{out}"
+    );
+    assert_eq!(
+        out["usage"]["input_tokens"], totals["input_tokens"],
+        "{out}"
+    );
+    assert_eq!(
+        out["usage"]["output_tokens"], totals["output_tokens"],
+        "{out}"
+    );
+}
