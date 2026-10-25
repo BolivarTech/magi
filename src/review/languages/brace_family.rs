@@ -845,4 +845,34 @@ mod tests {
         assert_eq!(units[0].name, "b");
         assert_eq!((units[0].start_line, units[0].end_line), (2, 4));
     }
+
+    #[test]
+    fn a_java_class_is_a_class_not_a_function() {
+        let code = "public class Foo {\n    public void run() {\n    }\n}\n";
+        let units = extract(&BraceFamilyExtractor::java(), code, &[3]);
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert_eq!(
+            (units[0].kind, units[0].name.as_str()),
+            (UnitKind::Class, "Foo")
+        );
+    }
+
+    #[test]
+    fn qualified_rust_functions_are_functions() {
+        for (code, name) in [
+            ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
+            ("const fn f() -> u8 {\n    1\n}\n", "f"),
+            ("unsafe fn g() {\n    h();\n}\n", "g"),
+            ("pub unsafe fn g() {\n    h();\n}\n", "g"),
+            ("extern \"C\" fn cb() {\n    h();\n}\n", "cb"),
+        ] {
+            let units = extract(&rust_extractor(), code, &[2]);
+            assert_eq!(units.len(), 1, "{code}: {units:?}");
+            assert_eq!(
+                (units[0].kind, units[0].name.as_str(), units[0].end_line),
+                (UnitKind::Function, name, 3),
+                "{code}"
+            );
+        }
+    }
 }
