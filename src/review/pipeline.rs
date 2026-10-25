@@ -186,7 +186,7 @@ pub struct ReviewOutcome {
     /// The consolidated report; `None` when no batch completed or consolidation failed.
     pub consolidated: Option<Consolidated>,
     /// The paid batch reports, raw, when consolidation failed (empty otherwise).
-    pub batch_reports: Vec<MagiReport>,
+    pub batch_reports: Vec<(usize, MagiReport)>,
     /// What every stage declared.
     pub summary: ReviewSummary,
     /// Why there is no consolidated report, redacted.
@@ -351,7 +351,7 @@ pub async fn run_review(
             let message = redact_foreign_text(&e.to_string()).as_str().to_string();
             return Ok(ReviewOutcome {
                 consolidated: None,
-                batch_reports: finished.into_iter().map(|f| f.report).collect(),
+                batch_reports: finished.into_iter().map(|f| (f.batch, f.report)).collect(),
                 summary,
                 consolidation_error: Some(message),
             });
@@ -1766,6 +1766,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_numbers_are_one_based_and_name_the_real_batch_everywhere() {
+        // Batch 1 fails, batch 2 is paid and cannot reach consensus alone: the paid report is
+        // "batch 2", the failure is "batch 1", in the text and in the JSON alike.
+        let dir = workspace(2);
+        let mut lonely = serde_json::to_value(real_report(empty()).await).expect("serializes");
+        lonely["agents"].as_array_mut().expect("agents").truncate(1);
+        let lonely: MagiReport = serde_json::from_value(lonely).expect("still a MagiReport");
+        let consult = FakeConsult::new(vec![Err(ConsultFailure::Other("down".into())), Ok(lonely)]);
+        let out = review(
+            dir.path(),
+            None,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("the paid batch comes back");
+        let text = render_batch_reports(&out.batch_reports);
+        assert!(
+            text.contains("## [batch 2]") && !text.contains("## [batch 1]"),
+            "{text}"
+        );
+        let v = crate::review::report::summary_json(&out.summary);
+        assert_eq!(v["failed_batches"][0][0], 1, "{v}");
+        assert_eq!(v["batches"][0]["index"], 2, "{v}");
+    }
+
+    #[tokio::test]
+    async fn a_discarded_finding_names_its_batch_one_based_in_the_json() {
+        let dir = workspace(2);
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"f1.rs","line":3}]);
+        let consult = FakeConsult::new(vec![
+            Ok(real_report([f.clone(), f, serde_json::json!([])]).await),
+            Err(ConsultFailure::Other("seat failed".into())),
+        ]);
+        let out = review(
+            dir.path(),
+            None,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("reports");
+        let v = crate::review::report::summary_json(&out.summary);
+        assert_eq!(v["discarded"][0]["batch"], 1, "{v}");
+        assert_eq!(v["failed_batches"][0][0], 2, "{v}");
+        let text = render_text(
+            out.consolidated.as_ref().expect("consolidated"),
+            &out.summary,
+        );
+        assert!(
+            text.contains("batch 2 did not complete: seat failed"),
+            "{text}"
+        );
+        assert!(text.contains("(batch 1, "), "{text}");
+    }
+
+    #[tokio::test]
     async fn a_failed_consolidation_returns_the_paid_batch_reports() {
         // A report that kept a single agent cannot reach consensus (min_agents = 2): consolidation fails.
         // [CP2 MS2 S2 loop 4] the paid report carries a credential a mage echoed: the fallback path must redact it too.
@@ -1800,7 +1859,7 @@ mod tests {
         );
         let text = render_batch_reports(&out.batch_reports);
         assert!(
-            text.contains("## [batch 0]") && text.contains("## [batch 1]"),
+            text.contains("## [batch 1]") && text.contains("## [batch 2]"),
             "{text}"
         );
         assert!(!text.contains("hunter2"), "{text}");

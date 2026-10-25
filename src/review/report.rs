@@ -323,10 +323,10 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
 /// # Returns
 ///
 /// The text.
-pub fn render_batch_reports(reports: &[MagiReport]) -> String {
+pub fn render_batch_reports(reports: &[(usize, MagiReport)]) -> String {
     let formatter = ReportFormatter::new();
     let mut out = String::new();
-    for (k, report) in reports.iter().enumerate() {
+    for (k, (_, report)) in reports.iter().enumerate() {
         // Writing into a `String` cannot fail.
         let _ = writeln!(out, "## [batch {k}]");
         out.push_str(&formatter.format_report(&report.agents, &report.consensus));
@@ -533,8 +533,8 @@ mod tests {
         // that this backstop redacts; one in a title can.
         let f = serde_json::json!([{"severity":"warning","title":"see https://user:hunter2@example.invalid/x","detail":"d","file":"a.rs","line":1}]);
         let report = real_report([f.clone(), f, serde_json::json!([])]).await;
-        let text = render_batch_reports(&[report]);
-        assert!(text.contains("## [batch 0]"), "{text}");
+        let text = render_batch_reports(&[(0, report)]);
+        assert!(text.contains("## [batch 1]"), "{text}");
         assert!(
             text.contains("example.invalid"),
             "the title is rendered: {text}"
