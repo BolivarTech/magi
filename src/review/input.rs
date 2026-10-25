@@ -452,9 +452,11 @@ fn resolve_uncommitted(
 /// Whether `path` is a link (or a junction) whose target does not exist. Such a link reads as a
 /// file that does not exist, so an enumeration leaves it out the way it leaves out a tracked
 /// file deleted from the tree. A path that does not exist at all is not a dangling link.
+/// Only a missing target counts: a loop or an inaccessible target is not dangling, so it reaches
+/// the reader, which reports it.
 fn is_dangling_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
-        && std::fs::metadata(path).is_err()
+        && std::fs::metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Splits NUL-separated names; the ones that are not UTF-8 come back apart, decoded lossily.
