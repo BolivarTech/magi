@@ -1383,6 +1383,25 @@ pub(crate) enum TuiCodeReviewParseError {
     Invalid(String),
 }
 
+/// The clap id of `-w`, which the TUI refuses.
+const TUI_WORKDIR_ARG: &str = "workdir";
+/// Why the TUI refuses `-w`: the session's runner reviews the session's workspace only.
+const TUI_WORKDIR_REFUSED: &str =
+    "-w is not available in the TUI: /code-review reviews this session's workspace";
+/// The flags of `magi code-review` that parse in the TUI but that it does not apply, as clap
+/// ids with the spelling the confirmation names, in declaration order.
+const TUI_INERT_FLAGS: [(&str, &str); 9] = [
+    ("output", "-o"),
+    ("output_format", "--output-format"),
+    ("no_clobber", "--no-clobber"),
+    ("log_level", "--log-level"),
+    ("log_dir", "--log-dir"),
+    ("auto", "--auto"),
+    ("full_auto", "--full-auto"),
+    ("no_memory", "--no-memory"),
+    ("structured_verdicts", "--structured-verdicts"),
+];
+
 /// The command word of `/code-review`, which is also clap's program name for its arguments.
 const CODE_REVIEW_COMMAND: &str = "/code-review";
 
@@ -1391,8 +1410,9 @@ const CODE_REVIEW_COMMAND: &str = "/code-review";
 /// The words after the command go through the subcommand's own clap arguments
 /// ([`crate::CodeReviewArgs`]), so the TUI accepts exactly the flags of `magi code-review`; the
 /// program name clap reads first is the command itself, never a path. Words are split on spaces,
-/// so a path with spaces cannot be written here. The output flags parse and are ignored: the
-/// report goes to the transcript.
+/// so a path with spaces cannot be written here. The output, log and tier flags parse and are
+/// not applied (the report goes to the transcript); the command names them so the confirmation
+/// says so. `-w` is refused: the TUI reviews its own session's workspace.
 ///
 /// # Arguments
 /// * `trimmed` - The input line, trimmed.
@@ -1402,7 +1422,8 @@ const CODE_REVIEW_COMMAND: &str = "/code-review";
 ///
 /// # Errors
 /// [`TuiCodeReviewParseError::NotACodeReviewCommand`] for any other line;
-/// [`TuiCodeReviewParseError::Invalid`] with clap's first line for arguments that do not parse.
+/// [`TuiCodeReviewParseError::Invalid`] with clap's first line for arguments that do not parse,
+/// or with a fixed message for `-w`.
 pub(crate) fn parse_tui_code_review(
     trimmed: &str,
 ) -> Result<TuiCodeReviewCommand, TuiCodeReviewParseError> {
@@ -1419,11 +1440,22 @@ pub(crate) fn parse_tui_code_review(
     };
     let command = crate::CodeReviewArgs::augment_args(clap::Command::new(program));
     let matches = command.try_get_matches_from(argv).map_err(invalid)?;
+    let given = |id: &str| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
+    if given(TUI_WORKDIR_ARG) {
+        return Err(TuiCodeReviewParseError::Invalid(
+            TUI_WORKDIR_REFUSED.to_string(),
+        ));
+    }
+    let ignored_flags = TUI_INERT_FLAGS
+        .iter()
+        .filter(|(id, _)| given(id))
+        .map(|(_, flag)| *flag)
+        .collect();
     let args = crate::CodeReviewArgs::from_arg_matches(&matches).map_err(invalid)?;
     Ok(TuiCodeReviewCommand {
         input: crate::review_input_of(&args),
         timeout: args.timeout,
-        ignored_flags: Vec::new(),
+        ignored_flags,
     })
 }
 
@@ -2181,6 +2213,15 @@ impl App {
         runner: std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
         plan: crate::tools::code_review::ReviewPlan,
     ) {
+        if !cmd.ignored_flags.is_empty() {
+            let inert = format!(
+                "System: Accepted but not applied in the TUI: {}; the review runs on this                  session's workspace and the report goes to the transcript.",
+                cmd.ignored_flags.join(", ")
+            );
+            for line in audit_for_transcript(&inert) {
+                self.push_message(line);
+            }
+        }
         let text = code_review_confirmation_text(plan.batches, plan.worst_case_secs);
         for line in audit_for_transcript(&format!("System: {text}")) {
             self.push_message(line);
