@@ -23,7 +23,7 @@ use super::source::{is_never_reviewed, ContentSource, GitCommand};
 /// Bytes git inspects for a NUL to call a file binary; the same heuristic here.
 const BINARY_SNIFF_BYTES: usize = 8_000;
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
-const MISSING: &str = "missing";
+pub(crate) const MISSING: &str = "missing";
 /// The tracing target of the filter's run-log entries.
 const LOG_TARGET: &str = "magi_rs::review";
 /// `ls-files` for a file named by the caller: tracked or untracked, when a rule excludes it.

@@ -150,8 +150,8 @@ pub fn validate_ref(r: &str) -> Result<(), ReviewError> {
 ///
 /// [`ReviewError::InvalidRef`] before any git call for a hostile ref,
 /// [`ReviewError::RefNotFound`] for a ref that names no commit, [`ReviewError::OutsideWorkspace`]
-/// from the guard, [`ReviewError::NotReviewable`] for a `File` that is a directory,
-/// [`ReviewError::Git`] when git fails (inside a repository, a failing git never falls back to a
+/// from the guard, [`ReviewError::NotReviewable`] for a `File` that is a directory or a
+/// `Directory` that does not exist (`missing`), [`ReviewError::Git`] when git fails (inside a repository, a failing git never falls back to a
 /// walk that would ignore `.gitignore`), [`ReviewError::Io`] for a failing walk, and
 /// [`ReviewError::NothingToReview`] when nothing is left.
 pub fn resolve_input(
@@ -375,6 +375,12 @@ fn resolve_directory(
     guard: &dyn Fn(&Path) -> Result<PathBuf, ReviewError>,
 ) -> Result<ResolvedInput, ReviewError> {
     let dir = guard(&workspace.join(d))?;
+    if std::fs::symlink_metadata(&dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return Err(ReviewError::NotReviewable {
+            path: d.display().to_string(),
+            cause: super::filter::MISSING,
+        });
+    }
     let rel = relative(workspace, &dir)?;
     let mut resolved = ResolvedInput {
         files: Vec::new(),
