@@ -542,7 +542,8 @@ impl ReviewTimer<'_> {
 ///
 /// Each batch's wall clock is recomputed from what is left, split over the pending batches; a
 /// batch whose wall clock ran out cuts it and every pending one, each declared as
-/// `clock expired`.
+/// `clock expired`. Every batch that ran gets its metrics, failed or not (a failed one counts no
+/// tokens: its report never arrived); a batch cut before it started spent nothing and has none.
 async fn run_batches(
     batches: &[ReviewBatch],
     consult: &dyn BatchConsult,
@@ -568,12 +569,14 @@ async fn run_batches(
                 });
             }
             Err(ConsultFailure::ClockExpired) => {
+                summary.batches.push(spent(batch.index, started.elapsed()));
                 summary
                     .failed_batches
                     .extend((batch.index..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
                 break;
             }
             Err(ConsultFailure::Other(message)) => {
+                summary.batches.push(spent(batch.index, started.elapsed()));
                 summary.failed_batches.push((batch.index, message));
             }
         }
@@ -653,6 +656,16 @@ fn metrics(index: usize, report: &MagiReport, took: Duration) -> BatchMetrics {
         index,
         input_tokens,
         output_tokens,
+        ms: millis(took),
+    }
+}
+
+/// The metrics of a batch that ran and gave no report: its time, and no tokens.
+fn spent(index: usize, took: Duration) -> BatchMetrics {
+    BatchMetrics {
+        index,
+        input_tokens: 0,
+        output_tokens: 0,
         ms: millis(took),
     }
 }

@@ -54,7 +54,8 @@ pub struct ReviewSummary {
     pub unmeasured_models: Vec<String>,
     /// Milliseconds the preparation took (never charged to `--timeout`).
     pub prep_ms: u64,
-    /// Per-batch metrics, for the batches that completed.
+    /// Per-batch metrics, for every batch that ran: a failed batch has its time and no tokens
+    /// (its report never arrived); a batch cut before it started has none.
     pub batches: Vec<BatchMetrics>,
     /// Batches that completed.
     pub batches_completed: usize,
