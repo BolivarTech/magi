@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 
 use super::scanner::{find_closing_brace, CodeScanner, LexicalRules, ScannedLine};
-use super::{gap_units, LanguageExtractor, SemanticUnit, UnitKind};
+use super::{gap_units, lines_in_range, LanguageExtractor, SemanticUnit, UnitKind};
 use crate::review::context::FileContext;
 
 /// Configuration for a brace-delimited language extractor.
@@ -69,19 +69,13 @@ impl LanguageExtractor for BraceFamilyExtractor {
         let mut units: Vec<SemanticUnit> = Vec::new();
         let mut covered_lines: HashSet<u32> = HashSet::new();
 
+        let mut sorted: Vec<u32> = changed_lines.iter().copied().collect();
+        sorted.sort_unstable();
         for construct in &constructs {
-            let overlaps = changed_lines
-                .iter()
-                .any(|&l| l >= construct.start_line && l <= construct.end_line);
-            if overlaps {
-                let changed_in_unit: Vec<u32> = changed_lines
-                    .iter()
-                    .copied()
-                    .filter(|&l| l >= construct.start_line && l <= construct.end_line)
-                    .collect();
-                for &l in &changed_in_unit {
-                    covered_lines.insert(l);
-                }
+            let changed_in_unit =
+                lines_in_range(&sorted, construct.start_line, construct.end_line).to_vec();
+            if !changed_in_unit.is_empty() {
+                covered_lines.extend(changed_in_unit.iter().copied());
                 let start_idx = construct.start_line.saturating_sub(1) as usize;
                 let end_idx = construct.end_line as usize;
                 let unit_content = lines

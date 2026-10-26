@@ -87,6 +87,10 @@ pub trait LanguageExtractor {
     fn extensions(&self) -> &[&str];
     /// Extract semantic units from full file content, filtering
     /// to only those that overlap with `changed_lines`.
+    ///
+    /// Each unit's `changed_lines` is sorted. The ported extractors cost O(n log n) for n lines
+    /// even when every line is changed (a file reviewed whole): the changed lines are sorted
+    /// once and each construct takes its share by binary search.
     fn extract_units(
         &self,
         content: &str,
@@ -211,9 +215,10 @@ impl Default for LanguageRegistry {
 /// # Returns
 ///
 /// The sub-slice of `sorted` inside the range, empty when none is.
-pub fn lines_in_range(sorted: &[u32], start: u32, end: u32) -> &[u32] {
-    let _ = (start, end);
-    sorted.get(..0).unwrap_or(&[])
+pub(crate) fn lines_in_range(sorted: &[u32], start: u32, end: u32) -> &[u32] {
+    let lo = sorted.partition_point(|&l| l < start);
+    let hi = sorted.partition_point(|&l| l <= end).max(lo);
+    sorted.get(lo..hi).unwrap_or(&[])
 }
 
 /// The fallback units of the changed lines no construct holds: one [`UnitKind::TopLevel`] unit
