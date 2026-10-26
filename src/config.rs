@@ -5008,6 +5008,38 @@ model = \"x\"
         assert_eq!(s.auto_approve, Some(false));
     }
 
+    /// The built-in chain never goes through `load`'s check of a declared section, so this is
+    /// the only place an invalid default (a repeated model, a threshold outside [0, 1]) is seen.
+    #[test]
+    fn the_built_in_code_review_section_passes_its_own_validation() {
+        assert_eq!(
+            crate::defaults::default_code_review_section().validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_declared_code_review_section_takes_its_absent_limits_from_the_defaults() {
+        let c = MagiConfig::from_toml_str(
+            "[decision]\nmodel = \"x\"\n[code_review]\nmodel = \"m\"\nmin_confidence = 0.4\n",
+        )
+        .expect("valid");
+        let s = c.effective_code_review();
+        assert_eq!(
+            s.timeout_secs,
+            Some(crate::defaults::DEFAULT_CODE_REVIEW_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            s.max_state_bytes,
+            Some(crate::defaults::DEFAULT_CODE_REVIEW_MAX_STATE_BYTES)
+        );
+        assert_eq!(
+            s.auto_approve,
+            Some(crate::defaults::DEFAULT_CODE_REVIEW_AUTO_APPROVE)
+        );
+        assert!(s.fallback.is_empty(), "a declared chain is never completed");
+    }
+
     /// Passes before the section exists, by design: `deny_unknown_fields` already rejects it.
     #[test]
     fn an_api_key_in_code_review_is_a_load_error() {
