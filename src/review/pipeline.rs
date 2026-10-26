@@ -1829,6 +1829,53 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_read_failure_log_names_the_file_and_the_line() {
+        // [MAGI §6 MS2 D loop 2] the WARN must say which finding lost its code.
+        use std::sync::Arc;
+        use tracing_subscriber::layer::SubscriberExt;
+        struct Failing;
+        impl ContentSource for Failing {
+            fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Err(ReviewError::Io(format!("{}: gone", path.len())))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if let Ok(mut lines) = self.0.lock() {
+                    lines.push(crate::logging::render::render_event(event));
+                }
+            }
+        }
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&lines)));
+        let faces = HashMap::from([(
+            "src/a.rs",
+            Faces {
+                whole: true,
+                ..Faces::default()
+            },
+        )]);
+        let code = tracing::subscriber::with_default(subscriber, || {
+            gate_code(Some("src/a.rs"), Some(7), &faces, &HashMap::new(), &Failing)
+        });
+        assert!(code.is_none());
+        let lines = lines.lock().expect("lock");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("file=src/a.rs") && lines[0].contains("line=7"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn a_failed_read_after_the_batches_falls_back_to_the_finished_units() {
         // [MAGI §6 MS2 D loop 2] the batches are paid when `reviewed_of` reads a unit-split file:
         // a failing read must not throw them away. It registers only the units the trio saw.
