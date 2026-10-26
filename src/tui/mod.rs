@@ -1542,12 +1542,13 @@ const CODE_REVIEW_RESTART_HINT: &str = "the code review is built once at startup
      does not rebuild it: fix the cause, then restart Magi";
 /// What `/code-review` answers when this session has no review runner: why, when the build
 /// said, and what to do. The runner is built once at startup, so a `/login` does not bring it
-/// back: the user restarts after fixing the cause.
+/// back: the user restarts after fixing the cause. Sanitized like the other `/code-review`
+/// replies: the reason carries a build error.
 fn code_review_unavailable_message(reason: Option<&str>) -> String {
-    format!(
+    crate::agent::Agent::sanitize_text(&format!(
         "{}; {CODE_REVIEW_RESTART_HINT}",
         reason.unwrap_or(CODE_REVIEW_UNAVAILABLE)
-    )
+    ))
 }
 /// What the transcript says when the confirmation is answered with 'c' or 'Esc'.
 const CODE_REVIEW_CANCELLED: &str = "code review cancelled; nothing was sent to any model.";
