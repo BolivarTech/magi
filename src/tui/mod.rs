@@ -9296,6 +9296,46 @@ end"
     }
 
     #[test]
+    fn every_review_flag_is_applied_refused_or_named_inert() {
+        // [MAGI §6 MS2 E loop 2] `TUI_INERT_FLAGS` is a hand-kept list: a flag added to
+        // `CodeReviewArgs` that the TUI neither applies nor names would be ignored in silence.
+        use clap::Args as _;
+        // What `parse_tui_code_review` applies: the review input (`review_input_of`) and the total.
+        const APPLIED: [&str; 8] = [
+            "path",
+            "commit",
+            "from",
+            "to",
+            "base",
+            "head",
+            "uncommitted",
+            "timeout",
+        ];
+        let command = crate::CodeReviewArgs::augment_args(clap::Command::new("code-review"));
+        let ids: Vec<String> = command
+            .get_arguments()
+            .map(|a| a.get_id().as_str().to_string())
+            .collect();
+        let inert: Vec<&str> = TUI_INERT_FLAGS.iter().map(|(id, _)| *id).collect();
+        for id in &ids {
+            let known = APPLIED.contains(&id.as_str())
+                || inert.contains(&id.as_str())
+                || id == TUI_WORKDIR_ARG;
+            assert!(
+                known,
+                "`{id}` is neither applied, refused nor named inert by the TUI"
+            );
+        }
+        // And the other way: a renamed flag must not leave a stale entry that names nothing.
+        for id in APPLIED.iter().chain(&inert).chain(&[TUI_WORKDIR_ARG]) {
+            assert!(
+                ids.iter().any(|i| i == id),
+                "`{id}` is not a code-review flag"
+            );
+        }
+    }
+
+    #[test]
     fn an_unavailable_review_message_is_sanitized_like_its_siblings() {
         // [MAGI §6 MS2 E loop 2] the parse-error and plan-error replies pass through
         // `Agent::sanitize_text`; the unavailable reply carries a build error too.
