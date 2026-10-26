@@ -860,6 +860,8 @@ fn gate_code(
             tracing::event!(
                 target: LOG_TARGET,
                 tracing::Level::WARN,
+                file = file,
+                line = line,
                 error = error.as_str(),
                 "the gate could not read the code of a finding"
             );
