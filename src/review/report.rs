@@ -80,7 +80,7 @@ pub struct ReviewSummary {
     pub ungrouped_unlocated: usize,
 }
 
-/// The metrics of one completed batch.
+/// The metrics of one batch that ran (completed or not).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BatchMetrics {
     /// Zero-based batch index.
