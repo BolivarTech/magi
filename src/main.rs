@@ -22748,6 +22748,8 @@ mod code_review_surface_tests {
                 path: "a".into(),
                 limit: 1,
             },
+            // [MAGI §6 MS2 E loop 2]
+            ReviewError::NotRegularFile("a".into()),
         ] {
             assert_eq!(review_error_exit(&e), 2, "{e}");
         }
@@ -22755,6 +22757,11 @@ mod code_review_surface_tests {
             ReviewError::GitOutputTooLarge { limit: 1 },
             ReviewError::Consolidation("x".into()),
             ReviewError::EgressSecret { path: "a".into() },
+            // [MAGI §6 MS2 E loop 2]
+            ReviewError::PlanChanged {
+                approved: 2,
+                now: 3,
+            },
         ] {
             // [S1b2 loop 16]
             assert_eq!(review_error_exit(&e), 1, "{e}");
