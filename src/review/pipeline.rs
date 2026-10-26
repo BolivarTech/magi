@@ -11,7 +11,8 @@
 //! weight, in that order.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf, Prefix, MAIN_SEPARATOR_STR};
 use std::time::{Duration, Instant};
 
 use magi_core::reporting::MagiReport;
@@ -38,10 +39,6 @@ use crate::redact::redact_foreign_text;
 const LOG_TARGET: &str = "magi_rs::review";
 /// Why a batch did not run, or stopped, when its wall clock ran out.
 const CLOCK_EXPIRED: &str = "clock expired";
-/// Windows' verbatim path prefix, which a reported location never carries.
-const VERBATIM_PREFIX: &str = r"\\?\";
-/// What follows [`VERBATIM_PREFIX`] in a verbatim UNC path (`\\?\UNC\srv\share`).
-const VERBATIM_UNC: &str = r"UNC\";
 /// The prefix of a UNC path as an editor writes it (`\\srv\share`).
 const UNC_PREFIX: &str = r"\\";
 
@@ -856,16 +853,28 @@ fn gate_code(
 
 /// `path` without Windows' verbatim prefix, so a reported absolute location compares with the
 /// workspace as an editor writes it: `\\?\C:\w` becomes `C:\w` and `\\?\UNC\srv\share\w` becomes
-/// `\\srv\share\w`. Any other path is returned as it is.
+/// `\\srv\share\w`. Any other path (a volume GUID path, a device path, any path off Windows) is
+/// returned as it is. It works on the path's components, so a component that is not Unicode
+/// keeps every unit it had. O(components).
 fn without_verbatim_prefix(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    match text.strip_prefix(VERBATIM_PREFIX) {
-        Some(rest) => match rest.strip_prefix(VERBATIM_UNC) {
-            Some(share) => PathBuf::from(format!("{UNC_PREFIX}{share}")),
-            None => PathBuf::from(rest),
-        },
-        None => path.to_path_buf(),
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut head = OsString::new();
+    match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => head.push(format!("{}:", char::from(letter))),
+        Prefix::VerbatimUNC(server, share) => {
+            head.push(UNC_PREFIX);
+            head.push(server);
+            head.push(MAIN_SEPARATOR_STR);
+            head.push(share);
+        }
+        _ => return path.to_path_buf(),
     }
+    let mut out = PathBuf::from(head);
+    out.extend(components);
+    out
 }
 
 #[cfg(test)]
