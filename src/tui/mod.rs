@@ -1409,8 +1409,9 @@ const CODE_REVIEW_COMMAND: &str = "/code-review";
 ///
 /// The words after the command go through the subcommand's own clap arguments
 /// ([`crate::CodeReviewArgs`]), so the TUI accepts exactly the flags of `magi code-review`; the
-/// program name clap reads first is the command itself, never a path. Words are split on spaces,
-/// so a path with spaces cannot be written here. The output, log and tier flags parse and are
+/// program name clap reads first is the command itself, never a path. Words are split as a
+/// shell would ([`command_words`]): a path with spaces is written in quotes. The output, log and
+/// tier flags parse and are
 /// not applied (the report goes to the transcript); the command names them so the confirmation
 /// says so. `-w` is refused: the TUI reviews its own session's workspace.
 ///
@@ -1423,7 +1424,7 @@ const CODE_REVIEW_COMMAND: &str = "/code-review";
 /// # Errors
 /// [`TuiCodeReviewParseError::NotACodeReviewCommand`] for any other line;
 /// [`TuiCodeReviewParseError::Invalid`] with clap's first line for arguments that do not parse,
-/// or with a fixed message for `-w`.
+/// or with a fixed message for `-w` or an unbalanced quote.
 pub(crate) fn parse_tui_code_review(
     trimmed: &str,
 ) -> Result<TuiCodeReviewCommand, TuiCodeReviewParseError> {
@@ -1433,7 +1434,8 @@ pub(crate) fn parse_tui_code_review(
         _ => return Err(TuiCodeReviewParseError::NotACodeReviewCommand),
     };
     let program = CODE_REVIEW_COMMAND.trim_start_matches('/');
-    let argv = std::iter::once(program).chain(rest.split_whitespace());
+    let words = command_words(rest).map_err(TuiCodeReviewParseError::Invalid)?;
+    let argv = std::iter::once(program.to_string()).chain(words);
     let invalid = |e: clap::Error| {
         let text = e.to_string();
         TuiCodeReviewParseError::Invalid(text.lines().next().unwrap_or_default().to_string())
@@ -1457,6 +1459,48 @@ pub(crate) fn parse_tui_code_review(
         timeout: args.timeout,
         ignored_flags,
     })
+}
+
+/// Why [`command_words`] refused a line: a quote opened and never closed.
+const UNBALANCED_QUOTE: &str = "unbalanced quote: close it, or remove it";
+
+/// Splits the arguments of a TUI command into words, as a shell groups them for the
+/// subcommand: whitespace separates words, and a run between double or single quotes is part
+/// of the word with the quotes removed, so a path with spaces is one argument. A quote of the
+/// other kind inside a quoted run is a plain character. A backslash is never an escape:
+/// Windows paths are written as they are.
+///
+/// Complexity: O(len of `text`).
+///
+/// # Arguments
+/// * `text` - What follows the command word.
+///
+/// # Returns
+/// The words, in order.
+///
+/// # Errors
+/// [`UNBALANCED_QUOTE`] when a quote is not closed.
+fn command_words(text: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote: Option<char> = None;
+    for c in text.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.get_or_insert_with(String::new).push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                word.get_or_insert_with(String::new);
+            }
+            None if c.is_whitespace() => words.extend(word.take()),
+            None => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    if quote.is_some() {
+        return Err(UNBALANCED_QUOTE.to_string());
+    }
+    words.extend(word);
+    Ok(words)
 }
 
 /// The confirmation text for `batches` batches and a worst case of `worst_case_secs`, labelled
