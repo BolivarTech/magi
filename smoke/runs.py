@@ -568,6 +568,13 @@ ENVELOPE_FLAGS = ("--input-format", "json")
 _ENVELOPE_SYSTEM = "Answer in as few words as you can."
 
 
+#: The batch constants below DUPLICATE the product's on purpose (the harness
+#: reads no Rust): ``BYTES_PER_TOKEN``, ``DEFAULT_UNMEASURED_WINDOW_TOKENS`` and
+#: ``BATCH_WINDOW_FRACTION_PERCENT`` live in ``src/review/window.rs`` (the
+#: unmeasured window is also referenced from ``src/defaults.rs``). Change one
+#: side and the other must follow, or the generated input stops filling the
+#: batches S47 requires.
+#:
 #: The same heuristic the product uses to turn bytes into tokens (one token per
 #: four bytes). The batch arithmetic below is only as good as this number.
 BYTES_PER_TOKEN = 4
@@ -671,6 +678,34 @@ def review_input_files() -> tuple[tuple[str, bytes], ...]:
             "the generated review input is %d tokens, under the %d needed for "
             "%d batches" % (tokens, needed, REVIEW_MIN_BATCHES))
     return tuple(files)
+
+
+def review_gen_line_counts() -> dict[str, int]:
+    """Line count of each generated review file, by workspace-relative path.
+
+    Complexity: ``O(total bytes)``.
+
+    Returns:
+        dict: ``{path: lines}``; a line number in ``1..lines`` points inside
+        the file, anything else points outside it.
+
+    Raises:
+        HarnessError: If the generated input cannot fill the batches.
+    """
+    return {path: body.count(b"\n") for path, body in review_input_files()}
+
+
+def review_workspace_root():
+    """The review workspace the review runs execute in.
+
+    Returns:
+        pathlib.Path: ``<scratch>/review-ws``. It holds the run's own
+        ``.magi/logs``, rebuilt by every review run.
+
+    Raises:
+        HarnessError: If :func:`configure` has not run.
+    """
+    return scratch_root() / REVIEW_WORKSPACE_DIR
 
 
 def verify_visible(workspace, paths) -> None:
@@ -1122,8 +1157,15 @@ class RunExecutor:
         if REVIEW_WORKSPACE_TOKEN not in definition.argv:
             return None
         workspace = self._review_workspace()
+        scratch = pathlib.Path(self._env.scratch_dir).resolve()
         try:
             if workspace.exists():
+                # The tree is deleted wholesale: only a path that resolves
+                # strictly under the scratch area may go.
+                if scratch not in workspace.resolve().parents:
+                    raise HarnessError(
+                        "refusing to delete %s: it resolves outside the "
+                        "scratch area %s" % (workspace, scratch))
                 shutil.rmtree(workspace)
             workspace.mkdir(parents=True)
             shutil.copytree(self._env.magi_dir, workspace / ".magi")

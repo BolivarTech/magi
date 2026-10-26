@@ -325,7 +325,7 @@ figures are written here when they exist.
 
 ### The code-review scenarios (v0.25.0)
 
-S47 to S50 add twelve assertions (6 + 2 + 2 + 2). The harness now promises 50 scenarios and 149
+S47 to S50 add thirteen assertions (6 + 2 + 2 + 3). The harness now promises 50 scenarios and 150
 assertions.
 
 | Id | Invariant | Without its environment |
@@ -333,7 +333,7 @@ assertions.
 | S47 | `code-review gen` over a generated tree that plans at least three batches exits 0, prints a JSON document with `code_review.batches_planned` of at least 3 and one `consult.consensus`, keeps every located main finding inside the generated files, and gives every discarded finding a cause | `CANNOT_TEST` with no reachable backend. Fewer than three batches is `CANNOT_TEST` when every model of the pool measured a window (the input is sized for the 32 768-token default of an unmeasured model), else `FAIL`. No located finding, or nothing discarded, is `CANNOT_TEST`: a real trio cannot be forced to invent a location. A missing `findings` or `discarded` key is `FAIL`, never an empty list that passes |
 | S48 | a path outside the workspace exits 2 and `stderr` says so | none: the refusal comes before any model is reached |
 | S49 | a directory holding only a binary and a file with a key-shaped toy secret exits 2 and `stderr` says there is nothing to review | none |
-| S50 | `--timeout 30 --log-level error` over the S47 tree exits 2 and `stderr` names the 15 s floor and a minimum `--timeout`. The numbers are the product's formula and are not compared | none |
+| S50 | `--timeout 30 --log-level error` over the S47 tree exits 2, `stderr` names the batches (at least three), the per-batch ceiling, the 15 s floor and a minimum `--timeout` above the 30 s asked for, and the review workspace's run log holds a line with this run's id and that same text. The numbers are the product's formula and are only range-checked | none. A run that published no run id, or a missing log directory, is `CANNOT_TEST` for the log half |
 
 **How the input exists.** A review reads files from disk, and the product leaves out whatever
 `.gitignore` excludes when it reviews a directory inside a git repository. The environment's own

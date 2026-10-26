@@ -68,7 +68,10 @@ DECLARED_SCENARIO_COUNT = 50
 #: and caused discards; a path outside the workspace, a directory of only
 #: skipped files and a too-short --timeout are each refused with exit 2),
 #: v0.25.0. The scenario count goes 46 -> 50 with them.
-DECLARED_ASSERTION_COUNT = 149
+#:
+#: 150 on 2026-10-25: S50 gains a third assertion, the refusal in the run log
+#: (RV-S7 asks for stderr AND the run log), v0.25.0.
+DECLARED_ASSERTION_COUNT = 150
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

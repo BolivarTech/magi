@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 from smoke import runs
 from smoke.errors import HarnessError
@@ -168,6 +169,29 @@ class ReviewWorkspaceTests(unittest.TestCase):
             (workspace / "stale.rs").write_text("x", encoding="utf-8")
             executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
             self.assertFalse((workspace / "stale.rs").exists())
+
+    def test_a_workspace_resolving_outside_the_scratch_area_is_not_deleted(self) -> None:
+        # [MAGI §6 MS2 F loop 2] rmtree runs only on a path strictly under the scratch area.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            (root / "scratch").mkdir()
+            outside = root / "elsewhere"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(runs, "REVIEW_WORKSPACE_DIR", "../elsewhere"):
+                with self.assertRaises(HarnessError):
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertTrue((outside / "keep.txt").is_file())
+
+
+class ReviewLineCountTests(unittest.TestCase):
+
+    def test_the_line_counts_match_the_generated_bytes(self) -> None:
+        counts = runs.review_gen_line_counts()
+        self.assertEqual(set(runs.REVIEW_GEN_PATHS), set(counts))
+        for path, body in runs.review_input_files():
+            self.assertEqual(len(body.decode("utf-8").splitlines()), counts[path])
 
 
 if __name__ == "__main__":

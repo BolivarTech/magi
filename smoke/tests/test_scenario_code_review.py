@@ -4,24 +4,53 @@
 """Unit tests for S47-S50 (code-review against the release binary)."""
 
 import json
+import pathlib
+import tempfile
+import types
 import unittest
 
+from smoke import runs
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
 from smoke.registry import DEFAULT_REGISTRY
 from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
 
-def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"") -> RunResult:
+def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"", timed_out: bool = False) -> RunResult:
     """A real ``RunResult`` for *run_id* whose stdout is *document* serialised (``None`` → empty stdout)."""
     body = b"" if document is None else json.dumps(document).encode()
     return RunResult(run_id=run_id,
                      output=ProductOutput(stdout=body, stderr=stderr, exit_code=exit_code, command=["magi-rs"]),
-                     duration_s=1.0, timed_out=False, planted=())
+                     duration_s=1.0, timed_out=timed_out, planted=())
 
 
-def _outcomes(scenario_id: str, result) -> dict[str, Outcome]:
-    return {f.assertion: f.outcome for f in DEFAULT_REGISTRY.get(scenario_id).func(result)}
+RUN_ID = "4242-0123456789abcdef"
+_BUDGET_MSG = (b"5 batches leave 6 s per batch, less than the 783 s a batch needs at the 15 s floor "
+               b"(per-batch ceiling 0 s); pass --timeout 2349 or more")
+_NL = bytes([10])
+_BUDGET_STDERR = b"error: " + _BUDGET_MSG + _NL
+#: One run-log line of the refusal; ``%s`` is the run id.
+_BUDGET_LOG = b'ERROR run=%s target=magi_rs::code_review ' + _BUDGET_MSG + _NL
+
+
+def _with_id(tail: bytes) -> bytes:
+    """Stderr as the product prints it: the ``run: <id>`` line, then *tail*."""
+    return b"run: " + RUN_ID.encode() + _NL + tail
+
+
+def _outcomes(scenario_id: str, result, log=b"") -> dict[str, Outcome]:
+    """Outcomes of *scenario_id*; *log* is the review workspace's run-log file (``None``: no directory)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = pathlib.Path(tmp)
+        if log is not None:
+            logs = scratch / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            logs.mkdir(parents=True)
+            (logs / "2026-10-25.log").write_bytes(log)
+        runs.configure(None, types.SimpleNamespace(scratch_dir=scratch, prepare_scratch=lambda: None), None)
+        try:
+            return {f.assertion: f.outcome for f in DEFAULT_REGISTRY.get(scenario_id).func(result)}
+        finally:
+            runs.reset_for_test()
 
 
 def _review(batches: int = 3, findings=None, discarded=None) -> dict:
@@ -91,13 +120,66 @@ class CodeReviewScenarioTests(unittest.TestCase):
         r = _result("R14", 2, None, b"error: nothing to review: no reviewable file in the input\n")
         self.assertEqual({Outcome.PASS}, set(_outcomes("S49", r).values()))
 
-    def test_s50_passes_when_the_floor_and_a_minimum_timeout_are_named(self) -> None:
-        r = _result("R15", 2, None, b"error: 3 batches leave 10 s per batch, less than the 783 s a batch needs at the 15 s floor (per-batch ceiling 0 s); pass --timeout 2349 or more\n")
-        self.assertEqual({Outcome.PASS}, set(_outcomes("S50", r).values()))
+    def test_s50_passes_when_stderr_and_the_run_log_carry_the_refusal(self) -> None:
+        # [MAGI §6 MS2 F loop 2] RV-S7: stderr AND the run log, naming batches, ceiling, floor and minimum.
+        log = _BUDGET_LOG % RUN_ID.encode()
+        r = _result("R15", 2, None, _with_id(_BUDGET_STDERR))
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S50", r, log=log).values()))
 
-    def test_s50_fails_without_a_minimum(self) -> None:
-        r = _result("R15", 2, None, b"error: below the 15 s floor\n")
+    def test_s50_fails_without_a_minimum_or_a_ceiling_on_stderr(self) -> None:
+        for text in (b"error: below the 15 s floor" + _NL,
+                     b"error: 5 batches leave 6 s per batch, less than the 783 s a batch needs at the 15 s floor; "
+                     b"pass --timeout 2349 or more" + _NL):
+            r = _result("R15", 2, None, _with_id(text))
+            self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=_BUDGET_LOG % RUN_ID.encode())[
+                code_review.S50_ASSERTIONS[1]], text)
+
+    def test_s50_fails_when_the_minimum_does_not_exceed_the_total_asked_for(self) -> None:
+        text = _BUDGET_STDERR.replace(b"--timeout 2349", b"--timeout 30")
+        r = _result("R15", 2, None, _with_id(text))
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
+
+    def test_s50_fails_when_the_floor_is_not_the_15_s_one(self) -> None:
+        text = _BUDGET_STDERR.replace(b"the 15 s floor", b"the 20 s floor")
+        r = _result("R15", 2, None, _with_id(text))
+        self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
+
+    def test_s50_fails_when_the_run_log_has_no_refusal_for_this_run(self) -> None:
+        r = _result("R15", 2, None, _with_id(_BUDGET_STDERR))
+        other = b"run=" + RUN_ID.encode() + b" ERROR something else" + _NL
+        for log in (b"", _BUDGET_LOG % b"1-0000000000000000", other):
+            self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=log)[code_review.S50_ASSERTIONS[2]], log)
+
+    def test_s50_fails_when_the_log_line_differs_from_stderr(self) -> None:
+        r = _result("R15", 2, None, _with_id(_BUDGET_STDERR))
+        log = (_BUDGET_LOG % RUN_ID.encode()).replace(b"2349", b"9999")
+        self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=log)[code_review.S50_ASSERTIONS[2]])
+
+    def test_s50_cannot_test_the_log_without_a_run_id_or_a_log_directory(self) -> None:
+        r = _result("R15", 2, None, _BUDGET_STDERR)
+        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S50", r, log=_BUDGET_LOG % RUN_ID.encode())[
+            code_review.S50_ASSERTIONS[2]])
+        r = _result("R15", 2, None, _with_id(_BUDGET_STDERR))
+        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S50", r, log=None)[code_review.S50_ASSERTIONS[2]])
+
+    def test_s47_fails_on_a_line_outside_the_generated_file(self) -> None:
+        # [MAGI §6 MS2 F loop 2] RV09: an out-of-range line in the main list is a defect, not just a bad file.
+        count = runs.review_gen_line_counts()["gen/a.rs"]
+        ok = _result("R12", 0, _review(3, [{"file": "gen/a.rs", "line": count}]))
+        self.assertEqual(Outcome.PASS, _outcomes("S47", ok)[code_review.S47_ASSERTIONS[4]])
+        for bad in (count + 1, 0, -3, "7", True):
+            r = _result("R12", 0, _review(3, [{"file": "gen/a.rs", "line": bad}]))
+            self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]], bad)
+
+    def test_s47_fails_on_a_findings_entry_that_is_not_an_object(self) -> None:
+        r = _result("R12", 0, _review(3, [{"file": "gen/a.rs", "line": 1}, "gen/a.rs:1"]))
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]])
+
+    def test_s47_leaves_a_timed_out_run_to_the_runner(self) -> None:
+        # The runner turns a timed-out run into CANNOT_TEST (runner.py) for every scenario that does not
+        # declare inspects_timeouts; S47 must not declare it, or a slow trio would read as a FAIL.
+        for sid in ("S47", "S48", "S49", "S50"):
+            self.assertFalse(DEFAULT_REGISTRY.get(sid).inspects_timeouts, sid)
 
     def test_s47_without_the_findings_key_fails_never_an_empty_pass(self) -> None:
         doc = _review(3)

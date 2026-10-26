@@ -27,7 +27,7 @@ records every body.
 
 import re
 
-from smoke import runs
+from smoke import logs, runs
 from smoke.errors import ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
@@ -43,7 +43,11 @@ S47_ASSERTIONS = (
 )
 S48_ASSERTIONS = ("exit 2", "stderr names the outside path")
 S49_ASSERTIONS = ("exit 2", "stderr says nothing to review")
-S50_ASSERTIONS = ("exit 2", "stderr names the 15 s floor and a minimum --timeout")
+S50_ASSERTIONS = (
+    "exit 2",
+    "stderr names the batches, the per-batch ceiling, the 15 s floor and a minimum --timeout",
+    "the run log carries the same refusal",
+)
 
 #: Exit codes of a successful run and of CLI misuse.
 EXIT_OK = 0
@@ -65,11 +69,19 @@ OUTSIDE_WORKSPACE_TEXT = "outside the workspace"
 NOTHING_TO_REVIEW_TEXT = "nothing to review"
 
 #: The floor of a per-batch ceiling in seconds
-#: (``AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS``), the phrase S50 looks for, and the
-#: shape of the minimum it must name.
+#: (``AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`` = ``MIN_OPERATION_BUDGET`` 10 s +
+#: ``MIN_CLIENT_TIMEOUT`` 5 s in ``src/magi/mod.rs``).
 FLOOR_SECS = 15
-FLOOR_TEXT = "%d s floor" % FLOOR_SECS
-MINIMUM_TIMEOUT_PATTERN = re.compile(r"--timeout\s+\d+")
+
+#: The product's refusal, as ``ReviewError::Budget`` renders it
+#: (``src/review/error.rs``): batches, wall clock per batch, the wall clock a
+#: batch needs at the floor, the floor, the per-batch ceiling and the smallest
+#: ``--timeout``. The numbers come from the product's formula and are only
+#: range-checked; the fields are what RV-S7 requires.
+BUDGET_PATTERN = re.compile(
+    r"(?P<batches>\d+) batches leave \d+ s per batch, less than the \d+ s a "
+    r"batch needs at the (?P<floor>\d+) s floor \(per-batch ceiling "
+    r"(?P<ceiling>\d+) s\); pass --timeout (?P<minimum>\d+) or more")
 
 
 def _finding(texts, index, outcome, run_id, detail=""):
@@ -216,22 +228,47 @@ def _locations_finding(section, run_id):
         run_id: The shared run.
 
     Returns:
-        Finding: ``FAIL`` on a missing list or a file outside
-        :data:`S47_FILES`; ``CANNOT_TEST`` when no finding carries a file;
+        Finding: ``FAIL`` on a missing list, an entry that is not an object, a
+        file outside :data:`S47_FILES` or a ``line`` outside the generated
+        file's lines; ``CANNOT_TEST`` when no finding carries a file;
         otherwise ``PASS``. A finding without a file is unlocated, not invented.
     """
     findings, failure = _list_under(section, "findings")
     if findings is None:
         return _finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id, failure)
-    located = [f for f in findings
-               if isinstance(f, dict) and f.get("file") is not None]
+    if not all(isinstance(f, dict) for f in findings):
+        return _finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
+                        "code_review.findings holds an entry that is not an object")
+    located = [f for f in findings if f.get("file") is not None]
     if not located:
         return _finding(S47_ASSERTIONS, 4, Outcome.CANNOT_TEST, run_id,
                         "the trio reported no located finding, so there is "
                         "no location to check")
+    counts = runs.review_gen_line_counts()
     outside = [f.get("file") for f in located if f.get("file") not in S47_FILES]
-    return _verdict(S47_ASSERTIONS, 4, run_id, not outside,
-                    "findings point outside the reviewed files: %s" % outside)
+    if outside:
+        return _finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
+                        "findings point outside the reviewed files: %s" % outside)
+    beyond = [(f["file"], f.get("line")) for f in located
+              if not _line_inside(f.get("line"), counts[f["file"]])]
+    return _verdict(S47_ASSERTIONS, 4, run_id, not beyond,
+                    "findings point outside the lines of their file: %s" % beyond)
+
+
+def _line_inside(line, count):
+    """Whether a finding's ``line`` is absent or inside a file of *count* lines.
+
+    Args:
+        line: The ``line`` the product reported; ``None`` means unlocated.
+        count: Lines in the file.
+
+    Returns:
+        bool: ``True`` for ``None`` or an integer in ``1..count``; a boolean
+        or any non-integer is shape drift and is not inside.
+    """
+    if line is None:
+        return True
+    return isinstance(line, int) and not isinstance(line, bool) and 1 <= line <= count
 
 
 def _causes_finding(section, run_id):
@@ -332,10 +369,14 @@ def only_skipped_files_are_nothing_to_review(run):
 
 @scenario("S50", assertions=S50_ASSERTIONS, run="R15")
 def an_insufficient_timeout_is_refused_before_spending(run):
-    """Check that a too-short ``--timeout`` is refused naming floor and minimum.
+    """Check that a too-short ``--timeout`` is refused in stderr and the run log.
 
-    The numbers in the message come from the product's formula and are not
-    compared; only the floor text and the presence of a minimum are.
+    RV-S7: the refusal names the batches, the per-batch ceiling, the floor and
+    the smallest ``--timeout``, on stderr and in the run log. The numbers come
+    from the product's formula and are only range-checked: at least
+    :data:`MIN_BATCHES` batches, the 15 s floor, and a minimum above the total
+    the run asked for. The run log is the review workspace's own, and its line
+    must carry this run's id and the very text stderr showed.
 
     Args:
         run: R15's ``RunResult``, or ``None`` when the run produced no capture.
@@ -343,8 +384,71 @@ def an_insufficient_timeout_is_refused_before_spending(run):
     Yields:
         Finding: One per entry of :data:`S50_ASSERTIONS`, in that order.
     """
-    yield from _refusal(
-        S50_ASSERTIONS, "R15", run,
-        lambda text: FLOOR_TEXT in text
-        and bool(MINIMUM_TIMEOUT_PATTERN.search(text)),
-        "stderr does not name the %s and a minimum --timeout" % FLOOR_TEXT)
+    if run is None:
+        yield from _all_cannot_test(
+            S50_ASSERTIONS, "R15", "run R15 produced no capture to inspect")
+        return
+    code = run.output.exit_code
+    yield _verdict(S50_ASSERTIONS, 0, "R15", code == EXIT_MISUSE,
+                   "exited %d, expected %d" % (code, EXIT_MISUSE))
+    match = BUDGET_PATTERN.search(_stderr_text(run))
+    yield _verdict(S50_ASSERTIONS, 1, "R15", _budget_fields_ok(match),
+                   "stderr does not carry the budget refusal with at least %d "
+                   "batches, the %d s floor and a minimum --timeout above %d"
+                   % (MIN_BATCHES, FLOOR_SECS, runs.REVIEW_TOO_SHORT_TIMEOUT_S))
+    yield _run_log_finding(run, match)
+
+
+def _budget_fields_ok(match):
+    """Whether a parsed refusal names sane batches, floor and minimum.
+
+    Args:
+        match: The :data:`BUDGET_PATTERN` match, or ``None``.
+
+    Returns:
+        bool: ``True`` for at least :data:`MIN_BATCHES` batches, the
+        :data:`FLOOR_SECS` floor and a minimum above the total the run asked for.
+    """
+    return (match is not None
+            and int(match.group("batches")) >= MIN_BATCHES
+            and int(match.group("floor")) == FLOOR_SECS
+            and int(match.group("minimum")) > runs.REVIEW_TOO_SHORT_TIMEOUT_S)
+
+
+def _run_log_finding(run, match):
+    """Judge that the run log holds the refusal stderr showed.
+
+    Args:
+        run: R15's ``RunResult``.
+        match: The :data:`BUDGET_PATTERN` match on stderr, or ``None``.
+
+    Returns:
+        Finding: ``CANNOT_TEST`` without a run id or a log directory (nothing
+        to search, not a verdict); ``PASS`` when a line carries ``run=<id>``
+        and the refusal (the text stderr showed, when it matched); else ``FAIL``.
+    """
+    run_id = logs.resolve_id(run.output)
+    if run_id is None:
+        return _finding(S50_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R15",
+                        "the run published no run id, so its log lines cannot be told apart")
+    directory = runs.review_workspace_root().joinpath(*logs.LOG_DIR_PARTS)
+    needle = ("run=%s" % run_id).encode("utf-8")
+    exact = match.group(0).encode("utf-8") if match else None
+
+    def matcher(data):
+        for line in data.split(b"\n"):
+            if needle not in line:
+                continue
+            if exact is not None and exact in line:
+                return True
+            if exact is None and BUDGET_PATTERN.search(line.decode("utf-8", errors="replace")):
+                return True
+        return None
+
+    found, existed, _ = logs.scan(matcher, directory)
+    if not existed:
+        return _finding(S50_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R15",
+                        "%s does not exist, so there is no run log to search" % directory)
+    return _verdict(S50_ASSERTIONS, 2, "R15", bool(found),
+                    "no line of the run log under %s carries run=%s and the budget refusal"
+                    % (directory, run_id))
