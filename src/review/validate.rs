@@ -438,6 +438,32 @@ mod tests {
     }
 
     #[test]
+    fn single_backticks_nested_in_a_longer_span_are_not_citations() {
+        // [MAGI MS2 S6 loop 2, C] a span closes only on a run of its own length, so what lies
+        // inside a doubled or tripled span is literal text.
+        assert!(cited_identifiers("`` a `b` c ``").is_empty());
+        assert!(cited_identifiers("``` x `` y `z` ```").is_empty());
+        assert_eq!(
+            cited_identifiers("`` a `b` c `` then `d`"),
+            vec!["d".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_longer_run_is_literal_and_later_singles_still_pair() {
+        // No run of the same length closes it, so `` is plain text, as in CommonMark.
+        assert_eq!(cited_identifiers("`` a `b` c"), vec!["b".to_string()]);
+        assert_eq!(cited_identifiers("``` a `` `b`"), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn a_single_span_holding_a_doubled_run_is_one_span() {
+        // The doubled run inside does not close it, and its content is no identifier.
+        assert!(cited_identifiers("`a ``b`` c` and ok").is_empty());
+        assert_eq!(cited_identifiers("`a ``b`` c` `e`"), vec!["e".to_string()]);
+    }
+
+    #[test]
     fn a_qualified_citation_is_checked_by_its_last_segment_against_every_identifier_in_the_code() {
         // [CP2 MS2 S1 loop 1] the corpus is every identifier, so a called dependency method is known.
         let code = "fn real() { let v = Vec::new(); self.helper(v); }\nfn helper(_: Vec<u8>) {}\n";
