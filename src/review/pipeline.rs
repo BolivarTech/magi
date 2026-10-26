@@ -2286,6 +2286,28 @@ mod tests {
         assert_eq!(out.summary.judged_fraction, 1.0);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn dropping_a_verbatim_prefix_keeps_a_path_that_is_not_unicode() {
+        // [MAGI §6 MS2 D loop 2] a Windows path may hold an unpaired surrogate; the prefix goes,
+        // every other unit stays as it was (no U+FFFD), and a volume GUID path is left alone.
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let mut raw = wide(r"\\?\C:\w\");
+        raw.push(0xD800);
+        let got = without_verbatim_prefix(Path::new(&OsString::from_wide(&raw)));
+        let mut want = wide(r"C:\w\");
+        want.push(0xD800);
+        assert_eq!(got.as_os_str().encode_wide().collect::<Vec<u16>>(), want);
+        let volume = r"\\?\Volume{00000000-0000-0000-0000-000000000000}\w";
+        assert_eq!(
+            without_verbatim_prefix(Path::new(volume)),
+            Path::new(volume)
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn a_verbatim_prefix_is_dropped_from_a_drive_and_from_a_unc_path() {
         // Windows canonicalizes to `\\?\C:\..` and `\\?\UNC\srv\share\..`; a mage reports the
@@ -2300,6 +2322,7 @@ mod tests {
         assert_eq!(plain("/w"), "/w");
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_unc_location_under_a_verbatim_unc_workspace_is_reviewed() {
         // The workspace the validator gets and the location a mage writes name the same file.
