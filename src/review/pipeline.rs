@@ -2074,7 +2074,9 @@ mod tests {
         );
         let v = crate::review::report::summary_json(&out.summary);
         assert_eq!(v["failed_batches"][0][0], 1, "{v}");
-        assert_eq!(v["batches"][0]["index"], 2, "{v}");
+        // [MAGI §6 MS2 D loop 2] the failed batch ran too: it has its metrics, numbered 1.
+        assert_eq!(v["batches"][0]["index"], 1, "{v}");
+        assert_eq!(v["batches"][1]["index"], 2, "{v}");
     }
 
     #[tokio::test]
