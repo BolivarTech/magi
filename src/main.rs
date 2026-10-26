@@ -2425,6 +2425,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
             Arc::clone(runner),
             code_review_auto_approve(&magi_config),
             None,
+            magi_config.effective_tool_result_cap(),
         ),
         Err(text) => startup_notices.push(Notice::warn(text.clone())),
     }
@@ -4896,13 +4897,17 @@ fn register_decide_tool_if_available(
 /// * `auto_approve` - `[code_review].auto_approve`.
 /// * `run_deadline` - The calling run's deadline: `None` in the TUI, the `--timeout` deadline in
 ///   `magi query` (see [`run_deadline`]), so a review run as a tool gets only what is left.
+/// * `output_cap` - `MagiConfig::effective_tool_result_cap()`: the bound of what the agent reads,
+///   the same one `consult`'s tool result honors.
 fn register_code_review_tool(
     agent: &mut Agent,
     runner: Arc<dyn crate::tools::code_review::CodeReviewRunner>,
     auto_approve: bool,
     run_deadline: Option<std::time::Instant>,
+    output_cap: usize,
 ) {
-    let tool = crate::tools::code_review::CodeReviewTool::new(runner, auto_approve);
+    let tool = crate::tools::code_review::CodeReviewTool::new(runner, auto_approve)
+        .with_output_cap(output_cap);
     let tool = match run_deadline {
         Some(deadline) => tool.with_run_deadline(deadline),
         None => tool,
@@ -7401,6 +7406,7 @@ async fn run_query_subcommand(
             runner,
             code_review_auto_approve(&magi_config),
             run_deadline(std::time::Instant::now(), timeout),
+            magi_config.effective_tool_result_cap(),
         );
     }
     // SC-A04c/d: this route shares its single deadline with a forced/proactive consult
@@ -22584,6 +22590,7 @@ mod code_review_surface_tests {
             Arc::new(NoRun),
             false,
             Some(std::time::Instant::now()),
+            magi_rs::magi::TOOL_RESULT_CAP_BYTES,
         );
         assert!(agent.has_tool("code-review"));
         // [CP2 MS2 S2 loop 5] both surfaces call it: the TUI agent (`run`) and `magi query` (`run_query_subcommand`).

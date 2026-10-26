@@ -511,6 +511,18 @@ impl CodeReviewTool {
         self
     }
 
+    /// Bounds the result the agent reads to `cap` bytes (`MagiConfig::effective_tool_result_cap`,
+    /// the cap `consult`'s tool result honors).
+    ///
+    /// # Arguments
+    /// * `cap` - The byte cap.
+    ///
+    /// # Returns
+    /// The tool.
+    pub(crate) fn with_output_cap(self, _cap: usize) -> Self {
+        self
+    }
+
     /// The plan for `args`: the one the approval prompt computed for the same arguments (taken
     /// once), or a fresh one.
     fn plan_for(&self, args: &Value, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
@@ -909,6 +921,45 @@ mod tests {
                 deadline - std::time::Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS)
             )
         );
+    }
+
+    #[tokio::test]
+    async fn the_result_the_agent_reads_is_bounded_by_the_output_cap() {
+        // [MAGI §6 MS2 D loop 2] a review of many batches renders far more than the agent's
+        // context can take; the result honors the tool-result cap like `consult`'s does.
+        const CAP: usize = 4_096;
+        let finding = serde_json::json!({"file": "a.rs", "title": "x".repeat(2_000)});
+        let runner = Arc::new(FakeRunner {
+            text: "finding line
+"
+            .repeat(5_000),
+            json: Some(serde_json::json!({
+                "gate_states": {"kept": 50},
+                "findings": vec![finding.clone(); 50],
+                "filtered": vec![finding.clone(); 50],
+                "discarded": vec![finding.clone(); 50],
+                "symbol_unverified": vec![finding; 50],
+            })),
+            ..FakeRunner::default()
+        });
+        let t = CodeReviewTool::new(runner, true).with_output_cap(CAP);
+        let out = t
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("runs");
+        // Measured as `consult` measures its report: the text's bytes, plus the summary's JSON.
+        let size = out["report"].as_str().map_or(0, str::len)
+            + serde_json::to_string(&out["code_review"])
+                .expect("json")
+                .len();
+        assert!(size <= CAP, "{size} bytes over a {CAP}-byte cap");
+        assert!(out["report"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("finding line")));
+        assert_eq!(out["code_review"]["gate_states"]["kept"], 50);
     }
 
     #[tokio::test]
