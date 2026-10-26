@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 
+use super::scanner::{CodeScanner, LexicalRules};
 use super::{gap_units, lines_in_range, LanguageExtractor, SemanticUnit, UnitKind};
 use crate::review::context::FileContext;
 
@@ -100,6 +101,14 @@ struct PythonConstruct {
 
 /// Detect Python constructs using indentation.
 fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
+    let in_literal: Vec<bool> = CodeScanner::new(LexicalRules::python())
+        .scan_all(&lines.join(
+            "
+",
+        ))
+        .iter()
+        .map(|s| s.starts_in_literal)
+        .collect();
     let mut constructs = Vec::new();
     let mut i = 0;
 
@@ -112,7 +121,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         if (trimmed.starts_with("def ") || trimmed.starts_with("async def ")) && indent == 0 {
             let name = extract_python_name(trimmed, "def ");
             let start = scan_back_decorators(lines, i);
-            let end = find_block_end(lines, i);
+            let end = find_block_end(lines, &in_literal, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::Function,
                 name,
@@ -127,7 +136,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         if trimmed.starts_with("class ") && indent == 0 {
             let name = extract_python_name(trimmed, "class ");
             let start = scan_back_decorators(lines, i);
-            let end = find_block_end(lines, i);
+            let end = find_block_end(lines, &in_literal, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::Class,
                 name,
@@ -175,11 +184,13 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
     constructs
 }
 
-/// Words that open a statement which is never a module-level assignment: definitions, imports
-/// and the compound statements, whose `:` and `==` would otherwise read as an assignment.
+/// Words that open a statement which is never a module-level assignment: definitions, imports,
+/// the compound statements and the simple-statement keywords, whose `:`, `=` and `==` would
+/// otherwise read as an assignment.
 const NOT_ASSIGNMENT_WORDS: &[&str] = &[
     "def", "async", "class", "import", "from", "if", "elif", "else", "for", "while", "with", "try",
-    "except", "finally", "match", "case",
+    "except", "finally", "match", "case", "assert", "raise", "del", "global", "nonlocal", "return",
+    "yield", "await", "pass", "lambda", "not",
 ];
 
 /// Whether an unindented, trimmed line is a module-level assignment (`X = 1`, `x: int = 1`):
@@ -202,16 +213,30 @@ fn indentation(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
-/// Find the end of a Python indented block.
-fn find_block_end(lines: &[&str], def_line: usize) -> usize {
+/// Find the end of a Python indented block: the last line before the first code line indented
+/// no deeper than the definition.
+///
+/// As in Python's own tokenizer, a comment-only line and a line that starts inside a
+/// triple-quoted string never end the block (`in_literal[j]` is the scanner's
+/// [`super::scanner::ScannedLine::starts_in_literal`]). A string line extends the block; an
+/// unindented comment does not, so a comment between two definitions stays outside both.
+/// O(n) in the lines after `def_line`.
+fn find_block_end(lines: &[&str], in_literal: &[bool], def_line: usize) -> usize {
     let def_indent = lines.get(def_line).map_or(0, |line| indentation(line));
     let mut end = def_line;
     for (j, line) in lines.iter().enumerate().skip(def_line + 1) {
+        if in_literal.get(j).copied().unwrap_or(false) {
+            end = j;
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue; // blank lines inside block
         }
         let ind = indentation(line);
+        if trimmed.starts_with('#') && ind <= def_indent {
+            continue;
+        }
         if ind <= def_indent {
             break;
         }

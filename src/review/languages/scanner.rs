@@ -192,6 +192,9 @@ pub struct ScannedLine {
     /// code. A line that starts in code is `false` even when it is all comment (`// note`):
     /// keyword detection does not need to skip it, since no keyword opens with a comment.
     pub is_non_code: bool,
+    /// `true` when the line starts inside a multi-line comment or string, whether or not it
+    /// returns to code: its leading whitespace is literal text, not indentation.
+    pub starts_in_literal: bool,
 }
 
 /// Context-aware source code scanner.
@@ -493,6 +496,7 @@ impl CodeScanner {
             brace_delta: delta,
             depth_after: self.depth,
             is_non_code,
+            starts_in_literal: !was_code_at_start,
         }
     }
 
