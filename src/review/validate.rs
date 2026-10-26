@@ -4,6 +4,7 @@
 
 //! Deterministic validation of the findings a batch returned (REQ-RV09).
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use magi_core::schema::{AgentName, AgentOutput, Finding, Severity};
@@ -64,8 +65,11 @@ fn is_citation(s: &str) -> bool {
 }
 
 /// The code spans of `text` that look like a symbol: identifiers joined by `::` or `.`, between a
-/// pair of single backticks (`Baz::qux`, `self.helper`). A run of two or more backticks is never
-/// a delimiter, so ``` ``x`` ``` is not a citation.
+/// pair of single backticks (`Baz::qux`, `self.helper`). Spans follow CommonMark: a run of
+/// backticks opens a span that only the next run of the same length closes, and everything in
+/// between is literal. So only a single-backtick span can be a citation (``` ``x`` ``` is not),
+/// single backticks nested inside a longer span (``` `` a `b` c `` ```) never pair, and a run
+/// that nothing closes is plain text, after which later runs may still open spans.
 ///
 /// Complexity: O(len of `text`).
 pub(crate) fn cited_identifiers(text: &str) -> Vec<String> {
@@ -80,17 +84,28 @@ pub(crate) fn cited_identifiers(text: &str) -> Vec<String> {
             _ => runs.push((pos, 1)),
         }
     }
+    // For each run, the index of the next run of the same length: its closer, if any.
+    let mut closer = vec![None; runs.len()];
+    let mut next_of_len: HashMap<usize, usize> = HashMap::new();
+    for (i, &(_, len)) in runs.iter().enumerate().rev() {
+        if let Some(slot) = closer.get_mut(i) {
+            *slot = next_of_len.insert(len, i);
+        }
+    }
     let mut cited = Vec::new();
     let mut i = 0;
     while let Some(&(open, open_len)) = runs.get(i) {
-        match runs.get(i + 1) {
-            Some(&(close, close_len)) if open_len == 1 && close_len == 1 => {
-                if let Some(span) = text.get(open + 1..close).filter(|s| is_citation(s)) {
-                    cited.push(span.to_string());
+        let close = closer.get(i).copied().flatten();
+        match close.and_then(|j| runs.get(j).map(|&(start, _)| (j, start))) {
+            Some((j, close_start)) => {
+                if open_len == 1 {
+                    if let Some(span) = text.get(open + 1..close_start).filter(|s| is_citation(s)) {
+                        cited.push(span.to_string());
+                    }
                 }
-                i += 2;
+                i = j + 1;
             }
-            _ => i += 1,
+            None => i += 1,
         }
     }
     cited
