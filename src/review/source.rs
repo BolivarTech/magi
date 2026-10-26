@@ -183,8 +183,10 @@ pub fn is_never_reviewed(path: &str) -> bool {
 ///
 /// Each read canonicalizes `root.join(path)`, checks by path components that it stays under the
 /// canonical root, refuses a resolved target that is a never-reviewed path (a symlink alias of
-/// `.git/config`), and reads that canonical path with the per-file cap. A directory component
-/// swapped for a symlink between the check and the open is a declared, accepted window.
+/// `.git/config`), and reads that canonical path with the per-file cap. After the open the path
+/// is resolved again and must still lie under the root and name the very file opened (same
+/// device and inode, or volume and file index): a component swapped for a link between the
+/// check and the open is refused as outside the workspace.
 pub struct WorktreeSource<'g> {
     /// The root as given; paths are joined to it (a verbatim canonical root would not resolve `..`).
     root: PathBuf,
@@ -220,7 +222,8 @@ impl ContentSource for WorktreeSource<'_> {
     /// # Errors
     ///
     /// [`ReviewError::Io`] when the root did not resolve or a read fails,
-    /// [`ReviewError::OutsideWorkspace`] when the path resolves outside the root,
+    /// [`ReviewError::OutsideWorkspace`] when the path resolves outside the root or no longer
+    /// names the file opened (see [`WorktreeSource`]),
     /// [`ReviewError::Protected`] when it resolves to a never-reviewed path,
     /// [`ReviewError::NotRegularFile`] when it resolves to something other than a regular file
     /// (a link to a directory), and [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
@@ -274,8 +277,18 @@ impl WorktreeSource<'_> {
         if !std::fs::metadata(&canonical).map_err(io)?.is_file() {
             return Err(ReviewError::NotRegularFile(path.to_string()));
         }
-        let file = open(&canonical).map_err(io)?;
-        match read_bounded(file, MAX_REVIEW_FILE_BYTES).map_err(io)? {
+        let opened = same_file::Handle::from_file(open(&canonical).map_err(io)?).map_err(io)?;
+        // Re-resolved after the open: a component swapped for an escaping link before the open
+        // either still escapes, or names another file than the one opened.
+        let now = std::fs::canonicalize(&joined)
+            .map_err(|_| ReviewError::OutsideWorkspace(path.to_string()))?;
+        let still_inside = now
+            .strip_prefix(canonical_root)
+            .is_ok_and(|r| !is_never_reviewed(&r.to_string_lossy()));
+        if !still_inside || same_file::Handle::from_path(&now).map_err(io)? != opened {
+            return Err(ReviewError::OutsideWorkspace(path.to_string()));
+        }
+        match read_bounded(opened.as_file(), MAX_REVIEW_FILE_BYTES).map_err(io)? {
             Some(bytes) => Ok(Some(bytes)),
             None => Err(ReviewError::TooLarge {
                 path: path.to_string(),

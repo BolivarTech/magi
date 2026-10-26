@@ -1781,6 +1781,7 @@ dependencies = [
  "rpassword",
  "rusqlite",
  "rustix",
+ "same-file",
  "serde",
  "serde_json",
  "serial_test",

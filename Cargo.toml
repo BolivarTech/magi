@@ -114,6 +114,13 @@ tokio-util = { version = "0.7", default-features = false }
 # dev-dependency for test fixtures); promoted here for production use, no new
 # transitive dependency introduced.
 dunce = "1.0.5"
+# code-review RV22 — the worktree read compares the file it opened with the file its path names
+# after the open, so a component swapped for an escaping link between the containment check and
+# the open is refused. Comparing an open handle's identity on Windows needs the volume serial and
+# file index, which `std` exposes only on nightly; `same-file` gives both platforms one safe
+# comparison (dev/inode on Unix) with no `unsafe` of ours. Already in Cargo.lock (through
+# walkdir), with its only dependency `winapi-util`: no new crate enters the build. Pinned.
+same-file = "=1.0.6"
 lzma-rust2 = "=0.20.0"
 
 [dev-dependencies]
