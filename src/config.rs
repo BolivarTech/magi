@@ -5405,6 +5405,46 @@ base_url = \"http://\"
         assert!(err.to_string().contains("[decision].base_url"), "{err}");
     }
 
+    /// Both HTTP-client sections refuse, at load, a URL that parses but that no HTTP client can
+    /// call: another scheme, or no host. Before, `[code_review]` accepted them and the gate only
+    /// failed after every trio batch had been paid for.
+    #[test]
+    fn a_parseable_base_url_that_is_not_an_http_endpoint_is_a_load_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for url in [
+            "file:///tmp/model",
+            "mailto:x",
+            "ftp://host/v1",
+            "data:text/plain,x",
+        ] {
+            let decision = format!("[decision]\nmodel = \"m\"\nbase_url = \"{url}\"\n");
+            let err = MagiConfig::load(&write_toml(&dir, &decision))
+                .expect_err("not an HTTP endpoint")
+                .to_string();
+            assert!(err.contains("[decision].base_url"), "{url}: {err}");
+            let code_review = format!(
+                "[decision]\nmodel = \"m\"\n[code_review]\nmodel = \"m\"\nmin_confidence = 0.4\n\
+                 base_url = \"{url}\"\n"
+            );
+            let err = MagiConfig::load(&write_toml(&dir, &code_review))
+                .expect_err("not an HTTP endpoint")
+                .to_string();
+            assert!(err.contains("[code_review].base_url"), "{url}: {err}");
+            assert!(!err.contains(url), "the value is never echoed: {err}");
+        }
+    }
+
+    #[test]
+    fn an_https_base_url_with_a_host_loads_in_both_http_client_sections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        MagiConfig::load(&write_toml(
+            &dir,
+            "[decision]\nmodel = \"m\"\nbase_url = \"HTTPS://host:8443/v1\"\n\
+             [code_review]\nmodel = \"m\"\nmin_confidence = 0.4\nbase_url = \"http://10.0.0.2:11434\"\n",
+        ))
+        .expect("http and https with a host are endpoints");
+    }
+
     #[test]
     fn the_decision_base_url_inherits_the_root_and_is_validated_at_load() {
         let dir = tempfile::tempdir().expect("tempdir");
