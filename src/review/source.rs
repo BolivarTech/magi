@@ -226,6 +226,29 @@ impl ContentSource for WorktreeSource<'_> {
     /// (a link to a directory), and [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
     /// A link whose target does not exist is `Ok(None)`, like a file that does not exist.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+        self.read_with(path, &|canonical| std::fs::File::open(canonical))
+    }
+
+    fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+        match &self.old {
+            Some(old) => old.read(path),
+            None => Ok(None),
+        }
+    }
+}
+
+impl WorktreeSource<'_> {
+    /// [`ContentSource::read`] with the file opened by `open`, so a test can stand in for a
+    /// path swapped between the check and the open.
+    ///
+    /// # Errors
+    ///
+    /// As [`ContentSource::read`].
+    fn read_with(
+        &self,
+        path: &str,
+        open: &dyn Fn(&std::path::Path) -> std::io::Result<std::fs::File>,
+    ) -> Result<Option<Vec<u8>>, ReviewError> {
         let io = |e: std::io::Error| ReviewError::Io(format!("{path}: {e}"));
         let canonical_root = self
             .canonical_root
@@ -251,20 +274,13 @@ impl ContentSource for WorktreeSource<'_> {
         if !std::fs::metadata(&canonical).map_err(io)?.is_file() {
             return Err(ReviewError::NotRegularFile(path.to_string()));
         }
-        let file = std::fs::File::open(&canonical).map_err(io)?;
+        let file = open(&canonical).map_err(io)?;
         match read_bounded(file, MAX_REVIEW_FILE_BYTES).map_err(io)? {
             Some(bytes) => Ok(Some(bytes)),
             None => Err(ReviewError::TooLarge {
                 path: path.to_string(),
                 limit: MAX_REVIEW_FILE_BYTES,
             }),
-        }
-    }
-
-    fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        match &self.old {
-            Some(old) => old.read(path),
-            None => Ok(None),
         }
     }
 }
@@ -696,6 +712,42 @@ mod tests {
                 "{p}"
             ); // [S1a loop 10] typed
         }
+    }
+
+    #[test]
+    fn a_file_swapped_between_the_check_and_the_open_is_refused() {
+        // [MAGI §6 MS2 D loop 2, security] the opener stands in for a component swapped for an
+        // escaping link after the containment check: what was opened is not what the path names.
+        let outer = tempfile::tempdir().expect("tempdir");
+        let outside = outer.path().join("secret.txt");
+        std::fs::write(
+            &outside, "outside
+",
+        )
+        .expect("write");
+        let root = outer.path().join("ws");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(
+            root.join("a.rs"),
+            "fn f() {}
+",
+        )
+        .expect("write");
+        let src = WorktreeSource::new(root);
+        let swapped = |_: &std::path::Path| std::fs::File::open(&outside);
+        assert!(matches!(
+            src.read_with("a.rs", &swapped),
+            Err(ReviewError::OutsideWorkspace(_))
+        ));
+        let honest = |p: &std::path::Path| std::fs::File::open(p);
+        assert_eq!(
+            src.read_with("a.rs", &honest).expect("inside"),
+            Some(
+                b"fn f() {}
+"
+                .to_vec()
+            )
+        );
     }
 
     #[cfg(unix)]
