@@ -774,6 +774,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_finding_demoted_for_unasked_pairs_counts_for_no_model() {
+        // [MAGI MS2 S6 loop 2, C] the model answered `filtered`, but the final state comes from
+        // the question cap, so no model decided it.
+        let mut f = finding(Severity::Warning, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING + 1;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(MAX_GATE_QUESTIONS_PER_FINDING)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\n"), None).await;
+        assert_eq!(v.cause, Some("not every claim judged"));
+        assert!(g.per_model().is_empty(), "{:?}", g.per_model());
+    }
+
+    #[tokio::test]
+    async fn a_critical_kept_in_the_list_counts_for_the_model_that_judged_it() {
+        let f = finding(Severity::Critical, Some(1));
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\n"), None).await;
+        assert_eq!(v.cause, Some("critical never filtered"));
+        assert_eq!(g.per_model().get("clef:cloud"), Some(&1));
+    }
+
+    #[tokio::test]
     async fn a_finding_whose_every_pair_was_asked_can_be_filtered() {
         let mut f = finding(Severity::Warning, Some(1));
         let n = MAX_GATE_QUESTIONS_PER_FINDING;
