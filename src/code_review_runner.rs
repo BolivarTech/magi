@@ -374,6 +374,33 @@ mod tests {
         assert_eq!(unmeasured, vec!["mel", "bal", "cas", "other"]);
     }
 
+    #[test]
+    fn a_pool_error_is_redacted_like_every_other_build_error() {
+        // [MAGI §6 MS2 D loop 2] an unknown `[magi].kind` is echoed by its parse error; a value
+        // shaped like a credential URL must not reach the surface's notice in clear.
+        let cfg = MagiConfig::builder()
+            .magi(crate::config::MagiSectionConfig {
+                kind: Some("https://user:hunter2@example.invalid".to_string()),
+                ..crate::config::MagiSectionConfig::default()
+            })
+            .build_unvalidated();
+        let tpl = EndpointTemplate::parse("http://localhost:11434/v1", Scope::Root).expect("url");
+        let endpoints = ResolvedEndpoints {
+            root: tpl.resolve(&mut NoVaultInScope, Scope::Root).expect("root"),
+            magi: tpl.resolve(&mut NoVaultInScope, Scope::Magi).expect("magi"),
+        };
+        let err = review_pool(
+            &cfg,
+            ProviderKind::Ollama,
+            &endpoints,
+            &MagiEnvModelOverrides::default(),
+            &ProbeOutcome::default(),
+        )
+        .expect_err("an unknown kind");
+        assert!(err.contains("unknown provider"), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
+    }
+
     #[tokio::test]
     async fn an_answer_under_the_threshold_reaches_the_gate_as_low_confidence() {
         // [MAGI §6 MS2 D loop 1, carried from C7] the production client, over HTTP: an answer
