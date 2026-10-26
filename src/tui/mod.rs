@@ -9295,6 +9295,16 @@ end"
     }
 
     #[test]
+    fn an_unavailable_review_message_is_sanitized_like_its_siblings() {
+        // [MAGI §6 MS2 E loop 2] the parse-error and plan-error replies pass through
+        // `Agent::sanitize_text`; the unavailable reply carries a build error too.
+        let text = code_review_unavailable_message(Some("no trio\u{1b}[31m: red\u{7}"));
+        assert!(text.contains("no trio"), "{text:?}");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\u{7}'), "{text:?}");
+    }
+
+    #[test]
     fn the_tui_command_parses_every_review_flag_of_the_subcommand() {
         // [CP2 MS2 S2b loop 6] RV18 «los mismos argumentos»: the TUI parses through the subcommand's own clap args.
         // `-w` left out: the TUI refuses it (`the_tui_refuses_a_workdir_and_names_the_flags_it_does_not_apply`).
