@@ -1720,6 +1720,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_batch_that_ran_and_failed_is_timed_and_counted_in_the_totals() {
+        // [MAGI §6 MS2 D loop 2] RV13: a batch that spent its clock and gave no report still
+        // spent it. Batch 0 fails after 30 ms, batch 1 runs out of its wall clock after 30 ms,
+        // batches 2-3 never start (no time spent, no metrics).
+        struct Slow(Mutex<VecDeque<ConsultFailure>>);
+        #[async_trait::async_trait]
+        impl BatchConsult for Slow {
+            async fn consult(
+                &self,
+                _: &str,
+                _: Option<Duration>,
+            ) -> Result<MagiReport, ConsultFailure> {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Err(self
+                    .0
+                    .lock()
+                    .expect("lock")
+                    .pop_front()
+                    .unwrap_or(ConsultFailure::Other("no scripted reply".into())))
+            }
+        }
+        let dir = workspace(4);
+        let consult = Slow(Mutex::new(
+            vec![
+                ConsultFailure::Other("seat failed".into()),
+                ConsultFailure::ClockExpired,
+            ]
+            .into(),
+        ));
+        let git = FakeGit::from(&[(
+            "ls-files --others --ignored --exclude-standard --directory -z -- .",
+            Ok(""),
+        )]);
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let client = gate_always("real_defect");
+        let out = run_review(
+            ReviewRequest {
+                input: ReviewInput::Directory(dir.path().to_path_buf()),
+                workspace: dir.path(),
+                timeout_secs: Some(100_000),
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+            },
+        )
+        .await
+        .expect("runs");
+        let m = &out.summary.batches;
+        assert_eq!(m.iter().map(|b| b.index).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(m.iter().all(|b| b.ms >= 30 && b.input_tokens == 0), "{m:?}");
+        let v = crate::review::report::summary_json(&out.summary);
+        assert!(v["batch_totals"]["ms"].as_u64().unwrap_or(0) >= 60, "{v}");
+        assert_eq!(out.summary.failed_batches.len(), 4);
+    }
+
+    #[tokio::test]
     async fn a_clock_that_runs_out_mid_review_consolidates_the_finished_batches() {
         let dir = workspace(4);
         let consult = FakeConsult::new(vec![
