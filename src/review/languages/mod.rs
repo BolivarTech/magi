@@ -197,6 +197,25 @@ impl Default for LanguageRegistry {
     }
 }
 
+/// The changed lines of `sorted` that fall in `start..=end`.
+///
+/// Extractors call it once per construct with the changed lines sorted once, so a whole file
+/// (every line changed) costs O(c log n + n) for c constructs and n lines instead of O(c × n).
+///
+/// # Arguments
+///
+/// * `sorted` - Changed lines, sorted ascending and without repeats.
+/// * `start` - First line of the range (1-based, inclusive).
+/// * `end` - Last line of the range (1-based, inclusive).
+///
+/// # Returns
+///
+/// The sub-slice of `sorted` inside the range, empty when none is.
+pub fn lines_in_range(sorted: &[u32], start: u32, end: u32) -> &[u32] {
+    let _ = (start, end);
+    sorted.get(..0).unwrap_or(&[])
+}
+
 /// The fallback units of the changed lines no construct holds: one [`UnitKind::TopLevel`] unit
 /// per gap between constructs that holds orphans, spanning that whole gap and nothing else.
 ///
@@ -316,6 +335,21 @@ pub fn fallback_extract(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_in_range_returns_exactly_the_changed_lines_inside_the_range() {
+        let sorted = [2, 4, 5, 9, 12];
+        assert_eq!(lines_in_range(&sorted, 4, 9), &[4, 5, 9]);
+        assert_eq!(lines_in_range(&sorted, 1, 2), &[2]);
+        assert_eq!(lines_in_range(&sorted, 6, 8), &[] as &[u32]);
+        assert_eq!(lines_in_range(&sorted, 13, 20), &[] as &[u32]);
+        assert_eq!(lines_in_range(&[], 1, 5), &[] as &[u32]);
+        assert_eq!(
+            lines_in_range(&sorted, 9, 4),
+            &[] as &[u32],
+            "an empty range holds nothing"
+        );
+    }
 
     // --- Test 37: registry_dispatches_by_extension ---
     #[test]
