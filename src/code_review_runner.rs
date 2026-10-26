@@ -187,7 +187,8 @@ fn review_pool(
     env_overrides: &MagiEnvModelOverrides,
     probe: &ProbeOutcome,
 ) -> Result<Vec<(String, Option<usize>)>, String> {
-    let kind = resolve_magi_kind(cfg, principal_kind).map_err(|e| e.to_string())?;
+    let kind =
+        resolve_magi_kind(cfg, principal_kind).map_err(|e| redact_foreign_error(&e).to_string())?;
     let backend = resolve_backend_model(cfg, kind);
     let view = candidate_window_view(cfg, endpoints, principal_kind, probe);
     let mut models: Vec<String> = seats_with_env_overrides(cfg, backend, env_overrides)
