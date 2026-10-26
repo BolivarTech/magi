@@ -722,7 +722,9 @@ fn build_index(
 
 /// What the completed batches showed (U24): both ranges of each hunk, each whole file, and each
 /// file split by units whole when every batch holding one completed, else only its finished
-/// units. O(items · log r).
+/// units. Never fails, because the batches are already paid: a unit-split file that cannot be
+/// read again (unreachable with the cache, which already holds it) counts only its finished
+/// units, with a WARN. O(items · log r).
 fn reviewed_of(
     batches: &[ReviewBatch],
     completed: &BTreeSet<usize>,
@@ -768,17 +770,30 @@ fn reviewed_of(
         }
     }
     for (file, UnitProgress { all_done, finished }) in units {
-        if all_done {
-            let lines = source
-                .read(file)
-                .ok()
-                .flatten()
-                .map(|bytes| String::from_utf8_lossy(&bytes).lines().count())
-                .unwrap_or(0);
-            reviewed.add_whole_file(file, u32::try_from(lines).unwrap_or(u32::MAX));
+        let whole = if all_done {
+            match source.read(file) {
+                Ok(bytes) => Some(bytes.map_or(0, |b| String::from_utf8_lossy(&b).lines().count())),
+                Err(e) => {
+                    let error = redact_foreign_text(&e.to_string());
+                    tracing::event!(
+                        target: LOG_TARGET,
+                        tracing::Level::WARN,
+                        file = file,
+                        error = error.as_str(),
+                        "a reviewed file could not be read again: only its units count as reviewed"
+                    );
+                    None
+                }
+            }
         } else {
-            for (first, last) in finished {
-                reviewed.add_lines(file, first, last);
+            None
+        };
+        match whole {
+            Some(lines) => reviewed.add_whole_file(file, u32::try_from(lines).unwrap_or(u32::MAX)),
+            None => {
+                for (first, last) in finished {
+                    reviewed.add_lines(file, first, last);
+                }
             }
         }
     }
