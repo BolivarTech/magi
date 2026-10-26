@@ -1324,6 +1324,21 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_path_is_an_argument_error_not_the_whole_workspace() {
+        // [MAGI §6 MS2 D loop 2] `path: ""` joined to the workspace is the workspace itself: a
+        // degenerate form like the others, refused before any plan.
+        for bad in [
+            serde_json::json!({"path": ""}),
+            serde_json::json!({"path": "   "}),
+        ] {
+            assert!(
+                matches!(parse_tool_input(&bad), Err(ToolError::InvalidArguments(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn a_path_names_a_directory_or_a_file_by_what_is_on_disk() {
         // [CP2 MS2 S2b loop 8] one rule for the CLI positional and the tool's `path`.
         let ws = tempfile::tempdir().expect("tempdir");
