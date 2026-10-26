@@ -342,7 +342,7 @@ pub(crate) fn envelope_usage(r: &Rendered) -> magi_rs::headless::types::Usage {
 ///
 /// # Errors
 /// [`ToolError::InvalidArguments`] for a non-object, an unknown field, a value of the wrong
-/// type, two forms at once, half a pair, or a hostile ref.
+/// type, a blank `path`, two forms at once, half a pair, or a hostile ref.
 pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
     let invalid = |m: String| ToolError::InvalidArguments(m);
     let fields = args
@@ -359,6 +359,9 @@ pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
         }
     };
     let path = text(PATH_FIELD)?;
+    if path.as_deref().is_some_and(|p| p.trim().is_empty()) {
+        return Err(invalid(format!("`{PATH_FIELD}` must not be blank")));
+    }
     let commit = text(COMMIT_FIELD)?;
     let (from, to) = (text(FROM_FIELD)?, text(TO_FIELD)?);
     let (base, head) = (text(BASE_FIELD)?, text(HEAD_FIELD)?);
