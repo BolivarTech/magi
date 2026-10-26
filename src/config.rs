@@ -196,8 +196,8 @@ pub enum ConfigError {
         db_path: std::path::PathBuf,
     },
 
-    /// `[decision].base_url` (or the root URL it inherits) is not a valid URL. The text names
-    /// the file and never repeats the value (REQ-D05).
+    /// `[decision].base_url` (or the root URL it inherits) is not an `http`/`https` URL with a
+    /// host. The text names the file and never repeats the value (REQ-D05).
     #[error(
         "{}: [decision].base_url is not a valid URL (scheme://host/...)",
         config_path.display()
@@ -207,8 +207,8 @@ pub enum ConfigError {
         config_path: std::path::PathBuf,
     },
 
-    /// `[code_review].base_url` (or the root URL it inherits) is not a valid URL. The text
-    /// names the file and never repeats the value.
+    /// `[code_review].base_url` (or the root URL it inherits) is not an `http`/`https` URL
+    /// with a host. The text names the file and never repeats the value.
     #[error(
         "{}: [code_review].base_url is not a valid URL (scheme://host/...)",
         config_path.display()
@@ -1953,7 +1953,7 @@ impl MagiConfig {
         // D-P4: the placeholders `[user]:[password]` parse as userinfo, so the template itself
         // can be checked here without resolving any secret.
         match cfg.effective_decision_base_url() {
-            Ok(t) if reqwest::Url::parse(t.as_str()).is_ok() => {}
+            Ok(t) if is_http_endpoint(t.as_str()) => {}
             Ok(_) | Err(EndpointError::Unparseable) => {
                 return Err(ConfigError::DecisionBaseUrl {
                     config_path: path.to_path_buf(),
@@ -1962,7 +1962,7 @@ impl MagiConfig {
             Err(e) => return Err(e.into()),
         }
         match cfg.effective_code_review_base_url() {
-            Ok(t) if reqwest::Url::parse(t.as_str()).is_ok() => {}
+            Ok(t) if is_http_endpoint(t.as_str()) => {}
             Ok(_) | Err(EndpointError::Unparseable) => {
                 return Err(ConfigError::CodeReviewBaseUrl {
                     config_path: path.to_path_buf(),
@@ -2095,6 +2095,26 @@ impl MagiConfig {
 
         out
     }
+}
+
+/// Whether `url` is something an HTTP client can call: it parses, its scheme is `http` or
+/// `https`, and it names a host.
+///
+/// Shared by the `[decision]` and `[code_review]` load checks so the two sections accept the
+/// same URLs. `Url::parse` alone accepts `file:///x` or `mailto:x`, which only fail at the first
+/// request, after the review has paid for every trio batch. The placeholders `[user]:[password]`
+/// parse as userinfo, so a template can be checked without resolving a secret. O(n) in the URL.
+///
+/// # Arguments
+/// * `url` - The `base_url` template.
+///
+/// # Returns
+/// `true` for an `http`/`https` URL with a host.
+fn is_http_endpoint(url: &str) -> bool {
+    const HTTP_SCHEMES: [&str; 2] = ["http", "https"];
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        HTTP_SCHEMES.contains(&u.scheme()) && u.host_str().is_some_and(|h| !h.is_empty())
+    })
 }
 
 /// Refuses a file that parses as an empty table: empty, whitespace-only or comment-only
