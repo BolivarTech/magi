@@ -9360,4 +9360,43 @@ end"
             app.messages
         );
     }
+
+    #[test]
+    fn a_quoted_path_with_spaces_is_one_argument() {
+        // [MAGI §6 MS2 E loop 2] RV18 «los mismos argumentos»: the shell groups a quoted path for
+        // `magi code-review`, so the TUI does too, with double or single quotes.
+        use magi_rs::review::input::ReviewInput;
+        let spaced = ReviewInput::File(PathBuf::from("src/my crate.rs"));
+        assert_eq!(
+            parse_tui_code_review(r#"/code-review "src/my crate.rs""#)
+                .expect("parses")
+                .input,
+            spaced
+        );
+        let cmd =
+            parse_tui_code_review("/code-review 'src/my crate.rs' --timeout 600").expect("parses");
+        assert_eq!(cmd.input, spaced);
+        assert_eq!(cmd.timeout, Some(600));
+        // A quote inside the other kind is a plain character; a backslash is never an escape
+        // (Windows paths).
+        assert_eq!(
+            parse_tui_code_review(r#"/code-review "it's here\a.rs""#)
+                .expect("parses")
+                .input,
+            ReviewInput::File(PathBuf::from(r"it's here\a.rs"))
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_quote_is_refused_with_a_reason() {
+        // [MAGI §6 MS2 E loop 2] never guessed: the command says the quote is not closed.
+        for argv in [r#"/code-review "src/my crate.rs"#, "/code-review 'src"] {
+            match parse_tui_code_review(argv) {
+                Err(TuiCodeReviewParseError::Invalid(m)) => {
+                    assert!(m.contains("unbalanced quote"), "{argv}: {m}");
+                }
+                other => panic!("{argv}: {other:?}"),
+            }
+        }
+    }
 }
