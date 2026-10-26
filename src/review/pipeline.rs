@@ -25,7 +25,7 @@ use super::error::ReviewError;
 use super::filter::{filter_files, Filtered, SkipCause, Skipped};
 use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
-use super::input::{resolve_input, ReviewFile, ReviewInput, SourceKind};
+use super::input::{renamed_from, resolve_input, ReviewFile, ReviewInput, SourceKind};
 use super::languages::LanguageRegistry;
 use super::report::{name, BatchMetrics, ReviewSummary};
 use super::secrets::display_path;
@@ -379,9 +379,16 @@ pub async fn run_review(
     }
 
     let faces = faces_of(&batches, &completed);
+    let old_paths = renamed_old_paths(&filtered.kept);
     let mut verdicts = Vec::with_capacity(consolidated.findings.len());
     for finding in &consolidated.findings {
-        let code = gate_code(finding.file.as_deref(), finding.line, &faces, &source);
+        let code = gate_code(
+            finding.file.as_deref(),
+            finding.line,
+            &faces,
+            &old_paths,
+            &source,
+        );
         verdicts.push(
             deps.gate
                 .judge(finding, code.as_deref(), clock.remaining())
@@ -661,6 +668,26 @@ fn ratio(part: usize, whole: usize) -> f64 {
     as_f64(part) / as_f64(whole)
 }
 
+/// The path of `file`'s old side: its `rename from` path when its diff is a rename, else its
+/// own path (RV21: the deleted lines of a rename live under the old path).
+fn old_path(file: &ReviewFile) -> String {
+    file.diff
+        .as_deref()
+        .and_then(renamed_from)
+        .unwrap_or_else(|| file.path.clone())
+}
+
+/// The old path of every renamed file, by its new path. O(files).
+fn renamed_old_paths(files: &[ReviewFile]) -> HashMap<String, String> {
+    files
+        .iter()
+        .filter_map(|f| {
+            let old = old_path(f);
+            (old != f.path).then(|| (f.path.clone(), old))
+        })
+        .collect()
+}
+
 /// The lexical index over both sides of every reviewed file. O(bytes reviewed).
 fn build_index(
     files: &[ReviewFile],
@@ -671,7 +698,7 @@ fn build_index(
     for file in files {
         let mut sides = vec![source.read(&file.path)?];
         if file.diff.is_some() {
-            sides.push(source.read_old(&file.path)?);
+            sides.push(source.read_old(&old_path(file))?);
         }
         for bytes in sides.into_iter().flatten() {
             texts.push((
@@ -778,13 +805,15 @@ fn faces_of<'b>(
 
 /// The code the gate sees for a finding (RV10 + RV21): the new side when the line lies in a new
 /// range or the file was shown whole, else the old side when it lies in an old range, numbered
-/// as that side. `None` (the gate's `no location`) without a line, without a face that holds
+/// as that side; the old side of a renamed file is read under its old path (`old_paths`).
+/// `None` (the gate's `no location`) without a line, without a face that holds
 /// it, or when the read fails, with a WARN; with the cache that read is unreachable, because
 /// every face of a reviewed file was read during the preparation.
 fn gate_code(
     file: Option<&str>,
     line: Option<u32>,
     faces: &HashMap<&str, Faces>,
+    old_paths: &HashMap<String, String>,
     source: &dyn ContentSource,
 ) -> Option<String> {
     let (file, line) = (file?, line?);
@@ -793,7 +822,7 @@ fn gate_code(
     let read = if face.whole || holds(&face.new) {
         source.read(file)
     } else if holds(&face.old) {
-        source.read_old(file)
+        source.read_old(old_paths.get(file).map_or(file, String::as_str))
     } else {
         return None;
     };
