@@ -443,8 +443,10 @@ impl<'a> Gate<'a> {
     ///
     /// A finding counts once, for the model whose answer decided its final state (`kept`,
     /// `filtered`, or `low_confidence` for a critical), however many of its (title, detail)
-    /// pairs were asked. A finding whose chain ended with every model under its threshold, or
-    /// that passed `unfiltered`, counts for no model. [`Self::questions`] counts the questions.
+    /// pairs were asked. A finding whose chain ended with every model under its threshold, that
+    /// passed `unfiltered`, or that is `low_confidence` (`not every claim judged`) because pairs
+    /// past [`MAX_GATE_QUESTIONS_PER_FINDING`] went unasked, counts for no model: in that last
+    /// case the question cap, not an answer, set its final state. [`Self::questions`] counts the questions.
     ///
     /// # Returns
     /// Model name to the number of findings whose state its answer decided.
@@ -518,8 +520,10 @@ impl<'a> Gate<'a> {
             }
         }
         if outcome.state == GateState::Filtered && asked < pairs {
+            // The cap, not the model's answer, sets this state: it counts for no model.
             outcome.state = GateState::LowConfidence;
             outcome.cause = Some(CAUSE_NOT_EVERY_CLAIM_JUDGED);
+            outcome.decided = false;
         }
         if outcome.decided {
             if let Some(model) = &outcome.model {
