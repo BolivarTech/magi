@@ -335,7 +335,7 @@ pub async fn run_review(
     }
 
     let completed: BTreeSet<usize> = finished.iter().map(|f| f.batch).collect();
-    let reviewed = reviewed_of(&batches, &completed, &source)?;
+    let reviewed = reviewed_of(&batches, &completed, &source);
     let workspace = without_verbatim_prefix(req.workspace);
     let mut outcomes = Vec::with_capacity(finished.len());
     for f in &finished {
@@ -727,7 +727,7 @@ fn reviewed_of(
     batches: &[ReviewBatch],
     completed: &BTreeSet<usize>,
     source: &dyn ContentSource,
-) -> Result<Reviewed, ReviewError> {
+) -> Reviewed {
     let mut reviewed = Reviewed::default();
     let mut units: BTreeMap<&str, UnitProgress> = BTreeMap::new();
     for batch in batches {
@@ -770,7 +770,9 @@ fn reviewed_of(
     for (file, UnitProgress { all_done, finished }) in units {
         if all_done {
             let lines = source
-                .read(file)?
+                .read(file)
+                .ok()
+                .flatten()
                 .map(|bytes| String::from_utf8_lossy(&bytes).lines().count())
                 .unwrap_or(0);
             reviewed.add_whole_file(file, u32::try_from(lines).unwrap_or(u32::MAX));
@@ -780,7 +782,7 @@ fn reviewed_of(
             }
         }
     }
-    Ok(reviewed)
+    reviewed
 }
 
 /// The faces each file showed in the completed batches. O(items).
@@ -1809,6 +1811,39 @@ mod tests {
         let v = crate::review::report::summary_json(&out.summary);
         assert!(v["batch_totals"]["ms"].as_u64().unwrap_or(0) >= 60, "{v}");
         assert_eq!(out.summary.failed_batches.len(), 4);
+    }
+
+    #[test]
+    fn a_failed_read_after_the_batches_falls_back_to_the_finished_units() {
+        // [MAGI §6 MS2 D loop 2] the batches are paid when `reviewed_of` reads a unit-split file:
+        // a failing read must not throw them away. It registers only the units the trio saw.
+        struct Failing;
+        impl ContentSource for Failing {
+            fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Err(ReviewError::Io(format!("{path}: gone")))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let unit = |first_line, last_line| BatchItem::Unit {
+            file: "a.rs".into(),
+            name: "f".into(),
+            text: String::new(),
+            first_line,
+            last_line,
+        };
+        let batches = vec![ReviewBatch {
+            index: 0,
+            items: vec![unit(1, 3), unit(6, 8)],
+            tokens: 0,
+        }];
+        let reviewed = reviewed_of(&batches, &BTreeSet::from([0]), &Failing);
+        assert!(reviewed.contains_line("a.rs", 2) && reviewed.contains_line("a.rs", 7));
+        assert!(
+            !reviewed.contains_line("a.rs", 5),
+            "the gap between units is not claimed"
+        );
     }
 
     #[tokio::test]
