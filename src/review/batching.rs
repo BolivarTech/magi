@@ -6,8 +6,12 @@
 //!
 //! Each batch is what one `consult code-review` receives: hunks of a diff, whole files, or the
 //! units of a whole file too large for one batch, each file preceded by its [`file_header`].
-//! Packing is greedy in input order. This is also the egress point of the review: every byte a
-//! batch carries passes the secret detector here, whatever an earlier filter decided.
+//! Packing is greedy in input order. This is also the egress point of the review: every item and
+//! file header a batch carries passes the secret detector here, whatever an earlier filter
+//! decided. A companion ([`plan_batches_with`]) is only a key and a token count: its text never
+//! enters this module, so whoever builds the companion's text scans it before it joins a prompt.
+//! A secret that spans two units of one file is not caught by either unit's scan; the file-level
+//! filter, which reads each file whole before batching, is the net for it.
 
 use std::collections::HashSet;
 
@@ -34,7 +38,8 @@ pub struct ReviewBatch {
     /// What the batch reviews, in input order.
     pub items: Vec<BatchItem>,
     /// Estimated tokens of the items plus one [`file_header`] per distinct file of the batch.
-    /// Companions ([`plan_batches_with`]) are not included: whoever adds them charges them.
+    /// Companions ([`plan_batches_with`]) are not included: whoever adds them charges them and
+    /// scans their text for secrets.
     pub tokens: usize,
 }
 
@@ -218,6 +223,10 @@ pub fn plan_batches(
 /// Every item text and every file header is passed through the secret detector before it joins
 /// a batch. That scan repeats the filter's on purpose: it is the egress net of the review, it
 /// costs one more O(bytes) pass, and it must not be removed to save it.
+///
+/// A companion's text is not scanned here: the closure returns only its key and tokens, so the
+/// code that later puts the companion's text into the prompt must pass it through
+/// [`find_secret`] itself.
 ///
 /// O(n) in items (plus O(bytes) for the scan), with one key set per batch.
 ///
