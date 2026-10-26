@@ -164,11 +164,13 @@ impl CodeReviewSection {
 
     /// The gate's chain: the primary model first, then the fallbacks in order, names trimmed.
     ///
-    /// The gate applies the thresholds itself, so the client it builds gets this chain with
-    /// every `min_confidence` cleared (the answer and its lean are what the gate needs).
+    /// Each entry keeps its configured `min_confidence` unchanged: the gate
+    /// ([`crate::review::gate::Gate`]) applies these thresholds itself. Only the decision client
+    /// the bin builds for the gate receives the model names with the thresholds cleared, so the
+    /// client returns every answer and its lean instead of applying a threshold twice.
     ///
     /// # Returns
-    /// One [`ModelSpec`] per model, in declaration order.
+    /// One [`ModelSpec`] per model, in declaration order, thresholds as configured.
     pub fn chain(&self) -> Vec<ModelSpec> {
         std::iter::once((&self.model, self.min_confidence))
             .chain(

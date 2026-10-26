@@ -2061,13 +2061,6 @@ mod tests {
     /// that break the old formulation — without a parallel slack-parameterized copy of
     /// every function.
     #[test]
-    fn a_zero_factor_gives_a_zero_ceiling_instead_of_panicking() {
-        // No production path yields a zero factor, but the function is crate-visible: a zero
-        // must land on the refusing side (a ceiling under every floor), never abort the process.
-        assert_eq!(raw_ceiling_from_factor(10_000, 0), 0);
-    }
-
-    #[test]
     fn the_threshold_is_the_exact_boundary_of_floor_activation() {
         // 720 = the shipped 20 %; 750 and 798 are 25 % and 33 %, where the old
         // `headless_consult_timeout_secs(FLOOR, ..)` formulation returned a value that
@@ -2084,6 +2077,13 @@ mod tests {
                  factor={factor} threshold={t}"
             );
         }
+    }
+
+    #[test]
+    fn a_zero_factor_gives_a_zero_ceiling_instead_of_panicking() {
+        // No production path yields a zero factor, but the function is crate-visible: a zero
+        // must land on the refusing side (a ceiling under every floor), never abort the process.
+        assert_eq!(raw_ceiling_from_factor(10_000, 0), 0);
     }
 
     /// The inverse used by the coverage warning is an EXACT boundary, like
