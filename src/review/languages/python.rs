@@ -361,6 +361,77 @@ mod tests {
     }
 
     #[test]
+    fn an_unindented_comment_inside_a_function_does_not_end_it() {
+        // Python ignores comment-only lines for indentation.
+        let code = "def f():
+    x = 1
+# note
+    return x
+
+def g():
+    pass
+";
+        let units = extract(code, &[4]);
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert_eq!(
+            (
+                units[0].name.as_str(),
+                units[0].start_line,
+                units[0].end_line
+            ),
+            ("f", 1, 4)
+        );
+    }
+
+    #[test]
+    fn a_dedented_line_inside_a_triple_quoted_string_does_not_end_the_function() {
+        for quote in ["\"\"\"", "'''"] {
+            let code = format!(
+                "def f():
+    s = {quote}
+not code
+{quote}
+    return s
+
+def g():
+    pass
+"
+            );
+            let units = extract(&code, &[5]);
+            assert_eq!(units.len(), 1, "{quote}: {units:?}");
+            assert_eq!(
+                (
+                    units[0].name.as_str(),
+                    units[0].start_line,
+                    units[0].end_line
+                ),
+                ("f", 1, 5),
+                "{quote}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_module_level_statement_with_an_equals_sign_is_not_a_declaration_group() {
+        for statement in [
+            "assert x == 1",
+            "raise E(code=1)",
+            "del d[k == 1]",
+            "await f(x=1)",
+        ] {
+            let code = format!(
+                "{statement}
+"
+            );
+            let units = extract(&code, &[1]);
+            assert!(
+                units.iter().all(|u| u.kind != UnitKind::DeclarationGroup),
+                "{statement}: {units:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_control_flow_block_is_not_a_declaration_group() {
         for opener in [
             "if __name__ == \"__main__\":",
