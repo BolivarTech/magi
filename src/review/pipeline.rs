@@ -508,6 +508,10 @@ fn filter_and_plan(
 /// The review's total in seconds, read when the preparation ends, with the bound that set it:
 /// the explicit `--timeout`, at most what is left of the caller's deadline; `None` when there is
 /// neither.
+///
+/// The deadline is an absolute [`Instant`] of the calling run, so what is left of it is read on
+/// the real clock; the injected [`ReviewClock`] only measures the batches' progress from this
+/// total on. A test double of that clock therefore never moves the deadline, only the batches.
 fn review_total(
     timeout_secs: Option<u64>,
     deadline: Option<Instant>,
