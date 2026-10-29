@@ -1272,6 +1272,34 @@ mod tests {
     }
 
     #[test]
+    fn java_modifiers_in_any_combination_name_the_declaration() {
+        // [MAGI S6 loop 4, B2] `public final class` matched the function keyword `public ` and
+        // became a function named `final`, which cannot split.
+        for (code, kind, name) in [
+            (
+                "public final class C {\n    int a;\n}\n",
+                UnitKind::Class,
+                "C",
+            ),
+            ("abstract class A {\n    int a;\n}\n", UnitKind::Class, "A"),
+            (
+                "public sealed interface I {\n    int a();\n}\n",
+                UnitKind::Trait,
+                "I",
+            ),
+            ("record R(int x) {\n    int y;\n}\n", UnitKind::Class, "R"),
+            (
+                "public static enum E {\n    A, B;\n}\n",
+                UnitKind::Enum,
+                "E",
+            ),
+        ] {
+            let units = extract(&BraceFamilyExtractor::java(), code, &[2]);
+            assert_eq!(spans(&units), vec![(name, kind, 1, 3)], "{code}");
+        }
+    }
+
+    #[test]
     fn qualified_rust_functions_are_functions() {
         for (code, name) in [
             ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
