@@ -1433,7 +1433,8 @@ pub(crate) fn parse_tui_code_review(
 ) -> Result<TuiCodeReviewCommand, TuiCodeReviewParseError> {
     use clap::{Args as _, FromArgMatches as _};
     let rest = match trimmed.strip_prefix(CODE_REVIEW_COMMAND) {
-        Some(rest) if rest.is_empty() || rest.starts_with(' ') => rest,
+        // MAGI FIX (S6 loop 3): any whitespace, as `command_words` splits on, not only ' '.
+        Some(rest) if rest.is_empty() || rest.starts_with(char::is_whitespace) => rest,
         _ => return Err(TuiCodeReviewParseError::NotACodeReviewCommand),
     };
     let program = CODE_REVIEW_COMMAND.trim_start_matches('/');
