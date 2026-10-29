@@ -789,6 +789,41 @@ mod tests {
     }
 
     #[test]
+    fn an_impl_block_that_does_not_fit_is_split_into_its_methods() {
+        // [MAGI S6 loop 3, B4] the impl (~135 tokens) does not fit in 100, each method does:
+        // the review used to fail with TooLargeForBatch.
+        let body = |v: &str| format!("        let _{v} = 1;\n").repeat(12);
+        let text = format!(
+            "/// Doc.\nimpl Foo {{\n    fn a() {{\n{}    }}\n\n    fn b() {{\n{}    }}\n}}\n",
+            body("a"),
+            body("b")
+        );
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: None,
+        }];
+        let src = MapSource::new(&[("a.rs", &text)], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 100).expect("plans");
+        let units: Vec<(&str, u32, u32)> = b
+            .iter()
+            .flat_map(|x| x.items.iter())
+            .map(|i| match i {
+                BatchItem::Unit {
+                    name,
+                    first_line,
+                    last_line,
+                    ..
+                } => (name.as_str(), *first_line, *last_line),
+                other => panic!("expected units, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            units,
+            vec![("Foo", 1, 2), ("a", 3, 16), ("b", 18, 31), ("Foo", 32, 32)]
+        );
+    }
+
+    #[test]
     fn a_single_unit_larger_than_the_limit_is_a_typed_error() {
         let text = format!("fn big() {{\n{}}}\n", "    let _x = 1;\n".repeat(50)); // ~200 tokens
         let files = vec![ReviewFile {

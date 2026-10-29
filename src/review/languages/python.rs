@@ -472,6 +472,36 @@ def g():
     }
 
     #[test]
+    fn a_class_splits_into_its_methods_and_keeps_its_header() {
+        // [MAGI S6 loop 3, B4] a class was one unit: one larger than the batch failed the review
+        // although each of its methods fits. A `def` inside a string is not a method.
+        let code = "@dataclass\nclass Foo:\n    x = 1\n\n    @property\n    def a(self):\n        return 1\n\n    async def b(self):\n        s = '''\n    def fake():\n'''\n        return s\n";
+        let every: HashSet<u32> = (1..=13).collect();
+        let block = PythonExtractor
+            .extract_units(code, "test.py", &every)
+            .into_iter()
+            .find(|u| u.kind == UnitKind::Class)
+            .expect("the class");
+        let parts = PythonExtractor.split_block(&block);
+        let found: Vec<(&str, UnitKind, u32, u32)> = parts
+            .iter()
+            .map(|u| (u.name.as_str(), u.kind, u.start_line, u.end_line))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("Foo", UnitKind::Class, 1, 4),
+                ("a", UnitKind::Method, 5, 7),
+                ("Foo", UnitKind::Class, 8, 8),
+                ("b", UnitKind::Method, 9, 13),
+            ]
+        );
+        assert_eq!(parts[0].content, "@dataclass\nclass Foo:\n    x = 1\n");
+        let def = extract("def f():\n    pass\n", &[2]);
+        assert!(PythonExtractor.split_block(&def[0]).is_empty());
+    }
+
+    #[test]
     fn a_module_level_statement_with_an_equals_sign_is_not_a_declaration_group() {
         for statement in [
             "assert x == 1",

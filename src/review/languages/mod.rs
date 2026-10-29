@@ -111,6 +111,23 @@ pub trait LanguageExtractor {
         file_path: &str,
         changed_lines: impl Into<ChangedLines<'a>>,
     ) -> Vec<SemanticUnit>;
+
+    /// Splits a block unit (an `impl`, a class, a trait or a namespace) one level down: its
+    /// methods become [`UnitKind::Method`] units, other nested constructs keep their kind, and
+    /// the lines between them (the block's header, the blank lines and its closing line) become
+    /// pieces with the block's kind and name, so the block's header is never lost.
+    ///
+    /// # Arguments
+    ///
+    /// * `unit` - A unit this extractor returned from [`Self::extract_units`].
+    ///
+    /// # Returns
+    ///
+    /// The pieces in line order, covering every line of `unit` exactly once, each with the
+    /// changed lines of `unit` it holds; empty when `unit` is not a block or holds no member.
+    fn split_block(&self, _unit: &SemanticUnit) -> Vec<SemanticUnit> {
+        Vec::new()
+    }
 }
 
 /// The lines [`LanguageExtractor::extract_units`] treats as changed.

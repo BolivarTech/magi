@@ -948,6 +948,79 @@ mod tests {
         assert_eq!(spans(&units), vec![("B", UnitKind::Struct, 1, 1)]);
     }
 
+    /// The one unit of `kind` that `code` gives when line `changed` changes, split one level.
+    fn split(
+        ext: &BraceFamilyExtractor,
+        code: &str,
+        changed: u32,
+        kind: UnitKind,
+    ) -> Vec<SemanticUnit> {
+        let every: HashSet<u32> =
+            (1..=u32::try_from(code.lines().count()).expect("small")).collect();
+        let block = ext
+            .extract_units(code, "test.rs", &every)
+            .into_iter()
+            .find(|u| u.kind == kind && u.start_line <= changed && changed <= u.end_line)
+            .expect("the block");
+        ext.split_block(&block)
+    }
+
+    #[test]
+    fn an_impl_block_splits_into_its_methods_and_keeps_its_header() {
+        // [MAGI S6 loop 3, B4] an impl or class was one unit: one larger than the batch failed
+        // the review although each of its methods fits.
+        let code = "/// Doc.\nimpl Foo {\n    const N: u8 = 1;\n\n    /// A.\n    pub fn a(&self) {\n        x();\n    }\n\n    fn b(\n        &self,\n    ) -> u8 {\n        1\n    }\n}\n";
+        let parts = split(&rust_extractor(), code, 7, UnitKind::Impl);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("Foo", UnitKind::Impl, 1, 2),
+                ("constants", UnitKind::DeclarationGroup, 3, 3),
+                ("Foo", UnitKind::Impl, 4, 4),
+                ("a", UnitKind::Method, 5, 8),
+                ("Foo", UnitKind::Impl, 9, 9),
+                ("b", UnitKind::Method, 10, 14),
+                ("Foo", UnitKind::Impl, 15, 15),
+            ]
+        );
+        assert_eq!(parts[0].content, "/// Doc.\nimpl Foo {");
+        assert_eq!(
+            parts[3].content,
+            "    /// A.\n    pub fn a(&self) {\n        x();\n    }"
+        );
+        assert_eq!(parts[3].changed_lines, vec![5, 6, 7, 8]);
+        assert_each_line_in_one_unit(&parts, 15);
+    }
+
+    #[test]
+    fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
+        let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
+        assert!(
+            spans(&parts).contains(&("run", UnitKind::Method, 4, 6)),
+            "{:?}",
+            spans(&parts)
+        );
+        assert_each_line_in_one_unit(&parts, 7);
+        let cpp = "namespace ns {\n    int f(int a) {\n        return a;\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::cpp(), cpp, 3, UnitKind::Class);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("ns", UnitKind::Class, 1, 1),
+                ("f", UnitKind::Method, 2, 4),
+                ("ns", UnitKind::Class, 5, 5)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_function_or_a_block_without_members_does_not_split() {
+        let code = "fn f() {\n    x();\n}\nstruct S {\n    a: u8,\n}\n";
+        assert!(split(&rust_extractor(), code, 2, UnitKind::Function).is_empty());
+        assert!(split(&rust_extractor(), code, 5, UnitKind::Struct).is_empty());
+    }
+
     #[test]
     fn an_indented_c_function_is_a_function() {
         // [MAGI S6 loop 3, B5] a signature was a function only unindented, so the functions of
