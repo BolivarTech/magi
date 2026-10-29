@@ -1783,4 +1783,31 @@ mod tests {
             vec!["mode 160000"]
         );
     }
+    #[cfg(unix)]
+    // Creating a symlink needs Developer Mode on Windows; the rule is the same there.
+    #[test]
+    fn a_directory_input_naming_a_dangling_link_is_missing() {
+        // [MAGI S6 MS2 loop 4, A1 Melchior] a link whose target is gone reads as a path that
+        // does not exist, as everywhere else, not as an I/O error.
+        let d = tempfile::tempdir().expect("tempdir");
+        std::os::unix::fs::symlink(d.path().join("gone"), d.path().join("dir")).expect("symlink");
+        let git = FakeGit(Default::default());
+        let r = resolve_input(
+            &ReviewInput::Directory("dir".into()),
+            d.path(),
+            &git,
+            &allow_all,
+        );
+        assert!(
+            matches!(
+                r,
+                Err(ReviewError::NotReviewable {
+                    cause: "missing",
+                    ..
+                })
+            ),
+            "{:?}",
+            r.err()
+        );
+    }
 }
