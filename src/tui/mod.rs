@@ -9635,10 +9635,13 @@ end"
         assert!(shown.contains("at most 600 s"), "{shown}");
         assert!(shown.contains("--timeout"), "{shown}");
         assert!(shown.contains("maximum"), "{shown}");
+        // [MAGI S6 loop 4, E2-1] RV18: the unconditional worst case is always shown, labelled
+        // as the maximum, with the --timeout cap stated apart (this assertion was negated).
         assert!(
-            !shown.contains("worst case 42030 s, the maximum"),
+            shown.contains("worst case 42030 s, the maximum with every retry and rotation"),
             "{shown}"
         );
+        assert!(!shown.contains("without it"), "{shown}");
         // A cap above the worst case does not bind: the worst case is still the maximum.
         let mut loose = App::new_for_test();
         let generous = TuiCodeReviewCommand {
