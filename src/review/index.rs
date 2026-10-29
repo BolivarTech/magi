@@ -143,7 +143,8 @@ impl LexicalIndex {
     ///
     /// * it has the form of a path (holds `/` or `\`), or
     /// * it is the name of a file given to `build` (`this.ts` when `lib/this.ts` was reviewed), or
-    /// * its first `.`-segment is not a receiver of [`FIELD_ACCESS_RECEIVERS`].
+    /// * its first `.`-segment is not a receiver of `FIELD_ACCESS_RECEIVERS` (`self`, `Self`,
+    ///   `this`, `super`, `cls`).
     ///
     /// So `self.c` and `this.inner.h` are field accesses, looked up as the symbols `c` and `h` by
     /// [`Self::contains`], while `main.c` stays a file name. Cost declared: any other

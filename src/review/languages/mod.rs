@@ -478,7 +478,7 @@ const FALLBACK_CONTEXT_LINES: u32 = 20;
 
 /// Create fallback semantic units for changed lines in unknown file types.
 ///
-/// Each changed line gets a window of ±[`FALLBACK_CONTEXT_LINES`] lines, clamped to the file;
+/// Each changed line gets a window of ±`FALLBACK_CONTEXT_LINES` (20) lines, clamped to the file;
 /// windows that overlap or touch merge, so each `TopLevel` unit holds its changes and their
 /// context, never the unchanged stretch between two distant changes.
 ///
