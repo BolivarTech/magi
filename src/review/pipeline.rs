@@ -325,6 +325,9 @@ pub async fn run_review(
     };
     let finished = run_batches(&batches, deps.consult, &clock, &mut summary).await;
 
+    // MAGI FIX (S6 loop 4): `planned` is never 0 here: a plan without a batch already failed in
+    // `filter_and_plan` with `NothingToReview` naming the files left out (RV20), before any spend.
+    // So an empty `finished` always means every planned batch failed or was cut.
     if finished.is_empty() {
         let message = format!(
             "no batch completed: {} of {planned} failed",

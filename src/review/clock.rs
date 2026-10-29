@@ -77,6 +77,8 @@ pub fn pre_budget(
     max_rotations: u32,
     retry_disabled: bool,
 ) -> Result<u64, ReviewError> {
+    // MAGI FIX (S6 loop 4): unreachable from `run_review`, whose planning fails first with the
+    // omitted files named; kept so a direct caller with zero batches spends nothing.
     if batches == 0 {
         return Err(ReviewError::NothingToReview {
             skipped: Vec::new(),
