@@ -599,6 +599,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_text_report_shows_what_the_json_says_of_each_gate_verdict() {
+        // [MAGI §6 MS2 C loop 3] parity with the JSON: the deciding model, its lean and
+        // confidence, every cause, the models skipped after a 400 and their count.
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+        let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        let answered = report.agents.iter().map(|a| a.agent).collect();
+        let c = consolidate(&[BatchOutcome {
+            batch: 0,
+            agents: report.agents.clone(),
+            answered,
+        }])
+        .expect("consolidates");
+        let verdict = GateVerdict {
+            state: GateState::LowConfidence,
+            cause: Some("critical never filtered"),
+            causes: vec!["critical never filtered", "not every claim judged"],
+            model: Some("clef-flash".into()),
+            lean: Some("false_positive".into()),
+            confidence: Some(0.625),
+            skipped: vec!["clef:cloud".into()],
+        };
+        let mut s = ReviewSummary::default();
+        s.findings.push((c.findings[0].clone(), verdict));
+        let text = render_text(&c, &s);
+        for needle in [
+            "gate: low_confidence (critical never filtered; not every claim judged)",
+            "by clef-flash, lean false_positive, confidence 0.62",
+            "skipped after HTTP 400: clef:cloud",
+            "rejected skips: clef:cloud 1",
+        ] {
+            assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
+        }
+    }
+
+    #[tokio::test]
     async fn the_text_report_redacts_model_text_too() {
         // [CP2 MS2 S2 loop 2] the subcommand's stdout is render_text: a credential echoed by a mage never reaches it.
         let f = serde_json::json!([{"severity":"warning","title":"t","detail":"see https://user:hunter2@example.invalid/x","file":"a.rs","line":1}]);
