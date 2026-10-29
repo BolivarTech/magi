@@ -1241,6 +1241,9 @@ class RunExecutor:
             return
         root = pathlib.Path(root).resolve()
         for relative, body in definition.files:
+            # Containment is checked on the RESOLVED target: resolve() follows
+            # every symlink and collapses every "..", so a link under *root*
+            # that points outside lands outside and is refused like "../x".
             target = (root / relative).resolve()
             if root not in target.parents:
                 raise HarnessError(
