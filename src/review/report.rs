@@ -726,6 +726,37 @@ mod tests {
         assert!(out.contains("[logic-error, error-handling]"), "{out}");
     }
 
+    #[test]
+    fn every_line_of_a_multiline_detail_stays_indented_under_its_finding() {
+        // [MAGI S6 loop 4, C2] a detail with a newline broke out of its finding's indentation, so
+        // its second line read as a line of the report.
+        let finding = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: Severity::Warning,
+            reported_severity: Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["first\nsecond\r\nthird".into()],
+            categories: vec![Category::Other],
+            sources: vec![AgentName::Melchior, AgentName::Caspar],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let verdict = GateVerdict {
+            state: GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+        };
+        let mut out = String::new();
+        write_finding(&mut out, &finding, &verdict).expect("writes");
+        let details: Vec<&str> = out.lines().skip(1).collect();
+        assert_eq!(details, ["  first", "  second", "  third"], "{out}");
+    }
+
     #[tokio::test]
     async fn the_paid_batch_reports_redact_a_credential_in_a_finding_title() {
         // magi-core's report prints titles, never details: a credential in a detail cannot show
