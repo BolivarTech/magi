@@ -8,10 +8,8 @@
 //! brace counting and keyword detection to extract complete semantic
 //! units (functions, structs, classes, declaration groups).
 
-use std::collections::HashSet;
-
 use super::scanner::{find_closing_brace, CodeScanner, LexicalRules, ScannedLine};
-use super::{gap_units, lines_in_range, LanguageExtractor, SemanticUnit, UnitKind};
+use super::{gap_units, ChangedLines, LanguageExtractor, SemanticUnit, UnitKind};
 use crate::review::context::FileContext;
 
 /// Configuration for a brace-delimited language extractor.
@@ -52,12 +50,13 @@ impl LanguageExtractor for BraceFamilyExtractor {
         self.exts
     }
 
-    fn extract_units(
+    fn extract_units<'a>(
         &self,
         content: &str,
         file_path: &str,
-        changed_lines: &HashSet<u32>,
+        changed_lines: impl Into<ChangedLines<'a>>,
     ) -> Vec<SemanticUnit> {
+        let changed_lines = changed_lines.into();
         if changed_lines.is_empty() {
             return vec![];
         }
@@ -68,18 +67,18 @@ impl LanguageExtractor for BraceFamilyExtractor {
 
         // Detect all constructs
         let constructs = self.detect_constructs(&lines, &scanned);
+        let ranges: Vec<(u32, u32)> = constructs
+            .iter()
+            .map(|c| (c.start_line, c.end_line))
+            .collect();
+        // MAGI FIX (S6 loop 3): a whole file hands out its lines by range, without a set of all.
+        let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+        let (shares, orphans) = changed_lines.assign(&ranges, total);
 
         // Filter to constructs that overlap with changed lines
         let mut units: Vec<SemanticUnit> = Vec::new();
-        let mut covered_lines: HashSet<u32> = HashSet::new();
-
-        let mut sorted: Vec<u32> = changed_lines.iter().copied().collect();
-        sorted.sort_unstable();
-        for construct in &constructs {
-            let changed_in_unit =
-                lines_in_range(&sorted, construct.start_line, construct.end_line).to_vec();
+        for (construct, changed_in_unit) in constructs.iter().zip(shares) {
             if !changed_in_unit.is_empty() {
-                covered_lines.extend(changed_in_unit.iter().copied());
                 let start_idx = construct.start_line.saturating_sub(1) as usize;
                 let end_idx = construct.end_line as usize;
                 let unit_content = lines
@@ -101,15 +100,6 @@ impl LanguageExtractor for BraceFamilyExtractor {
         }
 
         // Orphan fallback: one unit per gap between constructs that holds changed lines.
-        let orphans: Vec<u32> = changed_lines
-            .iter()
-            .copied()
-            .filter(|l| !covered_lines.contains(l))
-            .collect();
-        let ranges: Vec<(u32, u32)> = constructs
-            .iter()
-            .map(|c| (c.start_line, c.end_line))
-            .collect();
         units.extend(gap_units(&lines, file_path, &ranges, orphans));
 
         units
@@ -682,6 +672,7 @@ impl BraceFamilyExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn rust_extractor() -> BraceFamilyExtractor {
         BraceFamilyExtractor::rust()

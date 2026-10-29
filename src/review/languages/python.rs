@@ -7,10 +7,8 @@
 //! Recognizes `def`, `async def`, `class`, `import`/`from`, and module-level
 //! assignments. Block boundaries are determined by indentation level changes.
 
-use std::collections::HashSet;
-
 use super::scanner::{CodeScanner, LexicalRules};
-use super::{gap_units, lines_in_range, LanguageExtractor, SemanticUnit, UnitKind};
+use super::{gap_units, ChangedLines, LanguageExtractor, SemanticUnit, UnitKind};
 use crate::review::context::FileContext;
 
 /// Indentation-based Python code extractor.
@@ -32,29 +30,30 @@ impl LanguageExtractor for PythonExtractor {
         &["py", "pyi"]
     }
 
-    fn extract_units(
+    fn extract_units<'a>(
         &self,
         content: &str,
         file_path: &str,
-        changed_lines: &HashSet<u32>,
+        changed_lines: impl Into<ChangedLines<'a>>,
     ) -> Vec<SemanticUnit> {
+        let changed_lines = changed_lines.into();
         if changed_lines.is_empty() {
             return vec![];
         }
 
         let lines: Vec<&str> = content.lines().collect();
         let constructs = detect_python_constructs(&lines);
+        let ranges: Vec<(u32, u32)> = constructs
+            .iter()
+            .map(|c| (c.start_line, c.end_line))
+            .collect();
+        // MAGI FIX (S6 loop 3): a whole file hands out its lines by range, without a set of all.
+        let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+        let (shares, orphans) = changed_lines.assign(&ranges, total);
 
         let mut units = Vec::new();
-        let mut covered_lines: HashSet<u32> = HashSet::new();
-
-        let mut sorted: Vec<u32> = changed_lines.iter().copied().collect();
-        sorted.sort_unstable();
-        for construct in &constructs {
-            let changed_in_unit =
-                lines_in_range(&sorted, construct.start_line, construct.end_line).to_vec();
+        for (construct, changed_in_unit) in constructs.iter().zip(shares) {
             if !changed_in_unit.is_empty() {
-                covered_lines.extend(changed_in_unit.iter().copied());
                 let start_idx = construct.start_line.saturating_sub(1) as usize;
                 let end_idx = construct.end_line as usize;
                 let unit_content = lines
@@ -76,15 +75,6 @@ impl LanguageExtractor for PythonExtractor {
         }
 
         // Orphan fallback: one unit per gap between constructs that holds changed lines.
-        let orphans: Vec<u32> = changed_lines
-            .iter()
-            .copied()
-            .filter(|l| !covered_lines.contains(l))
-            .collect();
-        let ranges: Vec<(u32, u32)> = constructs
-            .iter()
-            .map(|c| (c.start_line, c.end_line))
-            .collect();
         units.extend(gap_units(&lines, file_path, &ranges, orphans));
 
         units
@@ -335,6 +325,7 @@ fn extract_python_name(trimmed: &str, prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn extract(code: &str, changed: &[u32]) -> Vec<SemanticUnit> {
         let ext = PythonExtractor;

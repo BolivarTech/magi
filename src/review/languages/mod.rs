@@ -88,15 +88,116 @@ pub trait LanguageExtractor {
     /// Extract semantic units from full file content, filtering
     /// to only those that overlap with `changed_lines`.
     ///
-    /// Each unit's `changed_lines` is sorted. The ported extractors cost O(n log n) for n lines
-    /// even when every line is changed (a file reviewed whole): the changed lines are sorted
-    /// once and each construct takes its share by binary search.
-    fn extract_units(
+    /// Each unit's `changed_lines` is sorted. With [`ChangedLines::Only`] the changed lines are
+    /// sorted once and each construct takes its share by binary search, O(c log c + n) for c
+    /// changed lines; with [`ChangedLines::All`] (a file reviewed whole) no set of every line is
+    /// built and each construct's share is its own range, O(n). Both give the same units for
+    /// the same lines.
+    ///
+    /// # Arguments
+    ///
+    /// * `content` - Full file content.
+    /// * `file_path` - Path to the file, copied into each unit.
+    /// * `changed_lines` - The changed lines: a `&HashSet<u32>` converts to
+    ///   [`ChangedLines::Only`].
+    ///
+    /// # Returns
+    ///
+    /// The units of the constructs that hold a changed line, then one fallback unit per gap
+    /// between constructs that holds one; empty when no line changed.
+    fn extract_units<'a>(
         &self,
         content: &str,
         file_path: &str,
-        changed_lines: &HashSet<u32>,
+        changed_lines: impl Into<ChangedLines<'a>>,
     ) -> Vec<SemanticUnit>;
+}
+
+/// The lines [`LanguageExtractor::extract_units`] treats as changed.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry};
+///
+/// let registry = LanguageRegistry::new();
+/// let rust = registry.get("a.rs").expect("registered");
+/// let units = rust.extract_units("fn f() {\n    x();\n}\n", "a.rs", ChangedLines::All);
+/// assert_eq!(units.len(), 1);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub enum ChangedLines<'a> {
+    /// Every line of the file (a file reviewed whole), without materializing them.
+    All,
+    /// Only these lines (1-based).
+    Only(&'a HashSet<u32>),
+}
+
+impl<'a> From<&'a HashSet<u32>> for ChangedLines<'a> {
+    fn from(lines: &'a HashSet<u32>) -> Self {
+        Self::Only(lines)
+    }
+}
+
+impl ChangedLines<'_> {
+    /// Whether no line is changed. [`ChangedLines::All`] is never empty, even for an empty file
+    /// (which has no line to give out).
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::All => false,
+            Self::Only(lines) => lines.is_empty(),
+        }
+    }
+
+    /// Hands the changed lines out to the constructs and the gaps between them.
+    ///
+    /// # Arguments
+    ///
+    /// * `ranges` - `(start, end)` line ranges (1-based, inclusive) of the constructs, sorted by
+    ///   start and disjoint, as the extractors detect them.
+    /// * `total` - Line count of the file: [`ChangedLines::All`] means `1..=total`.
+    ///
+    /// # Returns
+    ///
+    /// The sorted changed lines of each range, in the order of `ranges`, and the changed lines
+    /// outside every range (the orphans, sorted). O(c log c + c log r) for
+    /// [`ChangedLines::Only`] with c lines and r ranges, O(total) for [`ChangedLines::All`].
+    pub(crate) fn assign(&self, ranges: &[(u32, u32)], total: u32) -> (Vec<Vec<u32>>, Vec<u32>) {
+        match self {
+            Self::Only(set) => {
+                let mut sorted: Vec<u32> = set.iter().copied().collect();
+                sorted.sort_unstable();
+                let shares = ranges
+                    .iter()
+                    .map(|&(start, end)| lines_in_range(&sorted, start, end).to_vec())
+                    .collect();
+                let orphans = sorted
+                    .into_iter()
+                    .filter(|&line| {
+                        let next = ranges.partition_point(|&(start, _)| start <= line);
+                        next.checked_sub(1)
+                            .and_then(|i| ranges.get(i))
+                            .is_none_or(|&(_, end)| end < line)
+                    })
+                    .collect();
+                (shares, orphans)
+            }
+            Self::All => {
+                let shares = ranges
+                    .iter()
+                    .map(|&(start, end)| (start..=end.min(total)).collect())
+                    .collect();
+                let mut orphans = Vec::new();
+                let mut next = 1u32;
+                for &(start, end) in ranges {
+                    orphans.extend(next..start.min(total.saturating_add(1)));
+                    next = next.max(end.saturating_add(1));
+                }
+                orphans.extend(next..=total);
+                (shares, orphans)
+            }
+        }
+    }
 }
 
 /// Enum dispatch for language extractors.
@@ -127,12 +228,13 @@ impl LanguageExtractor for ExtractorKind {
         }
     }
 
-    fn extract_units(
+    fn extract_units<'a>(
         &self,
         content: &str,
         file_path: &str,
-        changed_lines: &HashSet<u32>,
+        changed_lines: impl Into<ChangedLines<'a>>,
     ) -> Vec<SemanticUnit> {
+        let changed_lines = changed_lines.into();
         match self {
             Self::BraceFamily(e) => e.extract_units(content, file_path, changed_lines),
             Self::Python(e) => e.extract_units(content, file_path, changed_lines),
@@ -389,6 +491,46 @@ mod tests {
         );
         assert_eq!(spans(&[30, 50, 71]), vec![(10, 91, vec![30, 50, 71])]);
         assert!(spans(&[]).is_empty());
+    }
+
+    #[test]
+    fn all_lines_gives_the_same_units_as_the_set_of_every_line() {
+        // [MAGI S6 loop 3, B9] `ChangedLines::All` replaces a set of every line for a file
+        // reviewed whole; the units must not change.
+        let samples = [
+            ("a.rs", "use a::b;\n\n/// doc\npub fn plan(\n    a: u8,\n) -> u8 {\n    a\n}\n// gap\nimpl X {\n    fn y() {}\n}\nconst C: u8 = 1;\n"),
+            ("a.c", "#include <x.h>\n\nint f(int a)\n{\n    return a;\n}\nstatic int g;\nextern \"C\" {\n    int h(void) {\n        return 0;\n    }\n}\n"),
+            ("a.py", "import os\n\nX = 1\n\n@d\ndef f():\n    s = '''\ndef g():\n'''\n    return s\n\nclass C:\n    pass\n# tail\n"),
+            ("a.java", "package p;\n\npublic class Foo {\n    public void run() {\n    }\n}\n"),
+            ("a.js", "const a = 1;\nfunction f() {\n  return `${a}`;\n}\n\nclass K {}\n"),
+            ("a.rs", ""),
+            ("a.rs", "x"),
+        ];
+        let registry = LanguageRegistry::new();
+        let view =
+            |units: Vec<SemanticUnit>| -> Vec<(UnitKind, String, u32, u32, String, Vec<u32>)> {
+                units
+                    .into_iter()
+                    .map(|u| {
+                        (
+                            u.kind,
+                            u.name,
+                            u.start_line,
+                            u.end_line,
+                            u.content,
+                            u.changed_lines,
+                        )
+                    })
+                    .collect()
+            };
+        for (path, text) in samples {
+            let ex = registry.get(path).expect("registered");
+            let total = u32::try_from(text.lines().count()).expect("small");
+            let every: HashSet<u32> = (1..=total).collect();
+            let from_set = view(ex.extract_units(text, path, &every));
+            let from_all = view(ex.extract_units(text, path, ChangedLines::All));
+            assert_eq!(from_all, from_set, "{path}: {text:?}");
+        }
     }
 
     // --- Test 37: registry_dispatches_by_extension ---

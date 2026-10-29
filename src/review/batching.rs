@@ -19,7 +19,7 @@ use crate::review::context::detect_language;
 use crate::review::error::ReviewError;
 use crate::review::hunk::parse_hunks;
 use crate::review::input::ReviewFile;
-use crate::review::languages::{LanguageExtractor, LanguageRegistry};
+use crate::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry};
 use crate::review::secrets::{display_path, find_secret};
 use crate::review::source::ContentSource;
 use crate::review::window::estimate_tokens;
@@ -378,9 +378,9 @@ fn whole_file_items(
         limit: limit_tokens,
     };
     let extractor = registry.get(path).ok_or_else(too_large)?;
-    let every_line: HashSet<u32> = (1..=lines).collect();
+    // MAGI FIX (S6 loop 3): every line is changed; no set of all of them is built.
     let units: Vec<BatchItem> = extractor
-        .extract_units(whole.text(), path, &every_line)
+        .extract_units(whole.text(), path, ChangedLines::All)
         .into_iter()
         // The extractor also emits an empty `TopLevel` unit for each gap between constructs.
         .filter(|u| !u.content.trim().is_empty())
