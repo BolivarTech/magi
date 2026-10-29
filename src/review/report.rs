@@ -663,6 +663,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_consolidated_finding_still_builds_magi_cores_key_finding() {
+        // [MAGI S6 loop 4, C2] `key_finding` goes through magi-core's `Deserialize`; a magi-core
+        // bump that changes that shape must turn this red, not silently move every finding out
+        // of Key Findings.
+        let f = serde_json::json!([{"severity":"warning","title":"unique-title","detail":"d","file":"a.rs","line":1}]);
+        let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        let answered = report.agents.iter().map(|a| a.agent).collect();
+        let c = consolidate(&[BatchOutcome {
+            batch: 0,
+            agents: report.agents.clone(),
+            answered,
+        }])
+        .expect("consolidates");
+        let verdict = GateVerdict {
+            state: GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+        };
+        assert!(key_finding(&c.findings[0]).is_some());
+        let mut s = ReviewSummary::default();
+        s.findings.push((c.findings[0].clone(), verdict));
+        let text = render_text(&c, &s);
+        assert!(!text.contains("could not be listed"), "{text}");
+    }
+
+    #[tokio::test]
     async fn the_paid_batch_reports_redact_a_credential_in_a_finding_title() {
         // magi-core's report prints titles, never details: a credential in a detail cannot show
         // that this backstop redacts; one in a title can.
