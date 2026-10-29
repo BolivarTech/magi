@@ -894,4 +894,25 @@ mod tests {
             assert!(!is_never_reviewed(p), "{p}");
         }
     }
+    #[test]
+    fn a_listed_name_that_is_not_utf8_never_stands_for_a_requested_path() {
+        // [MAGI S6 MS2 loop 4, A2 Caspar] the listing was decoded lossily, so `a\xff.rs` read as
+        // `a\u{FFFD}.rs`: a requested path that is valid UTF-8 matched a name it is not.
+        struct Latin1Tree;
+        impl GitCommand for Latin1Tree {
+            fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                match args.join(" ").as_str() {
+                    "ls-tree -r --name-only -z X" => Ok(b"a\xff.rs\0b.rs\0".to_vec()),
+                    "show --no-ext-diff --no-textconv X:./b.rs" => Ok(b"fn b() {}\n".to_vec()),
+                    other => Err(ReviewError::Git(format!("unexpected: {other}"))),
+                }
+            }
+        }
+        let src = RevisionSource::new(&Latin1Tree, "X".into(), None);
+        assert_eq!(src.read("a\u{FFFD}.rs").expect("absent"), None);
+        assert_eq!(
+            src.read("b.rs").expect("present"),
+            Some(b"fn b() {}\n".to_vec())
+        );
+    }
 }
