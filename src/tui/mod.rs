@@ -3958,7 +3958,9 @@ fn drain_approval_requests(app: &mut App) {
             app.push_message(line);
         }
         if let Some(detail) = &req.detail {
-            for line in audit_for_transcript(detail) {
+            // MAGI FIX (S6 loop 4): any tool may fill `detail`; sanitized at its sink (E2-3).
+            let detail = crate::agent::Agent::sanitize_text(detail);
+            for line in audit_for_transcript(&detail) {
                 app.push_message(line);
             }
         }
