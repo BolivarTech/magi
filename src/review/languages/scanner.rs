@@ -922,6 +922,33 @@ mod tests {
     }
 
     #[test]
+    fn braces_inside_a_javascript_regex_literal_are_not_counted() {
+        // [MAGI S6 loop 4, B2] `/}/` lowered the depth and `/\{/` raised it, so a function
+        // holding one ended early or absorbed the code after it.
+        let cases = [
+            ("const r = /}/;", 0),
+            (r"const r = /\{/g;", 0),
+            ("const r = /[/}]/;", 0),
+            ("if (/[}]/.test(s)) {", 1),
+            ("return /{/.test(s);", 0),
+            ("f(a, /}/);", 0),
+            ("x = a / b / c; {", 1),
+            ("x = (a) / 2; }", -1),
+            ("y = a++ / 2; {", 1),
+        ];
+        for (line, delta) in cases {
+            let mut scanner = CodeScanner::new(LexicalRules::javascript());
+            assert_eq!(scanner.scan_line(1, line).brace_delta, delta, "{line}");
+        }
+        let mut rust = CodeScanner::new(LexicalRules::rust());
+        assert_eq!(
+            rust.scan_line(1, "let q = a /{").brace_delta,
+            1,
+            "not JS: no regex"
+        );
+    }
+
+    #[test]
     fn balanced_braces_inside_a_template_expression_leave_the_depth_unchanged() {
         let mut scanner = CodeScanner::new(LexicalRules::javascript());
         let r = scanner.scan_all("const s = `x ${ {a: 1} } y`;\nfunction f() {\n}\n");
