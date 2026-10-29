@@ -78,7 +78,9 @@ pub fn pre_budget(
     retry_disabled: bool,
 ) -> Result<u64, ReviewError> {
     if batches == 0 {
-        return Err(ReviewError::NothingToReview);
+        return Err(ReviewError::NothingToReview {
+            skipped: Vec::new(),
+        });
     }
     let per_batch = batch_wall_clock_secs(total_secs, batches);
     let min_per_batch = headless_consult_timeout_secs(
@@ -154,7 +156,7 @@ mod tests {
         // [CP2 MS2 S2a2 loop 11] no batches is nothing to review, never a division by zero.
         assert!(matches!(
             pre_budget(60, 0, 2, false),
-            Err(ReviewError::NothingToReview)
+            Err(ReviewError::NothingToReview { .. })
         ));
         let err = pre_budget(60, 4, 2, false).expect_err("too little");
         match err {

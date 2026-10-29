@@ -496,7 +496,9 @@ impl<'c> Packer<'c> {
     fn finish(mut self) -> Result<Vec<ReviewBatch>, ReviewError> {
         self.close();
         if self.done.is_empty() {
-            return Err(ReviewError::NothingToReview);
+            return Err(ReviewError::NothingToReview {
+                skipped: Vec::new(),
+            });
         }
         Ok(self.done)
     }
@@ -729,7 +731,7 @@ mod tests {
         let src = MapSource::new(&[("empty.rs", "")], &[]);
         assert!(matches!(
             plan_batches(&files, &src, &LanguageRegistry::new(), 100),
-            Err(ReviewError::NothingToReview)
+            Err(ReviewError::NothingToReview { .. })
         ));
     }
 

@@ -4,6 +4,7 @@
 
 //! The typed errors of the `code-review` pipeline.
 
+use super::filter::Skipped;
 use super::secrets::{display_path, outward_text};
 
 /// Every way a review can fail before or while it calls a model.
@@ -38,9 +39,12 @@ pub enum ReviewError {
         /// Why it cannot be reviewed.
         cause: &'static str,
     },
-    /// The input holds no reviewable file.
+    /// The input holds no reviewable file; `skipped` lists every file left out, with its cause.
     #[error("nothing to review: no reviewable file in the input")]
-    NothingToReview,
+    NothingToReview {
+        /// The files the input held and the review left out, with why (shown paths).
+        skipped: Vec<Skipped>,
+    },
     /// A hunk or unit that does not fit in one batch by itself.
     #[error(
         "{} does not fit in one batch ({tokens} tokens, limit {limit})",

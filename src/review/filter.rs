@@ -186,7 +186,9 @@ pub fn filter_files(
         }
     }
     if filtered.kept.is_empty() {
-        return Err(ReviewError::NothingToReview);
+        return Err(ReviewError::NothingToReview {
+            skipped: Vec::new(),
+        });
     }
     Ok(filtered)
 }
@@ -1359,7 +1361,7 @@ mod tests {
             filter_files(Vec::new(), &src, &LanguageRegistry::new(), false, &|_| {
                 false
             }),
-            Err(ReviewError::NothingToReview)
+            Err(ReviewError::NothingToReview { .. })
         ));
     }
 
@@ -1375,7 +1377,7 @@ mod tests {
         assert!(matches!(
             filter_files(ignored, &src, &LanguageRegistry::new(), false, &|p| p
                 == ".env"),
-            Err(ReviewError::NothingToReview)
+            Err(ReviewError::NothingToReview { .. })
         ));
         let secrets = vec![
             ReviewFile {
@@ -1389,8 +1391,54 @@ mod tests {
         ];
         assert!(matches!(
             filter_files(secrets, &src, &LanguageRegistry::new(), false, &|_| false),
-            Err(ReviewError::NothingToReview)
+            Err(ReviewError::NothingToReview { .. })
         ));
+    }
+
+    #[test]
+    fn an_all_omitted_input_keeps_every_omission_and_its_cause_in_the_error() {
+        // [MAGI S6 loop 3, A2] RV20/RV22: with nothing kept, the omissions are still reported.
+        let key = "const K: &str = \"AKIAABCDEFGHIJKLMNOP\";
+"; // allow-secret-scan
+        let src = MapSource::new(
+            &[
+                (
+                    ".env", "X=1
+",
+                ),
+                ("a.rs", key),
+                ("b.bin", "a b"),
+            ],
+            &[],
+        );
+        let files = [".env", "a.rs", "b.bin"]
+            .iter()
+            .map(|p| ReviewFile {
+                path: (*p).into(),
+                diff: None,
+            })
+            .collect();
+        let e = filter_files(files, &src, &LanguageRegistry::new(), false, &|p| {
+            p == ".env"
+        })
+        .expect_err("nothing kept");
+        let ReviewError::NothingToReview { skipped } = &e else {
+            panic!("expected NothingToReview, got {e:?}");
+        };
+        let causes: Vec<(&str, SkipCause)> =
+            skipped.iter().map(|s| (s.path.as_str(), s.cause)).collect();
+        assert_eq!(
+            causes,
+            vec![
+                (".env", SkipCause::Ignored),
+                ("a.rs", SkipCause::Secret),
+                ("b.bin", SkipCause::Binary)
+            ]
+        );
+        let shown = e.to_string();
+        for part in [".env (ignored)", "a.rs (secret)", "b.bin (binary)"] {
+            assert!(shown.contains(part), "{shown}");
+        }
     }
 
     #[test]

@@ -4976,7 +4976,7 @@ fn review_error_exit(e: &magi_rs::review::error::ReviewError) -> i32 {
         | E::InvalidRef(_)
         | E::RefNotFound(_)
         | E::NotReviewable { .. }
-        | E::NothingToReview
+        | E::NothingToReview { .. }
         | E::TooLargeForBatch { .. }
         | E::Budget { .. }
         | E::TooLarge { .. }
@@ -22573,7 +22573,9 @@ mod code_review_surface_tests {
                 &self,
                 _i: &ReviewInput,
             ) -> Result<crate::tools::code_review::ReviewPlan, ReviewError> {
-                Err(ReviewError::NothingToReview)
+                Err(ReviewError::NothingToReview {
+                    skipped: Vec::new(),
+                })
             }
             async fn run(
                 &self,
@@ -22581,7 +22583,9 @@ mod code_review_surface_tests {
                 _budget: crate::tools::code_review::ReviewBudget,
                 _c: &CancellationToken,
             ) -> Result<crate::tools::code_review::Rendered, ReviewError> {
-                Err(ReviewError::NothingToReview)
+                Err(ReviewError::NothingToReview {
+                    skipped: Vec::new(),
+                })
             }
         }
         let mut agent = Agent::new(Arc::new(StaticProvider));
@@ -22718,7 +22722,12 @@ mod code_review_surface_tests {
     #[test]
     fn every_review_error_maps_to_the_declared_exit_code() {
         // [CP2 MS2 S2b loop 7] the caller's request → 2 (EXIT_MISUSE); the environment → 1 (EXIT_RUNTIME).
-        assert_eq!(review_error_exit(&ReviewError::NothingToReview), 2);
+        assert_eq!(
+            review_error_exit(&ReviewError::NothingToReview {
+                skipped: Vec::new()
+            }),
+            2
+        );
         assert_eq!(
             review_error_exit(&ReviewError::InputTooLarge { limit: 1 }),
             2

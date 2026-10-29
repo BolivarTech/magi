@@ -470,7 +470,7 @@ pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
         ReviewError::RefNotFound(_) => "ref_not_found",
         ReviewError::Git(_) => "git",
         ReviewError::NotReviewable { .. } => "not_reviewable",
-        ReviewError::NothingToReview => "nothing_to_review",
+        ReviewError::NothingToReview { .. } => "nothing_to_review",
         ReviewError::TooLargeForBatch { .. } => "too_large_for_batch",
         ReviewError::Budget { .. } => "budget",
         ReviewError::Consolidation(_) => "consolidation",

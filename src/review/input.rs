@@ -207,7 +207,9 @@ pub fn resolve_input(
         ReviewInput::Uncommitted => resolve_uncommitted(git, workspace)?,
     };
     if resolved.files.is_empty() && resolved.not_utf8.is_empty() {
-        return Err(ReviewError::NothingToReview);
+        return Err(ReviewError::NothingToReview {
+            skipped: Vec::new(),
+        });
     }
     Ok(resolved)
 }
