@@ -513,8 +513,12 @@ pub fn mask_secrets(text: &str) -> String {
 
 /// `text` as it may leave the process: [`mask_secrets`], then every control character escaped.
 ///
+/// Single-line by contract: a newline or a tab becomes its two-character escape, which is what a
+/// one-line error message needs (its callers are [`super::error::ReviewError`]'s messages).
+/// Multi-line text, such as a model's reply, goes through [`mask_secrets`] alone.
+///
 /// # Arguments
-/// * `text` - Any foreign text (git stderr, a path, a ref, a model message).
+/// * `text` - A foreign text bound for one line (git stderr, a path, a ref, an I/O message).
 ///
 /// # Returns
 /// The masked, escaped text.
