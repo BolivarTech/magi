@@ -1505,10 +1505,34 @@ fn command_words(text: &str) -> Result<Vec<String>, String> {
 
 /// The confirmation text for `batches` batches and a worst case of `worst_case_secs`, labelled
 /// as the maximum it is (REQ-RV18), never as the expected duration.
-fn code_review_confirmation_text(batches: usize, worst_case_secs: u64) -> String {
+///
+/// # Arguments
+/// * `batches` - The batches of the review.
+/// * `worst_case_secs` - The plan's worst case, every retry and rotation included.
+/// * `timeout_secs` - The `--timeout` total, when given (RV06).
+///
+/// # Returns
+/// The text. A `--timeout` below the worst case is the maximum the approved run obeys, so the
+/// text states it, with the worst case it replaces; one at or above it does not bind.
+// MAGI FIX (S6 loop 3): the consent text named a worst case a `--timeout` run can never reach.
+fn code_review_confirmation_text(
+    batches: usize,
+    worst_case_secs: u64,
+    timeout_secs: Option<u64>,
+) -> String {
+    let bound = match timeout_secs {
+        Some(cap) if cap < worst_case_secs => format!(
+            "at most {cap} s, the maximum set by --timeout, counted from the first call to the \
+             trio (worst case {worst_case_secs} s without it); when it runs out the review \
+             reports the batches that finished"
+        ),
+        _ => format!(
+            "worst case {worst_case_secs} s, the maximum with every retry and rotation, not the \
+             expected duration"
+        ),
+    };
     format!(
-        "Code review: {batches} batches; worst case {worst_case_secs} s, the maximum with every \
-         retry and rotation, not the expected duration. It cannot be cancelled once started. \
+        "Code review: {batches} batches; {bound}. It cannot be cancelled once started. \
          Press 'y' to run it, 'c' or 'Esc' to cancel."
     )
 }
@@ -1531,6 +1555,7 @@ pub(crate) fn tui_code_review_confirmation(
     code_review_confirmation_text(
         batches,
         magi_rs::review::clock::tui_worst_case_secs(batches, max_rotations, agent_timeout_secs),
+        None,
     )
 }
 
@@ -2293,7 +2318,7 @@ impl App {
                 self.push_message(line);
             }
         }
-        let text = code_review_confirmation_text(plan.batches, plan.worst_case_secs);
+        let text = code_review_confirmation_text(plan.batches, plan.worst_case_secs, cmd.timeout);
         for line in audit_for_transcript(&format!("System: {text}")) {
             self.push_message(line);
         }
