@@ -1715,4 +1715,20 @@ mod tests {
         assert!(!is_dangling_link(&dir.join("missing")));
         assert!(!is_dangling_link(&dir.join("a")), "a loop is not dangling");
     }
+    #[test]
+    fn a_quoted_path_that_decodes_to_non_utf8_is_set_aside_not_dropped() {
+        // [MAGI S6 MS2 loop 4, A1 Melchior] with octal escapes (core.quotePath=true) the section
+        // is UTF-8 text but its path is not: it fell through both lists.
+        let diff = concat!(
+            "diff --git \"a/caf\\351.rs\" \"b/caf\\351.rs\"\n",
+            "--- \"a/caf\\351.rs\"\n+++ \"b/caf\\351.rs\"\n@@ -1 +1 @@\n-x\n+y\n",
+            "diff --git a/ok.rs b/ok.rs\n--- a/ok.rs\n+++ b/ok.rs\n@@ -1 +1 @@\n-x\n+y\n",
+        );
+        let (files, not_utf8) = split_diff(diff.as_bytes());
+        assert_eq!(
+            files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["ok.rs"]
+        );
+        assert_eq!(not_utf8, vec!["caf\u{fffd}.rs".to_string()]);
+    }
 }
