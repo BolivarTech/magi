@@ -102,6 +102,9 @@ pub(crate) struct ScrubbedGit {
     output_cap: u64,
     /// The filter overrides, probed once before the first command.
     filters: Mutex<Option<Vec<String>>>,
+    /// Extra variables for every git child, so a test can point git at an operator config.
+    #[cfg(test)]
+    test_env: Vec<(String, String)>,
 }
 
 /// The prefix of an empty repository's directory name under the system temporary directory.
@@ -187,6 +190,17 @@ impl ScrubbedGit {
             workdir,
             output_cap: MAX_GIT_OUTPUT_BYTES,
             filters: Mutex::new(None),
+            #[cfg(test)]
+            test_env: Vec::new(),
+        }
+    }
+
+    /// A runner whose git children also get `env` (an operator-scope config, in a test).
+    #[cfg(test)]
+    fn with_test_env(workdir: PathBuf, env: Vec<(String, String)>) -> Self {
+        Self {
+            test_env: env,
+            ..Self::new(workdir)
         }
     }
 
@@ -242,12 +256,16 @@ impl ScrubbedGit {
     fn execute(&self, args: &[&str]) -> Result<Finished, ReviewError> {
         let command = args.first().copied().unwrap_or_default();
         let deadline = Instant::now() + Duration::from_secs(GIT_CALL_TIMEOUT_SECS);
-        let mut child = Command::new("git")
+        let mut command_line = Command::new("git");
+        command_line
             .args(self.argv(args))
             .env_clear()
             .envs(tool_child_env())
             .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_LITERAL_PATHSPECS", "1")
+            .env("GIT_LITERAL_PATHSPECS", "1");
+        #[cfg(test)]
+        command_line.envs(self.test_env.iter().cloned());
+        let mut child = command_line
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -822,11 +840,48 @@ mod tests {
     }
 
     #[test]
-    fn only_filter_drivers_from_the_reviewed_repos_own_config_are_neutralized() {
+    fn a_filter_driver_from_the_operators_global_config_never_runs() {
+        // [MAGI S6 loop 3, S3] RV22: a filter receives the worktree bytes before the review scans
+        // them, so a driver from ANY scope git reads (the operator's global file here) must not run.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "one\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join(".gitattributes"), "* filter=evil\n").expect("write");
+        std::fs::write(d.path().join("a.rs"), "two\n").expect("write");
+        let home = tempfile::tempdir().expect("tempdir");
+        let global = home.path().join("gitconfig");
+        std::fs::write(&global, "[filter \"evil\"]\n\tclean = touch PWNED; cat\n").expect("write");
+        let env = vec![(
+            "GIT_CONFIG_GLOBAL".to_string(),
+            global.to_str().expect("utf-8 tempdir").to_string(),
+        )];
+        let g = ScrubbedGit::with_test_env(d.path().to_path_buf(), env);
+        let head = g
+            .run(&["rev-parse", "--verify", "HEAD^{commit}"])
+            .expect("head");
+        let diff = g
+            .run(&[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                head.trim(),
+            ])
+            .expect("diff");
+        assert!(diff.contains("+two"), "{diff}");
+        assert!(
+            !d.path().join("PWNED").exists(),
+            "the operator's global filter ran on the reviewed bytes"
+        );
+    }
+
+    #[test]
+    fn filter_drivers_from_every_scope_are_neutralized() {
         // [CP2 MS2 S1a loop 10] `config --null --show-scope --get-regexp ^filter\.`: scope NUL key LF value NUL.
         let z = b"global\0filter.lfs.clean\ngit-lfs clean -- %f\0local\0filter.evil.clean\nsh x\0\
                   worktree\0filter.a.b.process\ny\0local\0filter.evil.required\ntrue\0";
-        let want: Vec<String> = ["a.b", "evil"]
+        let want: Vec<String> = ["a.b", "evil", "lfs"]
             .iter()
             .flat_map(|n| {
                 ["clean=", "smudge=", "process=", "required=false"]
@@ -891,9 +946,7 @@ mod tests {
             b"system\0filter.lfs.clean\ngit-lfs clean -- %f\0",
             "",
         );
-        assert!(interpret_filter_probe(&operator)
-            .expect("parses")
-            .is_empty());
+        assert_eq!(interpret_filter_probe(&operator).expect("parses").len(), 4);
         let truncated = probe(Some(0), b"local\0filter.evil.clean\nsh x", "");
         assert!(interpret_filter_probe(&truncated).is_err());
         match interpret_filter_probe(&probe(Some(128), b"", "fatal: bad config line 1")) {
