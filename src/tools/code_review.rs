@@ -1695,7 +1695,11 @@ mod tests {
         ));
         assert!(matches!(
             runner
-                .run(unchecked(link), None, &CancellationToken::new())
+                .run(
+                    unchecked(link),
+                    ReviewBudget::Unbounded,
+                    &CancellationToken::new()
+                )
                 .await,
             Err(ReviewError::OutsideWorkspace(_))
         ));
