@@ -614,15 +614,21 @@ pub(crate) fn split_diff(bytes: &[u8]) -> (Vec<ReviewFile>, Vec<String>) {
         };
         match std::str::from_utf8(section) {
             Ok(text) => {
-                if let Some(path) = reviewable_path(text) {
+                if let Some(path) = reviewable_path(text, unquote) {
                     files.push(ReviewFile {
                         path,
                         diff: Some(text.to_string()),
                     });
+                } else if let Some(path) = reviewable_path(text, unquote_lossy) {
+                    // MAGI FIX (S6 loop 4): a quoted path whose escapes decode to non-UTF-8
+                    // bytes was dropped from both lists.
+                    not_utf8.push(path);
                 }
             }
             Err(_) => {
-                if let Some(path) = reviewable_path(&String::from_utf8_lossy(section)) {
+                if let Some(path) =
+                    reviewable_path(&String::from_utf8_lossy(section), unquote_lossy)
+                {
                     not_utf8.push(path);
                 }
             }
@@ -651,7 +657,10 @@ pub fn is_binary_section(section: &str) -> bool {
 
 /// The path of a section worth reviewing (it has hunks, or it is binary and gets listed), or
 /// `None` for a gitlink, a header-only section with nothing to review, or an unparseable header.
-fn reviewable_path(section: &str) -> Option<String> {
+///
+/// `decode` undoes git's quoting of a path ([`unquote`], or [`unquote_lossy`] for the lists of
+/// paths that are not UTF-8).
+fn reviewable_path(section: &str, decode: Decode) -> Option<String> {
     let mut lines = section.lines();
     let first = lines.next()?;
     let header: Vec<&str> = lines.take_while(|l| !l.starts_with("@@")).collect();
@@ -663,7 +672,7 @@ fn reviewable_path(section: &str) -> Option<String> {
     if gitlink || !(has_hunk || is_binary_section(section)) {
         return None;
     }
-    section_path(first, &header).filter(|p| !p.is_empty())
+    section_path(first, &header, decode).filter(|p| !p.is_empty())
 }
 
 /// The old path of a renamed or copied file's section (its `rename from` or `copy from` header
@@ -684,11 +693,11 @@ pub(crate) fn renamed_from(section: &str) -> Option<String> {
 
 /// The path of a section: `rename to` (or `copy to`), then `+++`, then `---` for a deletion, then the
 /// symmetric split of the `diff --git` header.
-fn section_path(first: &str, header: &[&str]) -> Option<String> {
+fn section_path(first: &str, header: &[&str], decode: Decode) -> Option<String> {
     let after = |prefix: &str| header.iter().find_map(|l| l.strip_prefix(prefix));
     if let Some(p) = after("rename to ")
         .or_else(|| after("copy to "))
-        .and_then(unquote)
+        .and_then(decode)
     {
         return Some(p);
     }
@@ -698,7 +707,7 @@ fn section_path(first: &str, header: &[&str]) -> Option<String> {
         if raw == "/dev/null" {
             return None;
         }
-        let path = unquote(raw)?;
+        let path = decode(raw)?;
         let path = path
             .strip_prefix("b/")
             .or_else(|| path.strip_prefix("a/"))?;
@@ -711,13 +720,13 @@ fn section_path(first: &str, header: &[&str]) -> Option<String> {
     } else {
         side(new_side)
     };
-    from_sides.or_else(|| header_path(first))
+    from_sides.or_else(|| header_path(first, decode))
 }
 
 /// The path of a `diff --git <a> <b>` header whose two halves are the same path: the text has
 /// odd length `2k + 1`, byte `k` is a space, and the halves differ only in `a/` against `b/`
 /// (quoted or not). Never cut at the first or last ` b/`: a path may contain one.
-fn header_path(first: &str) -> Option<String> {
+fn header_path(first: &str, decode: Decode) -> Option<String> {
     let rest = first.strip_prefix("diff --git ")?;
     let k = rest.len() / 2;
     if rest.len() % 2 == 0 || rest.as_bytes().get(k) != Some(&b' ') {
@@ -727,19 +736,34 @@ fn header_path(first: &str) -> Option<String> {
     for (a, b) in [("a/", "b/"), ("\"a/", "\"b/")] {
         if let (Some(l), Some(r)) = (left.strip_prefix(a), right.strip_prefix(b)) {
             if l == r {
-                return unquote(left)?.strip_prefix("a/").map(str::to_string);
+                return decode(left)?.strip_prefix("a/").map(str::to_string);
             }
         }
     }
     None
 }
 
+/// How a diff path is decoded from git's quoting: [`unquote`] or [`unquote_lossy`].
+type Decode = fn(&str) -> Option<String>;
+
 /// Undoes git's C-style quoting (`"..."` with `\\ \" \a \b \t \n \v \f \r` and octal `\ooo`
 /// bytes); an unquoted text comes back as is. `None` for a malformed quote or escape, or bytes
 /// that are not UTF-8.
 fn unquote(text: &str) -> Option<String> {
+    String::from_utf8(unquote_bytes(text)?).ok()
+}
+
+/// [`unquote`], with bytes that are not UTF-8 decoded lossily: the name of a path set aside as
+/// not UTF-8. `None` only for a malformed quote or escape.
+fn unquote_lossy(text: &str) -> Option<String> {
+    Some(String::from_utf8_lossy(&unquote_bytes(text)?).into_owned())
+}
+
+/// The bytes git's C-style quoting stands for (see [`unquote`]); `None` for a malformed quote
+/// or escape.
+fn unquote_bytes(text: &str) -> Option<Vec<u8>> {
     let Some(inner) = text.strip_prefix('"') else {
-        return Some(text.to_string());
+        return Some(text.as_bytes().to_vec());
     };
     let inner = inner.strip_suffix('"')?;
     let mut out = Vec::with_capacity(inner.len());
@@ -773,7 +797,7 @@ fn unquote(text: &str) -> Option<String> {
             other => out.push(other),
         }
     }
-    String::from_utf8(out).ok()
+    Some(out)
 }
 
 #[cfg(test)]
