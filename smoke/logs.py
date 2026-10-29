@@ -52,7 +52,7 @@ def log_directory() -> pathlib.Path:
     return runs.workspace_root().joinpath(*LOG_DIR_PARTS)
 
 
-def scan(matcher, directory=None):
+def scan(matcher):
     """Walk every file under the log directory, in sorted order.
 
     Complexity: ``O(bytes in the log directory)``.
@@ -60,8 +60,6 @@ def scan(matcher, directory=None):
     Args:
         matcher: Called with each file's raw bytes; returns a non-``None``
             result on a match, or ``None`` to keep looking.
-        directory: The directory to walk instead of :func:`log_directory`; the
-            review runs execute in a workspace of their own, with their own log.
 
     Returns:
         tuple[object | None, bool, list[str]]: ``(result, directory
@@ -72,8 +70,9 @@ def scan(matcher, directory=None):
         searched clean (whatever was sought was never produced) are
         different findings.
     """
-    if directory is None:
-        directory = log_directory()
+    # MAGI FIX (S6 loop 4): the ``directory`` override had no caller; S50 reads
+    # the log the executor captured on its result instead (F1-4).
+    directory = log_directory()
     if not directory.is_dir():
         return None, False, []
     unreadable = []
