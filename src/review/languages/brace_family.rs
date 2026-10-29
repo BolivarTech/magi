@@ -156,7 +156,7 @@ impl BraceFamilyExtractor {
                     .and_then(|_| identifier_before_paren(trimmed))
                     .unwrap_or_else(|| extract_name_from_line(trimmed, keywords));
                 let start = self.scan_back_for_docs(lines, i);
-                let end = brace_block_end(scanned, i, lines.len(), line_num, &stops);
+                let end = brace_block_end(lines, scanned, i, line_num, &stops);
                 constructs.push(Construct {
                     kind,
                     name,
@@ -168,10 +168,10 @@ impl BraceFamilyExtractor {
                 continue;
             }
             if let Some(name) = self.signature_name(line) {
-                let opens = open_brace_line(scanned, i, lines.len(), &stops).is_some();
+                let opens = open_brace_line(lines, scanned, i, &stops).is_some();
                 if opens || trimmed.ends_with('}') {
                     let start = self.scan_back_for_docs(lines, i);
-                    let end = brace_block_end(scanned, i, lines.len(), line_num, &stops);
+                    let end = brace_block_end(lines, scanned, i, line_num, &stops);
                     constructs.push(Construct {
                         kind: UnitKind::Function,
                         name,
@@ -368,22 +368,38 @@ impl BraceFamilyExtractor {
 }
 
 /// The 0-based line holding the opening brace of the construct that starts at line `i`: line
-/// `i` when it opens one, else the first of the next two lines that does, scanning no further
-/// than a line where `stops` holds (the next construct's start). A line whose braces balance
-/// (`fn a() { x(); }`) opens nothing, so a one-line construct never takes the brace of the
-/// construct after it.
+/// `i` when it opens one, else the first later line that does, so a signature wrapped over any
+/// number of lines (rustfmt's `fn f(\n    a: u8,\n) -> u8 {`) finds its brace.
+///
+/// The search ends without a brace when line `i` already ends the declaration (its code ends in
+/// `;`), and before the first later line that is blank, is code ending in `;` (a statement: the
+/// declaration had no block), or where `stops` holds (the next construct's start); comment lines
+/// are passed over. A line whose braces balance (`fn a() { x(); }`) opens nothing, so a one-line
+/// construct never takes the brace of the construct after it. O(k) for the k lines scanned,
+/// which never pass the next construct.
 fn open_brace_line(
+    lines: &[&str],
     scanned: &[ScannedLine],
     i: usize,
-    line_count: usize,
     stops: &dyn Fn(usize) -> bool,
 ) -> Option<usize> {
     let opens = |idx: usize| scanned.get(idx).is_some_and(|s| s.brace_delta > 0);
+    let is_code = |idx: usize| scanned.get(idx).is_some_and(|s| !s.is_non_code);
+    let ends_statement =
+        |idx: usize| is_code(idx) && lines.get(idx).is_some_and(|l| l.trim_end().ends_with(';'));
     if opens(i) {
         return Some(i);
     }
-    ((i + 1)..line_count.min(i + 3))
-        .take_while(|&j| !stops(j))
+    if ends_statement(i) {
+        return None;
+    }
+    // MAGI FIX (S6 loop 3): no fixed two-line cap; the declaration's own end bounds the search.
+    ((i + 1)..lines.len())
+        .take_while(|&j| {
+            !stops(j)
+                && !lines.get(j).is_some_and(|l| l.trim().is_empty())
+                && (opens(j) || !ends_statement(j))
+        })
         .find(|&j| opens(j))
 }
 
@@ -392,13 +408,13 @@ fn open_brace_line(
 /// The opening brace is the one [`open_brace_line`] finds. A construct with no brace (a
 /// single-line declaration) ends on `line_num`.
 fn brace_block_end(
+    lines: &[&str],
     scanned: &[ScannedLine],
     i: usize,
-    line_count: usize,
     line_num: u32,
     stops: &dyn Fn(usize) -> bool,
 ) -> u32 {
-    match open_brace_line(scanned, i, line_count, stops) {
+    match open_brace_line(lines, scanned, i, stops) {
         Some(open_idx) => {
             let close_idx = find_closing_brace(scanned, open_idx);
             u32::try_from(close_idx + 1).unwrap_or(line_num)
