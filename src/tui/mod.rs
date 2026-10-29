@@ -1566,28 +1566,27 @@ fn command_words(text: &str) -> Result<Vec<String>, String> {
 /// * `timeout_secs` - The `--timeout` total, when given (RV06).
 ///
 /// # Returns
-/// The text. A `--timeout` below the worst case is the maximum the approved run obeys, so the
-/// text states it, with the worst case it replaces; one at or above it does not bind.
+/// The text. The worst case is always stated, as the maximum (RV18). A `--timeout` below it
+/// is stated apart, as the cap the approved run obeys; one at or above it does not bind.
 // MAGI FIX (S6 loop 3): the consent text named a worst case a `--timeout` run can never reach.
+// MAGI FIX (S6 loop 4): RV18 shows the unconditional worst case even under a smaller
+// `--timeout`; the cap is added after it, never in its place (E2-1).
 fn code_review_confirmation_text(
     batches: usize,
     worst_case_secs: u64,
     timeout_secs: Option<u64>,
 ) -> String {
-    let bound = match timeout_secs {
+    let cap = match timeout_secs {
         Some(cap) if cap < worst_case_secs => format!(
-            "at most {cap} s, the maximum set by --timeout, counted from the first call to the \
-             trio (worst case {worst_case_secs} s without it); when it runs out the review \
-             reports the batches that finished"
+            "; --timeout caps this run at most {cap} s, counted from the first call to the \
+             trio, and when it runs out the review reports the batches that finished"
         ),
-        _ => format!(
-            "worst case {worst_case_secs} s, the maximum with every retry and rotation, not the \
-             expected duration"
-        ),
+        _ => String::new(),
     };
     format!(
-        "Code review: {batches} batches; {bound}. It cannot be cancelled once started. \
-         Press 'y' to run it, 'c' or 'Esc' to cancel."
+        "Code review: {batches} batches; worst case {worst_case_secs} s, the maximum with every \
+         retry and rotation, not the expected duration{cap}. It cannot be cancelled once \
+         started. Press 'y' to run it, 'c' or 'Esc' to cancel."
     )
 }
 
