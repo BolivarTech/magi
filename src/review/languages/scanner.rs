@@ -61,6 +61,9 @@ enum LexicalState {
     CharLiteral,
     /// Inside a JS/TS template literal (`` `...` ``).
     TemplateLiteral,
+    /// Inside a JS/TS regular expression literal (`/.../`); `in_class` is `true` inside a
+    /// character class (`[...]`), where `/` does not close it.
+    RegexLiteral { in_class: bool },
 }
 
 /// Raw string syntax variants across languages.
@@ -95,6 +98,8 @@ pub struct LexicalRules {
     pub raw_strings: RawStringSyntax,
     /// Whether backtick template literals exist (JS/TS only).
     pub template_literals: bool,
+    /// Whether `/.../` regular expression literals exist (JS/TS only).
+    pub regex_literals: bool,
 }
 
 impl LexicalRules {
@@ -108,6 +113,7 @@ impl LexicalRules {
             char_literals: true,
             raw_strings: RawStringSyntax::RustHashes,
             template_literals: false,
+            regex_literals: false,
         }
     }
 
@@ -121,6 +127,7 @@ impl LexicalRules {
             char_literals: true,
             raw_strings: RawStringSyntax::None,
             template_literals: false,
+            regex_literals: false,
         }
     }
 
@@ -139,6 +146,7 @@ impl LexicalRules {
             char_literals: true,
             raw_strings: RawStringSyntax::GoBacktick,
             template_literals: false,
+            regex_literals: false,
         }
     }
 
@@ -151,6 +159,7 @@ impl LexicalRules {
             char_literals: true,
             raw_strings: RawStringSyntax::None,
             template_literals: false,
+            regex_literals: false,
         }
     }
 
@@ -164,6 +173,7 @@ impl LexicalRules {
             char_literals: false,
             raw_strings: RawStringSyntax::None,
             template_literals: true,
+            regex_literals: true,
         }
     }
 
@@ -182,6 +192,7 @@ impl LexicalRules {
             char_literals: false,
             raw_strings: RawStringSyntax::TripleQuote,
             template_literals: false,
+            regex_literals: false,
         }
     }
 }
@@ -291,6 +302,17 @@ impl CodeScanner {
                     {
                         self.state = LexicalState::BlockComment { depth: 1 };
                         i += 2;
+                        continue;
+                    }
+
+                    // MAGI FIX (S6 loop 4): a regex literal's braces (`/}/`) are not structure.
+                    if self.rules.regex_literals
+                        && char_at(&chars, i) == '/'
+                        && regex_may_start(&chars, i, last_code)
+                    {
+                        last_code = Some(STRING_MARK);
+                        self.state = LexicalState::RegexLiteral { in_class: false };
+                        i += 1;
                         continue;
                     }
 
@@ -500,6 +522,23 @@ impl CodeScanner {
                     i += 1;
                 }
 
+                LexicalState::RegexLiteral { in_class } => {
+                    let in_class = *in_class;
+                    match char_at(&chars, i) {
+                        '\\' => {
+                            i += 2;
+                            continue;
+                        }
+                        '[' => self.state = LexicalState::RegexLiteral { in_class: true },
+                        ']' if in_class => {
+                            self.state = LexicalState::RegexLiteral { in_class: false };
+                        }
+                        '/' if !in_class => self.state = LexicalState::Code,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+
                 LexicalState::TemplateLiteral => {
                     if char_at(&chars, i) == '\\' {
                         i += 2;
@@ -515,8 +554,12 @@ impl CodeScanner {
             }
         }
 
-        // Reset line comment at end of line
-        if self.state == LexicalState::LineComment {
+        // Reset line comment at end of line; a regex literal cannot span lines either, so an
+        // unclosed one (a `/` misread as one) ends with its line.
+        if matches!(
+            self.state,
+            LexicalState::LineComment | LexicalState::RegexLiteral { .. }
+        ) {
             self.state = LexicalState::Code;
         }
 
@@ -612,6 +655,63 @@ impl CodeScanner {
 
         // Otherwise it's a lifetime or label
         false
+    }
+}
+
+/// Keywords after which a `/` starts a regular expression, not a division (`return /x/`).
+const REGEX_PRECEDING_KEYWORDS: [&str; 13] = [
+    "return",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "new",
+    "delete",
+    "void",
+    "throw",
+    "case",
+    "do",
+    "else",
+    "yield",
+];
+
+/// Whether the `/` at `i` (not `//` nor `/*`) starts a JS regular expression literal, by what
+/// precedes it on the line (`last_code`, the last non-blank code character): nothing, an
+/// operator or an opening bracket (`= /x/`, `(/x/`, `, /x/`), or a keyword of
+/// [`REGEX_PRECEDING_KEYWORDS`]. After an operand (an identifier, a number, a literal, `)`,
+/// `]`, `}`, `++`, `--`) it is a division.
+///
+/// A heuristic, declared: `}` and `)` always read as the end of an operand, so a regex that
+/// opens a statement after a block (`} /x/.test(s)`) or after an `if (...)` reads as a
+/// division; its braces then count, as they did before regex literals were known. An unclosed
+/// `/` misread as a regex ends with its line, so the misreading never spreads past it.
+/// O(k) for the k characters before `i`.
+fn regex_may_start(chars: &[char], i: usize, last_code: Option<char>) -> bool {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let before = chars.get(..i).unwrap_or(&[]);
+    match last_code {
+        None => true,
+        Some(c) if c == STRING_MARK || matches!(c, ')' | ']' | '}') => false,
+        Some(c) if is_word(c) => {
+            let word: String = before
+                .iter()
+                .rev()
+                .skip_while(|c| c.is_whitespace())
+                .take_while(|&&c| is_word(c))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            REGEX_PRECEDING_KEYWORDS.contains(&word.as_str())
+        }
+        // `a++ / 2` divides; a single `+` or `-` is an operator, so a regex may follow it.
+        Some(c @ ('+' | '-')) => !before
+            .iter()
+            .rev()
+            .filter(|p| !p.is_whitespace())
+            .take(2)
+            .all(|&p| p == c),
+        Some(_) => true,
     }
 }
 
