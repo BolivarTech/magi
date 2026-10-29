@@ -264,7 +264,8 @@ class CodeReviewScenarioTests(unittest.TestCase):
     def test_s47_leaves_a_timed_out_run_to_the_runner(self) -> None:
         # The runner turns a timed-out run into CANNOT_TEST (runner.py) for every scenario that does not
         # declare inspects_timeouts; S47 must not declare it, or a slow trio would read as a FAIL.
-        for sid in ("S47", "S48", "S49", "S50"):
+        # [MAGI §6 MS2 loop 4, F1-g35] S51 too: a hung R16 is CANNOT_TEST, never per-assertion FAILs.
+        for sid in ("S47", "S48", "S49", "S50", "S51"):
             self.assertFalse(DEFAULT_REGISTRY.get(sid).inspects_timeouts, sid)
 
     def test_s47_without_the_findings_key_fails_never_an_empty_pass(self) -> None:
