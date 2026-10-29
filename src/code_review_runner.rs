@@ -177,11 +177,16 @@ impl BatchConsult for TrioBatchConsult {
         prompt: &str,
         wall_clock: Option<Duration>,
     ) -> Result<MagiReport, ConsultFailure> {
-        let magi = self
-            .factory
-            .build(self.ceiling(wall_clock))
-            .map_err(|e| ConsultFailure::Other(redact_foreign_text(&e).to_string()))?;
+        let factory = Arc::clone(&self.factory);
+        let ceiling = self.ceiling(wall_clock);
         run_with_wall_clock(wall_clock, async move {
+            // MAGI FIX (S6 loop 3): the build is part of the batch. It runs on a blocking thread
+            // inside the wall clock, so the clock bounds it and the run's token is not held up by
+            // it (a build cut there finishes unread on its thread).
+            let magi = tokio::task::spawn_blocking(move || factory.build(ceiling))
+                .await
+                .map_err(|e| format!("the trio build did not finish: {e}"))?
+                .map_err(|e| redact_foreign_text(&e).to_string())?;
             let report = magi
                 .analyze(&Mode::CodeReview, prompt)
                 .await
