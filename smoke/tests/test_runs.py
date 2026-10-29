@@ -271,15 +271,16 @@ class AccessorTests(unittest.TestCase):
 
 
 class DefinitionTableTests(unittest.TestCase):
-    """The fifteen shared runs, declared complete in one place."""
+    """The sixteen shared runs, declared complete in one place."""
 
     def test_every_run_of_the_table_is_declared(self) -> None:
-        """All fifteen land here, not one per later task.
+        """All sixteen land here, not one per later task.
 
         A run whose only owner is a task nobody wrote never gets written at
         all, and the table then names something that does not exist.
         """
-        self.assertEqual(["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"],
+        self.assertEqual(["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
+                          "R16"],
                          list(runs.DEFINITIONS))
 
     def test_every_invocation_asks_for_json_and_names_the_workspace(self) -> None:

@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.24.3
 # Date: 2026-10-25
-"""Unit tests for the code-review runs R12-R15 and the files they write."""
+"""Unit tests for the code-review runs R12-R16 and the files they write."""
 
 import pathlib
 import shutil
@@ -71,6 +71,18 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                          argv[argv.index("--timeout") + 1])
         self.assertEqual("error", argv[argv.index("--log-level") + 1])
 
+    def test_the_root_run_reviews_the_workspace_root_with_a_too_short_timeout(self) -> None:
+        # [MAGI §6 MS2 loop 3, F2] the root of the nested workspace, holding .magi and .git; a
+        # protected file taken for review would end at the budget refusal, never at a model.
+        definition = runs.DEFINITIONS["R16"]
+        argv = list(definition.argv)
+        self.assertEqual(runs.REVIEW_ROOT_PATH, argv[-1])
+        self.assertEqual(".", runs.REVIEW_ROOT_PATH)
+        self.assertEqual(str(runs.REVIEW_TOO_SHORT_TIMEOUT_S),
+                         argv[argv.index("--timeout") + 1])
+        self.assertEqual(runs.review_skipped_files(), definition.files)
+        self.assertFalse(definition.needs_trio)
+
     def test_only_the_large_review_run_reaches_the_trio(self) -> None:
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()
                      if d.argv[0] == "code-review" and d.needs_trio}
@@ -134,7 +146,7 @@ class ReviewWorkspaceTests(unittest.TestCase):
     """R12-R15 run in a nested git repository under the scratch area."""
 
     def test_the_review_runs_name_the_review_workspace(self) -> None:
-        for run_id in ("R12", "R13", "R14", "R15"):
+        for run_id in ("R12", "R13", "R14", "R15", "R16"):
             argv = runs.DEFINITIONS[run_id].argv
             self.assertEqual(runs.REVIEW_WORKSPACE_TOKEN,
                              argv[argv.index("-w") + 1], run_id)

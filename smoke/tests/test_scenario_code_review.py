@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.24.3
 # Date: 2026-10-25
-"""Unit tests for S47-S50 (code-review against the release binary)."""
+"""Unit tests for S47-S51 (code-review against the release binary)."""
 
 import dataclasses
 import json
@@ -67,6 +67,57 @@ def _review(batches: int = 3, findings=None, discarded=None) -> dict:
                             "unmeasured_models": ["kimi-k2.6:cloud"],
                             "findings": [{"file": "gen/a.rs", "line": 1}] if findings is None else findings,
                             "discarded": [{"cause": "file not reviewed"}] if discarded is None else discarded}}
+
+
+#: R16's stderr as the release binary printed it over a workspace root holding the environment's
+#: ``.magi`` and R14's two skipped files (measured 2026-10-29).
+_ROOT_STDERR = (
+    b"error: nothing to review: no reviewable file in the input; left out: "
+    b".magi/.magi-rs-memory.db (ignored), .magi/logs/magi-2026-10-29.log (ignored), "
+    b".magi/magi.toml (ignored), skipped/leak.txt (secret), skipped/pixel.png (binary) "
+    b"review.error=nothing_to_review" + _NL)
+
+
+class WorkspaceRootScenarioTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 3, F2] S51: reviewing the workspace root never takes .magi or .git."""
+
+    def test_s51_is_registered_on_r16_without_a_backend(self) -> None:
+        entry = DEFAULT_REGISTRY.get("S51")
+        self.assertEqual("R16", entry.run)
+        self.assertFalse(entry.needs_backend)
+
+    def test_s51_passes_when_the_root_has_nothing_to_review_and_magi_is_left_out_as_ignored(self) -> None:
+        r = _result("R16", 2, None, _with_id(_ROOT_STDERR))
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
+
+    def test_s51_passes_when_no_protected_path_is_named_at_all(self) -> None:
+        r = _result("R16", 2, None, _with_id(
+            b"error: nothing to review: no reviewable file in the input; left out: "
+            b"skipped/leak.txt (secret), skipped/pixel.png (binary)" + _NL))
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
+
+    def test_s51_fails_when_a_protected_file_was_taken_for_review(self) -> None:
+        # A .magi/magi.toml taken for review makes the input reviewable: the run reaches the budget
+        # refusal (--timeout 30) instead of "nothing to review".
+        r = _result("R16", 2, None, _with_id(_BUDGET_STDERR))
+        outcomes = _outcomes("S51", r)
+        self.assertEqual(Outcome.FAIL, outcomes[code_review.S51_ASSERTIONS[1]])
+
+    def test_s51_fails_when_a_protected_path_was_read_for_its_content(self) -> None:
+        for path in (b".magi/.magi-rs-memory.db (binary)", b".git/config (secret)",
+                     b"sub/.magi/magi.toml (not utf-8)"):
+            stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)", path)
+            r = _result("R16", 2, None, _with_id(stderr))
+            self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], path)
+
+    def test_s51_fails_on_a_wrong_exit(self) -> None:
+        r = _result("R16", 0, None, _with_id(_ROOT_STDERR))
+        self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[0]])
+
+    def test_s51_without_a_capture_cannot_test(self) -> None:
+        findings = list(DEFAULT_REGISTRY.get("S51").func(None))
+        self.assertEqual({Outcome.CANNOT_TEST}, {f.outcome for f in findings})
+        self.assertEqual(len(code_review.S51_ASSERTIONS), len(findings))
 
 
 class CodeReviewScenarioTests(unittest.TestCase):
