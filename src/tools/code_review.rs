@@ -454,7 +454,7 @@ pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
     })
 }
 
-/// `cause.name` of a review error's run-log entry: the variant in snake_case.
+/// `review.error` of a review error's run-log entry: the variant in snake_case.
 ///
 /// # Arguments
 /// * `e` - The error.

@@ -4950,11 +4950,13 @@ const CODE_REVIEW_LOG_TARGET: &str = "magi_rs::code_review";
 fn emit_review_error(e: &magi_rs::review::error::ReviewError) {
     let text = redact_foreign_text(&e.to_string());
     magi_rs::notices::eprint_audited(&format!("error: {}", text.as_str()));
+    // MAGI FIX (S6 loop 3): `cause.subsystem`/`cause.name` are the health layer's degradation
+    // key; a review refusal is not a subsystem degrading, and with no declared screen row it
+    // printed an "internal error" line on stderr. The name rides in its own field.
     tracing::event!(
         target: CODE_REVIEW_LOG_TARGET,
         tracing::Level::ERROR,
-        cause.subsystem = "code_review",
-        cause.name = crate::tools::code_review::review_error_cause_name(e),
+        review.error = crate::tools::code_review::review_error_cause_name(e),
         "{}",
         text.as_str()
     );
