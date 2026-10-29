@@ -287,12 +287,16 @@ impl SystemOneClient {
 
 /// Whether a 404 `body` says that `model`, the one requested in this call, is missing.
 ///
-/// Matches the pre-0.40 Ollama text, or the 0.40 form `model '<model>' not found` with the
-/// requested name between the quotes: a generic 404 (a proxy, another model's name) is not
-/// this model missing.
+/// Matches the pre-0.40 Ollama text `model "<model>" not found, try pulling it first` (its
+/// quotes JSON-escaped in the body, or bare), or the 0.40 form `model '<model>' not found`, each
+/// with the requested name between the quotes: a generic 404 (a proxy, another model's name) is
+/// not this model missing.
+// MAGI FIX (S6 loop 3): the legacy marker is name-checked like the 0.40 form.
 fn names_missing_model(body: &str, model: &str) -> bool {
-    contains_any(body, MODEL_NOT_FOUND_MARKERS)
-        || body.contains(&format!("model '{model}' not found"))
+    MODEL_NOT_FOUND_MARKERS.iter().any(|marker| {
+        body.contains(&format!("\\\"{model}\\\" {marker}"))
+            || body.contains(&format!("\"{model}\" {marker}"))
+    }) || body.contains(&format!("model '{model}' not found"))
 }
 
 /// Whether `body` contains any of the `markers`.
@@ -1084,7 +1088,9 @@ mod tests {
     #[tokio::test]
     async fn the_first_model_that_answers_wins_and_every_hop_is_recorded() {
         let mut server = mockito::Server::new_async().await;
-        mock_model(&mut server, "a", 404, OLLAMA_MISSING_MODEL.to_string()).await;
+        // [MAGI §6 MS2 C loop 3] the missing-model body names the model it answers for.
+        let missing_a = OLLAMA_MISSING_MODEL.replace("nimble", "a");
+        mock_model(&mut server, "a", 404, missing_a).await;
         mock_model(&mut server, "b", 500, String::new()).await;
         mock_model(&mut server, "c", 200, noul_body("c", 0.9, 5, None)).await;
         let d = decide(settings(&server.url(), &["a", "b", "c"]), &request())
