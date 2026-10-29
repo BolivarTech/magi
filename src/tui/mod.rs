@@ -2296,15 +2296,12 @@ pub struct App {
     /// Why there is no review runner, redacted, when its build said.
     pub code_review_unavailable: Option<String>,
     /// A `/code-review` waiting for `y` (run) or `c`/`Esc` (cancel).
-    pub pending_code_review: Option<(
-        TuiCodeReviewCommand,
-        std::sync::Arc<dyn crate::tools::code_review::CodeReviewRunner>,
-        crate::tools::code_review::ReviewPlan,
-    )>,
+    pub pending_code_review: Option<PendingCodeReview>,
 }
 
-/// A `/code-review` the user approved, between its notice and its run.
-pub(crate) struct ApprovedCodeReview {
+/// A `/code-review` the confirmation showed, waiting for its answer.
+// MAGI FIX (S6 loop 4): a named struct instead of a three-element tuple (E2-6).
+pub(crate) struct PendingCodeReview {
     /// The parsed command.
     cmd: TuiCodeReviewCommand,
     /// The session's runner.
@@ -2312,6 +2309,10 @@ pub(crate) struct ApprovedCodeReview {
     /// The plan the confirmation showed.
     plan: crate::tools::code_review::ReviewPlan,
 }
+
+/// A `/code-review` the user approved, between its notice and its run: the pending review,
+/// typed apart so only an approval can hand it to [`App::run_approved_code_review`].
+pub(crate) struct ApprovedCodeReview(PendingCodeReview);
 
 impl App {
     pub fn new(
@@ -2376,16 +2377,16 @@ impl App {
         for line in audit_for_transcript(&format!("System: {text}")) {
             self.push_message(line);
         }
-        self.pending_code_review = Some((cmd, runner, plan));
+        self.pending_code_review = Some(PendingCodeReview { cmd, runner, plan });
     }
 
     /// Takes the approved `/code-review` and pushes the "running, cannot be cancelled" notice,
     /// so the caller can draw it before awaiting [`Self::run_approved_code_review`], which holds
     /// the event loop for the whole review. `None` without a pending confirmation.
     pub(crate) fn approve_code_review(&mut self) -> Option<ApprovedCodeReview> {
-        let (cmd, runner, plan) = self.pending_code_review.take()?;
+        let pending = self.pending_code_review.take()?;
         apply_response(self, AgentResponse::Info(CODE_REVIEW_RUNNING.to_string()));
-        Some(ApprovedCodeReview { cmd, runner, plan })
+        Some(ApprovedCodeReview(pending))
     }
 
     /// Runs an approved `/code-review` and waits for it in line, as `/consult` does (no key is
@@ -2394,7 +2395,7 @@ impl App {
     /// # Arguments
     /// * `review` - What [`Self::approve_code_review`] returned.
     pub(crate) async fn run_approved_code_review(&mut self, review: ApprovedCodeReview) {
-        let ApprovedCodeReview { cmd, runner, plan } = review;
+        let ApprovedCodeReview(PendingCodeReview { cmd, runner, plan }) = review;
         let budget = cmd
             .timeout
             .map_or(crate::tools::code_review::ReviewBudget::Unbounded, |t| {
