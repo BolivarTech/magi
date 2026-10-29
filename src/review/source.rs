@@ -229,7 +229,7 @@ impl ContentSource for WorktreeSource<'_> {
     /// (a link to a directory), and [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
     /// A link whose target does not exist is `Ok(None)`, like a file that does not exist.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        self.read_with(path, &|canonical| std::fs::File::open(canonical))
+        self.read_with(path, &open_for_review)
     }
 
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
@@ -296,6 +296,20 @@ impl WorktreeSource<'_> {
             }),
         }
     }
+}
+
+/// Opens a worktree file for reading.
+///
+/// # Arguments
+/// * `path` - The canonical path to open.
+///
+/// # Returns
+/// The open file.
+///
+/// # Errors
+/// Any error of the open.
+pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// Reads a git revision (`git show <rev>:./<path>`), never the worktree.
@@ -497,6 +511,33 @@ impl ContentSource for CachedSource<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)] // a FIFO is a unix file type; Windows has no open that blocks this way.
+    #[test]
+    fn a_file_swapped_for_a_fifo_before_the_open_is_refused_without_blocking() {
+        // [MAGI S6 loop 3, A5] TOCTOU: the type is checked before the open, so a regular file
+        // swapped for a FIFO in that window used to block the open forever (the preparation runs
+        // outside the review clock). The opener is the production one, pointed at the FIFO.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("a.rs"), "fn f() {}\n").expect("write");
+        let fifo = root.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo");
+        let src = WorktreeSource::new(root.path().to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let swapped = |_: &std::path::Path| open_for_review(&fifo);
+            let _ = tx.send(src.read_with("a.rs", &swapped));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Err(ReviewError::NotRegularFile(p))) => assert_eq!(p, "a.rs"),
+            Ok(other) => panic!("expected NotRegularFile, got {other:?}"),
+            Err(_) => panic!("opening the FIFO blocked"),
+        }
+    }
     use crate::review::test_support::FakeGit;
 
     #[test]
