@@ -134,8 +134,12 @@ max_state_bytes = 61000
 # Approval of the agent's `code-review` tool. Optional, default false: it asks, like `consult`.
 auto_approve    = false
 
-# Ordered fallbacks on the SAME endpoint, tried after the primary fails, answers HTTP 400 or
-# answers below its threshold.
+# Ordered fallbacks on the SAME endpoint. The next model is asked when the one before it answers
+# below its threshold, answers HTTP 400, 404, 429 or 5xx, redirects, times out, cannot be reached
+# or sends an answer that does not validate. A model that answered 400 is skipped for the rest of
+# the review. No fallback is asked after HTTP 401 or 403 (the gate stops: the remaining findings
+# pass unjudged) or after HTTP 413 or 422 (that finding passes unjudged; the next finding starts
+# again at the head of the chain).
 [[code_review.fallback]]
 model = "clef-flash"
 min_confidence = 0.32
