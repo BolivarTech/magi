@@ -17,7 +17,7 @@ from smoke.outcome import Finding
 #: certificate renderer, which publishes "N of N scenarios evaluated", and by
 #: the test that asserts the registry actually holds that many. One constant
 #: with two readers is what keeps the headline and the registry from drifting.
-DECLARED_SCENARIO_COUNT = 50
+DECLARED_SCENARIO_COUNT = 51
 
 #: How many ASSERTIONS those scenarios promise between them, per section 8 of
 #: the spec. A separate constant because it answers a separate question, and
@@ -71,7 +71,12 @@ DECLARED_SCENARIO_COUNT = 50
 #:
 #: 150 on 2026-10-25: S50 gains a third assertion, the refusal in the run log
 #: (RV-S7 asks for stderr AND the run log), v0.25.0.
-DECLARED_ASSERTION_COUNT = 150
+#:
+#: 153 on 2026-10-29: S51 adds 3 assertions (reviewing the review workspace's
+#: root never takes ``.magi`` or ``.git`` for review: exit 2, nothing to
+#: review, and every protected path named is left out as ignored), v0.25.0.
+#: The scenario count goes 50 -> 51 with it.
+DECLARED_ASSERTION_COUNT = 153
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

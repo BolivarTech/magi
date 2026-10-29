@@ -637,8 +637,13 @@ REVIEW_OUTSIDE_COMPONENT = "smoke-hostile-target"
 REVIEW_OUTSIDE_PATH = "../" + REVIEW_OUTSIDE_COMPONENT
 
 #: The total R15 asks for: three batches cannot each get the product's floor
-#: out of it.
+#: out of it. R16 asks for it too, so a protected file wrongly taken for review
+#: ends at the budget refusal instead of at a model.
 REVIEW_TOO_SHORT_TIMEOUT_S = 30
+
+#: The input R16 reviews: the review workspace's root, which holds its
+#: ``.magi`` and ``.git`` beside the files the run writes.
+REVIEW_ROOT_PATH = "."
 
 #: Toy contents of the files R14 reviews. The PNG signature plus NUL bytes make
 #: the first a binary; the second carries a key-shaped toy secret. Both are
@@ -974,8 +979,8 @@ DEFINITIONS: dict[str, RunDefinition] = {
         argv=("query",) + COMMON_FLAGS + ENVELOPE_FLAGS + ("--no-memory",),
         stdin=_envelope("say ok", "x" * (SYSTEM_CAP_DEFAULT_BYTES + 1)),
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60),
-    # R12-R15 feed ``code-review`` (S47-S50). R12 reviews the generated tree in
-    # at least three batches against the real trio; R13-R15 are refused before
+    # R12-R16 feed ``code-review`` (S47-S51). R12 reviews the generated tree in
+    # at least three batches against the real trio; R13-R16 are refused before
     # any model is reached.
     "R12": RunDefinition(
         run_id="R12",
@@ -1003,6 +1008,15 @@ DEFINITIONS: dict[str, RunDefinition] = {
         stdin=b"",
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         files=review_input_files()),
+    # MAGI FIX (S6 loop 3): the workspace ROOT, so ``.magi`` and ``.git`` are
+    # enumeration candidates; R12-R15 read subdirectories and never were (F2).
+    "R16": RunDefinition(
+        run_id="R16",
+        argv=("code-review",) + REVIEW_FLAGS
+        + ("--timeout", str(REVIEW_TOO_SHORT_TIMEOUT_S), REVIEW_ROOT_PATH),
+        stdin=b"",
+        needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
+        files=review_skipped_files()),
 }
 
 

@@ -325,7 +325,7 @@ figures are written here when they exist.
 
 ### The code-review scenarios (v0.25.0)
 
-S47 to S50 add thirteen assertions (6 + 2 + 2 + 3). The harness now promises 50 scenarios and 150
+S47 to S51 add sixteen assertions (6 + 2 + 2 + 3 + 3). The harness now promises 51 scenarios and 153
 assertions.
 
 | Id | Invariant | Without its environment |
@@ -333,11 +333,12 @@ assertions.
 | S47 | `code-review gen` over a generated tree that plans at least three batches exits 0, prints a JSON document with `code_review.batches_planned` of at least 3 and one `consult.consensus`, keeps every located main finding inside the generated files, and gives every discarded finding a cause | `CANNOT_TEST` with no reachable backend. Fewer than three batches is `CANNOT_TEST` when every model of the pool measured a window (the input is sized for the 32 768-token default of an unmeasured model), else `FAIL`. No located finding, or nothing discarded, is `CANNOT_TEST`: a real trio cannot be forced to invent a location. A missing `findings` or `discarded` key is `FAIL`, never an empty list that passes |
 | S48 | a path outside the workspace exits 2 and `stderr` says so | none: the refusal comes before any model is reached |
 | S49 | a directory holding only a binary and a file with a key-shaped toy secret exits 2 and `stderr` says there is nothing to review | none |
-| S50 | `--timeout 30 --log-level error` over the S47 tree exits 2, `stderr` names the batches (at least three), the per-batch ceiling, the 15 s floor and a minimum `--timeout` above the 30 s asked for, and the review workspace's run log holds a line with this run's id and that same text. The numbers are the product's formula and are only range-checked | none. A run that published no run id, or a missing log directory, is `FAIL` for the log half: the run is deterministic and RV-S7 requires the log |
+| S50 | `--timeout 30 --log-level error` over the S47 tree exits 2, `stderr` names the batches (at least three), the per-batch ceiling, the 15 s floor and a minimum `--timeout` above the 30 s asked for, and the review workspace's run log holds a line with this run's id and that same text. The numbers are the product's formula and are only range-checked | none. A run that published no run id, or a missing log directory, is `FAIL` for the log half: the run is deterministic and RV-S7 requires the log. The log is the copy the executor captured right after R15 (`RunResult.review_log`), never the live directory, which the next review run rebuilds |
+| S51 | `--timeout 30 .` over the review workspace's root, which holds its `.magi` and `.git` beside R14's binary and secret, exits 2 and `stderr` says there is nothing to review, and every `.magi/` or `.git/` path `stderr` names is left out as `ignored`. A protected file taken for review would make the input reviewable and end at the budget refusal instead; one opened and classified would carry `binary`, `secret` or `not utf-8` | none |
 
 **How the input exists.** A review reads files from disk, and the product leaves out whatever
 `.gitignore` excludes when it reviews a directory inside a git repository. The environment's own
-`.gitignore` is `*`, so the review runs do not execute there. R12 to R15 name a separate workspace,
+`.gitignore` is `*`, so the review runs do not execute there. R12 to R16 name a separate workspace,
 `smoke/scratch/review-ws`, which the executor rebuilds from nothing before each of them: it copies
 the environment's `.magi`, runs `git init` so git's top level is the workspace itself and no outer
 rule applies, and writes the files the run declares (`RunDefinition.files`). Nothing is committed.
@@ -349,9 +350,13 @@ R12 and R15 share one deterministic tree (`gen/a.rs`, `gen/b.rs`, `gen/c.rs`, ab
 the 32 768-token default window at four bytes per token. R14 writes `skipped/pixel.png` (NUL bytes)
 and `skipped/leak.txt` (a toy `sk-ant-` key), so its "nothing to review" comes from both files being
 skipped, as binary and as secret, and not from their being invisible. The product excludes `.magi/`
-from the review on its own, and the harness does nothing to help it.
+and `.git/` from the review on its own, and the harness does nothing to help it. R16 is what tests
+that: it reviews the workspace root, the one input where both are enumeration candidates, and
+writes R14's two files so that nothing else there is reviewable. The executor refuses to build the
+workspace (exit 3) unless its path resolves strictly under the scratch area, checked before anything
+is created or deleted.
 
-**Cost.** R13, R14 and R15 never reach a model. R12 is a review of at least three batches by the
+**Cost.** R13, R14, R15 and R16 never reach a model. R12 is a review of at least three batches by the
 real trio plus the gate. The tree is about 72 000 tokens and the product fills a batch to 50 % of
 the 32 768-token default window (16 384 tokens), so it plans at least five batches. Its harness
 timeout is 3 000 s and `TRIO_RUNS_MEASURED_S["R12"]` carries 1 500 s provisionally: five of R4's
@@ -407,6 +412,7 @@ assumes is the exact failure this harness exists to avoid.
 | S48 | a path outside the workspace is refused with exit 2 |
 | S49 | a directory of only a binary and a secret has nothing to review |
 | S50 | a `--timeout` too short for the batches is refused naming the floor and a minimum |
+| S51 | reviewing the workspace root never takes `.magi/` or `.git/` for review |
 
 The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 

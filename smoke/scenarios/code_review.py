@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.24.3
 # Date: 2026-10-25
-"""S47-S50 -- ``code-review`` against the release binary.
+"""S47-S51 -- ``code-review`` against the release binary.
 
 The suite proves each stage of a review with doubles. What it cannot see is the
 release binary doing it end to end on an input that really splits into batches,
@@ -19,8 +19,14 @@ and refusing the inputs it must refuse before a model is paid for.
   nothing to review: exit 2.
 * **S50** (R15): ``--timeout 30`` over three batches is refused before any model
   call, naming the floor and the ``--timeout`` that would do.
+* **S51** (R16): reviewing the workspace ROOT, which holds ``.magi`` and
+  ``.git`` beside a binary and a secret, is "nothing to review": no protected
+  file was taken for review, and any protected path the refusal names is left
+  out as ``ignored`` (never read and classified by its content). Under
+  ``--timeout 30``, a protected file wrongly taken for review ends at the
+  budget refusal, never at a model.
 
-S48-S50 need no backend. That no model was contacted is not observable from
+S48-S51 need no backend. That no model was contacted is not observable from
 outside the process; the Rust integration tests pin it with a stand-in that
 records every body.
 """
@@ -48,6 +54,11 @@ S50_ASSERTIONS = (
     "stderr names the batches, the per-batch ceiling, the 15 s floor and a minimum --timeout",
     "the run log carries the same refusal",
 )
+S51_ASSERTIONS = (
+    "exit 2",
+    "stderr says nothing to review: no file under .magi/ or .git/ was taken for review",
+    "every .magi/ or .git/ path stderr names is left out as ignored, never read",
+)
 
 #: Exit codes of a successful run and of CLI misuse.
 EXIT_OK = 0
@@ -67,6 +78,17 @@ S47_FILES = runs.REVIEW_GEN_PATHS
 #: The product's wording that S48 and S49 look for in stderr.
 OUTSIDE_WORKSPACE_TEXT = "outside the workspace"
 NOTHING_TO_REVIEW_TEXT = "nothing to review"
+
+#: The directories a review never takes, whatever input names them (RV22).
+PROTECTED_DIRS = (".magi", ".git")
+
+#: The cause the product gives a protected path it leaves out without reading
+#: it. Any other cause (``binary``, ``secret``, ``not utf-8``) means the file
+#: was opened and classified by its content.
+PROTECTED_CAUSE = "ignored"
+
+#: One ``path (cause)`` entry of the product's omission list.
+OMISSION_PATTERN = re.compile(r"(?P<path>[^\s,;]+) \((?P<cause>[^()]+)\)")
 
 #: The floor of a per-batch ceiling in seconds
 #: (``AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`` = ``MIN_OPERATION_BUDGET`` 10 s +
@@ -460,3 +482,71 @@ def _run_log_finding(run, match):
     return _verdict(S50_ASSERTIONS, 2, "R15", found,
                     "no line of the run log carries run=%s and the budget refusal"
                     % run_id)
+
+
+def _is_protected(path):
+    """Whether *path* has a ``.magi`` or ``.git`` component.
+
+    Args:
+        path: A path as the product printed it.
+
+    Returns:
+        bool: ``True`` when a ``/``- or ``\\``-separated component is one of
+        :data:`PROTECTED_DIRS`.
+
+    Example:
+        >>> _is_protected(".magi/magi.toml"), _is_protected("sub/.git/config")
+        (True, True)
+        >>> _is_protected("my.magi/x")
+        False
+    """
+    return any(part in PROTECTED_DIRS for part in re.split(r"[/\\]", path))
+
+
+def _protected_read(stderr):
+    """The protected paths stderr names with a cause other than ``ignored``.
+
+    Args:
+        stderr: The decoded stderr.
+
+    Returns:
+        list[str]: ``"path (cause)"`` for each one; empty when every protected
+        path named (possibly none) was left out unread.
+    """
+    return ["%s (%s)" % (m.group("path"), m.group("cause"))
+            for m in OMISSION_PATTERN.finditer(stderr)
+            if _is_protected(m.group("path")) and m.group("cause") != PROTECTED_CAUSE]
+
+
+@scenario("S51", assertions=S51_ASSERTIONS, run="R16")
+def the_workspace_root_never_reviews_magi_or_git(run):
+    """Check that a review of the workspace root never takes ``.magi`` or ``.git``.
+
+    MAGI FIX (S6 loop 3): R12-R15 review subdirectories, so the workspace's
+    ``.magi`` was never an enumeration candidate and RV22's exclusion went
+    untested (F2). R16 reviews the root, which holds only the environment's
+    ``.magi``, git's ``.git`` and R14's binary and secret: the product must have
+    nothing to review. A protected file taken for review would make the input
+    reviewable and end at the budget refusal of ``--timeout 30`` instead; one
+    read and classified by its content would be named with that cause.
+
+    Args:
+        run: R16's ``RunResult``, or ``None`` when the run produced no capture.
+
+    Yields:
+        Finding: One per entry of :data:`S51_ASSERTIONS`, in that order.
+    """
+    if run is None:
+        yield from _all_cannot_test(
+            S51_ASSERTIONS, "R16", "run R16 produced no capture to inspect")
+        return
+    code = run.output.exit_code
+    yield _verdict(S51_ASSERTIONS, 0, "R16", code == EXIT_MISUSE,
+                   "exited %d, expected %d" % (code, EXIT_MISUSE))
+    stderr = _stderr_text(run)
+    yield _verdict(S51_ASSERTIONS, 1, "R16", NOTHING_TO_REVIEW_TEXT in stderr,
+                   "stderr does not say there is nothing to review, so a file "
+                   "of the root was taken for review")
+    read = _protected_read(stderr)
+    yield _verdict(S51_ASSERTIONS, 2, "R16", not read,
+                   "protected paths were read and classified: %s" % read)
