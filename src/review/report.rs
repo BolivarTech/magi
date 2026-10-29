@@ -278,8 +278,9 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
         write!(out, "; skipped after HTTP 400: {}", v.skipped.join(", "))?;
     }
     writeln!(out)?;
-    for detail in &f.details {
-        writeln!(out, "  {detail}")?;
+    // MAGI FIX (S6 loop 4): every line of a detail is indented, so none reads as a report line.
+    for line in f.details.iter().flat_map(|detail| detail.lines()) {
+        writeln!(out, "  {line}")?;
     }
     Ok(())
 }
