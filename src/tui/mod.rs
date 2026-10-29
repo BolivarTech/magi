@@ -9740,6 +9740,38 @@ end"
     }
 
     #[test]
+    fn a_tool_approval_drained_during_a_review_confirmation_is_answered_first() {
+        // [MAGI S6 loop 4, E2-2] both prompts wait on y/c: 'y' must not start the uncancellable
+        // review while the agent's approval hangs. The approval, the newer prompt, takes the
+        // key; the confirmation keeps waiting and the transcript says so.
+        let (mut app, approvals) = App::new_for_test_with_approvals();
+        let runner = Arc::new(FakeTuiRunner::default());
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            runner.clone(),
+            shown_plan(),
+        );
+        let mut approved = drain_one_approval(&mut app, &approvals, None);
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Char('y')),
+            PromptKey::Handled
+        ));
+        assert_eq!(approved.try_recv(), Ok(true));
+        assert!(app.pending_code_review.is_some());
+        assert!(
+            app.last_message_text()
+                .contains("/code-review confirmation above is still waiting"),
+            "{:?}",
+            app.messages
+        );
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Char('y')),
+            PromptKey::RunCodeReview(_)
+        ));
+        assert_eq!(runner.calls(), 0);
+    }
+
+    #[test]
     fn the_prompt_keys_answer_a_tool_approval() {
         // [MAGI S6 loop 4, E2-5] 'y' approves, 'Esc' denies, any other key keeps it waiting.
         let (mut app, approvals) = App::new_for_test_with_approvals();
