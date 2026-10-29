@@ -9402,6 +9402,43 @@ end"
     }
 
     #[test]
+    fn the_confirmation_shows_the_timeout_cap_the_run_will_obey() {
+        // E2 (MAGI S6 loop 3): with `--timeout` the run is capped at that total (RV06), so the
+        // consent text states the cap the approved run obeys, not a worst case it cannot reach.
+        let mut app = App::new_for_test();
+        let capped = TuiCodeReviewCommand {
+            timeout: Some(600),
+            ..TuiCodeReviewCommand::default()
+        };
+        app.begin_code_review_confirmation(
+            capped,
+            Arc::new(FakeTuiRunner::default()),
+            shown_plan(),
+        );
+        let shown = app.messages.join("\n");
+        assert!(shown.contains("at most 600 s"), "{shown}");
+        assert!(shown.contains("--timeout"), "{shown}");
+        assert!(shown.contains("maximum"), "{shown}");
+        assert!(
+            !shown.contains("worst case 42030 s, the maximum"),
+            "{shown}"
+        );
+        // A cap above the worst case does not bind: the worst case is still the maximum.
+        let mut loose = App::new_for_test();
+        let generous = TuiCodeReviewCommand {
+            timeout: Some(100_000),
+            ..TuiCodeReviewCommand::default()
+        };
+        loose.begin_code_review_confirmation(
+            generous,
+            Arc::new(FakeTuiRunner::default()),
+            shown_plan(),
+        );
+        let shown = loose.messages.join("\n");
+        assert!(shown.contains("worst case 42030 s"), "{shown}");
+    }
+
+    #[test]
     fn the_tui_confirmation_shows_the_worst_case_labelled_as_a_maximum() {
         let text = tui_code_review_confirmation(3, 2, 2335);
         assert!(text.contains("3 batches"), "{text}");
