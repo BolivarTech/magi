@@ -2764,4 +2764,90 @@ mod tests {
             "the gate saw the old side's code: {states:?}"
         );
     }
+
+    /// A repository whose `old.rs` (20 functions) is renamed to `new.rs` and cut to 15, uncommitted.
+    fn renamed_repo() -> (tempfile::TempDir, PlainGit) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        for (k, v) in [
+            ("user.email", "t@example.invalid"),
+            ("user.name", "t"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git_in(dir.path(), &["config", k, v]);
+        }
+        let old: String = (1..=20).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        std::fs::write(dir.path().join("old.rs"), &old).expect("write");
+        git_in(dir.path(), &["add", "old.rs"]);
+        git_in(dir.path(), &["commit", "-q", "-m", "one"]);
+        git_in(dir.path(), &["mv", "old.rs", "new.rs"]);
+        let new: String = (1..=15).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        std::fs::write(dir.path().join("new.rs"), &new).expect("write");
+        let git = PlainGit(dir.path().to_path_buf());
+        let diff = git.run(&["diff", "HEAD"]).expect("diff");
+        assert!(
+            diff.contains("rename from old.rs"),
+            "precondition: a rename: {diff}"
+        );
+        (dir, git)
+    }
+
+    #[tokio::test]
+    async fn a_finding_on_the_old_path_of_a_rename_is_kept_under_the_new_path() {
+        // [MAGI S6 loop 4, B1-9] a mage that names a deleted line by the file's old path cites code
+        // the batch showed (the old side of the rename): it is reviewed, under the new path.
+        let (dir, git) = renamed_repo();
+        let f = serde_json::json!([
+            {"severity":"warning","title":"t","detail":"d","file":"old.rs","line":17}
+        ]);
+        let consult =
+            FakeConsult::new(vec![Ok(
+                real_report([f.clone(), f, serde_json::json!([])]).await
+            )]);
+        let client = gate_always("real_defect");
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW * 10))];
+        let out = run_review(
+            ReviewRequest {
+                input: ReviewInput::Uncommitted,
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+            },
+        )
+        .await
+        .expect("runs");
+        assert!(
+            out.summary.discarded.is_empty(),
+            "the old path names reviewed code: {:?}",
+            out.summary.discarded
+        );
+        let kept: Vec<_> = out
+            .summary
+            .findings
+            .iter()
+            .map(|(f, v)| (f.file.clone(), f.line, v.state))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![(Some("new.rs".to_string()), Some(17), GateState::Kept)],
+            "under the new path, and the gate read the old side"
+        );
+    }
 }
