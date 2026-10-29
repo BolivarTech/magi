@@ -842,6 +842,23 @@ mod tests {
 
     // --- Test 18: find_closing_brace_skips_braces_in_strings ---
     #[test]
+    fn a_block_closed_by_a_line_that_reopens_ends_on_that_line() {
+        // [MAGI S6 loop 4, B2] `} else {` closes the `if` block but nets zero, so the search
+        // passed it and ended on the `else` block's brace.
+        let mut scanner = CodeScanner::new(LexicalRules::rust());
+        let code = "fn f() {
+    if a {
+        x();
+    } else {
+        y();
+    }
+}";
+        let scanned = scanner.scan_all(code);
+        assert_eq!(find_closing_brace(&scanned, 1), 3, "the `if` block");
+        assert_eq!(find_closing_brace(&scanned, 0), 6, "the function");
+    }
+
+    #[test]
     fn find_closing_brace_skips_braces_in_strings() {
         let mut scanner = CodeScanner::new(LexicalRules::rust());
         let code = "fn foo() {\n    let s = \"}\";\n}";
