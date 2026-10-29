@@ -30,6 +30,12 @@ const UNKNOWN_LANGUAGE: &str = "unknown";
 /// The marker that opens a hunk header line (`@@ -a,b +c,d @@`).
 const HUNK_MARKER: &str = "@@";
 
+/// The Unicode line separator, which a model may read as a line break.
+const LINE_SEPARATOR: char = '\u{2028}';
+
+/// The Unicode paragraph separator, which a model may read as a line break.
+const PARAGRAPH_SEPARATOR: char = '\u{2029}';
+
 /// One batch: what one `consult code-review` receives.
 #[derive(Debug)]
 pub struct ReviewBatch {
@@ -150,12 +156,35 @@ pub type Companion = (String, usize);
 /// assert_eq!(file_header("notes.txt"), "### notes.txt\n");
 /// ```
 pub fn file_header(path: &str) -> String {
+    // MAGI FIX (S6 loop 4): a name holding a line break ended the header and put the rest of
+    // the name on a prompt line of its own; it is escaped so the header stays one line.
+    let shown = header_path(path);
     let language = detect_language(path);
     if language == UNKNOWN_LANGUAGE {
-        format!("### {path}\n")
+        format!("### {shown}\n")
     } else {
-        format!("### {path} ({language})\n")
+        format!("### {shown} ({language})\n")
     }
+}
+
+/// `path` as a header shows it: every control character and the Unicode line and paragraph
+/// separators, which a model may read as line breaks, written as their Rust escape (`\n`,
+/// `\u{2028}`), so a file name can never open a prompt line of its own. A path without them is
+/// unchanged. O(n) in the path.
+///
+/// Cost declared: a finding that cites such a file by its escaped name names no reviewed file
+/// and is discarded by REQ-RV09 (the fail-closed direction), which only a hostile or broken
+/// file name can reach.
+fn header_path(path: &str) -> String {
+    path.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, LINE_SEPARATOR | PARAGRAPH_SEPARATOR) {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Packs `files` into batches of at most `limit_tokens`, with no companion.
