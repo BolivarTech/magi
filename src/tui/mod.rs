@@ -1390,6 +1390,12 @@ const TUI_WORKDIR_ARG: &str = "workdir";
 /// Why the TUI refuses `-w`: the session's runner reviews the session's workspace only.
 const TUI_WORKDIR_REFUSED: &str =
     "-w is not available in the TUI: /code-review reviews this session's workspace";
+/// What the TUI appends to the subcommand's help: clap's text lists `-w` and the output, log
+/// and tier flags, which this surface refuses or does not apply.
+// MAGI FIX (S6 loop 4): the help advertised `-w`, which the TUI refuses (E2-4).
+const TUI_HELP_NOTE: &str = "In the TUI, -w/--workdir is refused (/code-review reviews this \
+     session's workspace), and the output, log and tier flags parse but are not applied: the \
+     report goes to the transcript.";
 /// The clap ids of the `magi code-review` arguments the TUI applies: the review input
 /// ([`crate::review_input_of`]) and the total. Every other argument but `-w` parses and is named
 /// as not applied ([`tui_inert_flags`]).
@@ -1457,7 +1463,8 @@ const CODE_REVIEW_COMMAND: &str = "/code-review";
 /// [`TuiCodeReviewParseError::NotACodeReviewCommand`] for any other line;
 /// [`TuiCodeReviewParseError::Invalid`] with clap's whole message for arguments that do not
 /// parse, or with a fixed message for `-w` or an unbalanced quote;
-/// [`TuiCodeReviewParseError::Help`] with the subcommand's help for `-h`/`--help`.
+/// [`TuiCodeReviewParseError::Help`] with the subcommand's help for `-h`/`--help`, followed by
+/// a note naming what the TUI refuses or does not apply.
 pub(crate) fn parse_tui_code_review(
     trimmed: &str,
 ) -> Result<TuiCodeReviewCommand, TuiCodeReviewParseError> {
@@ -1473,7 +1480,10 @@ pub(crate) fn parse_tui_code_review(
     // MAGI FIX (S6 loop 3): clap's whole message (tips, usage), not its first line; `-h`/`--help`
     // is the help itself, not an error. The caller sanitizes either before display.
     let invalid = |e: clap::Error| match e.kind() {
-        clap::error::ErrorKind::DisplayHelp => TuiCodeReviewParseError::Help(e.to_string()),
+        clap::error::ErrorKind::DisplayHelp => TuiCodeReviewParseError::Help(format!(
+            "{}\n\n{TUI_HELP_NOTE}",
+            e.to_string().trim_end()
+        )),
         _ => TuiCodeReviewParseError::Invalid(e.to_string().trim_end().to_string()),
     };
     let command = crate::CodeReviewArgs::augment_args(clap::Command::new(program));
