@@ -1072,6 +1072,43 @@ mod tests {
         assert_eq!(out["code_review"]["gate_states"]["kept"], 50);
     }
 
+    #[test]
+    fn the_serialized_result_never_passes_the_output_cap() {
+        // [MAGI §6 MS2 D loop 3] the agent reads the serialized object: JSON escaping and a
+        // summary that alone passes the cap must not carry it past the bound.
+        const CAP: usize = 4_096;
+        let size = |v: &serde_json::Value| serde_json::to_string(v).expect("json").len();
+        let report = "\"\\".repeat(1_900); // 3 800 bytes raw, twice that escaped
+        let out = bounded_result(
+            &report,
+            serde_json::json!({"gate_states": {"kept": 1}}),
+            CAP,
+        );
+        assert!(
+            size(&out) <= CAP,
+            "{} bytes over a {CAP}-byte cap",
+            size(&out)
+        );
+        assert!(out["report"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("\"\\")));
+        let skip = serde_json::json!({"path": "x".repeat(100), "cause": "binary"});
+        let summary = serde_json::json!({
+            "gate_states": {"kept": 1},
+            "skipped": vec![skip; 200],
+        });
+        let out = bounded_result("the report", summary, CAP);
+        assert!(
+            size(&out) <= CAP,
+            "{} bytes over a {CAP}-byte cap",
+            size(&out)
+        );
+        assert_eq!(out["code_review"]["gate_states"]["kept"], 1);
+        assert!(out["code_review"][OMITTED_KEY]
+            .as_array()
+            .is_some_and(|keys| keys.contains(&serde_json::json!("skipped"))));
+    }
+
     #[tokio::test]
     async fn a_spent_run_deadline_is_an_error_not_a_panic() {
         // [CP2 MS2 S2 loop 2] deadline already past: no Instant underflow, no runner call.
