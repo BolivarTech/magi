@@ -98,7 +98,8 @@ pub struct BatchMetrics {
 /// magi-core's report over the consolidated outputs, its `Key Findings` limited to the findings
 /// the gate did not filter and at their severity after the agreement weight; then the review's
 /// own sections: batches and their failures, the gate's counts (and, once, what stopped it),
-/// the findings of the main list with their gate verdict, the filtered ones listed apart, the
+/// the models skipped after an HTTP 400, the findings of the main list with their gate verdict
+/// (every cause, the deciding model, its lean and confidence, the models it skipped), the filtered ones listed apart, the
 /// discarded and symbol-unverified findings, the skipped files and the other declarations of
 /// the summary. The whole text is redacted as it is returned.
 ///
@@ -165,6 +166,10 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     }
     if !s.per_model.is_empty() {
         writeln!(out, "decided by: {}", counts(&s.per_model))?;
+    }
+    let skips = rejected_skips(s);
+    if !skips.is_empty() {
+        writeln!(out, "rejected skips: {}", counts(&skips))?;
     }
     writeln!(out, "gate questions: {}", s.gate_questions)?;
     writeln!(out, "judged: {:.0} %", s.judged_fraction * 100.0)?;
@@ -251,8 +256,22 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
         write!(out, " ({})", marks.join(", "))?;
     }
     write!(out, "; gate: {}", name(&v.state))?;
-    if let Some(cause) = v.cause {
-        write!(out, " ({cause})")?;
+    // MAGI FIX (S6 loop 3): the text says of each verdict what its JSON says: every cause, the
+    // answer that set it (model, lean, confidence) and the models skipped after an HTTP 400.
+    if !v.causes.is_empty() {
+        write!(out, " ({})", v.causes.join("; "))?;
+    }
+    if let Some(model) = &v.model {
+        write!(out, " by {model}")?;
+    }
+    if let Some(lean) = &v.lean {
+        write!(out, ", lean {lean}")?;
+    }
+    if let Some(confidence) = v.confidence {
+        write!(out, ", confidence {confidence:.2}")?;
+    }
+    if !v.skipped.is_empty() {
+        write!(out, "; skipped after HTTP 400: {}", v.skipped.join(", "))?;
     }
     writeln!(out)?;
     for detail in &f.details {
@@ -306,13 +325,7 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
             "batch_totals".into(),
             json!({"input_tokens": input, "output_tokens": output, "ms": ms}),
         );
-        let mut skips: BTreeMap<&str, usize> = BTreeMap::new();
-        for (_, verdict) in s.findings.iter().chain(&s.filtered) {
-            for model in &verdict.skipped {
-                *skips.entry(model.as_str()).or_insert(0) += 1;
-            }
-        }
-        fields.insert("rejected_skips".into(), json!(skips));
+        fields.insert("rejected_skips".into(), json!(rejected_skips(s)));
         number_batches_from_one(fields);
     }
     redact_strings(&mut v);
@@ -407,6 +420,18 @@ fn with_gate(list: &[(ConsolidatedFinding, GateVerdict)]) -> Value {
             })
             .collect(),
     )
+}
+
+/// The models skipped after an HTTP 400, each with the number of findings it was skipped for,
+/// over the main list and the filtered one. O(findings x models).
+fn rejected_skips(s: &ReviewSummary) -> BTreeMap<String, usize> {
+    let mut skips = BTreeMap::new();
+    for (_, verdict) in s.findings.iter().chain(&s.filtered) {
+        for model in &verdict.skipped {
+            *skips.entry(model.clone()).or_insert(0) += 1;
+        }
+    }
+    skips
 }
 
 /// Input tokens, output tokens and milliseconds summed over the batches, saturating.
