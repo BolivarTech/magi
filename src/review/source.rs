@@ -43,6 +43,16 @@ pub trait GitCommand: Send + Sync {
     /// [`ReviewError::GitOutputTooLarge`] when its output passes the cap.
     fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError>;
 
+    /// Runs git with `args` and returns its stdout, which may not pass `cap` bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`GitCommand::run_bytes`], and [`ReviewError::GitOutputTooLarge`] with `cap` as the
+    /// limit when the output passes it.
+    fn run_bytes_capped(&self, args: &[&str], _cap: u64) -> Result<Vec<u8>, ReviewError> {
+        self.run_bytes(args)
+    }
+
     /// Runs git and decodes its stdout as UTF-8.
     ///
     /// # Errors
@@ -940,6 +950,44 @@ mod tests {
         assert_eq!(
             src.read("b.rs").expect("present"),
             Some(b"fn b() {}\n".to_vec())
+        );
+    }
+    #[test]
+    fn a_revision_blob_is_read_with_the_per_file_cap_not_the_git_output_cap() {
+        // [MAGI S6 MS2 loop 4, A2 Balthasar] `show` ran under the 64 MiB git output cap, so a
+        // blob between 8 and 64 MiB was held whole only to be refused.
+        struct Capped(Mutex<Vec<u64>>);
+        impl GitCommand for Capped {
+            fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                match args.join(" ").as_str() {
+                    "ls-tree -r -z X" => Ok(concat!(
+                        "100644 blob 0000000000000000000000000000000000000000\t",
+                        "a.rs\0"
+                    )
+                    .into()),
+                    other => Err(ReviewError::Git(format!("uncapped: {other}"))),
+                }
+            }
+            fn run_bytes_capped(&self, args: &[&str], cap: u64) -> Result<Vec<u8>, ReviewError> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(cap);
+                match args.join(" ").as_str() {
+                    "show --no-ext-diff --no-textconv X:./a.rs" => Ok(b"fn a() {}\n".to_vec()),
+                    other => Err(ReviewError::Git(format!("unexpected: {other}"))),
+                }
+            }
+        }
+        let git = Capped(Mutex::new(Vec::new()));
+        let src = RevisionSource::new(&git, "X".into(), None);
+        assert_eq!(
+            src.read("a.rs").expect("read"),
+            Some(b"fn a() {}\n".to_vec())
+        );
+        assert_eq!(
+            *git.0.lock().unwrap_or_else(PoisonError::into_inner),
+            vec![MAX_REVIEW_FILE_BYTES]
         );
     }
 }

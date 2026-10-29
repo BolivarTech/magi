@@ -1639,4 +1639,20 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn a_capped_call_stops_git_at_its_own_cap() {
+        // [MAGI S6 MS2 loop 4, A2 Balthasar] a per-call cap below the runner's: git is stopped
+        // there instead of its output being read whole and then refused.
+        let d = repo();
+        std::fs::write(d.path().join("big.rs"), "a".repeat(2_048)).expect("write");
+        git(d.path(), &["add", "big.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let show = ["show", "--no-ext-diff", "--no-textconv", "HEAD:./big.rs"];
+        assert!(matches!(
+            g.run_bytes_capped(&show, 1_024),
+            Err(ReviewError::GitOutputTooLarge { limit: 1_024 })
+        ));
+        assert_eq!(g.run_bytes_capped(&show, 4_096).expect("fits").len(), 2_048);
+    }
 }
