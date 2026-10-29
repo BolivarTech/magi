@@ -113,6 +113,12 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
     let mut i = 0;
 
     while let Some(&line) = lines.get(i) {
+        // MAGI FIX (S6 loop 3): a line that starts inside a triple-quoted string is string text,
+        // never a definition, import or assignment.
+        if in_literal.get(i).copied().unwrap_or(false) {
+            i += 1;
+            continue;
+        }
         let trimmed = line.trim();
         let indent = indentation(line);
         let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
@@ -162,7 +168,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
 
         // Module-level assignment at indent 0 → DeclarationGroup
         if indent == 0 && is_module_assignment(trimmed) {
-            let group_end = find_assignment_group_end(lines, i);
+            let group_end = find_assignment_group_end(lines, &in_literal, i);
             let name = trimmed
                 .split(['=', ':', ' '])
                 .next()
@@ -268,9 +274,16 @@ fn find_import_group_end(lines: &[&str], start: usize) -> usize {
 }
 
 /// Find end of a contiguous assignment group at indent 0.
-fn find_assignment_group_end(lines: &[&str], start: usize) -> usize {
+///
+/// A line that starts inside a triple-quoted string (`in_literal[j]`) belongs to the assignment
+/// that opened the string, so it extends the group. O(n) in the lines after `start`.
+fn find_assignment_group_end(lines: &[&str], in_literal: &[bool], start: usize) -> usize {
     let mut end = start;
     for (j, line) in lines.iter().enumerate().skip(start + 1) {
+        if in_literal.get(j).copied().unwrap_or(false) {
+            end = j;
+            continue;
+        }
         let trimmed = line.trim();
         let indent = indentation(line);
         if indent == 0 && !trimmed.is_empty() && !trimmed.starts_with('#') {
