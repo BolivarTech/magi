@@ -472,12 +472,20 @@ fn filter_and_plan(
 ) -> Result<(Filtered, PoolWindow, Vec<ReviewBatch>), ReviewError> {
     let filtered = filter_files(files, source, registry, explicit, is_ignored)?;
     let window = pool_window(pool);
+    // MAGI FIX (S6 loop 4): when the kept files give no batch (all empty, or diffs without a
+    // hunk), the error names what the filter left out, as the filter's own error does.
     let batches = plan_batches(
         &filtered.kept,
         source,
         registry,
         batch_limit_tokens(&window),
-    )?;
+    )
+    .map_err(|e| match e {
+        ReviewError::NothingToReview { .. } => ReviewError::NothingToReview {
+            skipped: filtered.skipped.clone(),
+        },
+        other => other,
+    })?;
     Ok((filtered, window, batches))
 }
 
