@@ -45,12 +45,20 @@ pub trait GitCommand: Send + Sync {
 
     /// Runs git with `args` and returns its stdout, which may not pass `cap` bytes.
     ///
+    /// The default checks the length after [`GitCommand::run_bytes`], which is what a test
+    /// double needs; the production runner stops git at `cap` instead of reading past it.
+    ///
     /// # Errors
     ///
     /// As [`GitCommand::run_bytes`], and [`ReviewError::GitOutputTooLarge`] with `cap` as the
     /// limit when the output passes it.
-    fn run_bytes_capped(&self, args: &[&str], _cap: u64) -> Result<Vec<u8>, ReviewError> {
-        self.run_bytes(args)
+    // MAGI FIX (S6 loop 4): a blob over the per-file cap was read whole under the 64 MiB cap.
+    fn run_bytes_capped(&self, args: &[&str], cap: u64) -> Result<Vec<u8>, ReviewError> {
+        let out = self.run_bytes(args)?;
+        if u64::try_from(out.len()).unwrap_or(u64::MAX) > cap {
+            return Err(ReviewError::GitOutputTooLarge { limit: cap });
+        }
+        Ok(out)
     }
 
     /// Runs git and decodes its stdout as UTF-8.
@@ -409,13 +417,10 @@ impl<'g> RevisionSource<'g> {
             limit: MAX_REVIEW_FILE_BYTES,
         };
         let spec = format!("{rev}:./{path}");
-        match self
-            .git
-            .run_bytes(&["show", "--no-ext-diff", "--no-textconv", &spec])
-        {
-            Ok(bytes) if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_REVIEW_FILE_BYTES => {
-                Err(too_large())
-            }
+        match self.git.run_bytes_capped(
+            &["show", "--no-ext-diff", "--no-textconv", &spec],
+            MAX_REVIEW_FILE_BYTES,
+        ) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(ReviewError::GitOutputTooLarge { .. }) => Err(too_large()),
             Err(ReviewError::Git(msg)) => Err(ReviewError::Git(format!(

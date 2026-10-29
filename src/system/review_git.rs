@@ -249,9 +249,14 @@ impl ScrubbedGit {
         Ok(())
     }
 
-    /// Runs git with `args`, draining stdout (capped) and stderr (kept up to
-    /// [`MAX_GIT_STDERR_BYTES`], read to the end) in parallel, within [`GIT_CALL_TIMEOUT_SECS`].
+    /// [`ScrubbedGit::execute_capped`] under the runner's own stdout cap.
     fn execute(&self, args: &[&str]) -> Result<Finished, ReviewError> {
+        self.execute_capped(args, self.output_cap)
+    }
+
+    /// Runs git with `args`, draining stdout (stopped past `cap` bytes) and stderr (kept up to
+    /// [`MAX_GIT_STDERR_BYTES`], read to the end) in parallel, within [`GIT_CALL_TIMEOUT_SECS`].
+    fn execute_capped(&self, args: &[&str], cap: u64) -> Result<Finished, ReviewError> {
         let command = args.first().copied().unwrap_or_default();
         let deadline = Instant::now() + Duration::from_secs(GIT_CALL_TIMEOUT_SECS);
         let mut command_line = Command::new("git");
@@ -275,7 +280,6 @@ impl ScrubbedGit {
         };
         let stderr_reader = std::thread::spawn(move || drain_bounded(stderr, MAX_GIT_STDERR_BYTES));
         let (tx, rx) = mpsc::channel();
-        let cap = self.output_cap;
         std::thread::spawn(move || {
             let _ = tx.send(read_bounded(stdout, cap));
         });
@@ -312,8 +316,20 @@ impl GitCommand for ScrubbedGit {
     /// [`ReviewError::Git`] when git cannot run, exits with an error (the message is its bounded
     /// stderr), or does not finish in time; [`ReviewError::GitOutputTooLarge`] past the cap.
     fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+        self.run_bytes_capped(args, self.output_cap)
+    }
+
+    /// Stops git once its stdout passes `cap` (or the runner's own cap, when lower), so a
+    /// refused output is never held whole.
+    ///
+    /// # Errors
+    ///
+    /// As [`GitCommand::run_bytes`], with the lower cap as the limit of
+    /// [`ReviewError::GitOutputTooLarge`].
+    // MAGI FIX (S6 loop 4): a blob over the per-file cap was read whole under the 64 MiB cap.
+    fn run_bytes_capped(&self, args: &[&str], cap: u64) -> Result<Vec<u8>, ReviewError> {
         self.ensure_filters()?;
-        let finished = self.execute(args)?;
+        let finished = self.execute_capped(args, cap.min(self.output_cap))?;
         if finished.code == Some(0) {
             Ok(finished.stdout)
         } else {
