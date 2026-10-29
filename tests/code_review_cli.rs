@@ -505,3 +505,35 @@ fn the_code_review_key_reaches_the_gate() {
     assert_eq!(v["code_review"]["gate_states"]["kept"], 1, "{v}");
     gate.assert();
 }
+
+/// RV-S7 at the binary (MAGI S6 loop 3, E8): an explicit `--timeout` too short for the planned batches is refused before
+/// any model is contacted, with exit 2 and the batches, ceiling, floor and smallest `--timeout` on stderr even under
+/// `--log-level error` (RV06: stderr whatever `--log-level` says).
+#[test]
+fn rv_s7_an_insufficient_timeout_is_refused_on_stderr_with_exit_2_before_any_model_call() {
+    let mut server = mockito::Server::new();
+    let (trio_bodies, gate_bodies, _t, _g) = mount(&mut server);
+    let ws = workspace(&review_toml(&server.url()));
+    let (code, _, err) = review(
+        &ws,
+        &["--commit", "HEAD", "--timeout", "1", "--log-level", "error"],
+    );
+    assert_eq!(code, EXIT_MISUSE, "{err}");
+    for needle in [
+        "1 batches",
+        "per batch",
+        "floor",
+        "per-batch ceiling",
+        "pass --timeout",
+    ] {
+        assert!(err.contains(needle), "stderr must carry `{needle}`: {err}");
+    }
+    assert!(
+        trio_bodies.lock().expect("lock").is_empty(),
+        "the trio was contacted"
+    );
+    assert!(
+        gate_bodies.lock().expect("lock").is_empty(),
+        "the gate was contacted"
+    );
+}
