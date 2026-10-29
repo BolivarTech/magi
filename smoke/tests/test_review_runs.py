@@ -210,6 +210,33 @@ class ReviewWorkspaceTests(unittest.TestCase):
             self.assertFalse(outside.exists())
 
 
+class ReviewWorkingDirectoryTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 4, F1-2] a review run's relative input means the same under either base."""
+
+    def _invocation(self, root: pathlib.Path, run_id: str) -> dict:
+        """The keyword arguments the executor hands the binary for *run_id*."""
+        binary = mock.Mock()
+        binary.invoke.return_value = runs.ProductOutput(stdout=b"", stderr=b"", exit_code=0, command=["magi-rs"])
+        env = types.SimpleNamespace(root=root, magi_dir=root / ".magi", scratch_dir=root / "scratch")
+        executor = runs.RunExecutor(binary=binary, env=env,
+                                    config=types.SimpleNamespace(passphrase="toy"))
+        executor._invoke_with(runs.DEFINITIONS[run_id], {}, b"")
+        return binary.invoke.call_args.kwargs
+
+    def test_every_review_run_starts_the_product_in_the_review_workspace(self) -> None:
+        # 'gen', 'skipped', '.' and '../smoke-hostile-target' resolve against the workspace whether the
+        # product joins them to -w or to its working directory: R16's '.' must never be the harness's cwd.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for run_id in ("R12", "R13", "R14", "R15", "R16"):
+                self.assertEqual(root / "scratch" / runs.REVIEW_WORKSPACE_DIR,
+                                 self._invocation(root, run_id).get("cwd"), run_id)
+
+    def test_a_run_without_a_review_workspace_keeps_the_harness_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._invocation(pathlib.Path(tmp), "R1").get("cwd"))
+
+
 class ReviewLogCaptureTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 3, F4] the run log is captured onto the result at run time."""
 
