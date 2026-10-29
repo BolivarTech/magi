@@ -283,9 +283,14 @@ pub(crate) fn gap_units(
     units
 }
 
-/// Create a fallback semantic unit for changed lines in unknown file types.
+/// Lines of context [`fallback_extract`] keeps on each side of a changed line.
+const FALLBACK_CONTEXT_LINES: u32 = 20;
+
+/// Create fallback semantic units for changed lines in unknown file types.
 ///
-/// Captures ±20 lines around each changed line as a `TopLevel` unit.
+/// Each changed line gets a window of ±[`FALLBACK_CONTEXT_LINES`] lines, clamped to the file;
+/// windows that overlap or touch merge, so each `TopLevel` unit holds its changes and their
+/// context, never the unchanged stretch between two distant changes.
 ///
 /// # Arguments
 ///
@@ -293,48 +298,53 @@ pub(crate) fn gap_units(
 /// * `file_path` - Path to the file.
 /// * `changed_lines` - Set of changed line numbers.
 /// * `context` - File context metadata.
+///
+/// # Returns
+///
+/// The units in line order, each with its changed lines sorted; empty when nothing changed.
+/// O(c log c + n) for c changed lines and n lines of the file.
 pub fn fallback_extract(
     content: &str,
     file_path: &str,
     changed_lines: &HashSet<u32>,
     context: &FileContext,
 ) -> Vec<SemanticUnit> {
-    if changed_lines.is_empty() {
-        return vec![];
-    }
     let lines: Vec<&str> = content.lines().collect();
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    let mut sorted: Vec<u32> = changed_lines.iter().copied().collect();
+    sorted.sort_unstable();
 
-    let min_line = *changed_lines.iter().min().unwrap_or(&1);
-    let max_line = *changed_lines.iter().max().unwrap_or(&total);
+    // MAGI FIX (S6 loop 3): one window per change, merged when they overlap or touch, instead of
+    // one span from the first change to the last.
+    let mut windows: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+    for line in sorted {
+        let start = line.saturating_sub(FALLBACK_CONTEXT_LINES).max(1);
+        let end = line.saturating_add(FALLBACK_CONTEXT_LINES).min(total);
+        match windows.last_mut() {
+            Some((_, last_end, changed)) if last_end.saturating_add(1) >= start => {
+                *last_end = (*last_end).max(end);
+                changed.push(line);
+            }
+            _ => windows.push((start, end, vec![line])),
+        }
+    }
 
-    let start = min_line.saturating_sub(20).max(1);
-    let end = max_line.saturating_add(20).min(total);
-
-    let start_idx = start.saturating_sub(1) as usize;
-    let end_idx = end as usize;
-    let unit_content = lines
-        .get(start_idx..end_idx.min(lines.len()))
-        .unwrap_or(&[])
-        .join("\n");
-
-    let mut sorted_changed: Vec<u32> = changed_lines
-        .iter()
-        .copied()
-        .filter(|&l| l >= start && l <= end)
-        .collect();
-    sorted_changed.sort_unstable();
-
-    vec![SemanticUnit {
-        kind: UnitKind::TopLevel,
-        name: format!("lines {}-{}", start, end),
-        file: file_path.to_string(),
-        start_line: start,
-        end_line: end,
-        content: unit_content,
-        changed_lines: sorted_changed,
-        context: context.clone(),
-    }]
+    windows
+        .into_iter()
+        .map(|(start, end, changed)| SemanticUnit {
+            kind: UnitKind::TopLevel,
+            name: format!("lines {start}-{end}"),
+            file: file_path.to_string(),
+            start_line: start,
+            end_line: end,
+            content: lines
+                .get(start.saturating_sub(1) as usize..(end as usize).min(lines.len()))
+                .unwrap_or(&[])
+                .join("\n"),
+            changed_lines: changed,
+            context: context.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
