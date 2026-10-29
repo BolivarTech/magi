@@ -124,7 +124,9 @@ pub const MAX_UNLOCATED_PROBES: usize = 100_000;
 /// # Complexity
 ///
 /// O(n) to build the outputs and map located findings (n reported findings), plus magi-core's
-/// own O(n²) dedup, plus O(u·g) probes for u unlocated findings over g unlocated groups. The
+/// own O(n²) dedup, plus O(u·g) probes for u unlocated findings over g unlocated groups (each
+/// lookup also compares the title with every group's, borrowed, an O(u·g) scan of the order of
+/// magi-core's dedup). The
 /// probes are per review, not per batch (u and g grow with the batches), and bounded by
 /// [`MAX_UNLOCATED_PROBES`]: past it an unlocated finding whose title matches no group
 /// verbatim forms its own group, is counted in [`Consolidated::ungrouped_unlocated`], and
@@ -275,11 +277,12 @@ fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidat
 /// The group (index into `groups`) an unlocated title belongs to, among the groups without an
 /// id; resets `probe.refused` so the caller can tell a refused probe from no match.
 fn unlocated_slot(groups: &[Group], title: &str, probe: &Prober<'_>) -> Option<usize> {
-    let (candidates, reps): (Vec<usize>, Vec<String>) = groups
+    // MAGI FIX (S6 loop 4): the representatives are borrowed, not cloned, on every lookup.
+    let (candidates, reps): (Vec<usize>, Vec<&str>) = groups
         .iter()
         .enumerate()
         .filter(|(_, g)| g.id.is_none())
-        .map(|(i, g)| (i, g.rep.clone()))
+        .map(|(i, g)| (i, g.rep.as_str()))
         .unzip();
     probe.refused.set(false);
     group_of(title, &reps, &|a, b| probe.same(a, b)).and_then(|j| candidates.get(j).copied())
@@ -561,9 +564,9 @@ fn lower(s: Severity) -> Severity {
 ///
 /// An identical representative decides without calling `same`; otherwise the first
 /// representative `same` accepts. `None` when none does.
-fn group_of(title: &str, reps: &[String], same: &dyn Fn(&str, &str) -> bool) -> Option<usize> {
+fn group_of(title: &str, reps: &[&str], same: &dyn Fn(&str, &str) -> bool) -> Option<usize> {
     reps.iter()
-        .position(|r| r == title)
+        .position(|r| *r == title)
         .or_else(|| reps.iter().position(|r| same(title, r)))
 }
 
@@ -890,11 +893,9 @@ mod tests {
     #[test]
     fn a_finding_no_group_claims_is_never_dropped() {
         // [CP2 MS2 S2 loop 5] the fallback: group_of says None, so consolidate gives the finding its own group (RV12, no loss).
-        assert_eq!(group_of("x", &["y".to_string()], &|_, _| false), None);
+        assert_eq!(group_of("x", &["y"], &|_, _| false), None);
         assert_eq!(
-            group_of("y", &["y".to_string()], &|_, _| panic!(
-                "identical titles never probe"
-            )),
+            group_of("y", &["y"], &|_, _| panic!("identical titles never probe")),
             Some(0)
         );
     }
