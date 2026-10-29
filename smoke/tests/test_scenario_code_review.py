@@ -27,8 +27,10 @@ def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",
 
 
 RUN_ID = "4242-0123456789abcdef"
-_BUDGET_MSG = (b"5 batches leave 6 s per batch, less than the 783 s a batch needs at the 15 s floor "
-               b"(per-batch ceiling 0 s); pass --timeout 2349 or more")
+#: [MAGI §6 MS2 loop 4, F1-g34] the product's arithmetic for R15's 30 s over three batches: 30 / 3 = 10 s
+#: per batch, a ceiling the derivation lifts to the 15 s floor, and a minimum of 3 x 783 = 2349 s.
+_BUDGET_MSG = (b"3 batches leave 10 s per batch, less than the 783 s a batch needs at the 15 s floor "
+               b"(per-batch ceiling 15 s); pass --timeout 2349 or more")
 _NL = bytes([10])
 _BUDGET_STDERR = b"error: " + _BUDGET_MSG + _NL
 #: One run-log line of the refusal; ``%s`` is the run id.
@@ -210,7 +212,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
 
     def test_s50_fails_without_a_minimum_or_a_ceiling_on_stderr(self) -> None:
         for text in (b"error: below the 15 s floor" + _NL,
-                     b"error: 5 batches leave 6 s per batch, less than the 783 s a batch needs at the 15 s floor; "
+                     b"error: 3 batches leave 10 s per batch, less than the 783 s a batch needs at the 15 s floor; "
                      b"pass --timeout 2349 or more" + _NL):
             r = _result("R15", 2, None, _with_id(text))
             self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=_BUDGET_LOG % RUN_ID.encode())[
