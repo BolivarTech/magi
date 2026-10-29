@@ -69,8 +69,9 @@ pub(crate) struct SecretPattern {
 
 /// The opening of a PEM block (split so the source holds no PEM header).
 const PEM_BEGIN: &str = concat!("-----", "BEGIN ");
-/// The key types a PEM private-key header may name, each followed by a space.
-const PEM_KEY_TYPES: &[&str] = &["RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED "];
+/// The longest type word a PEM private-key header may name (`RSA`, `EC`, `ECDSA`, `OPENSSH`,
+/// `ENCRYPTED`, …), so a header is checked in constant time.
+const PEM_MAX_TYPE_WORD: usize = 16;
 /// The end of a PEM private-key header.
 const PEM_PRIVATE_KEY: &str = "PRIVATE KEY-----";
 /// The header of an armored OpenPGP private key (split so the source holds no such header).
@@ -275,8 +276,9 @@ impl Matcher {
                 .min_by_key(|r| r.start),
             Self::PemPrivateKey => text.match_indices(PEM_BEGIN).find_map(|(at, _)| {
                 let mut rest = at + PEM_BEGIN.len();
-                if let Some(kind) = PEM_KEY_TYPES.iter().find(|k| word_at(bytes, rest, k)) {
-                    rest += kind.len();
+                // MAGI FIX (S6 loop 4): any one type word, not a closed list (`ECDSA` was sent).
+                if !word_at(bytes, rest, PEM_PRIVATE_KEY) {
+                    rest += pem_type_word(bytes, rest).map_or(0, |word| word + 1);
                 }
                 bytes
                     .get(rest..)
@@ -291,6 +293,22 @@ impl Matcher {
             }
         }
     }
+}
+
+/// The length of the PEM type word that starts at `at` (1 to [`PEM_MAX_TYPE_WORD`] characters of
+/// `[A-Z0-9]` followed by one space), or `None` when none does. O(1).
+fn pem_type_word(bytes: &[u8], at: usize) -> Option<usize> {
+    let word = bytes
+        .get(at..)
+        .unwrap_or_default()
+        .iter()
+        .take(PEM_MAX_TYPE_WORD + 1)
+        .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        .count();
+    (1..=PEM_MAX_TYPE_WORD)
+        .contains(&word)
+        .then_some(word)
+        .filter(|w| bytes.get(at + w) == Some(&b' '))
 }
 
 /// The index past the run of class `tail` that starts at `at`.
