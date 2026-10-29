@@ -1373,6 +1373,28 @@ mod tests {
     }
 
     #[test]
+    fn a_javascript_class_splits_into_its_methods() {
+        // [MAGI S6 loop 4, B2] class methods matched no keyword, so a class too large for one
+        // batch could not split and failed the review as too large.
+        let js = "class C {\n  constructor(a) {\n    this.a = a;\n  }\n\n  async run() {\n    work();\n  }\n\n  get x() {\n    return 1;\n  }\n}\n";
+        for ext in [
+            BraceFamilyExtractor::javascript(),
+            BraceFamilyExtractor::typescript(),
+        ] {
+            let parts = split(&ext, js, 3, UnitKind::Class);
+            let found = spans(&parts);
+            for member in [
+                ("constructor", UnitKind::Method, 2, 4),
+                ("run", UnitKind::Method, 6, 8),
+                ("x", UnitKind::Method, 10, 12),
+            ] {
+                assert!(found.contains(&member), "{found:?}");
+            }
+            assert_each_line_in_one_unit(&parts, 13);
+        }
+    }
+
+    #[test]
     fn qualified_rust_functions_are_functions() {
         for (code, name) in [
             ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
