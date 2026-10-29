@@ -1631,6 +1631,11 @@ fn code_review_unavailable_message(reason: Option<&str>) -> String {
 }
 /// What the transcript says when the confirmation is answered with 'c' or 'Esc'.
 const CODE_REVIEW_CANCELLED: &str = "code review cancelled; nothing was sent to any model.";
+/// What the transcript says when a tool approval is answered while a `/code-review`
+/// confirmation still waits for its own 'y' or 'c'.
+const CODE_REVIEW_STILL_WAITING: &str =
+    "the /code-review confirmation above is still waiting: press 'y' to run it, 'c' or 'Esc' \
+     to cancel.";
 /// What the transcript says when the review starts.
 const CODE_REVIEW_RUNNING: &str = "running the code review; it cannot be cancelled.";
 
@@ -2434,7 +2439,10 @@ impl App {
     /// Routes a key to the prompt waiting for 'y' or 'c'/'Esc', if one is.
     ///
     /// Every key reaches the prompt while it waits: 'y' answers yes, 'c' or 'Esc' answers no,
-    /// any other key is swallowed and the prompt keeps waiting.
+    /// any other key is swallowed and the prompt keeps waiting. A tool approval answers before
+    /// a `/code-review` confirmation: it can only arrive while the confirmation waits, and the
+    /// agent's turn hangs on it; once it is answered the transcript says the confirmation still
+    /// waits.
     ///
     /// # Arguments
     /// * `code` - The key pressed.
@@ -2450,6 +2458,32 @@ impl App {
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => Some(false),
             _ => None,
         };
+        // MAGI FIX (S6 loop 4): a tool approval drained while a `/code-review` confirmation
+        // waits used to lose the key to the confirmation: 'y' started the uncancellable review
+        // and left the agent's turn hanging on its approval (E2-2). The approval is always the
+        // newer prompt (no `/code-review` can be typed while one waits), so it answers first.
+        if let Some(req) = self.pending_approval.take() {
+            match answer {
+                Some(approved) => {
+                    let _ = req.tx.send(approved);
+                    let echo = if approved {
+                        "User: Approved"
+                    } else {
+                        "User: Denied"
+                    };
+                    self.push_message(echo.to_string());
+                    if self.pending_code_review.is_some() {
+                        for line in
+                            audit_for_transcript(&format!("System: {CODE_REVIEW_STILL_WAITING}"))
+                        {
+                            self.push_message(line);
+                        }
+                    }
+                }
+                None => self.pending_approval = Some(req),
+            }
+            return PromptKey::Handled;
+        }
         if self.pending_code_review.is_some() {
             match answer {
                 Some(true) => {
@@ -2466,22 +2500,7 @@ impl App {
             }
             return PromptKey::Handled;
         }
-        let Some(req) = self.pending_approval.take() else {
-            return PromptKey::NoPrompt;
-        };
-        match answer {
-            Some(approved) => {
-                let _ = req.tx.send(approved);
-                let echo = if approved {
-                    "User: Approved"
-                } else {
-                    "User: Denied"
-                };
-                self.push_message(echo.to_string());
-            }
-            None => self.pending_approval = Some(req),
-        }
-        PromptKey::Handled
+        PromptKey::NoPrompt
     }
 
     /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
