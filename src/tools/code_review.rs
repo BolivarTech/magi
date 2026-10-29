@@ -34,6 +34,7 @@ use magi_rs::review::pipeline::{
     SystemReviewClock,
 };
 use magi_rs::review::report::{render_batch_reports, render_text, summary_json};
+use magi_rs::review::secrets::mask_secrets;
 use serde_json::{json, Map, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -294,8 +295,30 @@ fn consult_object(c: &Consolidated, structured: bool) -> Value {
 ///
 /// # Returns
 /// The same review with its secrets masked.
+// MAGI FIX (S6 loop 3): `redact_foreign_text` only scrubs URL credentials; the product's own
+// detector runs here, the one point every surface (CLI text, JSON and `-o`, TUI, tool) reads.
 fn egress_safe(r: Rendered) -> Rendered {
-    r
+    Rendered {
+        text: mask_secrets(&r.text),
+        json: masked_json(r.json),
+        consult: masked_json(r.consult),
+        failure: r.failure.map(|f| mask_secrets(&f)),
+    }
+}
+
+/// `value` with every string and key passed through [`mask_secrets`]. O(size of `value`).
+fn masked_json(value: Value) -> Value {
+    match value {
+        Value::String(s) => Value::String(mask_secrets(&s)),
+        Value::Array(items) => Value::Array(items.into_iter().map(masked_json).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (mask_secrets(&k), masked_json(v)))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// `value` with every string redacted. O(size of `value`).
