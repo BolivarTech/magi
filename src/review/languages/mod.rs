@@ -586,6 +586,49 @@ mod tests {
     }
 
     #[test]
+    fn every_line_of_a_whole_file_lands_in_one_unit_and_so_does_every_split_part() {
+        // [MAGI S6 loop 4, B2] the extractors are heuristics; whatever they misread, a file
+        // reviewed by units must send each of its lines exactly once, unit split or not. The
+        // samples hold the constructs the loop-4 review named.
+        let samples = [
+            ("a.rs", "pub(super) async unsafe fn f() {\n    x();\n}\nunsafe impl Send for S {\n    fn a() {\n        if x {\n        } else {\n        }\n    }\n}\n"),
+            ("a.c", "int counter = 0;\nint f(void)\n// keeps state;\n{\n    return 0;\n}\nstatic int g;\n"),
+            ("a.cpp", "namespace n {\n    void f() {\n        try {\n        } catch (const E& e) {\n        }\n    }\n}\n"),
+            ("a.java", "public final class C {\n    private static final int X = 1;\n    @Override\n    public String toString() {\n        return \"}\";\n    }\n    void run() {\n    }\n}\n"),
+            ("a.js", "const r = /}/;\nclass K {\n  constructor(a) {\n    this.a = a.replace(/\\{/g, '');\n  }\n  get x() {\n    return `${ `n${1}` }`;\n  }\n}\ndescribe('x', () => {\n  it('y', () => {});\n});\n"),
+            ("a.ts", "export abstract class A {\n  abstract run(): void;\n  async go() {\n    await x();\n  }\n}\n"),
+            ("a.py", "def f(\n    x,\n) -> None:\n    y = call(\n1,\n)\n    return y\n\nclass C(\n        Base,\n):\n    def a(self):\n        return 1\n"),
+            ("a.go", "package p\n\nfunc f() {\n\tif x {\n\t} else {\n\t}\n}\n"),
+        ];
+        let registry = LanguageRegistry::new();
+        for (path, code) in samples {
+            let ext = registry.get(path).expect("a registered extension");
+            let total = u32::try_from(code.lines().count()).expect("small");
+            let units = ext.extract_units(code, path, ChangedLines::All);
+            let parts: Vec<SemanticUnit> = units
+                .iter()
+                .flat_map(|u| {
+                    let split = ext.split_block(u);
+                    if split.is_empty() {
+                        vec![u.clone()]
+                    } else {
+                        split
+                    }
+                })
+                .collect();
+            for set in [&units, &parts] {
+                for line in 1..=total {
+                    let holders = set
+                        .iter()
+                        .filter(|u| u.start_line <= line && line <= u.end_line)
+                        .count();
+                    assert_eq!(holders, 1, "{path}: line {line} in {holders} units");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn all_lines_gives_the_same_units_as_the_set_of_every_line() {
         // [MAGI S6 loop 3, B9] `ChangedLines::All` replaces a set of every line for a file
         // reviewed whole; the units must not change.
