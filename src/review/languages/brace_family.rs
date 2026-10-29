@@ -37,13 +37,9 @@ pub struct BraceFamilyExtractor {
     attribute_prefixes: Vec<String>,
     /// Lexical rules for the CodeScanner.
     lexical_rules: LexicalRules,
-    /// Whether an unindented signature line (`int main(void) {`) starts a function: C and C++
-    /// have no function keyword.
+    /// Whether a signature line (`int main(void) {`, `void run() {`) starts a function named by
+    /// the identifier before its `(`: C, C++ and Java have no function keyword.
     signature_functions: bool,
-    /// Whether a function unit is named by the identifier just before its `(`: Java's function
-    /// keywords are modifiers (`public static void run(`), so the token after them is a modifier
-    /// or a type, not the name.
-    name_before_paren: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -246,11 +242,7 @@ impl BraceFamilyExtractor {
 
             let stops = |j: usize| self.starts_construct(lines, scanned, j);
             if let Some((kind, keywords, matched)) = self.construct_keyword(trimmed) {
-                // MAGI FIX (S6 loop 3): a Java method is named by the identifier before `(`.
-                let name = Some(kind)
-                    .filter(|k| self.name_before_paren && *k == UnitKind::Function)
-                    .and_then(|_| identifier_before_paren(trimmed))
-                    .unwrap_or_else(|| extract_name_from_line(matched, keywords));
+                let name = extract_name_from_line(matched, keywords);
                 let start = self.scan_back_for_docs(lines, i);
                 let end = brace_block_end(lines, scanned, i, line_num, &stops);
                 constructs.push(Construct {
@@ -702,7 +694,6 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec!["#[".to_string()],
             lexical_rules: LexicalRules::rust(),
             signature_functions: false,
-            name_before_paren: false,
         }
     }
 
@@ -728,7 +719,6 @@ impl BraceFamilyExtractor {
             modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::c(),
             signature_functions: true,
-            name_before_paren: false,
         }
     }
 
@@ -760,7 +750,6 @@ impl BraceFamilyExtractor {
             modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::go(),
             signature_functions: false,
-            name_before_paren: false,
         }
     }
 
@@ -769,12 +758,12 @@ impl BraceFamilyExtractor {
         Self {
             language: "java".to_string(),
             exts: &["java"],
-            function_keywords: vec![
-                "public ".to_string(),
-                "private ".to_string(),
-                "protected ".to_string(),
-                "static ".to_string(),
-            ],
+            // MAGI FIX (S6 loop 4): the modifiers were the function keywords, so a field
+            // (`private String name;`) read as a method named after its type and a method with no
+            // modifier was no unit; a method is now a signature, named by the identifier before
+            // its `(`, and a field is not one. MAGI FIX (S6 loop 3), kept through the signature
+            // path: a Java method is named by the identifier before `(`.
+            function_keywords: vec![],
             // MAGI FIX (S6 loop 4): modifiers combine freely (`public final class`), so they are
             // stripped and the tables hold the bare keywords.
             block_keywords: vec![
@@ -789,8 +778,7 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec!["@".to_string()],
             modifiers: &JAVA_MODIFIERS,
             lexical_rules: LexicalRules::java(),
-            signature_functions: false,
-            name_before_paren: true,
+            signature_functions: true,
         }
     }
 
@@ -823,7 +811,6 @@ impl BraceFamilyExtractor {
             modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::javascript(),
             signature_functions: false,
-            name_before_paren: false,
         }
     }
 
