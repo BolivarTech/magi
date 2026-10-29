@@ -856,4 +856,78 @@ mod tests {
             "<redacted: pem-private-key><redacted: github-token> tail"
         );
     }
+    /// The masking loop before S6 loop 4: each turn rescans what follows the last mask for every
+    /// pattern. O(k · n · p), kept as the reference the one-pass masking must equal.
+    fn mask_secrets_by_rescanning(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some((span, name)) = SECRET_PATTERNS
+            .iter()
+            .filter_map(|p| p.matcher.first_span(rest).map(|r| (r, p.name)))
+            .min_by_key(|(r, _)| r.start)
+        {
+            out.push_str(rest.get(..span.start).unwrap_or_default());
+            out.push_str(REDACTED_OPEN);
+            out.push_str(name);
+            out.push('>');
+            rest = rest.get(span.end..).unwrap_or_default();
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn one_pass_masking_equals_the_rescanning_loop_on_adjacent_and_fuzzed_secrets() {
+        // [MAGI S6 MS2 loop 4, review of the one-pass masking, security] a token that opens at
+        // the end of a mask, or one byte after it behind a `-` (read as a diff marker by the
+        // rescanning loop), was left in the clear.
+        let sk = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        let ant = concat!("sk-", "ant-", "api03-AAAAAAAAAAAAAAAAAAAA");
+        let ghp = concat!("gh", "p_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let aws = concat!("AK", "IA", "ABCDEFGHIJKLMNOP");
+        let aws_secret = concat!(
+            "aws_secret",
+            "_access_key=",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+        let pem = format!(
+            "{PEM_BEGIN}EC {PEM_PRIVATE_KEY}\nMIIB\n{}",
+            concat!("-----", "END EC PRIVATE KEY-----")
+        );
+        let fragments: Vec<&str> = vec![
+            sk, ant, ghp, aws, aws_secret, &pem, "-", "\n", "_", "a", " ", "x-", "-\n", ".",
+        ];
+        let adjacent = [
+            format!("{aws}-{sk}"),
+            format!("{sk}-{sk}"),
+            format!("{pem}{ghp}"),
+            format!("{pem}-{sk}"),
+            format!("{aws}{ghp}"),
+            format!("{aws_secret}-{aws}"),
+            format!("x{ant}-{ghp}"),
+        ];
+        for text in &adjacent {
+            assert_eq!(
+                mask_secrets(text),
+                mask_secrets_by_rescanning(text),
+                "{text}"
+            );
+        }
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..3_000 {
+            let mut text = String::new();
+            for _ in 0..8 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let pick = usize::try_from(state >> 33).unwrap_or(0) % fragments.len();
+                text.push_str(fragments.get(pick).copied().unwrap_or_default());
+            }
+            assert_eq!(
+                mask_secrets(&text),
+                mask_secrets_by_rescanning(&text),
+                "{text:?}"
+            );
+        }
+    }
 }
