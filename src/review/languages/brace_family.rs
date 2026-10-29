@@ -41,6 +41,10 @@ pub struct BraceFamilyExtractor {
     /// the identifier before its `(`: C, C++ and Java have no function keyword, and neither has
     /// a JavaScript or TypeScript class method.
     signature_functions: bool,
+    /// Whether any code line ending in `;` outside every construct is a declaration: C and C++
+    /// globals (`int counter = 0;`, `static int state;`) and prototypes have no declaration
+    /// keyword.
+    semicolon_declarations: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -343,9 +347,19 @@ impl BraceFamilyExtractor {
     }
 
     /// Whether a trimmed line opens a declaration: a declaration keyword starts the line as
-    /// written or with its visibility stripped (`pub(crate) use`). O(k + n).
+    /// written or with its visibility stripped (`pub(crate) use`), or, with
+    /// `semicolon_declarations`, it is code ending in `;` that does not open with `}`, `#` or a
+    /// comment. Only lines outside every construct are asked, so a statement inside a function
+    /// body is never taken for one. O(k + n).
     fn is_declaration(&self, trimmed: &str) -> bool {
-        self.match_declaration_keyword(trimmed)
+        // MAGI FIX (S6 loop 4): a C global with no declaration keyword fell into a gap.
+        let semicolon = self.semicolon_declarations
+            && trimmed.ends_with(';')
+            && !["}", "#", "//", "/*", "*"]
+                .iter()
+                .any(|p| trimmed.starts_with(p));
+        semicolon
+            || self.match_declaration_keyword(trimmed)
             || self.match_declaration_keyword(self.strip_modifiers(trimmed, false))
     }
 
@@ -702,6 +716,7 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec!["#[".to_string()],
             lexical_rules: LexicalRules::rust(),
             signature_functions: false,
+            semicolon_declarations: false,
         }
     }
 
@@ -727,6 +742,7 @@ impl BraceFamilyExtractor {
             modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::c(),
             signature_functions: true,
+            semicolon_declarations: true,
         }
     }
 
@@ -758,6 +774,7 @@ impl BraceFamilyExtractor {
             modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::go(),
             signature_functions: false,
+            semicolon_declarations: false,
         }
     }
 
@@ -787,6 +804,7 @@ impl BraceFamilyExtractor {
             modifiers: &JAVA_MODIFIERS,
             lexical_rules: LexicalRules::java(),
             signature_functions: true,
+            semicolon_declarations: false,
         }
     }
 
@@ -822,6 +840,7 @@ impl BraceFamilyExtractor {
             // has no keyword, so a class too large for one batch could not split; a method is a
             // signature, as in C and Java.
             signature_functions: true,
+            semicolon_declarations: false,
         }
     }
 
