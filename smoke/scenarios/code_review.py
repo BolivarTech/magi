@@ -423,13 +423,17 @@ def _run_log_finding(run, match):
         match: The :data:`BUDGET_PATTERN` match on stderr, or ``None``.
 
     Returns:
-        Finding: ``CANNOT_TEST`` without a run id or a log directory (nothing
-        to search, not a verdict); ``PASS`` when a line carries ``run=<id>``
-        and the refusal (the text stderr showed, when it matched); else ``FAIL``.
+        Finding: ``PASS`` when a line carries ``run=<id>`` and the refusal
+        (the text stderr showed, when it matched); else ``FAIL``. A missing run
+        id or log directory is a ``FAIL`` too: R15 is deterministic, needs no
+        backend, and RV-S7 requires the refusal in the run log, so a product
+        that refuses on stderr but never logs is the defect, not an
+        inconclusive environment.
     """
+    # MAGI FIX (S6 loop 3): a missing run id or log is FAIL, never CANNOT_TEST (F1).
     run_id = logs.resolve_id(run.output)
     if run_id is None:
-        return _finding(S50_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R15",
+        return _finding(S50_ASSERTIONS, 2, Outcome.FAIL, "R15",
                         "the run published no run id, so its log lines cannot be told apart")
     directory = runs.review_workspace_root().joinpath(*logs.LOG_DIR_PARTS)
     needle = ("run=%s" % run_id).encode("utf-8")
@@ -447,8 +451,8 @@ def _run_log_finding(run, match):
 
     found, existed, _ = logs.scan(matcher, directory)
     if not existed:
-        return _finding(S50_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R15",
-                        "%s does not exist, so there is no run log to search" % directory)
+        return _finding(S50_ASSERTIONS, 2, Outcome.FAIL, "R15",
+                        "%s does not exist, so the refusal was never logged" % directory)
     return _verdict(S50_ASSERTIONS, 2, "R15", bool(found),
                     "no line of the run log under %s carries run=%s and the budget refusal"
                     % (directory, run_id))
