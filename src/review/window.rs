@@ -14,6 +14,9 @@ pub const BYTES_PER_TOKEN: usize = 4;
 
 /// The window assumed for a model whose window was not measured; a declared starting point, not a
 /// measurement.
+///
+/// REQ-RV04 names `src/defaults.rs` as its home, but that module belongs to the binary and this
+/// one to the library, which cannot reach it; this is the only definition.
 pub const DEFAULT_UNMEASURED_WINDOW_TOKENS: usize = 32_768;
 
 /// The share of the pool window one batch (batch text plus retrieved context) may take, in
