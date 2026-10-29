@@ -1439,4 +1439,156 @@ mod tests {
             Err(ReviewError::Git(_))
         ));
     }
+    /// Resolves `input` in `ws` with the real git and filters it through the review's
+    /// worktree source, as a review does before batching.
+    #[cfg(unix)]
+    fn resolve_and_filter(
+        ws: &std::path::Path,
+        input: &ReviewInput,
+    ) -> Result<magi_rs::review::filter::Filtered, ReviewError> {
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let g = ScrubbedGit::new(ws.to_path_buf());
+        let resolved = magi_rs::review::input::resolve_input(input, ws, &g, &allow)?;
+        let src = magi_rs::review::source::WorktreeSource::new(ws.to_path_buf());
+        let explicit = matches!(input, ReviewInput::File(_));
+        magi_rs::review::filter::filter_files(
+            resolved.files,
+            &src,
+            &magi_rs::review::languages::LanguageRegistry::new(),
+            explicit,
+            &|_| false,
+        )
+    }
+
+    /// The marker the outside file holds; no kept file may carry it.
+    #[cfg(unix)]
+    const OUTSIDE_MARKER: &str = "OUTSIDE-THE-WORKSPACE";
+
+    /// Asserts `link.rs` and `dir-link` were left out as outside the workspace, `a.rs` was kept,
+    /// and no byte of the outside file reaches a kept file.
+    #[cfg(unix)]
+    fn assert_outside_links_skipped(ws: &std::path::Path, f: &magi_rs::review::filter::Filtered) {
+        use magi_rs::review::filter::SkipCause;
+        let mut kept: Vec<_> = f.kept.iter().map(|k| k.path.as_str()).collect();
+        kept.retain(|p| *p != "base.rs");
+        assert_eq!(kept, vec!["a.rs"]);
+        let mut skipped: Vec<_> = f
+            .skipped
+            .iter()
+            .map(|s| (s.path.as_str(), s.cause))
+            .collect();
+        skipped.sort_by_key(|(p, _)| p.to_string());
+        assert_eq!(
+            skipped,
+            vec![
+                ("dir-link", SkipCause::OutsideWorkspace),
+                ("link.rs", SkipCause::OutsideWorkspace)
+            ]
+        );
+        let src = magi_rs::review::source::WorktreeSource::new(ws.to_path_buf());
+        for k in &f.kept {
+            let bytes = src.read(&k.path).expect("read").expect("present");
+            assert!(!String::from_utf8_lossy(&bytes).contains(OUTSIDE_MARKER));
+        }
+    }
+
+    /// An outside directory holding a marked file, and a workspace with `a.rs`, `link.rs` (a link
+    /// to the outside file) and `dir-link` (a link to the outside directory).
+    #[cfg(unix)]
+    fn workspace_with_outside_links(ws: &std::path::Path, outer: &std::path::Path) {
+        std::fs::write(outer.join("secret.rs"), format!("// {OUTSIDE_MARKER}\n")).expect("write");
+        std::fs::write(ws.join("a.rs"), "fn a() {}\n").expect("write");
+        std::os::unix::fs::symlink(outer.join("secret.rs"), ws.join("link.rs")).expect("symlink");
+        std::os::unix::fs::symlink(outer, ws.join("dir-link")).expect("symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_link_out_of_the_workspace_is_skipped_in_a_directory_review() {
+        // [MAGI S6 MS2 loop 4, A1 Caspar, security] git lists a tracked link as a file; the read
+        // through the worktree source refuses its outside target, so it is skipped, never sent.
+        let d = repo();
+        let outer = tempfile::tempdir().expect("tempdir");
+        workspace_with_outside_links(d.path(), outer.path());
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let f = resolve_and_filter(d.path(), &ReviewInput::Directory(".".into())).expect("a.rs");
+        assert_outside_links_skipped(d.path(), &f);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_untracked_link_out_of_the_workspace_is_skipped_in_an_uncommitted_review() {
+        // [MAGI S6 MS2 loop 4, A1 Caspar, security] untracked links are listed whole.
+        let d = repo();
+        std::fs::write(d.path().join("base.rs"), "fn b() {}\n").expect("write");
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let outer = tempfile::tempdir().expect("tempdir");
+        workspace_with_outside_links(d.path(), outer.path());
+        let f = resolve_and_filter(d.path(), &ReviewInput::Uncommitted).expect("a.rs");
+        assert_outside_links_skipped(d.path(), &f);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_workspace_is_skipped_in_a_walk_outside_any_repository() {
+        // [MAGI S6 MS2 loop 4, A1 Caspar, security] the walk lists a link without following it.
+        let d = tempfile::tempdir().expect("tempdir");
+        assert!(
+            d.path().ancestors().all(|a| !a.join(".git").exists()),
+            "TMPDIR sits inside a git repository"
+        );
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        let outer = tempfile::tempdir().expect("tempdir");
+        workspace_with_outside_links(&ws, outer.path());
+        let f = resolve_and_filter(&ws, &ReviewInput::Directory(".".into())).expect("a.rs");
+        assert_outside_links_skipped(&ws, &f);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_explicit_fifo_or_missing_file_is_a_typed_error_without_blocking() {
+        // [MAGI S6 MS2 loop 4, A1 Caspar] the explicit file is checked when the review reads it:
+        // a FIFO is refused by its type before any open, a missing file is `missing`.
+        let d = repo();
+        let made = std::process::Command::new("mkfifo")
+            .arg(d.path().join("pipe.rs"))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ws = d.path().to_path_buf();
+        std::thread::spawn(move || {
+            let fifo = resolve_and_filter(&ws, &ReviewInput::File("pipe.rs".into()));
+            let missing = resolve_and_filter(&ws, &ReviewInput::File("gone.rs".into()));
+            let _ = tx.send((fifo, missing));
+        });
+        let (fifo, missing) = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("neither input blocks");
+        assert!(
+            matches!(
+                fifo,
+                Err(ReviewError::NotReviewable {
+                    cause: "not a regular file",
+                    ..
+                })
+            ),
+            "{fifo:?}"
+        );
+        assert!(
+            matches!(
+                missing,
+                Err(ReviewError::NotReviewable {
+                    cause: "missing",
+                    ..
+                })
+            ),
+            "{missing:?}"
+        );
+    }
 }
