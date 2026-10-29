@@ -383,6 +383,18 @@ fn resolve_directory(
             cause: super::filter::MISSING,
         });
     }
+    // MAGI FIX (S6 loop 3): in a repository `ls-files -- <file>` lists the file itself, so a
+    // regular file passed as a directory was reviewed; the shape is checked before git runs.
+    match std::fs::metadata(&dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            return Err(ReviewError::NotReviewable {
+                path: d.display().to_string(),
+                cause: NOT_A_DIRECTORY,
+            })
+        }
+        Err(e) => return Err(ReviewError::Io(format!("{}: {e}", d.display()))),
+    }
     let rel = relative(workspace, &dir)?;
     let mut resolved = ResolvedInput {
         files: Vec::new(),
