@@ -22468,6 +22468,43 @@ mod code_review_surface_tests {
     use magi_rs::review::input::ReviewInput;
     use tokio_util::sync::CancellationToken;
 
+    /// `magi-rs code-review <argv>` as the review input the subcommand runs.
+    fn input_of(argv: &[&str]) -> ReviewInput {
+        let a =
+            Args::try_parse_from(["magi-rs", "code-review"].iter().chain(argv)).expect("parses");
+        match a.command {
+            Some(TopCmd::CodeReview(ref c)) => review_input_of(c),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_cli_input_form_maps_to_its_review_input_side_for_side() {
+        // E7 (MAGI S6 loop 3): a swapped from/to or base/head pair would silently review the
+        // wrong side of a range; each arm is pinned with distinct values.
+        assert_eq!(
+            input_of(&["--commit", "abc"]),
+            ReviewInput::Commit(Some("abc".into()))
+        );
+        assert_eq!(
+            input_of(&["--from", "old", "--to", "new"]),
+            ReviewInput::Range {
+                from: "old".into(),
+                to: "new".into()
+            }
+        );
+        assert_eq!(
+            input_of(&["--base", "main", "--head", "topic"]),
+            ReviewInput::Branches {
+                base: "main".into(),
+                head: "topic".into()
+            }
+        );
+        assert_eq!(input_of(&["--uncommitted"]), ReviewInput::Uncommitted);
+        assert_eq!(input_of(&[]), ReviewInput::Commit(None));
+        assert_eq!(input_of(&["src"]), ReviewInput::File("src".into()));
+    }
+
     #[test]
     fn code_review_with_no_git_argument_parses_to_head() {
         let a = Args::try_parse_from(["magi-rs", "code-review"]).expect("parses");
