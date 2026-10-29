@@ -213,6 +213,8 @@ Rejected answers appear only inside `chain`, never in the top-level `answers`, s
 | `timeout` | `timeout_secs` ran out | yes |
 | `invalid_response` | the response did not validate | yes |
 
+The two `rejected` rows share one token in the `chain`. To tell a 400, which moved the chain on, from a 413 or 422, which ended it, read the attempt's `detail`: it names the status (`provider rejected the request as invalid (HTTP 400)`).
+
 A 404 that is not recognizably about the model or the account, or an answer that is not JSON at all (OpenRouter answers a path without its API prefix that way), usually means the URL is wrong. The attempt's `detail` names the exact URL that was tried and the two likely causes: a `base_url` without the provider's API prefix (for OpenRouter that is `https://openrouter.ai/api/v1`), or a server that does not implement System One (Ollama before 0.35).
 
 ### Exit codes
