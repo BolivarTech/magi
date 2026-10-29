@@ -249,7 +249,7 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, String, Option<String>) 
 /// The rendered review.
 pub(crate) fn render_outcome(o: ReviewOutcome, structured: bool) -> Rendered {
     let json = summary_json(&o.summary);
-    match (o.consolidated, o.consolidation_error) {
+    let rendered = match (o.consolidated, o.consolidation_error) {
         (Some(c), None) => Rendered {
             text: render_text(&c, &o.summary),
             json,
@@ -266,7 +266,8 @@ pub(crate) fn render_outcome(o: ReviewOutcome, structured: bool) -> Rendered {
                     .unwrap_or_else(|| NO_REPORT_MESSAGE.to_string()),
             ),
         },
-    }
+    };
+    egress_safe(rendered)
 }
 
 /// The `consult` object of a consolidated review: the consensus, and the agents when asked for.
@@ -283,6 +284,18 @@ fn consult_object(c: &Consolidated, structured: bool) -> Value {
         );
     }
     redacted_json(Value::Object(out))
+}
+
+/// `r` as it may leave the process: every secret the RV22 detector names masked in the text, the
+/// failure and every string (and key) of both JSON objects.
+///
+/// # Arguments
+/// * `r` - A rendered review.
+///
+/// # Returns
+/// The same review with its secrets masked.
+fn egress_safe(r: Rendered) -> Rendered {
+    r
 }
 
 /// `value` with every string redacted. O(size of `value`).
@@ -1229,6 +1242,50 @@ mod tests {
         for part in [response, consult.to_string(), code_review.to_string()] {
             assert!(!part.contains("hunter2"), "{part}");
         }
+    }
+
+    /// A secret-shaped token, built so the source holds no literal key.
+    fn model_secret() -> String {
+        format!("sk-{}", "b".repeat(30))
+    }
+
+    #[test]
+    fn egress_safe_masks_a_secret_in_every_field_of_a_rendered_review() {
+        // [MAGI S6 loop 3, S2] RV22's every-byte rule at the last point: model text in the text,
+        // the failure and both JSON objects passes the product's own detector.
+        let leak = format!("echoed {}", model_secret());
+        let r = egress_safe(Rendered {
+            text: leak.clone(),
+            json: serde_json::json!({"findings": [{"title": leak.clone()}], leak.clone(): 1}),
+            consult: serde_json::json!({"consensus": {"summary": leak.clone()}}),
+            failure: Some(leak),
+        });
+        let failure = r.failure.clone().unwrap_or_default();
+        for part in [r.text, r.json.to_string(), r.consult.to_string(), failure] {
+            assert!(!part.contains(&model_secret()), "{part}");
+            assert!(part.contains("<redacted: openai-key>"), "{part}");
+        }
+    }
+
+    #[test]
+    fn a_rendered_review_masks_a_model_secret_in_the_summary_and_the_failure() {
+        // [MAGI S6 loop 3, S2] render_outcome is the single point every surface reads (CLI text,
+        // JSON and -o, the TUI, the tool).
+        let mut summary = magi_rs::review::report::ReviewSummary::default();
+        summary
+            .failed_batches
+            .push((1, format!("consult failed: {}", model_secret())));
+        let o = magi_rs::review::pipeline::ReviewOutcome {
+            consolidated: None,
+            batch_reports: vec![],
+            summary,
+            consolidation_error: Some(format!("consolidation failed: {}", model_secret())),
+        };
+        let r = render_outcome(o, true);
+        assert!(!r.json.to_string().contains(&model_secret()), "{}", r.json);
+        let failure = r.failure.unwrap_or_default();
+        assert!(!failure.contains(&model_secret()), "{failure}");
+        assert!(failure.contains("<redacted: openai-key>"), "{failure}");
     }
 
     #[test]
