@@ -955,6 +955,25 @@ mod tests {
     }
 
     #[test]
+    fn an_indented_c_function_is_a_function() {
+        // [MAGI S6 loop 3, B5] a signature was a function only unindented, so the functions of
+        // an `extern "C"` block, a namespace or a class were never units.
+        let code = "extern \"C\" {\n    int add(int a, int b) {\n        return a + b;\n    }\n\n    static void log_it(void)\n    {\n        puts(\"x\");\n    }\n}\n";
+        for ext in [c_extractor(), BraceFamilyExtractor::cpp()] {
+            let units = extract(&ext, code, &[3, 8]);
+            let found = spans(&units);
+            assert!(
+                found.contains(&("add", UnitKind::Function, 2, 4)),
+                "{found:?}"
+            );
+            assert!(
+                found.contains(&("log_it", UnitKind::Function, 6, 9)),
+                "{found:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_java_method_is_named_by_the_identifier_before_its_parameters() {
         // [MAGI S6 loop 3, B8] the modifier keyword left `static` or `void` as the name.
         let code = "public static void run() {\n    a();\n}\nprivate int count(String s) {\n    return 0;\n}\npublic static <T> List<T> wrap(T t) {\n    return null;\n}\nprotected Foo(int x) {\n    b();\n}\n";
