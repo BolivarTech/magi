@@ -308,28 +308,43 @@ fn egress_safe(r: Rendered) -> Rendered {
 
 /// `value` with every string and key passed through [`mask_secrets`]. O(size of `value`).
 fn masked_json(value: Value) -> Value {
-    match value {
-        Value::String(s) => Value::String(mask_secrets(&s)),
-        Value::Array(items) => Value::Array(items.into_iter().map(masked_json).collect()),
-        Value::Object(fields) => Value::Object(
-            fields
-                .into_iter()
-                .map(|(k, v)| (mask_secrets(&k), masked_json(v)))
-                .collect(),
-        ),
-        other => other,
-    }
+    map_json_text(value, &|text| mask_secrets(text), true)
 }
 
 /// `value` with every string redacted. O(size of `value`).
 fn redacted_json(value: Value) -> Value {
+    map_json_text(
+        value,
+        &|text| redact_foreign_text(text).as_str().to_string(),
+        false,
+    )
+}
+
+/// `value` with `f` applied to every string, and to every key when `keys` is set.
+///
+/// # Arguments
+/// * `value` - The JSON value.
+/// * `f` - The text transform.
+/// * `keys` - Whether object keys pass through `f` too.
+///
+/// # Returns
+/// The transformed value. O(size of `value`).
+fn map_json_text(value: Value, f: &dyn Fn(&str) -> String, keys: bool) -> Value {
     match value {
-        Value::String(s) => Value::String(redact_foreign_text(&s).as_str().to_string()),
-        Value::Array(items) => Value::Array(items.into_iter().map(redacted_json).collect()),
+        Value::String(s) => Value::String(f(&s)),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| map_json_text(v, f, keys))
+                .collect(),
+        ),
         Value::Object(fields) => Value::Object(
             fields
                 .into_iter()
-                .map(|(k, v)| (k, redacted_json(v)))
+                .map(|(k, v)| {
+                    let k = if keys { f(&k) } else { k };
+                    (k, map_json_text(v, f, keys))
+                })
                 .collect(),
         ),
         other => other,
