@@ -2310,6 +2310,16 @@ pub(crate) struct PendingCodeReview {
     plan: crate::tools::code_review::ReviewPlan,
 }
 
+/// What [`App::answer_prompt_key`] did with a key.
+pub(crate) enum PromptKey {
+    /// 'y' approved a `/code-review`: draw the screen, then run it.
+    RunCodeReview(ApprovedCodeReview),
+    /// A prompt took the key.
+    Handled,
+    /// No prompt waits for a key: the key is ordinary input.
+    NoPrompt,
+}
+
 /// A `/code-review` the user approved, between its notice and its run: the pending review,
 /// typed apart so only an approval can hand it to [`App::run_approved_code_review`].
 pub(crate) struct ApprovedCodeReview(PendingCodeReview);
@@ -2421,20 +2431,78 @@ impl App {
         }
     }
 
+    /// Routes a key to the prompt waiting for 'y' or 'c'/'Esc', if one is.
+    ///
+    /// Every key reaches the prompt while it waits: 'y' answers yes, 'c' or 'Esc' answers no,
+    /// any other key is swallowed and the prompt keeps waiting.
+    ///
+    /// # Arguments
+    /// * `code` - The key pressed.
+    ///
+    /// # Returns
+    /// [`PromptKey::RunCodeReview`] when 'y' approved a `/code-review` (the caller draws the
+    /// screen, then awaits [`Self::run_approved_code_review`]); [`PromptKey::Handled`] when a
+    /// prompt took the key; [`PromptKey::NoPrompt`] when nothing waits for one.
+    // MAGI FIX (S6 loop 4): the routing lived only in `run_app`, untested (E2-5).
+    pub(crate) fn answer_prompt_key(&mut self, code: KeyCode) -> PromptKey {
+        let answer = match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => Some(false),
+            _ => None,
+        };
+        if self.pending_code_review.is_some() {
+            match answer {
+                Some(true) => {
+                    self.push_message("User: Approved".to_string());
+                    if let Some(review) = self.approve_code_review() {
+                        return PromptKey::RunCodeReview(review);
+                    }
+                }
+                Some(false) => {
+                    self.pending_code_review = None;
+                    apply_response(self, AgentResponse::Info(CODE_REVIEW_CANCELLED.to_string()));
+                }
+                None => {}
+            }
+            return PromptKey::Handled;
+        }
+        let Some(req) = self.pending_approval.take() else {
+            return PromptKey::NoPrompt;
+        };
+        match answer {
+            Some(approved) => {
+                let _ = req.tx.send(approved);
+                let echo = if approved {
+                    "User: Approved"
+                } else {
+                    "User: Denied"
+                };
+                self.push_message(echo.to_string());
+            }
+            None => self.pending_approval = Some(req),
+        }
+        PromptKey::Handled
+    }
+
     /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
     /// in line, as `/consult` does (no key is read meanwhile); `false` cancels it. Without a
-    /// pending confirmation it does nothing. Every reply is sanitized and audited.
+    /// pending confirmation it does nothing. Every reply is sanitized and audited. Test-only:
+    /// it presses 'y' or 'Esc' through [`Self::answer_prompt_key`], the routing `run_app` uses,
+    /// without the screen draw.
     ///
     /// # Arguments
     /// * `approved` - Whether the user answered 'y'.
+    #[cfg(test)]
     pub(crate) async fn answer_code_review_confirmation(&mut self, approved: bool) {
-        if !approved {
-            if self.pending_code_review.take().is_some() {
-                apply_response(self, AgentResponse::Info(CODE_REVIEW_CANCELLED.to_string()));
-            }
+        if self.pending_code_review.is_none() {
             return;
         }
-        if let Some(review) = self.approve_code_review() {
+        let key = if approved {
+            KeyCode::Char('y')
+        } else {
+            KeyCode::Esc
+        };
+        if let PromptKey::RunCodeReview(review) = self.answer_prompt_key(key) {
             self.run_approved_code_review(review).await;
         }
     }
@@ -4208,40 +4276,16 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                             _ => {}
                         }
 
-                        if app.pending_code_review.is_some() {
-                            match key.code {
-                                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                    app.push_message("User: Approved".to_string());
-                                    // Drawn after the notice and before the run: the review is
-                                    // awaited in line and the screen does not move until it ends.
-                                    if let Some(review) = app.approve_code_review() {
-                                        terminal.draw(|f| ui(f, &mut app))?;
-                                        app.run_approved_code_review(review).await;
-                                    }
-                                }
-                                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-                                    app.answer_code_review_confirmation(false).await;
-                                }
-                                _ => {}
+                        match app.answer_prompt_key(key.code) {
+                            PromptKey::RunCodeReview(review) => {
+                                // Drawn after the notice and before the run: the review is
+                                // awaited in line and the screen does not move until it ends.
+                                terminal.draw(|f| ui(f, &mut app))?;
+                                app.run_approved_code_review(review).await;
+                                continue;
                             }
-                            continue;
-                        }
-
-                        if let Some(req) = app.pending_approval.take() {
-                            match key.code {
-                                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                    let _ = req.tx.send(true);
-                                    app.push_message("User: Approved".to_string());
-                                }
-                                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
-                                    let _ = req.tx.send(false);
-                                    app.push_message("User: Denied".to_string());
-                                }
-                                _ => {
-                                    app.pending_approval = Some(req);
-                                }
-                            }
-                            continue;
+                            PromptKey::Handled => continue,
+                            PromptKey::NoPrompt => {}
                         }
 
                         match key.code {
@@ -9644,6 +9688,80 @@ end"
             "{:?}",
             app.messages
         );
+    }
+
+    /// Queues and drains one tool approval request; returns the receiver of its answer.
+    fn drain_one_approval(
+        app: &mut App,
+        approvals: &tokio::sync::mpsc::Sender<crate::agent::ApprovalRequest>,
+        detail: Option<String>,
+    ) -> tokio::sync::oneshot::Receiver<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        approvals
+            .try_send(crate::agent::ApprovalRequest {
+                tool_name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+                tx,
+                detail,
+            })
+            .expect("queued");
+        drain_approval_requests(app);
+        rx
+    }
+
+    #[test]
+    fn the_prompt_keys_route_a_review_confirmation() {
+        // [MAGI S6 loop 4, E2-5] the routing `run_app` applies: any other key keeps the
+        // confirmation waiting, 'y' hands the approved plan back to run, nothing runs before.
+        let mut app = App::new_for_test();
+        let runner = Arc::new(FakeTuiRunner::default());
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            runner.clone(),
+            shown_plan(),
+        );
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Char('x')),
+            PromptKey::Handled
+        ));
+        assert!(app.pending_code_review.is_some());
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Char('y')),
+            PromptKey::RunCodeReview(_)
+        ));
+        assert!(app.messages.iter().any(|m| m == "User: Approved"));
+        assert!(app.pending_code_review.is_none());
+        assert_eq!(runner.calls(), 0);
+        // Answered: the next key is ordinary input again.
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Char('y')),
+            PromptKey::NoPrompt
+        ));
+    }
+
+    #[test]
+    fn the_prompt_keys_answer_a_tool_approval() {
+        // [MAGI S6 loop 4, E2-5] 'y' approves, 'Esc' denies, any other key keeps it waiting.
+        let (mut app, approvals) = App::new_for_test_with_approvals();
+        let mut approved = drain_one_approval(&mut app, &approvals, None);
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Char('x')),
+            PromptKey::Handled
+        ));
+        assert!(app.pending_approval.is_some());
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Char('y')),
+            PromptKey::Handled
+        ));
+        assert_eq!(approved.try_recv(), Ok(true));
+        let mut denied = drain_one_approval(&mut app, &approvals, None);
+        assert!(matches!(
+            app.answer_prompt_key(KeyCode::Esc),
+            PromptKey::Handled
+        ));
+        assert_eq!(denied.try_recv(), Ok(false));
+        assert!(app.messages.iter().any(|m| m == "User: Denied"));
+        assert!(app.pending_approval.is_none());
     }
 
     #[test]
