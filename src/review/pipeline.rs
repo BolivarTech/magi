@@ -2707,28 +2707,7 @@ mod tests {
     async fn a_renamed_and_edited_file_reads_its_old_side_under_its_old_path() {
         // [MAGI §6 MS2 D loop 2] RV21: the deleted lines of a rename live under the old path. The
         // lexical index (the symbol `f18`) and the gate's code (line 17) must both read them there.
-        let dir = tempfile::tempdir().expect("tempdir");
-        git_in(dir.path(), &["init", "-q", "-b", "main"]);
-        for (k, v) in [
-            ("user.email", "t@example.invalid"),
-            ("user.name", "t"),
-            ("commit.gpgsign", "false"),
-        ] {
-            git_in(dir.path(), &["config", k, v]);
-        }
-        let old: String = (1..=20).map(|i| format!("fn f{i}() {{}}\n")).collect();
-        std::fs::write(dir.path().join("old.rs"), &old).expect("write");
-        git_in(dir.path(), &["add", "old.rs"]);
-        git_in(dir.path(), &["commit", "-q", "-m", "one"]);
-        git_in(dir.path(), &["mv", "old.rs", "new.rs"]);
-        let new: String = (1..=15).map(|i| format!("fn f{i}() {{}}\n")).collect();
-        std::fs::write(dir.path().join("new.rs"), &new).expect("write");
-        let git = PlainGit(dir.path().to_path_buf());
-        let diff = git.run(&["diff", "HEAD"]).expect("diff");
-        assert!(
-            diff.contains("rename from old.rs"),
-            "precondition: a rename: {diff}"
-        );
+        let (dir, git) = renamed_repo();
         let f = serde_json::json!([
             {"severity":"warning","title":"t","detail":"`f18` is never called","file":"new.rs","line":18},
             {"severity":"warning","title":"u","detail":"d","file":"new.rs","line":17}
