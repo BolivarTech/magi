@@ -134,7 +134,7 @@ enum Verdict {
 /// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker is
 /// `binary` without reading anything ([`is_binary_section`]).
-/// The binary and UTF-8 checks run on the new side, or on the old one for a deleted file. The
+/// The binary and UTF-8 checks run on both sides that exist (binary first). The
 /// secret scan covers both whole sides, not only what is sent: the safe direction. A renamed
 /// file's old side is read under its old path (`rename from`).
 ///
@@ -245,13 +245,22 @@ fn classify(
             ))
         });
     }
-    if let Some(primary) = new.as_deref().or(old.as_deref()) {
-        if primary.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0) {
-            return Ok(Verdict::Skip(SkipCause::Binary));
-        }
-        if std::str::from_utf8(primary).is_err() {
-            return Ok(Verdict::Skip(SkipCause::NotUtf8));
-        }
+    // MAGI FIX (S6 loop 4): both sides, not the new one alone: a text file whose old side was
+    // binary or Latin-1 carried old-side bytes into the review.
+    let sides = [new.as_deref(), old.as_deref()];
+    if sides
+        .iter()
+        .flatten()
+        .any(|side| side.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0))
+    {
+        return Ok(Verdict::Skip(SkipCause::Binary));
+    }
+    if sides
+        .iter()
+        .flatten()
+        .any(|side| std::str::from_utf8(side).is_err())
+    {
+        return Ok(Verdict::Skip(SkipCause::NotUtf8));
     }
     let faces = [
         new.as_deref(),
