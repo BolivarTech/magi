@@ -4945,11 +4945,20 @@ const CODE_REVIEW_LOG_TARGET: &str = "magi_rs::code_review";
 /// redacted text for both (git's stderr can echo a credential URL, and the run log does not
 /// pass through the stderr auditor).
 ///
+/// One stderr line either way: with the logging layer up, the `ERROR` event is that line (the
+/// headless screen branch is stderr, fixed at `SCREEN_LEVEL` whatever `--log-level` says) and the
+/// run-log entry; with no layer (no `.magi/`, or a log directory that could not be used), the
+/// line is written directly, the same test [`magi_rs::notices::emit_notices`] applies.
+///
 /// # Arguments
 /// * `e` - The error.
+// MAGI FIX (S6 loop 3): writing the line AND emitting the event put it on stderr twice.
 fn emit_review_error(e: &magi_rs::review::error::ReviewError) {
-    let text = redact_foreign_text(&e.to_string());
-    magi_rs::notices::eprint_audited(&format!("error: {}", text.as_str()));
+    let text = format!("error: {}", redact_foreign_text(&e.to_string()).as_str());
+    if tracing::level_filters::LevelFilter::current() == tracing::level_filters::LevelFilter::OFF {
+        magi_rs::notices::eprint_audited(&text);
+        return;
+    }
     // MAGI FIX (S6 loop 3): `cause.subsystem`/`cause.name` are the health layer's degradation
     // key; a review refusal is not a subsystem degrading, and with no declared screen row it
     // printed an "internal error" line on stderr. The name rides in its own field.
@@ -4958,7 +4967,7 @@ fn emit_review_error(e: &magi_rs::review::error::ReviewError) {
         tracing::Level::ERROR,
         review.error = crate::tools::code_review::review_error_cause_name(e),
         "{}",
-        text.as_str()
+        text
     );
 }
 
