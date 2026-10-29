@@ -37,6 +37,10 @@ pub struct BraceFamilyExtractor {
     /// Whether an unindented signature line (`int main(void) {`) starts a function: C and C++
     /// have no function keyword.
     signature_functions: bool,
+    /// Whether a function unit is named by the identifier just before its `(`: Java's function
+    /// keywords are modifiers (`public static void run(`), so the token after them is a modifier
+    /// or a type, not the name.
+    name_before_paren: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -146,7 +150,11 @@ impl BraceFamilyExtractor {
                 });
             let stops = |j: usize| self.starts_construct(lines, scanned, j);
             if let Some((kind, keywords)) = keyword {
-                let name = extract_name_from_line(trimmed, keywords);
+                // MAGI FIX (S6 loop 3): a Java method is named by the identifier before `(`.
+                let name = Some(kind)
+                    .filter(|k| self.name_before_paren && *k == UnitKind::Function)
+                    .and_then(|_| identifier_before_paren(trimmed))
+                    .unwrap_or_else(|| extract_name_from_line(trimmed, keywords));
                 let start = self.scan_back_for_docs(lines, i);
                 let end = brace_block_end(scanned, i, lines.len(), line_num, &stops);
                 constructs.push(Construct {
@@ -259,23 +267,11 @@ impl BraceFamilyExtractor {
         {
             return None;
         }
-        let (before, _) = trimmed.split_once('(')?;
-        if before.contains('=') {
-            return None;
-        }
-        let name: String = before
-            .trim_end()
-            .chars()
-            .rev()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let name = identifier_before_paren(trimmed)?;
         let control = [
             "if", "for", "while", "switch", "return", "sizeof", "else", "do",
         ];
-        if name.is_empty() || control.contains(&name.as_str()) {
+        if control.contains(&name.as_str()) {
             return None;
         }
         Some(name)
@@ -411,6 +407,34 @@ fn brace_block_end(
     }
 }
 
+/// The identifier just before the first `(` of `line` (`int *parse(` gives `parse`,
+/// `public static <T> List<T> wrap(` gives `wrap`).
+///
+/// # Arguments
+///
+/// * `line` - A signature line.
+///
+/// # Returns
+///
+/// `None` when the line has no `(`, holds `=` before it (an assignment or initializer), or no
+/// identifier ends right before it. O(n) in the line.
+fn identifier_before_paren(line: &str) -> Option<String> {
+    let (before, _) = line.split_once('(')?;
+    if before.contains('=') {
+        return None;
+    }
+    let name: String = before
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Some(name).filter(|n| !n.is_empty())
+}
+
 /// Extract a name from a line given a set of keywords.
 fn extract_name_from_line(trimmed: &str, keywords: &[String]) -> String {
     for kw in keywords {
@@ -502,6 +526,7 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec!["#[".to_string()],
             lexical_rules: LexicalRules::rust(),
             signature_functions: false,
+            name_before_paren: false,
         }
     }
 
@@ -526,6 +551,7 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec![],
             lexical_rules: LexicalRules::c(),
             signature_functions: true,
+            name_before_paren: false,
         }
     }
 
@@ -556,6 +582,7 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec![],
             lexical_rules: LexicalRules::go(),
             signature_functions: false,
+            name_before_paren: false,
         }
     }
 
@@ -583,6 +610,7 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec!["@".to_string()],
             lexical_rules: LexicalRules::java(),
             signature_functions: false,
+            name_before_paren: true,
         }
     }
 
@@ -614,6 +642,7 @@ impl BraceFamilyExtractor {
             attribute_prefixes: vec!["@".to_string()],
             lexical_rules: LexicalRules::javascript(),
             signature_functions: false,
+            name_before_paren: false,
         }
     }
 
