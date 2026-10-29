@@ -422,6 +422,9 @@ fn resolve_directory(
     Ok(resolved)
 }
 
+/// The cause of a `Directory` input that names something other than a directory.
+pub const NOT_A_DIRECTORY: &str = "not a directory";
+
 /// Walks `dir` (whose workspace-relative path is `rel`) without following symlinks, collecting
 /// every non-directory entry except a link whose target is gone and what `ignored` names (a
 /// file by its path, a directory by its path and a trailing `/`, never entered). O(entries).
@@ -1372,6 +1375,28 @@ mod tests {
             r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             vec!["a.rs"]
         );
+    }
+
+    #[test]
+    fn a_directory_input_that_names_a_regular_file_is_not_reviewable() {
+        // [MAGI S6 loop 3, A3] in a repository `ls-files -- <file>` lists the file itself, so the
+        // shape is checked before git runs; no git call is expected (FakeGit has none).
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        let git = FakeGit::from(&[]);
+        match resolve_input(
+            &ReviewInput::Directory("a.rs".into()),
+            d.path(),
+            &git,
+            &allow_all,
+        ) {
+            Err(ReviewError::NotReviewable { path, cause }) => {
+                assert_eq!(path, "a.rs");
+                assert_eq!(cause, NOT_A_DIRECTORY);
+            }
+            Err(other) => panic!("expected NotReviewable, got {other:?}"),
+            Ok(_) => panic!("a regular file was accepted as a directory"),
+        }
     }
 
     #[test]
