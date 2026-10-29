@@ -59,7 +59,10 @@ enum LexicalState {
     TripleQuote { quote: char },
     /// Inside a character literal (`'...'` in C/Rust/Java).
     CharLiteral,
-    /// Inside a JS/TS template literal (`` `...` ``).
+    /// Inside a JS/TS template literal (`` `...` ``). The braces of a `${...}` expression are
+    /// not counted: they balance in valid code, and a template nested inside one reads as the
+    /// outer template closing and a new one opening, which leaves the depth unchanged too. Only
+    /// an unbalanced expression (invalid code) can move the depth, by its own imbalance.
     TemplateLiteral,
     /// Inside a JS/TS regular expression literal (`/.../`); `in_class` is `true` inside a
     /// character class (`[...]`), where `/` does not close it.
@@ -1045,6 +1048,18 @@ mod tests {
             rust.scan_line(1, "let q = a /{").brace_delta,
             1,
             "not JS: no regex"
+        );
+    }
+
+    #[test]
+    fn a_template_nested_in_a_template_expression_leaves_the_depth_unchanged() {
+        // [MAGI S6 loop 4, B2] declared heuristic: `${...}` is not tracked, and a nested
+        // template must not drift the depth of the code after it.
+        let mut scanner = CodeScanner::new(LexicalRules::javascript());
+        let r = scanner.scan_all("const s = `a${ `b${ {k: 1}.k }` }c`;\nfunction f() {\n}\n");
+        assert_eq!(
+            r.iter().map(|l| l.depth_after).collect::<Vec<_>>(),
+            vec![0, 1, 0]
         );
     }
 
