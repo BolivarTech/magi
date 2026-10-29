@@ -46,6 +46,15 @@ fn extension_of(path: &str) -> Option<&str> {
 }
 
 /// Maximal ASCII identifier runs of `text`; runs that start with a digit are not identifiers.
+///
+/// ASCII on purpose, paired with the citation rule of REQ-RV09
+/// (`crate::review::validate::cited_identifiers`), which only takes ASCII identifiers: a
+/// citation of a non-ASCII name (`größe`) is never checked, so it can never be discarded as an
+/// unknown symbol, and an ASCII citation is looked up among ASCII runs. A Unicode index would
+/// only matter with Unicode citations, which would add a discard path that a different
+/// normalization of the same name (NFC in the finding, NFD in the code) turns into the loss of
+/// a real finding. The `citations_the_validator_checks_are_whole_index_identifiers` test pins
+/// the pairing.
 fn identifier_runs(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|run| run.chars().next().is_some_and(|c| !c.is_ascii_digit()))
@@ -246,6 +255,21 @@ mod tests {
         let i = idx("let x_1 = 0x1F + foo2(bar);\n");
         assert!(i.contains("x_1") && i.contains("foo2") && i.contains("bar") && i.contains("let"));
         assert!(!i.contains("x1F") && !i.contains("1F") && !i.contains("foo"));
+    }
+
+    #[test]
+    fn citations_the_validator_checks_are_whole_index_identifiers() {
+        // [MAGI S6 loop 4, B1] a finding naming a real non-ASCII identifier must never be
+        // discarded as an unknown symbol: whatever the validator cites from such a finding is
+        // in the index built from the code that holds it.
+        use crate::review::validate::cited_identifiers;
+        let code = "fn größe() {}\nlet café_total = 1;\nstruct 変数;\nfn x\u{301}y() {}\n";
+        let index = idx(code);
+        let finding =
+            "`größe` overflows; `café_total` and `変数` too; see `x\u{301}y` and `Self::größe`";
+        for cited in cited_identifiers(finding) {
+            assert!(index.contains(&cited), "{cited} would be discarded");
+        }
     }
 
     #[test]
