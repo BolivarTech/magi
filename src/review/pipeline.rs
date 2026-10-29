@@ -928,6 +928,43 @@ mod tests {
     /// header) per batch. Derived from the fraction so the fixture follows it (200 at 60 %).
     const POOL_WINDOW: usize = 120 * 100 / BATCH_WINDOW_FRACTION_PERCENT;
 
+    #[test]
+    fn nothing_left_after_batching_names_what_the_filter_left_out() {
+        // [MAGI S6 loop 4, B1] the filter kept an empty file and left out a binary one; the
+        // batching then found nothing and its error named no file at all.
+        use crate::review::filter::SkipCause;
+        use crate::review::test_support::MapSource;
+        let files = vec![
+            ReviewFile {
+                path: "a.bin".into(),
+                diff: None,
+            },
+            ReviewFile {
+                path: "empty.rs".into(),
+                diff: None,
+            },
+        ];
+        let source = MapSource::new(&[("a.bin", "x\0y"), ("empty.rs", "")], &[]);
+        let pool = [("m".to_string(), Some(POOL_WINDOW))];
+        match filter_and_plan(
+            files,
+            &source,
+            false,
+            &LanguageRegistry::new(),
+            &|_| false,
+            &pool,
+        ) {
+            Err(ReviewError::NothingToReview { skipped }) => {
+                assert_eq!(skipped.len(), 1, "{skipped:?}");
+                assert_eq!(
+                    (skipped[0].path.as_str(), skipped[0].cause),
+                    ("a.bin", SkipCause::Binary)
+                );
+            }
+            other => panic!("expected NothingToReview, got {other:?}"),
+        }
+    }
+
     /// Scripted trio: one reply per batch, recording the wall clock it was given; may advance a FakeClock.
     struct FakeConsult {
         replies: Mutex<VecDeque<Result<MagiReport, ConsultFailure>>>,
