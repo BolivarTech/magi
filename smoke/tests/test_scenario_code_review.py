@@ -119,6 +119,24 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
             r = _result("R16", 2, None, _with_id(stderr))
             self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], path)
 
+    def test_s51_fails_when_the_omission_list_cannot_be_parsed(self) -> None:
+        # [MAGI §6 MS2 loop 4, F1-5] a drifted rendering used to match nothing and pass vacuously. R16's
+        # root always holds R14's two skipped files, so a missing list is drift as well.
+        drifted = (
+            _ROOT_STDERR.replace(b" (ignored)", b" [ignored]").replace(b" (secret)", b" [secret]")
+            .replace(b" (binary)", b" [binary]"),
+            _ROOT_STDERR.replace(b".magi/magi.toml (ignored)", b".magi/magi.toml (read)"),
+            _ROOT_STDERR.replace(b"; left out: ", b"; skipped: "),
+        )
+        for stderr in drifted:
+            r = _result("R16", 2, None, _with_id(stderr))
+            self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], stderr)
+
+    def test_s51_reads_an_omission_list_cut_at_the_display_cap(self) -> None:
+        stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)", b"skipped/pixel.png (binary), and 3 more")
+        r = _result("R16", 2, None, _with_id(stderr))
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
+
     def test_s51_fails_on_a_wrong_exit(self) -> None:
         r = _result("R16", 0, None, _with_id(_ROOT_STDERR))
         self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[0]])
