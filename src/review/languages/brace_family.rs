@@ -9,7 +9,9 @@
 //! units (functions, structs, classes, declaration groups).
 
 use super::scanner::{find_closing_brace, CodeScanner, LexicalRules, ScannedLine};
-use super::{gap_units, ChangedLines, LanguageExtractor, SemanticUnit, UnitKind};
+use super::{
+    gap_units, split_into_members, ChangedLines, LanguageExtractor, Member, SemanticUnit, UnitKind,
+};
 use crate::review::context::FileContext;
 
 /// Configuration for a brace-delimited language extractor.
@@ -103,6 +105,48 @@ impl LanguageExtractor for BraceFamilyExtractor {
         units.extend(gap_units(&lines, file_path, &ranges, orphans));
 
         units
+    }
+
+    /// Splits an `impl`, class, trait, interface or namespace at its members: the constructs
+    /// between the block's opening brace and its matching closing brace, found as at the top
+    /// level (indented functions included). O(n) in the block's lines.
+    fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
+        // MAGI FIX (S6 loop 3): a block too large for one batch is reviewed method by method.
+        if !matches!(
+            unit.kind,
+            UnitKind::Impl | UnitKind::Class | UnitKind::Trait
+        ) {
+            return Vec::new();
+        }
+        let lines: Vec<&str> = unit.content.lines().collect();
+        let scanned = CodeScanner::new(self.lexical_rules.clone()).scan_all(&unit.content);
+        let Some(open) = scanned
+            .iter()
+            .position(|s| !s.is_non_code && s.brace_delta > 0)
+        else {
+            return Vec::new();
+        };
+        let close = find_closing_brace(&scanned, open);
+        let inner = (open + 1)..close.max(open + 1);
+        let (Some(inner_lines), Some(inner_scanned)) =
+            (lines.get(inner.clone()), scanned.get(inner))
+        else {
+            return Vec::new();
+        };
+        let offset = u32::try_from(open + 1).unwrap_or(u32::MAX);
+        let members: Vec<Member> = self
+            .detect_constructs(inner_lines, inner_scanned)
+            .into_iter()
+            .map(|c| {
+                (
+                    c.kind,
+                    c.name,
+                    c.start_line.saturating_add(offset),
+                    c.end_line.saturating_add(offset),
+                )
+            })
+            .collect();
+        split_into_members(unit, members)
     }
 }
 

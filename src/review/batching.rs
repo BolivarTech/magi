@@ -341,7 +341,8 @@ fn side_range(side: &str) -> Option<(u32, u32)> {
 }
 
 /// The items of a file reviewed whole: none when empty, the whole file when it fits in an empty
-/// batch with its header (`header_tokens`), otherwise its non-blank units.
+/// batch with its header (`header_tokens`), otherwise its non-blank units, a block unit that does
+/// not fit alone split one level down by [`LanguageExtractor::split_block`].
 fn whole_file_items(
     path: &str,
     source: &dyn ContentSource,
@@ -382,6 +383,22 @@ fn whole_file_items(
     let units: Vec<BatchItem> = extractor
         .extract_units(whole.text(), path, ChangedLines::All)
         .into_iter()
+        // MAGI FIX (S6 loop 3): a block (impl, class, …) too large alone goes down one level, to
+        // its methods and the stretches between them; a block that cannot split stays whole and
+        // the packer reports it as too large.
+        .flat_map(|u| {
+            let fits = estimate_tokens(&u.content).saturating_add(header_tokens) <= limit_tokens;
+            let parts = if fits {
+                Vec::new()
+            } else {
+                extractor.split_block(&u)
+            };
+            if parts.is_empty() {
+                vec![u]
+            } else {
+                parts
+            }
+        })
         // The extractor also emits an empty `TopLevel` unit for each gap between constructs.
         .filter(|u| !u.content.trim().is_empty())
         .map(|u| BatchItem::Unit {

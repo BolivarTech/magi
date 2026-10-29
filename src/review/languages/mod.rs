@@ -125,9 +125,73 @@ pub trait LanguageExtractor {
     ///
     /// The pieces in line order, covering every line of `unit` exactly once, each with the
     /// changed lines of `unit` it holds; empty when `unit` is not a block or holds no member.
-    fn split_block(&self, _unit: &SemanticUnit) -> Vec<SemanticUnit> {
-        Vec::new()
+    fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit>;
+}
+
+/// A construct found inside a block: `(kind, name, first, last)`, lines 1-based and inclusive,
+/// counted from the block's first line.
+pub(crate) type Member = (UnitKind, String, u32, u32);
+
+/// The pieces of `block` given its `members`: each member as a unit ([`UnitKind::Function`]
+/// becomes [`UnitKind::Method`]), and each stretch between members (the header, blank lines,
+/// the closing line) as a piece with the block's kind and name. Shared by the extractors'
+/// [`LanguageExtractor::split_block`].
+///
+/// # Arguments
+///
+/// * `block` - The block unit.
+/// * `members` - Its members in block lines, sorted by start and disjoint.
+///
+/// # Returns
+///
+/// The pieces sorted by start line, covering every line of `block` once, each with the changed
+/// lines of `block` it holds; empty when `members` is. O(n log n) for the block's n lines.
+pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> Vec<SemanticUnit> {
+    if members.is_empty() {
+        return Vec::new();
     }
+    // `content` is the block's lines joined by '\n': splitting on it gives them back exactly.
+    let lines: Vec<&str> = block.content.split('\n').collect();
+    let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    let base = block.start_line.saturating_sub(1);
+    let piece = |kind: UnitKind, name: String, first: u32, last: u32| SemanticUnit {
+        kind,
+        name,
+        file: block.file.clone(),
+        start_line: first.saturating_add(base),
+        end_line: last.saturating_add(base),
+        content: lines
+            .get(first.saturating_sub(1) as usize..(last as usize).min(lines.len()))
+            .unwrap_or(&[])
+            .join("\n"),
+        changed_lines: lines_in_range(
+            &block.changed_lines,
+            first.saturating_add(base),
+            last.saturating_add(base),
+        )
+        .to_vec(),
+        context: block.context.clone(),
+    };
+    let ranges: Vec<(u32, u32)> = members.iter().map(|m| (m.2, m.3)).collect();
+    let (_, orphans) = ChangedLines::All.assign(&ranges, total);
+    let gaps = gap_units(&lines, &block.file, &ranges, orphans);
+    let mut parts: Vec<SemanticUnit> = members
+        .into_iter()
+        .map(|(kind, name, first, last)| {
+            let kind = if kind == UnitKind::Function {
+                UnitKind::Method
+            } else {
+                kind
+            };
+            piece(kind, name, first, last)
+        })
+        .chain(
+            gaps.into_iter()
+                .map(|g| piece(block.kind, block.name.clone(), g.start_line, g.end_line)),
+        )
+        .collect();
+    parts.sort_by_key(|u| u.start_line);
+    parts
 }
 
 /// The lines [`LanguageExtractor::extract_units`] treats as changed.
@@ -255,6 +319,13 @@ impl LanguageExtractor for ExtractorKind {
         match self {
             Self::BraceFamily(e) => e.extract_units(content, file_path, changed_lines),
             Self::Python(e) => e.extract_units(content, file_path, changed_lines),
+        }
+    }
+
+    fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
+        match self {
+            Self::BraceFamily(e) => e.split_block(unit),
+            Self::Python(e) => e.split_block(unit),
         }
     }
 }

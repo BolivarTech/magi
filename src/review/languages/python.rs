@@ -8,7 +8,9 @@
 //! assignments. Block boundaries are determined by indentation level changes.
 
 use super::scanner::{CodeScanner, LexicalRules};
-use super::{gap_units, ChangedLines, LanguageExtractor, SemanticUnit, UnitKind};
+use super::{
+    gap_units, split_into_members, ChangedLines, LanguageExtractor, Member, SemanticUnit, UnitKind,
+};
 use crate::review::context::FileContext;
 
 /// Indentation-based Python code extractor.
@@ -79,6 +81,63 @@ impl LanguageExtractor for PythonExtractor {
 
         units
     }
+
+    /// Splits a class at its methods: each `def` / `async def` at the indentation of the
+    /// class body, with its decorators, outside triple-quoted strings. O(n) in the class's lines.
+    fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
+        // MAGI FIX (S6 loop 3): a class too large for one batch is reviewed method by method.
+        if unit.kind != UnitKind::Class {
+            return Vec::new();
+        }
+        let lines: Vec<&str> = unit.content.split('\n').collect();
+        let in_literal = literal_lines(&lines);
+        let code = |j: usize| !in_literal.get(j).copied().unwrap_or(false);
+        let Some(class_idx) = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("class "))
+        else {
+            return Vec::new();
+        };
+        let Some(body_indent) = lines
+            .iter()
+            .enumerate()
+            .skip(class_idx + 1)
+            .find(|&(j, l)| code(j) && !l.trim().is_empty() && !l.trim().starts_with('#'))
+            .map(|(_, l)| indentation(l))
+        else {
+            return Vec::new();
+        };
+        let mut members: Vec<Member> = Vec::new();
+        let mut j = class_idx + 1;
+        while let Some(&line) = lines.get(j) {
+            let trimmed = line.trim();
+            let is_def = trimmed.starts_with("def ") || trimmed.starts_with("async def ");
+            if code(j) && is_def && indentation(line) == body_indent {
+                let start = scan_back_decorators(&lines, j);
+                let end = find_block_end(&lines, &in_literal, j);
+                members.push((
+                    UnitKind::Function,
+                    extract_python_name(trimmed, "def "),
+                    u32::try_from(start + 1).unwrap_or(u32::MAX),
+                    u32::try_from(end + 1).unwrap_or(u32::MAX),
+                ));
+                j = end + 1;
+            } else {
+                j += 1;
+            }
+        }
+        split_into_members(unit, members)
+    }
+}
+
+/// Whether each of `lines` starts inside a triple-quoted string, as the Python scanner reads them.
+/// O(n) in the text.
+fn literal_lines(lines: &[&str]) -> Vec<bool> {
+    CodeScanner::new(LexicalRules::python())
+        .scan_all(&lines.join("\n"))
+        .iter()
+        .map(|s| s.starts_in_literal)
+        .collect()
 }
 
 /// Intermediate detected construct.
@@ -91,14 +150,7 @@ struct PythonConstruct {
 
 /// Detect Python constructs using indentation.
 fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
-    let in_literal: Vec<bool> = CodeScanner::new(LexicalRules::python())
-        .scan_all(&lines.join(
-            "
-",
-        ))
-        .iter()
-        .map(|s| s.starts_in_literal)
-        .collect();
+    let in_literal = literal_lines(lines);
     let mut constructs = Vec::new();
     let mut i = 0;
 
