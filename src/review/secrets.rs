@@ -9,7 +9,9 @@
 //! linear in the text. Not covered, by design: JWTs (any base64url JSON looks like one), Azure
 //! keys, high-entropy strings with no prefix, and the base64 body of a PEM or armored OpenPGP
 //! private key without its `BEGIN` line. The minimum lengths can miss a shorter real key; that is the trade-off with
-//! false positives on ordinary code.
+//! false positives on ordinary code. So are the left boundaries: a short prefix (`sk-`, `ghp_`, `AKIA`, …) glued to a
+//! word character is not a token, because base64 runs and kebab-case names hold them by chance; the distinctive
+//! `sk-ant-` and `github_pat_` match wherever they occur.
 
 use std::ops::Range;
 
@@ -50,6 +52,9 @@ enum Matcher {
         min: usize,
         /// What may not follow the prefix (the Anthropic prefix inside the OpenAI one).
         not_followed_by: Option<&'static str>,
+        /// Whether the prefix needs no left boundary: it is distinctive enough (two parts and a
+        /// separator) that no base64 run or kebab-case name holds it by chance.
+        glued: bool,
     },
     /// A PEM private-key header.
     PemPrivateKey,
@@ -101,6 +106,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Word,
             min: 20,
             not_followed_by: None,
+            glued: true,
         },
     },
     SecretPattern {
@@ -110,6 +116,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Word,
             min: 20,
             not_followed_by: Some("ant-"),
+            glued: false,
         },
     },
     SecretPattern {
@@ -119,6 +126,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Word,
             min: 36,
             not_followed_by: None,
+            glued: false,
         },
     },
     SecretPattern {
@@ -128,6 +136,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Word,
             min: 22,
             not_followed_by: None,
+            glued: true,
         },
     },
     SecretPattern {
@@ -137,6 +146,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::UpperDigit,
             min: 16,
             not_followed_by: None,
+            glued: false,
         },
     },
     SecretPattern {
@@ -154,6 +164,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Alnum,
             min: 24,
             not_followed_by: None,
+            glued: false,
         },
     },
     SecretPattern {
@@ -163,6 +174,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Word,
             min: 35,
             not_followed_by: None,
+            glued: false,
         },
     },
     SecretPattern {
@@ -172,6 +184,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Word,
             min: 10,
             not_followed_by: None,
+            glued: false,
         },
     },
     SecretPattern {
@@ -181,6 +194,7 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
             tail: Tail::Word,
             min: 20,
             not_followed_by: None,
+            glued: false,
         },
     },
     SecretPattern {
@@ -237,8 +251,9 @@ fn skip_bytes(bytes: &[u8], mut at: usize, skip: &[u8]) -> usize {
 impl Matcher {
     /// Whether the pattern occurs anywhere in `text`.
     ///
-    /// Linear in the text: an occurrence of a token prefix inside another token fails its left
-    /// boundary before its tail is read, and a tail is read for at most its minimum length.
+    /// Linear in the text: each occurrence of a prefix reads at most its minimum tail length (an
+    /// occurrence inside another token fails its left boundary first, unless the prefix is
+    /// glued), and only the first match reads its whole tail.
     fn matches(&self, text: &str) -> bool {
         self.first_span(text).is_some()
     }
@@ -258,14 +273,17 @@ impl Matcher {
                 tail,
                 min,
                 not_followed_by,
+                glued,
             } => prefixes
                 .iter()
                 .filter_map(|prefix| {
                     text.match_indices(prefix).find_map(|(at, _)| {
-                        let bounded = at
-                            .checked_sub(1)
-                            .and_then(|before| bytes.get(before))
-                            .is_none_or(|b| !is_word(*b))
+                        // MAGI FIX (S6 loop 4): a distinctive prefix glued to a word was sent.
+                        let bounded = *glued
+                            || at
+                                .checked_sub(1)
+                                .and_then(|before| bytes.get(before))
+                                .is_none_or(|b| !is_word(*b))
                             || after_diff_marker(bytes, at);
                         let end = at + prefix.len();
                         let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
