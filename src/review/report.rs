@@ -320,7 +320,10 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
 ///
 /// The JSON object. O(size of the summary).
 pub fn summary_json(s: &ReviewSummary) -> Value {
-    // Serializing these types cannot fail: every map key is a string.
+    // Serializing these types cannot fail: every map key is a string and no field has a fallible
+    // `Serialize`. The invariant is pinned by a test, not by this fallback:
+    // `the_summary_json_counts_states_and_models_and_never_carries_raw_model_text_unredacted`
+    // requires every documented key, which a `Null` here would lose.
     let mut v = serde_json::to_value(s).unwrap_or_default();
     if let Value::Object(fields) = &mut v {
         fields.insert("findings".into(), with_gate(&s.findings));
@@ -413,6 +416,8 @@ fn with_gate(list: &[(ConsolidatedFinding, GateVerdict)]) -> Value {
     Value::Array(
         list.iter()
             .map(|(finding, verdict)| {
+                // An object by construction (a struct with named fields); pinned by the tests
+                // that read `filtered[0].file` and `findings[0].batches`.
                 let mut entry = match serde_json::to_value(finding) {
                     Ok(Value::Object(fields)) => fields,
                     _ => Map::new(),
