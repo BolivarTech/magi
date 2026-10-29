@@ -7911,6 +7911,11 @@ fn resolve_decision_endpoint(
 /// # Errors
 /// [`DecisionError::MissingVaultEntry`] naming the entry a placeholder needs when the vault
 /// is closed or lacks it; [`DecisionError::ClientUnavailable`] for any other template fault.
+/// The error is decision-typed whatever `scope` is: its one `Scope::CodeReview` caller,
+/// [`section_endpoints`], discards it (no key for an endpoint it cannot resolve), and the
+/// review runner resolves its own endpoint in `code_review_runner`, so a `[code_review]`
+/// fault never surfaces as a decision error.
+// MAGI FIX (S6 loop 4): the decision-typed error for the code-review scope was undocumented (E1-3).
 fn resolve_section_endpoint(
     template: &EndpointTemplate,
     scope: Scope,
