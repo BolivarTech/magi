@@ -643,22 +643,30 @@ fn reviewable_path(section: &str) -> Option<String> {
     section_path(first, &header).filter(|p| !p.is_empty())
 }
 
-/// The old path of a renamed file's section (its `rename from` header line), or `None` when the
-/// section is not a rename or the path does not decode.
+/// The old path of a renamed or copied file's section (its `rename from` or `copy from` header
+/// line), or `None` when the section is neither or the path does not decode.
+// MAGI FIX (S6 loop 3): `diff.renames=copies` prints `copy from`; without it the old side was read
+// at the destination path.
 pub(crate) fn renamed_from(section: &str) -> Option<String> {
     section
         .lines()
         .skip(1)
         .take_while(|l| !l.starts_with("@@"))
-        .find_map(|l| l.strip_prefix("rename from "))
+        .find_map(|l| {
+            l.strip_prefix("rename from ")
+                .or_else(|| l.strip_prefix("copy from "))
+        })
         .and_then(unquote)
 }
 
-/// The path of a section: `rename to`, then `+++`, then `---` for a deletion, then the
+/// The path of a section: `rename to` (or `copy to`), then `+++`, then `---` for a deletion, then the
 /// symmetric split of the `diff --git` header.
 fn section_path(first: &str, header: &[&str]) -> Option<String> {
     let after = |prefix: &str| header.iter().find_map(|l| l.strip_prefix(prefix));
-    if let Some(p) = after("rename to ").and_then(unquote) {
+    if let Some(p) = after("rename to ")
+        .or_else(|| after("copy to "))
+        .and_then(unquote)
+    {
         return Some(p);
     }
     let side = |line: Option<&str>| -> Option<String> {
