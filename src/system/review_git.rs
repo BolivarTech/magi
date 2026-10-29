@@ -1592,4 +1592,51 @@ mod tests {
             "{missing:?}"
         );
     }
+    #[test]
+    fn a_file_replaced_by_a_submodule_and_back_is_reviewed_without_a_git_error() {
+        // [MAGI S6 MS2 loop 4, A2 Melchior, measured with git 2.56] the path list held the
+        // gitlink, so reading the deleted file's new side ran `git show <rev>:./x.rs` on a
+        // submodule commit ("bad object") and failed the whole review. Both directions.
+        let d = repo();
+        std::fs::write(d.path().join("x.rs"), "fn x() {}\n").expect("write");
+        std::fs::write(d.path().join("k.rs"), "fn k() {}\n").expect("write");
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        git(d.path(), &["rm", "-q", "--cached", "x.rs"]);
+        std::fs::remove_file(d.path().join("x.rs")).expect("rm");
+        let gitlink = "160000,1111111111111111111111111111111111111111,x.rs";
+        git(d.path(), &["update-index", "--add", "--cacheinfo", gitlink]);
+        git(d.path(), &["commit", "-q", "-m", "2"]);
+        git(d.path(), &["rm", "-q", "--cached", "x.rs"]);
+        std::fs::write(d.path().join("x.rs"), "fn y() {}\n").expect("write");
+        git(d.path(), &["add", "x.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "3"]);
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        for rev in ["HEAD~1", "HEAD"] {
+            let input = ReviewInput::Commit(Some(rev.into()));
+            let r = magi_rs::review::input::resolve_input(&input, d.path(), &g, &allow)
+                .expect("resolves");
+            let magi_rs::review::input::SourceKind::Revision { new_rev, old_rev } = r.source_kind
+            else {
+                panic!("a commit is read from its revision");
+            };
+            let src = RevisionSource::new(&g, new_rev, old_rev);
+            let f = magi_rs::review::filter::filter_files(
+                r.files,
+                &src,
+                &magi_rs::review::languages::LanguageRegistry::new(),
+                false,
+                &|_| false,
+            )
+            .unwrap_or_else(|e| panic!("{rev}: {e}"));
+            assert!(
+                f.kept.iter().any(|k| k.path == "x.rs"),
+                "{rev}: {:?}",
+                f.kept.iter().map(|k| &k.path).collect::<Vec<_>>()
+            );
+        }
+    }
 }
