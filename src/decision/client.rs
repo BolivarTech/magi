@@ -1260,6 +1260,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn another_models_name_in_a_pre_0_40_body_is_not_this_model_missing() {
+        // [MAGI §6 MS2 C loop 3] the legacy text is name-checked like the 0.40 one: a proxy
+        // relaying another model's message is a generic 404, not this model missing.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/systemone")
+            .with_status(404)
+            .with_body(r#"{"error":"model \"other\" not found, try pulling it first"}"#)
+            .create_async()
+            .await;
+        let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+        assert_eq!(first_failure(&r).map(|(c, _)| c), Some(Cause::NotFound));
+    }
+
+    #[tokio::test]
     async fn the_pre_0_40_ollama_body_is_still_model_not_found() {
         let mut server = mockito::Server::new_async().await;
         server
