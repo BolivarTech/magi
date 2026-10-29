@@ -845,6 +845,22 @@ mod tests {
     }
 
     #[test]
+    fn a_char_literal_with_a_multi_char_escape_closes_on_its_own_quote() {
+        // [MAGI S6 loop 3, B7] `'\x00'`, `'\u{1F600}'` and C's `'\012'` are one char each: read
+        // as a lifetime, their closing quote paired with the next one and the `'{'` after it
+        // counted as code.
+        for (rules, code) in [
+            (LexicalRules::rust(), r"let v = ['\x00','{'];"),
+            (LexicalRules::rust(), r"let v = ['\u{1F600}','{'];"),
+            (LexicalRules::c(), r"char v[] = {'\012','{'};"),
+        ] {
+            let r = CodeScanner::new(rules).scan_all(code);
+            assert_eq!(r[0].brace_delta, 0, "{code}");
+            assert_eq!(r[0].depth_after, 0, "{code}");
+        }
+    }
+
+    #[test]
     fn balanced_braces_inside_a_template_expression_leave_the_depth_unchanged() {
         let mut scanner = CodeScanner::new(LexicalRules::javascript());
         let r = scanner.scan_all("const s = `x ${ {a: 1} } y`;\nfunction f() {\n}\n");
