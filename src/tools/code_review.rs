@@ -213,22 +213,21 @@ pub(crate) async fn run_cancellable<T>(
     }
 }
 
-/// `(exit code, stdout, stderr line)` of a rendered review.
+/// `(exit code, stderr line)` of a rendered review. What goes on stdout comes from
+/// [`envelope_fields`] alone, success and failed consolidation alike (M-9), so the CLI has one
+/// renderer of the text and the two cannot drift.
 ///
 /// # Arguments
 /// * `r` - The rendered review.
 ///
 /// # Returns
-/// With `failure`, exit 1, the batch reports on stdout and `error: <failure>` on stderr;
-/// otherwise exit 0 and the report.
-pub(crate) fn finish_code_review(r: &Rendered) -> (i32, String, Option<String>) {
+/// With `failure`, exit 1 and `error: <failure>` for stderr; otherwise exit 0 and none.
+// MAGI FIX (S6 loop 3): the stdout element duplicated `envelope_fields`' text, unredacted, and
+// no caller read it.
+pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
     match &r.failure {
-        Some(failure) => (
-            EXIT_RUNTIME,
-            r.text.clone(),
-            Some(format!("error: {failure}")),
-        ),
-        None => (EXIT_OK, r.text.clone(), None),
+        Some(failure) => (EXIT_RUNTIME, Some(format!("error: {failure}"))),
+        None => (EXIT_OK, None),
     }
 }
 
@@ -1259,9 +1258,9 @@ mod tests {
             consult: serde_json::Value::Null,
             failure: Some("consolidation failed: insufficient agents".into()),
         };
-        let (code, stdout, stderr) = finish_code_review(&r);
+        let (code, stderr) = finish_code_review(&r);
         assert_eq!(code, 1);
-        assert!(stdout.contains("## [batch 0]"));
+        assert!(envelope_fields(&r).0.contains("## [batch 0]"));
         assert_eq!(
             stderr.as_deref(),
             Some("error: consolidation failed: insufficient agents")

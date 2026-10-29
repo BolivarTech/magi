@@ -5286,7 +5286,7 @@ async fn run_code_review_subcommand(
             return review_error_exit(&e);
         }
     };
-    let (code, _, stderr_line) = crate::tools::code_review::finish_code_review(&rendered);
+    let (code, stderr_line) = crate::tools::code_review::finish_code_review(&rendered);
     let (response, consult, code_review) = crate::tools::code_review::envelope_fields(&rendered);
     let outcome = RunOutcome {
         response: Some(response),
