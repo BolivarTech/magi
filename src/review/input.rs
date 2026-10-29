@@ -1412,6 +1412,50 @@ mod tests {
     }
 
     #[test]
+    fn the_walk_outside_a_repo_never_enters_a_never_reviewed_path() {
+        // [MAGI S6 loop 3, A4] a nested `.git`, `.magi` or the memory database is pruned before
+        // the walk recurses: a large `.git` is never enumerated during the preparation.
+        let d = tempfile::tempdir().expect("tempdir");
+        for dir in ["src/sub/.git/objects", "src/.magi/logs"] {
+            std::fs::create_dir_all(d.path().join(dir)).expect("mkdir");
+        }
+        for file in [
+            "src/a.rs",
+            "src/sub/.git/config",
+            "src/sub/.git/objects/x",
+            "src/.magi/magi.toml",
+            "src/.magi-rs-memory.db-wal",
+        ] {
+            std::fs::write(d.path().join(file), "x\n").expect("write");
+        }
+        let git = FakeGit::from(&[
+            (
+                "rev-parse --is-inside-work-tree",
+                Err("fatal: not a git repository"),
+            ),
+            (
+                "ls-files --others --ignored --exclude-standard --directory -z -- src",
+                Ok(""),
+            ),
+        ]);
+        assert!(
+            d.path().ancestors().all(|a| !a.join(".git").exists()),
+            "TMPDIR sits inside a git repository"
+        );
+        let r = resolve_input(
+            &ReviewInput::Directory("src".into()),
+            d.path(),
+            &git,
+            &allow_all,
+        )
+        .expect("resolves");
+        assert_eq!(
+            r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.rs"]
+        );
+    }
+
+    #[test]
     fn a_directory_outside_a_repo_is_walked_in_order_without_what_gitignore_excludes() {
         // [MAGI §6 MS2 A loop 1] outside a repository git still names what `.gitignore` excludes, and the walk leaves it out.
         let d = tempfile::tempdir().expect("tempdir");
