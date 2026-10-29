@@ -1630,11 +1630,6 @@ fn code_review_unavailable_message(reason: Option<&str>) -> String {
 }
 /// What the transcript says when the confirmation is answered with 'c' or 'Esc'.
 const CODE_REVIEW_CANCELLED: &str = "code review cancelled; nothing was sent to any model.";
-/// What the transcript says when a tool approval is answered while a `/code-review`
-/// confirmation still waits for its own 'y' or 'c'.
-const CODE_REVIEW_STILL_WAITING: &str =
-    "the /code-review confirmation above is still waiting: press 'y' to run it, 'c' or 'Esc' \
-     to cancel.";
 /// What the transcript says when the review starts.
 const CODE_REVIEW_RUNNING: &str = "running the code review; it cannot be cancelled.";
 
@@ -2438,10 +2433,9 @@ impl App {
     /// Routes a key to the prompt waiting for 'y' or 'c'/'Esc', if one is.
     ///
     /// Every key reaches the prompt while it waits: 'y' answers yes, 'c' or 'Esc' answers no,
-    /// any other key is swallowed and the prompt keeps waiting. A tool approval answers before
-    /// a `/code-review` confirmation: it can only arrive while the confirmation waits, and the
-    /// agent's turn hangs on it; once it is answered the transcript says the confirmation still
-    /// waits.
+    /// any other key is swallowed and the prompt keeps waiting. Only one prompt is ever on
+    /// screen: [`drain_approval_requests`] leaves a tool approval queued while a `/code-review`
+    /// confirmation waits, so a key never answers a prompt the user did not see.
     ///
     /// # Arguments
     /// * `code` - The key pressed.
@@ -2457,32 +2451,6 @@ impl App {
             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => Some(false),
             _ => None,
         };
-        // MAGI FIX (S6 loop 4): a tool approval drained while a `/code-review` confirmation
-        // waits used to lose the key to the confirmation: 'y' started the uncancellable review
-        // and left the agent's turn hanging on its approval (E2-2). The approval is always the
-        // newer prompt (no `/code-review` can be typed while one waits), so it answers first.
-        if let Some(req) = self.pending_approval.take() {
-            match answer {
-                Some(approved) => {
-                    let _ = req.tx.send(approved);
-                    let echo = if approved {
-                        "User: Approved"
-                    } else {
-                        "User: Denied"
-                    };
-                    self.push_message(echo.to_string());
-                    if self.pending_code_review.is_some() {
-                        for line in
-                            audit_for_transcript(&format!("System: {CODE_REVIEW_STILL_WAITING}"))
-                        {
-                            self.push_message(line);
-                        }
-                    }
-                }
-                None => self.pending_approval = Some(req),
-            }
-            return PromptKey::Handled;
-        }
         if self.pending_code_review.is_some() {
             match answer {
                 Some(true) => {
@@ -2499,7 +2467,22 @@ impl App {
             }
             return PromptKey::Handled;
         }
-        PromptKey::NoPrompt
+        let Some(req) = self.pending_approval.take() else {
+            return PromptKey::NoPrompt;
+        };
+        match answer {
+            Some(approved) => {
+                let _ = req.tx.send(approved);
+                let echo = if approved {
+                    "User: Approved"
+                } else {
+                    "User: Denied"
+                };
+                self.push_message(echo.to_string());
+            }
+            None => self.pending_approval = Some(req),
+        }
+        PromptKey::Handled
     }
 
     /// Answers the pending `/code-review` confirmation: `true` runs the review and waits for it
@@ -3940,6 +3923,10 @@ fn refresh_stream_audit(app: &mut App) {
 /// from did: the prompt is a single slot and the key handler answers one at a
 /// time. That is behaviour this extraction preserves rather than introduces.
 ///
+/// **Nothing is drained while a `/code-review` confirmation waits:** both prompts answer
+/// y/c, and a key answers only the prompt on screen when it was pressed. The requests stay
+/// in the channel and are shown once the confirmation is answered.
+///
 /// **Both lines go through [`audit_for_transcript`], including the static one**
 /// (MS2 gate S4 fourth pass, Caspar). The prompt interpolates a tool name this
 /// crate did not necessarily author, and it lands in a transcript `y` copies to
@@ -3957,6 +3944,14 @@ fn refresh_stream_audit(app: &mut App) {
 ///
 /// `O(k*n)` — the auditor's, over each queued request's prompt.
 fn drain_approval_requests(app: &mut App) {
+    // MAGI FIX (S6 loop 4): a `/code-review` confirmation and a drained tool approval both
+    // waited on y/c, so a key pressed for the prompt on screen could answer the other: 'y'
+    // started the uncancellable review while the approval hung (E2-2), or approved a tool the
+    // user never saw (security review). The approval stays queued until the confirmation is
+    // answered; if the review then runs, the agent's own approval timeout denies it.
+    if app.pending_code_review.is_some() {
+        return;
+    }
     while let Ok(req) = app.approval_rx.try_recv() {
         let prompt = format!("APPROVAL REQUIRED: Execute {}?", req.tool_name);
         for line in audit_for_transcript(&prompt) {
