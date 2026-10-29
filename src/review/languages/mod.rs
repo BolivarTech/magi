@@ -356,6 +356,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fallback_extract_gives_one_window_per_change_and_merges_overlapping_ones() {
+        // [MAGI S6 loop 3, B6] one span from the first change to the last held everything
+        // between two distant changes.
+        let content: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+        let ctx = FileContext::default();
+        let spans = |changed: &[u32]| -> Vec<(u32, u32, Vec<u32>)> {
+            let set: HashSet<u32> = changed.iter().copied().collect();
+            fallback_extract(&content, "a.txt", &set, &ctx)
+                .into_iter()
+                .map(|u| (u.start_line, u.end_line, u.changed_lines))
+                .collect()
+        };
+        assert_eq!(
+            spans(&[5, 100, 199]),
+            vec![
+                (1, 25, vec![5]),
+                (80, 120, vec![100]),
+                (179, 200, vec![199])
+            ]
+        );
+        assert_eq!(spans(&[30, 50, 71]), vec![(10, 91, vec![30, 50, 71])]);
+        assert!(spans(&[]).is_empty());
+    }
+
     // --- Test 37: registry_dispatches_by_extension ---
     #[test]
     fn registry_dispatches_by_extension() {
