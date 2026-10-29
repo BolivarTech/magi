@@ -501,14 +501,28 @@ pub fn mask_secrets(text: &str) -> String {
         for (slot, (p, lane)) in next.iter_mut().zip(&lanes) {
             if slot.as_ref().is_some_and(|s| s.start < done) {
                 *slot = p.matcher.lane_span(*lane, rest).map(|r| at(done, r));
-            } else if let Some(r) = p.matcher.token_at(*lane, rest.as_bytes(), 0) {
-                // The end of a mask is a left boundary: a token may open right there.
+            } else if let Some(r) = token_after_mask(p, *lane, rest) {
                 *slot = Some(at(done, r));
             }
         }
     }
     out.push_str(text.get(done..).unwrap_or_default());
     out
+}
+
+/// The token of `pattern`'s search `lane` whose left boundary is the end of a mask: the only
+/// tokens of `rest` (what follows the mask) that a search over the whole text can miss. One
+/// opens at the start of `rest`, which is a boundary; or one byte later behind a `-`, which
+/// opens `rest` like a removed-line marker opens a line. Every other match is decided by bytes
+/// inside `rest`, so the cached span already holds it. O(min).
+// MAGI FIX (S6 loop 4): a token right after a mask and a `-` was left in the clear.
+fn token_after_mask(pattern: &SecretPattern, lane: usize, rest: &str) -> Option<Range<usize>> {
+    let bytes = rest.as_bytes();
+    pattern.matcher.token_at(lane, bytes, 0).or_else(|| {
+        (bytes.first() == Some(&b'-'))
+            .then(|| pattern.matcher.token_at(lane, bytes, 1))
+            .flatten()
+    })
 }
 
 /// `text` as it may leave the process: [`mask_secrets`], then every control character escaped.
