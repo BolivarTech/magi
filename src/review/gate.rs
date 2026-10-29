@@ -301,6 +301,9 @@ struct Outcome {
     status: Option<u16>,
     /// Whether `model`'s answer reached its threshold and decided the state.
     decided: bool,
+    /// Whether the chain was asked about this finding and some of its (title, detail) pairs
+    /// were never put to it.
+    unasked: bool,
 }
 
 impl Outcome {
@@ -314,6 +317,7 @@ impl Outcome {
             confidence: None,
             status: None,
             decided: false,
+            unasked: false,
         }
     }
 
@@ -333,6 +337,7 @@ impl Outcome {
             confidence: Some(confidence),
             status: None,
             decided: false,
+            unasked: false,
         }
     }
 }
@@ -422,7 +427,10 @@ impl<'a> Gate<'a> {
     /// 413/422 ends the chain, a 401/403 stops the gate, and a call cut by the review clock stops
     /// it as `timeout`. A merged finding is `filtered` only when every pair was asked and judged a
     /// false positive; with pairs past the cap unasked it is `low_confidence` (`not every claim
-    /// judged`). Every `unfiltered` writes one WARN entry. At most one call per model per pair.
+    /// judged`). A walk that ends early (a pair kept, under every threshold, a critical, a stop)
+    /// leaves the later pairs unasked: once the chain was asked about the finding, any unasked
+    /// pair adds `not every claim judged` to [`GateVerdict::causes`], after the state's own cause.
+    /// Every `unfiltered` writes one WARN entry. At most one call per model per pair.
     ///
     /// # Arguments
     /// * `finding` - the consolidated finding.
@@ -441,6 +449,12 @@ impl<'a> Gate<'a> {
         let deadline = remaining.and_then(|r| Instant::now().checked_add(r));
         let mut skipped = Vec::new();
         let outcome = self.decide(finding, code, deadline, &mut skipped).await;
+        // MAGI FIX (S6 loop 3): unasked claims are named beside the state's own cause, never
+        // replaced by it (`critical never filtered`) nor left out (a lean that ended the walk).
+        let mut causes: Vec<&'static str> = outcome.cause.into_iter().collect();
+        if outcome.unasked && !causes.contains(&CAUSE_NOT_EVERY_CLAIM_JUDGED) {
+            causes.push(CAUSE_NOT_EVERY_CLAIM_JUDGED);
+        }
         if outcome.state == GateState::Unfiltered {
             tracing::event!(
                 target: GATE_LOG_TARGET,
@@ -452,8 +466,8 @@ impl<'a> Gate<'a> {
         }
         GateVerdict {
             state: outcome.state,
-            cause: outcome.cause,
-            causes: outcome.cause.into_iter().collect(),
+            cause: causes.first().copied(),
+            causes,
             model: outcome.model,
             lean: outcome.lean,
             confidence: outcome.confidence,
@@ -534,14 +548,17 @@ impl<'a> Gate<'a> {
         }
         let critical = finding.reported_severity == Severity::Critical;
         let mut outcome = Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
+        let mut put = 0;
         for state in states {
             self.questions += 1;
+            put += 1;
             outcome = self.ask(state, critical, deadline, skipped).await;
             if outcome.state != GateState::Filtered {
                 break;
             }
         }
-        if outcome.state == GateState::Filtered && asked < pairs {
+        outcome.unasked = put < pairs;
+        if outcome.state == GateState::Filtered && outcome.unasked {
             // The cap, not the model's answer, sets this state: it counts for no model.
             outcome.state = GateState::LowConfidence;
             outcome.cause = Some(CAUSE_NOT_EVERY_CLAIM_JUDGED);

@@ -601,8 +601,9 @@ fn record_verdicts(
     };
     for (finding, verdict) in findings.iter().zip(verdicts) {
         *summary.gate_states.entry(name(&verdict.state)).or_insert(0) += 1;
-        if let Some(cause) = verdict.cause {
-            *summary.gate_causes.entry(cause.to_string()).or_insert(0) += 1;
+        // MAGI FIX (S6 loop 3): a verdict counts under every cause it carries.
+        for cause in &verdict.causes {
+            *summary.gate_causes.entry((*cause).to_string()).or_insert(0) += 1;
         }
         let list = if verdict.state == GateState::Filtered {
             &mut summary.filtered
