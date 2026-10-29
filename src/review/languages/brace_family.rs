@@ -889,6 +889,55 @@ mod tests {
         );
     }
 
+    /// `(name, kind, start, end)` of each unit.
+    fn spans(units: &[SemanticUnit]) -> Vec<(&str, UnitKind, u32, u32)> {
+        units
+            .iter()
+            .map(|u| (u.name.as_str(), u.kind, u.start_line, u.end_line))
+            .collect()
+    }
+
+    #[test]
+    fn a_signature_wrapped_over_several_lines_finds_its_brace() {
+        // [MAGI S6 loop 3, B3] the brace was sought only two lines after the keyword, so a
+        // rustfmt-wrapped signature collapsed to its first line and the body became a gap.
+        let rust = "pub fn plan(\n    a: u8,\n    b: u8,\n    c: u8,\n) -> u8 {\n    a\n}\nfn g() {\n    x();\n}\n";
+        let units = extract(&rust_extractor(), rust, &(1..=10).collect::<Vec<_>>());
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("plan", UnitKind::Function, 1, 7),
+                ("g", UnitKind::Function, 8, 10)
+            ]
+        );
+        let c = "int f(int a,\n      int b,\n      int c)\n{\n    return a;\n}\n";
+        let units = extract(&c_extractor(), c, &[5]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 1, 6)]);
+    }
+
+    #[test]
+    fn a_declaration_ended_by_a_semicolon_or_a_blank_line_takes_no_later_brace() {
+        // [MAGI S6 loop 3, B3] with the lookahead unbounded, a complete declaration must not
+        // reach the brace of the code after it.
+        let java = "static final int X = 1;\nvoid run() {\n    a();\n}\n";
+        let units = extract(&BraceFamilyExtractor::java(), java, &[1]);
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| (u.start_line, u.end_line))
+                .collect::<Vec<_>>(),
+            vec![(1, 1)],
+            "{:?}",
+            spans(&units)
+        );
+        let rust = "struct A;\n\nmacro_rules! m {\n    () => {};\n}\n";
+        let units = extract(&rust_extractor(), rust, &[1]);
+        assert_eq!(spans(&units), vec![("A", UnitKind::Struct, 1, 1)]);
+        let rust = "struct B(u8)\n\nmacro_rules! m {\n    () => {};\n}\n";
+        let units = extract(&rust_extractor(), rust, &[1]);
+        assert_eq!(spans(&units), vec![("B", UnitKind::Struct, 1, 1)]);
+    }
+
     #[test]
     fn a_java_method_is_named_by_the_identifier_before_its_parameters() {
         // [MAGI S6 loop 3, B8] the modifier keyword left `static` or `void` as the name.
