@@ -358,6 +358,9 @@ impl<'g> RevisionSource<'g> {
     }
 
     /// Whether `rev` holds `path`, listing `rev` once. O(log n) per lookup after the listing.
+    ///
+    /// A listed name that is not UTF-8 is left out: a requested path is always UTF-8 (the input
+    /// sets other names aside), and a lossy decoding could make it match a name it is not.
     fn holds(&self, rev: &str, path: &str) -> Result<bool, ReviewError> {
         let mut listings = self.listings.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(paths) = listings.get(rev) {
@@ -369,7 +372,8 @@ impl<'g> RevisionSource<'g> {
         let paths: BTreeSet<String> = out
             .split(|b| *b == 0)
             .filter(|name| !name.is_empty())
-            .map(|name| String::from_utf8_lossy(name).into_owned())
+            // MAGI FIX (S6 loop 4): never decoded lossily (`a\xff.rs` matched `a\u{FFFD}.rs`).
+            .filter_map(|name| std::str::from_utf8(name).ok().map(str::to_string))
             .collect();
         let holds = paths.contains(path);
         listings.insert(rev.to_string(), paths);
