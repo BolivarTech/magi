@@ -1382,10 +1382,6 @@ pub(crate) enum TuiCodeReviewParseError {
     /// The arguments did not parse; the message says why.
     Invalid(String),
     /// `-h`/`--help` was asked for: the subcommand's help, to show as such, never as an error.
-    #[expect(
-        dead_code,
-        reason = "Red stub: the parser returns it in the fix commit"
-    )]
     Help(String),
 }
 
@@ -1429,8 +1425,9 @@ const CODE_REVIEW_COMMAND: &str = "/code-review";
 ///
 /// # Errors
 /// [`TuiCodeReviewParseError::NotACodeReviewCommand`] for any other line;
-/// [`TuiCodeReviewParseError::Invalid`] with clap's first line for arguments that do not parse,
-/// or with a fixed message for `-w` or an unbalanced quote.
+/// [`TuiCodeReviewParseError::Invalid`] with clap's whole message for arguments that do not
+/// parse, or with a fixed message for `-w` or an unbalanced quote;
+/// [`TuiCodeReviewParseError::Help`] with the subcommand's help for `-h`/`--help`.
 pub(crate) fn parse_tui_code_review(
     trimmed: &str,
 ) -> Result<TuiCodeReviewCommand, TuiCodeReviewParseError> {
@@ -1442,9 +1439,11 @@ pub(crate) fn parse_tui_code_review(
     let program = CODE_REVIEW_COMMAND.trim_start_matches('/');
     let words = command_words(rest).map_err(TuiCodeReviewParseError::Invalid)?;
     let argv = std::iter::once(program.to_string()).chain(words);
-    let invalid = |e: clap::Error| {
-        let text = e.to_string();
-        TuiCodeReviewParseError::Invalid(text.lines().next().unwrap_or_default().to_string())
+    // MAGI FIX (S6 loop 3): clap's whole message (tips, usage), not its first line; `-h`/`--help`
+    // is the help itself, not an error. The caller sanitizes either before display.
+    let invalid = |e: clap::Error| match e.kind() {
+        clap::error::ErrorKind::DisplayHelp => TuiCodeReviewParseError::Help(e.to_string()),
+        _ => TuiCodeReviewParseError::Invalid(e.to_string().trim_end().to_string()),
     };
     let command = crate::CodeReviewArgs::augment_args(clap::Command::new(program));
     let matches = command.try_get_matches_from(argv).map_err(invalid)?;
