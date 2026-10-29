@@ -9441,6 +9441,23 @@ end"
     }
 
     #[test]
+    fn any_whitespace_after_the_command_word_starts_its_arguments() {
+        // E5 (MAGI S6 loop 3): a tab (or other Unicode space) after `/code-review` made the line
+        // a chat message to the model instead of the command.
+        for line in ["/code-review\tsrc", "/code-review\u{3000}src"] {
+            assert_eq!(
+                parse_tui_code_review(line).map(|c| c.input),
+                Ok(magi_rs::review::input::ReviewInput::File("src".into())),
+                "{line:?}"
+            );
+        }
+        assert_eq!(
+            parse_tui_code_review("/code-reviewx"),
+            Err(TuiCodeReviewParseError::NotACodeReviewCommand)
+        );
+    }
+
+    #[test]
     fn a_clap_error_keeps_every_line_and_help_is_shown_as_help() {
         // E3 (MAGI S6 loop 3): clap's tips and usage follow its first line; cutting them left
         // the user without the hint, and `--help` came back as a one-line error.
