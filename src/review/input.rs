@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use super::error::ReviewError;
-use super::source::GitCommand;
+use super::source::{is_never_reviewed, GitCommand};
 
 /// What the caller asked to review.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,8 +438,9 @@ fn resolve_directory(
 pub const NOT_A_DIRECTORY: &str = "not a directory";
 
 /// Walks `dir` (whose workspace-relative path is `rel`) without following symlinks, collecting
-/// every non-directory entry except a link whose target is gone and what `ignored` names (a
-/// file by its path, a directory by its path and a trailing `/`, never entered). O(entries).
+/// every non-directory entry except a link whose target is gone, a never-reviewed path
+/// ([`is_never_reviewed`], never entered) and what `ignored` names (a file by its path, a
+/// directory by its path and a trailing `/`, never entered). O(entries).
 fn walk(
     dir: &Path,
     rel: &str,
@@ -462,7 +463,12 @@ fn walk(
             not_utf8.push(joined(&name.to_string_lossy()));
             continue;
         };
-        if ignored.contains(&path) || ignored.contains(&format!("{path}/")) {
+        // MAGI FIX (S6 loop 3): `.git`, `.magi` and the memory database are pruned here, before
+        // the walk recurses, so a large nested `.git` is never enumerated.
+        if is_never_reviewed(&path)
+            || ignored.contains(&path)
+            || ignored.contains(&format!("{path}/"))
+        {
             continue;
         }
         if entry.file_type().map_err(io)?.is_dir() {
