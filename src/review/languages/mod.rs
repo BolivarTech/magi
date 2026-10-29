@@ -686,6 +686,17 @@ mod tests {
     }
 
     #[test]
+    fn an_upper_case_extension_finds_its_extractor() {
+        // [MAGI S6 loop 4, B1] a whole file named `A.RS` too large for one batch had no
+        // extractor to split it, so the review failed as too large.
+        let registry = LanguageRegistry::new();
+        for path in ["src/A.RS", "m.Py", "x.JAVA", "y.Ts"] {
+            assert!(registry.get(path).is_some(), "{path}");
+        }
+        assert!(registry.get("Makefile").is_none());
+    }
+
+    #[test]
     fn every_extractor_reports_its_extensions_through_the_trait() {
         let registry = LanguageRegistry::new();
         for ext in registry.extensions() {

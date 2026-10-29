@@ -101,6 +101,14 @@ mod tests {
     }
 
     #[test]
+    fn an_upper_case_extension_names_the_same_language() {
+        // [MAGI S6 loop 4, B1] `FOO.RS` was `unknown`, so it lost its extractor.
+        assert_eq!(detect_language("src/MAIN.RS"), "rust");
+        assert_eq!(detect_language("App.Py"), "python");
+        assert_eq!(detect_language("x.Cpp"), "cpp");
+    }
+
+    #[test]
     fn detect_language_unknown() {
         assert_eq!(detect_language("Makefile"), "unknown");
     }
