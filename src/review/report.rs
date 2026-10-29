@@ -608,6 +608,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_batch_index_of_the_json_form_is_one_based() {
+        // [MAGI S6 loop 4, C2] the renumbering patches the serialized JSON by field name: a renamed
+        // field would leave its indices 0-based while the text form stays 1-based.
+        let finding = |batches: Vec<usize>| ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: Severity::Warning,
+            reported_severity: Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![Category::Other],
+            sources: vec![AgentName::Melchior, AgentName::Caspar],
+            marks: vec![],
+            batches,
+        };
+        let verdict = GateVerdict {
+            state: GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+        };
+        let discarded = |cause| Discarded {
+            agent: AgentName::Melchior,
+            batch: 0,
+            finding: magi_core::schema::Finding::new(Severity::Critical, "t", "d"),
+            cause,
+            symbol: None,
+        };
+        let mut s = ReviewSummary::default();
+        s.findings.push((finding(vec![0]), verdict.clone()));
+        s.filtered.push((finding(vec![1]), verdict));
+        s.failed_batches.push((0, "why".into()));
+        s.batches.push(BatchMetrics {
+            index: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            ms: 0,
+        });
+        s.discarded.push(discarded(DiscardCause::LineOutOfRange));
+        s.symbol_unverified
+            .push(discarded(DiscardCause::UnknownSymbol));
+        let v = summary_json(&s);
+        assert_eq!(v["findings"][0]["batches"][0], 1, "{v}");
+        assert_eq!(v["filtered"][0]["batches"][0], 2, "{v}");
+        assert_eq!(v["failed_batches"][0][0], 1, "{v}");
+        assert_eq!(v["batches"][0]["index"], 1, "{v}");
+        assert_eq!(v["discarded"][0]["batch"], 1, "{v}");
+        assert_eq!(v["symbol_unverified"][0]["batch"], 1, "{v}");
+    }
+
     #[tokio::test]
     async fn the_paid_batch_reports_redact_a_credential_in_a_finding_title() {
         // magi-core's report prints titles, never details: a credential in a detail cannot show
