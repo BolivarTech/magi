@@ -219,12 +219,17 @@ fn check(
 /// the `file`/`line` of `normalize_location`, the one point of normalization, so later stages
 /// see the same path as `reviewed`. A discarded finding is returned as the mage reported it.
 ///
+/// A finding that names a renamed file by its old path is checked, and kept, under the new path:
+/// `reviewed` holds both sides of a rename's hunks under the new path (`renames` maps old path
+/// to new path), unless the old path is itself a reviewed file.
+///
 /// Complexity: O(f log r + c) for f findings, r ranges per file and c characters of title and
 /// detail.
 pub fn validate_batch(
     agents: &mut [AgentOutput],
     batch: usize,
     reviewed: &Reviewed,
+    renames: &HashMap<String, String>,
     index: &LexicalIndex,
     workspace: &Path,
 ) -> Validation {
@@ -237,11 +242,18 @@ pub fn validate_batch(
             if finding.file.as_deref().is_some_and(|f| f.trim().is_empty()) {
                 finding.file = None;
             }
-            let location = normalize_location(
+            let mut location = normalize_location(
                 workspace,
                 finding.file.as_deref().unwrap_or_default(),
                 finding.line,
             );
+            // MAGI FIX (S6 loop 4): the old path of a rename names code the batch showed (its
+            // deleted lines), recorded under the new path.
+            if !reviewed.has_file(&location.0) {
+                if let Some(new_path) = renames.get(&location.0) {
+                    location.0.clone_from(new_path);
+                }
+            }
             let verdict = check(&finding, &location, reviewed, index);
             let record = |cause, symbol| Discarded {
                 agent: name,
@@ -294,7 +306,15 @@ mod tests {
             {"severity":"warning","title":"t2","detail":"d","file":"src/a.rs","line":99},
             {"severity":"warning","title":"t3","detail":"d","file":"src/a.rs","line":15}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(
             d.iter().map(|x| x.cause.clone()).collect::<Vec<_>>(),
             vec![DiscardCause::FileNotReviewed, DiscardCause::LineOutOfRange]
@@ -313,7 +333,15 @@ mod tests {
             {"severity":"warning","title":"t1","detail":"d","file":"src/ghost.rs"},
             {"severity":"warning","title":"t2","detail":"d"}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(
             d.iter().map(|x| x.cause.clone()).collect::<Vec<_>>(),
             vec![DiscardCause::FileNotReviewed]
@@ -339,7 +367,15 @@ mod tests {
             {"severity":"warning","title":"t1","detail":"d","file":""},
             {"severity":"warning","title":"t2","detail":"d","file":"  ","line":3}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert!(d.is_empty(), "{d:?}");
         assert!(
             agents[0].findings.iter().all(|f| f.file.is_none()),
@@ -358,9 +394,34 @@ mod tests {
             {"severity":"info","title":"b","detail":"d","file":"b.rs","line":1},
             {"severity":"info","title":"c","detail":"d","file":"c.rs","line":1}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].cause, DiscardCause::FileNotReviewed); // c.rs was never reviewed
+    }
+
+    #[test]
+    fn an_old_path_that_is_itself_reviewed_keeps_its_own_name() {
+        // [MAGI S6 loop 4, B1-9] `a.rs` was renamed to `b.rs` and a new `a.rs` was added: a finding
+        // on `a.rs` is about the new file, not the rename.
+        let index = LexicalIndex::build(&[], &LanguageRegistry::new());
+        let mut reviewed = Reviewed::default();
+        reviewed.add_lines("b.rs", 1, 5);
+        reviewed.add_whole_file("a.rs", 3);
+        let renames = HashMap::from([("a.rs".to_string(), "b.rs".to_string())]);
+        let mut agents = vec![agent(serde_json::json!([
+            {"severity":"warning","title":"t","detail":"d","file":"a.rs","line":2}
+        ]))];
+        let v = validate_batch(&mut agents, 0, &reviewed, &renames, &index, Path::new("/w"));
+        assert!(v.discarded.is_empty(), "{:?}", v.discarded);
+        assert_eq!(agents[0].findings[0].file.as_deref(), Some("a.rs"));
     }
 
     #[test]
@@ -376,7 +437,15 @@ mod tests {
             {"severity":"warning","title":"`ghost` again","detail":"d","file":"conf.unknownlang","line":1},
             {"severity":"warning","title":"no code cited","detail":"d","file":"a.rs","line":1}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].cause, DiscardCause::UnknownSymbol);
         assert_eq!(d[0].symbol.as_deref(), Some("ghost"));
@@ -393,7 +462,14 @@ mod tests {
         let mut agents = vec![agent(serde_json::json!([
             {"severity":"critical","title":"`ghost` corrupts state","detail":"d","file":"a.rs","line":1}
         ]))];
-        let v = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w"));
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        );
         assert!(v.discarded.is_empty());
         assert_eq!(agents[0].findings.len(), 1);
         assert_eq!(v.symbol_unverified.len(), 1);
@@ -417,7 +493,14 @@ mod tests {
             {"severity":"critical","title":"`ghost` corrupts state","detail":"d","file":"a.rs","line":40},
             {"severity":"critical","title":"t","detail":"d","file":"ghost.rs","line":1}
         ]))];
-        let v = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w"));
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        );
         assert_eq!(
             v.discarded
                 .iter()
@@ -498,7 +581,15 @@ mod tests {
             {"severity":"warning","title":"`self.helper` leaks","detail":"d","file":"a.rs","line":1},
             {"severity":"warning","title":"`Baz::ghost` is wrong","detail":"d","file":"a.rs","line":1}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(
             d.iter().map(|x| x.symbol.as_deref()).collect::<Vec<_>>(),
             vec![Some("Baz::ghost")]
@@ -589,7 +680,15 @@ mod tests {
             {"severity":"warning","title":"`ghost` somewhere","detail":"d"},
             {"severity":"warning","title":"`ghost`","detail":"d","file":"other.rs","line":1}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         let got: Vec<(DiscardCause, Option<&str>)> = d
             .iter()
             .map(|x| (x.cause.clone(), x.symbol.as_deref()))
@@ -632,7 +731,15 @@ mod tests {
             {"severity":"info","title":"a","detail":"d","file":"gone.rs","line":5},
             {"severity":"info","title":"b","detail":"d","file":"only_empty.rs","line":1}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(
             d.iter().map(|x| x.cause.clone()).collect::<Vec<_>>(),
             vec![DiscardCause::FileNotReviewed]
@@ -650,11 +757,16 @@ mod tests {
             {"severity":"warning","title":"abs","detail":"d","file":"/w/src/a.rs","line":12},
             {"severity":"warning","title":"dot","detail":"d","file":"./src/a.rs","line":0}
         ]))];
-        assert!(
-            validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w"))
-                .discarded
-                .is_empty()
-        );
+        assert!(validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w")
+        )
+        .discarded
+        .is_empty());
         let got: Vec<(Option<&str>, Option<u32>)> = agents[0]
             .findings
             .iter()
@@ -685,7 +797,15 @@ mod tests {
             {"severity":"critical","title":"`consts.rs` and `conf.toml` disagree","detail":"see `mod.rs`","file":"src/consts.rs","line":1},
             {"severity":"info","title":"`self.ghost` is unused","detail":"d","file":"src/consts.rs","line":1}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(
             d.iter().map(|x| x.cause.clone()).collect::<Vec<_>>(),
             vec![DiscardCause::UnknownSymbol]
@@ -717,7 +837,15 @@ mod tests {
         let mut agents = vec![agent(serde_json::json!([
             {"severity":"warning","title":"`conf.toml` is stale","detail":"d","file":"src/a.rs","line":1},
             {"severity":"warning","title":"`notes.zzz` is stale","detail":"d","file":"src/a.rs","line":1}]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(
             d.iter().map(|x| x.cause.clone()).collect::<Vec<_>>(),
             vec![DiscardCause::UnknownSymbol]
@@ -736,7 +864,15 @@ mod tests {
             {"severity":"warning","title":"gap","detail":"d","file":"a.rs","line":15},
             {"severity":"warning","title":"unit","detail":"d","file":"a.rs","line":25}
         ]))];
-        let d = validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w")).discarded;
+        let d = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        )
+        .discarded;
         assert_eq!(
             d.iter().map(|x| x.cause.clone()).collect::<Vec<_>>(),
             vec![DiscardCause::LineOutOfRange]
@@ -758,11 +894,16 @@ mod tests {
         reviewed.add_whole_file("a.rs", 3);
         let mut agents = vec![agent(serde_json::json!([
             {"severity":"warning","title":"`ghost` is wrong","detail":"d","file":"a.rs","line":1}]))];
-        assert!(
-            validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w"))
-                .discarded
-                .is_empty()
-        );
+        assert!(validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w")
+        )
+        .discarded
+        .is_empty());
         assert_eq!(agents[0].findings.len(), 1);
     }
 
@@ -774,11 +915,16 @@ mod tests {
         let mut agents = vec![agent(
             serde_json::json!([{"severity":"info","title":"t","detail":"d","file":"gone.rs","line":5}]),
         )];
-        assert!(
-            validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w"))
-                .discarded
-                .is_empty()
-        );
+        assert!(validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w")
+        )
+        .discarded
+        .is_empty());
     }
 
     #[test]
@@ -791,11 +937,16 @@ mod tests {
             {"severity":"warning","title":"t","detail":"d","file":"src/a.rs","line":3}
         ]))];
         agents[0].findings[0].line = Some(0);
-        assert!(
-            validate_batch(&mut agents, 0, &reviewed, &index, Path::new("/w"))
-                .discarded
-                .is_empty()
-        );
+        assert!(validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w")
+        )
+        .discarded
+        .is_empty());
         assert_eq!(agents[0].findings[0].line, None);
     }
 }

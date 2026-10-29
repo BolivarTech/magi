@@ -341,11 +341,23 @@ pub async fn run_review(
     let completed: BTreeSet<usize> = finished.iter().map(|f| f.batch).collect();
     let reviewed = reviewed_of(&batches, &completed, &source);
     let workspace = without_verbatim_prefix(req.workspace);
+    let old_paths = renamed_old_paths(&filtered.kept);
+    let renames: HashMap<String, String> = old_paths
+        .iter()
+        .map(|(new_path, old)| (old.clone(), new_path.clone()))
+        .collect();
     let mut outcomes = Vec::with_capacity(finished.len());
     for f in &finished {
         let mut agents = f.report.agents.clone();
         let answered = agents.iter().map(|a| a.agent).collect();
-        let validation = validate_batch(&mut agents, f.batch, &reviewed, &index, &workspace);
+        let validation = validate_batch(
+            &mut agents,
+            f.batch,
+            &reviewed,
+            &renames,
+            &index,
+            &workspace,
+        );
         summary.discarded.extend(validation.discarded);
         summary
             .symbol_unverified
@@ -380,7 +392,6 @@ pub async fn run_review(
     }
 
     let faces = faces_of(&batches, &completed);
-    let old_paths = renamed_old_paths(&filtered.kept);
     let mut verdicts = Vec::with_capacity(consolidated.findings.len());
     for finding in &consolidated.findings {
         let code = gate_code(
@@ -2589,7 +2600,14 @@ mod tests {
             0.9,
             serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":r"\\srv\share\w\f0.rs","line":3}]),
         )];
-        let v = validate_batch(&mut agents, 0, &reviewed, &index, &workspace);
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            &workspace,
+        );
         assert!(v.discarded.is_empty(), "{:?}", v.discarded);
         assert_eq!(agents[0].findings[0].file.as_deref(), Some("f0.rs"));
     }
