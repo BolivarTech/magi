@@ -9607,6 +9607,9 @@ end"
             match parse_tui_code_review(argv) {
                 Err(TuiCodeReviewParseError::Help(h)) => {
                     assert!(h.contains("--uncommitted"), "{h}");
+                    // [MAGI S6 loop 4, E2-4] clap's help lists `-w`, which the TUI refuses:
+                    // the reply says so instead of advertising a flag that cannot be used.
+                    assert!(h.contains("In the TUI, -w/--workdir is refused"), "{h}");
                 }
                 other => panic!("{argv}: {other:?}"),
             }
