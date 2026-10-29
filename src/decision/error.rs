@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 use crate::decision::protocol::Answer;
 
 /// Why one attempt of the fallback chain failed (REQ-D10 `cause` token).
+///
+/// Serialize-only on purpose: [`Cause::BadRequest`] and [`Cause::Rejected`] share the token
+/// `rejected` (DE-S1 names a 400 skip `rejected`, and the published envelope keeps that closed
+/// set), so the token cannot be read back into the variant. A consumer of a serialized trace
+/// tells them apart by the HTTP status of the attempt's detail, never by the token.
+// MAGI FIX (S6 loop 4): pinned by `cause_never_derives_deserialize_because_two_variants_share_a_token`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
@@ -17,9 +23,9 @@ pub enum Cause {
     /// HTTP 400: this model refused the request. Unlike [`Cause::Rejected`] the chain moves on
     /// to the next model, because the refusal may belong to the model and not to the request
     /// (a cloud model on an old daemon, a model in an unsupported format, a tiny context
-    /// window). It shares the serialized token `rejected` with [`Cause::Rejected`]: they are
-    /// told apart by whether the chain continues, and a consumer decides by the variant, never
-    /// by the token.
+    /// window). It shares the serialized token `rejected` with [`Cause::Rejected`]: in code a
+    /// consumer decides by the variant; in a serialized trace, by the HTTP status the attempt's
+    /// `detail` names (`HTTP 400`), never by the token.
     #[serde(rename = "rejected")]
     BadRequest,
     /// HTTP 413 or 422: the request itself is at fault, so the chain stops.
