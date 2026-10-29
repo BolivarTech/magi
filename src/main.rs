@@ -7399,16 +7399,6 @@ async fn run_query_subcommand(
 
     let policy = Policy::new(tier, resolved.max_tool_calls, h.timeout);
     let timeout = resolve_tier_timeout_default(&policy, limits.full_auto_timeout_secs);
-    // RV17: a review run as a tool gets what is left of this run's wall clock.
-    if let Some(runner) = code_review {
-        register_code_review_tool(
-            &mut agent,
-            runner,
-            code_review_auto_approve(&magi_config),
-            run_deadline(std::time::Instant::now(), timeout),
-            magi_config.effective_tool_result_cap(),
-        );
-    }
     // SC-A04c/d: this route shares its single deadline with a forced/proactive consult
     // (REQ-H22), so REQ-A04's minimum applies here too. The deadline is obeyed either way;
     // what the check adds is the heads-up on stderr and the flag in the JSON.
@@ -7434,6 +7424,7 @@ async fn run_query_subcommand(
     if let Some(w) = timeout_decision.as_ref().and_then(|d| d.warning.as_ref()) {
         magi_rs::notices::eprint_audited(w);
     }
+    // MAGI FIX (S6 loop 3): one instant for the run's clock and the review tool's deadline (RV17).
     let wiring = crate::headless_runner::RunWiring {
         timeout,
         started: std::time::Instant::now(),
@@ -7441,6 +7432,17 @@ async fn run_query_subcommand(
         timeout_below_formula: timeout_decision.is_some_and(|d| d.below_formula),
         budget,
     };
+    // RV17: a review run as a tool gets what is left of this run's wall clock, counted from the
+    // same `wiring.started` `run_query` counts its own deadline from.
+    if let Some(runner) = code_review {
+        register_code_review_tool(
+            &mut agent,
+            runner,
+            code_review_auto_approve(&magi_config),
+            run_deadline(wiring.started, wiring.timeout),
+            magi_config.effective_tool_result_cap(),
+        );
+    }
     let outcome = run_query(resolved, policy, &mut agent, &prompt, &wiring).await;
     // SC-A20h: the run's gate evaluations still reach the log — the SINGLE layer
     // now, rather than the retired JSONL run log. Drained here rather than inside

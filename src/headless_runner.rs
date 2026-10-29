@@ -805,7 +805,6 @@ pub struct RunWiring {
     pub timeout: Option<Duration>,
     /// When the run's wall clock started: `timeout` counts from here, for the run and for every
     /// tool that is handed the run's deadline (RV17), so both read one instant.
-    #[expect(dead_code, reason = "Red stub: run_query reads it in the fix commit")]
     pub started: Instant,
     /// The operator's autonomous-consult configuration (REQ-A20/A07d).
     pub autonomous: crate::AutonomousRunConfig,
@@ -1186,16 +1185,20 @@ pub async fn run_query(
     // with the future — killing any subprocess tree either way. `None` on the
     // outcome marks a timeout.
     let query_fut = agent.query_streaming(prompt, chunk_tx, config);
-    let outcome_result: Option<Result<String, anyhow::Error>> = match timeout {
-        Some(dur) => match tokio::time::timeout(dur, query_fut).await {
-            Ok(r) => Some(r),
-            Err(_elapsed) => {
-                cancel.cancel();
-                None
-            }
-        },
-        None => Some(query_fut.await),
-    };
+    let outcome_result: Option<Result<String, anyhow::Error>> =
+        match crate::run_deadline(wiring.started, timeout) {
+            // MAGI FIX (S6 loop 3): the deadline counts from `wiring.started`, the instant the
+            // `code-review` tool's own deadline is derived from (RV17), so the review never gets more
+            // than what is left of this run.
+            Some(deadline) => match tokio::time::timeout_at(deadline.into(), query_fut).await {
+                Ok(r) => Some(r),
+                Err(_elapsed) => {
+                    cancel.cancel();
+                    None
+                }
+            },
+            None => Some(query_fut.await),
+        };
     let ttfb_ms = bounded_drain_result(drain).await;
 
     // Headless has no event loop to expire the health window on, so the end of
