@@ -184,6 +184,19 @@ class ReviewWorkspaceTests(unittest.TestCase):
                     executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
             self.assertTrue((outside / "keep.txt").is_file())
 
+    def test_a_nonexistent_workspace_outside_the_scratch_area_is_never_created(self) -> None:
+        # [MAGI §6 MS2 loop 3, F3] containment is checked before anything is created, not only
+        # before an existing tree is deleted.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            (root / "scratch").mkdir()
+            outside = root / "elsewhere-new"
+            with mock.patch.object(runs, "REVIEW_WORKSPACE_DIR", "../elsewhere-new"):
+                with self.assertRaises(HarnessError):
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertFalse(outside.exists())
+
 
 class ReviewLogCaptureTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 3, F4] the run log is captured onto the result at run time."""
