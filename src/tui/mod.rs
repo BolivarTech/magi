@@ -9684,6 +9684,22 @@ end"
     }
 
     #[test]
+    fn the_tool_detail_is_sanitized_before_it_is_shown() {
+        // [MAGI S6 loop 4, E2-3] any tool may fill `detail`; the TUI is its display sink, so
+        // escapes and control characters are stripped there like every other reply.
+        let (mut app, approvals) = App::new_for_test_with_approvals();
+        let _answer = drain_one_approval(
+            &mut app,
+            &approvals,
+            Some("3 batches\u{1b}[31m; worst case\u{7} 42030 s".into()),
+        );
+        let shown = app.messages.join("\n");
+        assert!(shown.contains("3 batches"), "{shown:?}");
+        assert!(!shown.contains('\u{1b}'), "{shown:?}");
+        assert!(!shown.contains('\u{7}'), "{shown:?}");
+    }
+
+    #[test]
     fn the_tool_detail_comes_before_the_key_prompt() {
         // [MAGI §6 MS2 E loop 1] the cost (batches, worst case) is read before the keys to answer.
         let (mut app, approvals) = App::new_for_test_with_approvals();
