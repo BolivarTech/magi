@@ -484,6 +484,12 @@ class RunResult:
     #: without it, "the previous history is still there" can only ask whether
     #: SOME history is there, and a rotation that destroyed most of it passes.
     baseline: dict | None = None
+    #: The bytes of every file under the review workspace's ``.magi/logs``,
+    #: in sorted path order, read right after the run. ``None`` means the run
+    #: used no review workspace or the directory did not exist. Captured at run
+    #: time because the next review run rebuilds the workspace from nothing, so
+    #: a scenario reading the live directory would depend on run order.
+    review_log: tuple[bytes, ...] | None = None
 
 
 #: The token that stands for the environment's path inside a definition's argv.

@@ -185,6 +185,40 @@ class ReviewWorkspaceTests(unittest.TestCase):
             self.assertTrue((outside / "keep.txt").is_file())
 
 
+class ReviewLogCaptureTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 3, F4] the run log is captured onto the result at run time."""
+
+    def _execute(self, root: pathlib.Path, definition, write_log: bool) -> runs.RunResult:
+        """Execute *definition* with a stand-in product that may write one log line."""
+        executor = _executor(root)
+
+        def fake_invoke(_definition, _stdin):
+            logs = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            if write_log:
+                logs.mkdir(parents=True, exist_ok=True)
+                (logs / "2026-10-29.log").write_bytes(b"ERROR run=1-ab refusal\n")
+            return runs.ProductOutput(stdout=b"", stderr=b"", exit_code=2, command=["magi-rs"])
+
+        with mock.patch.object(executor, "_invoke", side_effect=fake_invoke):
+            return executor.execute(definition)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_review_run_carries_its_log_after_the_workspace_is_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            result = self._execute(root, runs.DEFINITIONS["R15"], write_log=True)
+            shutil.rmtree(root / "scratch" / runs.REVIEW_WORKSPACE_DIR)
+            self.assertIsNotNone(result.review_log)
+            self.assertTrue(any(b"run=1-ab refusal" in data for data in result.review_log))
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_review_run_without_a_log_directory_carries_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # The toy .magi the workspace is copied from has no logs directory.
+            result = self._execute(pathlib.Path(tmp), runs.DEFINITIONS["R14"], write_log=False)
+            self.assertIsNone(result.review_log)
+
+
 class ReviewLineCountTests(unittest.TestCase):
 
     def test_the_line_counts_match_the_generated_bytes(self) -> None:

@@ -3,6 +3,7 @@
 # Date: 2026-10-25
 """Unit tests for S47-S50 (code-review against the release binary)."""
 
+import dataclasses
 import json
 import pathlib
 import tempfile
@@ -16,12 +17,13 @@ from smoke.registry import DEFAULT_REGISTRY
 from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
 
-def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"", timed_out: bool = False) -> RunResult:
+def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"", timed_out: bool = False,
+            review_log=None) -> RunResult:
     """A real ``RunResult`` for *run_id* whose stdout is *document* serialised (``None`` → empty stdout)."""
     body = b"" if document is None else json.dumps(document).encode()
     return RunResult(run_id=run_id,
                      output=ProductOutput(stdout=body, stderr=stderr, exit_code=exit_code, command=["magi-rs"]),
-                     duration_s=1.0, timed_out=timed_out, planted=())
+                     duration_s=1.0, timed_out=timed_out, planted=(), review_log=review_log)
 
 
 RUN_ID = "4242-0123456789abcdef"
@@ -39,13 +41,15 @@ def _with_id(tail: bytes) -> bytes:
 
 
 def _outcomes(scenario_id: str, result, log=b"") -> dict[str, Outcome]:
-    """Outcomes of *scenario_id*; *log* is the review workspace's run-log file (``None``: no directory)."""
+    """Outcomes of *scenario_id*; *log* is the run log captured on the result (``None``: no directory).
+
+    [MAGI §6 MS2 loop 3, F4] the log rides on the ``RunResult`` the executor captured right after the
+    run; the scratch area handed to ``runs`` stays empty, so a scenario that read the live directory
+    would find nothing.
+    """
+    result = dataclasses.replace(result, review_log=None if log is None else (log,))
     with tempfile.TemporaryDirectory() as tmp:
         scratch = pathlib.Path(tmp)
-        if log is not None:
-            logs = scratch / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
-            logs.mkdir(parents=True)
-            (logs / "2026-10-25.log").write_bytes(log)
         runs.configure(None, types.SimpleNamespace(scratch_dir=scratch, prepare_scratch=lambda: None), None)
         try:
             return {f.assertion: f.outcome for f in DEFAULT_REGISTRY.get(scenario_id).func(result)}
