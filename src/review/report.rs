@@ -242,7 +242,8 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     Ok(())
 }
 
-/// Writes one finding with its gate verdict: severity, location, titles, marks, then its details.
+/// Writes one finding with its gate verdict: severity, location, titles, marks, categories, then
+/// its details.
 fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> std::fmt::Result {
     write!(
         out,
@@ -255,6 +256,9 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
         let marks: Vec<String> = f.marks.iter().map(name).collect();
         write!(out, " ({})", marks.join(", "))?;
     }
+    // MAGI FIX (S6 loop 4): every category a merged finding conserves (RV-S18), as the JSON has.
+    let categories: Vec<String> = f.categories.iter().map(name).collect();
+    write!(out, " [{}]", categories.join(", "))?;
     write!(out, "; gate: {}", name(&v.state))?;
     // MAGI FIX (S6 loop 3): the text says of each verdict what its JSON says: every cause, the
     // answer that set it (model, lean, confidence) and the models skipped after an HTTP 400.
