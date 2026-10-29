@@ -1731,4 +1731,22 @@ mod tests {
         );
         assert_eq!(not_utf8, vec!["caf\u{fffd}.rs".to_string()]);
     }
+    #[test]
+    fn a_path_shaped_like_a_mode_line_is_not_mistaken_for_a_submodule() {
+        // [MAGI S6 MS2 loop 4, A1 Melchior] `--- a/mode 160000` holds `mode ` and ends in the
+        // gitlink mode, so the file was dropped from both lists as a submodule.
+        let diff = concat!(
+            "diff --git a/mode 160000 b/mode 160000\nindex 1..2 100644\n",
+            "--- a/mode 160000\n+++ b/mode 160000\n@@ -1 +1 @@\n-x\n+y\n",
+            "diff --git a/sub b/sub\nindex 1..2 160000\n--- a/sub\n+++ b/sub\n@@ -1 +1 @@\n",
+            "-Subproject commit 1\n+Subproject commit 2\n",
+            "diff --git a/new b/new\nnew file mode 160000\nindex 0..1\n--- /dev/null\n+++ b/new\n",
+            "@@ -0,0 +1 @@\n+Subproject commit 1\n",
+        );
+        let (files, _) = split_diff(diff.as_bytes());
+        assert_eq!(
+            files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["mode 160000"]
+        );
+    }
 }
