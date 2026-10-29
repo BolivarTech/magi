@@ -1360,7 +1360,7 @@ pub(crate) struct TuiCodeReviewCommand {
     pub timeout: Option<u64>,
     /// The flags given that parse but that the TUI does not apply (output, log and tier
     /// flags), named in the confirmation.
-    pub ignored_flags: Vec<&'static str>,
+    pub ignored_flags: Vec<String>,
 }
 
 impl Default for TuiCodeReviewCommand {
@@ -1390,19 +1390,49 @@ const TUI_WORKDIR_ARG: &str = "workdir";
 /// Why the TUI refuses `-w`: the session's runner reviews the session's workspace only.
 const TUI_WORKDIR_REFUSED: &str =
     "-w is not available in the TUI: /code-review reviews this session's workspace";
-/// The flags of `magi code-review` that parse in the TUI but that it does not apply, as clap
-/// ids with the spelling the confirmation names, in declaration order.
-const TUI_INERT_FLAGS: [(&str, &str); 9] = [
-    ("output", "-o"),
-    ("output_format", "--output-format"),
-    ("no_clobber", "--no-clobber"),
-    ("log_level", "--log-level"),
-    ("log_dir", "--log-dir"),
-    ("auto", "--auto"),
-    ("full_auto", "--full-auto"),
-    ("no_memory", "--no-memory"),
-    ("structured_verdicts", "--structured-verdicts"),
+/// The clap ids of the `magi code-review` arguments the TUI applies: the review input
+/// ([`crate::review_input_of`]) and the total. Every other argument but `-w` parses and is named
+/// as not applied ([`tui_inert_flags`]).
+const TUI_APPLIED_ARGS: [&str; 8] = [
+    "path",
+    "commit",
+    "from",
+    "to",
+    "base",
+    "head",
+    "uncommitted",
+    "timeout",
 ];
+
+/// The arguments of `command` the TUI parses but does not apply, as `(clap id, spelling)` in
+/// declaration order, the spelling read from clap's own metadata (short form when there is one,
+/// else the long one), so a renamed flag is named as the CLI spells it.
+///
+/// # Arguments
+/// * `command` - The `code-review` arguments, as clap declares them.
+///
+/// # Returns
+/// Every argument that is neither applied ([`TUI_APPLIED_ARGS`]) nor refused (`-w`).
+///
+/// Complexity: O(arguments × applied).
+// MAGI FIX (S6 loop 3): derived from clap, not a hand-kept list of ids and spellings.
+fn tui_inert_flags(command: &clap::Command) -> Vec<(String, String)> {
+    command
+        .get_arguments()
+        .filter(|a| {
+            let id = a.get_id().as_str();
+            id != TUI_WORKDIR_ARG && !TUI_APPLIED_ARGS.contains(&id)
+        })
+        .map(|a| {
+            let spelling = match (a.get_short(), a.get_long()) {
+                (Some(short), _) => format!("-{short}"),
+                (None, Some(long)) => format!("--{long}"),
+                (None, None) => a.get_id().as_str().to_string(),
+            };
+            (a.get_id().as_str().to_string(), spelling)
+        })
+        .collect()
+}
 
 /// The command word of `/code-review`, which is also clap's program name for its arguments.
 const CODE_REVIEW_COMMAND: &str = "/code-review";
@@ -1447,6 +1477,7 @@ pub(crate) fn parse_tui_code_review(
         _ => TuiCodeReviewParseError::Invalid(e.to_string().trim_end().to_string()),
     };
     let command = crate::CodeReviewArgs::augment_args(clap::Command::new(program));
+    let inert = tui_inert_flags(&command);
     let matches = command.try_get_matches_from(argv).map_err(invalid)?;
     let given = |id: &str| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
     if given(TUI_WORKDIR_ARG) {
@@ -1454,10 +1485,10 @@ pub(crate) fn parse_tui_code_review(
             TUI_WORKDIR_REFUSED.to_string(),
         ));
     }
-    let ignored_flags = TUI_INERT_FLAGS
-        .iter()
+    let ignored_flags = inert
+        .into_iter()
         .filter(|(id, _)| given(id))
-        .map(|(_, flag)| *flag)
+        .map(|(_, flag)| flag)
         .collect();
     let args = crate::CodeReviewArgs::from_arg_matches(&matches).map_err(invalid)?;
     Ok(TuiCodeReviewCommand {
@@ -9337,28 +9368,34 @@ end"
 
     #[test]
     fn every_review_flag_is_applied_refused_or_named_inert() {
-        // [MAGI §6 MS2 E loop 2] `TUI_INERT_FLAGS` is a hand-kept list: a flag added to
-        // `CodeReviewArgs` that the TUI neither applies nor names would be ignored in silence.
+        // [MAGI §6 MS2 E loop 2] a flag added to `CodeReviewArgs` that the TUI neither applies
+        // nor names would be ignored in silence. [MAGI S6 loop 3, E4] the inert list is derived
+        // from clap, so this pins the applied list and the spellings the derivation yields.
         use clap::Args as _;
-        // What `parse_tui_code_review` applies: the review input (`review_input_of`) and the total.
-        const APPLIED: [&str; 8] = [
-            "path",
-            "commit",
-            "from",
-            "to",
-            "base",
-            "head",
-            "uncommitted",
-            "timeout",
-        ];
         let command = crate::CodeReviewArgs::augment_args(clap::Command::new("code-review"));
         let ids: Vec<String> = command
             .get_arguments()
             .map(|a| a.get_id().as_str().to_string())
             .collect();
-        let inert: Vec<&str> = TUI_INERT_FLAGS.iter().map(|(id, _)| *id).collect();
+        let derived = tui_inert_flags(&command);
+        let spellings: Vec<&str> = derived.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(
+            spellings,
+            [
+                "-o",
+                "--output-format",
+                "--no-clobber",
+                "--log-level",
+                "--log-dir",
+                "--auto",
+                "--full-auto",
+                "--no-memory",
+                "--structured-verdicts"
+            ]
+        );
+        let inert: Vec<&str> = derived.iter().map(|(id, _)| id.as_str()).collect();
         for id in &ids {
-            let known = APPLIED.contains(&id.as_str())
+            let known = TUI_APPLIED_ARGS.contains(&id.as_str())
                 || inert.contains(&id.as_str())
                 || id == TUI_WORKDIR_ARG;
             assert!(
@@ -9367,7 +9404,11 @@ end"
             );
         }
         // And the other way: a renamed flag must not leave a stale entry that names nothing.
-        for id in APPLIED.iter().chain(&inert).chain(&[TUI_WORKDIR_ARG]) {
+        for id in TUI_APPLIED_ARGS
+            .iter()
+            .chain(&inert)
+            .chain(&[TUI_WORKDIR_ARG])
+        {
             assert!(
                 ids.iter().any(|i| i == id),
                 "`{id}` is not a code-review flag"
