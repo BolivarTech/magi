@@ -7436,6 +7436,7 @@ async fn run_query_subcommand(
     }
     let wiring = crate::headless_runner::RunWiring {
         timeout,
+        started: std::time::Instant::now(),
         autonomous: AutonomousRunConfig::from_magi_config(&magi_config),
         timeout_below_formula: timeout_decision.is_some_and(|d| d.below_formula),
         budget,
@@ -22626,6 +22627,31 @@ mod code_review_surface_tests {
             calls
                 .iter()
                 .filter(|c| c.contains(deadline.as_str()))
+                .count(),
+            1,
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn the_query_review_deadline_is_the_runs_own_clock() {
+        // E1 (MAGI S6 loop 3): RV17's "what is left of that run" needs ONE instant: the tool's
+        // deadline is derived from the same `wiring.started` `run_query` counts its clock from,
+        // never from a fresh `Instant::now()` at registration.
+        let src = include_str!("main.rs").replace('\r', "");
+        let needle = ["register_code_review_tool", "("].concat();
+        let calls: Vec<&str> = src
+            .match_indices(needle.as_str())
+            .map(|(i, _)| {
+                let rest = &src[i..];
+                &rest[..rest.find(';').unwrap_or(rest.len())]
+            })
+            .collect();
+        let anchored = ["run_deadline", "(wiring.started, wiring.timeout)"].concat();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.contains(anchored.as_str()))
                 .count(),
             1,
             "{calls:?}"

@@ -803,6 +803,10 @@ pub fn resolve_tier_timeout_default(
 pub struct RunWiring {
     /// Wall-clock ceiling for the whole run (REQ-H36).
     pub timeout: Option<Duration>,
+    /// When the run's wall clock started: `timeout` counts from here, for the run and for every
+    /// tool that is handed the run's deadline (RV17), so both read one instant.
+    #[expect(dead_code, reason = "Red stub: run_query reads it in the fix commit")]
+    pub started: Instant,
     /// The operator's autonomous-consult configuration (REQ-A20/A07d).
     pub autonomous: crate::AutonomousRunConfig,
     /// Whether `timeout` falls below REQ-A04's minimum for a consult-capable run (SC-A04d).
@@ -2119,6 +2123,7 @@ mod tests {
     fn wiring(timeout: Option<Duration>) -> RunWiring {
         RunWiring {
             timeout,
+            started: Instant::now(),
             autonomous: crate::AutonomousRunConfig::from_magi_config(
                 &crate::config::MagiConfig::default(),
             ),
@@ -2133,6 +2138,7 @@ mod tests {
     fn wiring_from_toml(toml: &str) -> RunWiring {
         RunWiring {
             timeout: None,
+            started: Instant::now(),
             autonomous: crate::AutonomousRunConfig::from_magi_config(
                 &crate::config::MagiConfig::from_toml_str(toml).expect("fixture parses"),
             ),
@@ -2520,6 +2526,7 @@ mod tests {
         let policy = Policy::new(Tier::Auto, 15, None);
         let w = RunWiring {
             timeout: None,
+            started: Instant::now(),
             autonomous: crate::AutonomousRunConfig::from_magi_config(&MagiConfig::default()),
             timeout_below_formula,
             budget: BudgetTelemetry::default(),
@@ -4339,6 +4346,37 @@ mod tests {
             "the forced consult must be bounded by the deadline, not run to completion"
         );
     }
+    /// E1 (MAGI S6 loop 3): the run's wall clock counts from `wiring.started`, the one instant the
+    /// `code-review` tool's deadline is also derived from (RV17), never from when `run_query` happens
+    /// to be called. A clock that started long enough ago is already spent: the run ends at once
+    /// with a timeout instead of waiting out a fresh `timeout` from the call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_run_clock_counts_from_the_wiring_start_not_from_the_call() {
+        const CLOCK: Duration = Duration::from_secs(20);
+        const GUARD: Duration = Duration::from_secs(10);
+        let provider = ScriptedProvider::new(vec![Turn::Text("answer".to_string())]);
+        let mut agent = Agent::new(provider);
+        agent.register_tool(Box::new(ConsultTool::new(slow_magi(CLOCK * 2), true)));
+        let started = Instant::now()
+            .checked_sub(CLOCK)
+            .expect("the monotonic clock is older than the test's clock");
+        let w = RunWiring {
+            started,
+            ..wiring(Some(CLOCK))
+        };
+        let policy = Policy::new(Tier::Auto, 15, None);
+        let outcome = tokio::time::timeout(
+            GUARD,
+            run_query(forced_resolved(), policy, &mut agent, "decide X vs Y", &w),
+        )
+        .await
+        .expect("a clock that started CLOCK ago is spent: the run must end at once");
+        assert_eq!(
+            outcome.error.expect("a timeout populates the error").kind,
+            ErrorKind::Timeout
+        );
+    }
+
     /// S21 (mutation-verified): `tool_calls[]` never stores a decide call's state.
     #[test]
     fn the_run_record_omits_the_state_of_a_decide_call() {
