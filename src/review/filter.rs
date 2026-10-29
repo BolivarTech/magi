@@ -1516,4 +1516,47 @@ mod tests {
             filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false).expect("kept");
         assert!(f.skipped.is_empty() && f.kept.len() == 1, "{f:?}");
     }
+    #[test]
+    fn an_old_side_that_is_binary_or_not_utf8_skips_the_file_even_if_the_new_one_is_text() {
+        // [MAGI S6 MS2 loop 4, A2 Caspar] the checks ran on the new side only, so a text file
+        // whose previous revision was binary or Latin-1 carried old-side bytes into the review.
+        struct OldBytes;
+        impl ContentSource for OldBytes {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(b"fn h() {}\n".to_vec()))
+            }
+            fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(match path {
+                    "bin.rs" => b"fn g() {}\0\n".to_vec(),
+                    "latin1.rs" => b"// caf\xe9\nfn g() {}\n".to_vec(),
+                    _ => b"fn g() {}\n".to_vec(),
+                }))
+            }
+        }
+        let diff = "@@ -2,1 +1,1 @@\n-fn g() {}\n+fn h() {}\n";
+        let files = ["bin.rs", "latin1.rs", "a.rs"]
+            .into_iter()
+            .map(|p| ReviewFile {
+                path: p.into(),
+                diff: Some(diff.into()),
+            })
+            .collect();
+        let f = filter_files(files, &OldBytes, &LanguageRegistry::new(), false, &|_| {
+            false
+        })
+        .expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![
+                Skipped {
+                    path: "bin.rs".into(),
+                    cause: SkipCause::Binary
+                },
+                Skipped {
+                    path: "latin1.rs".into(),
+                    cause: SkipCause::NotUtf8
+                }
+            ]
+        );
+    }
 }
