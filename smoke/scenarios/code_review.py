@@ -522,6 +522,40 @@ def _is_protected(path):
     return any(part in PROTECTED_DIRS for part in re.split(r"[/\\]", path))
 
 
+def _omissions(stderr):
+    """Parse the omission list of a ``nothing to review`` refusal.
+
+    The list is read entry by entry from its start, so every byte of it must
+    belong to an entry: a rendering the harness no longer understands is a
+    failure, never an empty list that would pass.
+
+    Args:
+        stderr: The decoded stderr.
+
+    Returns:
+        tuple: ``(entries, failure)``: ``(path, cause)`` pairs in order, or
+        ``None`` and why the list is unusable (absent, or text left over).
+
+    Example:
+        >>> _omissions("x; left out: a, b (binary), c (secret)")
+        ([('a, b', 'binary'), ('c', 'secret')], '')
+        >>> _omissions("x; left out: a [binary]")[0] is None
+        True
+    """
+    listed = OMISSION_LIST_PATTERN.search(stderr)
+    if listed is None:
+        return None, "stderr carries no omission list to check"
+    text = OMISSION_TAIL_PATTERN.sub("", listed.group("list"), count=1)
+    entries, position = [], 0
+    while position < len(text):
+        entry = OMISSION_PATTERN.match(text, position)
+        if entry is None:
+            return None, "the omission list does not parse from %r" % text[position:]
+        entries.append((entry.group("path"), entry.group("cause")))
+        position = entry.end()
+    return entries, ""
+
+
 def _protected_read(stderr):
     """The protected paths stderr names with a cause other than ``ignored``.
 
@@ -529,16 +563,17 @@ def _protected_read(stderr):
         stderr: The decoded stderr.
 
     Returns:
-        list[str]: ``"path (cause)"`` for each one; empty when every protected
-        path named (possibly none) was left out unread.
+        tuple: ``(read, failure)``: ``"path (cause)"`` for each protected path
+        read for its content (empty when every one named, possibly none, was
+        left out unread), or ``None`` and why the omission list is unusable.
     """
-    listed = OMISSION_LIST_PATTERN.search(stderr)
-    if listed is None:
-        return []
-    entries = OMISSION_TAIL_PATTERN.sub("", listed.group("list"), count=1)
-    return ["%s (%s)" % (m.group("path"), m.group("cause"))
-            for m in OMISSION_PATTERN.finditer(entries)
-            if _is_protected(m.group("path")) and m.group("cause") != PROTECTED_CAUSE]
+    # MAGI FIX (S6 loop 4): an unparseable list used to match nothing and pass
+    # vacuously; R16's root always holds R14's skipped files, so it fails (F1-5).
+    entries, failure = _omissions(stderr)
+    if entries is None:
+        return None, failure
+    return ["%s (%s)" % (path, cause) for path, cause in entries
+            if _is_protected(path) and cause != PROTECTED_CAUSE], ""
 
 
 @scenario("S51", assertions=S51_ASSERTIONS, run="R16")
@@ -570,6 +605,9 @@ def the_workspace_root_never_reviews_magi_or_git(run):
     yield _verdict(S51_ASSERTIONS, 1, "R16", NOTHING_TO_REVIEW_TEXT in stderr,
                    "stderr does not say there is nothing to review, so a file "
                    "of the root was taken for review")
-    read = _protected_read(stderr)
+    read, failure = _protected_read(stderr)
+    if read is None:
+        yield _finding(S51_ASSERTIONS, 2, Outcome.FAIL, "R16", failure)
+        return
     yield _verdict(S51_ASSERTIONS, 2, "R16", not read,
                    "protected paths were read and classified: %s" % read)
