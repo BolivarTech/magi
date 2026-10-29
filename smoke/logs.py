@@ -33,7 +33,7 @@ from smoke.product import ProductOutputError
 
 #: Where the product writes its logs, relative to the workspace root. The
 #: default did not move when the JSONL format did.
-LOG_DIR_PARTS = (".magi", "logs")
+LOG_DIR_PARTS = runs.LOG_DIR_PARTS
 
 #: The prefix REQ-L63 puts on stderr, ahead of the run id.
 STDERR_RUN_PREFIX = "run: "

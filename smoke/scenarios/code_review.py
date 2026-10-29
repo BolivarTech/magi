@@ -376,7 +376,9 @@ def an_insufficient_timeout_is_refused_before_spending(run):
     from the product's formula and are only range-checked: at least
     :data:`MIN_BATCHES` batches, the 15 s floor, and a minimum above the total
     the run asked for. The run log is the review workspace's own, and its line
-    must carry this run's id and the very text stderr showed.
+    must carry this run's id and the very text stderr showed. It is read from
+    the copy the executor captured right after R15, never from the live
+    directory, which a later review run rebuilds.
 
     Args:
         run: R15's ``RunResult``, or ``None`` when the run produced no capture.
@@ -435,7 +437,8 @@ def _run_log_finding(run, match):
     if run_id is None:
         return _finding(S50_ASSERTIONS, 2, Outcome.FAIL, "R15",
                         "the run published no run id, so its log lines cannot be told apart")
-    directory = runs.review_workspace_root().joinpath(*logs.LOG_DIR_PARTS)
+    # MAGI FIX (S6 loop 3): the log captured at run time, not the live directory (F4).
+    captured = run.review_log
     needle = ("run=%s" % run_id).encode("utf-8")
     exact = match.group(0).encode("utf-8") if match else None
 
@@ -447,12 +450,13 @@ def _run_log_finding(run, match):
                 return True
             if exact is None and BUDGET_PATTERN.search(line.decode("utf-8", errors="replace")):
                 return True
-        return None
+        return False
 
-    found, existed, _ = logs.scan(matcher, directory)
-    if not existed:
+    if captured is None:
         return _finding(S50_ASSERTIONS, 2, Outcome.FAIL, "R15",
-                        "%s does not exist, so the refusal was never logged" % directory)
-    return _verdict(S50_ASSERTIONS, 2, "R15", bool(found),
-                    "no line of the run log under %s carries run=%s and the budget refusal"
-                    % (directory, run_id))
+                        "the review workspace has no %s directory, so the refusal "
+                        "was never logged" % "/".join(logs.LOG_DIR_PARTS))
+    found = any(matcher(data) for data in captured)
+    return _verdict(S50_ASSERTIONS, 2, "R15", found,
+                    "no line of the run log carries run=%s and the budget refusal"
+                    % run_id)

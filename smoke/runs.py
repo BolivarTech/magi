@@ -492,6 +492,11 @@ class RunResult:
     review_log: tuple[bytes, ...] | None = None
 
 
+#: Where the product writes its logs, relative to a workspace root. The one
+#: definition: :mod:`smoke.logs` re-exports it, because it imports this module
+#: and this module cannot import it back.
+LOG_DIR_PARTS = (".magi", "logs")
+
 #: The token that stands for the environment's path inside a definition's argv.
 WORKSPACE_TOKEN = "<workspace>"
 
@@ -699,19 +704,6 @@ def review_gen_line_counts() -> dict[str, int]:
         HarnessError: If the generated input cannot fill the batches.
     """
     return {path: body.count(b"\n") for path, body in review_input_files()}
-
-
-def review_workspace_root():
-    """The review workspace the review runs execute in.
-
-    Returns:
-        pathlib.Path: ``<scratch>/review-ws``. It holds the run's own
-        ``.magi/logs``, rebuilt by every review run.
-
-    Raises:
-        HarnessError: If :func:`configure` has not run.
-    """
-    return scratch_root() / REVIEW_WORKSPACE_DIR
 
 
 def verify_visible(workspace, paths) -> None:
@@ -1123,6 +1115,7 @@ class RunExecutor:
                 stdout=b"", stderr=b"", exit_code=0,
                 command=self._command(definition))
             timed_out = True
+        review_log = self._capture_review_log(definition)
         return RunResult(
             run_id=definition.run_id,
             output=output,
@@ -1131,6 +1124,7 @@ class RunExecutor:
             planted=definition.planted,
             stdin_bytes=len(stdin),
             baseline=baseline,
+            review_log=review_log,
         )
 
     def _review_workspace(self) -> pathlib.Path:
@@ -1140,6 +1134,37 @@ class RunExecutor:
             pathlib.Path: ``<scratch>/review-ws``.
         """
         return pathlib.Path(self._env.scratch_dir) / REVIEW_WORKSPACE_DIR
+
+    def _capture_review_log(self, definition: RunDefinition):
+        """Read the review workspace's run log right after a run.
+
+        MAGI FIX (S6 loop 3): the next review run rebuilds the workspace from
+        nothing, so a scenario that read the live directory after the runs
+        depended on being evaluated before a later review run wiped it (F4).
+
+        Args:
+            definition: The run that just finished.
+
+        Returns:
+            tuple[bytes, ...] | None: Each file's bytes under ``.magi/logs``,
+            in sorted path order; ``None`` for a run without a review
+            workspace or when the directory does not exist. A file that cannot
+            be read is left out: the caller judges what is there.
+        """
+        if REVIEW_WORKSPACE_TOKEN not in definition.argv:
+            return None
+        directory = self._review_workspace().joinpath(*LOG_DIR_PARTS)
+        if not directory.is_dir():
+            return None
+        captured = []
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file():
+                continue
+            try:
+                captured.append(path.read_bytes())
+            except OSError:
+                continue
+        return tuple(captured)
 
     def _prepare_review_workspace(self, definition: RunDefinition):
         """Build the nested-repository workspace a review run executes in.
