@@ -751,6 +751,18 @@ mod tests {
     use crate::review::test_support::FakeGit;
 
     #[test]
+    fn a_copied_file_reads_its_old_side_under_the_copy_source() {
+        // [MAGI S6 loop 3, A1] `diff.renames=copies` makes git print `copy from`/`copy to`: the old
+        // side lives at the source path, never at the destination.
+        let section =
+            "diff --git a/src/a.rs b/src/b.rs\nsimilarity index 90%\ncopy from src/a.rs\n\
+                       copy to src/b.rs\n--- a/src/a.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-x\n+y\n";
+        assert_eq!(renamed_from(section).as_deref(), Some("src/a.rs"));
+        let renamed = "diff --git a/o.rs b/n.rs\nrename from o.rs\nrename to n.rs\n";
+        assert_eq!(renamed_from(renamed).as_deref(), Some("o.rs"));
+    }
+
+    #[test]
     fn pinning_turns_every_ref_into_its_commit_and_leaves_the_working_tree_alone() {
         let git = FakeGit::from(&[
             (
