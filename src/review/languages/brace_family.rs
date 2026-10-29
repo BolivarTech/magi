@@ -195,6 +195,32 @@ const JAVA_MODIFIERS: Modifiers = Modifiers {
     ],
 };
 
+/// Keywords that may stand right before a `(` without naming a function: control flow, operators
+/// and statements of the C family, Java and JavaScript (`catch (e) {`, `synchronized (lock) {`,
+/// `function (x) {`).
+const NOT_FUNCTION_NAMES: [&str; 20] = [
+    "if",
+    "for",
+    "while",
+    "switch",
+    "return",
+    "sizeof",
+    "else",
+    "do",
+    "catch",
+    "try",
+    "finally",
+    "new",
+    "delete",
+    "throw",
+    "synchronized",
+    "function",
+    "typeof",
+    "await",
+    "yield",
+    "case",
+];
+
 /// Intermediate representation of a detected construct.
 struct Construct {
     kind: UnitKind,
@@ -381,8 +407,8 @@ impl BraceFamilyExtractor {
     /// The function name of a C-family signature line, for extractors with
     /// `signature_functions`: a line that holds `(`, whose code does not end in `;` (a prototype;
     /// with `scanned`, a comment after the code does not count), does not
-    /// open with `#`, a comment or `}`, has no `=` before its `(`, and names an identifier, not a
-    /// control keyword, just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
+    /// open with `#`, a comment, `}` or `@`, has no `=` before its `(`, and names an identifier,
+    /// not a keyword of [`NOT_FUNCTION_NAMES`], just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
     /// `bar`). The line may be indented: a function inside a namespace, a class or an
     /// `extern "C"` block is a function too. Only lines outside every construct are asked, so a
     /// call inside a recognised function body is never taken for one. O(n) in the line.
@@ -403,18 +429,17 @@ impl BraceFamilyExtractor {
         let trimmed = line.trim();
         // MAGI FIX (S6 loop 4): a trailing comment ending in `;` is not a prototype's `;`.
         let prototype = scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement);
+        // An annotation or decorator (`@SuppressWarnings("x")`) is no signature either.
         if prototype
-            || ["#", "//", "/*", "*", "}"]
+            || ["#", "//", "/*", "*", "}", "@"]
                 .iter()
                 .any(|p| trimmed.starts_with(p))
         {
             return None;
         }
         let name = identifier_before_paren(trimmed)?;
-        let control = [
-            "if", "for", "while", "switch", "return", "sizeof", "else", "do",
-        ];
-        if control.contains(&name.as_str()) {
+        // MAGI FIX (S6 loop 4): `catch (e) {` read as a function named `catch`.
+        if NOT_FUNCTION_NAMES.contains(&name.as_str()) {
             return None;
         }
         Some(name)
