@@ -705,6 +705,7 @@ mod tests {
         assert_eq!(out, "fatal: \\u{1b}[31mbad <redacted: openai-key>\\n");
         assert_eq!(find_secret(&out), None);
     }
+
     #[test]
     fn a_pem_private_key_of_any_single_type_word_is_a_secret() {
         // [MAGI S6 MS2 loop 4, A2 Melchior] the type word is not a closed list: `ECDSA` and
@@ -722,6 +723,7 @@ mod tests {
             assert_eq!(find_secret(&header), None, "{header}");
         }
     }
+
     #[test]
     fn a_distinctive_prefix_glued_to_a_word_is_still_a_secret() {
         // [MAGI S6 MS2 loop 4, A2 Caspar] `sk-ant-` and `github_pat_` cannot occur by chance in a
@@ -748,5 +750,42 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// A failure deadline far above a linear pass (milliseconds) and below the quadratic one.
+    const MASK_DEADLINE_SECS: u64 = 10;
+
+    #[test]
+    fn mask_secrets_masks_many_secrets_in_one_pass_and_one_right_after_a_masked_block() {
+        // [MAGI S6 MS2 loop 4, A2 Caspar/Balthasar] each turn rescanned the rest for every
+        // pattern: with a pattern whose only match is at the end, 4 000 secrets took ~28 s in a
+        // debug build. Masking keeps a next span per pattern and must mask what the rescanning
+        // loop masked, a token that opens right where a masked block ends included.
+        let key = concat!("gh", "p_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let aws = concat!("AK", "IA", "ABCDEFGHIJKLMNOP");
+        let mut text = String::new();
+        let mut want = String::new();
+        for i in 0..2_000 {
+            text.push_str(&format!("x{i} {key} y {aws};\n"));
+            want.push_str(&format!(
+                "x{i} <redacted: github-token> y <redacted: aws-access-key>;\n"
+            ));
+        }
+        text.push_str(concat!("z sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA"));
+        want.push_str("z <redacted: openai-key>");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(mask_secrets(&text));
+        });
+        let masked = rx
+            .recv_timeout(std::time::Duration::from_secs(MASK_DEADLINE_SECS))
+            .expect("masking 4 000 secrets is linear, not quadratic");
+        assert_eq!(masked, want);
+        let end = concat!("-----", "END RSA PRIVATE KEY-----");
+        let pem = format!("{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\nMIIB\n{end}{key} tail");
+        assert_eq!(
+            mask_secrets(&pem),
+            "<redacted: pem-private-key><redacted: github-token> tail"
+        );
     }
 }

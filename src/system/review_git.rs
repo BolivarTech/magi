@@ -1439,6 +1439,7 @@ mod tests {
             Err(ReviewError::Git(_))
         ));
     }
+
     /// Resolves `input` in `ws` with the real git and filters it through the review's
     /// worktree source, as a review does before batching.
     #[cfg(unix)]
