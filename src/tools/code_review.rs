@@ -102,10 +102,8 @@ const DESCRIPTION: &str = concat!(
 /// holds model text per finding, and the report text already lists every one of them.
 const AGENT_OMITTED_SUMMARY_KEYS: [&str; 4] =
     ["findings", "filtered", "discarded", "symbol_unverified"];
-/// Summary key that names the lists [`bounded_result`] left out.
+/// Summary key that names the keys [`bounded_result`] left out.
 const OMITTED_KEY: &str = "omitted_from_tool_result";
-/// Bytes kept free for the truncation marker (`…[truncated N bytes]`, at most 3 + 11 + 20 + 6).
-const TRUNCATION_MARKER_RESERVE: usize = 64;
 
 /// Notice shown when the tool launches without a prompt.
 const AUTO_APPROVED_NOTICE: &str =
@@ -625,45 +623,111 @@ impl CodeReviewTool {
     }
 }
 
-/// The result the agent reads, its report's bytes plus its summary's JSON within `cap`, the way
-/// `consult` bounds its report. When everything fits it is returned whole; otherwise the summary
-/// drops its per-finding lists ([`AGENT_OMITTED_SUMMARY_KEYS`], named under [`OMITTED_KEY`]) and
-/// the report is cut to what is left. Past the cap the whole review is not kept for the agent:
-/// `magi code-review` with the same input prints it in full.
+/// The result the agent reads, `{"report", "code_review"}`, whose serialized JSON stays within
+/// `cap` bytes, the way `consult` bounds its report. When everything fits it is returned whole;
+/// otherwise the summary drops its per-finding lists ([`AGENT_OMITTED_SUMMARY_KEYS`]) and, if it
+/// still passes the cap alone, its largest remaining lists and maps until it fits (every dropped
+/// key named under [`OMITTED_KEY`]); the report is then cut to what is left once JSON-escaped.
+/// Past the cap the whole review is not kept for the agent: `magi code-review` with the same
+/// input prints it in full.
+///
+/// The bound holds for any `cap` that fits the result's skeleton with the summary's scalars
+/// (well under a kilobyte); below that the summary's scalars are kept and the cap is passed.
 ///
 /// # Arguments
 /// * `report` - The report text, redacted.
 /// * `summary` - The review's summary, redacted.
-/// * `cap` - The byte cap.
+/// * `cap` - The byte cap of the serialized result.
 ///
 /// # Returns
-/// `{"report", "code_review"}`. O(size of the inputs).
+/// `{"report", "code_review"}`. O(size of the inputs x log(size of the report)).
+// MAGI FIX (S6 loop 3): the cap bounds the serialized object the agent reads, not the raw
+// lengths: escaping and a summary that alone passes the cap no longer carry it past the bound.
 fn bounded_result(report: &str, summary: Value, cap: usize) -> Value {
-    let json_len = |v: &Value| serde_json::to_string(v).map_or(0, |s| s.len());
-    if report.len().saturating_add(json_len(&summary)) <= cap {
-        return json!({"report": report, "code_review": summary});
+    let whole = tool_result(report, summary);
+    if json_len(&whole) <= cap {
+        return whole;
     }
-    let summary = match summary {
-        Value::Object(mut fields) => {
-            let omitted: Vec<&str> = AGENT_OMITTED_SUMMARY_KEYS
-                .into_iter()
-                .filter(|key| fields.remove(*key).is_some())
-                .collect();
-            if !omitted.is_empty() {
-                fields.insert(OMITTED_KEY.into(), json!(omitted));
-            }
-            Value::Object(fields)
-        }
-        other => other,
+    let summary = match whole {
+        Value::Object(mut fields) => fields.remove("code_review").unwrap_or(Value::Null),
+        _ => Value::Null,
     };
-    let summary_len = json_len(&summary);
-    let budget = cap.saturating_sub(summary_len);
-    let report = if report.len() <= budget {
-        report.to_string()
-    } else {
-        truncate_result(report, budget.saturating_sub(TRUNCATION_MARKER_RESERVE))
-    };
+    let summary = trimmed_summary(summary, cap);
+    let budget = cap.saturating_sub(json_len(&tool_result("", summary.clone())));
+    tool_result(&fit_escaped(report, budget), summary)
+}
+
+/// The tool result object.
+fn tool_result(report: &str, summary: Value) -> Value {
     json!({"report": report, "code_review": summary})
+}
+
+/// The bytes of `value` serialized as JSON.
+fn json_len(value: &Value) -> usize {
+    serde_json::to_string(value).map_or(0, |s| s.len())
+}
+
+/// The bytes `text` takes inside a JSON string, escaping included and quotes excluded.
+fn escaped_len(text: &str) -> usize {
+    json_len(&Value::String(text.to_string())).saturating_sub(2)
+}
+
+/// `summary` without [`AGENT_OMITTED_SUMMARY_KEYS`], then without its largest list or map at a
+/// time while the result with an empty report passes `cap`; every key dropped is named under
+/// [`OMITTED_KEY`]. A summary that is not an object is returned as it is.
+fn trimmed_summary(summary: Value, cap: usize) -> Value {
+    let Value::Object(mut fields) = summary else {
+        return summary;
+    };
+    let mut omitted: Vec<String> = AGENT_OMITTED_SUMMARY_KEYS
+        .into_iter()
+        .filter(|key| fields.remove(*key).is_some())
+        .map(str::to_string)
+        .collect();
+    let with_omitted = |fields: &Map<String, Value>, omitted: &[String]| {
+        let mut out = fields.clone();
+        if !omitted.is_empty() {
+            out.insert(OMITTED_KEY.into(), json!(omitted));
+        }
+        Value::Object(out)
+    };
+    while json_len(&tool_result("", with_omitted(&fields, &omitted))) > cap {
+        let largest = fields
+            .iter()
+            .filter(|(_, v)| v.is_array() || v.is_object())
+            .max_by_key(|(_, v)| json_len(v))
+            .map(|(k, _)| k.clone());
+        let Some(key) = largest else {
+            break;
+        };
+        fields.remove(&key);
+        omitted.push(key);
+    }
+    with_omitted(&fields, &omitted)
+}
+
+/// `report`, or its longest truncation (marker included) whose JSON-escaped form takes at most
+/// `budget` bytes; empty when not even the marker fits. Binary search over the cut, whose escaped
+/// length does not decrease as the cut grows. O(n log n) for n report bytes.
+fn fit_escaped(report: &str, budget: usize) -> String {
+    if escaped_len(report) <= budget {
+        return report.to_string();
+    }
+    let (mut lo, mut hi) = (0usize, report.len());
+    let mut best = None;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let cut = truncate_result(report, mid);
+        if escaped_len(&cut) <= budget {
+            best = Some(cut);
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    best.unwrap_or_default()
 }
 
 /// A review error as the tool's execution error, redacted.
