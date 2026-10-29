@@ -913,6 +913,36 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_ending_in_a_semicolon_does_not_end_a_signature() {
+        // [MAGI S6 loop 4, B2] a line comment ending in `;` read as a statement: the search for
+        // the brace stopped there (or the signature read as a prototype) and the body became a
+        // gap.
+        let between = "int f(void)
+// keeps state;
+{
+    return 0;
+}
+";
+        let units = extract(&c_extractor(), between, &[4]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 1, 5)]);
+        let trailing = "int g(void) // returns 0;
+{
+    return 0;
+}
+";
+        let units = extract(&c_extractor(), trailing, &[3]);
+        assert_eq!(spans(&units), vec![("g", UnitKind::Function, 1, 4)]);
+        let rust = "pub fn h(
+    a: u8, // the count;
+) -> u8 {
+    a
+}
+";
+        let units = extract(&rust_extractor(), rust, &[4]);
+        assert_eq!(spans(&units), vec![("h", UnitKind::Function, 1, 5)]);
+    }
+
+    #[test]
     fn a_function_opening_two_blocks_on_one_line_ends_at_its_own_brace() {
         let code = "fn f() { if x {\n        a();\n    }\n    b();\n}\n\nfn g() {\n    c();\n}\n";
         let units = extract(&rust_extractor(), code, &[4]);
