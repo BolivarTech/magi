@@ -269,6 +269,22 @@ fn note_skip(skipped: &mut Vec<String>, model: &str) {
     }
 }
 
+/// The HTTP timeout of one gate call, and whether the review clock set it.
+///
+/// # Arguments
+/// * `left` - What is left of the review clock, if there is one.
+/// * `call_timeout` - The per-call timeout (`[code_review].timeout_secs`).
+///
+/// # Returns
+/// `(cap, cut_by_clock)`: the smaller of the two, and whether a timeout of that call is the
+/// review clock running out rather than a slow model.
+fn call_cap(left: Option<Duration>, call_timeout: Duration) -> (Duration, bool) {
+    match left {
+        Some(left) if left < call_timeout => (left, true),
+        _ => (call_timeout, false),
+    }
+}
+
 /// What one question (one pair of a finding) came to.
 struct Outcome {
     state: GateState,
@@ -560,10 +576,7 @@ impl<'a> Gate<'a> {
                 }
                 None => None,
             };
-            let (cap, cut_by_clock) = match left {
-                Some(left) if left < self.call_timeout => (left, true),
-                _ => (self.call_timeout, false),
-            };
+            let (cap, cut_by_clock) = call_cap(left, self.call_timeout);
             // `new` only fails on a malformed state or question set; both are built here.
             let Ok(request) = DecisionRequest::new(state.clone(), gate_questions()) else {
                 return Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
@@ -1201,6 +1214,19 @@ mod tests {
             )
             .await;
         assert_eq!(v.state, GateState::Kept);
+    }
+
+    #[test]
+    fn a_review_clock_equal_to_the_call_timeout_is_the_clock_that_cuts_the_call() {
+        // [MAGI §6 MS2 C loop 3] when what is left equals the per-call timeout, a timeout of that
+        // call is the review clock running out (`timeout`), not a slow model (`transport`).
+        let t = std::time::Duration::from_secs(120);
+        assert_eq!(call_cap(Some(t), t), (t, true));
+        assert_eq!(
+            call_cap(Some(t + std::time::Duration::from_secs(1)), t),
+            (t, false)
+        );
+        assert_eq!(call_cap(None, t), (t, false));
     }
 
     #[tokio::test]
