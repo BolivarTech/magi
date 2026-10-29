@@ -177,6 +177,24 @@ const RUST_MODIFIERS: Modifiers = Modifiers {
     qualifiers: &["const", "async", "unsafe", "extern", "default"],
 };
 
+/// Java's access modifiers and the other modifiers a class, interface or member may carry.
+const JAVA_MODIFIERS: Modifiers = Modifiers {
+    visibility: &["public", "private", "protected"],
+    qualifiers: &[
+        "static",
+        "final",
+        "abstract",
+        "sealed",
+        "non-sealed",
+        "strictfp",
+        "default",
+        "synchronized",
+        "native",
+        "transient",
+        "volatile",
+    ],
+};
+
 /// Intermediate representation of a detected construct.
 struct Construct {
     kind: UnitKind,
@@ -732,18 +750,19 @@ impl BraceFamilyExtractor {
                 "protected ".to_string(),
                 "static ".to_string(),
             ],
+            // MAGI FIX (S6 loop 4): modifiers combine freely (`public final class`), so they are
+            // stripped and the tables hold the bare keywords.
             block_keywords: vec![
                 "class ".to_string(),
                 "interface ".to_string(),
+                "@interface ".to_string(),
                 "enum ".to_string(),
-                "public class ".to_string(),
-                "public interface ".to_string(),
-                "public enum ".to_string(),
+                "record ".to_string(),
             ],
             declaration_keywords: vec!["import ".to_string(), "package ".to_string()],
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec!["@".to_string()],
-            modifiers: &NO_MODIFIERS,
+            modifiers: &JAVA_MODIFIERS,
             lexical_rules: LexicalRules::java(),
             signature_functions: false,
             name_before_paren: true,
