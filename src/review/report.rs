@@ -692,6 +692,36 @@ mod tests {
         assert!(!text.contains("could not be listed"), "{text}");
     }
 
+    #[test]
+    fn the_text_form_lists_every_category_of_a_merged_finding() {
+        // [MAGI S6 loop 4, C2] RV-S18 conserves both categories; the JSON showed them and the text
+        // showed none.
+        let finding = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(10),
+            severity: Severity::Warning,
+            reported_severity: Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![Category::LogicError, Category::ErrorHandling],
+            sources: vec![AgentName::Melchior, AgentName::Caspar],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let verdict = GateVerdict {
+            state: GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+        };
+        let mut out = String::new();
+        write_finding(&mut out, &finding, &verdict).expect("writes");
+        assert!(out.contains("[logic-error, error-handling]"), "{out}");
+    }
+
     #[tokio::test]
     async fn the_paid_batch_reports_redact_a_credential_in_a_finding_title() {
         // magi-core's report prints titles, never details: a credential in a detail cannot show
