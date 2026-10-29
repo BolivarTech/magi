@@ -437,6 +437,37 @@ def g():
     }
 
     #[test]
+    fn a_definition_inside_a_triple_quoted_string_is_not_a_construct() {
+        // [MAGI S6 loop 3, B1] `def fake():` at column 0 inside a module string read as a
+        // function, and the string's lines became its body.
+        for quote in ["\"\"\"", "'''"] {
+            let code = format!(
+                "DOC = {quote}\ndef fake():\nclass Ghost:\nimport os\nX = 1\n{quote}\n\ndef real():\n    return 1\n"
+            );
+            let every: Vec<u32> = (1..=9).collect();
+            let units = extract(&code, &every);
+            let found: Vec<(&str, UnitKind, u32, u32)> = units
+                .iter()
+                .map(|u| (u.name.as_str(), u.kind, u.start_line, u.end_line))
+                .collect();
+            assert!(
+                !found
+                    .iter()
+                    .any(|(n, ..)| ["fake", "Ghost", "imports", "X"].contains(n)),
+                "{quote}: {found:?}"
+            );
+            assert!(
+                found.contains(&("DOC", UnitKind::DeclarationGroup, 1, 6)),
+                "{quote}: the string belongs to its assignment: {found:?}"
+            );
+            assert!(
+                found.contains(&("real", UnitKind::Function, 8, 9)),
+                "{quote}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_module_level_statement_with_an_equals_sign_is_not_a_declaration_group() {
         for statement in [
             "assert x == 1",
