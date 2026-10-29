@@ -83,6 +83,13 @@ impl serde::Serialize for SkipCause {
     }
 }
 
+impl std::fmt::Display for Skipped {
+    /// `<path> (<cause>)`, the shown path and the cause's text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.path, self.cause.as_str())
+    }
+}
+
 impl SkipCause {
     /// The cause's text: the one place it is spelled.
     fn as_str(self) -> &'static str {
@@ -186,8 +193,9 @@ pub fn filter_files(
         }
     }
     if filtered.kept.is_empty() {
+        // MAGI FIX (S6 loop 3): the omissions and their causes travel with the error (RV20/RV22).
         return Err(ReviewError::NothingToReview {
-            skipped: Vec::new(),
+            skipped: filtered.skipped,
         });
     }
     Ok(filtered)

@@ -40,7 +40,10 @@ pub enum ReviewError {
         cause: &'static str,
     },
     /// The input holds no reviewable file; `skipped` lists every file left out, with its cause.
-    #[error("nothing to review: no reviewable file in the input")]
+    #[error(
+        "nothing to review: no reviewable file in the input{}",
+        outward_text(&omissions(.skipped))
+    )]
     NothingToReview {
         /// The files the input held and the review left out, with why (shown paths).
         skipped: Vec<Skipped>,
@@ -139,6 +142,34 @@ pub enum ReviewError {
     },
 }
 
+/// How many omissions a [`ReviewError::NothingToReview`] message names before it counts the rest.
+pub const MAX_OMISSIONS_SHOWN: usize = 20;
+
+/// `; left out: a (cause), b (cause), and N more`, or nothing when no file was left out.
+///
+/// # Arguments
+/// * `skipped` - The files left out.
+///
+/// # Returns
+/// The suffix of the message; O(shown omissions).
+fn omissions(skipped: &[Skipped]) -> String {
+    if skipped.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<String> = skipped
+        .iter()
+        .take(MAX_OMISSIONS_SHOWN)
+        .map(ToString::to_string)
+        .collect();
+    let rest = skipped.len().saturating_sub(MAX_OMISSIONS_SHOWN);
+    let more = if rest > 0 {
+        format!(", and {rest} more")
+    } else {
+        String::new()
+    };
+    format!("; left out: {}{more}", shown.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +227,25 @@ mod tests {
             assert!(!shown.chars().any(char::is_control), "{shown:?}");
             assert!(shown.contains("a\\u{1b}[2Jb\\nc"), "{shown}");
         }
+    }
+
+    #[test]
+    fn a_long_omission_list_names_the_first_ones_and_counts_the_rest() {
+        // [MAGI S6 loop 3, A2] a directory of thousands of binaries cannot flood stderr.
+        let skipped = (0..MAX_OMISSIONS_SHOWN + 3)
+            .map(|i| Skipped {
+                path: format!("f{i}.bin"),
+                cause: crate::review::filter::SkipCause::Binary,
+            })
+            .collect();
+        let shown = ReviewError::NothingToReview { skipped }.to_string();
+        assert!(shown.contains("f0.bin (binary)"), "{shown}");
+        assert!(
+            !shown.contains(&format!("f{MAX_OMISSIONS_SHOWN}.bin")),
+            "{shown}"
+        );
+        assert!(shown.ends_with(", and 3 more"), "{shown}");
+        let none = ReviewError::NothingToReview { skipped: vec![] }.to_string();
+        assert_eq!(none, "nothing to review: no reviewable file in the input");
     }
 }
