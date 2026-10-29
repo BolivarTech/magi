@@ -531,6 +531,8 @@ fn rv_s7_an_insufficient_timeout_is_refused_on_stderr_with_exit_2_before_any_mod
     // A refusal is not a subsystem degrading: the health layer must not read it as one and print
     // its "no screen message is declared" defect line (found while verifying this test).
     assert!(!err.contains("internal error"), "{err}");
+    // Once: the stderr write and the run-log event must not both reach the screen.
+    assert_eq!(err.matches("pass --timeout").count(), 1, "{err}");
     assert!(
         trio_bodies.lock().expect("lock").is_empty(),
         "the trio was contacted"
