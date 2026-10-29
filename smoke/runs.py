@@ -1430,9 +1430,15 @@ class RunExecutor:
         """
         overlay = {PASSPHRASE_VARIABLE: self._config.passphrase}
         overlay.update(declared)
+        # MAGI FIX (S6 loop 4): a review run starts IN its workspace, so its
+        # relative input ('gen', '.', '../smoke-hostile-target') names the same
+        # path whether the product joins it to -w or to its working directory;
+        # R16's '.' was the harness's own directory otherwise (F1-2).
+        cwd = (self._review_workspace()
+               if REVIEW_WORKSPACE_TOKEN in definition.argv else None)
         return self._binary.invoke(
             self._command(definition), stdin=stdin,
-            env=overlay, timeout=definition.timeout_s)
+            env=overlay, timeout=definition.timeout_s, cwd=cwd)
 
     def _stdin_for(self, definition: RunDefinition) -> bytes:
         """What actually goes on the run's standard input.
