@@ -229,6 +229,39 @@ mod tests {
     }
 
     #[test]
+    fn a_field_access_on_a_receiver_is_a_symbol_and_a_file_or_path_is_a_file() {
+        // [MAGI S6 loop 3, B2] `self.c` ends in the C extension but is the field `c`, looked up
+        // by its last segment; `main.c` and `src/a.rs` name files.
+        let i = idx("fn a() { let b = 1; }\n");
+        for field in [
+            "self.c",
+            "this.h",
+            "Self.rs",
+            "super.go",
+            "cls.py",
+            "self.inner.c",
+        ] {
+            assert!(!i.is_file_name(field), "{field}");
+        }
+        assert!(
+            !i.contains("self.c"),
+            "`c` is absent from the reviewed code"
+        );
+        assert!(i.contains("self.b"), "`b` is present");
+        for file in ["main.c", "src/a.rs", "src\\self.c", "mod.rs", "app.test.ts"] {
+            assert!(i.is_file_name(file), "{file}");
+        }
+        let reviewed = LexicalIndex::build(
+            &[("lib/this.ts".to_string(), "x".to_string())],
+            &LanguageRegistry::new(),
+        );
+        assert!(
+            reviewed.is_file_name("this.ts"),
+            "a reviewed file's name stays a file name"
+        );
+    }
+
+    #[test]
     fn overlapping_and_adjacent_ranges_merge_and_gaps_stay() {
         let mut r = Reviewed::default();
         r.add_lines("a.rs", 10, 20);
