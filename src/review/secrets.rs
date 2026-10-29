@@ -669,4 +669,21 @@ mod tests {
         assert_eq!(out, "fatal: \\u{1b}[31mbad <redacted: openai-key>\\n");
         assert_eq!(find_secret(&out), None);
     }
+    #[test]
+    fn a_pem_private_key_of_any_single_type_word_is_a_secret() {
+        // [MAGI S6 MS2 loop 4, A2 Melchior] the type word is not a closed list: `ECDSA` and
+        // `ED25519` keys were kept and sent. Public keys and certificates stay ordinary text.
+        for kind in ["ECDSA ", "ED25519 ", "X448 ", ""] {
+            let header = format!("{PEM_BEGIN}{kind}{PEM_PRIVATE_KEY}");
+            assert_eq!(find_secret(&header), Some("pem-private-key"), "{header}");
+        }
+        for kind in [
+            "ECDSA PUBLIC KEY-----",
+            "CERTIFICATE-----",
+            "ECDSA  PRIVATE KEY-----",
+        ] {
+            let header = format!("{PEM_BEGIN}{kind}");
+            assert_eq!(find_secret(&header), None, "{header}");
+        }
+    }
 }
