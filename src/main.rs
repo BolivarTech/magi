@@ -6219,7 +6219,7 @@ impl AuditedOutcome {
             ok: r.ok,
         };
         let mut out = outcome.clone();
-        out.response = out.response.as_deref().map(&mask);
+        out.response = out.response.as_deref().map(mask);
         out.tool_calls = out.tool_calls.iter().map(&mask_record).collect();
         out.transcript = out
             .transcript
