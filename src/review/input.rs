@@ -386,7 +386,10 @@ fn resolve_directory(
     guard: &dyn Fn(&Path) -> Result<PathBuf, ReviewError>,
 ) -> Result<ResolvedInput, ReviewError> {
     let dir = guard(&workspace.join(d))?;
-    if std::fs::symlink_metadata(&dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+    // MAGI FIX (S6 loop 4): a link whose target is gone is missing too, not an I/O error.
+    if std::fs::symlink_metadata(&dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        || is_dangling_link(&dir)
+    {
         return Err(ReviewError::NotReviewable {
             path: d.display().to_string(),
             cause: super::filter::MISSING,
