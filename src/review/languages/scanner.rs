@@ -30,6 +30,10 @@ fn char_at(chars: &[char], i: usize) -> char {
     chars.get(i).copied().unwrap_or('\0')
 }
 
+/// Characters after the backslash of the longest escaped char literal, Rust's `'\u{10FFFF}'`:
+/// `u`, the two braces and six hex digits, plus the closing quote.
+const MAX_CHAR_ESCAPE_CHARS: usize = 10;
+
 /// Lexical context states for the code scanner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LexicalState {
@@ -563,9 +567,14 @@ impl CodeScanner {
 
         let next = char_at(chars, i + 1);
 
-        // Escaped char: '\n', '\\'
-        if next == '\\' && i + 3 < len && char_at(chars, i + 3) == '\'' {
-            return true;
+        // Escaped char: '\n', '\\', '\'', and the multi-char escapes '\x00', '\012', '\u{1F600}'.
+        // MAGI FIX (S6 loop 3): the closing quote may sit up to MAX_CHAR_ESCAPE_CHARS after the
+        // backslash, with only escape-body chars between; a lifetime never follows a backslash.
+        if next == '\\' {
+            return ((i + 3)..len.min(i + 3 + MAX_CHAR_ESCAPE_CHARS))
+                .map(|k| char_at(chars, k))
+                .take_while(|&c| c == '\'' || c.is_ascii_alphanumeric() || c == '{' || c == '}')
+                .any(|c| c == '\'');
         }
         // Simple char: 'a'
         if char_at(chars, i + 2) == '\'' {
