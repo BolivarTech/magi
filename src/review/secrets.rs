@@ -704,4 +704,31 @@ mod tests {
             assert_eq!(find_secret(&header), None, "{header}");
         }
     }
+    #[test]
+    fn a_distinctive_prefix_glued_to_a_word_is_still_a_secret() {
+        // [MAGI S6 MS2 loop 4, A2 Caspar] `sk-ant-` and `github_pat_` cannot occur by chance in a
+        // base64 run or a kebab-case name, so they need no left boundary: glued to an identifier
+        // they were sent. The short prefixes keep theirs (a_secret_prefix_inside_a_longer_token).
+        let glued = [
+            (
+                concat!("abc", "sk-", "ant-", "api03-AAAAAAAAAAAAAAAAAAAA"),
+                "anthropic-key",
+            ),
+            (
+                concat!("KEY_", "sk-", "ant-", "api03-AAAAAAAAAAAAAAAAAAAA"),
+                "anthropic-key",
+            ),
+            (
+                concat!("x_", "github_", "pat_", "AAAAAAAAAAAAAAAAAAAAAA"),
+                "github-token",
+            ),
+        ];
+        for (text, name) in glued {
+            assert_eq!(find_secret(text), Some(name), "{text}");
+            assert!(
+                !mask_secrets(text).contains("AAAAAAAAAAAAAAAAAAAA"),
+                "{text}"
+            );
+        }
+    }
 }
