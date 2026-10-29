@@ -251,15 +251,18 @@ impl BraceFamilyExtractor {
     }
 
     /// The function name of a C-family signature line, for extractors with
-    /// `signature_functions`: an unindented line that holds `(`, does not end in `;` (a
-    /// prototype), does not open with `#`, a comment or `}`, has no `=` before its `(`, and
-    /// names an identifier, not a control keyword, just before the `(` (`int *parse(` gives
-    /// `parse`, `void Foo::bar(` gives `bar`). O(n) in the line.
+    /// `signature_functions`: a line that holds `(`, does not end in `;` (a prototype), does not
+    /// open with `#`, a comment or `}`, has no `=` before its `(`, and names an identifier, not a
+    /// control keyword, just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
+    /// `bar`). The line may be indented: a function inside a namespace, a class or an
+    /// `extern "C"` block is a function too. Only lines outside every construct are asked, so a
+    /// call inside a recognised function body is never taken for one. O(n) in the line.
     fn signature_name(&self, line: &str) -> Option<String> {
-        if !self.signature_functions || line.starts_with(char::is_whitespace) {
+        // MAGI FIX (S6 loop 3): indentation no longer disqualifies a signature.
+        if !self.signature_functions {
             return None;
         }
-        let trimmed = line.trim_end();
+        let trimmed = line.trim();
         if trimmed.ends_with(';')
             || ["#", "//", "/*", "*", "}"]
                 .iter()
