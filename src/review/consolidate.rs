@@ -483,6 +483,10 @@ impl<'a> Prober<'a> {
             o.findings = vec![Finding::new(Severity::Info, t, "")];
             o
         };
+        // Two distinct mages, because `determine` refuses fewer than its `min_agents` (2 in
+        // magi-core 4.2.0, pinned by `magi_core_still_refuses_a_one_mage_consensus`). Were that
+        // minimum to rise, `determine` would fail, every probe would answer "not the same" and
+        // each unlocated title would keep its own group: no grouping, but nothing lost.
         let pair = [
             one(AgentName::Melchior, title),
             one(AgentName::Balthasar, rep),
