@@ -87,8 +87,27 @@ PROTECTED_DIRS = (".magi", ".git")
 #: was opened and classified by its content.
 PROTECTED_CAUSE = "ignored"
 
-#: One ``path (cause)`` entry of the product's omission list.
-OMISSION_PATTERN = re.compile(r"(?P<path>[^\s,;]+) \((?P<cause>[^()]+)\)")
+#: Every cause the product prints for a file it leaves out
+#: (``SkipCause::as_str`` in ``src/review/filter.rs``). An entry is anchored on
+#: these words, so a path may hold commas, semicolons or spaces.
+OMISSION_CAUSES = ("binary", "not utf-8", "secret", "ignored",
+                   "outside workspace", "too large", "not a regular file")
+
+#: The omission list of a ``nothing to review`` refusal, to the end of its line.
+OMISSION_LIST_PATTERN = re.compile(r"; left out: (?P<list>.*)")
+
+#: What may follow the last entry on the line: the ``, and N more`` the product
+#: writes past its display cap, then the run log's ``key=value`` fields that the
+#: stderr layer prints after the message (``review.error=nothing_to_review``).
+OMISSION_TAIL_PATTERN = re.compile(
+    r"(?:, and \d+ more)?(?:\s+[A-Za-z_][\w.]*=\S*)*\s*$")
+
+#: One ``path (cause)`` entry of that list, followed by the separator or the end.
+# MAGI FIX (S6 loop 4): the path was ``[^\s,;]+``, so a protected path holding a
+# comma, semicolon or space lost its ``.magi`` component and passed (F1-1).
+OMISSION_PATTERN = re.compile(
+    r"(?P<path>.+?) \((?P<cause>%s)\)(?:, |$)"
+    % "|".join(re.escape(cause) for cause in OMISSION_CAUSES))
 
 #: The floor of a per-batch ceiling in seconds
 #: (``AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`` = ``MIN_OPERATION_BUDGET`` 10 s +
@@ -513,8 +532,12 @@ def _protected_read(stderr):
         list[str]: ``"path (cause)"`` for each one; empty when every protected
         path named (possibly none) was left out unread.
     """
+    listed = OMISSION_LIST_PATTERN.search(stderr)
+    if listed is None:
+        return []
+    entries = OMISSION_TAIL_PATTERN.sub("", listed.group("list"), count=1)
     return ["%s (%s)" % (m.group("path"), m.group("cause"))
-            for m in OMISSION_PATTERN.finditer(stderr)
+            for m in OMISSION_PATTERN.finditer(entries)
             if _is_protected(m.group("path")) and m.group("cause") != PROTECTED_CAUSE]
 
 
