@@ -876,6 +876,50 @@ mod tests {
     }
 
     #[test]
+    fn no_textconv_or_external_diff_driver_of_any_scope_runs_in_a_review_diff() {
+        // [MAGI S6 loop 3, S3] guardian: every diff a review takes (the worktree, a commit, a root
+        // commit) carries --no-textconv and --no-ext-diff, so a `diff.<driver>.textconv` or
+        // `.command` from the operator's global config never sees the reviewed bytes.
+        let d = repo();
+        std::fs::write(d.path().join(".gitattributes"), "* diff=evil\n").expect("write");
+        std::fs::write(d.path().join("a.rs"), "one\n").expect("write");
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join("a.rs"), "two\n").expect("write");
+        git(d.path(), &["commit", "-q", "-am", "2"]);
+        std::fs::write(d.path().join("a.rs"), "three\n").expect("write");
+        let home = tempfile::tempdir().expect("tempdir");
+        let global = home.path().join("gitconfig");
+        std::fs::write(
+            &global,
+            "[diff \"evil\"]\n\ttextconv = touch PWNED_TEXTCONV; cat\n\tcommand = touch PWNED_EXT\n",
+        )
+        .expect("write");
+        let env = vec![(
+            "GIT_CONFIG_GLOBAL".to_string(),
+            global.to_str().expect("utf-8 tempdir").to_string(),
+        )];
+        let g = ScrubbedGit::with_test_env(d.path().to_path_buf(), env);
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let results: Vec<_> = [
+            ReviewInput::Uncommitted,
+            ReviewInput::Commit(None),
+            ReviewInput::Commit(Some("HEAD~1".into())),
+        ]
+        .iter()
+        .map(|input| magi_rs::review::input::resolve_input(input, d.path(), &g, &allow))
+        .collect();
+        for sentinel in ["PWNED_TEXTCONV", "PWNED_EXT"] {
+            assert!(!d.path().join(sentinel).exists(), "{sentinel} ran");
+        }
+        for r in results {
+            assert!(!r.expect("resolves").files.is_empty());
+        }
+    }
+
+    #[test]
     fn filter_drivers_from_every_scope_are_neutralized() {
         // [CP2 MS2 S1a loop 10] `config --null --show-scope --get-regexp ^filter\.`: scope NUL key LF value NUL.
         let z = b"global\0filter.lfs.clean\ngit-lfs clean -- %f\0local\0filter.evil.clean\nsh x\0\
