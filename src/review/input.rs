@@ -105,6 +105,15 @@ const BINARY_MARKER: &str = "Binary files ";
 const BINARY_PATCH_MARKER: &str = "GIT binary patch";
 /// The mode of a gitlink (a submodule): its "content" is a commit id, never reviewed.
 const GITLINK_MODE: &str = "160000";
+/// The extended header lines whose last word is a file mode (`index` ends in one when the mode
+/// did not change); a path-bearing line (`---`, `+++`, `rename to`, …) never counts.
+const MODE_HEADER_PREFIXES: &[&str] = &[
+    "index ",
+    "old mode ",
+    "new mode ",
+    "new file mode ",
+    "deleted file mode ",
+];
 
 /// Rejects a ref git could read as an option, a range or several arguments.
 ///
@@ -665,8 +674,9 @@ fn reviewable_path(section: &str, decode: Decode) -> Option<String> {
     let first = lines.next()?;
     let header: Vec<&str> = lines.take_while(|l| !l.starts_with("@@")).collect();
     let has_hunk = section.lines().any(|l| l.starts_with("@@"));
+    // MAGI FIX (S6 loop 4): anchored to the mode lines; `--- a/mode 160000` read as a gitlink.
     let gitlink = header.iter().any(|l| {
-        (l.starts_with("index ") || l.contains("mode "))
+        MODE_HEADER_PREFIXES.iter().any(|p| l.starts_with(p))
             && l.split(' ').next_back() == Some(GITLINK_MODE)
     });
     if gitlink || !(has_hunk || is_binary_section(section)) {
