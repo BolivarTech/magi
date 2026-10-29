@@ -555,6 +555,24 @@ mod tests {
     }
 
     #[test]
+    fn a_filesystem_root_workspace_makes_every_absolute_path_relative() {
+        // [MAGI §6 MS2 C loop 3] trimming `/` leaves an empty root: an absolute path under it is
+        // still in the workspace and must reach the reviewed set's relative key.
+        assert_eq!(
+            normalize_location(Path::new("/"), "/src/a.rs", Some(1)),
+            ("src/a.rs".to_string(), Some(1))
+        );
+        assert_eq!(
+            normalize_location(Path::new("/"), "src/a.rs", Some(1)).0,
+            "src/a.rs"
+        );
+        assert_eq!(
+            normalize_location(Path::new(r"C:\"), r"C:\src\a.rs", None).0,
+            "src/a.rs"
+        );
+    }
+
+    #[test]
     fn the_symbol_check_reads_title_and_detail_and_names_the_first_unknown() {
         let files = vec![("a.rs".to_string(), "fn real() {}\n".to_string())];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
