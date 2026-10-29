@@ -4930,7 +4930,11 @@ fn code_review_auto_approve(cfg: &MagiConfig) -> bool {
 /// * `timeout` - The run's wall clock, if any.
 ///
 /// # Returns
-/// `Some(start + timeout)` exactly when the run has a wall clock.
+/// `Some(start + timeout)` when the run has a wall clock; `None` without one. One exception:
+/// a `timeout` so large that `start + timeout` overflows `Instant` (on the order of
+/// `u64::MAX` seconds) also gives `None` rather than panicking, so a review tool registered
+/// with it has no run deadline of its own; the run's own clock still cancels the run.
+// MAGI FIX (S6 loop 4): the overflow case contradicted "exactly when" (E1-1).
 fn run_deadline(
     start: std::time::Instant,
     timeout: Option<Duration>,
