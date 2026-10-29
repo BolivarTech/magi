@@ -34,6 +34,10 @@ fn char_at(chars: &[char], i: usize) -> char {
 /// `u`, the two braces and six hex digits, plus the closing quote.
 const MAX_CHAR_ESCAPE_CHARS: usize = 10;
 
+/// What [`ScannedLine::ends_statement`] records for a literal read in code context: any
+/// character but `;` would do, since a literal is an operand.
+const STRING_MARK: char = '"';
+
 /// Lexical context states for the code scanner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LexicalState {
@@ -195,6 +199,9 @@ pub struct ScannedLine {
     /// The lowest running net brace count reached within the line, from 0 at its start (so
     /// never positive): `} else {` gives -1 although its `brace_delta` is 0.
     pub min_delta: i32,
+    /// Whether the last non-blank character the line has in code context is `;`: a comment or
+    /// string after it does not count, so `int f(void) // note;` does not end a statement.
+    pub ends_statement: bool,
     /// `true` when the line starts inside a multi-line comment or string and never returns to
     /// code. A line that starts in code is `false` even when it is all comment (`// note`):
     /// keyword detection does not need to skip it, since no keyword opens with a comment.
@@ -249,6 +256,8 @@ impl CodeScanner {
         let mut i = 0;
         let mut delta: i32 = 0;
         let mut min_delta: i32 = 0;
+        // The last non-blank character read in code context (a string counts as its quote).
+        let mut last_code: Option<char> = None;
         let was_code_at_start = self.state == LexicalState::Code;
         let mut entered_code = false;
 
@@ -288,6 +297,7 @@ impl CodeScanner {
                     // Check for Rust raw string: r#"..."# or br#"..."#
                     if self.rules.raw_strings == RawStringSyntax::RustHashes {
                         if let Some(hashes) = self.try_rust_raw_string(&chars, i) {
+                            last_code = Some(STRING_MARK);
                             self.state = LexicalState::RawString { hashes };
                             // Skip past r[b]###"
                             let mut skip = if char_at(&chars, i) == 'b' { 2 } else { 1 }; // b?r
@@ -306,6 +316,7 @@ impl CodeScanner {
                         && char_at(&chars, i + 2) == char_at(&chars, i)
                     {
                         let q = char_at(&chars, i);
+                        last_code = Some(STRING_MARK);
                         self.state = LexicalState::TripleQuote { quote: q };
                         i += 3;
                         continue;
@@ -315,6 +326,7 @@ impl CodeScanner {
                     if self.rules.raw_strings == RawStringSyntax::GoBacktick
                         && char_at(&chars, i) == '`'
                     {
+                        last_code = Some(STRING_MARK);
                         self.state = LexicalState::StringLiteral {
                             quote: '`',
                             escapable: false,
@@ -325,6 +337,7 @@ impl CodeScanner {
 
                     // Check for template literal (JS/TS)
                     if self.rules.template_literals && char_at(&chars, i) == '`' {
+                        last_code = Some(STRING_MARK);
                         self.state = LexicalState::TemplateLiteral;
                         i += 1;
                         continue;
@@ -333,6 +346,7 @@ impl CodeScanner {
                     // Check for character literal (Rust/C/Java)
                     if self.rules.char_literals && char_at(&chars, i) == '\'' {
                         if self.is_char_literal(&chars, i) {
+                            last_code = Some(STRING_MARK);
                             self.state = LexicalState::CharLiteral;
                             i += 1; // skip opening quote, content handled in CharLiteral state
                             continue;
@@ -344,6 +358,7 @@ impl CodeScanner {
 
                     // Check for string literal with "
                     if char_at(&chars, i) == '"' {
+                        last_code = Some(STRING_MARK);
                         self.state = LexicalState::StringLiteral {
                             quote: '"',
                             escapable: true,
@@ -354,6 +369,7 @@ impl CodeScanner {
 
                     // Check for single-quote string (non-char-literal languages like JS/Python)
                     if !self.rules.char_literals && char_at(&chars, i) == '\'' {
+                        last_code = Some(STRING_MARK);
                         self.state = LexicalState::StringLiteral {
                             quote: '\'',
                             escapable: true,
@@ -364,12 +380,18 @@ impl CodeScanner {
 
                     // Check for byte string: b"..."
                     if char_at(&chars, i) == 'b' && i + 1 < len && char_at(&chars, i + 1) == '"' {
+                        last_code = Some(STRING_MARK);
                         self.state = LexicalState::StringLiteral {
                             quote: '"',
                             escapable: true,
                         };
                         i += 2;
                         continue;
+                    }
+
+                    let c = char_at(&chars, i);
+                    if !c.is_whitespace() {
+                        last_code = Some(c);
                     }
 
                     // Count braces
@@ -505,6 +527,7 @@ impl CodeScanner {
             brace_delta: delta,
             depth_after: self.depth,
             min_delta,
+            ends_statement: last_code == Some(';'),
             is_non_code,
             starts_in_literal: !was_code_at_start,
         }

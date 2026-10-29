@@ -201,7 +201,7 @@ impl BraceFamilyExtractor {
                 i = (end as usize).max(i + 1);
                 continue;
             }
-            if let Some(name) = self.signature_name(line) {
+            if let Some(name) = self.signature_name(line, scanned.get(i)) {
                 let opens = open_brace_line(lines, scanned, i, &stops).is_some();
                 if opens || trimmed.ends_with('}') {
                     let start = self.scan_back_for_docs(lines, i);
@@ -281,23 +281,35 @@ impl BraceFamilyExtractor {
         self.match_function_keyword(trimmed).is_some()
             || self.match_block_keyword(trimmed).is_some()
             || self.match_declaration_keyword(trimmed)
-            || self.signature_name(line).is_some()
+            || self.signature_name(line, scanned.get(j)).is_some()
     }
 
     /// The function name of a C-family signature line, for extractors with
-    /// `signature_functions`: a line that holds `(`, does not end in `;` (a prototype), does not
+    /// `signature_functions`: a line that holds `(`, whose code does not end in `;` (a prototype;
+    /// with `scanned`, a comment after the code does not count), does not
     /// open with `#`, a comment or `}`, has no `=` before its `(`, and names an identifier, not a
     /// control keyword, just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
     /// `bar`). The line may be indented: a function inside a namespace, a class or an
     /// `extern "C"` block is a function too. Only lines outside every construct are asked, so a
     /// call inside a recognised function body is never taken for one. O(n) in the line.
-    fn signature_name(&self, line: &str) -> Option<String> {
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The line, untrimmed.
+    /// * `scanned` - The scanner's record of the line; `None` falls back to the trimmed text.
+    ///
+    /// # Returns
+    ///
+    /// The function name, or `None` when the line is no signature.
+    fn signature_name(&self, line: &str, scanned: Option<&ScannedLine>) -> Option<String> {
         // MAGI FIX (S6 loop 3): indentation no longer disqualifies a signature.
         if !self.signature_functions {
             return None;
         }
         let trimmed = line.trim();
-        if trimmed.ends_with(';')
+        // MAGI FIX (S6 loop 4): a trailing comment ending in `;` is not a prototype's `;`.
+        let prototype = scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement);
+        if prototype
             || ["#", "//", "/*", "*", "}"]
                 .iter()
                 .any(|p| trimmed.starts_with(p))
@@ -410,7 +422,7 @@ impl BraceFamilyExtractor {
 ///
 /// The search ends without a brace when line `i` already ends the declaration (its code ends in
 /// `;`), and before the first later line that is blank, is code ending in `;` (a statement: the
-/// declaration had no block), or where `stops` holds (the next construct's start); comment lines
+/// declaration had no block; a comment ending in `;` does not count), or where `stops` holds (the next construct's start); comment lines
 /// are passed over. A line whose braces balance (`fn a() { x(); }`) opens nothing, so a one-line
 /// construct never takes the brace of the construct after it. O(k) for the k lines scanned,
 /// which never pass the next construct.
@@ -422,8 +434,9 @@ fn open_brace_line(
 ) -> Option<usize> {
     let opens = |idx: usize| scanned.get(idx).is_some_and(|s| s.brace_delta > 0);
     let is_code = |idx: usize| scanned.get(idx).is_some_and(|s| !s.is_non_code);
+    // MAGI FIX (S6 loop 4): a comment ending in `;` (`// keeps state;`) is not a statement.
     let ends_statement =
-        |idx: usize| is_code(idx) && lines.get(idx).is_some_and(|l| l.trim_end().ends_with(';'));
+        |idx: usize| is_code(idx) && scanned.get(idx).is_some_and(|s| s.ends_statement);
     if opens(i) {
         return Some(i);
     }
