@@ -1381,6 +1381,12 @@ pub(crate) enum TuiCodeReviewParseError {
     NotACodeReviewCommand,
     /// The arguments did not parse; the message says why.
     Invalid(String),
+    /// `-h`/`--help` was asked for: the subcommand's help, to show as such, never as an error.
+    #[expect(
+        dead_code,
+        reason = "Red stub: the parser returns it in the fix commit"
+    )]
+    Help(String),
 }
 
 /// The clap id of `-w`, which the TUI refuses.
@@ -4300,6 +4306,15 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                                     "/code-review: {}",
                                                     crate::agent::Agent::sanitize_text(&reason)
                                                 )),
+                                            );
+                                            continue;
+                                        }
+                                        Err(TuiCodeReviewParseError::Help(help)) => {
+                                            apply_response(
+                                                &mut app,
+                                                AgentResponse::Info(
+                                                    crate::agent::Agent::sanitize_text(&help),
+                                                ),
                                             );
                                             continue;
                                         }
@@ -9424,6 +9439,27 @@ end"
             "{:?}",
             plain.messages
         );
+    }
+
+    #[test]
+    fn a_clap_error_keeps_every_line_and_help_is_shown_as_help() {
+        // E3 (MAGI S6 loop 3): clap's tips and usage follow its first line; cutting them left
+        // the user without the hint, and `--help` came back as a one-line error.
+        match parse_tui_code_review("/code-review --bogus") {
+            Err(TuiCodeReviewParseError::Invalid(m)) => {
+                assert!(m.contains("--bogus"), "{m}");
+                assert!(m.contains("Usage:"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        for argv in ["/code-review --help", "/code-review -h"] {
+            match parse_tui_code_review(argv) {
+                Err(TuiCodeReviewParseError::Help(h)) => {
+                    assert!(h.contains("--uncommitted"), "{h}");
+                }
+                other => panic!("{argv}: {other:?}"),
+            }
+        }
     }
 
     #[test]
