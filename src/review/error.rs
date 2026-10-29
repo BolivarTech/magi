@@ -4,25 +4,34 @@
 
 //! The typed errors of the `code-review` pipeline.
 
+use super::secrets::{display_path, outward_text};
+
 /// Every way a review can fail before or while it calls a model.
 ///
 /// Each variant is specific so callers decide by the variant, never by the text of the message.
+///
+/// The message ([`std::fmt::Display`]) is safe to send out of the process wherever it lands
+/// (stderr, the run log, the JSON envelope, the TUI, a tool result): every path and ref passes
+/// through [`display_path`] and every other foreign text (git's stderr, an I/O or consolidation
+/// message) through [`outward_text`], so no secret the RV22 detector names and no control
+/// character leaves in it. The fields keep the raw text for callers that match on it.
+// MAGI FIX (S6 loop 3): one outward scrubber, at Display, for every surface at once.
 #[derive(Debug, thiserror::Error)]
 pub enum ReviewError {
     /// A requested path resolves outside the workspace (or a worktree read would leave it).
-    #[error("path is outside the workspace: {0}")]
+    #[error("path is outside the workspace: {}", display_path(.0))]
     OutsideWorkspace(String),
     /// A git ref that is empty, starts with `-`, or holds a NUL, `..` or a space.
-    #[error("invalid git ref: {0}")]
+    #[error("invalid git ref: {}", display_path(.0))]
     InvalidRef(String),
     /// A git ref that does not name a commit.
-    #[error("git ref not found: {0}")]
+    #[error("git ref not found: {}", display_path(.0))]
     RefNotFound(String),
     /// git could not run, or exited with an error (the message carries its bounded stderr).
-    #[error("git failed: {0}")]
+    #[error("git failed: {}", outward_text(.0))]
     Git(String),
     /// A file named explicitly that cannot be reviewed, with the reason.
-    #[error("{path} is not reviewable: {cause}")]
+    #[error("{} is not reviewable: {cause}", display_path(.path))]
     NotReviewable {
         /// The path as the caller named it.
         path: String,
@@ -33,7 +42,10 @@ pub enum ReviewError {
     #[error("nothing to review: no reviewable file in the input")]
     NothingToReview,
     /// A hunk or unit that does not fit in one batch by itself.
-    #[error("{what} does not fit in one batch ({tokens} tokens, limit {limit})")]
+    #[error(
+        "{} does not fit in one batch ({tokens} tokens, limit {limit})",
+        outward_text(.what)
+    )]
     TooLargeForBatch {
         /// What did not fit.
         what: String,
@@ -65,10 +77,10 @@ pub enum ReviewError {
         min_timeout_secs: u64,
     },
     /// The batch reports could not be merged into one report.
-    #[error("consolidation failed: {0}")]
+    #[error("consolidation failed: {}", outward_text(.0))]
     Consolidation(String),
     /// A local I/O error.
-    #[error("I/O error: {0}")]
+    #[error("I/O error: {}", outward_text(.0))]
     Io(String),
     /// A git output that went past its byte cap; git was stopped.
     #[error("git output is larger than {limit} bytes")]
@@ -77,7 +89,7 @@ pub enum ReviewError {
         limit: u64,
     },
     /// A file over the per-file byte cap; its content is never returned.
-    #[error("{path} is larger than {limit} bytes")]
+    #[error("{} is larger than {limit} bytes", display_path(.path))]
     TooLarge {
         /// The file path.
         path: String,
@@ -94,11 +106,11 @@ pub enum ReviewError {
     #[error("the review was cancelled")]
     Cancelled,
     /// A worktree path whose resolved target is a path a review never reads.
-    #[error("{0} resolves to a path a review never reads")]
+    #[error("{} resolves to a path a review never reads", display_path(.0))]
     Protected(String),
     /// A worktree path whose resolved target is not a regular file (a link to a directory, a FIFO,
     /// a socket or a device file).
-    #[error("{0} is not a regular file")]
+    #[error("{} is not a regular file", display_path(.0))]
     NotRegularFile(String),
     /// The review no longer splits into the batches that were approved: the working tree moved
     /// between the approval and the run. Raised before any trio call.
@@ -114,7 +126,8 @@ pub enum ReviewError {
     },
     /// A secret found in what was about to be sent.
     #[error(
-        "{path} holds a secret at batching time: it changed during the review or was not filtered"
+        "{} holds a secret at batching time: it changed during the review or was not filtered",
+        display_path(.path)
     )]
     EgressSecret {
         /// The file path.
@@ -167,7 +180,7 @@ mod tests {
         for e in carrying(&format!("fatal: bad object {}", key())) {
             let shown = e.to_string();
             assert_eq!(find_secret(&shown), None, "{shown}");
-            assert!(shown.contains("<redacted: openai-key>"), "{shown}");
+            assert!(shown.contains("redacted: openai-key>"), "{shown}");
         }
     }
 
@@ -177,7 +190,7 @@ mod tests {
         for e in carrying("a\u{1b}[2Jb\nc") {
             let shown = e.to_string();
             assert!(!shown.chars().any(char::is_control), "{shown:?}");
-            assert!(shown.contains("a\u{1b}[2Jb\nc"), "{shown}");
+            assert!(shown.contains("a\\u{1b}[2Jb\\nc"), "{shown}");
         }
     }
 }

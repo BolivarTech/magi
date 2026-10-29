@@ -11,6 +11,8 @@
 //! private key without its `BEGIN` line. The minimum lengths can miss a shorter real key; that is the trade-off with
 //! false positives on ordinary code.
 
+use std::ops::Range;
+
 /// What may follow a token prefix.
 #[derive(Clone, Copy)]
 enum Tail {
@@ -73,6 +75,12 @@ const PEM_KEY_TYPES: &[&str] = &["RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED "
 const PEM_PRIVATE_KEY: &str = "PRIVATE KEY-----";
 /// The header of an armored OpenPGP private key (split so the source holds no such header).
 const PGP_PRIVATE_KEY: &str = concat!("-----", "BEGIN PGP PRIVATE KEY BLOCK-----");
+/// The opening of the `END` line of an armored block (split so the source holds no PEM line).
+const ARMOR_END: &str = concat!("-----", "END ");
+/// The dashes that close an armor line.
+const ARMOR_DASHES: &str = "-----";
+/// What opens the mark that replaces a masked secret: `<redacted: <pattern name>>`.
+const REDACTED_OPEN: &str = "<redacted: ";
 /// The words of the AWS secret access key's name, in order.
 const AWS_SECRET_WORDS: &[&str] = &["aws", "secret", "access", "key"];
 /// The minimum length of the AWS secret access key.
@@ -231,6 +239,17 @@ impl Matcher {
     /// Linear in the text: an occurrence of a token prefix inside another token fails its left
     /// boundary before its tail is read, and a tail is read for at most its minimum length.
     fn matches(&self, text: &str) -> bool {
+        self.first_span(text).is_some()
+    }
+
+    /// The byte range of the first occurrence of the pattern in `text`, if any.
+    ///
+    /// A token's range runs to the end of its tail; the AWS secret key's from its name to the end
+    /// of the key; a PEM or OpenPGP private key's from its header through the end of its `END`
+    /// line, or to the end of the text when there is none (the base64 body matches no pattern,
+    /// so it is masked with its header).
+    // MAGI FIX (S6 loop 3): the outward scrubber masks the span; `matches` is its `is_some`.
+    fn first_span(&self, text: &str) -> Option<Range<usize>> {
         let bytes = text.as_bytes();
         match self {
             Self::Token {
@@ -238,19 +257,23 @@ impl Matcher {
                 tail,
                 min,
                 not_followed_by,
-            } => prefixes.iter().any(|prefix| {
-                text.match_indices(prefix).any(|(at, _)| {
-                    let bounded = at
-                        .checked_sub(1)
-                        .and_then(|before| bytes.get(before))
-                        .is_none_or(|b| !is_word(*b))
-                        || after_diff_marker(bytes, at);
-                    let end = at + prefix.len();
-                    let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
-                    bounded && !excluded && tail_at_least(bytes, end, *tail, *min)
+            } => prefixes
+                .iter()
+                .filter_map(|prefix| {
+                    text.match_indices(prefix).find_map(|(at, _)| {
+                        let bounded = at
+                            .checked_sub(1)
+                            .and_then(|before| bytes.get(before))
+                            .is_none_or(|b| !is_word(*b))
+                            || after_diff_marker(bytes, at);
+                        let end = at + prefix.len();
+                        let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
+                        (bounded && !excluded && tail_at_least(bytes, end, *tail, *min))
+                            .then(|| at..tail_end(bytes, end, *tail))
+                    })
                 })
-            }),
-            Self::PemPrivateKey => text.match_indices(PEM_BEGIN).any(|(at, _)| {
+                .min_by_key(|r| r.start),
+            Self::PemPrivateKey => text.match_indices(PEM_BEGIN).find_map(|(at, _)| {
                 let mut rest = at + PEM_BEGIN.len();
                 if let Some(kind) = PEM_KEY_TYPES.iter().find(|k| word_at(bytes, rest, k)) {
                     rest += kind.len();
@@ -258,36 +281,64 @@ impl Matcher {
                 bytes
                     .get(rest..)
                     .is_some_and(|r| r.starts_with(PEM_PRIVATE_KEY.as_bytes()))
+                    .then(|| at..armor_end(text, rest + PEM_PRIVATE_KEY.len()))
             }),
-            Self::Header(header) => text.contains(header),
-            Self::AwsSecretKey => (0..bytes.len()).any(|at| aws_secret_at(bytes, at)),
+            Self::Header(header) => text
+                .find(header)
+                .map(|at| at..armor_end(text, at + header.len())),
+            Self::AwsSecretKey => {
+                (0..bytes.len()).find_map(|at| aws_secret_end(bytes, at).map(|end| at..end))
+            }
         }
     }
 }
 
-/// Whether the AWS secret access key's name opens at `at`, followed by an assignment and a
-/// 40-character key: the four words in any case with at most one `_` or `-` between them, then
-/// blanks, `=` or `:`, blanks, an optional quote, and the key.
-fn aws_secret_at(bytes: &[u8], at: usize) -> bool {
+/// The index past the run of class `tail` that starts at `at`.
+fn tail_end(bytes: &[u8], at: usize, tail: Tail) -> usize {
+    at + bytes
+        .get(at..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|b| tail.admits(**b))
+        .count()
+}
+
+/// The end of an armored block whose header ends at `from`: past the `-----` that closes its
+/// `END` line, or the end of the text when the block has no `END` line.
+fn armor_end(text: &str, from: usize) -> usize {
+    text.get(from..)
+        .and_then(|rest| {
+            let end = rest.find(ARMOR_END)? + ARMOR_END.len();
+            let close = rest.get(end..)?.find(ARMOR_DASHES)? + ARMOR_DASHES.len();
+            Some(from + end + close)
+        })
+        .unwrap_or(text.len())
+}
+
+/// Where the AWS secret access key that opens at `at` ends: its name (the four words in any case
+/// with at most one `_` or `-` between them), blanks, `=` or `:`, blanks, an optional quote, and
+/// a key of at least 40 characters. `None` when none opens there.
+fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
     let mut pos = at;
     for (i, word) in AWS_SECRET_WORDS.iter().enumerate() {
         if i > 0 && bytes.get(pos).is_some_and(|b| *b == b'_' || *b == b'-') {
             pos += 1;
         }
         if !word_at(bytes, pos, word) {
-            return false;
+            return None;
         }
         pos += word.len();
     }
     pos = skip_bytes(bytes, pos, BLANKS);
     if !bytes.get(pos).is_some_and(|b| *b == b'=' || *b == b':') {
-        return false;
+        return None;
     }
     pos = skip_bytes(bytes, pos + 1, BLANKS);
     if bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
         pos += 1;
     }
     tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN)
+        .then(|| tail_end(bytes, pos, Tail::Base64))
 }
 
 /// The name of the first secret pattern (in table order) that matches `text`, if any.
@@ -327,15 +378,7 @@ pub fn display_path(path: &str) -> String {
     if let Some(name) = find_secret(path) {
         return format!("<path redacted: {name}>");
     }
-    path.chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    escape_controls(path)
 }
 
 /// `text` with every secret [`find_secret`] would name replaced by `<redacted: <pattern name>>`.
@@ -346,7 +389,26 @@ pub fn display_path(path: &str) -> String {
 /// # Returns
 /// The masked text; `text` unchanged when it holds no secret.
 pub fn mask_secrets(text: &str) -> String {
-    text.to_string()
+    if find_secret(text).is_none() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // Each turn masks the earliest secret of the rest (ties go to table order), so a text with
+    // k secrets is scanned k + 1 times: O((k + 1) · n · p).
+    while let Some((span, name)) = SECRET_PATTERNS
+        .iter()
+        .filter_map(|p| p.matcher.first_span(rest).map(|r| (r, p.name)))
+        .min_by_key(|(r, _)| r.start)
+    {
+        out.push_str(rest.get(..span.start).unwrap_or_default());
+        out.push_str(REDACTED_OPEN);
+        out.push_str(name);
+        out.push('>');
+        rest = rest.get(span.end..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `text` as it may leave the process: [`mask_secrets`], then every control character escaped.
@@ -357,7 +419,20 @@ pub fn mask_secrets(text: &str) -> String {
 /// # Returns
 /// The masked, escaped text.
 pub fn outward_text(text: &str) -> String {
-    text.to_string()
+    escape_controls(&mask_secrets(text))
+}
+
+/// `text` with every control character escaped ([`char::escape_default`]).
+fn escape_controls(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -591,7 +666,7 @@ mod tests {
     fn outward_text_masks_secrets_and_escapes_control_characters() {
         let raw = "fatal: \u{1b}[31mbad sk-abcdefghijklmnopqrstuvwxyz0123\n"; // allow-secret-scan
         let out = outward_text(raw);
-        assert_eq!(out, "fatal: \u{1b}[31mbad <redacted: openai-key>\n");
+        assert_eq!(out, "fatal: \\u{1b}[31mbad <redacted: openai-key>\\n");
         assert_eq!(find_secret(&out), None);
     }
 }
