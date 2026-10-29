@@ -1319,6 +1319,24 @@ mod tests {
     }
 
     #[test]
+    fn control_keywords_before_a_parenthesis_are_not_function_names() {
+        // [MAGI S6 loop 4, B2] `catch (e) {` read as a function named `catch`.
+        for (ext, line) in [
+            (BraceFamilyExtractor::cpp(), "    catch (const E& e) {"),
+            (BraceFamilyExtractor::cpp(), "    throw (e);"),
+            (BraceFamilyExtractor::cpp(), "    delete (p);"),
+            (BraceFamilyExtractor::java(), "    catch (Exception e) {"),
+            (BraceFamilyExtractor::java(), "    synchronized (lock) {"),
+            (BraceFamilyExtractor::java(), "    @SuppressWarnings(\"x\")"),
+            (BraceFamilyExtractor::javascript(), "  catch (e) {"),
+            (BraceFamilyExtractor::javascript(), "  function (e) {"),
+            (BraceFamilyExtractor::javascript(), "  switch (k) {"),
+        ] {
+            assert_eq!(ext.signature_name(line, None), None, "{line}");
+        }
+    }
+
+    #[test]
     fn qualified_rust_functions_are_functions() {
         for (code, name) in [
             ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
