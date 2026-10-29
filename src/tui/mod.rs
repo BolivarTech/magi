@@ -9761,10 +9761,11 @@ end"
     }
 
     #[test]
-    fn a_tool_approval_drained_during_a_review_confirmation_is_answered_first() {
-        // [MAGI S6 loop 4, E2-2] both prompts wait on y/c: 'y' must not start the uncancellable
-        // review while the agent's approval hangs. The approval, the newer prompt, takes the
-        // key; the confirmation keeps waiting and the transcript says so.
+    fn a_tool_approval_waits_while_a_review_confirmation_is_on_screen() {
+        // [MAGI S6 loop 4, E2-2 + security review] both prompts wait on y/c, and a key answers
+        // only the prompt on screen when it was pressed. An approval that arrives while the
+        // confirmation waits stays queued: 'y' answers the confirmation and never approves a
+        // tool the user did not see. Once the confirmation is answered the approval is shown.
         let (mut app, approvals) = App::new_for_test_with_approvals();
         let runner = Arc::new(FakeTuiRunner::default());
         app.begin_code_review_confirmation(
@@ -9772,23 +9773,30 @@ end"
             runner.clone(),
             shown_plan(),
         );
-        let mut approved = drain_one_approval(&mut app, &approvals, None);
-        assert!(matches!(
-            app.answer_prompt_key(KeyCode::Char('y')),
-            PromptKey::Handled
-        ));
-        assert_eq!(approved.try_recv(), Ok(true));
-        assert!(app.pending_code_review.is_some());
+        let mut answer = drain_one_approval(&mut app, &approvals, None);
+        assert!(app.pending_approval.is_none(), "{:?}", app.messages);
         assert!(
-            app.last_message_text()
-                .contains("/code-review confirmation above is still waiting"),
+            !app.messages.iter().any(|m| m.contains("APPROVAL REQUIRED")),
             "{:?}",
             app.messages
         );
         assert!(matches!(
-            app.answer_prompt_key(KeyCode::Char('y')),
-            PromptKey::RunCodeReview(_)
+            app.answer_prompt_key(KeyCode::Char('c')),
+            PromptKey::Handled
         ));
+        assert!(app.pending_code_review.is_none());
+        assert_eq!(
+            answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+            "the key meant for the confirmation answered the approval"
+        );
+        // Answered: the queued approval is drained and shown, and the next key is its own.
+        drain_approval_requests(&mut app);
+        assert!(app.pending_approval.is_some(), "{:?}", app.messages);
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| m.contains("APPROVAL REQUIRED: Execute bash?")));
         assert_eq!(runner.calls(), 0);
     }
 
