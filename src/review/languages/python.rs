@@ -553,6 +553,68 @@ def g():
         assert!(PythonExtractor.split_block(&def[0]).is_empty());
     }
 
+    /// `(name, kind, start, end)` of each unit.
+    fn spans(units: &[SemanticUnit]) -> Vec<(&str, UnitKind, u32, u32)> {
+        units
+            .iter()
+            .map(|u| (u.name.as_str(), u.kind, u.start_line, u.end_line))
+            .collect()
+    }
+
+    #[test]
+    fn a_header_wrapped_over_several_lines_keeps_its_body() {
+        // [MAGI S6 loop 4, B2] the `) -> None:` line, unindented, ended the function before its
+        // header closed, so the body became a gap.
+        let code = "def f(\n    x,\n) -> None:\n    return x\n\ndef g():\n    pass\n";
+        let every: Vec<u32> = (1..=7).collect();
+        assert_eq!(
+            spans(&extract(code, &every)),
+            vec![
+                ("f", UnitKind::Function, 1, 4),
+                ("g", UnitKind::Function, 6, 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dedented_continuation_line_does_not_end_the_block() {
+        // [MAGI S6 loop 4, B2] inside brackets indentation means nothing, so `)` at column 0
+        // continues the statement; it neither ends the function nor starts an assignment.
+        let code = "def h():\n    x = call(\n1,\n)\n    return x\n";
+        assert_eq!(
+            spans(&extract(code, &[5])),
+            vec![("h", UnitKind::Function, 1, 5)]
+        );
+        let module = "setup(\nname='x',\n)\n";
+        assert!(
+            extract(module, &[1, 2, 3])
+                .iter()
+                .all(|u| u.kind != UnitKind::DeclarationGroup),
+            "{:?}",
+            spans(&extract(module, &[1, 2, 3]))
+        );
+    }
+
+    #[test]
+    fn a_class_with_a_wrapped_header_splits_at_its_methods() {
+        // [MAGI S6 loop 4, B2] the body indentation was read off the first base-class line.
+        let code = "class C(\n        Base,\n):\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2\n";
+        let every: HashSet<u32> = (1..=8).collect();
+        let block = PythonExtractor
+            .extract_units(code, "test.py", &every)
+            .into_iter()
+            .find(|u| u.kind == UnitKind::Class)
+            .expect("the class");
+        assert_eq!((block.start_line, block.end_line), (1, 8));
+        let parts = PythonExtractor.split_block(&block);
+        assert!(
+            spans(&parts).contains(&("a", UnitKind::Method, 4, 5))
+                && spans(&parts).contains(&("b", UnitKind::Method, 7, 8)),
+            "{:?}",
+            spans(&parts)
+        );
+    }
+
     #[test]
     fn a_module_level_statement_with_an_equals_sign_is_not_a_declaration_group() {
         for statement in [
