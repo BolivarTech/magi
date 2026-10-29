@@ -38,7 +38,8 @@ pub struct BraceFamilyExtractor {
     /// Lexical rules for the CodeScanner.
     lexical_rules: LexicalRules,
     /// Whether a signature line (`int main(void) {`, `void run() {`) starts a function named by
-    /// the identifier before its `(`: C, C++ and Java have no function keyword.
+    /// the identifier before its `(`: C, C++ and Java have no function keyword, and neither has
+    /// a JavaScript or TypeScript class method.
     signature_functions: bool,
 }
 
@@ -216,6 +217,13 @@ const NOT_FUNCTION_NAMES: [&str; 20] = [
     "yield",
     "case",
 ];
+
+/// The words a JavaScript or TypeScript declaration may open with (`export default`,
+/// `export abstract class`, `async function`).
+const JS_MODIFIERS: Modifiers = Modifiers {
+    visibility: &["export", "default", "declare"],
+    qualifiers: &["async", "abstract"],
+};
 
 /// Intermediate representation of a detected construct.
 struct Construct {
@@ -808,9 +816,12 @@ impl BraceFamilyExtractor {
             ],
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec!["@".to_string()],
-            modifiers: &NO_MODIFIERS,
+            modifiers: &JS_MODIFIERS,
             lexical_rules: LexicalRules::javascript(),
-            signature_functions: false,
+            // MAGI FIX (S6 loop 4): a class method (`run() {`, `async run() {`, `get x() {`)
+            // has no keyword, so a class too large for one batch could not split; a method is a
+            // signature, as in C and Java.
+            signature_functions: true,
         }
     }
 
