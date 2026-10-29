@@ -1343,6 +1343,7 @@ mod tests {
         let verdict = magi_rs::review::gate::GateVerdict {
             state: magi_rs::review::gate::GateState::Kept,
             cause: None,
+            causes: vec![],
             model: Some("m".into()),
             lean: None,
             confidence: None,

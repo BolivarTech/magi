@@ -1455,6 +1455,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_cause_of_a_verdict_is_counted() {
+        // [MAGI §6 MS2 C loop 3] a verdict with two causes counts under both.
+        let finding = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: magi_core::schema::Severity::Critical,
+            reported_severity: magi_core::schema::Severity::Critical,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![magi_core::schema::Category::Other],
+            sources: vec![magi_core::schema::AgentName::Melchior],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let verdict = GateVerdict {
+            state: GateState::LowConfidence,
+            cause: Some("critical never filtered"),
+            causes: vec!["critical never filtered", "not every claim judged"],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+        };
+        let mut summary = ReviewSummary::default();
+        record_verdicts(&mut summary, &[finding], vec![verdict]);
+        assert_eq!(
+            (
+                summary.gate_causes.get("critical never filtered"),
+                summary.gate_causes.get("not every claim judged")
+            ),
+            (Some(&1), Some(&1)),
+            "{:?}",
+            summary.gate_causes
+        );
+    }
+
     #[tokio::test]
     async fn the_summary_carries_the_omissions_and_the_gate_causes() {
         // [CP2 MS2 S2a2 loop 11] by content: a default-empty list or map would pass a key-presence check.

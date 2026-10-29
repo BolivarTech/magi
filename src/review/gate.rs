@@ -96,8 +96,12 @@ pub enum GateState {
 pub struct GateVerdict {
     /// The state.
     pub state: GateState,
-    /// Why, for `unfiltered` and for a critical kept as `low_confidence`.
+    /// Why, for `unfiltered` and for a critical kept as `low_confidence`: the first of
+    /// [`Self::causes`].
     pub cause: Option<&'static str>,
+    /// Every cause that applies, the state's own first: a finding with (title, detail) pairs
+    /// that were never put to the chain also carries `not every claim judged`.
+    pub causes: Vec<&'static str>,
     /// The model whose answer decided the state (or, for `low_confidence`, answered last).
     pub model: Option<String>,
     /// The option that answer leaned to.
@@ -449,6 +453,7 @@ impl<'a> Gate<'a> {
         GateVerdict {
             state: outcome.state,
             cause: outcome.cause,
+            causes: outcome.cause.into_iter().collect(),
             model: outcome.model,
             lean: outcome.lean,
             confidence: outcome.confidence,
@@ -807,6 +812,64 @@ mod tests {
         let v = g.judge(&f, Some("x\n"), None).await;
         assert_eq!(v.cause, Some("not every claim judged"));
         assert!(g.per_model().is_empty(), "{:?}", g.per_model());
+    }
+
+    #[tokio::test]
+    async fn a_critical_with_unasked_claims_carries_both_causes() {
+        // [MAGI §6 MS2 C loop 3] `critical never filtered` does not replace the unasked claims.
+        let mut f = finding(Severity::Critical, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING + 2;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("critical never filtered"),
+                vec!["critical never filtered", "not every claim judged"]
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lean_that_ends_a_merged_finding_names_its_unasked_claims() {
+        // [MAGI §6 MS2 C loop 3] the first pair under every threshold ends the walk: the second
+        // pair is never asked, and the `low_confidence` verdict says so.
+        let mut f = finding(Severity::Warning, Some(1));
+        f.titles = vec!["a".into(), "b".into()];
+        f.details = vec!["da".into(), "db".into()];
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(chain().len())
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.10));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("not every claim judged"),
+                vec!["not every claim judged"]
+            )
+        );
+        assert_eq!(v.lean.as_deref(), Some("false_positive"));
+    }
+
+    #[tokio::test]
+    async fn a_finding_whose_every_pair_was_asked_names_no_unasked_claim() {
+        let f = finding(Severity::Critical, Some(1));
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\n"), None).await;
+        assert_eq!(v.causes, vec!["critical never filtered"]);
     }
 
     #[tokio::test]

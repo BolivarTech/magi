@@ -489,6 +489,7 @@ mod tests {
         let verdict = GateVerdict {
             state: GateState::Filtered,
             cause: None,
+            causes: vec![],
             model: Some("clef:cloud".into()),
             lean: Some("false_positive".into()),
             confidence: Some(0.9),
