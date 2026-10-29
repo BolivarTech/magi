@@ -1137,6 +1137,70 @@ mod tests {
     }
 
     #[test]
+    fn rust_qualifiers_in_any_combination_are_recognised() {
+        // [MAGI S6 loop 4, B2] the keyword table listed fixed forms, so `pub async unsafe fn`
+        // or `pub(super) fn` matched nothing and the function became a gap.
+        for (code, kind, name) in [
+            (
+                "pub async unsafe fn f() {\n    x();\n}\n",
+                UnitKind::Function,
+                "f",
+            ),
+            (
+                "pub(crate) extern \"C\" fn cb() {\n    x();\n}\n",
+                UnitKind::Function,
+                "cb",
+            ),
+            (
+                "pub(super) fn g() {\n    x();\n}\n",
+                UnitKind::Function,
+                "g",
+            ),
+            (
+                "pub(in crate::a) const fn k() -> u8 {\n    1\n}\n",
+                UnitKind::Function,
+                "k",
+            ),
+            (
+                "async unsafe fn h() {\n    x();\n}\n",
+                UnitKind::Function,
+                "h",
+            ),
+            ("extern fn e() {\n    x();\n}\n", UnitKind::Function, "e"),
+            (
+                "pub(super) struct S {\n    a: u8,\n}\n",
+                UnitKind::Struct,
+                "S",
+            ),
+            (
+                "unsafe impl Send for S {\n    // none\n}\n",
+                UnitKind::Impl,
+                "Send",
+            ),
+            (
+                "pub(crate) unsafe trait T {\n    fn t();\n}\n",
+                UnitKind::Trait,
+                "T",
+            ),
+        ] {
+            let units = extract(&rust_extractor(), code, &[2]);
+            assert_eq!(spans(&units), vec![(name, kind, 1, 3)], "{code}");
+        }
+        let uses = "pub(crate) use a::b;\npub(super) use c::d;\n";
+        let units = extract(&rust_extractor(), uses, &[1, 2]);
+        assert_eq!(
+            spans(&units),
+            vec![("imports", UnitKind::DeclarationGroup, 1, 2)]
+        );
+        let consts = "pub(super) const A: u8 = 1;\n";
+        let units = extract(&rust_extractor(), consts, &[1]);
+        assert_eq!(
+            spans(&units),
+            vec![("constants", UnitKind::DeclarationGroup, 1, 1)]
+        );
+    }
+
+    #[test]
     fn qualified_rust_functions_are_functions() {
         for (code, name) in [
             ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
