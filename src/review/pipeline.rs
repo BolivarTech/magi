@@ -1348,7 +1348,10 @@ mod tests {
                 Ok(diff.as_str()),
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
-            ("ls-tree -r --name-only -z abc", Ok("gone.rs\0")),
+            (
+                "ls-tree -r -z abc",
+                Ok("100644 blob 0000000000000000000000000000000000000000\tgone.rs\0"),
+            ),
             (
                 "show --no-ext-diff --no-textconv abc:./gone.rs",
                 Ok(old.as_str()),
@@ -1437,7 +1440,10 @@ mod tests {
                 Ok(diff.as_str()),
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
-            ("ls-tree -r --name-only -z abc", Ok("gone.rs\0")),
+            (
+                "ls-tree -r -z abc",
+                Ok("100644 blob 0000000000000000000000000000000000000000\tgone.rs\0"),
+            ),
             (
                 "show --no-ext-diff --no-textconv abc:./gone.rs",
                 Ok(old.as_str()),
