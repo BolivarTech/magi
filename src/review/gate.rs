@@ -109,7 +109,9 @@ pub struct GateVerdict {
     pub lean: Option<String>,
     /// Magi's confidence of that answer.
     pub confidence: Option<f64>,
-    /// Models skipped because they answered HTTP 400 in this review, in chain order.
+    /// Models skipped because they answered HTTP 400 in this review, in chain order. Each entry
+    /// is a skip with cause `rejected` (RV10, RV-S20), the only cause that skips a model, so the
+    /// field carries the cause by its meaning; the summary counts them under `rejected_skips`.
     pub skipped: Vec<String>,
 }
 
