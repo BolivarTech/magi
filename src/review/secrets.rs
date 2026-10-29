@@ -268,29 +268,8 @@ impl Matcher {
     fn first_span(&self, text: &str) -> Option<Range<usize>> {
         let bytes = text.as_bytes();
         match self {
-            Self::Token {
-                prefixes,
-                tail,
-                min,
-                not_followed_by,
-                glued,
-            } => prefixes
-                .iter()
-                .filter_map(|prefix| {
-                    text.match_indices(prefix).find_map(|(at, _)| {
-                        // MAGI FIX (S6 loop 4): a distinctive prefix glued to a word was sent.
-                        let bounded = *glued
-                            || at
-                                .checked_sub(1)
-                                .and_then(|before| bytes.get(before))
-                                .is_none_or(|b| !is_word(*b))
-                            || after_diff_marker(bytes, at);
-                        let end = at + prefix.len();
-                        let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
-                        (bounded && !excluded && tail_at_least(bytes, end, *tail, *min))
-                            .then(|| at..tail_end(bytes, end, *tail))
-                    })
-                })
+            Self::Token { prefixes, .. } => (0..prefixes.len())
+                .filter_map(|lane| self.token_span(lane, text))
                 .min_by_key(|r| r.start),
             Self::PemPrivateKey => text.match_indices(PEM_BEGIN).find_map(|(at, _)| {
                 let mut rest = at + PEM_BEGIN.len();
@@ -327,6 +306,69 @@ fn pem_type_word(bytes: &[u8], at: usize) -> Option<usize> {
         .contains(&word)
         .then_some(word)
         .filter(|w| bytes.get(at + w) == Some(&b' '))
+}
+
+impl Matcher {
+    /// How many independent searches the pattern runs: one per prefix of a token, one otherwise.
+    fn lanes(&self) -> usize {
+        match self {
+            Self::Token { prefixes, .. } => prefixes.len(),
+            _ => 1,
+        }
+    }
+
+    /// The first span of search `lane` in `text`: of a token's `lane`-th prefix alone, or
+    /// [`Matcher::first_span`] for any other pattern. O(n).
+    fn lane_span(&self, lane: usize, text: &str) -> Option<Range<usize>> {
+        match self {
+            Self::Token { .. } => self.token_span(lane, text),
+            _ => self.first_span(text),
+        }
+    }
+
+    /// The first token of the `lane`-th prefix in `text` that has a left boundary (or needs
+    /// none: `glued`); `None` for any other pattern. O(n).
+    fn token_span(&self, lane: usize, text: &str) -> Option<Range<usize>> {
+        let Self::Token {
+            prefixes, glued, ..
+        } = self
+        else {
+            return None;
+        };
+        let prefix = prefixes.get(lane)?;
+        let bytes = text.as_bytes();
+        text.match_indices(prefix).find_map(|(at, _)| {
+            // MAGI FIX (S6 loop 4): a distinctive prefix glued to a word was sent.
+            let bounded = *glued
+                || at
+                    .checked_sub(1)
+                    .and_then(|before| bytes.get(before))
+                    .is_none_or(|b| !is_word(*b))
+                || after_diff_marker(bytes, at);
+            bounded.then(|| self.token_at(lane, bytes, at)).flatten()
+        })
+    }
+
+    /// The token of the `lane`-th prefix that opens at `at`, its left boundary aside; `None`
+    /// when none opens there or the pattern is not a token. O(min) unless it matches.
+    fn token_at(&self, lane: usize, bytes: &[u8], at: usize) -> Option<Range<usize>> {
+        let Self::Token {
+            prefixes,
+            tail,
+            min,
+            not_followed_by,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let prefix = prefixes.get(lane)?;
+        let end = at + prefix.len();
+        let opens = bytes.get(at..end) == Some(prefix.as_bytes());
+        let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
+        (opens && !excluded && tail_at_least(bytes, end, *tail, *min))
+            .then(|| at..tail_end(bytes, end, *tail))
+    }
 }
 
 /// The index past the run of class `tail` that starts at `at`.
@@ -419,31 +461,53 @@ pub fn display_path(path: &str) -> String {
 
 /// `text` with every secret [`find_secret`] would name replaced by `<redacted: <pattern name>>`.
 ///
+/// Each turn masks the earliest secret of what follows the last mask (ties go to table order),
+/// and the end of a mask counts as a left boundary.
+///
 /// # Arguments
 /// * `text` - Any text about to leave the process.
 ///
 /// # Returns
 /// The masked text; `text` unchanged when it holds no secret.
+///
+/// O(n · s) for a text of n bytes and s searches (one per token prefix, one per other pattern):
+/// each search keeps its next span and runs again, from the mask's end, only when a mask passed
+/// its start; the others check only whether a token opens at the mask's end.
+// MAGI FIX (S6 loop 4): each turn rescanned the rest for every pattern, O(k · n · p).
 pub fn mask_secrets(text: &str) -> String {
-    if find_secret(text).is_none() {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    // Each turn masks the earliest secret of the rest (ties go to table order), so a text with
-    // k secrets is scanned k + 1 times: O((k + 1) · n · p).
-    while let Some((span, name)) = SECRET_PATTERNS
+    let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
+    let lanes: Vec<(&SecretPattern, usize)> = SECRET_PATTERNS
         .iter()
-        .filter_map(|p| p.matcher.first_span(rest).map(|r| (r, p.name)))
-        .min_by_key(|(r, _)| r.start)
+        .flat_map(|p| (0..p.matcher.lanes()).map(move |lane| (p, lane)))
+        .collect();
+    let mut next: Vec<Option<Range<usize>>> = lanes
+        .iter()
+        .map(|(p, lane)| p.matcher.lane_span(*lane, text))
+        .collect();
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    while let Some((span, name)) = next
+        .iter()
+        .zip(&lanes)
+        .filter_map(|(span, (p, _))| span.clone().map(|s| (s, p.name)))
+        .min_by_key(|(s, _)| s.start)
     {
-        out.push_str(rest.get(..span.start).unwrap_or_default());
+        out.push_str(text.get(done..span.start).unwrap_or_default());
         out.push_str(REDACTED_OPEN);
         out.push_str(name);
         out.push('>');
-        rest = rest.get(span.end..).unwrap_or_default();
+        done = span.end;
+        let rest = text.get(done..).unwrap_or_default();
+        for (slot, (p, lane)) in next.iter_mut().zip(&lanes) {
+            if slot.as_ref().is_some_and(|s| s.start < done) {
+                *slot = p.matcher.lane_span(*lane, rest).map(|r| at(done, r));
+            } else if let Some(r) = p.matcher.token_at(*lane, rest.as_bytes(), 0) {
+                // The end of a mask is a left boundary: a token may open right there.
+                *slot = Some(at(done, r));
+            }
+        }
     }
-    out.push_str(rest);
+    out.push_str(text.get(done..).unwrap_or_default());
     out
 }
 
