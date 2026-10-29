@@ -37,7 +37,7 @@ pub struct FileContext {
     pub framework_hints: Vec<String>,
 }
 
-/// Detect programming language from file extension.
+/// Detect programming language from file extension, ignoring its ASCII case.
 ///
 /// # Arguments
 ///
@@ -56,8 +56,13 @@ pub struct FileContext {
 /// assert_eq!(detect_language("Makefile"), "unknown");
 /// ```
 pub fn detect_language(file_path: &str) -> String {
-    let ext = file_path.rsplit('.').next().unwrap_or("");
-    match ext {
+    // MAGI FIX (S6 loop 4): `MAIN.RS` is Rust too; the extension is matched case-insensitively.
+    let ext = file_path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
         "rs" => "rust",
         "c" | "h" => "c",
         "cpp" | "cxx" | "cc" | "hpp" | "hxx" => "cpp",

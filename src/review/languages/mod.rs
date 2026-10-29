@@ -378,10 +378,14 @@ impl LanguageRegistry {
         self.extractors.keys().map(String::as_str)
     }
 
-    /// Get the extractor for a file path, or `None` for unknown extensions.
+    /// Get the extractor for a file path, or `None` for unknown extensions. The extension is
+    /// matched ignoring its ASCII case (`A.RS` is Rust), as [`detect_language`] does.
+    ///
+    /// [`detect_language`]: crate::review::context::detect_language
     pub fn get(&self, file_path: &str) -> Option<&ExtractorKind> {
+        // MAGI FIX (S6 loop 4): an upper-case extension lost its extractor.
         let ext = file_path.rsplit('.').next()?;
-        self.extractors.get(ext)
+        self.extractors.get(&ext.to_ascii_lowercase())
     }
 }
 
