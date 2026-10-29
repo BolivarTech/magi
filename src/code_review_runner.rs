@@ -97,7 +97,22 @@ struct TrioFactory {
     probe: ProbeOutcome,
 }
 
-impl TrioFactory {
+/// Builds the trio of one batch under a ceiling. Production: [`TrioFactory`].
+trait TrioBuilder: Send + Sync {
+    /// Builds a trio under `ceiling`.
+    ///
+    /// # Arguments
+    /// * `ceiling` - The batch's resolved ceiling.
+    ///
+    /// # Returns
+    /// The trio.
+    ///
+    /// # Errors
+    /// A message naming why the trio cannot be built (not yet redacted).
+    fn build(&self, ceiling: ResolvedCeiling) -> Result<Arc<Magi>, String>;
+}
+
+impl TrioBuilder for TrioFactory {
     /// Builds a trio under `ceiling`. Its notices were already announced by the startup build
     /// of the same configuration, so they are dropped here.
     fn build(&self, ceiling: ResolvedCeiling) -> Result<Arc<Magi>, String> {
@@ -123,7 +138,7 @@ impl TrioFactory {
 /// The production [`BatchConsult`]: a trio per batch, in the code-review mode.
 struct TrioBatchConsult {
     /// Builds each batch's trio.
-    factory: TrioFactory,
+    factory: Arc<dyn TrioBuilder>,
     /// `[magi].agent_timeout_secs`, resolved.
     configured_ceiling: u64,
     /// `[magi].max_rotations`, resolved.
@@ -307,7 +322,7 @@ pub(crate) fn build_code_review_runner(
         probe: b.probe,
     };
     let consult = TrioBatchConsult {
-        factory,
+        factory: Arc::new(factory),
         configured_ceiling,
         max_rotations,
         retry_disabled,
@@ -342,6 +357,66 @@ mod tests {
     use crate::NoVaultInScope;
     use magi_rs::magi::endpoint::EndpointTemplate;
     use magi_rs::review::window::pool_window;
+
+    /// A trio build that takes its duration and then fails, as a slow or stuck build would.
+    struct SlowBuild(Duration);
+    impl TrioBuilder for SlowBuild {
+        fn build(&self, _ceiling: ResolvedCeiling) -> Result<Arc<Magi>, String> {
+            std::thread::sleep(self.0);
+            Err("built too late".into())
+        }
+    }
+
+    fn slow_consult(build: Duration) -> TrioBatchConsult {
+        TrioBatchConsult {
+            factory: Arc::new(SlowBuild(build)),
+            configured_ceiling: 120,
+            max_rotations: 0,
+            retry_disabled: false,
+        }
+    }
+
+    /// How long a slow build takes in these tests, and the bound the review must answer within.
+    const SLOW_BUILD: Duration = Duration::from_millis(1_500);
+    const PROMPT_ANSWER: Duration = Duration::from_millis(1_000);
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_trio_build_runs_inside_the_batch_wall_clock() {
+        // [MAGI §6 MS2 D loop 3] the build is part of the batch: its wall clock bounds it.
+        let consult = slow_consult(SLOW_BUILD);
+        let started = std::time::Instant::now();
+        let r = consult
+            .consult("p", Some(Duration::from_millis(100)))
+            .await
+            .err();
+        assert_eq!(r, Some(ConsultFailure::ClockExpired));
+        assert!(started.elapsed() < PROMPT_ANSWER, "{:?}", started.elapsed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_the_run_does_not_wait_for_the_trio_build() {
+        // [MAGI §6 MS2 D loop 3] the run's token is honored while a batch's trio is built.
+        use crate::tools::code_review::run_cancellable;
+        use magi_rs::review::error::ReviewError;
+        let consult = slow_consult(SLOW_BUILD);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let fire = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            fire.cancel();
+        });
+        let started = std::time::Instant::now();
+        let r = run_cancellable(&cancel, async {
+            consult
+                .consult("p", None)
+                .await
+                .map(|_| ())
+                .map_err(|e| ReviewError::Io(format!("{e:?}")))
+        })
+        .await;
+        assert!(matches!(r, Err(ReviewError::Cancelled)), "{r:?}");
+        assert!(started.elapsed() < PROMPT_ANSWER, "{:?}", started.elapsed());
+    }
 
     #[test]
     fn a_seat_repeated_as_a_non_adjacent_fallback_is_listed_once() {
