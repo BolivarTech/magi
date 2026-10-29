@@ -11,7 +11,10 @@
 //! decided. A companion ([`plan_batches_with`]) is only a key and a token count: its text never
 //! enters this module, so whoever builds the companion's text scans it before it joins a prompt.
 //! A secret that spans two units of one file is not caught by either unit's scan; the file-level
-//! filter, which reads each file whole before batching, is the net for it.
+//! filter, which reads each file whole before batching, is the net for it. That filter also
+//! scans both faces of a diff (removed lines included) and omits a secret-bearing file with
+//! cause `secret` while the review goes on (REQ-RV22, RV-S30), so the egress scan here fails the
+//! review only for what changed between the two reads: a backstop, never the omission itself.
 
 use std::collections::HashSet;
 
