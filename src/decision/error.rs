@@ -338,6 +338,22 @@ impl DecisionError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cause_never_derives_deserialize_because_two_variants_share_a_token() {
+        // [MAGI S6 loop 4, C2] `BadRequest` and `Rejected` both serialize as `rejected` (DE-S1
+        // names the 400 skip `rejected`), so the token cannot be read back into the variant: a
+        // derived `Deserialize` would turn every 400 into a 413/422.
+        let source = include_str!("error.rs").replace('\r', "");
+        let at = source.find("pub enum Cause {").unwrap_or(0);
+        let attributes = source
+            .get(..at)
+            .and_then(|head| head.rfind("#[derive("))
+            .and_then(|start| source.get(start..at))
+            .unwrap_or_default();
+        assert!(attributes.contains("Serialize"), "{attributes}");
+        assert!(!attributes.contains("Deserialize"), "{attributes}");
+    }
+
     const ALL: [Cause; 12] = [
         Cause::Unauthorized,
         Cause::Rejected,
