@@ -192,6 +192,9 @@ pub struct ScannedLine {
     pub brace_delta: i32,
     /// Cumulative brace depth AFTER this line (saturates at 0).
     pub depth_after: u32,
+    /// The lowest running net brace count reached within the line, from 0 at its start (so
+    /// never positive): `} else {` gives -1 although its `brace_delta` is 0.
+    pub min_delta: i32,
     /// `true` when the line starts inside a multi-line comment or string and never returns to
     /// code. A line that starts in code is `false` even when it is all comment (`// note`):
     /// keyword detection does not need to skip it, since no keyword opens with a comment.
@@ -245,6 +248,7 @@ impl CodeScanner {
         let len = chars.len();
         let mut i = 0;
         let mut delta: i32 = 0;
+        let mut min_delta: i32 = 0;
         let was_code_at_start = self.state == LexicalState::Code;
         let mut entered_code = false;
 
@@ -374,6 +378,7 @@ impl CodeScanner {
                         self.depth = self.depth.saturating_add(1);
                     } else if char_at(&chars, i) == '}' {
                         delta -= 1;
+                        min_delta = min_delta.min(delta);
                         self.depth = self.depth.saturating_sub(1);
                     }
 
@@ -499,6 +504,7 @@ impl CodeScanner {
             line_number,
             brace_delta: delta,
             depth_after: self.depth,
+            min_delta,
             is_non_code,
             starts_in_literal: !was_code_at_start,
         }
@@ -589,9 +595,10 @@ impl CodeScanner {
 /// Find the closing brace for a construct that opens at `open_idx`.
 ///
 /// Uses pre-scanned brace depths instead of naive counting.
-/// The closing brace is the first line after `open_idx` where
-/// `depth_after` returns to the level it was at before the
-/// opening brace.
+/// The closing brace is the first line after `open_idx` where the
+/// depth, at any point within the line, returns to the level it was
+/// at before the opening brace: `} else {` closes the block it ends
+/// although it opens another one.
 ///
 /// # Arguments
 ///
@@ -611,10 +618,15 @@ pub fn find_closing_brace(scanned: &[ScannedLine], open_idx: usize) -> usize {
     // when the depth falls back to it, not after its innermost block.
     let opened = u32::try_from(open_line.brace_delta.max(0)).unwrap_or(0);
     let target_depth = open_line.depth_after.saturating_sub(opened);
+    // MAGI FIX (S6 loop 4): a line that closes and reopens (`} else {`) nets zero; the lowest
+    // depth within the line, not the depth after it, says whether it closed the block.
+    let mut start_depth = open_line.depth_after;
     for (i, line) in scanned.iter().enumerate().skip(open_idx + 1) {
-        if line.depth_after <= target_depth && line.brace_delta < 0 {
+        let lowest = i64::from(start_depth) + i64::from(line.min_delta);
+        if line.min_delta < 0 && lowest <= i64::from(target_depth) {
             return i;
         }
+        start_depth = line.depth_after;
     }
     // Unclosed brace — return last line (graceful degradation)
     scanned.len().saturating_sub(1)
