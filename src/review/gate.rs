@@ -280,7 +280,8 @@ fn note_skip(skipped: &mut Vec<String>, model: &str) {
 /// review clock running out rather than a slow model.
 fn call_cap(left: Option<Duration>, call_timeout: Duration) -> (Duration, bool) {
     match left {
-        Some(left) if left < call_timeout => (left, true),
+        // MAGI FIX (S6 loop 3): equality is the review clock too, so its timeout is `timeout`.
+        Some(left) if left <= call_timeout => (left, true),
         _ => (call_timeout, false),
     }
 }
