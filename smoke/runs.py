@@ -1189,14 +1189,16 @@ class RunExecutor:
             return None
         workspace = self._review_workspace()
         scratch = pathlib.Path(self._env.scratch_dir).resolve()
+        # MAGI FIX (S6 loop 3): containment is checked before anything is
+        # deleted OR created. The tree is deleted wholesale and then rebuilt,
+        # so only a path that resolves strictly under the scratch area may be
+        # touched at all (F3).
+        if scratch not in workspace.resolve().parents:
+            raise HarnessError(
+                "refusing to build the review workspace at %s: it resolves "
+                "outside the scratch area %s" % (workspace, scratch))
         try:
             if workspace.exists():
-                # The tree is deleted wholesale: only a path that resolves
-                # strictly under the scratch area may go.
-                if scratch not in workspace.resolve().parents:
-                    raise HarnessError(
-                        "refusing to delete %s: it resolves outside the "
-                        "scratch area %s" % (workspace, scratch))
                 shutil.rmtree(workspace)
             workspace.mkdir(parents=True)
             shutil.copytree(self._env.magi_dir, workspace / ".magi")
