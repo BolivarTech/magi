@@ -1362,6 +1362,30 @@ mod tests {
     }
 
     #[test]
+    fn java_fields_are_not_functions_and_methods_without_modifiers_are() {
+        // [MAGI S6 loop 4, B2] a field with a modifier read as a function named after its type,
+        // and a method with no modifier was no unit at all.
+        let java = "public class Foo {\n    public static final int X = 1;\n    private String name;\n\n    void run() {\n        a();\n    }\n\n    @Override\n    public String toString() {\n        return name;\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), java, 6, UnitKind::Class);
+        let found = spans(&parts);
+        assert!(
+            found.contains(&("run", UnitKind::Method, 5, 7)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&("toString", UnitKind::Method, 9, 12)),
+            "{found:?}"
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|(n, k, ..)| *k == UnitKind::Method && ["int", "String", "X"].contains(n)),
+            "{found:?}"
+        );
+        assert_each_line_in_one_unit(&parts, 13);
+    }
+
+    #[test]
     fn qualified_rust_functions_are_functions() {
         for (code, name) in [
             ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
