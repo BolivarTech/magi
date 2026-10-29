@@ -84,7 +84,7 @@ impl LanguageExtractor for PythonExtractor {
 
     /// Splits a class at its methods: each `def` / `async def` at the indentation of the
     /// class body, with its decorators, on a line that starts a logical line (outside
-    /// triple-quoted strings and brackets; see [`continued_lines`]). O(n) in the class's lines.
+    /// triple-quoted strings and brackets; see `continued_lines`). O(n) in the class's lines.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         // MAGI FIX (S6 loop 3): a class too large for one batch is reviewed method by method.
         if unit.kind != UnitKind::Class {
