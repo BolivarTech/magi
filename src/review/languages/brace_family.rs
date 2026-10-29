@@ -1406,6 +1406,19 @@ mod tests {
     }
 
     #[test]
+    fn c_globals_form_a_declaration_group() {
+        // [MAGI S6 loop 4, B2] a global with no declaration keyword fell into a gap.
+        let code = "int counter = 0;\nstatic int state;\nconst char *name = \"x\";\n\nint main(void) {\n    return 0;\n}\n";
+        for ext in [c_extractor(), BraceFamilyExtractor::cpp()] {
+            let units = extract(&ext, code, &[1, 2, 3]);
+            assert_eq!(
+                spans(&units),
+                vec![("declarations", UnitKind::DeclarationGroup, 1, 3)]
+            );
+        }
+    }
+
+    #[test]
     fn qualified_rust_functions_are_functions() {
         for (code, name) in [
             ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
