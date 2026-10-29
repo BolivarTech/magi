@@ -22,6 +22,10 @@ const KNOWN_FILE_EXTENSIONS: [&str; 14] = [
     "env",
 ];
 
+/// Receivers of a field or method access (`self.c`, `this.h`): a citation whose first `.`-segment
+/// is one of them is a member, never a file name, even when its last segment is an extension.
+const FIELD_ACCESS_RECEIVERS: [&str; 5] = ["self", "Self", "this", "super", "cls"];
+
 /// Separator of a qualified citation (`Baz::qux`).
 pub(crate) const PATH_SEPARATOR: &str = "::";
 
@@ -29,6 +33,11 @@ pub(crate) const PATH_SEPARATOR: &str = "::";
 fn last_segment(citation: &str) -> &str {
     let after_path = citation.rsplit(PATH_SEPARATOR).next().unwrap_or(citation);
     after_path.rsplit('.').next().unwrap_or(after_path)
+}
+
+/// Last component of a path, after its last `/` or `\`.
+fn base_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Extension of a path: the text after its last `.`, if it has one.
@@ -52,6 +61,8 @@ pub struct LexicalIndex {
     identifiers: HashSet<String>,
     extractor_files: HashSet<String>,
     file_extensions: HashSet<String>,
+    /// Last path component of every file given to `build` (`lib/this.ts` gives `this.ts`).
+    file_names: HashSet<String>,
     complete: bool,
 }
 
@@ -86,12 +97,14 @@ impl LexicalIndex {
                 .chain(KNOWN_FILE_EXTENSIONS)
                 .map(str::to_string)
                 .collect(),
+            file_names: HashSet::new(),
             complete: true,
         };
         for (path, _) in files {
             if let Some(ext) = extension_of(path) {
                 index.file_extensions.insert(ext.to_string());
             }
+            index.file_names.insert(base_name(path).to_string());
             if registry.get(path).is_some() {
                 index.extractor_files.insert(path.clone());
             }
@@ -122,13 +135,38 @@ impl LexicalIndex {
         self.extractor_files.contains(file)
     }
 
-    /// Whether a `.`-joined citation names a file (`consts.rs`, `conf.toml`) rather than a symbol:
-    /// its last segment is the extension of a file given to `build`, of the registry or of
-    /// `KNOWN_FILE_EXTENSIONS`. A citation joined by `::` is a symbol path, never a file name.
-    /// Cost declared: a field access ending in an extension (`self.c`) is not checked either.
+    /// Whether a citation names a file (`consts.rs`, `conf.toml`, `src/a.rs`) rather than a symbol.
+    ///
+    /// A citation joined by `::` is a symbol path, never a file name. Otherwise it names a file
+    /// when its extension (the text after the last `.`) is the extension of a file given to
+    /// `build`, of the registry or of `KNOWN_FILE_EXTENSIONS`, and it is plausibly a file:
+    ///
+    /// * it has the form of a path (holds `/` or `\`), or
+    /// * it is the name of a file given to `build` (`this.ts` when `lib/this.ts` was reviewed), or
+    /// * its first `.`-segment is not a receiver of [`FIELD_ACCESS_RECEIVERS`].
+    ///
+    /// So `self.c` and `this.inner.h` are field accesses, looked up as the symbols `c` and `h` by
+    /// [`Self::contains`], while `main.c` stays a file name. Cost declared: any other
+    /// `<name>.<extension>` (`node.ts`) is ambiguous and reads as a file, which skips its symbol
+    /// check and keeps the finding (the fail-open direction of REQ-RV09).
+    ///
+    /// # Arguments
+    ///
+    /// * `citation` - The cited text, as `cited_identifiers` returns it, or a path.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the citation is read as a file name. O(len of `citation`).
     pub fn is_file_name(&self, citation: &str) -> bool {
-        !citation.contains(PATH_SEPARATOR)
-            && extension_of(citation).is_some_and(|ext| self.file_extensions.contains(ext))
+        // MAGI FIX (S6 loop 3): a field access on a receiver (`self.c`) is a symbol, not a file.
+        if citation.contains(PATH_SEPARATOR)
+            || !extension_of(citation).is_some_and(|ext| self.file_extensions.contains(ext))
+        {
+            return false;
+        }
+        let is_path = citation.contains(['/', '\\']);
+        let receiver = citation.split('.').next().unwrap_or(citation);
+        is_path || self.file_names.contains(citation) || !FIELD_ACCESS_RECEIVERS.contains(&receiver)
     }
 
     /// False when `build` stopped at the identifier cap: the symbol check is off for the review.
