@@ -136,7 +136,8 @@ fn same_prefix(head: &str, workspace: &str) -> bool {
 /// in both arguments, the workspace is removed as a prefix only at a component boundary (`/w2/a.rs`
 /// does not start with `/w`), the drive letter is compared ignoring case, and a leading `/` left
 /// by that removal and any leading `./` are dropped. An absolute path outside the workspace stays
-/// absolute.
+/// absolute. A workspace that is the filesystem root (`/`) holds every absolute path, so the
+/// leading `/` alone is removed.
 ///
 /// Complexity: O(len of `file` + len of `workspace`).
 pub(crate) fn normalize_location(
@@ -144,10 +145,14 @@ pub(crate) fn normalize_location(
     file: &str,
     line: Option<u32>,
 ) -> (String, Option<u32>) {
-    let workspace = slashed(&workspace.to_string_lossy());
-    let workspace = workspace.trim_end_matches('/');
+    let root = slashed(&workspace.to_string_lossy());
+    let workspace = root.trim_end_matches('/');
     let mut path = slashed(file);
-    if !workspace.is_empty() {
+    if workspace.is_empty() && !root.is_empty() {
+        // MAGI FIX (S6 loop 3): the workspace is the filesystem root (`/`): every absolute path
+        // is under it, so its leading `/` is the removed prefix.
+        path = path.trim_start_matches('/').to_string();
+    } else if !workspace.is_empty() {
         let relative = path
             .get(..workspace.len())
             .filter(|head| same_prefix(head, workspace))
