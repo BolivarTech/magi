@@ -861,6 +861,15 @@ mod tests {
     }
 
     #[test]
+    fn a_java_method_is_named_by_the_identifier_before_its_parameters() {
+        // [MAGI S6 loop 3, B8] the modifier keyword left `static` or `void` as the name.
+        let code = "public static void run() {\n    a();\n}\nprivate int count(String s) {\n    return 0;\n}\npublic static <T> List<T> wrap(T t) {\n    return null;\n}\nprotected Foo(int x) {\n    b();\n}\n";
+        let units = extract(&BraceFamilyExtractor::java(), code, &[2, 5, 8, 11]);
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, vec!["run", "count", "wrap", "Foo"]);
+    }
+
+    #[test]
     fn qualified_rust_functions_are_functions() {
         for (code, name) in [
             ("pub const fn f() -> u8 {\n    1\n}\n", "f"),
