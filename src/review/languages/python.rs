@@ -83,15 +83,16 @@ impl LanguageExtractor for PythonExtractor {
     }
 
     /// Splits a class at its methods: each `def` / `async def` at the indentation of the
-    /// class body, with its decorators, outside triple-quoted strings. O(n) in the class's lines.
+    /// class body, with its decorators, on a line that starts a logical line (outside
+    /// triple-quoted strings and brackets; see [`continued_lines`]). O(n) in the class's lines.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         // MAGI FIX (S6 loop 3): a class too large for one batch is reviewed method by method.
         if unit.kind != UnitKind::Class {
             return Vec::new();
         }
         let lines: Vec<&str> = unit.content.split('\n').collect();
-        let in_literal = literal_lines(&lines);
-        let code = |j: usize| !in_literal.get(j).copied().unwrap_or(false);
+        let continued = continued_lines(&lines);
+        let code = |j: usize| !continued.get(j).copied().unwrap_or(false);
         let Some(class_idx) = lines
             .iter()
             .position(|l| l.trim_start().starts_with("class "))
@@ -114,7 +115,7 @@ impl LanguageExtractor for PythonExtractor {
             let is_def = trimmed.starts_with("def ") || trimmed.starts_with("async def ");
             if code(j) && is_def && indentation(line) == body_indent {
                 let start = scan_back_decorators(&lines, j);
-                let end = find_block_end(&lines, &in_literal, j);
+                let end = find_block_end(&lines, &continued, j);
                 members.push((
                     UnitKind::Function,
                     extract_python_name(trimmed, "def "),
@@ -130,14 +131,99 @@ impl LanguageExtractor for PythonExtractor {
     }
 }
 
-/// Whether each of `lines` starts inside a triple-quoted string, as the Python scanner reads them.
-/// O(n) in the text.
-fn literal_lines(lines: &[&str]) -> Vec<bool> {
-    CodeScanner::new(LexicalRules::python())
-        .scan_all(&lines.join("\n"))
+/// Whether each of `lines` continues a logical line begun on an earlier one: it starts inside a
+/// triple-quoted string (as the Python scanner reads it), inside an open bracket (`(`, `[`,
+/// `{`), or after a line ending in a `\` continuation. Python ignores the indentation of such a
+/// line, so it never ends a block nor starts a construct. O(n) in the text.
+///
+/// Declared: an unclosed bracket (invalid code) carries the continuation to the end of the
+/// text, so the construct open there takes the rest of the file; no line is lost.
+fn continued_lines(lines: &[&str]) -> Vec<bool> {
+    // MAGI FIX (S6 loop 4): a wrapped header (`def f(\n    x,\n) -> None:`) or a dedented
+    // continuation (`)` at column 0) ended the block by its indentation.
+    let literal = CodeScanner::new(LexicalRules::python()).scan_all(&lines.join("\n"));
+    let mut brackets = LogicalLines::default();
+    lines
         .iter()
-        .map(|s| s.starts_in_literal)
+        .enumerate()
+        .map(|(j, line)| {
+            let continued = brackets.continues();
+            brackets.read(line);
+            continued || literal.get(j).is_some_and(|s| s.starts_in_literal)
+        })
         .collect()
+}
+
+/// A Python string being read: its quote and whether it is triple-quoted.
+#[derive(Clone, Copy)]
+struct OpenString {
+    quote: char,
+    triple: bool,
+}
+
+/// What carries a Python logical line over to the next physical line: open brackets, an open
+/// triple-quoted string, or a trailing `\`. Strings and comments are read so that their
+/// brackets do not count.
+#[derive(Default)]
+struct LogicalLines {
+    depth: u32,
+    string: Option<OpenString>,
+    backslash: bool,
+}
+
+impl LogicalLines {
+    /// Whether the next line to read continues the current logical line.
+    fn continues(&self) -> bool {
+        self.depth > 0 || self.backslash || self.string.is_some_and(|s| s.triple)
+    }
+
+    /// Reads one physical line. O(n) in the line.
+    fn read(&mut self, line: &str) {
+        let chars: Vec<char> = line.chars().collect();
+        let at = |k: usize| chars.get(k).copied();
+        let mut last_code: Option<char> = None;
+        let mut k = 0;
+        while let Some(c) = at(k) {
+            match self.string {
+                Some(open) => {
+                    if c == '\\' {
+                        k += 2;
+                        continue;
+                    }
+                    let closes = c == open.quote
+                        && (!open.triple
+                            || (at(k + 1) == Some(open.quote) && at(k + 2) == Some(open.quote)));
+                    if closes {
+                        self.string = None;
+                        k += if open.triple { 3 } else { 1 };
+                        continue;
+                    }
+                }
+                None => match c {
+                    '#' => break,
+                    '"' | '\'' => {
+                        let triple = at(k + 1) == Some(c) && at(k + 2) == Some(c);
+                        self.string = Some(OpenString { quote: c, triple });
+                        last_code = Some(c);
+                        k += if triple { 3 } else { 1 };
+                        continue;
+                    }
+                    '(' | '[' | '{' => self.depth = self.depth.saturating_add(1),
+                    ')' | ']' | '}' => self.depth = self.depth.saturating_sub(1),
+                    _ => {}
+                },
+            }
+            if self.string.is_none() && !c.is_whitespace() {
+                last_code = Some(c);
+            }
+            k += 1;
+        }
+        // A one-quote string cannot span lines without a `\`; an unclosed one ends here.
+        if self.string.is_some_and(|s| !s.triple) {
+            self.string = None;
+        }
+        self.backslash = self.string.is_none() && last_code == Some('\\');
+    }
 }
 
 /// Intermediate detected construct.
@@ -150,14 +236,15 @@ struct PythonConstruct {
 
 /// Detect Python constructs using indentation.
 fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
-    let in_literal = literal_lines(lines);
+    let continued = continued_lines(lines);
     let mut constructs = Vec::new();
     let mut i = 0;
 
     while let Some(&line) = lines.get(i) {
         // MAGI FIX (S6 loop 3): a line that starts inside a triple-quoted string is string text,
-        // never a definition, import or assignment.
-        if in_literal.get(i).copied().unwrap_or(false) {
+        // never a definition, import or assignment; (S6 loop 4) nor is a line that continues a
+        // bracket or a `\` continuation.
+        if continued.get(i).copied().unwrap_or(false) {
             i += 1;
             continue;
         }
@@ -169,7 +256,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         if (trimmed.starts_with("def ") || trimmed.starts_with("async def ")) && indent == 0 {
             let name = extract_python_name(trimmed, "def ");
             let start = scan_back_decorators(lines, i);
-            let end = find_block_end(lines, &in_literal, i);
+            let end = find_block_end(lines, &continued, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::Function,
                 name,
@@ -184,7 +271,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         if trimmed.starts_with("class ") && indent == 0 {
             let name = extract_python_name(trimmed, "class ");
             let start = scan_back_decorators(lines, i);
-            let end = find_block_end(lines, &in_literal, i);
+            let end = find_block_end(lines, &continued, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::Class,
                 name,
@@ -210,7 +297,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
 
         // Module-level assignment at indent 0 → DeclarationGroup
         if indent == 0 && is_module_assignment(trimmed) {
-            let group_end = find_assignment_group_end(lines, &in_literal, i);
+            let group_end = find_assignment_group_end(lines, &continued, i);
             let name = trimmed
                 .split(['=', ':', ' '])
                 .next()
@@ -264,16 +351,16 @@ fn indentation(line: &str) -> usize {
 /// Find the end of a Python indented block: the last line before the first code line indented
 /// no deeper than the definition.
 ///
-/// As in Python's own tokenizer, a comment-only line and a line that starts inside a
-/// triple-quoted string never end the block (`in_literal[j]` is the scanner's
-/// [`super::scanner::ScannedLine::starts_in_literal`]). A string line extends the block; an
+/// As in Python's own tokenizer, a comment-only line and a line that continues a logical line
+/// (`continued[j]`, from [`continued_lines`]: inside a triple-quoted string or a bracket, or
+/// after a `\`) never end the block. A continued line extends the block; an
 /// unindented comment does not, so a comment between two definitions stays outside both.
 /// O(n) in the lines after `def_line`.
-fn find_block_end(lines: &[&str], in_literal: &[bool], def_line: usize) -> usize {
+fn find_block_end(lines: &[&str], continued: &[bool], def_line: usize) -> usize {
     let def_indent = lines.get(def_line).map_or(0, |line| indentation(line));
     let mut end = def_line;
     for (j, line) in lines.iter().enumerate().skip(def_line + 1) {
-        if in_literal.get(j).copied().unwrap_or(false) {
+        if continued.get(j).copied().unwrap_or(false) {
             end = j;
             continue;
         }
@@ -317,12 +404,12 @@ fn find_import_group_end(lines: &[&str], start: usize) -> usize {
 
 /// Find end of a contiguous assignment group at indent 0.
 ///
-/// A line that starts inside a triple-quoted string (`in_literal[j]`) belongs to the assignment
-/// that opened the string, so it extends the group. O(n) in the lines after `start`.
-fn find_assignment_group_end(lines: &[&str], in_literal: &[bool], start: usize) -> usize {
+/// A line that continues a logical line (`continued[j]`: inside a triple-quoted string or a
+/// bracket, or after a `\`) belongs to the assignment that opened it, so it extends the group. O(n) in the lines after `start`.
+fn find_assignment_group_end(lines: &[&str], continued: &[bool], start: usize) -> usize {
     let mut end = start;
     for (j, line) in lines.iter().enumerate().skip(start + 1) {
-        if in_literal.get(j).copied().unwrap_or(false) {
+        if continued.get(j).copied().unwrap_or(false) {
             end = j;
             continue;
         }
@@ -572,6 +659,7 @@ def g():
             vec![
                 ("f", UnitKind::Function, 1, 4),
                 ("g", UnitKind::Function, 6, 7),
+                ("lines 5-5", UnitKind::TopLevel, 5, 5),
             ]
         );
     }
