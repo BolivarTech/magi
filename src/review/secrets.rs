@@ -338,6 +338,28 @@ pub fn display_path(path: &str) -> String {
         .collect()
 }
 
+/// `text` with every secret [`find_secret`] would name replaced by `<redacted: <pattern name>>`.
+///
+/// # Arguments
+/// * `text` - Any text about to leave the process.
+///
+/// # Returns
+/// The masked text; `text` unchanged when it holds no secret.
+pub fn mask_secrets(text: &str) -> String {
+    text.to_string()
+}
+
+/// `text` as it may leave the process: [`mask_secrets`], then every control character escaped.
+///
+/// # Arguments
+/// * `text` - Any foreign text (git stderr, a path, a ref, a model message).
+///
+/// # Returns
+/// The masked, escaped text.
+pub fn outward_text(text: &str) -> String {
+    text.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +562,36 @@ mod tests {
         // [CP2 MS2 S1b1 loop 16] a file name can carry a terminal escape; the report never replays it.
         assert_eq!(display_path("a\u{1b}[31m.rs"), "a\\u{1b}[31m.rs");
         assert_eq!(display_path("src/a.rs"), "src/a.rs");
+    }
+
+    #[test]
+    fn mask_secrets_replaces_only_the_secret_span_and_keeps_the_rest() {
+        // [MAGI S6 loop 3, S1] the outward scrubber masks the span, not the whole text.
+        let line = "token sk-abcdefghijklmnopqrstuvwxyz0123 here"; // allow-secret-scan
+        assert_eq!(mask_secrets(line), "token <redacted: openai-key> here");
+        let two = "a=AKIAABCDEFGHIJKLMNOP b=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!"; // allow-secret-scan
+        let want = "a=<redacted: aws-access-key> b=<redacted: github-token>!";
+        assert_eq!(mask_secrets(two), want);
+        assert_eq!(mask_secrets("let x = 1;"), "let x = 1;");
+    }
+
+    #[test]
+    fn mask_secrets_hides_a_whole_pem_block_and_an_aws_secret_assignment() {
+        // [MAGI S6 loop 3, S1] the PEM body matches no pattern, so the block is masked to its END line.
+        let end = concat!("-----", "END RSA PRIVATE KEY-----");
+        let pem = format!("x {PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\nMIIBOgIBAAJBAK\n{end} y");
+        assert_eq!(mask_secrets(&pem), "x <redacted: pem-private-key> y");
+        let open = format!("x {PGP_PRIVATE_KEY}\nbody without end");
+        assert_eq!(mask_secrets(&open), "x <redacted: pgp-private-key>");
+        let aws = "aws_secret_access_key = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA tail"; // allow-secret-scan
+        assert_eq!(mask_secrets(aws), "<redacted: aws-secret-key> tail");
+    }
+
+    #[test]
+    fn outward_text_masks_secrets_and_escapes_control_characters() {
+        let raw = "fatal: \u{1b}[31mbad sk-abcdefghijklmnopqrstuvwxyz0123\n"; // allow-secret-scan
+        let out = outward_text(raw);
+        assert_eq!(out, "fatal: \u{1b}[31mbad <redacted: openai-key>\n");
+        assert_eq!(find_secret(&out), None);
     }
 }

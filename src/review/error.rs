@@ -121,3 +121,63 @@ pub enum ReviewError {
         path: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::secrets::find_secret;
+
+    /// A secret-shaped token, split so the line holds no literal key.
+    fn key() -> String {
+        format!("sk-{}", "a".repeat(30))
+    }
+
+    /// Every variant that carries foreign text (git stderr, a path, a ref, a message).
+    fn carrying(text: &str) -> Vec<ReviewError> {
+        let t = text.to_string();
+        vec![
+            ReviewError::OutsideWorkspace(t.clone()),
+            ReviewError::InvalidRef(t.clone()),
+            ReviewError::RefNotFound(t.clone()),
+            ReviewError::Git(t.clone()),
+            ReviewError::NotReviewable {
+                path: t.clone(),
+                cause: "binary",
+            },
+            ReviewError::TooLargeForBatch {
+                what: t.clone(),
+                tokens: 1,
+                limit: 1,
+            },
+            ReviewError::Consolidation(t.clone()),
+            ReviewError::Io(t.clone()),
+            ReviewError::TooLarge {
+                path: t.clone(),
+                limit: 1,
+            },
+            ReviewError::Protected(t.clone()),
+            ReviewError::NotRegularFile(t.clone()),
+            ReviewError::EgressSecret { path: t },
+        ]
+    }
+
+    #[test]
+    fn no_error_message_carries_a_secret_from_its_foreign_text() {
+        // [MAGI S6 loop 3, S1] every outward error text passes the RV22 detector at Display.
+        for e in carrying(&format!("fatal: bad object {}", key())) {
+            let shown = e.to_string();
+            assert_eq!(find_secret(&shown), None, "{shown}");
+            assert!(shown.contains("<redacted: openai-key>"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn no_error_message_replays_a_control_character() {
+        // [MAGI S6 loop 3, S1] a path or a git diagnostic never replays a terminal escape.
+        for e in carrying("a\u{1b}[2Jb\nc") {
+            let shown = e.to_string();
+            assert!(!shown.chars().any(char::is_control), "{shown:?}");
+            assert!(shown.contains("a\u{1b}[2Jb\nc"), "{shown}");
+        }
+    }
+}
