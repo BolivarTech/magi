@@ -975,6 +975,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     retry_disabled: self.parts.retry_disabled,
                     agent_timeout_secs: self.parts.agent_timeout_secs,
                     approved_batches: Some(plan.batches),
+                    prep_started: None,
                 },
                 ReviewDeps {
                     git: &self.git,

@@ -164,6 +164,9 @@ pub struct ReviewRequest<'a> {
     /// The batch count the caller approved, if any: a review that now splits otherwise fails
     /// with [`ReviewError::PlanChanged`] before any trio call.
     pub approved_batches: Option<usize>,
+    /// When the caller started preparing this review, if before this call: the preparation it
+    /// did first (its own git reads, the gate) is part of `prep_ms`. `None` starts it here.
+    pub prep_started: Option<Instant>,
 }
 
 /// What a review runs on.
@@ -1068,6 +1071,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                prep_started: None,
             },
             ReviewDeps {
                 git: &git,
@@ -1089,6 +1093,53 @@ mod tests {
             serde_json::json!([]),
             serde_json::json!([]),
         ]
+    }
+
+    #[tokio::test]
+    async fn the_preparation_a_caller_did_first_counts_in_prep_ms() {
+        // [MAGI §6 MS2 D loop 3] the runner's own preparation (its git reads, the gate) happens
+        // before `run_review`; the start it passes is where `prep_ms` counts from.
+        const EARLIER: Duration = Duration::from_secs(2);
+        let dir = workspace(1);
+        let git = FakeGit::from(&[(
+            "ls-files --others --ignored --exclude-standard --directory -z -- .",
+            Ok(""),
+        )]);
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let client = MockDecisionClient::new();
+        let out = run_review(
+            ReviewRequest {
+                input: ReviewInput::Directory(dir.path().to_path_buf()),
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                prep_started: Instant::now().checked_sub(EARLIER),
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+            },
+        )
+        .await
+        .expect("runs");
+        assert!(
+            u128::from(out.summary.prep_ms) >= EARLIER.as_millis(),
+            "{} ms",
+            out.summary.prep_ms
+        );
     }
 
     #[tokio::test]
@@ -1330,6 +1381,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                prep_started: None,
             },
             ReviewDeps {
                 git: &git,
@@ -1410,6 +1462,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                prep_started: None,
             },
             ReviewDeps {
                 git: &git,
@@ -1556,6 +1609,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                prep_started: None,
             },
             ReviewDeps {
                 git: &git,
@@ -1846,6 +1900,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                prep_started: None,
             },
             ReviewDeps {
                 git: &git,
@@ -2626,6 +2681,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                prep_started: None,
             },
             ReviewDeps {
                 git: &git,
