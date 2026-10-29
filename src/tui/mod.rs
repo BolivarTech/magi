@@ -1479,7 +1479,7 @@ pub(crate) fn parse_tui_code_review(
     let command = crate::CodeReviewArgs::augment_args(clap::Command::new(program));
     let inert = tui_inert_flags(&command);
     let matches = command.try_get_matches_from(argv).map_err(invalid)?;
-    let given = |id: &str| matches.value_source(id) == Some(clap::parser::ValueSource::CommandLine);
+    let given = |id: &str| was_given(&matches, id);
     if given(TUI_WORKDIR_ARG) {
         return Err(TuiCodeReviewParseError::Invalid(
             TUI_WORKDIR_REFUSED.to_string(),
@@ -1496,6 +1496,23 @@ pub(crate) fn parse_tui_code_review(
         timeout: args.timeout,
         ignored_flags,
     })
+}
+
+/// Whether the user supplied argument `id`: any value source but clap's default counts, so an
+/// argument that ever gains another source (an `env = …`) is still refused or named as not
+/// applied, never ignored in silence.
+///
+/// # Arguments
+/// * `matches` - The parsed arguments.
+/// * `id` - The clap id.
+///
+/// # Returns
+/// `true` when `id` has a value that did not come from its default.
+// MAGI FIX (S6 loop 3): `== CommandLine` would miss an env-sourced value.
+fn was_given(matches: &clap::ArgMatches, id: &str) -> bool {
+    matches
+        .value_source(id)
+        .is_some_and(|s| s != clap::parser::ValueSource::DefaultValue)
 }
 
 /// Why [`command_words`] refused a line: a quote opened and never closed.
@@ -9480,6 +9497,22 @@ end"
             "{:?}",
             plain.messages
         );
+    }
+
+    #[test]
+    fn only_a_default_value_counts_as_not_given() {
+        // E6 (MAGI S6 loop 3): a value clap filled in by default is not the user's; anything else is.
+        let command = clap::Command::new("t")
+            .arg(clap::Arg::new("d").long("d").default_value("x"))
+            .arg(clap::Arg::new("c").long("c"));
+        let defaulted = command.clone().try_get_matches_from(["t"]).expect("parses");
+        assert!(!was_given(&defaulted, "d"));
+        assert!(!was_given(&defaulted, "c"));
+        let typed = command
+            .try_get_matches_from(["t", "--d", "y", "--c", "z"])
+            .expect("parses");
+        assert!(was_given(&typed, "d"));
+        assert!(was_given(&typed, "c"));
     }
 
     #[test]
