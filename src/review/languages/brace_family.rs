@@ -28,6 +28,9 @@ pub struct BraceFamilyExtractor {
     block_keywords: Vec<String>,
     /// Keywords that start a single-line declaration (const, type, use, etc.).
     declaration_keywords: Vec<String>,
+    /// The modifier words a declaration may open with, stripped before the keyword tables are
+    /// matched ([`Self::strip_modifiers`]).
+    modifiers: &'static Modifiers,
     /// Line prefixes for doc comments (e.g., "///", "//!").
     doc_comment_prefixes: Vec<String>,
     /// Line prefixes for attributes (e.g., "#[").
@@ -150,6 +153,30 @@ impl LanguageExtractor for BraceFamilyExtractor {
     }
 }
 
+/// The modifier words of a language, stripped before its keyword tables are matched.
+struct Modifiers {
+    /// Visibility words that may open any declaration (`pub`, `pub(crate)`, `public`,
+    /// `export`): stripped, in any order and number, before every keyword table is matched.
+    visibility: &'static [&'static str],
+    /// Qualifier words that may open a block or function declaration (`const`, `async`,
+    /// `unsafe`, `extern "C"`, `final`): stripped, after the visibility, before the block and
+    /// function tables are matched, never the declaration table (Rust's `const X` is a
+    /// constant, `const fn` a function).
+    qualifiers: &'static [&'static str],
+}
+
+/// A language whose declarations open with their keyword.
+const NO_MODIFIERS: Modifiers = Modifiers {
+    visibility: &[],
+    qualifiers: &[],
+};
+
+/// Rust's visibility (`pub`, `pub(crate)`, `pub(in path)`) and function qualifiers.
+const RUST_MODIFIERS: Modifiers = Modifiers {
+    visibility: &["pub"],
+    qualifiers: &["const", "async", "unsafe", "extern", "default"],
+};
+
 /// Intermediate representation of a detected construct.
 struct Construct {
     kind: UnitKind,
@@ -173,22 +200,13 @@ impl BraceFamilyExtractor {
             let trimmed = line.trim();
             let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
 
-            // Check block keywords, then function keywords: Java's `public class` would
-            // otherwise read as a function named `class`.
-            let keyword = self
-                .match_block_keyword(trimmed)
-                .map(|kind| (kind, &self.block_keywords))
-                .or_else(|| {
-                    self.match_function_keyword(trimmed)
-                        .map(|kind| (kind, &self.function_keywords))
-                });
             let stops = |j: usize| self.starts_construct(lines, scanned, j);
-            if let Some((kind, keywords)) = keyword {
+            if let Some((kind, keywords, matched)) = self.construct_keyword(trimmed) {
                 // MAGI FIX (S6 loop 3): a Java method is named by the identifier before `(`.
                 let name = Some(kind)
                     .filter(|k| self.name_before_paren && *k == UnitKind::Function)
                     .and_then(|_| identifier_before_paren(trimmed))
-                    .unwrap_or_else(|| extract_name_from_line(trimmed, keywords));
+                    .unwrap_or_else(|| extract_name_from_line(matched, keywords));
                 let start = self.scan_back_for_docs(lines, i);
                 let end = brace_block_end(lines, scanned, i, line_num, &stops);
                 constructs.push(Construct {
@@ -217,19 +235,19 @@ impl BraceFamilyExtractor {
                 }
             }
             // Check declaration keywords
-            if self.match_declaration_keyword(trimmed) {
+            if self.is_declaration(trimmed) {
                 let group_start = i;
                 let mut group_end = i;
                 // Scan forward for contiguous declarations of the same kind
                 while group_end + 1 < lines.len() {
                     let next = lines.get(group_end + 1).map_or("", |l| l.trim());
-                    if self.match_declaration_keyword(next) {
+                    if self.is_declaration(next) {
                         group_end += 1;
                     } else if next.is_empty() {
                         // Allow blank lines within groups
                         if lines
                             .get(group_end + 2)
-                            .is_some_and(|l| self.match_declaration_keyword(l.trim()))
+                            .is_some_and(|l| self.is_declaration(l.trim()))
                         {
                             group_end += 2;
                         } else {
@@ -240,7 +258,7 @@ impl BraceFamilyExtractor {
                     }
                 }
                 let doc_start = self.scan_back_for_docs(lines, group_start);
-                let name = self.declaration_group_name(trimmed);
+                let name = self.declaration_group_name(self.strip_modifiers(trimmed, false));
                 constructs.push(Construct {
                     kind: UnitKind::DeclarationGroup,
                     name,
@@ -255,6 +273,65 @@ impl BraceFamilyExtractor {
         }
 
         constructs
+    }
+
+    /// The keyword that opens a block or function construct on a trimmed line, its table, and
+    /// the text it matched: the line with its visibility and qualifiers stripped
+    /// ([`Self::strip_modifiers`]) or, failing that, the line as written. Block keywords are
+    /// tried before function keywords: Java's `public class` would otherwise read as a function
+    /// named `class`. O(k + n) for k keywords and a line of n characters.
+    fn construct_keyword<'t>(&self, trimmed: &'t str) -> Option<(UnitKind, &[String], &'t str)> {
+        // MAGI FIX (S6 loop 4): qualifiers combine freely (`pub(super) async unsafe fn`); the
+        // tables of fixed prefixes missed most combinations.
+        let candidates = [self.strip_modifiers(trimmed, true), trimmed];
+        candidates
+            .iter()
+            .find_map(|&text| {
+                self.match_block_keyword(text)
+                    .map(|kind| (kind, self.block_keywords.as_slice(), text))
+            })
+            .or_else(|| {
+                candidates.iter().find_map(|&text| {
+                    self.match_function_keyword(text)
+                        .map(|kind| (kind, self.function_keywords.as_slice(), text))
+                })
+            })
+    }
+
+    /// Whether a trimmed line opens a declaration: a declaration keyword starts the line as
+    /// written or with its visibility stripped (`pub(crate) use`). O(k + n).
+    fn is_declaration(&self, trimmed: &str) -> bool {
+        self.match_declaration_keyword(trimmed)
+            || self.match_declaration_keyword(self.strip_modifiers(trimmed, false))
+    }
+
+    /// `trimmed` without the visibility words it opens with and, when `qualifiers`, the
+    /// qualifier words after them, in any order and number. A word counts only when a blank or
+    /// a `(` follows it (`public`, not `publicity`); a `(...)` right after a word is part of it
+    /// (`pub(in crate::a)`), and a quoted string after a word is too (`extern "C"`). O(n) in
+    /// the line.
+    ///
+    /// # Arguments
+    ///
+    /// * `trimmed` - A trimmed line.
+    /// * `qualifiers` - Whether the qualifier words are stripped too.
+    ///
+    /// # Returns
+    ///
+    /// The rest of the line, trimmed at its start; `trimmed` when it opens with no such word.
+    fn strip_modifiers<'t>(&self, trimmed: &'t str, qualifiers: bool) -> &'t str {
+        let words = self
+            .modifiers
+            .visibility
+            .iter()
+            .chain(self.modifiers.qualifiers.iter().filter(|_| qualifiers));
+        let mut rest = trimmed;
+        loop {
+            let Some(after) = words.clone().find_map(|w| strip_modifier(rest, w)) else {
+                return rest;
+            };
+            rest = after;
+        }
     }
 
     /// Check if the line starts a function declaration.
@@ -278,9 +355,8 @@ impl BraceFamilyExtractor {
             return false;
         };
         let trimmed = line.trim();
-        self.match_function_keyword(trimmed).is_some()
-            || self.match_block_keyword(trimmed).is_some()
-            || self.match_declaration_keyword(trimmed)
+        self.construct_keyword(trimmed).is_some()
+            || self.is_declaration(trimmed)
             || self.signature_name(line, scanned.get(j)).is_some()
     }
 
@@ -501,6 +577,26 @@ fn identifier_before_paren(line: &str) -> Option<String> {
     Some(name).filter(|n| !n.is_empty())
 }
 
+/// `text` without the modifier `word` it opens with, and what belongs to the word: a `(...)`
+/// right after it (`pub(crate)`) or, after blanks, a quoted string (`extern "C"`); the rest is
+/// trimmed at its start. `None` when `text` does not open with `word` followed by a blank or a
+/// `(`. O(n) in the text.
+fn strip_modifier<'t>(text: &'t str, word: &str) -> Option<&'t str> {
+    let rest = text.strip_prefix(word)?;
+    if let Some(inner) = rest.strip_prefix('(') {
+        let (_, after) = inner.split_once(')')?;
+        return Some(after.trim_start());
+    }
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    match rest.strip_prefix('"').and_then(|r| r.split_once('"')) {
+        Some((_, after)) => Some(after.trim_start()),
+        None => Some(rest),
+    }
+}
+
 /// Extract a name from a line given a set of keywords.
 fn extract_name_from_line(trimmed: &str, keywords: &[String]) -> String {
     for kw in keywords {
@@ -544,50 +640,21 @@ impl BraceFamilyExtractor {
         Self {
             language: "rust".to_string(),
             exts: &["rs"],
-            function_keywords: vec![
-                "pub(crate) const fn ".to_string(),
-                "pub const fn ".to_string(),
-                "const fn ".to_string(),
-                "pub(crate) unsafe fn ".to_string(),
-                "pub unsafe fn ".to_string(),
-                "unsafe fn ".to_string(),
-                "pub extern \"C\" fn ".to_string(),
-                "extern \"C\" fn ".to_string(),
-                "pub async fn ".to_string(),
-                "pub(crate) async fn ".to_string(),
-                "async fn ".to_string(),
-                "pub(crate) fn ".to_string(),
-                "pub fn ".to_string(),
-                "fn ".to_string(),
-            ],
+            function_keywords: vec!["fn ".to_string()],
             block_keywords: vec![
-                "pub(crate) struct ".to_string(),
-                "pub struct ".to_string(),
                 "struct ".to_string(),
-                "pub(crate) enum ".to_string(),
-                "pub enum ".to_string(),
                 "enum ".to_string(),
-                "pub(crate) trait ".to_string(),
-                "pub trait ".to_string(),
                 "trait ".to_string(),
                 "impl ".to_string(),
-                "pub(crate) mod ".to_string(),
-                "pub mod ".to_string(),
                 "mod ".to_string(),
             ],
             declaration_keywords: vec![
-                "pub(crate) const ".to_string(),
-                "pub const ".to_string(),
                 "const ".to_string(),
-                "pub(crate) static ".to_string(),
-                "pub static ".to_string(),
                 "static ".to_string(),
-                "pub(crate) type ".to_string(),
-                "pub type ".to_string(),
                 "type ".to_string(),
-                "pub use ".to_string(),
                 "use ".to_string(),
             ],
+            modifiers: &RUST_MODIFIERS,
             doc_comment_prefixes: vec!["///".to_string(), "//!".to_string()],
             attribute_prefixes: vec!["#[".to_string()],
             lexical_rules: LexicalRules::rust(),
@@ -615,6 +682,7 @@ impl BraceFamilyExtractor {
             ],
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec![],
+            modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::c(),
             signature_functions: true,
             name_before_paren: false,
@@ -646,6 +714,7 @@ impl BraceFamilyExtractor {
             ],
             doc_comment_prefixes: vec!["//".to_string()],
             attribute_prefixes: vec![],
+            modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::go(),
             signature_functions: false,
             name_before_paren: false,
@@ -674,6 +743,7 @@ impl BraceFamilyExtractor {
             declaration_keywords: vec!["import ".to_string(), "package ".to_string()],
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec!["@".to_string()],
+            modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::java(),
             signature_functions: false,
             name_before_paren: true,
@@ -706,6 +776,7 @@ impl BraceFamilyExtractor {
             ],
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: vec!["@".to_string()],
+            modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::javascript(),
             signature_functions: false,
             name_before_paren: false,
