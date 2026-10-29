@@ -7,6 +7,26 @@
 use super::filter::Skipped;
 use super::secrets::{display_path, outward_text};
 
+/// What set a review's total wall clock (REQ-RV06, RV17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetLimit {
+    /// An explicit `--timeout`.
+    Timeout,
+    /// What is left of the calling run (the agent tool's run deadline); no `--timeout` was set.
+    RunDeadline,
+}
+
+/// The advice that ends a [`ReviewError::Budget`] message, naming the bound the user can move.
+// MAGI FIX (S6 loop 4): a run deadline is not a `--timeout`; the message names what was set.
+fn budget_advice(limit: BudgetLimit, min_secs: u64) -> String {
+    match limit {
+        BudgetLimit::Timeout => format!("pass --timeout {min_secs} or more"),
+        BudgetLimit::RunDeadline => {
+            format!("the review needs {min_secs} s or more left of the calling run")
+        }
+    }
+}
+
 /// Every way a review can fail before or while it calls a model.
 ///
 /// Each variant is specific so callers decide by the variant, never by the text of the message.
@@ -61,13 +81,15 @@ pub enum ReviewError {
         /// The per-batch limit in tokens.
         limit: usize,
     },
-    /// An explicit `--timeout` that leaves each batch less wall clock than the floor needs.
+    /// An explicit `--timeout`, or what is left of a calling run, that leaves each batch less
+    /// wall clock than the floor needs.
     // D22 compares the per-batch WALL CLOCK with the wall clock a batch needs at the floor; the
     // ceiling and the raw floor are context, never claimed to be "below" each other.
     #[error(
         "{batches} batches leave {per_batch_wall_clock_secs} s per batch, less than the \
          {min_per_batch_secs} s a batch needs at the {floor_secs} s floor (per-batch ceiling \
-         {per_batch_ceiling_secs} s); pass --timeout {min_timeout_secs} or more"
+         {per_batch_ceiling_secs} s); {}",
+        budget_advice(*.limit, *.min_timeout_secs)
     )]
     Budget {
         /// Batches the review was split into.
@@ -80,8 +102,10 @@ pub enum ReviewError {
         per_batch_ceiling_secs: u64,
         /// The absolute floor of the ceiling.
         floor_secs: u64,
-        /// The smallest `--timeout` that would be enough.
+        /// The smallest total that would be enough: a `--timeout`, or what is left of the run.
         min_timeout_secs: u64,
+        /// Which bound set the total, so the message names the one the user can move.
+        limit: BudgetLimit,
     },
     /// The batch reports could not be merged into one report.
     #[error("consolidation failed: {}", outward_text(.0))]

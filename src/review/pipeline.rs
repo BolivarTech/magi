@@ -22,7 +22,7 @@ use super::clock::{batch_wall_clock_secs, pre_budget};
 use super::consolidate::{
     apply_agreement, consolidate, BatchOutcome, Consolidated, ConsolidatedFinding,
 };
-use super::error::ReviewError;
+use super::error::{BudgetLimit, ReviewError};
 use super::filter::{filter_files, Filtered, SkipCause, Skipped};
 use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
@@ -311,9 +311,11 @@ pub async fn run_review(
             "the lexical index hit its cap: the symbol check is off for this review"
         );
     }
-    let total = review_total(req.timeout_secs, req.deadline);
-    if let Some(total) = total {
-        let ceiling = pre_budget(total, planned, req.max_rotations, req.retry_disabled)?;
+    let bound = review_total(req.timeout_secs, req.deadline);
+    let total = bound.map(|(secs, _)| secs);
+    if let Some((total, limit)) = bound {
+        let ceiling = pre_budget(total, planned, req.max_rotations, req.retry_disabled)
+            .map_err(|e| with_budget_limit(e, limit))?;
         summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
     }
     summary.prep_ms = millis(prep.elapsed());
@@ -503,14 +505,29 @@ fn filter_and_plan(
     Ok((filtered, window, batches))
 }
 
-/// The review's total in seconds, read when the preparation ends: the explicit `--timeout`, at
-/// most what is left of the caller's deadline; `None` when there is neither.
-fn review_total(timeout_secs: Option<u64>, deadline: Option<Instant>) -> Option<u64> {
+/// The review's total in seconds, read when the preparation ends, with the bound that set it:
+/// the explicit `--timeout`, at most what is left of the caller's deadline; `None` when there is
+/// neither.
+fn review_total(
+    timeout_secs: Option<u64>,
+    deadline: Option<Instant>,
+) -> Option<(u64, BudgetLimit)> {
     let left = deadline.map(|d| d.saturating_duration_since(Instant::now()).as_secs());
     match (timeout_secs, left) {
-        (Some(t), Some(l)) => Some(t.min(l)),
-        (t, l) => t.or(l),
+        (Some(t), Some(l)) if l < t => Some((l, BudgetLimit::RunDeadline)),
+        (Some(t), _) => Some((t, BudgetLimit::Timeout)),
+        (None, l) => l.map(|l| (l, BudgetLimit::RunDeadline)),
     }
+}
+
+/// `e` with its budget bound set to `limit` (any other error unchanged), so the message names the
+/// bound the user can move.
+// MAGI FIX (S6 loop 4): `pre_budget` knows only a total; the pipeline knows what set it.
+fn with_budget_limit(mut e: ReviewError, limit: BudgetLimit) -> ReviewError {
+    if let ReviewError::Budget { limit: bound, .. } = &mut e {
+        *bound = limit;
+    }
+    e
 }
 
 /// The single content source an input resolved to: the worktree (with its old side, if any) or

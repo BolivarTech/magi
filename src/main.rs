@@ -22748,6 +22748,7 @@ mod code_review_surface_tests {
             per_batch_ceiling_secs: 0,
             floor_secs: 15,
             min_timeout_secs: 2349,
+            limit: magi_rs::review::error::BudgetLimit::Timeout,
         });
         assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -22835,6 +22836,7 @@ mod code_review_surface_tests {
                 per_batch_ceiling_secs: 0,
                 floor_secs: 15,
                 min_timeout_secs: 2349,
+                limit: magi_rs::review::error::BudgetLimit::Timeout,
             },
             ReviewError::TooLarge {
                 path: "a".into(),
@@ -22884,7 +22886,8 @@ mod code_review_surface_tests {
                 min_per_batch_secs: 783,
                 per_batch_ceiling_secs: 0,
                 floor_secs: 15,
-                min_timeout_secs: 2349
+                min_timeout_secs: 2349,
+                limit: magi_rs::review::error::BudgetLimit::Timeout,
             }),
             "budget"
         );

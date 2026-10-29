@@ -5,7 +5,7 @@
 //! The clock of a review (REQ-RV06): how an explicit `--timeout` is split over the batches, the
 //! budget check before the first trio call, and the worst case the TUI shows.
 
-use super::error::ReviewError;
+use super::error::{BudgetLimit, ReviewError};
 use crate::magi::{
     attempt_factor, derive_ceiling_from_timeout, headless_consult_timeout_secs,
     raw_ceiling_from_factor, AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS, CALLS_PER_MODEL,
@@ -100,6 +100,7 @@ pub fn pre_budget(
                 attempt_factor(max_rotations, retry_disabled),
             ),
             floor_secs: AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+            limit: BudgetLimit::Timeout,
             min_timeout_secs: u64::try_from(batches)
                 .unwrap_or(u64::MAX)
                 .saturating_mul(min_per_batch),
