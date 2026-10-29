@@ -163,7 +163,9 @@ rlimit = "0.11.0"
 # group. Safe wrapper over `kill(2)`, honoring crate-wide `forbid(unsafe_code)`;
 # `process` feature only. On Linux this unions with the `fs` feature declared in
 # the linux-only block below. Pinned.
-rustix = { version = "1", features = ["process"] }
+# MAGI S6 loop 3 (code-review A5): `fs` too, on every unix, for `OFlags::NONBLOCK`: a
+# worktree file swapped for a FIFO must not block the open (no libc, no `unsafe`).
+rustix = { version = "1", features = ["process", "fs"] }
 
 # Vault MS2 — REQ-V42 layer 2 (Linux only): PR_SET_DUMPABLE=0 (also blocks peer ptrace).
 [target.'cfg(target_os = "linux")'.dependencies]

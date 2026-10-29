@@ -277,7 +277,13 @@ impl WorktreeSource<'_> {
         if !std::fs::metadata(&canonical).map_err(io)?.is_file() {
             return Err(ReviewError::NotRegularFile(path.to_string()));
         }
-        let opened = same_file::Handle::from_file(open(&canonical).map_err(io)?).map_err(io)?;
+        let file = open(&canonical).map_err(io)?;
+        // Checked again on the handle: the path may have been swapped between the check above
+        // and the open (a FIFO, a device file).
+        if !file.metadata().map_err(io)?.is_file() {
+            return Err(ReviewError::NotRegularFile(path.to_string()));
+        }
+        let opened = same_file::Handle::from_file(file).map_err(io)?;
         // Re-resolved after the open: a component swapped for an escaping link before the open
         // either still escapes, or names another file than the one opened.
         let now = std::fs::canonicalize(&joined)
@@ -298,7 +304,12 @@ impl WorktreeSource<'_> {
     }
 }
 
-/// Opens a worktree file for reading.
+/// Opens a worktree file for reading without ever blocking in the open.
+///
+/// On unix the open carries `O_NONBLOCK`: a path swapped for a FIFO between the type check and
+/// the open returns at once instead of waiting for a writer (the caller then refuses the handle,
+/// which is not a regular file). On a regular file the flag changes nothing. Elsewhere it is a
+/// plain open: Windows has no file type whose open blocks this way.
 ///
 /// # Arguments
 /// * `path` - The canonical path to open.
@@ -308,8 +319,18 @@ impl WorktreeSource<'_> {
 ///
 /// # Errors
 /// Any error of the open.
+// MAGI FIX (S6 loop 3): TOCTOU, a FIFO swapped in after the `is_file` check blocked the open.
 pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let nonblock = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits())
+            .map_err(|_| std::io::Error::other("O_NONBLOCK does not fit an open flag"))?;
+        options.custom_flags(nonblock);
+    }
+    options.open(path)
 }
 
 /// Reads a git revision (`git show <rev>:./<path>`), never the worktree.
