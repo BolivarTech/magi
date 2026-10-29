@@ -5,8 +5,9 @@
 //! The git runner of `code-review`: an untrusted repository's config and environment never run
 //! code, and no git output takes more memory than its cap.
 //!
-//! Every call runs `git -C <workdir>` with [`NEUTRAL_GIT_CONFIG`] and, when the reviewed
-//! repository's own config defines filter drivers, `-c` overrides that disable them; the child
+//! Every call runs `git -C <workdir>` with [`NEUTRAL_GIT_CONFIG`] and, when git's config (any
+//! scope: system, global, the repository's own) defines filter drivers, `-c` overrides that
+//! disable them; the child
 //! gets only the tool environment allowlist plus `GIT_NO_LAZY_FETCH=1` (a partial clone never
 //! downloads during a review) and `GIT_LITERAL_PATHSPECS=1` (a path is never a glob).
 
@@ -70,9 +71,6 @@ const FILTER_PROBE: &[&str] = &[
     "--get-regexp",
     "^filter\\.",
 ];
-
-/// Scopes that belong to the reviewed repository, not to the operator.
-const REPOSITORY_SCOPES: &[&str] = &["local", "worktree"];
 
 /// What each neutralized driver is set to.
 const NEUTRALIZED_FILTER_SETTINGS: &[&str] = &["clean=", "smudge=", "process=", "required=false"];
@@ -455,21 +453,22 @@ pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBu
         .map_err(|_| ReviewError::OutsideWorkspace(path.display().to_string()))
 }
 
-/// The `-c` values that neutralize the filter drivers the reviewed repository's own config
-/// (scope `local` or `worktree`) defines, sorted by driver.
+/// The `-c` values that neutralize every filter driver git's config defines, in any scope
+/// (`system`, `global`, `local`, `worktree`, an included file), sorted by driver.
 ///
 /// Reads the output of `git config --null --show-scope --get-regexp ^filter\.`: records of
 /// `<scope> NUL <key>` followed by `LF <value> NUL`, or by `NUL` alone for a key without value.
 /// The key ends at the first `LF` (a value may hold more). This shape is git's output, not a
 /// documented format: `--show-scope` needs git 2.26 or later, the parser was measured against
-/// git 2.56 (the tests pin each shape), and a record it cannot parse fails closed. A name with a
-/// local entry is neutralized whole, including what the operator's own config defines under it: the safe
-/// direction. The operator's filters (`global`, `system`) keep running. O(n) in the input.
+/// git 2.56 (the tests pin each shape), and a record it cannot parse fails closed. No filter
+/// runs during a review, the operator's included: a filter receives the worktree bytes before the
+/// review's secret scan (REQ-RV22), so an LFS file is read as its worktree bytes, not its pointer.
+/// O(n) in the input.
 ///
 /// # Errors
 ///
 /// [`ReviewError::Git`] for a truncated record, a key outside `filter.<name>.<variable>`, a
-/// repository driver name with `=` (which `-c` cannot express), or overrides over
+/// driver name with `=` (which `-c` cannot express), or overrides over
 /// [`MAX_FILTER_OVERRIDE_BYTES`].
 pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewError> {
     let unreadable = |what: String| {
@@ -480,7 +479,7 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
     let mut names = BTreeSet::new();
     let mut rest = config_z;
     while !rest.is_empty() {
-        let (scope, after) =
+        let (_scope, after) =
             split_at_nul(rest).ok_or_else(|| unreadable("a truncated record".into()))?;
         let (entry, after) =
             split_at_nul(after).ok_or_else(|| unreadable("a truncated record".into()))?;
@@ -493,14 +492,14 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
             .filter(|(name, variable)| !name.is_empty() && !variable.is_empty())
             .map(|(name, _)| name)
             .ok_or_else(|| unreadable(format!("unexpected key {key:?}")))?;
-        if REPOSITORY_SCOPES.iter().any(|s| s.as_bytes() == scope) {
-            if name.contains('=') {
-                return Err(unreadable(format!(
-                    "a filter driver name with '=': {name:?}"
-                )));
-            }
-            names.insert(name.to_string());
+        // MAGI FIX (S6 loop 3): every scope, the operator's too: a filter gets the worktree bytes
+        // before the review scans them (RV22), wherever it is defined.
+        if name.contains('=') {
+            return Err(unreadable(format!(
+                "a filter driver name with '=': {name:?}"
+            )));
         }
+        names.insert(name.to_string());
     }
     let overrides: Vec<String> = names
         .iter()
@@ -513,7 +512,7 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
     if overrides.iter().map(String::len).sum::<usize>() > MAX_FILTER_OVERRIDE_BYTES {
         let listed: Vec<&str> = names.iter().map(String::as_str).collect();
         return Err(ReviewError::Git(format!(
-            "the repository defines more filter drivers than a review can disable ({} drivers: {})",
+            "git's config defines more filter drivers than a review can disable ({} drivers: {})",
             listed.len(),
             listed.join(", ")
         )));
