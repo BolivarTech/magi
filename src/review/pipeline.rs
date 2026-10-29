@@ -270,7 +270,8 @@ pub async fn run_review(
     req: ReviewRequest<'_>,
     mut deps: ReviewDeps<'_>,
 ) -> Result<ReviewOutcome, ReviewError> {
-    let prep = Instant::now();
+    // MAGI FIX (S6 loop 3): `prep_ms` counts from the caller's start, when it gave one.
+    let prep = req.prep_started.unwrap_or_else(Instant::now);
     let mut summary = ReviewSummary::default();
     let resolved = resolve_input(&req.input, req.workspace, deps.git, deps.guard)?;
     let inner = content_source(resolved.source_kind, req.workspace, deps.git);

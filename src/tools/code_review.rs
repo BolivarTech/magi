@@ -953,6 +953,9 @@ impl CodeReviewRunner for ProductionReviewRunner {
             ReviewBudget::Total(t) => (Some(t.as_secs()), None),
             ReviewBudget::Until(d) => (None, Some(d)),
         };
+        // MAGI FIX (S6 loop 3): the preparation done here (git's ignored paths, the gate) is
+        // part of the review's `prep_ms`.
+        let prep_started = Instant::now();
         run_cancellable(cancel, async {
             let input = path_input(&self.workspace, plan.input);
             let ignored = self.ignored(&input)?;
@@ -975,7 +978,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     retry_disabled: self.parts.retry_disabled,
                     agent_timeout_secs: self.parts.agent_timeout_secs,
                     approved_batches: Some(plan.batches),
-                    prep_started: None,
+                    prep_started: Some(prep_started),
                 },
                 ReviewDeps {
                     git: &self.git,
