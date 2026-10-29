@@ -110,6 +110,15 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
             r = _result("R16", 2, None, _with_id(stderr))
             self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], path)
 
+    def test_s51_fails_when_a_read_protected_path_holds_a_comma_semicolon_or_space(self) -> None:
+        # [MAGI §6 MS2 loop 4, F1-1] the old entry pattern stopped a path at ',', ';' or a space, so the
+        # protected component fell outside the match and a read .magi file passed unseen.
+        for path in (b".magi/a,b.db (binary)", b".magi/x;y.toml (secret)", b".git/with space (not utf-8)",
+                     b"sub dir/.magi/z.db (binary)"):
+            stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)", path)
+            r = _result("R16", 2, None, _with_id(stderr))
+            self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], path)
+
     def test_s51_fails_on_a_wrong_exit(self) -> None:
         r = _result("R16", 0, None, _with_id(_ROOT_STDERR))
         self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[0]])
