@@ -2264,6 +2264,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deadline_too_close_names_the_calling_run_not_a_timeout_flag() {
+        // [MAGI S6 loop 4, D] the agent tool passes its run's deadline, not a `--timeout`: telling
+        // the user to pass `--timeout` names a flag they never set.
+        let dir = workspace(4);
+        let consult = FakeConsult::new(Vec::new());
+        let r = review_until(
+            dir.path(),
+            None,
+            Some(Instant::now() + Duration::from_secs(60)),
+            Duration::ZERO,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await;
+        let message = r.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(!message.contains("--timeout"), "{message}");
+        assert!(message.contains("left of the calling run"), "{message}");
+        let r = review(
+            dir.path(),
+            Some(60),
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await;
+        let message = r.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(message.contains("pass --timeout"), "{message}");
+    }
+
+    #[tokio::test]
     async fn a_budget_too_small_for_the_batches_fails_before_any_trio_call() {
         // [CP2 MS2 S2a loop 6] RV-S7 at the layer that owns §5.0 step 4: four batches in 60 s, and no consult runs.
         let dir = workspace(4);
