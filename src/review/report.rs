@@ -763,6 +763,23 @@ mod tests {
         assert_eq!(details, ["  first", "  second", "  third"], "{out}");
     }
 
+    #[test]
+    fn a_capped_lexical_index_is_declared_so_zero_symbol_discards_is_not_misread() {
+        // [MAGI S6 loop 4, C1] with the index over its cap no symbol is checked: the report must
+        // say so, or "no unknown symbol" would read as "none cited".
+        let s = ReviewSummary {
+            symbol_check_skipped: true,
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(
+            out.contains("the symbol check was off: the lexical index hit its cap"),
+            "{out}"
+        );
+        assert_eq!(summary_json(&s)["symbol_check_skipped"], true);
+    }
+
     #[tokio::test]
     async fn the_paid_batch_reports_redact_a_credential_in_a_finding_title() {
         // magi-core's report prints titles, never details: a credential in a detail cannot show
