@@ -155,12 +155,14 @@ class CodeReviewScenarioTests(unittest.TestCase):
         log = (_BUDGET_LOG % RUN_ID.encode()).replace(b"2349", b"9999")
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=log)[code_review.S50_ASSERTIONS[2]])
 
-    def test_s50_cannot_test_the_log_without_a_run_id_or_a_log_directory(self) -> None:
+    def test_s50_fails_the_log_without_a_run_id_or_a_log_directory(self) -> None:
+        # [MAGI §6 MS2 loop 3, F1] R15 is deterministic and RV-S7 requires the run log: a missing run id
+        # or log directory is a product failure, never an inconclusive CANNOT_TEST.
         r = _result("R15", 2, None, _BUDGET_STDERR)
-        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S50", r, log=_BUDGET_LOG % RUN_ID.encode())[
+        self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=_BUDGET_LOG % RUN_ID.encode())[
             code_review.S50_ASSERTIONS[2]])
         r = _result("R15", 2, None, _with_id(_BUDGET_STDERR))
-        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S50", r, log=None)[code_review.S50_ASSERTIONS[2]])
+        self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=None)[code_review.S50_ASSERTIONS[2]])
 
     def test_s47_fails_on_a_line_outside_the_generated_file(self) -> None:
         # [MAGI §6 MS2 F loop 2] RV09: an out-of-range line in the main list is a defect, not just a bad file.
