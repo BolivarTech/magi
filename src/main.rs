@@ -8444,6 +8444,33 @@ mod envelope_audit_guard {
         );
     }
 
+    /// The `code_review` field, the envelope's most model-text-heavy one (findings, gate
+    /// causes, omissions), is masked like `consult` (MAGI S6 loop 4, E1-5): every other
+    /// fixture leaves it `None`, so its masking line had no guardian that could turn red.
+    #[test]
+    fn the_code_review_field_of_the_envelope_is_masked() {
+        const VALUE: &str = "a-review-envelope-value-nobody-would-pattern-match";
+        magi_rs::logging::register_process_secrets(&[(
+            magi_rs::logging::auditor::SecretName::new("A_REVIEW_ENVELOPE_GUARD_ONLY_SECRET"),
+            VALUE,
+        )]);
+        let mut raw = run_outcome_with_consult(serde_json::json!({}));
+        raw.consult = None;
+        raw.code_review = Some(serde_json::json!({
+            "findings": [{"title": "leak", "detail": format!("the config holds {VALUE}")}],
+            "gate": {"causes": [format!("transport to {VALUE}")]},
+        }));
+
+        let audited = AuditedOutcome::new(&raw);
+        let rendered = serde_json::to_string(audited.get()).expect("the envelope serializes");
+
+        assert!(rendered.contains("\"findings\""), "{rendered}");
+        assert!(
+            !rendered.contains(VALUE),
+            "a registered secret reached the envelope's code_review in the clear: {rendered}"
+        );
+    }
+
     /// A `CandidateEligibility` built through magi-core's serde (the only door: the type is
     /// `#[non_exhaustive]`), from `{"model": model, "causes": causes}`.
     ///
