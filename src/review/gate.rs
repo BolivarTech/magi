@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use magi_core::schema::Severity;
@@ -365,7 +366,8 @@ impl Outcome {
 /// ```
 pub struct Gate<'a> {
     client: &'a dyn DecisionClient,
-    chain: Vec<ModelSpec>,
+    /// Shared, so a walk holds it without cloning every model per question.
+    chain: Arc<[ModelSpec]>,
     max_state_bytes: usize,
     call_timeout: Duration,
     rejected: BTreeSet<String>,
@@ -393,7 +395,7 @@ impl<'a> Gate<'a> {
     ) -> Self {
         Self {
             client,
-            chain,
+            chain: chain.into(),
             max_state_bytes,
             call_timeout: Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS),
             rejected: BTreeSet::new(),
@@ -583,8 +585,9 @@ impl<'a> Gate<'a> {
         let mut lean: Option<Outcome> = None;
         let mut called = false;
         let mut all_transport = true;
-        let chain = self.chain.clone();
-        for spec in &chain {
+        // MAGI FIX (S6 loop 4): a reference count, not a copy of the chain, per question.
+        let chain = Arc::clone(&self.chain);
+        for spec in chain.iter() {
             if self.rejected.contains(&spec.model) {
                 note_skip(skipped, &spec.model);
                 continue;
