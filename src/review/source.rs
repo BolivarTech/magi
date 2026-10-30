@@ -1106,4 +1106,27 @@ mod tests {
             vec![MAX_REVIEW_FILE_BYTES]
         );
     }
+
+    #[test]
+    fn a_revision_read_lists_only_the_requested_path_never_the_whole_tree() {
+        // [MAGI S6 loop 7, A2-c5] the existence check listed every blob of the revision, so a
+        // monorepo past the 64 MiB git output cap failed the review before any model call.
+        let git = FakeGit::from(&[
+            (
+                "ls-tree -z X -- a.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
+            ),
+            ("ls-tree -z X -- gone.rs", Ok("")),
+            (
+                "show --no-ext-diff --no-textconv X:./a.rs",
+                Ok("fn a() {}\n"),
+            ),
+        ]);
+        let src = RevisionSource::new(&git, "X".into(), None);
+        assert_eq!(
+            src.read("a.rs").expect("read"),
+            Some(b"fn a() {}\n".to_vec())
+        );
+        assert_eq!(src.read("gone.rs").expect("absent"), None);
+    }
 }
