@@ -408,6 +408,12 @@ pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File>
 /// reads that path as the file's text, where the worktree source follows the link: the same
 /// logical file can read differently on the two sides. Nothing extra leaves the process: the
 /// target string is repository data and passes the same secret scan (RV22).
+///
+/// Paths are workspace-relative and every call runs `git -C <workspace>`, so `<rev>:./<path>`
+/// resolves from the workspace: a workspace below the repository root reads its own subtree,
+/// never a same-named path at the root. That is why the source takes no root (unlike
+/// [`WorktreeSource`]); pinned with the real git by
+/// `a_workspace_below_the_repo_root_reviews_only_its_own_subtree` (S6 loop 7, A1-m3).
 pub struct RevisionSource<'g> {
     git: &'g dyn GitCommand,
     new_rev: String,
