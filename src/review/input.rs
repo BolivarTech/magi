@@ -456,17 +456,29 @@ fn merge_base(
 }
 
 /// A `File` input: one path from the worktree, through the guard.
+///
+/// The shape is read through links, whatever `guard` resolved: a link to a directory is a
+/// `directory` and a link whose target is gone is `missing`. The binary's guard
+/// (`PathGuard::validate`, wrapped by `review_path_guard` in the binary) canonicalizes, so
+/// there a link to a directory arrives as the directory and a dangling link is refused before
+/// this as outside the workspace (it cannot be resolved); both fail closed.
 fn resolve_file(
     p: &Path,
     workspace: &Path,
     guard: &dyn Fn(&Path) -> Result<PathBuf, ReviewError>,
 ) -> Result<ResolvedInput, ReviewError> {
     let guarded = guard(&workspace.join(p))?;
-    if std::fs::symlink_metadata(&guarded).is_ok_and(|m| m.is_dir()) {
-        return Err(ReviewError::NotReviewable {
-            path: p.display().to_string(),
-            cause: "directory",
-        });
+    // MAGI FIX (S6 loop 8): `symlink_metadata` saw the link, not its target, so a link to a
+    // directory and a dangling link came back as files to read.
+    let not_reviewable = |cause| ReviewError::NotReviewable {
+        path: p.display().to_string(),
+        cause,
+    };
+    if is_dangling_link(&guarded) {
+        return Err(not_reviewable(super::filter::MISSING));
+    }
+    if std::fs::metadata(&guarded).is_ok_and(|m| m.is_dir()) {
+        return Err(not_reviewable("directory"));
     }
     let path = relative(workspace, &guarded)?;
     Ok(ResolvedInput {
