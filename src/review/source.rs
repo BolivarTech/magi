@@ -358,6 +358,11 @@ pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File>
 /// "Absent" is decided by the revision's path list (`ls-tree`, run once per revision), never by
 /// the text of a git error: a path not listed is `Ok(None)`, and a failing `show` on a listed
 /// path is an error.
+///
+/// A symlink (mode `120000`) is a blob whose content is its target path, so a revision review
+/// reads that path as the file's text, where the worktree source follows the link: the same
+/// logical file can read differently on the two sides. Nothing extra leaves the process: the
+/// target string is repository data and passes the same secret scan (RV22).
 pub struct RevisionSource<'g> {
     git: &'g dyn GitCommand,
     new_rev: String,
