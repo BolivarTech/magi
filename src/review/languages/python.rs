@@ -744,4 +744,43 @@ def g():
             );
         }
     }
+
+    #[test]
+    fn a_module_level_call_is_not_an_assignment() {
+        // [MAGI S6 loop 5, B2-c1] any `=` or `:` made a line an assignment, so a call with a
+        // keyword argument or a string holding `:` became a declaration group with the
+        // assignments around it.
+        let code = "print(\"a:b\")\nsetup_logging(level=INFO)\nx = 1\n";
+        let units = extract(code, &[1, 2, 3]);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("x", UnitKind::DeclarationGroup, 3, 3),
+                ("lines 1-2", UnitKind::TopLevel, 1, 2)
+            ]
+        );
+        for line in [
+            "x = 1",
+            "x: int = 1",
+            "x: int",
+            "a[i] = 2",
+            "obj.attr = f(a=1)",
+            "a, b = 1, 2",
+            "y += 1",
+            "MAP = {\"k\": 1}",
+            "handler = lambda e: e",
+        ] {
+            assert!(is_module_assignment(line), "{line}");
+        }
+        for line in [
+            "print(\"a:b\")",
+            "setup_logging(level=INFO)",
+            "x == 1",
+            "f(x) != g(y)",
+            "d[\"k:v\"]",
+            "run(a=1)  # x = 2",
+        ] {
+            assert!(!is_module_assignment(line), "{line}");
+        }
+    }
 }
