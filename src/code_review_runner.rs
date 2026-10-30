@@ -22,13 +22,15 @@ use magi_rs::magi::endpoint::Scope;
 use magi_rs::magi::kind::ProviderKind;
 use magi_rs::magi::probe::Measurement;
 use magi_rs::magi::{resolve_run_timeout, BudgetTelemetry, ResolvedCeiling, TimeoutMeasure};
-use magi_rs::redact::{redact_foreign_error, redact_foreign_text};
+use magi_rs::redact::redact_foreign_error;
 use magi_rs::review::pipeline::{run_with_wall_clock, BatchConsult, ConsultFailure};
 use magi_rs::section_keys::{SectionKeys, SharedSecretStore};
 
 use crate::config::MagiConfig;
 use crate::system::model_cache::ModelCapabilityCache;
-use crate::tools::code_review::{CodeReviewRunner, ProductionReviewRunner, ReviewRunnerParts};
+use crate::tools::code_review::{
+    egress_text, CodeReviewRunner, ProductionReviewRunner, ReviewRunnerParts,
+};
 use crate::{
     build_magi_orchestrator, candidate_window_view, code_review_api_key, resolve_backend_model,
     resolve_magi_kind, resolve_section_endpoint, seats_with_env_overrides, timeout_scale,
@@ -171,10 +173,12 @@ impl TrioBatchConsult {
     /// The builder's message, redacted as every other error of [`build_code_review_runner`].
     fn check(&self) -> Result<(), String> {
         // MAGI FIX (S6 loop 5): the builder's message is not yet redacted (`TrioBuilder::build`).
+        // MAGI FIX (S6 loop 7, D-b1): every runner error passes `egress_text`, URL redaction and
+        // the RV22 detector both, not URL redaction alone.
         self.factory
             .build(self.ceiling(None))
             .map(|_| ())
-            .map_err(|e| redact_foreign_text(&e).to_string())
+            .map_err(|e| egress_text(&e))
     }
 
     /// The ceiling of a batch: derived from its wall clock as headless derives it from a
@@ -226,11 +230,11 @@ impl BatchConsult for TrioBatchConsult {
             let magi = tokio::task::spawn_blocking(move || factory.build(ceiling))
                 .await
                 .map_err(|e| format!("the trio build did not finish: {e}"))?
-                .map_err(|e| redact_foreign_text(&e).to_string())?;
+                .map_err(|e| egress_text(&e))?;
             let report = magi
                 .analyze(&Mode::CodeReview, prompt)
                 .await
-                .map_err(|e| redact_foreign_error(&e).to_string())?;
+                .map_err(|e| egress_text(&redact_foreign_error(&e).to_string()))?;
             crate::cut_log::CutAttemptLog::from_report(&report).emit();
             Ok(report)
         })
@@ -247,8 +251,8 @@ fn review_pool(
     env_overrides: &MagiEnvModelOverrides,
     probe: &ProbeOutcome,
 ) -> Result<Vec<(String, Option<usize>)>, String> {
-    let kind =
-        resolve_magi_kind(cfg, principal_kind).map_err(|e| redact_foreign_error(&e).to_string())?;
+    let kind = resolve_magi_kind(cfg, principal_kind)
+        .map_err(|e| egress_text(&redact_foreign_error(&e).to_string()))?;
     let backend = resolve_backend_model(cfg, kind);
     let view = candidate_window_view(cfg, endpoints, principal_kind, probe);
     let mut models: Vec<String> = seats_with_env_overrides(cfg, backend, env_overrides)
@@ -327,9 +331,9 @@ pub(crate) fn build_code_review_runner(
     let template = b
         .cfg
         .effective_code_review_base_url()
-        .map_err(|e| redact_foreign_error(&e).to_string())?;
+        .map_err(|e| egress_text(&redact_foreign_error(&e).to_string()))?;
     let base_url = resolve_section_endpoint(&template, Scope::CodeReview, b.secret_store.as_ref())
-        .map_err(|e| redact_foreign_error(&e).to_string())?;
+        .map_err(|e| egress_text(&redact_foreign_error(&e).to_string()))?;
     // One source of truth: `DEFAULT_CODE_REVIEW_TIMEOUT_SECS` (src/defaults.rs) is defined as
     // `magi_rs::review::config::DEFAULT_CALL_TIMEOUT_SECS`, the constant the gate itself falls
     // back to, so the two defaults cannot diverge.
@@ -345,7 +349,7 @@ pub(crate) fn build_code_review_runner(
         &gate_chain,
         call_timeout,
     )
-    .map_err(|e| redact_foreign_error(&e).to_string())?;
+    .map_err(|e| egress_text(&redact_foreign_error(&e).to_string()))?;
     let pool = review_pool(
         &b.cfg,
         b.principal_kind,
@@ -395,7 +399,7 @@ pub(crate) fn build_code_review_runner(
         agent_timeout_secs: configured_ceiling,
         structured: b.structured,
     })
-    .map_err(|e| redact_foreign_text(&e.to_string()).to_string())?;
+    .map_err(|e| egress_text(&e.to_string()))?;
     Ok(Arc::new(runner))
 }
 

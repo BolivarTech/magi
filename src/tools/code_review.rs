@@ -307,6 +307,23 @@ fn egress_safe(r: Rendered) -> Rendered {
     }
 }
 
+/// `text` as an error may carry it out of the process: URL credentials redacted, then every
+/// secret the RV22 detector names masked. The one scrubber of every error string this tool and
+/// its runner build themselves (argument errors, review errors, runner build errors), so an
+/// echoed argument or a builder's message can never leave with a key in it. Stderr and the run
+/// log also pass the process auditor; the tool's errors go back to the agent's model and do not,
+/// which is why the detector runs here. O(len of `text`).
+///
+/// # Arguments
+/// * `text` - The error text.
+///
+/// # Returns
+/// The text with its credentials and secrets masked.
+// MAGI FIX (S6 loop 7, D-b1): one helper with both stages for every error path.
+pub(crate) fn egress_text(text: &str) -> String {
+    mask_secrets(redact_foreign_text(text).as_str())
+}
+
 /// `value` with every string and key passed through [`mask_secrets`]. O(size of `value`).
 fn masked_json(value: Value) -> Value {
     map_json_text(value, &|text| mask_secrets(text), true)
@@ -396,7 +413,7 @@ pub(crate) fn envelope_usage(r: &Rendered) -> magi_rs::headless::types::Usage {
 /// [`ToolError::InvalidArguments`] for a non-object, an unknown field, a value of the wrong
 /// type, a blank `path`, two forms at once, half a pair, or a hostile ref.
 pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
-    let invalid = |m: String| ToolError::InvalidArguments(m);
+    let invalid = |m: String| ToolError::InvalidArguments(egress_text(&m));
     let fields = args
         .as_object()
         .ok_or_else(|| invalid("the arguments must be a JSON object".into()))?;
@@ -433,7 +450,7 @@ pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
         return Err(invalid("give at most one input form".into()));
     }
     let checked = |r: String| -> Result<String, ToolError> {
-        validate_ref(&r).map_err(|e| invalid(redact_foreign_text(&e.to_string()).to_string()))?;
+        validate_ref(&r).map_err(|e| invalid(e.to_string()))?;
         Ok(r)
     };
     let half = |a: &str, b: &str| invalid(format!("`{a}` and `{b}` go together"));
@@ -735,7 +752,7 @@ fn fit_escaped(report: &str, budget: usize) -> String {
 
 /// A review error as the tool's execution error, redacted.
 fn tool_error(e: &ReviewError) -> ToolError {
-    ToolError::ExecutionError(redact_foreign_text(&e.to_string()).to_string())
+    ToolError::ExecutionError(egress_text(&e.to_string()))
 }
 
 #[async_trait]
