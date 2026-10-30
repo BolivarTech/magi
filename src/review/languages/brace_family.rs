@@ -679,10 +679,16 @@ impl BraceFamilyExtractor {
 /// `;`), and before the first later line that is blank, is code ending in `;` (a statement: the
 /// declaration had no block; a comment ending in `;` does not count), opens a statement with a
 /// keyword of [`STATEMENT_KEYWORDS`] (`if (x) {`: a signature's brace is never there), or where
-/// `stops` holds (the next construct's start); comment lines are passed over. A line whose
-/// braces balance (`fn a() { x(); }`) opens nothing, so a one-line construct never takes the
-/// brace of the construct after it. O(k) for the k lines scanned, which never pass the next
-/// construct.
+/// `stops` holds (the next construct's start) while no parenthesis opened since line `i` is
+/// still open; comment lines are passed over. A line whose braces balance (`fn a() { x(); }`)
+/// opens nothing, so a one-line construct never takes the brace of the construct after it.
+/// O(k) for the k lines scanned, which never pass the next construct.
+///
+/// Inside an open parameter list `stops` is not asked: a parameter line holding a `(` after a
+/// word (`int (*callback)(int),`, `std::function<void(int)> cb,`) reads like a signature of its
+/// own, and stopping there cut the function at that line. The parentheses are counted on the
+/// line text ([`paren_delta`]), so a `(` or `)` inside a string or a comment of the parameter
+/// list miscounts them; the search then still ends at a blank line, a statement or a brace.
 fn open_brace_line(
     lines: &[&str],
     scanned: &[ScannedLine],
@@ -702,15 +708,41 @@ fn open_brace_line(
     }
     // MAGI FIX (S6 loop 3): no fixed two-line cap; the declaration's own end bounds the search.
     // MAGI FIX (S6 loop 6): a top-level `foo()` took the brace of the `if (x) {` after it.
-    ((i + 1)..lines.len())
-        .take_while(|&j| {
-            !stops(j)
-                && !lines
-                    .get(j)
-                    .is_some_and(|l| l.trim().is_empty() || opens_statement(l.trim()))
-                && (opens(j) || !ends_statement(j))
+    // MAGI FIX (S6 loop 7): a parameter line inside the open list no longer stops the search.
+    let mut parens = paren_delta(lines, scanned, i);
+    for j in (i + 1)..lines.len() {
+        let ends_search = (parens <= 0 && stops(j))
+            || lines
+                .get(j)
+                .is_some_and(|l| l.trim().is_empty() || opens_statement(l.trim()));
+        if ends_search {
+            return None;
+        }
+        if opens(j) {
+            return Some(j);
+        }
+        if ends_statement(j) {
+            return None;
+        }
+        parens += paren_delta(lines, scanned, j);
+    }
+    None
+}
+
+/// The `(` minus the `)` of line `idx` when it is code; 0 for a line that starts inside a comment
+/// or a string and stays there, or that does not exist. The characters are counted on the line
+/// text, strings and trailing comments included. O(n) in the line.
+fn paren_delta(lines: &[&str], scanned: &[ScannedLine], idx: usize) -> i64 {
+    if scanned.get(idx).is_none_or(|s| s.is_non_code) {
+        return 0;
+    }
+    lines.get(idx).map_or(0, |l| {
+        l.chars().fold(0, |n, c| match c {
+            '(' => n + 1,
+            ')' => n - 1,
+            _ => n,
         })
-        .find(|&j| opens(j))
+    })
 }
 
 /// Keywords that open a statement, never the rest of a declaration: the brace of a line that
