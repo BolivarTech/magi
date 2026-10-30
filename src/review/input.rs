@@ -2124,6 +2124,33 @@ mod tests {
     #[cfg(unix)]
     // Creating a symlink needs Developer Mode on Windows; the rule is the same there.
     #[test]
+    fn a_file_input_naming_a_link_to_a_directory_or_a_dangling_link_is_not_reviewable() {
+        // [MAGI S6 loop 8, A1-b1/A1-b2 Balthasar] `resolve_file` looked at the link itself, so a
+        // link to a directory and a link whose target is gone came back as files to read, with
+        // whatever guard the caller gave.
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(d.path().join("sub")).expect("mkdir");
+        std::os::unix::fs::symlink(d.path().join("sub"), d.path().join("to_dir")).expect("link");
+        std::os::unix::fs::symlink(d.path().join("gone.rs"), d.path().join("dangling.rs"))
+            .expect("link");
+        let git = FakeGit(Default::default());
+        for (name, expected) in [("to_dir", "directory"), ("dangling.rs", "missing")] {
+            let r = resolve_input(
+                &ReviewInput::File(name.into()),
+                d.path(),
+                &git,
+                &allow_all,
+            );
+            assert!(
+                matches!(&r, Err(ReviewError::NotReviewable { cause, .. }) if *cause == expected),
+                "{name}: {:?}",
+                r.err()
+            );
+        }
+    }
+    #[cfg(unix)]
+    // Creating a symlink needs Developer Mode on Windows; the rule is the same there.
+    #[test]
     fn a_directory_input_naming_a_dangling_link_is_missing() {
         // [MAGI S6 MS2 loop 4, A1 Melchior] a link whose target is gone reads as a path that
         // does not exist, as everywhere else, not as an I/O error.
