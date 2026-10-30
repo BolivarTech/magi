@@ -468,10 +468,16 @@ fn find_import_group_end(lines: &[&str], continued: &[bool], start: usize) -> us
     end
 }
 
-/// Find end of a contiguous assignment group at indent 0.
+/// Find end of a contiguous assignment group at indent 0: the assignments that follow one
+/// another, one blank line allowed between two, as the import group and the brace-family
+/// declaration groups allow.
 ///
 /// A line that continues a logical line (`continued[j]`: inside a triple-quoted string or a
-/// bracket, or after a `\`) belongs to the assignment that opened it, so it extends the group. O(n) in the lines after `start`.
+/// bracket, or after a `\`) belongs to the assignment that opened it, so it extends the group.
+/// O(n) in the lines after `start`.
+///
+/// Declared: a group is never split, so a run of adjacent assignments too large for one batch
+/// is reported as too large rather than cut.
 fn find_assignment_group_end(lines: &[&str], continued: &[bool], start: usize) -> usize {
     let mut end = start;
     for (j, line) in lines.iter().enumerate().skip(start + 1) {
@@ -488,7 +494,15 @@ fn find_assignment_group_end(lines: &[&str], continued: &[bool], start: usize) -
             }
             break;
         } else if trimmed.is_empty() {
-            continue;
+            // MAGI FIX (S6 loop 7): any number of blank lines kept the group open, so far-apart
+            // constants became one unit; one blank line is allowed, before an assignment.
+            let next_assigns = !continued.get(j + 1).copied().unwrap_or(false)
+                && lines
+                    .get(j + 1)
+                    .is_some_and(|l| indentation(l) == 0 && is_module_assignment(l.trim()));
+            if !next_assigns {
+                break;
+            }
         } else {
             break;
         }
