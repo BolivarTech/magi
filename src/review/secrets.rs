@@ -11,7 +11,9 @@
 //! private key without its `BEGIN` line. The minimum lengths can miss a shorter real key; that is the trade-off with
 //! false positives on ordinary code. So are the left boundaries: a short prefix (`sk-`, `ghp_`, `AKIA`, …) glued to a
 //! word character is not a token, because base64 runs and kebab-case names hold them by chance; the distinctive
-//! `sk-ant-` and `github_pat_` match wherever they occur.
+//! `sk-ant-` and `github_pat_` match wherever they occur. A PEM or OpenPGP header must be in
+//! upper case as every standard tool writes it: a hand-made `-----begin private key-----` is
+//! not detected.
 
 use std::ops::Range;
 
