@@ -14,7 +14,7 @@ use crate::decision::protocol::Answer;
 /// `rejected` (DE-S1 names a 400 skip `rejected`, and the published envelope keeps that closed
 /// set), so the token cannot be read back into the variant. A consumer of a serialized trace
 /// tells them apart by the HTTP status of the attempt's detail, never by the token.
-// MAGI FIX (S6 loop 4): pinned by `cause_never_derives_deserialize_because_two_variants_share_a_token`.
+// MAGI FIX (S6 loop 4): pinned at compile time by the `AmbiguousIfDeserialize` assertion (S6 loop 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
@@ -340,25 +340,37 @@ impl DecisionError {
     }
 }
 
+/// Implemented for every type with `()`, and for every deserializable type with
+/// [`Deserializable`]: naming the impl with an inferred parameter is ambiguous, a compile
+/// error, exactly when the type deserializes. The negative-bound idiom of the
+/// `static_assertions` crate, written out instead of adding a dependency for one assertion.
+trait AmbiguousIfDeserialize<Marker> {
+    /// The item an assertion names.
+    fn item() {}
+}
+
+impl<T: ?Sized> AmbiguousIfDeserialize<()> for T {}
+
+/// The marker of the impl only deserializable types have.
+struct Deserializable;
+
+impl<T: serde::de::DeserializeOwned> AmbiguousIfDeserialize<Deserializable> for T {}
+
+// [`Cause`] serializes and never deserializes, checked by the compiler (C2 of S6 loop 4, made a
+// compile-time check in S6 loop 5): `BadRequest` and `Rejected` both serialize as `rejected`
+// (DE-S1 names the 400 skip `rejected`), so the token cannot be read back into the variant, and
+// a derived `Deserialize` would turn every 400 into a 413/422. Adding it makes the name below
+// ambiguous and the crate stops compiling (E0283), whatever the derive's formatting or place.
+// MAGI FIX (S6 loop 5): a static assertion replaces the test that grepped this file's source.
+const _: fn() = || {
+    fn serializes<T: serde::Serialize>() {}
+    serializes::<Cause>();
+    <Cause as AmbiguousIfDeserialize<_>>::item();
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cause_never_derives_deserialize_because_two_variants_share_a_token() {
-        // [MAGI S6 loop 4, C2] `BadRequest` and `Rejected` both serialize as `rejected` (DE-S1
-        // names the 400 skip `rejected`), so the token cannot be read back into the variant: a
-        // derived `Deserialize` would turn every 400 into a 413/422.
-        let source = include_str!("error.rs").replace('\r', "");
-        let at = source.find("pub enum Cause {").unwrap_or(0);
-        let attributes = source
-            .get(..at)
-            .and_then(|head| head.rfind("#[derive("))
-            .and_then(|start| source.get(start..at))
-            .unwrap_or_default();
-        assert!(attributes.contains("Serialize"), "{attributes}");
-        assert!(!attributes.contains("Deserialize"), "{attributes}");
-    }
 
     const ALL: [Cause; 12] = [
         Cause::Unauthorized,
