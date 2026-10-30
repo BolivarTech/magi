@@ -22,7 +22,7 @@ use crate::review::context::detect_language;
 use crate::review::error::ReviewError;
 use crate::review::hunk::parse_hunks;
 use crate::review::input::ReviewFile;
-use crate::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry};
+use crate::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry, SemanticUnit};
 use crate::review::secrets::{display_path, find_secret};
 use crate::review::source::ContentSource;
 use crate::review::window::estimate_tokens;
@@ -303,7 +303,16 @@ pub fn plan_batches_with(
         let header_tokens = estimate_tokens(&header);
         let items = match &file.diff {
             Some(diff) => hunk_items(&file.path, diff)?,
-            None => whole_file_items(&file.path, source, registry, limit_tokens, header_tokens)?,
+            None => whole_file_items(
+                &file.path,
+                source,
+                registry,
+                Fit {
+                    limit_tokens,
+                    header_tokens,
+                    companion,
+                },
+            )?,
         };
         if items.is_empty() {
             continue;
@@ -383,15 +392,41 @@ fn side_range(side: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// What decides whether an item of a file reviewed whole fits in an empty batch: the per-batch
+/// limit, the file's header tokens and the companion the packer will charge for the item.
+struct Fit<'c> {
+    limit_tokens: usize,
+    header_tokens: usize,
+    companion: &'c dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
+}
+
+impl Fit<'_> {
+    /// The tokens `item` takes in an empty batch: its text, its file's header and its companion,
+    /// as [`Packer::add`] charges them.
+    ///
+    /// # Errors
+    ///
+    /// The companion's error, unchanged.
+    fn alone(&self, item: &BatchItem) -> Result<usize, ReviewError> {
+        let companion = (self.companion)(item)?.map_or(0, |(_, tokens)| tokens);
+        Ok(estimate_tokens(item.text())
+            .saturating_add(self.header_tokens)
+            .saturating_add(companion))
+    }
+}
+
 /// The items of a file reviewed whole: none when empty, the whole file when it fits in an empty
-/// batch with its header (`header_tokens`), otherwise its non-blank units, a block unit that does
-/// not fit alone split one level down by [`LanguageExtractor::split_block`].
+/// batch with its header and its companion (`fit`), otherwise its non-blank units, a block unit
+/// that does not fit alone with its companion split one level down by
+/// [`LanguageExtractor::split_block`].
+///
+/// The companion closure is asked here and again by the packer for the same item, so it must
+/// give one key the same token count every time it is asked.
 fn whole_file_items(
     path: &str,
     source: &dyn ContentSource,
     registry: &LanguageRegistry,
-    limit_tokens: usize,
-    header_tokens: usize,
+    fit: Fit<'_>,
 ) -> Result<Vec<BatchItem>, ReviewError> {
     let bytes = source.read(path)?.ok_or_else(|| {
         ReviewError::Io(format!(
@@ -412,46 +447,45 @@ fn whole_file_items(
         text,
         lines,
     };
-    let alone = estimate_tokens(whole.text()).saturating_add(header_tokens);
-    if alone <= limit_tokens {
+    // MAGI FIX (S6 loop 5): the decision counts the companion, as the packer does; a file that
+    // fit only without it failed as too large instead of being split.
+    let alone = fit.alone(&whole)?;
+    if alone <= fit.limit_tokens {
         return Ok(vec![whole]);
     }
     let too_large = || ReviewError::TooLargeForBatch {
         what: whole.describe(),
         tokens: alone,
-        limit: limit_tokens,
+        limit: fit.limit_tokens,
     };
     let extractor = registry.get(path).ok_or_else(too_large)?;
+    let unit_item = |u: SemanticUnit| BatchItem::Unit {
+        file: path.to_string(),
+        name: u.name,
+        text: u.content,
+        first_line: u.start_line,
+        last_line: u.end_line,
+    };
+    let mut units = Vec::new();
     // MAGI FIX (S6 loop 3): every line is changed; no set of all of them is built.
-    let units: Vec<BatchItem> = extractor
-        .extract_units(whole.text(), path, ChangedLines::All)
-        .into_iter()
+    for unit in extractor.extract_units(whole.text(), path, ChangedLines::All) {
         // MAGI FIX (S6 loop 3): a block (impl, class, …) too large alone goes down one level, to
         // its methods and the stretches between them; a block that cannot split stays whole and
         // the packer reports it as too large.
-        .flat_map(|u| {
-            let fits = estimate_tokens(&u.content).saturating_add(header_tokens) <= limit_tokens;
-            let parts = if fits {
-                Vec::new()
-            } else {
-                extractor.split_block(&u)
-            };
-            if parts.is_empty() {
-                vec![u]
-            } else {
-                parts
-            }
-        })
+        let parts = if fit.alone(&unit_item(unit.clone()))? <= fit.limit_tokens {
+            Vec::new()
+        } else {
+            extractor.split_block(&unit)
+        };
+        let pieces = if parts.is_empty() { vec![unit] } else { parts };
         // The extractor also emits an empty `TopLevel` unit for each gap between constructs.
-        .filter(|u| !u.content.trim().is_empty())
-        .map(|u| BatchItem::Unit {
-            file: path.to_string(),
-            name: u.name,
-            text: u.content,
-            first_line: u.start_line,
-            last_line: u.end_line,
-        })
-        .collect();
+        units.extend(
+            pieces
+                .into_iter()
+                .filter(|u| !u.content.trim().is_empty())
+                .map(unit_item),
+        );
+    }
     if units.is_empty() {
         return Err(too_large());
     }
