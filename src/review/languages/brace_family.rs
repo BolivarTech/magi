@@ -538,6 +538,15 @@ impl BraceFamilyExtractor {
                     "mod" => UnitKind::Module,
                     _ => UnitKind::Class, // class, namespace, record, @interface
                 };
+                // MAGI FIX (S6 loop 7): C++'s `enum class Color` was named `class`.
+                let rest = if kind == UnitKind::Enum {
+                    ["class ", "struct "]
+                        .iter()
+                        .find_map(|w| rest.strip_prefix(w))
+                        .unwrap_or(rest)
+                } else {
+                    rest
+                };
                 return Some((kind, rest));
             }
         }
