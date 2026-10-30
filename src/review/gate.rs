@@ -1147,6 +1147,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_line_past_the_end_of_the_code_shown_is_no_location_without_a_call() {
+        // [MAGI S6 loop 7, C1-c3] the excerpt must hold the finding's line: code that ends before
+        // it, or no code at all, is nothing to judge, so no call is made.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().times(0);
+        let mut g = Gate::new(&c, chain(), 61_000);
+        for (line, code) in [
+            (
+                100, "one
+two
+",
+            ),
+            (1, ""),
+        ] {
+            let v = g
+                .judge(&finding(Severity::Warning, Some(line)), Some(code), None)
+                .await;
+            assert_eq!(
+                (v.state, v.cause),
+                (GateState::Unfiltered, Some("no location")),
+                "line {line}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_state_over_the_limit_is_unfiltered_not_truncated() {
         let mut c = MockDecisionClient::new();
         c.expect_decide().times(0);
