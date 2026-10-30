@@ -1089,4 +1089,23 @@ mod tests {
         assert!(!results[1].starts_in_literal, "the string closed on line 1");
         assert_eq!(results[1].brace_delta, 1);
     }
+
+    #[test]
+    fn a_java_text_block_keeps_its_quotes_and_braces_as_text() {
+        // [MAGI S6 loop 5, B2-m5] Java had no text-block state: `"""` read as three ordinary
+        // quotes, so a `"` inside the block returned the scanner to code and the braces after it
+        // moved the depth.
+        let code = "class A {\n    String s = \"\"\"\n        say \" { hi \\\"\"\" }\n        \"\"\";\n    void f() {\n        x();\n    }\n}\n";
+        let results = CodeScanner::new(LexicalRules::java()).scan_all(code);
+        assert_eq!(results[2].brace_delta, 0, "line 3 is text-block text");
+        assert_eq!(
+            results[3].depth_after, 1,
+            "only the class is open after the block"
+        );
+        assert_eq!(
+            find_closing_brace(&results, 0),
+            7,
+            "the class closes on its own brace"
+        );
+    }
 }
