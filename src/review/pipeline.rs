@@ -16,6 +16,7 @@ use std::path::{Component, Path, PathBuf, Prefix, MAIN_SEPARATOR_STR};
 use std::time::{Duration, Instant};
 
 use magi_core::reporting::MagiReport;
+use sha2::{Digest, Sha256};
 
 use super::batching::{file_header, plan_batches, BatchItem, ReviewBatch};
 use super::clock::{batch_wall_clock_secs, pre_budget};
@@ -306,6 +307,11 @@ pub async fn run_review(
             now: planned,
         });
     }
+    if let Some(approved) = req.approved_digest {
+        if content_digest(&filtered.kept, &source)? != approved {
+            return Err(ReviewError::ContentChanged);
+        }
+    }
     let index = build_index(&filtered.kept, &source, deps.registry)?;
     summary.symbol_check_skipped = !index.is_complete();
     if summary.symbol_check_skipped {
@@ -469,7 +475,7 @@ pub fn plan_review(
     let inner = content_source(resolved.source_kind, workspace, git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(input, ReviewInput::File(_));
-    let (_, _, batches) = filter_and_plan(
+    let (filtered, _, batches) = filter_and_plan(
         resolved.files,
         &source,
         explicit,
@@ -479,8 +485,35 @@ pub fn plan_review(
     )?;
     Ok(PlanFingerprint {
         batches: batches.len(),
-        digest: [0; 32],
+        digest: content_digest(&filtered.kept, &source)?,
     })
+}
+
+/// SHA-256 over every kept file's path, diff and content, in input order, each part
+/// length-prefixed so no two different reviews hash alike by moving bytes between parts.
+///
+/// The content comes from `source`, the same cached reads the batches are built from, so the
+/// digest covers exactly what the review would send. O(bytes reviewed).
+///
+/// # Errors
+///
+/// The read errors of `source`.
+// MAGI FIX (S6 loop 6): the approval pins the content, not only the batch count (D-c1).
+fn content_digest(
+    kept: &[ReviewFile],
+    source: &dyn ContentSource,
+) -> Result<[u8; 32], ReviewError> {
+    let mut hash = Sha256::new();
+    let mut part = |bytes: &[u8]| {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    };
+    for file in kept {
+        part(file.path.as_bytes());
+        part(file.diff.as_deref().unwrap_or_default().as_bytes());
+        part(&source.read(&file.path)?.unwrap_or_default());
+    }
+    Ok(hash.finalize().into())
 }
 
 /// What an approval saw, computed without any model call by [`plan_review`]: the batch count it
