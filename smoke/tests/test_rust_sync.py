@@ -142,7 +142,7 @@ class SecretPrefixDocTests(unittest.TestCase):
     # src/review/secrets.rs and promise a protection that is not there (F2-b1).
     def test_every_prefix_the_readme_names_is_a_detector_prefix(self) -> None:
         readme = _source("README.md")
-        sentence = re.search(r"The patterns are named prefixes and shapes:(.*?)Not covered, by design", readme, re.S)
+        sentence = re.search(r"The patterns are named prefixes and shapes[.:](.*?)Not covered, by design", readme, re.S)
         self.assertIsNotNone(sentence, "the README's secret pattern list was not found")
         named = {token for token in re.findall(r"`([^`\s]+)`", sentence.group(1))
                  if re.fullmatch(r"[A-Za-z]+(?:[-_][a-z]+)*[-_]|AKIA|ASIA|AIza", token)}
