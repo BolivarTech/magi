@@ -664,6 +664,29 @@ mod tests {
     }
 
     #[test]
+    fn a_tracked_ignored_file_named_with_glob_characters_keeps_its_ignore_verdict() {
+        // [MAGI S6 loop 6, A2-c1, false positive] Caspar's case: a TRACKED file a rule ignores,
+        // named explicitly, with `[` in its name, next to a sibling the glob would match.
+        // Measured with git 2.56: the name is listed with and without GIT_LITERAL_PATHSPECS
+        // (git tries the exact name before the glob); the variable makes the match exact.
+        let d = repo();
+        std::fs::write(d.path().join("a[1].rs"), "fn a() {}\n").expect("write");
+        std::fs::write(d.path().join("a1.rs"), "fn b() {}\n").expect("write");
+        git(d.path(), &["add", "--", "a[1].rs", "a1.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join(".gitignore"), "a*\n").expect("write");
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let ignored = magi_rs::review::filter::ignored_paths(
+            &ReviewInput::File("a[1].rs".into()),
+            "a[1].rs",
+            d.path(),
+            &g,
+        )
+        .expect("query runs");
+        assert_eq!(ignored, ["a[1].rs".to_string()].into_iter().collect());
+    }
+
+    #[test]
     fn a_replace_ref_never_changes_the_content_a_revision_review_reads() {
         // [MAGI S6 loop 5, A1-b2] `refs/replace/*` is repository data: honoring it would review
         // a substitute blob instead of what the pinned commit holds (RV21).
