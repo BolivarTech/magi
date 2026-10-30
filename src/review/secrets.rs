@@ -552,12 +552,31 @@ pub fn outward_text(text: &str) -> String {
     escape_controls(&mask_secrets(text))
 }
 
-/// `text` with every control character escaped ([`char::escape_default`]).
+/// The format characters (Unicode category Cf) that can reorder or hide text on a terminal or a
+/// log viewer: the soft hyphen, the Arabic letter mark, the Mongolian vowel separator, the
+/// zero-width and directional marks, the bidi embeddings, overrides and isolates, the invisible
+/// operators and the byte-order mark.
+const HIDDEN_FORMAT_CHARS: &[std::ops::RangeInclusive<char>] = &[
+    '\u{00ad}'..='\u{00ad}',
+    '\u{061c}'..='\u{061c}',
+    '\u{180e}'..='\u{180e}',
+    '\u{200b}'..='\u{200f}',
+    '\u{202a}'..='\u{202e}',
+    '\u{2060}'..='\u{2064}',
+    '\u{2066}'..='\u{206f}',
+    '\u{feff}'..='\u{feff}',
+];
+
+/// `text` with every control character escaped ([`char::escape_default`]) and every
+/// [`HIDDEN_FORMAT_CHARS`] character escaped as `\u{…}`. O(n · r) for r ranges, a constant.
+// MAGI FIX (S6 loop 5): a right-to-left override in a file name could reorder a report line.
 fn escape_controls(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() {
                 c.escape_default().to_string()
+            } else if HIDDEN_FORMAT_CHARS.iter().any(|r| r.contains(&c)) {
+                c.escape_unicode().to_string()
             } else {
                 c.to_string()
             }
