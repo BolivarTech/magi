@@ -855,6 +855,45 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_driver_with_a_non_utf8_name_never_runs() {
+        // [MAGI S6 loop 5, A1-m1] a subsection name is bytes: a lossy decode would neutralize
+        // `filter.\u{fffd}` and leave the attacker's `filter.\xff` active, so its `clean` would
+        // run on the worktree bytes before the secret scan. The runner must fail closed instead.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "one\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join(".gitattributes"), b"* filter=\xff\n").expect("write");
+        let config = d.path().join(".git").join("config");
+        let mut bytes = std::fs::read(&config).expect("read config");
+        bytes.extend_from_slice(b"[filter \"\xff\"]\n\tclean = touch PWNED; cat\n");
+        std::fs::write(&config, bytes).expect("write config");
+        std::fs::write(d.path().join("a.rs"), "two\n").expect("write");
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let diff = g.run(&[
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+        ]);
+        assert!(
+            !d.path().join("PWNED").exists(),
+            "a non-UTF-8 filter driver ran: {diff:?}"
+        );
+        assert!(diff.is_err(), "the runner must fail closed: {diff:?}");
+    }
+
+    #[test]
+    fn filter_overrides_refuses_a_driver_name_that_is_not_utf8() {
+        // [MAGI S6 loop 5, A1-m1] `-c` cannot carry the name's bytes on every platform, so a
+        // name that is not UTF-8 fails closed instead of neutralizing a lossy replacement.
+        let err = filter_overrides(b"local\0filter.\xff.clean\ntouch PWNED\0")
+            .expect_err("a non-UTF-8 driver name fails closed");
+        assert!(matches!(err, ReviewError::Git(_)), "{err:?}");
+    }
+
+    #[test]
     fn a_filter_driver_from_the_operators_global_config_never_runs() {
         // [MAGI S6 loop 3, S3] RV22: a filter receives the worktree bytes before the review scans
         // them, so a driver from ANY scope git reads (the operator's global file here) must not run.
