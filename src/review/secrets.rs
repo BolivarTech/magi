@@ -866,7 +866,7 @@ mod tests {
                 let shown = display_path(&format!("a{c}b"));
                 assert!(
                     !shown.contains(c),
-                    "{:?} kept in {shown:?}",
+                    "{} kept in {shown:?}",
                     c.escape_unicode()
                 );
             }
