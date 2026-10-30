@@ -1145,4 +1145,25 @@ mod tests {
             assert!(!mask_secrets(&text).contains(tail), "{text}");
         }
     }
+
+    #[test]
+    fn a_pem_private_key_header_of_several_type_words_is_a_secret() {
+        // [MAGI S6 loop 7, A2-b4] `SSH2 ENCRYPTED` and `RSA ENCRYPTED` headers name a private key
+        // with two type words, and the SSH2 (RFC 4716 style) armor uses four dashes and spaces:
+        // all were sent. Public keys stay ordinary text.
+        for kind in ["SSH2 ENCRYPTED ", "RSA ENCRYPTED ", "A B C D "] {
+            let header = format!("{PEM_BEGIN}{kind}{PEM_PRIVATE_KEY}");
+            assert_eq!(find_secret(&header), Some("pem-private-key"), "{header}");
+        }
+        let ssh2 = concat!("---- BEGIN SSH2 ", "ENCRYPTED PRIVATE KEY ----");
+        assert_eq!(find_secret(ssh2), Some("pem-private-key"));
+        for kind in ["SSH2 PUBLIC KEY-----", "A B C D E PRIVATE KEY-----"] {
+            let header = format!("{PEM_BEGIN}{kind}");
+            assert_eq!(find_secret(&header), None, "{header}");
+        }
+        assert_eq!(
+            find_secret(concat!("---- BEGIN SSH2 ", "PUBLIC KEY ----")),
+            None
+        );
+    }
 }
