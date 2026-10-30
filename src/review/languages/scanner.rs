@@ -34,6 +34,12 @@ fn char_at(chars: &[char], i: usize) -> char {
 /// `u`, the two braces and six hex digits, plus the closing quote.
 const MAX_CHAR_ESCAPE_CHARS: usize = 10;
 
+/// The longest delimiter a C++ raw string allows between `"` and `(` (C++11 [lex.string]).
+const MAX_CPP_RAW_DELIMITER_CHARS: usize = 16;
+
+/// The encoding prefixes a C++ raw string may carry before its `R`, longest first.
+const CPP_RAW_PREFIXES: [&str; 5] = ["u8R", "uR", "UR", "LR", "R"];
+
 /// What [`ScannedLine::ends_statement`] records for a literal read in code context: any
 /// character but `;` would do, since a literal is an operand.
 const STRING_MARK: char = '"';
@@ -64,6 +70,8 @@ enum LexicalState {
     /// Inside a Rust raw string: `r###"..."###`.
     /// `hashes` is the number of `#` delimiters.
     RawString { hashes: u32 },
+    /// Inside a C++ raw string: `R"delim(...)delim"`; `delimiter` may be empty.
+    CppRawString { delimiter: Vec<char> },
     /// Inside a Python triple-quoted string (`"""` or `'''`).
     TripleQuote { quote: char },
     /// Inside a character literal (`'...'` in C/Rust/Java).
@@ -90,6 +98,9 @@ pub enum RawStringSyntax {
     TripleQuote,
     /// Go-style: backtick raw strings (`` `...` ``).
     GoBacktick,
+    /// C++11-style: `R"delim(...)delim"`, with an optional `u8`, `u`, `U` or `L` prefix; no
+    /// escape is read inside, and only `)delim"` closes it.
+    CppDelimited,
 }
 
 /// Per-language lexical rules that configure the scanner.
@@ -144,10 +155,14 @@ impl LexicalRules {
         }
     }
 
-    /// C++: Same as C. (C++11 raw strings `R"(...)"` are rare
-    /// enough to ignore in heuristic parsing.)
+    /// C++: same as C, plus C++11 raw strings (`R"(...)"`).
     pub fn cpp() -> Self {
-        Self::c()
+        Self {
+            // MAGI FIX (S6 loop 6): a raw string read as ordinary strings, so the braces and
+            // the unbalanced quotes of `R"({"a": 1} ")"` moved the depth.
+            raw_strings: RawStringSyntax::CppDelimited,
+            ..Self::c()
+        }
     }
 
     /// Go: `//` + `/* */`, char literals, backtick raw strings.
@@ -349,6 +364,15 @@ impl CodeScanner {
                         }
                     }
 
+                    if self.rules.raw_strings == RawStringSyntax::CppDelimited {
+                        if let Some((delimiter, skip)) = cpp_raw_string_start(&chars, i) {
+                            last_code = Some(STRING_MARK);
+                            self.state = LexicalState::CppRawString { delimiter };
+                            i += skip;
+                            continue;
+                        }
+                    }
+
                     // Check for triple-quote strings (Python)
                     if self.rules.raw_strings == RawStringSyntax::TripleQuote
                         && i + 2 < len
@@ -521,6 +545,19 @@ impl CodeScanner {
                             i = j;
                             continue;
                         }
+                    }
+                    i += 1;
+                }
+
+                LexicalState::CppRawString { delimiter } => {
+                    let end = i + 1 + delimiter.len();
+                    if char_at(&chars, i) == ')'
+                        && chars.get(i + 1..end) == Some(delimiter.as_slice())
+                        && char_at(&chars, end) == '"'
+                    {
+                        self.state = LexicalState::Code;
+                        i = end + 1;
+                        continue;
                     }
                     i += 1;
                 }
@@ -742,6 +779,42 @@ fn regex_may_start(chars: &[char], i: usize, last_code: Option<char>) -> bool {
             .all(|&p| p == c),
         Some(_) => true,
     }
+}
+
+/// Whether a C++ raw string (`R"delim(`, with an optional encoding prefix) starts at `i`.
+///
+/// # Returns
+///
+/// The delimiter and the number of characters up to and including its `(`, or `None` when no
+/// raw string starts there: the prefix is the tail of a longer identifier (`FOOR"x"`), or no
+/// valid delimiter of at most [`MAX_CPP_RAW_DELIMITER_CHARS`] characters reaches a `(` on the
+/// line. O(1): the prefix and the delimiter are bounded.
+fn cpp_raw_string_start(chars: &[char], i: usize) -> Option<(Vec<char>, usize)> {
+    if i > 0 && is_js_word_char(char_at(chars, i - 1)) {
+        return None;
+    }
+    let rest = chars.get(i..)?;
+    let prefix = CPP_RAW_PREFIXES.iter().find(|p| {
+        let p: Vec<char> = p.chars().collect();
+        rest.starts_with(&p) && rest.get(p.len()) == Some(&'"')
+    })?;
+    let open = prefix.chars().count() + 1;
+    let delimiter: Vec<char> = rest
+        .get(open..)?
+        .iter()
+        .take(MAX_CPP_RAW_DELIMITER_CHARS + 1)
+        .take_while(|&&c| c != '(')
+        .copied()
+        .collect();
+    let valid = delimiter.len() <= MAX_CPP_RAW_DELIMITER_CHARS
+        && rest.get(open + delimiter.len()) == Some(&'(')
+        && !delimiter
+            .iter()
+            .any(|&c| c.is_whitespace() || matches!(c, ')' | '\\' | '"'));
+    valid.then(|| {
+        let skip = open + delimiter.len() + 1;
+        (delimiter, skip)
+    })
 }
 
 /// Whether `c` can be part of a JS identifier or keyword (`$` included).
