@@ -1070,6 +1070,48 @@ mod tests {
     }
 
     #[test]
+    fn a_regex_after_a_control_condition_or_a_block_close_is_not_counted() {
+        // [MAGI S6 loop 6, B2a-b2/c1] `)` and `}` always read as the end of an operand, so a
+        // regex opening a statement after `if (...)` or after a block counted its braces.
+        let cases = [
+            ("if (ok) /}/.test(s);", 0),
+            ("if (a) /{/.test(s); {", 1),
+            ("while (x) /}/.test(s);", 0),
+            ("for (;;) /{/.exec(s);", 0),
+            ("function f() {} /{/.test(s);", 0),
+            ("if (f(a)) /}/.test(s);", 0),
+            // Divisions keep dividing: a call, a group or an index is an operand.
+            ("x = f(a) / 2; }", -1),
+            ("x = a[0] / b[1]; }", -1),
+            ("if (a / b) {", 1),
+        ];
+        for (line, delta) in cases {
+            let mut scanner = CodeScanner::new(LexicalRules::javascript());
+            assert_eq!(scanner.scan_line(1, line).brace_delta, delta, "{line}");
+        }
+        let code = "function f() {
+  if (a &&
+      b) /}/.test(s);
+  g();
+}
+function h() {
+}
+";
+        let results = CodeScanner::new(LexicalRules::javascript()).scan_all(code);
+        assert_eq!(results[2].brace_delta, 0, "a condition spanning lines");
+        assert_eq!(
+            find_closing_brace(&results, 0),
+            4,
+            "f ends on its own brace"
+        );
+        assert_eq!(
+            find_closing_brace(&results, 5),
+            6,
+            "h is still found after f"
+        );
+    }
+
+    #[test]
     fn a_template_nested_in_a_template_expression_leaves_the_depth_unchanged() {
         // [MAGI S6 loop 4, B2] declared heuristic: `${...}` is not tracked, and a nested
         // template must not drift the depth of the code after it.
