@@ -26,6 +26,8 @@ use crate::redact::redact_foreign_text;
 const GATE_KEY: &str = "gate";
 /// How the titles of a merged finding are joined on one line.
 const TITLE_JOINER: &str = " / ";
+/// The key under which a value of the JSON form that could not be serialized declares why.
+const SERIALIZATION_ERROR_KEY: &str = "serialization_error";
 
 /// What every stage of a review declared.
 ///
@@ -328,7 +330,7 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
     // `Serialize`. The invariant is pinned by a test, not by this fallback:
     // `the_summary_json_counts_states_and_models_and_never_carries_raw_model_text_unredacted`
     // requires every documented key, which a `Null` here would lose.
-    let mut v = serde_json::to_value(s).unwrap_or_default();
+    let mut v = to_json(s, "summary");
     if let Value::Object(fields) = &mut v {
         fields.insert("findings".into(), with_gate(&s.findings));
         fields.insert("filtered".into(), with_gate(&s.filtered));
@@ -422,14 +424,11 @@ fn with_gate(list: &[(ConsolidatedFinding, GateVerdict)]) -> Value {
             .map(|(finding, verdict)| {
                 // An object by construction (a struct with named fields); pinned by the tests
                 // that read `filtered[0].file` and `findings[0].batches`.
-                let mut entry = match serde_json::to_value(finding) {
-                    Ok(Value::Object(fields)) => fields,
+                let mut entry = match to_json(finding, "finding") {
+                    Value::Object(fields) => fields,
                     _ => Map::new(),
                 };
-                entry.insert(
-                    GATE_KEY.into(),
-                    serde_json::to_value(verdict).unwrap_or_default(),
-                );
+                entry.insert(GATE_KEY.into(), to_json(verdict, "gate verdict"));
                 Value::Object(entry)
             })
             .collect(),
@@ -485,6 +484,18 @@ pub(crate) fn name<T: serde::Serialize + std::fmt::Debug>(value: &T) -> String {
         Ok(Value::String(text)) => text,
         _ => format!("{value:?}"),
     }
+}
+
+/// `value` as JSON, `what` naming it in a failure.
+///
+/// The review's types cannot fail to serialize (every map key is a string, no field has a
+/// fallible `Serialize`), but were one to, the failure is never silent: the value becomes
+/// `{"serialization_error": "<what>: <error>"}` and one ERROR entry goes to the run log.
+fn to_json<T: serde::Serialize>(value: &T, what: &str) -> Value {
+    serde_json::to_value(value).unwrap_or_else(|_| {
+        let _ = (what, SERIALIZATION_ERROR_KEY);
+        Value::Null
+    })
 }
 
 /// `text` with every credential in an embedded URL redacted.
@@ -741,6 +752,23 @@ mod tests {
         let mut text = String::new();
         write_review_section(&mut text, &s, 0).expect("writes");
         assert!(text.contains("chain exhausted; HTTP 413"), "{text}");
+    }
+
+    #[test]
+    fn a_value_that_fails_to_serialize_is_declared_never_null() {
+        // [MAGI S6 loop 5, C2-m1/b4/c1] the impossible failure is loud, not an empty envelope.
+        struct Failing;
+        impl serde::Serialize for Failing {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("boom"))
+            }
+        }
+        let v = to_json(&Failing, "summary");
+        assert_eq!(
+            v[SERIALIZATION_ERROR_KEY].as_str(),
+            Some("summary: boom"),
+            "{v}"
+        );
     }
 
     #[test]
