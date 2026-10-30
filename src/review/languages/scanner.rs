@@ -302,6 +302,7 @@ impl CodeScanner {
     /// block comments).
     pub fn scan_line(&mut self, line_number: u32, line: &str) -> ScannedLine {
         let chars: Vec<char> = line.chars().collect();
+        let line_comment: Vec<char> = self.rules.line_comment.chars().collect();
         let len = chars.len();
         let mut i = 0;
         let mut delta: i32 = 0;
@@ -317,21 +318,15 @@ impl CodeScanner {
                 LexicalState::Code => {
                     entered_code |= self.templates.is_empty();
 
-                    // Check for line comment
-                    if !self.rules.line_comment.is_empty() {
-                        let lc = self.rules.line_comment;
-                        if lc == "//"
-                            && i + 1 < len
-                            && char_at(&chars, i) == '/'
-                            && char_at(&chars, i + 1) == '/'
-                        {
-                            self.state = LexicalState::LineComment;
-                            break; // rest of line is comment
-                        }
-                        if lc == "#" && char_at(&chars, i) == '#' {
-                            self.state = LexicalState::LineComment;
-                            break;
-                        }
+                    // MAGI FIX (S6 loop 6): only `//` and `#` were matched, so any other
+                    // configured token was ignored and the braces after it counted.
+                    if !line_comment.is_empty()
+                        && chars
+                            .get(i..)
+                            .is_some_and(|rest| rest.starts_with(&line_comment))
+                    {
+                        self.state = LexicalState::LineComment;
+                        break; // rest of line is comment
                     }
 
                     // Check for block comment
