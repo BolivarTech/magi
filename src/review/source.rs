@@ -209,7 +209,7 @@ pub fn is_never_reviewed(path: &str) -> bool {
 /// check and the open is refused as outside the workspace.
 ///
 /// A hard link names its inode from inside the workspace whatever file it is, so a file with
-/// more than one link is refused as outside the workspace too, on every platform ([`link_count`]).
+/// more than one link is refused as outside the workspace too, on every platform (`link_count`).
 pub struct WorktreeSource<'g> {
     /// The root as given; paths are joined to it (a verbatim canonical root would not resolve `..`).
     root: PathBuf,
