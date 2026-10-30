@@ -1399,6 +1399,18 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_argument_named_like_a_secret_never_leaves_in_the_error() {
+        // [MAGI S6 loop 7, D-b1] the argument error goes back to the agent, and so to its model:
+        // an echoed key passes the RV22 detector as every other egress does.
+        let key = model_secret();
+        let err =
+            parse_tool_input(&serde_json::json!({ key.clone(): 1 })).expect_err("an unknown field");
+        let text = err.to_string();
+        assert!(!text.contains(&key), "{text}");
+        assert!(text.contains("<redacted: openai-key>"), "{text}");
+    }
+
+    #[test]
     fn egress_safe_masks_a_secret_in_every_field_of_a_rendered_review() {
         // [MAGI S6 loop 3, S2] RV22's every-byte rule at the last point: model text in the text,
         // the failure and both JSON objects passes the product's own detector.

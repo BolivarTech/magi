@@ -444,6 +444,28 @@ mod tests {
         assert!(err.contains("seat failed"), "{err}");
     }
 
+    #[test]
+    fn the_early_trio_check_masks_a_secret_shaped_build_error() {
+        // [MAGI S6 loop 7, D-b1] URL redaction alone left a key-shaped value of the builder's
+        // message in clear; every runner error passes the RV22 detector too.
+        let key = format!("sk-{}", "b".repeat(30));
+        struct KeyBuild(String);
+        impl TrioBuilder for KeyBuild {
+            fn build(&self, _ceiling: ResolvedCeiling) -> Result<Arc<Magi>, String> {
+                Err(format!("seat failed with key {}", self.0))
+            }
+        }
+        let consult = TrioBatchConsult {
+            factory: Arc::new(KeyBuild(key.clone())),
+            configured_ceiling: 120,
+            max_rotations: 0,
+            retry_disabled: false,
+        };
+        let err = consult.check().expect_err("the build fails");
+        assert!(!err.contains(&key), "{err}");
+        assert!(err.contains("<redacted: openai-key>"), "{err}");
+    }
+
     /// How long a slow build takes in these tests, and the bound the review must answer within.
     const SLOW_BUILD: Duration = Duration::from_millis(1_500);
     const PROMPT_ANSWER: Duration = Duration::from_millis(1_000);
