@@ -597,6 +597,34 @@ mod tests {
     }
 
     #[test]
+    fn a_replace_ref_never_changes_the_content_a_revision_review_reads() {
+        // [MAGI S6 loop 5, A1-b2] `refs/replace/*` is repository data: honoring it would review
+        // a substitute blob instead of what the pinned commit holds (RV21).
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "real\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "x"]);
+        std::fs::write(d.path().join("fake.txt"), "fake\n").expect("write");
+        let blob = |p: &str| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args(["hash-object", "-w", p])
+                .output()
+                .expect("git runs");
+            String::from_utf8(out.stdout)
+                .expect("utf-8")
+                .trim()
+                .to_string()
+        };
+        let (real, fake) = (blob("a.rs"), blob("fake.txt"));
+        git(d.path(), &["replace", &real, &fake]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let src = RevisionSource::new(&g, "HEAD".into(), None);
+        assert_eq!(src.read("a.rs").expect("read"), Some(b"real\n".to_vec()));
+    }
+
+    #[test]
     fn a_core_worktree_that_points_outside_the_workspace_is_never_read() {
         // [MAGI §6 MS2 A loop 1] core.worktree is repository config: an untrusted repository can point git's work
         // tree at a directory outside the workspace, and `git diff <HEAD>` then embeds that directory's files.
