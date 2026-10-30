@@ -1428,6 +1428,31 @@ mod tests {
     }
 
     #[test]
+    fn a_call_or_a_one_line_function_does_not_take_a_following_control_block() {
+        // [MAGI S6 loop 6, B2b-c1] a top-level `foo()` or a one-line function read as a
+        // signature looking for its brace, and took the `{` of the `if` or `while` after it.
+        let code = "foo()\nif (x) {\n  a();\n}\nfunction a() { x(); }\nwhile (y) {\n  b();\n}\nfunction g() {\n}\n";
+        let units = extract(
+            &BraceFamilyExtractor::javascript(),
+            code,
+            &(1..=10).collect::<Vec<u32>>(),
+        );
+        let named: Vec<(&str, u32, u32)> = units
+            .iter()
+            .filter(|u| u.kind == UnitKind::Function)
+            .map(|u| (u.name.as_str(), u.start_line, u.end_line))
+            .collect();
+        assert_eq!(named, vec![("a", 5, 5), ("g", 9, 10)]);
+        assert_each_line_in_one_unit(&units, 10);
+        let c = "int f(void)\n// note\n{\n    return 0;\n}\n";
+        let units = extract(&c_extractor(), c, &(1..=5).collect::<Vec<u32>>());
+        assert!(
+            units.iter().any(|u| u.name == "f" && u.end_line == 5),
+            "a brace on its own line still opens the function"
+        );
+    }
+
+    #[test]
     fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
         let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
         let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
