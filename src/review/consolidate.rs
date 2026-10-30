@@ -116,6 +116,14 @@ pub const MAX_UNLOCATED_PROBES: usize = 100_000;
 /// severity. Model text (titles, details, summaries, reasoning, recommendations) is redacted
 /// on the way in.
 ///
+/// The `file` field is not redacted here, on purpose: the input is [`super::validate`]'s output,
+/// which has already replaced every kept finding's `file` with a reviewed path (or a rename
+/// target) or `None`, so no model-written path reaches this point, and that path is the key the
+/// gate uses to find the code it shows. Redacting a key could break the lookup. A caller that
+/// skips validation must not use this function. The report redacts `file` on the way out with
+/// the URL-credential and RV22 detectors (`report::redacted`), and the gate refuses any state
+/// that holds a secret.
+///
 /// Each reported finding is then mapped to its group without a local key: a located one by
 /// [`generate_finding_id`] with the neutral category, an unlocated one by asking magi-core
 /// whether its title and a group's title are one finding (a probe), with identical titles
@@ -145,6 +153,7 @@ pub const MAX_UNLOCATED_PROBES: usize = 100_000;
 ///
 /// [`ReviewError::Consolidation`] when magi-core refuses the consensus: no batch, or fewer
 /// mages across the review than its `min_agents` (2).
+// MAGI FIX (S6 loop 6): the unredacted `file` is a contract on the input, now stated.
 pub fn consolidate(batches: &[BatchOutcome]) -> Result<Consolidated, ReviewError> {
     consolidate_capped(batches, MAX_UNLOCATED_PROBES)
 }
