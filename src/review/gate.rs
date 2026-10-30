@@ -481,7 +481,8 @@ impl<'a> Gate<'a> {
             lean: outcome.lean,
             confidence: outcome.confidence,
             skipped,
-            status: None,
+            // MAGI FIX (S6 loop 5): the refusal's status reaches the report, not only the log.
+            status: outcome.status,
         }
     }
 

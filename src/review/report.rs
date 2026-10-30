@@ -99,7 +99,8 @@ pub struct BatchMetrics {
 /// the gate did not filter and at their severity after the agreement weight; then the review's
 /// own sections: batches and their failures, the gate's counts (and, once, what stopped it),
 /// the models skipped after an HTTP 400, the findings of the main list with their gate verdict
-/// (every cause, the deciding model, its lean and confidence, the models it skipped), the filtered ones listed apart, the
+/// (every cause and the HTTP status of a 413/422 that ended its chain, the deciding model, its
+/// lean and confidence, the models it skipped), the filtered ones listed apart, the
 /// discarded and symbol-unverified findings, the skipped files and the other declarations of
 /// the summary. The whole text is redacted as it is returned.
 ///
@@ -262,8 +263,11 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
     write!(out, "; gate: {}", name(&v.state))?;
     // MAGI FIX (S6 loop 3): the text says of each verdict what its JSON says: every cause, the
     // answer that set it (model, lean, confidence) and the models skipped after an HTTP 400.
-    if !v.causes.is_empty() {
-        write!(out, " ({})", v.causes.join("; "))?;
+    // MAGI FIX (S6 loop 5): a 413/422 that ended the chain names its HTTP status after the causes.
+    let mut causes: Vec<String> = v.causes.iter().map(|c| (*c).to_string()).collect();
+    causes.extend(v.status.map(|status| format!("HTTP {status}")));
+    if !causes.is_empty() {
+        write!(out, " ({})", causes.join("; "))?;
     }
     if let Some(model) = &v.model {
         write!(out, " by {model}")?;
