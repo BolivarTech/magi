@@ -628,6 +628,25 @@ mod tests {
     }
 
     #[test]
+    fn an_ignored_file_with_glob_characters_in_its_name_keeps_its_ignore_verdict() {
+        // [MAGI S6 loop 5, A2-m1, false positive] the ignore query's pathspec is literal because
+        // every call carries GIT_LITERAL_PATHSPECS=1: `x[0].rs` never globs to `x0.rs`.
+        let d = repo();
+        std::fs::write(d.path().join(".gitignore"), "x\\[0\\].rs\n").expect("write");
+        std::fs::write(d.path().join("x[0].rs"), "fn x() {}\n").expect("write");
+        std::fs::write(d.path().join("x0.rs"), "fn y() {}\n").expect("write");
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let ignored = magi_rs::review::filter::ignored_paths(
+            &ReviewInput::File("x[0].rs".into()),
+            "x[0].rs",
+            d.path(),
+            &g,
+        )
+        .expect("query runs");
+        assert!(ignored.contains("x[0].rs"), "{ignored:?}");
+    }
+
+    #[test]
     fn a_replace_ref_never_changes_the_content_a_revision_review_reads() {
         // [MAGI S6 loop 5, A1-b2] `refs/replace/*` is repository data: honoring it would review
         // a substitute blob instead of what the pinned commit holds (RV21).
