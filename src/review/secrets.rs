@@ -789,6 +789,18 @@ mod tests {
     }
 
     #[test]
+    fn a_shown_path_escapes_format_characters_that_reorder_or_hide_text() {
+        // [MAGI S6 loop 5, A2-m3] a right-to-left override or a zero-width space in a file name
+        // could visually reorder a report or run-log line; they are escaped like controls.
+        for c in ['\u{202e}', '\u{200b}', '\u{2066}', '\u{feff}', '\u{061c}'] {
+            let shown = display_path(&format!("a{c}b.rs"));
+            assert!(!shown.contains(c), "{c:?} kept in {shown:?}");
+            assert!(shown.contains(&c.escape_unicode().to_string()), "{shown:?}");
+        }
+        assert_eq!(display_path("año/módulo.rs"), "año/módulo.rs");
+    }
+
+    #[test]
     fn a_shown_path_escapes_control_characters() {
         // [CP2 MS2 S1b1 loop 16] a file name can carry a terminal escape; the report never replays it.
         assert_eq!(display_path("a\u{1b}[31m.rs"), "a\\u{1b}[31m.rs");
