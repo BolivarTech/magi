@@ -1404,6 +1404,29 @@ mod tests {
     }
 
     #[test]
+    fn a_rust_module_splits_into_its_items() {
+        // [MAGI S6 loop 6, B2b-m1] a `mod` block was a function-like unit that never split, so
+        // a whole-file review of a file whose `mod tests` exceeded the batch failed outright.
+        let code = "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    fn a() {\n        x();\n    }\n\n    struct S {\n        n: u8,\n    }\n}\nfn after() {\n}\n";
+        let ext = rust_extractor();
+        let units = extract(&ext, code, &(1..=14).collect::<Vec<u32>>());
+        let module = units
+            .iter()
+            .find(|u| u.name == "tests")
+            .expect("the module is one unit");
+        assert_eq!((module.start_line, module.end_line), (1, 12));
+        assert!(
+            units.iter().any(|u| u.name == "after"),
+            "the next item is found"
+        );
+        let parts = ext.split_block(module);
+        let names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"a") && names.contains(&"S"), "{names:?}");
+        assert_eq!(parts[0].content, "#[cfg(test)]\nmod tests {");
+        assert_each_line_in_one_unit(&parts, 12);
+    }
+
+    #[test]
     fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
         let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
         let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
