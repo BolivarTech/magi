@@ -76,7 +76,8 @@ pub enum RawStringSyntax {
     None,
     /// Rust-style: `r#"..."#` with variable hash count.
     RustHashes,
-    /// Python-style: `"""..."""` or `'''...'''`.
+    /// Python-style `"""..."""` or `'''...'''`, and Java's `"""` text blocks; a backslash
+    /// escapes the next character.
     TripleQuote,
     /// Go-style: backtick raw strings (`` `...` ``).
     GoBacktick,
@@ -153,14 +154,16 @@ impl LexicalRules {
         }
     }
 
-    /// Java: `//` + `/* */`, char literals.
+    /// Java: `//` + `/* */`, char literals, `"""` text blocks.
     pub fn java() -> Self {
         Self {
             line_comment: "//",
             block_comments: true,
             nested_comments: false,
             char_literals: true,
-            raw_strings: RawStringSyntax::None,
+            // MAGI FIX (S6 loop 5): a text block read as three plain quotes, so a `"` inside it
+            // returned to code and its braces moved the depth.
+            raw_strings: RawStringSyntax::TripleQuote,
             template_literals: false,
             regex_literals: false,
         }
