@@ -66,6 +66,16 @@ EXIT_MISUSE = 2
 
 #: Batches S47 requires, and the keys of the product's JSON it reads.
 MIN_BATCHES = runs.REVIEW_MIN_BATCHES
+
+#: Batches S50's refusal must name: the refusal fires at any batch count
+#: (30 s is below what even one batch needs at the floor), and a pool that
+#: measured a window larger than the unmeasured default plans fewer than
+#: :data:`MIN_BATCHES` over the same tree. Requiring three there would be a
+#: FAIL for the environmental reason S47 reports as CANNOT_TEST; the tree's
+#: size is already guarded when it is generated (``review_input_files``).
+# MAGI FIX (S6 loop 5): S50 asked for three batches, false-failing under a
+# measured window (F1-m1).
+MIN_REFUSED_BATCHES = 1
 CODE_REVIEW_KEY = "code_review"
 CONSULT_KEY = "consult"
 CONSENSUS_KEY = "consensus"
@@ -415,8 +425,8 @@ def an_insufficient_timeout_is_refused_before_spending(run):
     RV-S7: the refusal names the batches, the per-batch ceiling, the floor and
     the smallest ``--timeout``, on stderr and in the run log. The numbers come
     from the product's formula and are only range-checked: at least
-    :data:`MIN_BATCHES` batches, the 15 s floor, and a minimum above the total
-    the run asked for. The run log is the review workspace's own, and its line
+    :data:`MIN_REFUSED_BATCHES` batch, the 15 s floor, and a minimum above the
+    total the run asked for. The run log is the review workspace's own, and its line
     must carry this run's id and the very text stderr showed. It is read from
     the copy the executor captured right after R15, never from the live
     directory, which a later review run rebuilds.
@@ -437,8 +447,9 @@ def an_insufficient_timeout_is_refused_before_spending(run):
     match = BUDGET_PATTERN.search(_stderr_text(run))
     yield _verdict(S50_ASSERTIONS, 1, "R15", _budget_fields_ok(match),
                    "stderr does not carry the budget refusal with at least %d "
-                   "batches, the %d s floor and a minimum --timeout above %d"
-                   % (MIN_BATCHES, FLOOR_SECS, runs.REVIEW_TOO_SHORT_TIMEOUT_S))
+                   "batch, the %d s floor and a minimum --timeout above %d"
+                   % (MIN_REFUSED_BATCHES, FLOOR_SECS,
+                      runs.REVIEW_TOO_SHORT_TIMEOUT_S))
     yield _run_log_finding(run, match)
 
 
@@ -449,11 +460,11 @@ def _budget_fields_ok(match):
         match: The :data:`BUDGET_PATTERN` match, or ``None``.
 
     Returns:
-        bool: ``True`` for at least :data:`MIN_BATCHES` batches, the
+        bool: ``True`` for at least :data:`MIN_REFUSED_BATCHES` batch, the
         :data:`FLOOR_SECS` floor and a minimum above the total the run asked for.
     """
     return (match is not None
-            and int(match.group("batches")) >= MIN_BATCHES
+            and int(match.group("batches")) >= MIN_REFUSED_BATCHES
             and int(match.group("floor")) == FLOOR_SECS
             and int(match.group("minimum")) > runs.REVIEW_TOO_SHORT_TIMEOUT_S)
 
