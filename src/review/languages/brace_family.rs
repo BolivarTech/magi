@@ -862,8 +862,9 @@ fn strip_modifier<'t>(text: &'t str, word: &str) -> Option<&'t str> {
 
 /// The text after keyword `kw` at the start of `text`. A table keyword ends in a blank
 /// (`impl `), and the word may also be followed directly by a generic parameter list
-/// (`impl<T: Clone> Foo<T>`), which is passed over. `None` when `text` does not open with the
-/// keyword. O(n) in the text.
+/// (`impl<T: Clone> Foo<T>`), which is passed over, or by the brace of an anonymous construct
+/// (`class{`), which is kept. `None` when `text` does not open with the keyword. O(n) in the
+/// text.
 fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
     if let Some(rest) = text.strip_prefix(kw) {
         return Some(rest);
@@ -871,6 +872,10 @@ fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
     // MAGI FIX (S6 loop 5): `impl<T> Foo<T>` matched no `impl ` and its methods lost the header.
     let word = kw.strip_suffix(' ')?;
     let rest = text.strip_prefix(word)?;
+    // MAGI FIX (S6 loop 6): `export default class{` matched no `class ` and was no class.
+    if rest.starts_with('{') {
+        return Some(rest);
+    }
     rest.starts_with('<').then(|| skip_generics(rest))
 }
 
