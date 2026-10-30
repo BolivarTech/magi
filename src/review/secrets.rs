@@ -89,8 +89,15 @@ const ARMOR_END: &str = concat!("-----", "END ");
 const ARMOR_DASHES: &str = "-----";
 /// What opens the mark that replaces a masked secret: `<redacted: <pattern name>>`.
 const REDACTED_OPEN: &str = "<redacted: ";
-/// The words of the AWS secret access key's name, in order.
-const AWS_SECRET_WORDS: &[&str] = &["aws", "secret", "access", "key"];
+/// The words of the AWS secret access key's name, in order, each with whether it may be left
+/// out: `AWS_SECRET_KEY` and the STS field `SecretAccessKey` name the same key. A name must keep
+/// `aws` or `access` (see [`aws_name_end`]), so a generic `secret_key` is not taken for it.
+const AWS_SECRET_WORDS: &[(&str, bool)] = &[
+    ("aws", true),
+    ("secret", false),
+    ("access", true),
+    ("key", false),
+];
 /// The minimum length of the AWS secret access key.
 const AWS_SECRET_MIN: usize = 40;
 /// The blanks allowed around the `=` or `:` of an AWS secret key assignment.
@@ -405,20 +412,34 @@ fn armor_end(text: &str, from: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-/// Where the AWS secret access key that opens at `at` ends: its name (the four words in any case
-/// with at most one `_` or `-` between them), blanks, `=` or `:`, blanks, an optional quote, and
-/// a key of at least 40 characters. `None` when none opens there.
-fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
+/// Where the name of an AWS secret access key that opens at `at` ends: the words of
+/// [`AWS_SECRET_WORDS`] in order and in any case, with at most one `_` or `-` between two of
+/// them, the optional ones present or not, and at least one optional word present. `None` when
+/// no such name opens there. O(1).
+// MAGI FIX (S6 loop 7): `AWS_SECRET_KEY` and `SecretAccessKey` were not names of the key.
+fn aws_name_end(bytes: &[u8], at: usize) -> Option<usize> {
     let mut pos = at;
-    for (i, word) in AWS_SECRET_WORDS.iter().enumerate() {
-        if i > 0 && bytes.get(pos).is_some_and(|b| *b == b'_' || *b == b'-') {
-            pos += 1;
-        }
-        if !word_at(bytes, pos, word) {
+    let mut started = false;
+    let mut kept_optional = false;
+    for (word, optional) in AWS_SECRET_WORDS {
+        let separator =
+            usize::from(started && bytes.get(pos).is_some_and(|b| *b == b'_' || *b == b'-'));
+        if word_at(bytes, pos + separator, word) {
+            pos += separator + word.len();
+            started = true;
+            kept_optional |= *optional;
+        } else if !optional {
             return None;
         }
-        pos += word.len();
     }
+    kept_optional.then_some(pos)
+}
+
+/// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), blanks,
+/// `=` or `:`, blanks, an optional quote, and a key of at least 40 characters. `None` when none
+/// opens there.
+fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut pos = aws_name_end(bytes, at)?;
     pos = skip_bytes(bytes, pos, BLANKS);
     if !bytes.get(pos).is_some_and(|b| *b == b'=' || *b == b':') {
         return None;
