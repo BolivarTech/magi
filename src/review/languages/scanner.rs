@@ -500,6 +500,13 @@ impl CodeScanner {
 
                 LexicalState::TripleQuote { quote } => {
                     let q = *quote;
+                    // MAGI FIX (S6 loop 5): `\"""` closed the string on its escaped quote. A
+                    // backslash escapes the next character in a raw string too, as far as where
+                    // the string ends is concerned.
+                    if char_at(&chars, i) == '\\' {
+                        i += 2;
+                        continue;
+                    }
                     if i + 2 < len
                         && char_at(&chars, i) == q
                         && char_at(&chars, i + 1) == q
