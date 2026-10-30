@@ -629,8 +629,9 @@ mod tests {
 
     #[test]
     fn an_ignored_file_with_glob_characters_in_its_name_keeps_its_ignore_verdict() {
-        // [MAGI S6 loop 5, A2-m1, false positive] the ignore query's pathspec is literal because
-        // every call carries GIT_LITERAL_PATHSPECS=1: `x[0].rs` never globs to `x0.rs`.
+        // [MAGI S6 loop 5, A2-m1, false positive] every call carries GIT_LITERAL_PATHSPECS=1, and
+        // git also matches a pathspec against the exact name before trying it as a glob (measured:
+        // the verdict holds with the variable removed), so `x[0].rs` keeps its verdict.
         let d = repo();
         std::fs::write(d.path().join(".gitignore"), "x\\[0\\].rs\n").expect("write");
         std::fs::write(d.path().join("x[0].rs"), "fn x() {}\n").expect("write");
