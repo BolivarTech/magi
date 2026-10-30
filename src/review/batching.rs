@@ -586,6 +586,24 @@ mod tests {
     }
 
     #[test]
+    fn a_combined_merge_diff_fails_naming_the_combined_format() {
+        // [MAGI S6 loop 5, B1-m1] a combined diff (`@@@ -a,b -c,d +e,f @@@`, what `git show`
+        // writes for a merge) failed as a malformed hunk header, a cause that hides the real one.
+        let files = vec![ReviewFile {
+            path: "m.rs".into(),
+            diff: Some("@@@ -1,2 -1,2 +1,3 @@@\n  a\n +b\n- c\n".into()),
+        }];
+        let src = MapSource::new(&[("m.rs", "a\nb\n")], &[]);
+        match plan_batches(&files, &src, &LanguageRegistry::new(), 1_000) {
+            Err(ReviewError::Git(msg)) => {
+                assert!(msg.contains("combined (merge) diff"), "{msg}");
+                assert!(msg.contains("m.rs"), "{msg}");
+            }
+            other => panic!("expected a Git error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_hunk_carries_both_sides_and_a_deletion_has_an_empty_new_side() {
         // [CP2 MS2 S1 loop 2] a finding on a removed line uses the old numbering.
         let files = vec![
