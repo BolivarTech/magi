@@ -40,9 +40,12 @@ fn base_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-/// Extension of a path: the text after its last `.`, if it has one.
-fn extension_of(path: &str) -> Option<&str> {
-    path.rsplit_once('.').map(|(_, ext)| ext)
+/// Extension of a path: the text after its last `.`, if it has one, in ASCII lowercase.
+fn extension_of(path: &str) -> Option<String> {
+    // MAGI FIX (S6 loop 5): `FOO.ZZZ` and `notes.zzz` share an extension; both sides compare
+    // lowercased, as `detect_language` does.
+    path.rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
 }
 
 /// Maximal ASCII identifier runs of `text`; runs that start with a digit are not identifiers.
@@ -104,14 +107,14 @@ impl LexicalIndex {
             file_extensions: registry
                 .extensions()
                 .chain(KNOWN_FILE_EXTENSIONS)
-                .map(str::to_string)
+                .map(str::to_ascii_lowercase)
                 .collect(),
             file_names: HashSet::new(),
             complete: true,
         };
         for (path, _) in files {
             if let Some(ext) = extension_of(path) {
-                index.file_extensions.insert(ext.to_string());
+                index.file_extensions.insert(ext);
             }
             index.file_names.insert(base_name(path).to_string());
             if registry.get(path).is_some() {
@@ -170,7 +173,7 @@ impl LexicalIndex {
     pub fn is_file_name(&self, citation: &str) -> bool {
         // MAGI FIX (S6 loop 3): a field access on a receiver (`self.c`) is a symbol, not a file.
         if citation.contains(PATH_SEPARATOR)
-            || !extension_of(citation).is_some_and(|ext| self.file_extensions.contains(ext))
+            || !extension_of(citation).is_some_and(|ext| self.file_extensions.contains(&ext))
         {
             return false;
         }
