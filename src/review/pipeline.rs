@@ -537,9 +537,19 @@ pub struct PlanFingerprint {
 /// omissions; any other result unchanged.
 fn with_not_utf8<T>(
     planned: Result<T, ReviewError>,
-    _not_utf8: &[String],
+    not_utf8: &[String],
 ) -> Result<T, ReviewError> {
-    planned
+    // MAGI FIX (S6 loop 6): binaries plus non-UTF-8 names named only the binaries (RV20).
+    planned.map_err(|e| match e {
+        ReviewError::NothingToReview { mut skipped } => {
+            skipped.extend(not_utf8.iter().map(|path| Skipped {
+                path: display_path(path),
+                cause: SkipCause::NotUtf8,
+            }));
+            ReviewError::NothingToReview { skipped }
+        }
+        other => other,
+    })
 }
 
 /// Steps 2-3 of §5.0 over the resolved files, shared by [`run_review`] and [`plan_review`]: the
