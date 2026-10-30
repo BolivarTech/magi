@@ -531,7 +531,11 @@ impl<'a> CachedSource<'a> {
             .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX));
         let total = held.bytes.saturating_add(len);
         if total > self.cap {
-            return Err(ReviewError::InputTooLarge { limit: self.cap });
+            return Err(ReviewError::InputTooLarge {
+                limit: self.cap,
+                held: 0,
+                path: String::new(),
+            });
         }
         held.bytes = total;
         let side = match face {
@@ -656,12 +660,15 @@ mod tests {
         // [CP2 MS2 cierre (sin MAGI)] the old side is held too, so it counts toward the same cap.
         assert!(matches!(
             cached.read_old("a.rs"),
-            Err(ReviewError::InputTooLarge { limit: 5 })
+            Err(ReviewError::InputTooLarge { limit: 5, .. })
         ));
-        assert!(matches!(
-            cached.read("b.rs"),
-            Err(ReviewError::InputTooLarge { limit: 5 })
-        ));
+        // [MAGI S6 loop 5, A2-b1] the error says what was held and which read passed the cap.
+        let err = cached.read("b.rs").expect_err("over the cap");
+        assert!(
+            matches!(&err, ReviewError::InputTooLarge { limit: 5, held: 3, path } if path == "b.rs"),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("b.rs"), "{err}");
         assert_eq!(
             cached.read("a.rs").expect("already held: adds nothing"),
             Some(b"abc".to_vec())

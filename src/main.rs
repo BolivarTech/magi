@@ -22842,7 +22842,11 @@ mod code_review_surface_tests {
             2
         );
         assert_eq!(
-            review_error_exit(&ReviewError::InputTooLarge { limit: 1 }),
+            review_error_exit(&ReviewError::InputTooLarge {
+                limit: 1,
+                held: 0,
+                path: String::new(),
+            }),
             2
         );
         assert_eq!(

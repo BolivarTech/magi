@@ -132,6 +132,10 @@ pub enum ReviewError {
     InputTooLarge {
         /// The cap in bytes.
         limit: u64,
+        /// The bytes already held when the read was refused.
+        held: u64,
+        /// The path whose read would have passed the cap.
+        path: String,
     },
     /// The run's cancellation token fired mid-review.
     #[error("the review was cancelled")]
