@@ -890,4 +890,19 @@ def g():
             vec![("imports", UnitKind::DeclarationGroup, 1, 6)]
         );
     }
+
+    #[test]
+    fn assignments_apart_by_more_than_one_blank_line_are_separate_groups() {
+        // [MAGI S6 loop 7, B2b-m3] the assignment group went on through any number of blank
+        // lines, so a module of constants far apart became one unit that never splits.
+        let code = "X = 1\n\n\nY = 2\n\nZ = 3\n";
+        let units = extract(code, &[1, 4, 6]);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("X", UnitKind::DeclarationGroup, 1, 1),
+                ("Y", UnitKind::DeclarationGroup, 4, 6),
+            ]
+        );
+    }
 }
