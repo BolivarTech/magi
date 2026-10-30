@@ -126,7 +126,8 @@ enum Verdict {
 ///
 /// For each file, in this order, the first cause that applies wins: a path a review never
 /// reads (a `.git` or `.magi` component, or a name that starts with `.magi-rs-memory.db`,
-/// whatever `is_ignored` says) or one `is_ignored` names → `ignored`; a path that holds a
+/// whatever `is_ignored` says) or one `is_ignored` names, as the new path or as a rename's old
+/// path → `ignored`; a path that holds a
 /// secret → `secret`, without reading it; a file that does not exist → an error, never a skip;
 /// over the byte cap → `too large`; a NUL anywhere in a side → `binary`; not UTF-8 →
 /// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
@@ -207,7 +208,15 @@ fn classify(
     explicit: bool,
 ) -> Result<Verdict, ReviewError> {
     let path = file.path.as_str();
-    if is_never_reviewed(path) || is_ignored(path) {
+    // A renamed or copied file's old side lives under its old path.
+    let old_path = file.diff.as_deref().and_then(renamed_from);
+    // MAGI FIX (S6 loop 7): the old path meets the same name rule as the new one: a crafted
+    // commit carried a blob stored under `.git/` (or an ignored name) in as a rename's old side.
+    if [Some(path), old_path.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|p| is_never_reviewed(p) || is_ignored(p))
+    {
         return Ok(Verdict::Skip(SkipCause::Ignored));
     }
     if let Some(name) = find_secret(path) {
@@ -220,14 +229,11 @@ fn classify(
         Side::Content(bytes) => bytes,
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
-    // A renamed file's old side lives under its old path.
     let old = match &file.diff {
-        Some(diff) => {
-            match read_side(source.read_old(renamed_from(diff).as_deref().unwrap_or(path)))? {
-                Side::Content(bytes) => bytes,
-                Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
-            }
-        }
+        Some(_) => match read_side(source.read_old(old_path.as_deref().unwrap_or(path)))? {
+            Side::Content(bytes) => bytes,
+            Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
+        },
         None => None,
     };
     if new.is_none() && file.diff.is_none() {
