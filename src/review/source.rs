@@ -207,6 +207,11 @@ pub fn is_never_reviewed(path: &str) -> bool {
 /// is resolved again and must still lie under the root and name the very file opened (same
 /// device and inode, or volume and file index): a component swapped for a link between the
 /// check and the open is refused as outside the workspace.
+///
+/// A hard link names its inode from inside the workspace whatever file it is, so on Unix a file
+/// with more than one link is refused as outside the workspace too. On Windows std has no stable
+/// link count, so a hard link there is read like any other file: review a commit or a range,
+/// not the working tree, of a checkout you do not trust.
 pub struct WorktreeSource<'g> {
     /// The root as given; paths are joined to it (a verbatim canonical root would not resolve `..`).
     root: PathBuf,
@@ -300,8 +305,16 @@ impl WorktreeSource<'_> {
         let file = open(&canonical).map_err(io)?;
         // Checked again on the handle: the path may have been swapped between the check above
         // and the open (a FIFO, a device file).
-        if !file.metadata().map_err(io)?.is_file() {
+        let opened_meta = file.metadata().map_err(io)?;
+        if !opened_meta.is_file() {
             return Err(ReviewError::NotRegularFile(path.to_string()));
+        }
+        // MAGI FIX (S6 loop 6): a hard link's path is inside the workspace, its inode may be any
+        // file on the filesystem; the containment check cannot tell, so more than one link is
+        // refused. Unix only: std has no stable link count on Windows (declared above).
+        #[cfg(unix)]
+        if std::os::unix::fs::MetadataExt::nlink(&opened_meta) > 1 {
+            return Err(ReviewError::OutsideWorkspace(path.to_string()));
         }
         let opened = same_file::Handle::from_file(file).map_err(io)?;
         // Re-resolved after the open: a component swapped for an escaping link before the open
