@@ -1619,6 +1619,7 @@ mod tests {
             lean: None,
             confidence: None,
             skipped: vec![],
+            status: None,
         };
         let mut summary = ReviewSummary::default();
         record_verdicts(&mut summary, &[finding], vec![verdict]);

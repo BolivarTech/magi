@@ -1452,6 +1452,7 @@ mod tests {
             lean: None,
             confidence: None,
             skipped: vec![],
+            status: None,
         };
         let mut summary = magi_rs::review::report::ReviewSummary::default();
         summary.findings.push((finding, verdict));

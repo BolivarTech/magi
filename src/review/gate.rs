@@ -113,6 +113,11 @@ pub struct GateVerdict {
     /// is a skip with cause `rejected` (RV10, RV-S20), the only cause that skips a model, so the
     /// field carries the cause by its meaning; the summary counts them under `rejected_skips`.
     pub skipped: Vec<String>,
+    /// The HTTP status of the provider refusal that ended the chain (413 or 422), so a
+    /// `chain exhausted` from a refused request is told apart from one where every model
+    /// answered under its threshold; absent otherwise (and from the JSON form).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
 }
 
 /// The `state` sent to `decide` for a finding's first (title, detail) pair.
@@ -476,6 +481,7 @@ impl<'a> Gate<'a> {
             lean: outcome.lean,
             confidence: outcome.confidence,
             skipped,
+            status: None,
         }
     }
 
@@ -1152,6 +1158,34 @@ mod tests {
                     "{status}"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_413_or_422_verdict_carries_the_provider_status() {
+        // [MAGI S6 loop 5, C1-c3] the status of the refusal that ended the chain reaches the
+        // verdict, not only the WARN entry, so the report tells it from an under-threshold end.
+        for status in [413, 422] {
+            let mut c = MockDecisionClient::new();
+            c.expect_decide().returning(move |_| {
+                Err(DecisionError::Rejected {
+                    status,
+                    provider_message: "too large".into(),
+                    trace: Trace::default(),
+                })
+            });
+            let mut g = Gate::new(&c, chain(), 61_000);
+            let v = g
+                .judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some(
+                        "x
+",
+                    ),
+                    None,
+                )
+                .await;
+            assert_eq!((v.cause, v.status), (Some("chain exhausted"), Some(status)));
         }
     }
 

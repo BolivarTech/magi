@@ -529,6 +529,7 @@ mod tests {
             lean: Some("false_positive".into()),
             confidence: Some(0.9),
             skipped: vec!["nimble".into()],
+            status: None,
         };
         let mut s = ReviewSummary::default();
         s.gate_states.insert("filtered".into(), 1);
@@ -642,6 +643,7 @@ mod tests {
             lean: None,
             confidence: None,
             skipped: vec![],
+            status: None,
         };
         let discarded = |cause| Discarded {
             agent: AgentName::Melchior,
@@ -694,12 +696,47 @@ mod tests {
             lean: None,
             confidence: None,
             skipped: vec![],
+            status: None,
         };
         assert!(key_finding(&c.findings[0]).is_some());
         let mut s = ReviewSummary::default();
         s.findings.push((c.findings[0].clone(), verdict));
         let text = render_text(&c, &s);
         assert!(!text.contains("could not be listed"), "{text}");
+    }
+
+    #[test]
+    fn a_refused_request_shows_its_http_status_in_the_text_and_the_json() {
+        // [MAGI S6 loop 5, C1-c3] a 413/422 `chain exhausted` names its status in both forms.
+        let finding = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: Severity::Warning,
+            reported_severity: Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![Category::Other],
+            sources: vec![AgentName::Melchior, AgentName::Caspar],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let verdict = GateVerdict {
+            state: GateState::Unfiltered,
+            cause: Some("chain exhausted"),
+            causes: vec!["chain exhausted"],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+            status: Some(413),
+        };
+        let mut s = ReviewSummary::default();
+        s.findings.push((finding, verdict));
+        let v = summary_json(&s);
+        assert_eq!(v["findings"][0]["gate"]["status"], 413, "{v}");
+        let mut text = String::new();
+        write_review_section(&mut text, &s, 0).expect("writes");
+        assert!(text.contains("chain exhausted; HTTP 413"), "{text}");
     }
 
     #[test]
@@ -726,6 +763,7 @@ mod tests {
             lean: None,
             confidence: None,
             skipped: vec![],
+            status: None,
         };
         let mut out = String::new();
         write_finding(&mut out, &finding, &verdict).expect("writes");
@@ -756,6 +794,7 @@ mod tests {
             lean: None,
             confidence: None,
             skipped: vec![],
+            status: None,
         };
         let mut out = String::new();
         write_finding(&mut out, &finding, &verdict).expect("writes");
@@ -816,6 +855,7 @@ mod tests {
             lean: Some("false_positive".into()),
             confidence: Some(0.625),
             skipped: vec!["clef:cloud".into()],
+            status: None,
         };
         let mut s = ReviewSummary::default();
         s.findings.push((c.findings[0].clone(), verdict));
