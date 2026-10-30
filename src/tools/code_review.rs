@@ -1446,6 +1446,41 @@ mod tests {
     }
 
     #[test]
+    fn a_review_where_no_batch_completed_names_each_batch_cause_in_the_text_and_the_failure() {
+        // [MAGI S6 loop 7, D-b2] the causes lived only in the JSON summary: the default text
+        // output and the stderr line said "failed" without saying why.
+        let mut summary = magi_rs::review::report::ReviewSummary::default();
+        summary
+            .failed_batches
+            .push((0, "consult failed: connection refused".into()));
+        summary
+            .failed_batches
+            .push((1, "the review clock ran out".into()));
+        let o = magi_rs::review::pipeline::ReviewOutcome {
+            consolidated: None,
+            batch_reports: vec![],
+            summary,
+            consolidation_error: Some("no batch completed: 2 of 2 failed".into()),
+        };
+        let r = render_outcome(o, false);
+        for line in [
+            "batch 1 did not complete: consult failed: connection refused",
+            "batch 2 did not complete: the review clock ran out",
+        ] {
+            assert!(r.text.contains(line), "{}", r.text);
+        }
+        let failure = r.failure.unwrap_or_default();
+        assert!(
+            failure.starts_with("no batch completed: 2 of 2 failed"),
+            "{failure}"
+        );
+        assert!(
+            failure.contains("connection refused") && failure.contains("clock ran out"),
+            "{failure}"
+        );
+    }
+
+    #[test]
     fn a_rendered_review_masks_a_model_secret_in_the_summary_and_the_failure() {
         // [MAGI S6 loop 3, S2] render_outcome is the single point every surface reads (CLI text,
         // JSON and -o, the TUI, the tool).
