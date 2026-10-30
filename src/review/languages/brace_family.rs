@@ -2170,4 +2170,41 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_braced_initializer_of_a_struct_variable_is_a_declaration() {
+        // [MAGI S6 loop 7, B2b-c3] `struct Foo x{1};` read its initializer's `{` as the struct
+        // body, so a variable was named as the struct `Foo`.
+        let cpp = BraceFamilyExtractor::cpp();
+        let code = "struct Foo x{1};\nint g(void) {\n    return 0;\n}\n";
+        let units = extract(&cpp, code, &[1]);
+        assert_eq!(
+            spans(&units),
+            vec![("declarations", UnitKind::DeclarationGroup, 1, 1)]
+        );
+        // A struct definition stays a struct, `final` and a one-line body included.
+        for (code, name, end) in [
+            (
+                "struct Foo final {
+    int x;
+};
+",
+                "Foo",
+                3,
+            ),
+            (
+                "struct P { int x; };
+",
+                "P",
+                1,
+            ),
+        ] {
+            let units = extract(&cpp, code, &all_lines(code));
+            assert_eq!(
+                spans(&units),
+                vec![(name, UnitKind::Struct, 1, end)],
+                "{code}"
+            );
+        }
+    }
 }
