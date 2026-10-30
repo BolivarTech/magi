@@ -1615,6 +1615,16 @@ mod tests {
     }
 
     #[test]
+    fn a_rust_block_doc_comment_belongs_to_its_item() {
+        // [MAGI S6 loop 6, B2b-m5] Rust's doc prefixes were `///` and `//!` only, so a
+        // `/** ... */` rustdoc above an item fell into a gap unit.
+        let code = "use a::b;\n\n/**\n * Doc.\n */\nfn a() {\n    x();\n}\n";
+        let units = extract(&rust_extractor(), code, &[7]);
+        let a = units.iter().find(|u| u.name == "a").expect("fn a");
+        assert_eq!((a.start_line, a.end_line), (3, 8));
+    }
+
+    #[test]
     fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
         let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
         let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
