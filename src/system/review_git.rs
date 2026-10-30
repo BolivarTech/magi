@@ -10,6 +10,22 @@
 //! disable them; the child
 //! gets only the tool environment allowlist plus `GIT_NO_LAZY_FETCH=1` (a partial clone never
 //! downloads during a review) and `GIT_LITERAL_PATHSPECS=1` (a path is never a glob).
+//!
+//! It parses untrusted bytes (the filter probe, git's listings, a bounded stderr), so it carries
+//! the same no-panic net as `magi_rs::review`: `panic = "abort"` would end the process on hostile
+//! input with no report.
+// MAGI FIX (S6 loop 6): the review module's deny net now covers its git runner too.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::string_slice,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
