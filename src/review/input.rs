@@ -889,6 +889,10 @@ fn unquote_lossy(text: &str) -> Option<String> {
 
 /// The bytes git's C-style quoting stands for (see [`unquote`]); `None` for a malformed quote
 /// or escape.
+///
+/// Every escape consumes its backslash and the byte after it (three more for an octal), so an
+/// escaped backslash followed by an escaped quote (`\\\"`) decodes to `\"`: a review of S6 loop 8
+/// read it as a raw quote. Pinned by `an_escaped_backslash_followed_by_an_escaped_quote_decodes_both`.
 fn unquote_bytes(text: &str) -> Option<Vec<u8>> {
     let Some(inner) = text.strip_prefix('"') else {
         return Some(text.as_bytes().to_vec());
@@ -2080,6 +2084,24 @@ mod tests {
             vec!["ok.rs"]
         );
         assert_eq!(not_utf8, vec!["caf\u{fffd}.rs".to_string()]);
+    }
+    #[test]
+    fn an_escaped_backslash_followed_by_an_escaped_quote_decodes_both() {
+        // [MAGI S6 loop 8, A1-b3 Balthasar] the review read `\\\"` as an escaped backslash and a
+        // raw quote, dropping the section. Each escape consumes exactly two bytes, so the next
+        // `\"` starts a fresh escape: the name `a\"b.rs` survives, in the header and in a section.
+        assert_eq!(unquote(r#""a/a\\\"b.rs""#).as_deref(), Some(r#"a/a\"b.rs"#));
+        assert_eq!(unquote(r#""a\\\\\"""#).as_deref(), Some(r#"a\\""#));
+        let diff = concat!(
+            "diff --git \"a/a\\\\\\\"b.rs\" \"b/a\\\\\\\"b.rs\"\n",
+            "--- \"a/a\\\\\\\"b.rs\"\n+++ \"b/a\\\\\\\"b.rs\"\n@@ -1 +1 @@\n-x\n+y\n",
+        );
+        let (files, not_utf8) = split_diff(diff.as_bytes());
+        assert_eq!(
+            files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec![r#"a\"b.rs"#]
+        );
+        assert!(not_utf8.is_empty(), "{not_utf8:?}");
     }
     #[test]
     fn a_path_shaped_like_a_mode_line_is_not_mistaken_for_a_submodule() {
