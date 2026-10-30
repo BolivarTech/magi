@@ -191,6 +191,12 @@ rustix = { version = "1", features = ["fs"] }
 # `forbid(unsafe_code)`; NO raw Win32, NO `windows`-crate calls of our own. Pinned.
 win32job = "2.0.3"
 windows-acl = "0.3"
+# code-review RV22 — a working-tree file with more than one hard link is refused (its inode can
+# be any file on the volume). std exposes the Windows link count only on nightly
+# (`windows_by_handle`); `winapi-util` reads it through `GetFileInformationByHandle` with no
+# `unsafe` of ours. Already in Cargo.lock as `same-file`'s only dependency (same version): no
+# new crate enters the build. `Unlicense OR MIT`. Pinned.
+winapi-util = "=0.1.11"
 
 [profile.release]
 lto = true

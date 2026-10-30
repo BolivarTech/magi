@@ -208,10 +208,8 @@ pub fn is_never_reviewed(path: &str) -> bool {
 /// device and inode, or volume and file index): a component swapped for a link between the
 /// check and the open is refused as outside the workspace.
 ///
-/// A hard link names its inode from inside the workspace whatever file it is, so on Unix a file
-/// with more than one link is refused as outside the workspace too. On Windows std has no stable
-/// link count, so a hard link there is read like any other file: review a commit or a range,
-/// not the working tree, of a checkout you do not trust.
+/// A hard link names its inode from inside the workspace whatever file it is, so a file with
+/// more than one link is refused as outside the workspace too, on every platform ([`link_count`]).
 pub struct WorktreeSource<'g> {
     /// The root as given; paths are joined to it (a verbatim canonical root would not resolve `..`).
     root: PathBuf,
@@ -311,9 +309,9 @@ impl WorktreeSource<'_> {
         }
         // MAGI FIX (S6 loop 6): a hard link's path is inside the workspace, its inode may be any
         // file on the filesystem; the containment check cannot tell, so more than one link is
-        // refused. Unix only: std has no stable link count on Windows (declared above).
-        #[cfg(unix)]
-        if std::os::unix::fs::MetadataExt::nlink(&opened_meta) > 1 {
+        // refused.
+        // MAGI FIX (S6 loop 7): on Windows too (it read the outside bytes there).
+        if link_count(&file, &opened_meta).map_err(io)? > 1 {
             return Err(ReviewError::OutsideWorkspace(path.to_string()));
         }
         let opened = same_file::Handle::from_file(file).map_err(io)?;
@@ -342,6 +340,33 @@ impl WorktreeSource<'_> {
             }),
         }
     }
+}
+
+/// How many hard links name the open file.
+///
+/// On Unix the count of its metadata (`st_nlink`). On Windows std exposes the count only on
+/// nightly (`windows_by_handle`), so it is read through `winapi-util`, which wraps
+/// `GetFileInformationByHandle` with no `unsafe` of ours (already in the build through
+/// `same-file`).
+///
+/// # Arguments
+/// * `file` - The open file.
+/// * `meta` - Its metadata (the Unix count).
+///
+/// # Returns
+/// The number of links; 1 for a file no hard link shares.
+///
+/// # Errors
+/// On Windows, any error of the handle query.
+#[cfg(unix)]
+fn link_count(_file: &std::fs::File, meta: &std::fs::Metadata) -> std::io::Result<u64> {
+    Ok(std::os::unix::fs::MetadataExt::nlink(meta))
+}
+
+/// See the Unix [`link_count`].
+#[cfg(windows)]
+fn link_count(file: &std::fs::File, _meta: &std::fs::Metadata) -> std::io::Result<u64> {
+    Ok(winapi_util::file::information(file)?.number_of_links())
 }
 
 /// Opens a worktree file for reading without ever blocking in the open.
