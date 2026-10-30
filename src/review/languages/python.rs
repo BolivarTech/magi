@@ -114,7 +114,7 @@ impl LanguageExtractor for PythonExtractor {
             let trimmed = line.trim();
             let is_def = trimmed.starts_with("def ") || trimmed.starts_with("async def ");
             if code(j) && is_def && indentation(line) == body_indent {
-                let start = scan_back_decorators(&lines, j);
+                let start = scan_back_decorators(&lines, &continued, j);
                 let end = find_block_end(&lines, &continued, j);
                 members.push((
                     UnitKind::Function,
@@ -255,7 +255,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         // def / async def at indent 0 → Function
         if (trimmed.starts_with("def ") || trimmed.starts_with("async def ")) && indent == 0 {
             let name = extract_python_name(trimmed, "def ");
-            let start = scan_back_decorators(lines, i);
+            let start = scan_back_decorators(lines, &continued, i);
             let end = find_block_end(lines, &continued, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::Function,
@@ -270,7 +270,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         // class at indent 0 → Class
         if trimmed.starts_with("class ") && indent == 0 {
             let name = extract_python_name(trimmed, "class ");
-            let start = scan_back_decorators(lines, i);
+            let start = scan_back_decorators(lines, &continued, i);
             let end = find_block_end(lines, &continued, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::Class,
@@ -490,15 +490,19 @@ fn find_assignment_group_end(lines: &[&str], continued: &[bool], start: usize) -
     end
 }
 
-/// Scan backward for Python decorators (`@...`).
-fn scan_back_decorators(lines: &[&str], idx: usize) -> usize {
+/// Scan backward for Python decorators (`@...`): the 0-based first line of the decorators
+/// right above line `idx`, or `idx` when there are none. A decorator is a whole logical line, so
+/// one wrapped over several lines (`@route(\n    "/a",\n)`) is taken with its continuation
+/// lines, as `continued` marks them ([`continued_lines`]). O(k) for the k lines taken.
+fn scan_back_decorators(lines: &[&str], continued: &[bool], idx: usize) -> usize {
+    // MAGI FIX (S6 loop 6): a wrapped decorator's continuation lines were left out.
     let mut start = idx;
-    while start > 0 {
-        let is_decorator = lines
-            .get(start - 1)
-            .is_some_and(|prev| prev.trim().starts_with('@'));
-        if is_decorator {
-            start -= 1;
+    while let Some(mut first) = start.checked_sub(1) {
+        while first > 0 && continued.get(first).copied().unwrap_or(false) {
+            first -= 1;
+        }
+        if lines.get(first).is_some_and(|l| l.trim().starts_with('@')) {
+            start = first;
         } else {
             break;
         }
