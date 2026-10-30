@@ -125,21 +125,25 @@ struct EmptyGitDir {
 }
 
 impl EmptyGitDir {
-    /// Creates a fresh directory (never an existing one) and its skeleton.
+    /// Creates a fresh directory (never an existing one, never through a symlink: `create_dir`
+    /// refuses any name that exists) under a random name, and its skeleton.
     ///
     /// # Errors
     ///
     /// [`ReviewError::Io`] when no fresh name can be created or the skeleton cannot be written.
     fn create() -> Result<Self, ReviewError> {
-        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let io = |e: std::io::Error| {
             ReviewError::Io(format!("cannot make an empty git repository: {e}"))
         };
         let mut last = None;
         for _ in 0..EMPTY_GIT_DIR_ATTEMPTS {
-            let n = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("{EMPTY_GIT_DIR_PREFIX}-{}-{n}", std::process::id()));
+            // MAGI FIX (S6 loop 5): a sequence number was predictable, so another local user
+            // could take the next names ahead of time; a random suffix leaves nothing to guess.
+            let path = std::env::temp_dir().join(format!(
+                "{EMPTY_GIT_DIR_PREFIX}-{}-{:016x}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
             match std::fs::create_dir(&path) {
                 Ok(()) => {
                     let dir = Self { path };
