@@ -2060,4 +2060,36 @@ mod tests {
         let units = extract(&c_extractor(), code, &[5]);
         assert_eq!(spans(&units), vec![("f", UnitKind::Function, 4, 6)]);
     }
+
+    /// Every line of `code`, 1-based.
+    fn all_lines(code: &str) -> Vec<u32> {
+        (1..=u32::try_from(code.lines().count()).expect("small")).collect()
+    }
+
+    #[test]
+    fn a_wrapped_signature_with_a_function_pointer_parameter_is_one_function() {
+        // [MAGI S6 loop 7, B2b-c1] a parameter line holding `(` before its own name
+        // (`int (*callback)(int),`) read as the next construct's signature, so the brace search
+        // stopped there and the function was cut at that line.
+        for (ext, code) in [
+            (
+                c_extractor(),
+                "void foo(\n    int (*callback)(int),\n    int y\n) {\n    callback(y);\n}\nint bar(void) {\n    return 0;\n}\n",
+            ),
+            (
+                BraceFamilyExtractor::cpp(),
+                "void foo(\n    const std::function<void(int)>& callback,\n    int y\n) {\n    callback(y);\n}\nint bar(void) {\n    return 0;\n}\n",
+            ),
+        ] {
+            let units = extract(&ext, code, &all_lines(code));
+            assert_eq!(
+                spans(&units),
+                vec![
+                    ("foo", UnitKind::Function, 1, 6),
+                    ("bar", UnitKind::Function, 7, 9)
+                ],
+                "{code}"
+            );
+        }
+    }
 }
