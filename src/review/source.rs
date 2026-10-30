@@ -926,12 +926,11 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    // Windows has no stable link count in std; the limit is declared on `WorktreeSource`.
     #[test]
     fn a_hard_link_to_a_file_outside_the_workspace_is_refused() {
         // [MAGI S6 loop 6, F2-c1] a hard link's path is inside the workspace but its inode may
         // be anything on the same filesystem: a file with more than one link is never read.
+        // [MAGI S6 loop 7, A2-b3] on every platform: Windows read the outside bytes.
         let outer = tempfile::tempdir().expect("tempdir");
         std::fs::write(outer.path().join("secret.txt"), "outside\n").expect("write");
         let root = outer.path().join("ws");
