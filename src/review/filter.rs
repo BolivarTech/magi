@@ -71,7 +71,7 @@ pub enum SkipCause {
     /// A file over the per-file byte cap.
     TooLarge,
     /// A path whose target is not a regular file: a link to a directory inside the workspace, a
-    /// FIFO, a socket or a device file.
+    /// FIFO, a socket, a device file, or a submodule (a diff with neither side).
     NotRegularFile,
 }
 
@@ -236,6 +236,12 @@ fn classify(
         },
         None => None,
     };
+    // MAGI FIX (S6 loop 8): a diff with neither side is a gitlink (a submodule reads as absent
+    // on both sides) or a path gone from both revisions; it was kept with no content and no
+    // cause. `split_diff` drops gitlink sections before this, so this is the filter's own answer.
+    if new.is_none() && old.is_none() && file.diff.is_some() {
+        return Ok(Verdict::Skip(SkipCause::NotRegularFile));
+    }
     if new.is_none() && file.diff.is_none() {
         return Err(if explicit {
             ReviewError::NotReviewable {
