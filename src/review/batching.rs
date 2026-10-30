@@ -13,8 +13,24 @@
 //! A secret that spans two units of one file is not caught by either unit's scan; the file-level
 //! filter, which reads each file whole before batching, is the net for it. That filter also
 //! scans both faces of a diff (removed lines included) and omits a secret-bearing file with
-//! cause `secret` while the review goes on (REQ-RV22, RV-S30), so the egress scan here fails the
-//! review only for what changed between the two reads: a backstop, never the omission itself.
+//! cause `secret` while the review goes on (REQ-RV22, RV-S30), so the egress scan here is a
+//! backstop, never the omission itself.
+//!
+//! The filter and this module see the same bytes, by construction: the pipeline wraps the
+//! review's content source once in a `CachedSource` (`review::source`) and hands that one value
+//! to the filter and to [`plan_batches_with`]; the cache keeps each side's first read, so a file
+//! changed on disk between the two stages is still batched as the filter scanned it (pinned by
+//! `source::tests::a_cached_source_keeps_the_bytes_it_first_read_even_if_the_file_changes` and
+//! `pipeline::tests::each_side_of_each_file_is_read_from_git_once_per_review`). A hunk's text is
+//! the diff string the filter scanned, never re-read. A caller that passes a source other than
+//! the filter's loses this guarantee for split secrets; the per-item scan still runs.
+//!
+//! A diff section with no hunk (a mode change, a rename without a content change, an empty new
+//! file) has no line to review: it gives no item and no omission, because nothing is withheld.
+//!
+//! Notes for retrieved context (MS3): a companion's key must map to one token count every time
+//! the closure is asked, since the whole-file split decision and the packer both ask it; and its
+//! text, built outside this module, must pass [`find_secret`] before it joins a prompt.
 
 use std::collections::HashSet;
 
@@ -286,7 +302,9 @@ pub fn plan_batches(
 /// * [`ReviewError::EgressSecret`] when an item or a header holds a secret.
 /// * [`ReviewError::TooLargeForBatch`] when an item, its header and its companion do not fit
 ///   in an empty batch, or a whole file without an extractor (or without units) does not.
-/// * [`ReviewError::Io`] when a file reviewed whole has disappeared from the source.
+/// * [`ReviewError::Io`] when a file reviewed whole has disappeared from the source
+///   ([`ContentSource::read`] gives `Ok(None)` only for an absent path; a read over the size cap
+///   is [`ReviewError::TooLarge`], never `None`).
 /// * [`ReviewError::NotReviewable`] when a file reviewed whole is no longer UTF-8.
 /// * [`ReviewError::Git`] when a hunk header cannot be parsed or is a combined (merge) diff's.
 /// * [`ReviewError::NothingToReview`] when no file produces an item.
@@ -329,7 +347,8 @@ pub fn plan_batches_with(
 }
 
 /// Fails with [`ReviewError::EgressSecret`] when `text`, about to leave in a batch, holds a
-/// secret. O(n) in the text.
+/// secret. The error names the file by [`display_path`], which masks a secret in the name itself,
+/// so it never echoes the secret it caught. O(n) in the text.
 fn scan(path: &str, text: &str) -> Result<(), ReviewError> {
     match find_secret(text) {
         Some(_) => Err(ReviewError::EgressSecret {
