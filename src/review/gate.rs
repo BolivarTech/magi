@@ -1213,14 +1213,7 @@ mod tests {
         let mut c = MockDecisionClient::new();
         c.expect_decide().times(0);
         let mut g = Gate::new(&c, chain(), 61_000);
-        for (line, code) in [
-            (
-                100, "one
-two
-",
-            ),
-            (1, ""),
-        ] {
+        for (line, code) in [(100, "one\ntwo\n"), (1, "")] {
             let v = g
                 .judge(&finding(Severity::Warning, Some(line)), Some(code), None)
                 .await;
