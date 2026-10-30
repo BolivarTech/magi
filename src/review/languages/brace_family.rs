@@ -2263,4 +2263,18 @@ mod tests {
         let kinds: Vec<UnitKind> = units.iter().map(|u| u.kind).collect();
         assert_eq!(kinds, vec![UnitKind::Struct, UnitKind::DeclarationGroup]);
     }
+
+    #[test]
+    fn a_cpp_scoped_enum_is_named_by_its_own_name() {
+        // [MAGI S6 loop 7, B2b-m2, B2b-b1] `enum class Color {` was named `class`.
+        let code = "enum class Color : int {\n    Red,\n};\nenum struct Mode {\n    A,\n};\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &all_lines(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("Color", UnitKind::Enum, 1, 3),
+                ("Mode", UnitKind::Enum, 4, 6)
+            ]
+        );
+    }
 }
