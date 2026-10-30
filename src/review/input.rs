@@ -1303,6 +1303,90 @@ mod tests {
     }
 
     #[test]
+    fn a_listed_name_that_climbs_out_of_the_workspace_is_refused_in_every_listing() {
+        // [MAGI S6 loop 6, A1-c1] git scopes `ls-files` to its cwd (pinned against the real git
+        // by `an_uncommitted_review_in_a_sub_workspace_lists_nothing_outside_it`), but a name
+        // that climbs out (`../secret.txt`) or is absolute must never become a file to read.
+        let d = tempfile::tempdir().expect("tempdir");
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        std::fs::write(
+            d.path().join("secret.txt"),
+            "s
+",
+        )
+        .expect("write");
+        std::fs::write(
+            ws.join("a.rs"),
+            "fn a() {}
+",
+        )
+        .expect("write");
+        let cases = [
+            (
+                ReviewInput::Uncommitted,
+                FakeGit::from(&[
+                    (
+                        "rev-parse --is-inside-work-tree",
+                        Ok("true
+"),
+                    ),
+                    (
+                        "rev-parse --verify --quiet HEAD^{commit}",
+                        Ok("abc
+"),
+                    ),
+                    (
+                        "diff --no-color --no-ext-diff --no-textconv --relative abc",
+                        Ok(""),
+                    ),
+                    (
+                        "ls-files --others --exclude-standard -z",
+                        Ok("a.rs ../secret.txt "),
+                    ),
+                ]),
+            ),
+            (
+                ReviewInput::Uncommitted,
+                FakeGit::from(&[
+                    (
+                        "rev-parse --is-inside-work-tree",
+                        Ok("true
+"),
+                    ),
+                    ("rev-parse --verify --quiet HEAD^{commit}", Err("")),
+                    (
+                        "ls-files --cached --others --exclude-standard -z",
+                        Ok("a.rs ../secret.txt "),
+                    ),
+                ]),
+            ),
+            (
+                ReviewInput::Directory(".".into()),
+                FakeGit::from(&[
+                    (
+                        "rev-parse --is-inside-work-tree",
+                        Ok("true
+"),
+                    ),
+                    (
+                        "ls-files --cached --others --exclude-standard -z -- .",
+                        Ok("a.rs ../secret.txt "),
+                    ),
+                ]),
+            ),
+        ];
+        for (input, git) in cases {
+            let r = resolve_input(&input, &ws, &git, &allow_all);
+            assert!(
+                matches!(r, Err(ReviewError::OutsideWorkspace(ref p)) if p == "../secret.txt"),
+                "{input:?}: {:?}",
+                r.as_ref().err()
+            );
+        }
+    }
+
+    #[test]
     fn a_hostile_ref_is_rejected_by_resolve_input_before_any_git_call() {
         // [CP2 MS2 S1 loop 2] FakeGit has no entries: any git call is a `Git` error, so only validate_ref yields InvalidRef.
         let git = FakeGit(Default::default());
