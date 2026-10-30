@@ -2215,4 +2215,28 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_c_function_returning_a_struct_or_an_enum_is_a_function() {
+        // [MAGI S6 loop 7, B2b-m2] the block keyword was matched before the signature, so
+        // `struct Point make_point(void) {` became a struct named `Point`.
+        let code = "struct Point make_point(void) {\n    struct Point p = {0, 0};\n    return p;\n}\nenum Color pick(void) {\n    return RED;\n}\nstruct Point *origin(void) {\n    return 0;\n}\n";
+        for ext in [c_extractor(), BraceFamilyExtractor::cpp()] {
+            let units = extract(&ext, code, &all_lines(code));
+            assert_eq!(
+                spans(&units),
+                vec![
+                    ("make_point", UnitKind::Function, 1, 4),
+                    ("pick", UnitKind::Function, 5, 7),
+                    ("origin", UnitKind::Function, 8, 10)
+                ]
+            );
+        }
+        // An attribute's parentheses before the type's name keep it a struct, and a prototype
+        // returning a struct stays a declaration.
+        let code = "struct __attribute__((packed)) Hdr {\n    int a;\n};\nstruct Point make_point(void);\n";
+        let units = extract(&c_extractor(), code, &all_lines(code));
+        let kinds: Vec<UnitKind> = units.iter().map(|u| u.kind).collect();
+        assert_eq!(kinds, vec![UnitKind::Struct, UnitKind::DeclarationGroup]);
+    }
 }
