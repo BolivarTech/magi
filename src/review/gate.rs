@@ -248,6 +248,14 @@ fn numbered_window(code: &str, line: u32) -> String {
     out
 }
 
+/// Whether `code` has a line numbered `line` (from 1). O(bytes up to that line).
+fn holds_line(code: &str, line: u32) -> bool {
+    usize::try_from(line)
+        .ok()
+        .and_then(|l| l.checked_sub(1))
+        .is_some_and(|i| code.lines().nth(i).is_some())
+}
+
 /// Whether the secret detector finds a pattern in any string of `value`. O(bytes).
 fn carries_secret(value: &Value) -> bool {
     match value {
@@ -432,7 +440,7 @@ impl<'a> Gate<'a> {
 
     /// Judges one finding, never failing: what cannot be judged passes as `unfiltered`.
     ///
-    /// In order: no line or no code (`no location`); a cause that already stopped the gate; a
+    /// In order: no line, no code, or code without that line (`no location`); a cause that already stopped the gate; a
     /// spent review clock (`timeout`); a state over `max_state_bytes` (`state too large`, never
     /// truncated) or carrying a secret (`secret`, never sent). Then each distinct (title,
     /// detail) pair, up to [`MAX_GATE_QUESTIONS_PER_FINDING`], is asked once, walking the chain: a confident `false_positive` filters it
@@ -590,9 +598,14 @@ impl<'a> Gate<'a> {
     ) -> Outcome {
         // A finding with nothing to show is `no location` whatever stopped the gate: no call is
         // made either way, and the cause says what the finding lacks.
-        let (Some(_), Some(code)) = (finding.line, code) else {
+        let (Some(line), Some(code)) = (finding.line, code) else {
             return Outcome::unfiltered(CAUSE_NO_LOCATION);
         };
+        // MAGI FIX (S6 loop 7, C1-c3): code that does not reach the finding's line (empty, or
+        // shorter than it) would send an excerpt without that line: nothing to show either.
+        if !holds_line(code, line) {
+            return Outcome::unfiltered(CAUSE_NO_LOCATION);
+        }
         if let Some(cause) = self.stopped {
             return Outcome::unfiltered(cause);
         }
@@ -830,7 +843,7 @@ mod tests {
         });
         let mut g = Gate::new(&c, chain(), 61_000);
         assert_eq!(
-            g.judge(&f, Some("x\n"), None).await.state,
+            g.judge(&f, Some("x\nx\nx\n"), None).await.state,
             GateState::Kept,
             "one real defect keeps it"
         );
@@ -840,7 +853,7 @@ mod tests {
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g2 = Gate::new(&c2, chain(), 61_000);
         assert_eq!(
-            g2.judge(&f, Some("x\n"), None).await.state,
+            g2.judge(&f, Some("x\nx\nx\n"), None).await.state,
             GateState::Filtered
         );
     }
@@ -858,7 +871,7 @@ mod tests {
             .times(MAX_GATE_QUESTIONS_PER_FINDING)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        g.judge(&f, Some("x\n"), None).await;
+        g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(g.questions(), MAX_GATE_QUESTIONS_PER_FINDING);
     }
 
@@ -875,7 +888,7 @@ mod tests {
             .times(MAX_GATE_QUESTIONS_PER_FINDING)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(
             (v.state, v.cause),
             (GateState::LowConfidence, Some("not every claim judged"))
@@ -896,7 +909,7 @@ mod tests {
             .times(MAX_GATE_QUESTIONS_PER_FINDING)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(v.cause, Some("not every claim judged"));
         assert!(g.per_model().is_empty(), "{:?}", g.per_model());
     }
@@ -917,7 +930,7 @@ mod tests {
             .times(1)
             .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(
             (v.state, v.cause, v.causes),
             (GateState::Kept, None, vec!["not every claim judged"])
@@ -942,7 +955,7 @@ mod tests {
         c.expect_decide()
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(
             (v.state, v.cause, v.causes),
             (
@@ -965,7 +978,7 @@ mod tests {
             .times(chain().len())
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.10));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(
             (v.state, v.cause, v.causes),
             (
@@ -985,7 +998,7 @@ mod tests {
             .times(1)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(v.causes, vec!["critical never filtered"]);
     }
 
@@ -997,7 +1010,7 @@ mod tests {
             .times(1)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(v.cause, Some("critical never filtered"));
         assert_eq!(g.per_model().get("clef:cloud"), Some(&1));
     }
@@ -1013,7 +1026,7 @@ mod tests {
             .times(n)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!((v.state, v.cause), (GateState::Filtered, None));
     }
 
@@ -1028,7 +1041,7 @@ mod tests {
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
         assert_eq!(
-            g.judge(&f, Some("x\n"), None).await.state,
+            g.judge(&f, Some("x\nx\nx\n"), None).await.state,
             GateState::Filtered
         );
         assert_eq!(g.per_model().get("clef:cloud"), Some(&1));
@@ -1083,15 +1096,23 @@ mod tests {
             .returning(|_| answer("clef:cloud", "real_defect", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
         assert_eq!(
-            g.judge(&finding(Severity::Warning, Some(3)), Some("x\n"), None)
-                .await
-                .state,
+            g.judge(
+                &finding(Severity::Warning, Some(3)),
+                Some("x\nx\nx\n"),
+                None
+            )
+            .await
+            .state,
             GateState::Filtered
         );
         assert_eq!(
-            g.judge(&finding(Severity::Warning, Some(3)), Some("x\n"), None)
-                .await
-                .state,
+            g.judge(
+                &finding(Severity::Warning, Some(3)),
+                Some("x\nx\nx\n"),
+                None
+            )
+            .await
+            .state,
             GateState::Kept
         );
     }
@@ -1112,9 +1133,13 @@ mod tests {
             61_000,
         );
         assert_eq!(
-            g.judge(&finding(Severity::Warning, Some(3)), Some("x\n"), None)
-                .await
-                .state,
+            g.judge(
+                &finding(Severity::Warning, Some(3)),
+                Some("x\nx\nx\n"),
+                None
+            )
+            .await
+            .state,
             GateState::Filtered
         );
     }
@@ -1126,7 +1151,11 @@ mod tests {
             .returning(|_| answer("clef:cloud", "false_positive", 0.99));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g
-            .judge(&finding(Severity::Critical, Some(3)), Some("x\n"), None)
+            .judge(
+                &finding(Severity::Critical, Some(3)),
+                Some("x\nx\nx\n"),
+                None,
+            )
             .await;
         assert_eq!(
             (v.state, v.cause),
@@ -1178,7 +1207,11 @@ two
         c.expect_decide().times(0);
         let mut g = Gate::new(&c, chain(), 10);
         let v = g
-            .judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
             .await;
         assert_eq!(v.cause, Some("state too large"));
     }
@@ -1196,7 +1229,7 @@ two
         assert_eq!((v.state, v.cause), (GateState::Unfiltered, Some("secret")));
         let mut f = finding(Severity::Warning, Some(1));
         f.details = vec!["token ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA leaks".into()]; // allow-secret-scan
-        let v = g.judge(&f, Some("x\n"), None).await;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!((v.state, v.cause), (GateState::Unfiltered, Some("secret")));
     }
 
@@ -1214,7 +1247,11 @@ two
         let mut g = Gate::new(&c, chain(), 61_000);
         for _ in 0..2 {
             let v = g
-                .judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+                .judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some("x\nx\nx\n"),
+                    None,
+                )
                 .await;
             assert_eq!(v.model.as_deref(), Some("clef-flash"));
             assert_eq!(v.skipped, vec!["clef:cloud".to_string()]); // [CP2 MS2 S2 loop 2] RV-S15: the skip is visible
@@ -1238,7 +1275,11 @@ two
         for _ in 0..2 {
             let mut g = Gate::new(&c, chain(), 61_000);
             let v = g
-                .judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+                .judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some("x\nx\nx\n"),
+                    None,
+                )
                 .await;
             assert_eq!(v.model.as_deref(), Some("clef-flash")); // `times(2)` on the head is the check: asked once per review
         }
@@ -1266,9 +1307,13 @@ two
             let mut g = Gate::new(&c, chain(), 61_000);
             for _ in 0..2 {
                 assert_eq!(
-                    g.judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
-                        .await
-                        .cause,
+                    g.judge(
+                        &finding(Severity::Warning, Some(1)),
+                        Some("x\nx\nx\n"),
+                        None
+                    )
+                    .await
+                    .cause,
                     Some("chain exhausted"),
                     "{status}"
                 );
@@ -1317,7 +1362,11 @@ two
         let mut g = Gate::new(&c, chain(), 61_000);
         for _ in 0..2 {
             let v = g
-                .judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+                .judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some("x\nx\nx\n"),
+                    None,
+                )
                 .await;
             assert_eq!(
                 (v.state, v.cause),
@@ -1355,7 +1404,11 @@ two
         }
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g
-            .judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
             .await;
         assert_eq!(
             (v.state, v.cause),
@@ -1399,7 +1452,7 @@ two
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(1)),
-                Some("x\n"),
+                Some("x\nx\nx\n"),
                 Some(std::time::Duration::from_secs(5)),
             )
             .await;
@@ -1408,7 +1461,7 @@ two
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(2)),
-                Some("x\n"),
+                Some("x\nx\nx\n"),
                 Some(std::time::Duration::from_secs(5)),
             )
             .await;
@@ -1444,7 +1497,7 @@ two
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(1)),
-                Some("x\n"),
+                Some("x\nx\nx\n"),
                 Some(std::time::Duration::from_secs(30)),
             )
             .await;
@@ -1473,7 +1526,7 @@ two
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(1)),
-                Some("x\n"),
+                Some("x\nx\nx\n"),
                 Some(std::time::Duration::ZERO),
             )
             .await;
@@ -1493,14 +1546,14 @@ two
         let mut g = Gate::new(&c, chain(), 61_000);
         g.judge(
             &finding(Severity::Warning, Some(1)),
-            Some("x\n"),
+            Some("x\nx\nx\n"),
             Some(std::time::Duration::from_secs(60)),
         )
         .await;
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(2)),
-                Some("x\n"),
+                Some("x\nx\nx\n"),
                 Some(std::time::Duration::ZERO),
             )
             .await;
@@ -1520,7 +1573,11 @@ two
         let mut g =
             Gate::new(&c, chain(), 61_000).with_call_timeout(std::time::Duration::from_secs(120));
         let v = g
-            .judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
             .await;
         assert_eq!(
             (v.state, v.cause, g.stopped()),
@@ -1546,7 +1603,7 @@ two
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(1)),
-                Some("x\n"),
+                Some("x\nx\nx\n"),
                 Some(std::time::Duration::from_secs(5_000)),
             )
             .await;
@@ -1563,8 +1620,12 @@ two
             })
         });
         let mut g = Gate::new(&c, chain(), 61_000);
-        g.judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
-            .await;
+        g.judge(
+            &finding(Severity::Warning, Some(1)),
+            Some("x\nx\nx\n"),
+            None,
+        )
+        .await;
         let v = g.judge(&finding(Severity::Warning, None), None, None).await;
         assert_eq!(
             (v.state, v.cause, g.stopped()),
@@ -1588,7 +1649,7 @@ two
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(1)),
-                Some("x\n"),
+                Some("x\nx\nx\n"),
                 Some(std::time::Duration::from_secs(5_000)),
             )
             .await;
@@ -1638,9 +1699,13 @@ two
         let mut g = Gate::new(&c, chain(), 61_000);
         for _ in 0..3 {
             assert_eq!(
-                g.judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
-                    .await
-                    .cause,
+                g.judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some("x\nx\nx\n"),
+                    None
+                )
+                .await
+                .cause,
                 Some("unauthorized")
             );
         }
@@ -1654,7 +1719,11 @@ two
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.10));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g
-            .judge(&finding(Severity::Warning, Some(1)), Some("x\n"), None)
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
             .await;
         assert_eq!(
             (v.state, v.lean.as_deref()),
