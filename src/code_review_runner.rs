@@ -123,8 +123,14 @@ trait TrioBuilder: Send + Sync {
 }
 
 impl TrioBuilder for TrioFactory {
-    /// Builds a trio under `ceiling`. Its notices were already announced by the startup build
-    /// of the same configuration, so they are dropped here.
+    /// Builds a trio under `ceiling`, dropping its notices (configuration warnings only: a trio
+    /// that cannot be built is an error, redacted and reported).
+    ///
+    /// On a surface that built the same configuration at startup (`trio_checked`), that build
+    /// already announced them. On one that did not, they are not shown anywhere: accepted, since
+    /// they are warnings the next `consult` or TUI start of the same configuration shows, and a
+    /// review has no notice channel of its own to carry them.
+    // MAGI FIX (S6 loop 6, D-m2): the doc no longer claims the notices were always announced.
     fn build(&self, ceiling: ResolvedCeiling) -> Result<Arc<Magi>, String> {
         let mut notices = Vec::new();
         build_magi_orchestrator(
@@ -206,6 +212,17 @@ impl BatchConsult for TrioBatchConsult {
             // MAGI FIX (S6 loop 3): the build is part of the batch. It runs on a blocking thread
             // inside the wall clock, so the clock bounds it and the run's token is not held up by
             // it (a build cut there finishes unread on its thread).
+            // MAGI FIX (S6 loop 6, D-b2/D-c2): why that orphan cannot pile up. The build is local
+            // work (configuration, endpoint resolution, HTTP client construction: no request is
+            // sent, the probe ran once at startup), so it ends on its own in milliseconds. The
+            // batches run in series and a wall clock that runs out stops the review's batches, as
+            // a cancel stops the review: at most one build is left running per review, and the
+            // next review only starts after this one returned. The worst case is one blocking
+            // thread busy for the length of one build, never a growing set. Making the build
+            // cancellable would need magi-core's builder to be async, which it is not.
+            // D-b3: the orchestrator is rebuilt per batch because the ceiling is per batch under
+            // `--timeout` (what is left over the pending batches); without it the ceiling is the
+            // same, but a build costs milliseconds against a consult's minutes, so no cache.
             let magi = tokio::task::spawn_blocking(move || factory.build(ceiling))
                 .await
                 .map_err(|e| format!("the trio build did not finish: {e}"))?
