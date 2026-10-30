@@ -303,6 +303,9 @@ pub(crate) fn build_code_review_runner(
         .map_err(|e| redact_foreign_error(&e).to_string())?;
     let base_url = resolve_section_endpoint(&template, Scope::CodeReview, b.secret_store.as_ref())
         .map_err(|e| redact_foreign_error(&e).to_string())?;
+    // One source of truth: `DEFAULT_CODE_REVIEW_TIMEOUT_SECS` (src/defaults.rs) is defined as
+    // `magi_rs::review::config::DEFAULT_CALL_TIMEOUT_SECS`, the constant the gate itself falls
+    // back to, so the two defaults cannot diverge.
     let call_timeout = Duration::from_secs(
         section
             .timeout_secs
