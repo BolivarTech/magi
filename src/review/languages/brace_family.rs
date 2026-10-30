@@ -1270,10 +1270,18 @@ impl BraceFamilyExtractor {
     }
 
     /// JavaScript extractor.
+    ///
+    /// It does not claim `.jsx`, and the TypeScript one does not claim `.tsx`: the lexical rules
+    /// have no JSX text mode, so an apostrophe in JSX text (`<p>it's</p>`) opens a string that
+    /// runs to the next `'`, which may be the end of the file, and the unit around it runs there
+    /// too. Such files are reviewed as text with no extractor. A `.js` or `.ts` file holding JSX
+    /// keeps the limit, declared: a quote in its JSX text may make the unit around it run to the
+    /// end of the file.
     pub fn javascript() -> Self {
         Self {
             language: "javascript".to_string(),
-            exts: &["js", "jsx", "mjs"],
+            // MAGI FIX (S6 loop 7): `.jsx` is not read with rules that have no JSX text mode.
+            exts: &["js", "mjs"],
             // `export`, `default`, `async` and `abstract` are stripped before these tables are
             // matched ([`JS_MODIFIERS`]), so they hold the bare keywords.
             function_keywords: vec!["function ".to_string()],
@@ -1301,7 +1309,8 @@ impl BraceFamilyExtractor {
     pub fn typescript() -> Self {
         let mut ext = Self::javascript();
         ext.language = "typescript".to_string();
-        ext.exts = &["ts", "tsx", "mts"];
+        // MAGI FIX (S6 loop 7): `.tsx` is not claimed, as `.jsx` is not ([`Self::javascript`]).
+        ext.exts = &["ts", "mts"];
         ext.block_keywords.push("interface ".to_string());
         ext.declaration_keywords.push("type ".to_string());
         ext.declaration_keywords.push("export type ".to_string());
