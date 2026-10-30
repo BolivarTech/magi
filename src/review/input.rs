@@ -224,9 +224,18 @@ pub fn resolve_input(
     if let Some(escaping) = resolved.files.iter().find(|f| !is_confined(&f.path)) {
         return Err(ReviewError::OutsideWorkspace(escaping.path.clone()));
     }
-    if resolved.files.is_empty() && resolved.not_utf8.is_empty() {
+    // MAGI FIX (S6 loop 6): with only non-UTF-8 names left, the input went on with no file and
+    // the omissions never reached the `nothing to review` error (RV20).
+    if resolved.files.is_empty() {
         return Err(ReviewError::NothingToReview {
-            skipped: Vec::new(),
+            skipped: resolved
+                .not_utf8
+                .iter()
+                .map(|path| super::filter::Skipped {
+                    path: super::secrets::display_path(path),
+                    cause: super::filter::SkipCause::NotUtf8,
+                })
+                .collect(),
         });
     }
     Ok(resolved)
