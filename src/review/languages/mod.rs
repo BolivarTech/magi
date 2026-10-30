@@ -150,6 +150,12 @@ pub(crate) type Member = (UnitKind, String, u32, u32);
 ///
 /// The pieces sorted by start line, covering every line of `block` once, each with the changed
 /// lines of `block` it holds; empty when `members` is. O(n log n) for the block's n lines.
+///
+/// A piece may hold no changed line (a stretch between two members of a block whose changes
+/// are elsewhere): coverage of every line is the contract, so the block's header is never lost.
+/// Its one production caller splits a file reviewed whole, where every line is changed and no
+/// piece is left without one; batching packs a piece by its content, never by its changed
+/// lines.
 pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> Vec<SemanticUnit> {
     if members.is_empty() {
         return Vec::new();
