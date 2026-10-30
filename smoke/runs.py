@@ -584,7 +584,8 @@ _ENVELOPE_SYSTEM = "Answer in as few words as you can."
 #: ``BATCH_WINDOW_FRACTION_PERCENT`` live in ``src/review/window.rs`` (the
 #: unmeasured window is also referenced from ``src/defaults.rs``). Change one
 #: side and the other must follow, or the generated input stops filling the
-#: batches S47 requires.
+#: batches S47 requires; ``smoke/tests/test_rust_sync.py`` reads the Rust and
+#: fails on drift.
 #:
 #: The same heuristic the product uses to turn bytes into tokens (one token per
 #: four bytes). The batch arithmetic below is only as good as this number.
