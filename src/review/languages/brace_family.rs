@@ -118,7 +118,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
         // MAGI FIX (S6 loop 3): a block too large for one batch is reviewed method by method.
         if !matches!(
             unit.kind,
-            UnitKind::Impl | UnitKind::Class | UnitKind::Trait
+            UnitKind::Impl | UnitKind::Class | UnitKind::Trait | UnitKind::Module
         ) {
             return Vec::new();
         }
@@ -513,8 +513,9 @@ impl BraceFamilyExtractor {
                     "enum" => UnitKind::Enum,
                     "trait" | "interface" => UnitKind::Trait,
                     "impl" => UnitKind::Impl,
-                    "mod" => UnitKind::Function, // module as function-like
-                    _ => UnitKind::Class,        // class, namespace, record, @interface
+                    // MAGI FIX (S6 loop 6): a module was function-like, so it never split.
+                    "mod" => UnitKind::Module,
+                    _ => UnitKind::Class, // class, namespace, record, @interface
                 };
                 return Some((kind, rest));
             }

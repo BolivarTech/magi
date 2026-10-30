@@ -40,6 +40,8 @@ pub enum UnitKind {
     Trait,
     /// An impl block (Rust-specific).
     Impl,
+    /// A module block (Rust `mod name { ... }`); split into its items like an impl block.
+    Module,
     /// A group of related top-level declarations: constants, statics,
     /// type aliases, imports, macros, global variables.
     DeclarationGroup,
