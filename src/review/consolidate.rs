@@ -124,12 +124,12 @@ pub const MAX_UNLOCATED_PROBES: usize = 100_000;
 /// # Complexity
 ///
 /// O(n) to build the outputs and map located findings (n reported findings), plus magi-core's
-/// own O(n²) dedup, plus O(u·g) probes for u unlocated findings over g unlocated groups (each
-/// lookup also compares the title with every group's, borrowed, an O(u·g) scan of the order of
-/// magi-core's dedup). The
-/// probes are per review, not per batch (u and g grow with the batches), and bounded by
-/// [`MAX_UNLOCATED_PROBES`]: past it an unlocated finding whose title matches no group
-/// verbatim forms its own group, is counted in [`Consolidated::ungrouped_unlocated`], and
+/// own O(n²) dedup, plus at most O(u·g) probes for u unlocated findings over g unlocated groups.
+/// A title already placed (a group's or an earlier member's) is found in O(1) without a probe,
+/// and a new title's scan stops at the first group that accepts it, each step a probe, so the
+/// grouping work is O(u + probes). The probes are per review, not per batch (u and g grow with
+/// the batches), and bounded by [`MAX_UNLOCATED_PROBES`]: past it an unlocated finding whose
+/// title was not placed before forms its own group at O(1), is counted in [`Consolidated::ungrouped_unlocated`], and
 /// every single-source unlocated finding is marked [`FindingMark::Ungrouped`].
 ///
 /// # Arguments
@@ -314,14 +314,36 @@ impl Unlocated {
 
     /// The group (index into `groups`) an unlocated title belongs to; resets `probe.refused`
     /// so the caller can tell a refused probe from no match.
+    ///
+    /// A title already placed (a group's representative or an earlier member) decides without
+    /// a probe; otherwise the first group, in creation order, that `probe` accepts. `None` when
+    /// none does.
+    ///
+    /// # Complexity
+    ///
+    /// O(1) for a title already placed. A new title asks the groups in order until one accepts
+    /// it, and each of those asks is a probe (a new title has no memoized pair), so the scans of a
+    /// review cost at most its probes plus one per lookup. Once the budget is spent a new title
+    /// asks no group: it is refused at once (O(1)), so the cap bounds the work as well as the
+    /// `determine` calls.
+    // MAGI FIX (S6 loop 5): the exact-title scan is a map and a spent budget asks no group.
     fn slot(&self, groups: &[Group], title: &str, probe: &Prober<'_>) -> Option<usize> {
-        let reps: Vec<&str> = self
-            .slots
-            .iter()
-            .filter_map(|&i| groups.get(i).map(|g| g.rep.as_str()))
-            .collect();
         probe.refused.set(false);
-        group_of(title, &reps, &|a, b| probe.same(a, b)).and_then(|j| self.slots.get(j).copied())
+        if let Some(&i) = self.by_title.get(title) {
+            return Some(i);
+        }
+        if probe.left.get() == 0 {
+            let refused = !self.slots.is_empty();
+            probe.refused.set(refused);
+            if refused {
+                probe.exhausted.set(true);
+            }
+            return None;
+        }
+        self.slots
+            .iter()
+            .copied()
+            .find(|&i| groups.get(i).is_some_and(|g| probe.same(title, &g.rep)))
     }
 }
 
@@ -606,16 +628,6 @@ fn lower(s: Severity) -> Severity {
         Severity::Critical => Severity::Warning,
         Severity::Warning | Severity::Info => Severity::Info,
     }
-}
-
-/// The group an unlocated title belongs to, by index into `reps`.
-///
-/// An identical representative decides without calling `same`; otherwise the first
-/// representative `same` accepts. `None` when none does.
-fn group_of(title: &str, reps: &[&str], same: &dyn Fn(&str, &str) -> bool) -> Option<usize> {
-    reps.iter()
-        .position(|r| *r == title)
-        .or_else(|| reps.iter().position(|r| same(title, r)))
 }
 
 #[cfg(test)]
@@ -978,11 +990,24 @@ mod tests {
 
     #[test]
     fn a_finding_no_group_claims_is_never_dropped() {
-        // [CP2 MS2 S2 loop 5] the fallback: group_of says None, so consolidate gives the finding its own group (RV12, no loss).
-        assert_eq!(group_of("x", &["y"], &|_, _| false), None);
+        // [CP2 MS2 S2 loop 5] the fallback: the lookup says None, so consolidate gives the finding its own group (RV12, no loss).
+        // [MAGI S6 loop 5, C1-c2] moved from `group_of` to `Unlocated::slot`, which replaced it.
+        let mut groups = unlocated_groups(0);
+        groups.push(Group {
+            dedup: None,
+            id: None,
+            rep: "y".into(),
+            members: Vec::new(),
+        });
+        let engine = ConsensusEngine::default();
+        let probe = Prober::new(&engine, None, 10);
+        let index = Unlocated::new(&groups);
+        assert_eq!(index.slot(&groups, "x", &probe), None);
+        assert_eq!(index.slot(&groups, "y", &probe), Some(0));
         assert_eq!(
-            group_of("y", &["y"], &|_, _| panic!("identical titles never probe")),
-            Some(0)
+            probe.same_calls.get(),
+            1,
+            "identical titles never probe; only `x` asked"
         );
     }
 
