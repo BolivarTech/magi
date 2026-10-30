@@ -148,6 +148,15 @@ struct TrioBatchConsult {
 }
 
 impl TrioBatchConsult {
+    /// Builds the trio once under the configured ceiling, so a trio that cannot be built is
+    /// reported before any review starts.
+    ///
+    /// # Errors
+    /// The builder's message, redacted as every other error of [`build_code_review_runner`].
+    fn check(&self) -> Result<(), String> {
+        self.factory.build(self.ceiling(None)).map(|_| ())
+    }
+
     /// The ceiling of a batch: derived from its wall clock as headless derives it from a
     /// `--timeout`, or the configured one when the batch has none.
     fn ceiling(&self, wall_clock: Option<Duration>) -> ResolvedCeiling {
@@ -335,7 +344,7 @@ pub(crate) fn build_code_review_runner(
     // Built once now, unless the surface already did, so a trio that cannot be built is
     // reported before any review starts.
     if !b.trio_checked {
-        consult.factory.build(consult.ceiling(None))?;
+        consult.check()?;
     }
     let runner = ProductionReviewRunner::new(ReviewRunnerParts {
         workspace: b.workspace,
@@ -379,6 +388,26 @@ mod tests {
             max_rotations: 0,
             retry_disabled: false,
         }
+    }
+
+    #[test]
+    fn the_early_trio_check_redacts_the_build_error() {
+        // [MAGI S6 loop 5, D-m1] the one error path of the runner builder that went out raw.
+        struct LeakyBuild;
+        impl TrioBuilder for LeakyBuild {
+            fn build(&self, _ceiling: ResolvedCeiling) -> Result<Arc<Magi>, String> {
+                Err("seat failed at https://user:hunter2@example.invalid/v1".into())
+            }
+        }
+        let consult = TrioBatchConsult {
+            factory: Arc::new(LeakyBuild),
+            configured_ceiling: 120,
+            max_rotations: 0,
+            retry_disabled: false,
+        };
+        let err = consult.check().expect_err("the build fails");
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(err.contains("seat failed"), "{err}");
     }
 
     /// How long a slow build takes in these tests, and the bound the review must answer within.
