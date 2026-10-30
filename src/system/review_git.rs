@@ -1253,6 +1253,28 @@ mod tests {
         assert!(filter_overrides(&z).is_err());
     }
 
+    #[test]
+    fn the_filter_driver_cap_stops_the_parse_and_bounds_the_error() {
+        // [MAGI S6 loop 6, A1-c2] every override was built and every name joined into the error
+        // before the cap was checked: a config with many drivers grew both without bound.
+        let mut z = Vec::new();
+        for i in 0..50_000 {
+            z.extend_from_slice(
+                format!(
+                    "local filter.driver{i}.clean
+cat "
+                )
+                .as_bytes(),
+            );
+        }
+        let message = filter_overrides(&z).expect_err("over the cap").to_string();
+        assert!(
+            message.len() <= 2 * MAX_FILTER_OVERRIDE_BYTES,
+            "{} bytes",
+            message.len()
+        );
+    }
+
     /// 800 LF files committed, then rewritten under a repo-local `core.autocrlf=true`: every git call
     /// that compares them with the worktree prints one warning per file, far over a pipe buffer.
     /// Returns the repository and the SHA of its commit.
