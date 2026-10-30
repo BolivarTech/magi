@@ -1577,4 +1577,32 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_nul_anywhere_in_a_file_makes_it_binary() {
+        // [MAGI S6 loop 7, A2-c2] only the first 8 000 bytes were sniffed: a text prefix hid a
+        // binary payload, which is valid UTF-8 and was batched (RV20).
+        let mut late: Vec<u8> = vec![b'a'; 9_000];
+        late.extend_from_slice(b"\0payload\n");
+        let files = vec![
+            ReviewFile {
+                path: "late.rs".into(),
+                diff: None,
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let src = MapSource::with_bytes(&[("late.rs", &late), ("a.rs", b"fn f() {}\n")]);
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "late.rs".into(),
+                cause: SkipCause::Binary,
+            }]
+        );
+    }
 }
