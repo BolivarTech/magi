@@ -2059,6 +2059,58 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_sees_no_code_for_a_line_of_a_unit_whose_batch_did_not_complete() {
+        // [MAGI S6 loop 5, D-c1] a unit-split file is whole for the gate only when every batch
+        // holding one of its units completed, as `reviewed_of` decides; otherwise only its
+        // finished units are faces, so a line of an unfinished unit gets no code.
+        struct Text;
+        impl ContentSource for Text {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(
+                    b"x
+"
+                    .repeat(20),
+                ))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let unit = |first_line, last_line| BatchItem::Unit {
+            file: "a.rs".into(),
+            name: "f".into(),
+            text: String::new(),
+            first_line,
+            last_line,
+        };
+        let batch = |index, item| ReviewBatch {
+            index,
+            items: vec![item],
+            tokens: 0,
+            companion_tokens: 0,
+        };
+        let batches = vec![batch(0, unit(1, 10)), batch(1, unit(11, 20))];
+        let old_paths = HashMap::new();
+        let partial = faces_of(&batches, &BTreeSet::from([0]));
+        let code = |faces: &HashMap<&str, Faces>, line| {
+            gate_code(Some("a.rs"), Some(line), faces, &old_paths, &Text)
+        };
+        assert!(
+            code(&partial, 5).is_some(),
+            "a finished unit's line has its code"
+        );
+        assert!(
+            code(&partial, 15).is_none(),
+            "an unfinished unit's line has none"
+        );
+        let all = faces_of(&batches, &BTreeSet::from([0, 1]));
+        assert!(
+            code(&all, 15).is_some(),
+            "every unit done: the file is whole"
+        );
+    }
+
+    #[test]
     fn a_failed_read_after_the_batches_falls_back_to_the_finished_units() {
         // [MAGI §6 MS2 D loop 2] the batches are paid when `reviewed_of` reads a unit-split file:
         // a failing read must not throw them away. It registers only the units the trio saw.
