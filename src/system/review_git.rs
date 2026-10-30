@@ -35,6 +35,10 @@ use crate::tools::proc_group::tool_child_env;
 /// `protocol.allow=never` cuts every transport; and `core.useReplaceRefs=false` reads the
 /// objects the pinned commit names, never a repository's replacements. On Git for Windows
 /// `/dev/null` names a directory that does not exist, which disables hooks the same way.
+///
+/// `safe.directory` is deliberately not set: git's refusal of a repository another user owns is
+/// a defense layer this list does not replace, so such a review fails with git's "dubious
+/// ownership" error until the operator trusts the path in their own global config.
 pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
     "core.fsmonitor=false",
     "core.hooksPath=/dev/null",
