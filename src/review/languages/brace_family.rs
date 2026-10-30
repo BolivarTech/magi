@@ -318,8 +318,12 @@ impl BraceFamilyExtractor {
                     continue;
                 }
                 let group_start = i;
-                let end_of =
-                    |j: usize| declaration_block(lines, scanned, j, &stops).map_or(j, |b| b.1);
+                // MAGI FIX (S6 loop 7): a `#define` continued by `\` ends on its last line.
+                let end_of = |j: usize| {
+                    declaration_block(lines, scanned, j, &stops)
+                        .map_or(j, |b| b.1)
+                        .max(preprocessor_end(lines, j))
+                };
                 // A declaration joins the group unless it is a function expression, its own unit.
                 let joins = |j: usize| {
                     lines.get(j).is_some_and(|l| self.is_declaration(l.trim()))
@@ -828,6 +832,23 @@ fn opens_linkage_block(trimmed: &str) -> bool {
         .and_then(|r| r.strip_prefix('"'))
         .and_then(|r| r.split_once('"'))
         .is_some_and(|(_, after)| after.trim_start().starts_with('{'))
+}
+
+/// The 0-based last line of the preprocessor directive at line `i` (`#define MAX(a, b) \`):
+/// the directive goes on while a line ends in `\`. `i` when line `i` is no directive (its text
+/// does not open with `#`) or does not end in `\`. O(k) for the k lines of the directive.
+fn preprocessor_end(lines: &[&str], i: usize) -> usize {
+    if !lines
+        .get(i)
+        .is_some_and(|l| l.trim_start().starts_with('#'))
+    {
+        return i;
+    }
+    let mut end = i;
+    while end + 1 < lines.len() && lines.get(end).is_some_and(|l| l.trim_end().ends_with('\\')) {
+        end += 1;
+    }
+    end
 }
 
 /// The 0-based line where the statement that starts at line `i` ends: the first line from `i`
