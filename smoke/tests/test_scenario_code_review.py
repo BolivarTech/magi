@@ -64,7 +64,9 @@ def _review(batches: int = 3, findings=None, discarded=None) -> dict:
     # [CP2 MS2 S2 loop 2] the main findings live in code_review.findings (summary_json), not in consult.
     # [CP2 MS2 S2b loop 6] code_review.discarded, RV-S5's other half, each entry with its cause.
     # [CP2 MS2 S2b loop 8] unmeasured_models: RV04's window; with one unmeasured model it is the 32 768 default.
-    return {"consult": {"consensus": {"verdict": "approve"}},
+    # [MAGI §6 MS2 loop 6, F1a-c3] a consensus object with magi-core's label and verdict.
+    return {"consult": {"consensus": {"consensus": "STRONG GO", "consensus_verdict": "approve",
+                                      "agent_count": 3}},
             "code_review": {"batches_planned": batches, "batches_completed": batches,
                             "unmeasured_models": ["kimi-k2.6:cloud"],
                             "findings": [{"file": "gen/a.rs", "line": 1}] if findings is None else findings,
@@ -329,6 +331,26 @@ class CodeReviewScenarioTests(unittest.TestCase):
         doc = _review(3)
         del doc["consult"]["consensus"]
         self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[3]])
+
+    def test_s47_fails_on_a_consensus_that_is_not_one_report_object(self) -> None:
+        # [MAGI §6 MS2 loop 6, F1a-c3] a truthy value is not a consensus: a list of two reports, a bare
+        # string, or an object without magi-core's label and verdict all FAIL.
+        report = _review(3)["consult"]["consensus"]
+        for bad in ([report, report], "STRONG GO", {"verdict": "approve"},
+                    {"consensus": "", "consensus_verdict": "approve"}):
+            doc = _review(3)
+            doc["consult"]["consensus"] = bad
+            self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[3]],
+                             bad)
+
+    def test_s47_fails_when_consult_carries_the_consensus_key_twice(self) -> None:
+        # [MAGI §6 MS2 loop 6, F1a-c3] json.loads keeps the last duplicate silently; two reports under
+        # one key are still two.
+        body = json.dumps(_review(3)).encode()
+        twice = body.replace(b'"consensus": {', b'"consensus": {"consensus": "GO"}, "consensus": {', 1)
+        r = dataclasses.replace(_result("R12", 0, None),
+                                output=ProductOutput(stdout=twice, stderr=b"", exit_code=0, command=["magi-rs"]))
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[3]])
 
     def test_s48_and_s49_fail_on_a_wrong_exit_or_a_silent_stderr(self) -> None:
         for sid, run, asserts in (("S48", "R13", code_review.S48_ASSERTIONS), ("S49", "R14", code_review.S49_ASSERTIONS)):
