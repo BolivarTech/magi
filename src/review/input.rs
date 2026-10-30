@@ -270,15 +270,18 @@ pub fn pin_refs(input: &ReviewInput, git: &dyn GitCommand) -> Result<ReviewInput
 }
 
 /// Whether `dir` or one of its ancestors holds a `.git` entry (a directory, or a file as in a
-/// linked worktree). Decides "no repository" by the disk, never by the text of a git error.
+/// linked worktree), or one that cannot be read ([`is_git_evidence`]). Decides "no repository" by the disk, never by the text of a git error.
 fn inside_a_repository(dir: &Path) -> bool {
     dir.ancestors()
         .any(|a| is_git_evidence(&std::fs::symlink_metadata(a.join(".git")).map(|_| ())))
 }
 
-/// Whether a `.git` probe is evidence of a repository. Stub: replaced in the fix.
+/// Whether a `.git` probe is evidence of a repository: anything but "not found". An entry that
+/// exists but cannot be read is a repository, so a failing git there fails closed instead of
+/// falling back to a walk that would lose the repository's exclude rules.
+// MAGI FIX (S6 loop 6): a permission error on `.git` read as "no repository".
 fn is_git_evidence(probe: &std::io::Result<()>) -> bool {
-    probe.is_ok()
+    !matches!(probe, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Whether the review's git runs inside a work tree (`rev-parse --is-inside-work-tree`).
