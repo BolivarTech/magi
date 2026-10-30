@@ -177,7 +177,8 @@ pub fn resolve_input(
             validate_ref(r)?;
             let sha = verify(git, r)?;
             // `<sha>^^{commit}` is the first parent, peeled to a commit (`^` then `^{commit}`), of
-            // the pinned SHA; git's "no such commit" there is a root commit (or a shallow edge).
+            // the pinned SHA; git's "no such commit" there is a root commit or a shallow edge, which
+            // `ensure_root_commit` tells apart.
             let old_rev = git
                 .query(&[
                     "rev-parse",
@@ -191,6 +192,7 @@ pub fn resolve_input(
             let text = match &old_rev {
                 Some(parent) => diff(git, &format!("{parent}..{sha}"))?,
                 None => {
+                    ensure_root_commit(git, &sha)?;
                     let mut args = vec!["diff-tree", "-p", "-r", "--root"];
                     args.extend_from_slice(DIFF_FLAGS);
                     args.push(&sha);
@@ -317,6 +319,35 @@ fn verify(git: &dyn GitCommand, r: &str) -> Result<String, ReviewError> {
         Some(sha) if !sha.trim().is_empty() => Ok(sha.trim().to_string()),
         _ => Err(ReviewError::RefNotFound(r.to_string())),
     }
+}
+
+/// The header prefix of a parent line in a raw commit object.
+const PARENT_HEADER: &str = "parent ";
+
+/// Checks that `sha` is a true root commit before it is reviewed against the empty tree.
+///
+/// git's "no such commit" for `<sha>^` also covers a shallow edge and a parent object missing
+/// from the repository; the raw object (`cat-file commit`, whose headers end at the first empty
+/// line) says whether the commit names a parent at all. O(n) in the object's headers.
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] when the commit names a parent the repository cannot provide (a shallow
+/// clone, a missing object), and whatever reading the object fails with.
+// MAGI FIX (S6 loop 5): a shallow tip was reviewed with `--root`, its whole tree as added.
+fn ensure_root_commit(git: &dyn GitCommand, sha: &str) -> Result<(), ReviewError> {
+    let object = git.run_bytes(&["cat-file", "commit", sha])?;
+    let has_parent = object
+        .split(|b| *b == b'\n')
+        .take_while(|line| !line.is_empty())
+        .any(|line| line.starts_with(PARENT_HEADER.as_bytes()));
+    if has_parent {
+        return Err(ReviewError::Git(format!(
+            "the parent of commit {sha} is not available (a shallow clone or a missing object); \
+             fetch it, or review a range whose commits are all present"
+        )));
+    }
+    Ok(())
 }
 
 /// `diff <DIFF_FLAGS> <spec>`.
