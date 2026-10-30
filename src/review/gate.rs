@@ -844,9 +844,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_merged_finding_kept_on_its_first_claim_with_claims_unasked_is_low_confidence() {
-        // [MAGI S6 loop 6, C1] a `real_defect` on the first pair ends the walk: the later pairs
-        // were never judged, so the finding is not fully `kept`, and no model decided its state.
+    async fn a_merged_finding_kept_on_its_first_claim_stays_kept_and_names_its_unasked_claims() {
+        // [MAGI S6 loop 6, C1] a confident `real_defect` on the first pair ends the walk. One
+        // claim confirmed as a real defect keeps the finding (README: the walk stops at the first
+        // pair not judged a false positive), credited to the model that answered; the unasked
+        // claims are named in `causes`, beside its own, but `kept` has no cause of its own, so
+        // `cause` stays empty, as its doc says (only `unfiltered` and `low_confidence` have one).
         let mut f = finding(Severity::Warning, Some(1));
         let n = MAX_GATE_QUESTIONS_PER_FINDING + 1;
         f.titles = (0..n).map(|i| format!("t{i}")).collect();
@@ -859,14 +862,15 @@ mod tests {
         let v = g.judge(&f, Some("x\n"), None).await;
         assert_eq!(
             (v.state, v.cause, v.causes),
-            (
-                GateState::LowConfidence,
-                Some("not every claim judged"),
-                vec!["not every claim judged"]
-            )
+            (GateState::Kept, None, vec!["not every claim judged"])
         );
         assert_eq!(v.lean.as_deref(), Some("real_defect"));
-        assert!(g.per_model().is_empty(), "{:?}", g.per_model());
+        assert_eq!(
+            g.per_model().values().sum::<usize>(),
+            1,
+            "{:?}",
+            g.per_model()
+        );
     }
 
     #[tokio::test]
