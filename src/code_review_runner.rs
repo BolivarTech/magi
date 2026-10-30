@@ -66,6 +66,16 @@ pub(crate) struct CodeReviewBuild<'a> {
 
 /// The trio's credentials, copied from the section keys: both kinds take the `[magi]` key, as
 /// [`SectionKeys`] hands it to the trio.
+///
+/// The key is held zeroizing here, but each accessor returns a plain `String`, and that is
+/// deliberate: the only consumer is `build_native_provider` (`main.rs`), which moves the `String` into
+/// magi-core's provider constructors (`OpenAiCompatibleProvider::with_dialect`,
+/// `ClaudeProvider::with_timeout`), and those take and keep an owned `String` for the
+/// provider's life. A zeroizing return type would be unwrapped into that same `String` one call
+/// later, so it would add a type without shortening the key's exposure; closing it needs a
+/// zeroizing key in magi-core's API, which is out of this crate's hands. The plain copy lives
+/// exactly as long as the seat it authenticates.
+// MAGI FIX (S6 loop 6): why the accessors return a plain `String`, now stated (D-c3).
 struct TrioKey(Option<zeroize::Zeroizing<String>>);
 
 impl crate::Credentials for TrioKey {
