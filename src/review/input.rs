@@ -949,6 +949,7 @@ mod tests {
         let git = FakeGit::from(&[
             ("rev-parse --verify --quiet HEAD^{commit}", Ok("r\n")),
             ("rev-parse --verify --quiet r^^{commit}", Err("")),
+            ("cat-file commit r", Ok("tree t\nauthor a <a@x> 0 +0000\n\nparent in a message\n")),
             ("diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative r",
              Ok("diff --git a/a.rs b/a.rs\nnew file mode 100644\n--- /dev/null\n+++ b/a.rs\n@@ -0,0 +1 @@\n+fn f() {}\n")),
         ]);
@@ -1011,6 +1012,33 @@ mod tests {
         }
         assert!(matches!(
             pin_refs(&ReviewInput::Commit(Some("main".into())), &git),
+            Err(ReviewError::Git(_))
+        ));
+    }
+
+    #[test]
+    fn a_commit_whose_parent_is_unavailable_is_an_error_not_a_root_commit() {
+        // [MAGI S6 loop 5, A1-m2] a shallow edge (or a missing parent object) also answers "no such
+        // commit" for `<sha>^`; reviewing it with `--root` would send the whole tree as added.
+        let git = FakeGit::from(&[
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
+            ("rev-parse --verify --quiet abc^^{commit}", Err("")),
+            (
+                "cat-file commit abc",
+                Ok("tree t\nparent p\nauthor a <a@x> 0 +0000\n\nm\n"),
+            ),
+            (
+                "diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative abc",
+                Ok(ONE_HUNK),
+            ),
+        ]);
+        assert!(matches!(
+            resolve_input(
+                &ReviewInput::Commit(None),
+                Path::new("/w"),
+                &git,
+                &allow_all
+            ),
             Err(ReviewError::Git(_))
         ));
     }

@@ -864,6 +864,39 @@ mod tests {
     }
 
     #[test]
+    fn a_shallow_commit_is_never_reviewed_as_a_root_commit() {
+        // [MAGI S6 loop 5, A1-m2] the parent of a shallow clone's tip is not in the repository:
+        // the review fails typed instead of sending the whole tree as an addition.
+        let origin = repo();
+        std::fs::write(origin.path().join("a.rs"), "one\n").expect("write");
+        git(origin.path(), &["add", "a.rs"]);
+        git(origin.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(origin.path().join("a.rs"), "two\n").expect("write");
+        git(origin.path(), &["commit", "-q", "-am", "2"]);
+        let clone = tempfile::tempdir().expect("tempdir");
+        let url = format!(
+            "file://{}",
+            origin.path().to_str().expect("utf-8").replace('\\', "/")
+        );
+        git(
+            clone.path(),
+            &["clone", "-q", "--depth", "1", &url, "shallow"],
+        );
+        let shallow = clone.path().join("shallow");
+        let g = ScrubbedGit::new(shallow.clone());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let r =
+            magi_rs::review::input::resolve_input(&ReviewInput::Commit(None), &shallow, &g, &allow);
+        assert!(
+            matches!(r, Err(ReviewError::Git(_))),
+            "{:?}",
+            r.map(|r| r.files.len())
+        );
+    }
+
+    #[test]
     fn a_filter_driver_with_a_non_utf8_name_never_runs() {
         // [MAGI S6 loop 5, A1-m1] a subsection name is bytes: a lossy decode would neutralize
         // `filter.\u{fffd}` and leave the attacker's `filter.\xff` active, so its `clean` would
