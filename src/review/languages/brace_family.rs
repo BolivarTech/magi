@@ -800,15 +800,23 @@ fn declaration_block(
 /// Whether the text after a C block keyword declares a variable of that type rather than the
 /// type: before its first `{`, `=` or `;` stand two words or more (`Foo x = {1};`,
 /// `Foo *p;`), with no `:` or `<` (a base clause or a template, which only a type has). A type
-/// names itself once (`Foo {`, `Foo;`). O(n) in the text.
+/// names itself once (`Foo {`, `Foo;`). When that first character is `{`, it is a C++ braced
+/// initializer (`Foo x{1};`) only if the line also ends in `;` and the word before the `{` is
+/// not `final` (`Foo final {`); a braced initializer wrapped over lines is read as the type's
+/// body, declared. O(n) in the text.
 fn declares_variable(rest: &str) -> bool {
     let Some(end) = rest.find(['{', '=', ';']) else {
         return false;
     };
     let head = rest.get(..end).unwrap_or("");
-    !rest.get(end..).is_some_and(|t| t.starts_with('{'))
-        && !head.contains([':', '<'])
-        && head.split_whitespace().count() >= 2
+    let names_variable = !head.contains([':', '<']) && head.split_whitespace().count() >= 2;
+    if !rest.get(end..).is_some_and(|t| t.starts_with('{')) {
+        return names_variable;
+    }
+    // MAGI FIX (S6 loop 7): `struct Foo x{1};` is a variable with a braced initializer.
+    names_variable
+        && rest.trim_end().ends_with(';')
+        && head.split_whitespace().last() != Some("final")
 }
 
 /// Whether a trimmed line opens an initializer it continues on the next lines: it ends in `=`
