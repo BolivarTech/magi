@@ -31,6 +31,7 @@ outside the process; the Rust integration tests pin it with a stand-in that
 records every body.
 """
 
+import json
 import re
 
 from smoke import logs, runs
@@ -80,6 +81,10 @@ MIN_REFUSED_BATCHES = 1
 CODE_REVIEW_KEY = "code_review"
 CONSULT_KEY = "consult"
 CONSENSUS_KEY = "consensus"
+
+#: The members of magi-core's consensus report S47 requires as non-empty
+#: strings: the classification label and the final verdict.
+CONSENSUS_TEXT_KEYS = ("consensus", "consensus_verdict")
 
 #: The files S47 generated, as the product names them (relative to the
 #: workspace). The scenario compares findings against what it knows on its own
@@ -347,6 +352,59 @@ def _causes_finding(section, run_id):
                     "%d discarded finding(s) carry no cause" % len(bare))
 
 
+def _repeated_keys(stdout):
+    """The keys that occur more than once in some object of *stdout*.
+
+    ``json.loads`` keeps the last of a repeated key and drops the others
+    without a word, so two reports under one key would read as one.
+
+    Args:
+        stdout: The raw standard output, already known to parse.
+
+    Returns:
+        set: Each key repeated inside one object, anywhere in the document.
+
+    Example:
+        >>> sorted(_repeated_keys(b'{"a": {"b": 1, "b": 2}, "c": 3}'))
+        ['b']
+    """
+    repeated = set()
+
+    def pairs(items):
+        seen = set()
+        for key, _ in items:
+            if key in seen:
+                repeated.add(key)
+            seen.add(key)
+        return dict(items)
+
+    json.loads(stdout, object_pairs_hook=pairs)
+    return repeated
+
+
+def _consensus_ok(consult, stdout):
+    """Whether *consult* carries exactly one consensus report of the right shape.
+
+    Args:
+        consult: The document's ``consult`` member.
+        stdout: The raw standard output, to catch a repeated key.
+
+    Returns:
+        bool: ``True`` when ``consult.consensus`` is an object whose
+        :data:`CONSENSUS_TEXT_KEYS` are non-empty strings, and no object of
+        the document repeats ``consult`` or ``consensus``.
+    """
+    if not isinstance(consult, dict):
+        return False
+    report = consult.get(CONSENSUS_KEY)
+    if not isinstance(report, dict):
+        return False
+    if not all(isinstance(report.get(key), str) and report[key].strip()
+               for key in CONSENSUS_TEXT_KEYS):
+        return False
+    return not _repeated_keys(stdout) & {CONSULT_KEY, CONSENSUS_KEY}
+
+
 @scenario("S47", assertions=S47_ASSERTIONS, run="R12", needs_backend=True)
 def a_large_review_yields_one_report(run):
     """Check that a review over three or more batches yields one report.
@@ -376,9 +434,11 @@ def a_large_review_yields_one_report(run):
         section = {}
     yield _batches_finding(section, "R12")
     consult = document.get(CONSULT_KEY)
-    has_consensus = isinstance(consult, dict) and bool(consult.get(CONSENSUS_KEY))
-    yield _verdict(S47_ASSERTIONS, 3, "R12", has_consensus,
-                   "the document carries no consult.consensus")
+    # MAGI FIX (S6 loop 6): any truthy value passed, a list of two reports
+    # included, and a repeated key was dropped by the parser (F1a-c3).
+    yield _verdict(S47_ASSERTIONS, 3, "R12",
+                   _consensus_ok(consult, run.output.stdout),
+                   "consult.consensus is not one consensus report object")
     yield _locations_finding(section, "R12")
     yield _causes_finding(section, "R12")
 
