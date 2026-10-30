@@ -2409,4 +2409,20 @@ mod tests {
             .collect();
         assert_eq!(methods, vec!["items", "more"]);
     }
+
+    #[test]
+    fn no_extractor_claims_jsx_or_tsx() {
+        // [MAGI S6 loop 7, B2a] the JavaScript and TypeScript rules have no JSX text mode: an
+        // apostrophe in JSX text (`<p>it's</p>`) opened a string to the end of the file, so the
+        // unit around it ran to the end of the file. Such files are reviewed without an extractor.
+        for ext in all_extractors() {
+            for claimed in ["jsx", "tsx"] {
+                assert!(
+                    !ext.extensions().contains(&claimed),
+                    "{} claims .{claimed}",
+                    ext.language_id()
+                );
+            }
+        }
+    }
 }
