@@ -10,10 +10,12 @@ import tempfile
 import types
 import unittest
 
+from smoke import runner as runner_module
 from smoke import runs
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
-from smoke.registry import DEFAULT_REGISTRY
+from smoke.registry import DEFAULT_REGISTRY, Registry
+from smoke.runner import Ambient, Runner
 from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
 
@@ -313,6 +315,19 @@ class CodeReviewScenarioTests(unittest.TestCase):
         # [MAGI §6 MS2 loop 4, F1-g35] S51 too: a hung R16 is CANNOT_TEST, never per-assertion FAILs.
         for sid in ("S47", "S48", "S49", "S50", "S51"):
             self.assertFalse(DEFAULT_REGISTRY.get(sid).inspects_timeouts, sid)
+
+    def test_s47_never_judges_the_exit_of_a_timed_out_r12(self) -> None:
+        # [MAGI §6 MS2 loop 7, F1a-c1] the executor builds a timed-out run with exit_code 0, so S47 asked
+        # directly would PASS "exit 0" on a hang. The runner stops it first: S47 registered as it is, driven
+        # through Runner with a timed-out R12, yields one CANNOT_TEST and S47's body never runs.
+        entry = DEFAULT_REGISTRY.get("S47")
+        registry = Registry()
+        registry.add(entry)
+        hung = _result("R12", 0, None, timed_out=True)
+        findings = Runner(registry, {"R12": hung}, backend_reachable=True,
+                          ambient=Ambient(tree_snapshot=None, ceiling_fraction=None, memory_settings={})).run()
+        self.assertEqual([(runner_module._RUN_TIMED_OUT, Outcome.CANNOT_TEST)],
+                         [(f.assertion, f.outcome) for f in findings])
 
     def test_s47_without_the_findings_key_fails_never_an_empty_pass(self) -> None:
         doc = _review(3)
