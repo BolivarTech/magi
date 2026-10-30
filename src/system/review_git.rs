@@ -52,6 +52,11 @@ use crate::tools::proc_group::tool_child_env;
 /// objects the pinned commit names, never a repository's replacements. On Git for Windows
 /// `/dev/null` names a directory that does not exist, which disables hooks the same way.
 ///
+/// End-of-line conversion (`core.autocrlf`, `text`/`eol` attributes) is left as the repository
+/// sets it: an uncommitted review's diff may show the converted form while the gate reads the
+/// raw worktree bytes. Conversion keeps the line count, so hunk lines, the RV09 ranges and the
+/// gate's window still align; only the line endings shown can differ.
+///
 /// `safe.directory` is deliberately not set: git's refusal of a repository another user owns is
 /// a defense layer this list does not replace, so such a review fails with git's "dubious
 /// ownership" error until the operator trusts the path in their own global config.
