@@ -233,6 +233,8 @@ struct Faces {
     new: Vec<(u32, u32)>,
     /// Old-side ranges of its hunks.
     old: Vec<(u32, u32)>,
+    /// Old-side ranges of the lines its hunks deleted (`-` lines), a subset of `old`.
+    deleted: Vec<(u32, u32)>,
 }
 
 /// Runs a review, in the order of the spec's §5.0.
@@ -419,11 +421,26 @@ pub async fn run_review(
             &old_paths,
             &source,
         );
-        verdicts.push(
-            deps.gate
-                .judge(finding, code.as_deref(), clock.remaining())
-                .await,
-        );
+        let verdict = match code {
+            Some(GateCode {
+                text,
+                ambiguous: true,
+            }) => {
+                deps.gate
+                    .judge_ambiguous_side(finding, &text, clock.remaining())
+                    .await
+            }
+            code => {
+                deps.gate
+                    .judge(
+                        finding,
+                        code.as_ref().map(|c| c.text.as_str()),
+                        clock.remaining(),
+                    )
+                    .await
+            }
+        };
+        verdicts.push(verdict);
     }
     summary.per_model = deps.gate.per_model().clone();
     summary.gate_questions = deps.gate.questions();
@@ -850,6 +867,8 @@ enum Shown<'b> {
     Hunk {
         /// The file.
         file: &'b str,
+        /// The hunk text as it was sent.
+        text: &'b str,
         /// First and last line on the new side.
         new: (u32, u32),
         /// First and last line on the old side.
@@ -882,14 +901,15 @@ fn walk_completed<'b>(
             match item {
                 BatchItem::Hunk {
                     file,
+                    text,
                     first_line,
                     last_line,
                     old_first_line,
                     old_last_line,
-                    ..
                 } if done => {
                     visit(Shown::Hunk {
                         file,
+                        text,
                         new: (*first_line, *last_line),
                         old: (*old_first_line, *old_last_line),
                     });
@@ -934,7 +954,7 @@ fn reviewed_of(
 ) -> Reviewed {
     let mut reviewed = Reviewed::default();
     let units = walk_completed(batches, completed, |shown| match shown {
-        Shown::Hunk { file, new, old } => {
+        Shown::Hunk { file, new, old, .. } => {
             reviewed.add_lines(file, new.0, new.1);
             reviewed.add_lines(file, old.0, old.1);
         }
@@ -987,10 +1007,16 @@ fn faces_of<'b>(
 ) -> HashMap<&'b str, Faces> {
     let mut faces: HashMap<&str, Faces> = HashMap::new();
     let units = walk_completed(batches, completed, |shown| match shown {
-        Shown::Hunk { file, new, old } => {
+        Shown::Hunk {
+            file,
+            text,
+            new,
+            old,
+        } => {
             let f = faces.entry(file).or_default();
             f.new.push(new);
             f.old.push(old);
+            f.deleted.extend(deleted_ranges(text, old.0));
         }
         Shown::Whole { file, .. } => faces.entry(file).or_default().whole = true,
     });
@@ -1008,27 +1034,64 @@ fn faces_of<'b>(
     faces
 }
 
+/// The old-side ranges of the lines `hunk` deletes (its `-` lines), counting from `old_first`,
+/// the first old line of its `@@` header; the file header lines before that header are skipped.
+/// A context line (` `, or an empty line some tools leave for one) advances the old side, an
+/// added line (`+`) and a `\ No newline` marker do not. O(len of `hunk`).
+fn deleted_ranges(hunk: &str, old_first: u32) -> Vec<(u32, u32)> {
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut old = old_first;
+    for line in hunk.lines().skip_while(|l| !l.starts_with("@@")).skip(1) {
+        match line.as_bytes().first() {
+            Some(b'-') => {
+                match ranges.last_mut() {
+                    Some((_, last)) if last.saturating_add(1) == old => *last = old,
+                    _ => ranges.push((old, old)),
+                }
+                old = old.saturating_add(1);
+            }
+            Some(b'+' | b'\\') => {}
+            _ => old = old.saturating_add(1),
+        }
+    }
+    ranges
+}
+
+/// The code the gate sees for a finding, and whether its side is ambiguous.
+struct GateCode {
+    /// The whole side the finding's line was read on.
+    text: String,
+    /// The line's number names a live new-side line and an old-side line its hunk deleted.
+    ambiguous: bool,
+}
+
 /// The code the gate sees for a finding (RV10 + RV21): the new side when the line lies in a new
 /// range or the file was shown whole, else the old side when it lies in an old range, numbered
 /// as that side; the old side of a renamed file is read under its old path (`old_paths`). A
-/// line number that falls in both a new and an old range is read on the new side (RV21: the new
-/// side first, the old side for deleted lines), so a finding about a deleted line whose number
-/// collides with a live line is judged against the live one; the gate fails open, so the cost is
-/// a judgment on the wrong code, never a finding lost.
+/// line number that falls in a new range and is also a line a hunk deleted names two different
+/// lines, and a finding does not say which side it meant: it is read on the new side and marked
+/// [`GateCode::ambiguous`], so the gate never filters it ([`Gate::judge_ambiguous_side`]). A
+/// number in a new range that is a context line on the old side is not ambiguous: the code it
+/// names is still live. A finding that named the old path of a rename is validated under its new
+/// path (RV09) and reaches this function with no side either; its old-side lines are found
+/// through `old_paths`, and a colliding one is ambiguous as above.
 /// `None` (the gate's `no location`) without a line, without a face that holds
 /// it, or when the read fails, with a WARN; with the cache that read is unreachable, because
-/// every face of a reviewed file was read during the preparation.
+/// every face of a reviewed file was read during the preparation. The full side is returned:
+/// the gate's state shows only RV10's ±40 numbered lines of it (`gate::gate_state_of`).
 // MAGI FIX (S6 loop 6, D-m1): the new-side preference on a colliding line, stated.
+// MAGI FIX (S6 loop 7, D-b3/D-c3): a deleted line whose number is live is ambiguous, not new.
 fn gate_code(
     file: Option<&str>,
     line: Option<u32>,
     faces: &HashMap<&str, Faces>,
     old_paths: &HashMap<String, String>,
     source: &dyn ContentSource,
-) -> Option<String> {
+) -> Option<GateCode> {
     let (file, line) = (file?, line?);
     let face = faces.get(file)?;
     let holds = |ranges: &[(u32, u32)]| ranges.iter().any(|&(a, b)| a <= line && line <= b);
+    let ambiguous = !face.whole && holds(&face.new) && holds(&face.deleted);
     let read = if face.whole || holds(&face.new) {
         source.read(file)
     } else if holds(&face.old) {
@@ -1037,7 +1100,10 @@ fn gate_code(
         return None;
     };
     match read {
-        Ok(bytes) => bytes.map(|b| String::from_utf8_lossy(&b).into_owned()),
+        Ok(bytes) => bytes.map(|b| GateCode {
+            text: String::from_utf8_lossy(&b).into_owned(),
+            ambiguous,
+        }),
         Err(e) => {
             let error = redact_foreign_text(&e.to_string());
             tracing::event!(

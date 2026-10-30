@@ -69,6 +69,10 @@ const CAUSE_CRITICAL_NEVER_FILTERED: &str = "critical never filtered";
 /// Cause of a finding whose asked pairs were all judged false positives while pairs past
 /// [`MAX_GATE_QUESTIONS_PER_FINDING`] went unasked: what was never judged is never filtered.
 const CAUSE_NOT_EVERY_CLAIM_JUDGED: &str = "not every claim judged";
+/// Cause of a finding judged a false positive on a line whose number names both a line its hunk
+/// deleted and a live line: the finding does not say which side it meant, so a judgment made on
+/// the live side may be about other code, and it stays in the main list.
+const CAUSE_AMBIGUOUS_DIFF_SIDE: &str = "ambiguous diff side";
 
 /// The most distinct (title, detail) pairs of one finding put to the chain: one per mage of the
 /// trio. Each pair is a walk of the chain, so a finding merged from many rewordings (several
@@ -85,8 +89,9 @@ pub enum GateState {
     Kept,
     /// A model judged it a false positive with enough confidence; listed apart, never deleted.
     Filtered,
-    /// No model reached its threshold, a critical finding was judged a false positive, or every
-    /// pair asked was judged one while pairs past the question cap went unasked.
+    /// No model reached its threshold, a critical finding was judged a false positive, a finding
+    /// on an ambiguous diff line was judged one ([`Gate::judge_ambiguous_side`]), or every pair
+    /// asked was judged one while pairs past the question cap went unasked.
     LowConfidence,
     /// The gate could not judge it; it passes with its cause.
     Unfiltered,
@@ -455,9 +460,54 @@ impl<'a> Gate<'a> {
         code: Option<&str>,
         remaining: Option<Duration>,
     ) -> GateVerdict {
+        self.judge_with(finding, code, remaining, None).await
+    }
+
+    /// Judges a finding as [`Self::judge`] does, except that it is never `filtered`: the code is
+    /// the live side of a diff line whose number also names a line its hunk deleted, and the
+    /// finding does not say which side it meant (RV21). A confident `false_positive` is
+    /// `low_confidence` with cause `ambiguous diff side` (a `critical` keeps `critical never
+    /// filtered`); every other answer is read as by [`Self::judge`], and the deciding model is
+    /// counted the same way.
+    ///
+    /// # Arguments
+    /// * `finding` - the consolidated finding.
+    /// * `code` - the live side of the file it points into.
+    /// * `remaining` - what is left of the review clock, if there is one.
+    ///
+    /// # Returns
+    /// The verdict.
+    // MAGI FIX (S6 loop 7, D-b3/D-c3): what may have been judged on the wrong side is never
+    // filtered, as what was never judged is never filtered.
+    pub async fn judge_ambiguous_side(
+        &mut self,
+        finding: &ConsolidatedFinding,
+        code: &str,
+        remaining: Option<Duration>,
+    ) -> GateVerdict {
+        self.judge_with(
+            finding,
+            Some(code),
+            remaining,
+            Some(CAUSE_AMBIGUOUS_DIFF_SIDE),
+        )
+        .await
+    }
+
+    /// [`Self::judge`], with `guard` the cause a confident `false_positive` takes instead of
+    /// `filtered` (`None`: it filters, unless the finding is critical).
+    async fn judge_with(
+        &mut self,
+        finding: &ConsolidatedFinding,
+        code: Option<&str>,
+        remaining: Option<Duration>,
+        guard: Option<&'static str>,
+    ) -> GateVerdict {
         let deadline = remaining.and_then(|r| Instant::now().checked_add(r));
         let mut skipped = Vec::new();
-        let outcome = self.decide(finding, code, deadline, &mut skipped).await;
+        let outcome = self
+            .decide(finding, code, deadline, guard, &mut skipped)
+            .await;
         // MAGI FIX (S6 loop 3): unasked claims are named beside the state's own cause, never
         // replaced by it (`critical never filtered`) nor left out (a lean that ended the walk).
         let mut causes: Vec<&'static str> = outcome.cause.into_iter().collect();
@@ -535,6 +585,7 @@ impl<'a> Gate<'a> {
         finding: &ConsolidatedFinding,
         code: Option<&str>,
         deadline: Option<Instant>,
+        guard: Option<&'static str>,
         skipped: &mut Vec<String>,
     ) -> Outcome {
         // A finding with nothing to show is `no location` whatever stopped the gate: no call is
@@ -562,13 +613,17 @@ impl<'a> Gate<'a> {
         if states.iter().any(carries_secret) {
             return Outcome::unfiltered(CAUSE_SECRET);
         }
-        let critical = finding.reported_severity == Severity::Critical;
+        let never_filter = if finding.reported_severity == Severity::Critical {
+            Some(CAUSE_CRITICAL_NEVER_FILTERED)
+        } else {
+            guard
+        };
         let mut outcome = Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
         let mut put = 0;
         for state in states {
             self.questions += 1;
             put += 1;
-            outcome = self.ask(state, critical, deadline, skipped).await;
+            outcome = self.ask(state, never_filter, deadline, skipped).await;
             if outcome.state != GateState::Filtered {
                 break;
             }
@@ -588,11 +643,12 @@ impl<'a> Gate<'a> {
         outcome
     }
 
-    /// Asks one state down the chain.
+    /// Asks one state down the chain; a confident `false_positive` is `low_confidence` with
+    /// `never_filter` as its cause when one is given, else `filtered`.
     async fn ask(
         &mut self,
         state: Value,
-        critical: bool,
+        never_filter: Option<&'static str>,
         deadline: Option<Instant>,
         skipped: &mut Vec<String>,
     ) -> Outcome {
@@ -639,12 +695,9 @@ impl<'a> Gate<'a> {
                         ));
                         continue;
                     }
-                    let (state, cause) = match (choice, critical) {
-                        (FALSE_POSITIVE, true) => (
-                            GateState::LowConfidence,
-                            Some(CAUSE_CRITICAL_NEVER_FILTERED),
-                        ),
-                        (FALSE_POSITIVE, false) => (GateState::Filtered, None),
+                    let (state, cause) = match (choice, never_filter) {
+                        (FALSE_POSITIVE, Some(cause)) => (GateState::LowConfidence, Some(cause)),
+                        (FALSE_POSITIVE, None) => (GateState::Filtered, None),
                         _ => (GateState::Kept, None),
                     };
                     return Outcome {
