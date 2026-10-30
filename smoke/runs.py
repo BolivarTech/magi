@@ -628,6 +628,50 @@ REVIEW_FLAGS = ("--output-format", "json", "-w", REVIEW_WORKSPACE_TOKEN)
 #: it before a review so an input git cannot see is the harness's failure.
 GIT_VISIBLE_QUERY = ("ls-files", "--others", "--exclude-standard", "-z")
 
+#: The ``-c`` settings of every git call the harness makes, the subset of the
+#: product's ``NEUTRAL_GIT_CONFIG`` (``src/system/review_git.rs``) that applies
+#: to ``init`` and ``ls-files``: no filesystem monitor and no hooks. The rest of
+#: that list shapes diffs and fetches, which the harness never runs.
+HARNESS_GIT_CONFIG = ("core.fsmonitor=false", "core.hooksPath=/dev/null")
+
+#: The prefix of the environment variables that select or configure a git
+#: repository (``GIT_DIR``, ``GIT_WORK_TREE``, ``GIT_INDEX_FILE``,
+#: ``GIT_CONFIG_*``...). The product starts git from an allowlisted environment
+#: that carries none of them, so the harness drops them all.
+GIT_ENV_PREFIX = "GIT_"
+
+
+def git_command(workspace, *args) -> list[str]:
+    """The command line of a harness git call run inside *workspace*.
+
+    Args:
+        workspace: The directory git runs in (``-C``).
+        *args: The git subcommand and its arguments.
+
+    Returns:
+        list: ``git -C <workspace>``, the :data:`HARNESS_GIT_CONFIG` settings,
+        then *args*.
+    """
+    command = ["git", "-C", str(workspace)]
+    for setting in HARNESS_GIT_CONFIG:
+        command += ["-c", setting]
+    return command + list(args)
+
+
+def git_env() -> dict[str, str]:
+    """The environment of a harness git call: this process's, without git's own.
+
+    An inherited ``GIT_DIR`` or ``GIT_WORK_TREE`` would point git at another
+    repository, so the visibility check could approve an input other than the
+    one the product sees, and ``git init`` could initialise somewhere else.
+
+    Returns:
+        dict: ``os.environ`` without any variable starting with
+        :data:`GIT_ENV_PREFIX`.
+    """
+    return {name: value for name, value in os.environ.items()
+            if not name.upper().startswith(GIT_ENV_PREFIX)}
+
 #: Seconds the harness gives each git command it runs.
 GIT_TIMEOUT_S = 60
 
@@ -737,8 +781,10 @@ def verify_visible(workspace, paths) -> None:
         HarnessError: If git fails, or lists fewer than all of *paths*.
     """
     try:
+        # MAGI FIX (S6 loop 6): git ran with the harness's own environment, so
+        # an inherited GIT_DIR inspected another repository (F1a-c2).
         done = subprocess.run(
-            ["git", "-C", str(workspace)] + list(GIT_VISIBLE_QUERY),
+            git_command(workspace, *GIT_VISIBLE_QUERY), env=git_env(),
             capture_output=True, timeout=GIT_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise HarnessError("could not run git in %s: %s" % (workspace, exc)) from exc
@@ -1223,8 +1269,9 @@ class RunExecutor:
                 shutil.rmtree(workspace)
             workspace.mkdir(parents=True)
             shutil.copytree(self._env.magi_dir, workspace / ".magi")
-            subprocess.run(["git", "init", "-q", str(workspace)], check=True,
-                           capture_output=True, timeout=GIT_TIMEOUT_S)
+            subprocess.run(git_command(workspace, "init", "-q"), check=True,
+                           env=git_env(), capture_output=True,
+                           timeout=GIT_TIMEOUT_S)
         except (OSError, subprocess.SubprocessError, shutil.Error) as exc:
             raise HarnessError("could not build the review workspace at %s: %s"
                                % (workspace, exc)) from exc
