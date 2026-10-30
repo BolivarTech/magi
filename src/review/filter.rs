@@ -1582,6 +1582,38 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_file_with_neither_side_is_skipped_as_not_a_regular_file() {
+        // [MAGI S6 loop 8, A2-c1 Caspar] a submodule's gitlink reads as absent on both sides
+        // (`RevisionSource::holds`), so a diff section that reached the filter in that shape was
+        // kept with no content and no cause. `split_diff` drops gitlink sections first; this pins
+        // the filter's own answer for whatever brings that shape.
+        let files = vec![
+            ReviewFile {
+                path: "vendored".into(),
+                diff: Some("@@ -1 +1 @@\n-Subproject commit 1\n+Subproject commit 2\n".into()),
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: Some("@@ -1 +1 @@\n-fn f() {}\n+fn g() {}\n".into()),
+            },
+        ];
+        let src = MapSource::new(&[("a.rs", "fn g() {}\n")], &[("a.rs", "fn f() {}\n")]);
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("a.rs kept");
+        assert_eq!(
+            f.kept.iter().map(|k| k.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs"]
+        );
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "vendored".into(),
+                cause: SkipCause::NotRegularFile
+            }]
+        );
+    }
+
+    #[test]
     fn a_nul_anywhere_in_a_file_makes_it_binary() {
         // [MAGI S6 loop 7, A2-c2] only the first 8 000 bytes were sniffed: a text prefix hid a
         // binary payload, which is valid UTF-8 and was batched (RV20).
