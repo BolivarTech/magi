@@ -4,10 +4,10 @@
 
 //! What a review reports (REQ-RV13): the summary of every stage, its JSON form and its text form.
 //!
-//! Both forms pass every string through [`redact_foreign_text`] as they are written: the
-//! summary holds model text (titles, details, failure messages) and this is the last point
-//! before it leaves the process, so the redaction here is a backstop over the one consolidation
-//! already applied.
+//! Both forms pass every string through [`redact_foreign_text`] and then the RV22 detector
+//! ([`mask_secrets`]) as they are written: the summary holds model text (files, titles, details,
+//! failure messages) and this is the last point before it leaves the process, so the redaction
+//! here is a backstop over the one consolidation already applied.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -19,6 +19,7 @@ use serde_json::{json, Map, Value};
 use super::consolidate::{Consolidated, ConsolidatedFinding};
 use super::filter::Skipped;
 use super::gate::GateVerdict;
+use super::secrets::mask_secrets;
 use super::validate::Discarded;
 use crate::redact::redact_foreign_text;
 
@@ -509,9 +510,12 @@ fn to_json<T: serde::Serialize>(value: &T, what: &str) -> Value {
     })
 }
 
-/// `text` with every credential in an embedded URL redacted.
+/// `text` as the report may write it: every credential in an embedded URL redacted, then every
+/// secret the RV22 detector names masked.
+// MAGI FIX (S6 loop 6): the report is an egress point of its own (REQ-RV22), so it runs the
+// product's detector instead of relying on the caller's `egress_safe`.
 fn redacted(text: &str) -> String {
-    redact_foreign_text(text).as_str().to_string()
+    mask_secrets(redact_foreign_text(text).as_str())
 }
 
 /// Redacts every string of `value` in place (keys are field names, model names, states and causes). O(bytes).
