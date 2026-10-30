@@ -16,7 +16,7 @@ import pathlib
 import re
 import unittest
 
-from smoke import runs
+from smoke import logs, runs
 from smoke.scenarios import code_review
 
 #: The repository root, three levels above this file.
@@ -157,6 +157,26 @@ class ReportKeyTests(unittest.TestCase):
         pinned = re.search(r"every documented key is present.*?for k in \[(.*?)\]", report, re.S)
         self.assertIsNotNone(pinned, "the summary key list was not found in src/review/report.rs")
         self.assertEqual(set(), read - set(re.findall(r'"(\w+)"', pinned.group(1))))
+
+    def test_the_entry_fields_s47_reads_are_serialized_under_their_own_names(self) -> None:
+        # [MAGI §6 MS2 loop 7, F1a-m1] S47 reads file and line off each main finding and cause off each
+        # discarded one; a serde rename on either struct would surface as an opaque FAIL at SMOKE time.
+        for path, struct, fields in (("src/review/consolidate.rs", "ConsolidatedFinding",
+                                      ("pub file: Option<String>,", "pub line: Option<u32>,")),
+                                     ("src/review/validate.rs", "Discarded", ("pub cause: DiscardCause,",))):
+            body = re.search(r"#\[derive\([^)]*serde::Serialize[^)]*\)\]\npub struct %s \{(.*?)\n\}" % struct,
+                             _source(path), re.S)
+            self.assertIsNotNone(body, "%s was not found in %s" % (struct, path))
+            self.assertNotIn("rename", body.group(1), struct)
+            for field in fields:
+                self.assertIn(field, body.group(1), struct)
+
+    def test_the_run_field_the_harness_matches_is_the_one_the_log_writes(self) -> None:
+        # [MAGI §6 MS2 loop 7, F1a-m1] S50 binds its run-log line to this run through logs.run_needle;
+        # the product spells the field once, in src/logging/render.rs.
+        self.assertIn('pub(crate) const RUN_FIELD: &str = "%s";' % logs.RUN_FIELD,
+                      _source("src/logging/render.rs"))
+        self.assertEqual(b"run=4242-deadbeef", logs.run_needle("4242-deadbeef"))
 
     def test_the_consensus_s47_reads_is_the_one_the_envelope_writes(self) -> None:
         self.assertIn('"consensus".into(),\n        crate::tools::consult::consensus_json(&c.consensus)',
