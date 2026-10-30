@@ -102,7 +102,7 @@ const AWS_SECRET_WORDS: &[(&str, bool)] = &[
 const AWS_SECRET_MIN: usize = 40;
 /// The blanks allowed around the `=` or `:` of an AWS secret key assignment.
 const BLANKS: &[u8] = b" \t";
-/// The quotes allowed before an AWS secret key.
+/// The quotes allowed after an AWS secret key's name and before the key.
 const QUOTES: &[u8] = b"\"'";
 
 /// The patterns, in the order that decides the name of a match: `anthropic-key` comes before
@@ -435,16 +435,24 @@ fn aws_name_end(bytes: &[u8], at: usize) -> Option<usize> {
     kept_optional.then_some(pos)
 }
 
-/// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), blanks,
-/// `=` or `:`, blanks, an optional quote, and a key of at least 40 characters. `None` when none
-/// opens there.
+/// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), an
+/// optional quote that closes it (a JSON property, a quoted hash key), blanks, `=`, `=>` or `:`,
+/// blanks, an optional quote, and a key of at least 40 characters. `None` when none opens there.
+// MAGI FIX (S6 loop 7): `"aws_secret_access_key": "…"` and `=>` were not assignments.
 fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
     let mut pos = aws_name_end(bytes, at)?;
+    if bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
+        pos += 1;
+    }
     pos = skip_bytes(bytes, pos, BLANKS);
     if !bytes.get(pos).is_some_and(|b| *b == b'=' || *b == b':') {
         return None;
     }
-    pos = skip_bytes(bytes, pos + 1, BLANKS);
+    pos += 1;
+    if bytes.get(pos - 1) == Some(&b'=') && bytes.get(pos) == Some(&b'>') {
+        pos += 1;
+    }
+    pos = skip_bytes(bytes, pos, BLANKS);
     if bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
         pos += 1;
     }
