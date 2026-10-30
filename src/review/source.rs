@@ -8,7 +8,7 @@
 //! ([`RevisionSource`], `git show <rev>:./<path>`) or the worktree ([`WorktreeSource`]), with an
 //! optional old side for deleted lines. Nothing mixes the worktree with another revision.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
@@ -400,9 +400,9 @@ pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File>
 
 /// Reads a git revision (`git show <rev>:./<path>`), never the worktree.
 ///
-/// "Absent" is decided by the revision's path list (`ls-tree`, run once per revision), never by
-/// the text of a git error: a path not listed is `Ok(None)`, and a failing `show` on a listed
-/// path is an error.
+/// "Absent" is decided by the revision's own entry for the path (`ls-tree -z <rev> -- <path>`,
+/// one call per read), never by the text of a git error: a path with no file entry is
+/// `Ok(None)`, and a failing `show` on a listed path is an error.
 ///
 /// A symlink (mode `120000`) is a blob whose content is its target path, so a revision review
 /// reads that path as the file's text, where the worktree source follows the link: the same
@@ -412,8 +412,6 @@ pub struct RevisionSource<'g> {
     git: &'g dyn GitCommand,
     new_rev: String,
     old_rev: Option<String>,
-    /// The path list of each revision read so far.
-    listings: Mutex<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl<'g> RevisionSource<'g> {
@@ -423,38 +421,33 @@ impl<'g> RevisionSource<'g> {
             git,
             new_rev,
             old_rev,
-            listings: Mutex::new(BTreeMap::new()),
         }
     }
 
-    /// Whether `rev` holds `path`, listing `rev` once. O(log n) per lookup after the listing.
+    /// Whether `rev` holds `path` as a file: `ls-tree -z <rev> -- <path>` lists the entry for
+    /// that path alone (pathspecs are literal: `GIT_LITERAL_PATHSPECS`), so the output is one
+    /// record or none whatever the size of the repository. O(1) records per call.
     ///
-    /// A listed name that is not UTF-8 is left out: a requested path is always UTF-8 (the input
-    /// sets other names aside), and a lossy decoding could make it match a name it is not.
-    /// Only files are listed: a submodule (a gitlink, type `commit`) is not content of the
-    /// revision, so a path that names one there reads as absent, like in the worktree.
+    /// The listed name is compared as bytes with the requested path, never decoded: a name that
+    /// is not UTF-8 never stands for a requested path, which is always UTF-8. Only files count:
+    /// a submodule (a gitlink, type `commit`) is not content of the revision, so a path that
+    /// names one there reads as absent, like in the worktree; a directory (type `tree`) too.
+    // MAGI FIX (S6 loop 7): the whole revision was listed (`ls-tree -r`) to answer for one path,
+    // so a monorepo past the git output cap failed the review before any model call.
     fn holds(&self, rev: &str, path: &str) -> Result<bool, ReviewError> {
-        let mut listings = self.listings.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(paths) = listings.get(rev) {
-            return Ok(paths.contains(path));
-        }
-        let out = self.git.run_bytes(&["ls-tree", "-r", "-z", rev])?;
+        let out = self.git.run_bytes(&["ls-tree", "-z", rev, "--", path])?;
         // Each record is `<mode> SP <type> SP <object> TAB <path>`.
-        let paths: BTreeSet<String> = out
-            .split(|b| *b == 0)
-            .filter_map(|record| {
-                let tab = record.iter().position(|b| *b == b'\t')?;
-                let (meta, name) = (record.get(..tab)?, record.get(tab + 1..)?);
-                // MAGI FIX (S6 loop 4): a gitlink listed here failed the review on `git show`.
-                let blob = meta.split(|b| *b == b' ').nth(1) == Some(LS_TREE_BLOB.as_bytes());
-                // MAGI FIX (S6 loop 4): never decoded lossily (`a\xff.rs` matched `a\u{FFFD}.rs`).
-                blob.then(|| std::str::from_utf8(name).ok().map(str::to_string))
-                    .flatten()
-            })
-            .collect();
-        let holds = paths.contains(path);
-        listings.insert(rev.to_string(), paths);
-        Ok(holds)
+        Ok(out.split(|b| *b == 0).any(|record| {
+            record
+                .iter()
+                .position(|b| *b == b'\t')
+                .and_then(|tab| Some((record.get(..tab)?, record.get(tab + 1..)?)))
+                .is_some_and(|(meta, name)| {
+                    // MAGI FIX (S6 loop 4): a gitlink listed here failed the review on `git show`.
+                    meta.split(|b| *b == b' ').nth(1) == Some(LS_TREE_BLOB.as_bytes())
+                        && name == path.as_bytes()
+                })
+        }))
     }
 
     /// Reads `path` at `rev`, with the per-file cap.
@@ -761,12 +754,14 @@ mod tests {
     fn a_path_absent_from_the_revision_is_none_and_a_failing_show_is_an_error() {
         let git = FakeGit::from(&[
             (
-                "ls-tree -r -z X",
-                Ok(concat!(
-                    "100644 blob 0000000000000000000000000000000000000000\ta.rs\0",
-                    "100644 blob 0000000000000000000000000000000000000000\tb.rs\0"
-                )),
+                "ls-tree -z X -- a.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
             ),
+            (
+                "ls-tree -z X -- b.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\tb.rs\0"),
+            ),
+            ("ls-tree -z X -- missing.rs", Ok("")),
             (
                 "show --no-ext-diff --no-textconv X:./a.rs",
                 Ok("fn a() {}\n"),
@@ -885,11 +880,12 @@ mod tests {
         impl GitCommand for Big {
             fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
                 match args.join(" ").as_str() {
-                    "ls-tree -r -z X" => Ok(concat!(
-                        "100644 blob 0000000000000000000000000000000000000000\tbig.rs\0",
-                        "100644 blob 0000000000000000000000000000000000000000\tcut.rs\0"
-                    )
-                    .into()),
+                    "ls-tree -z X -- big.rs" => Ok(
+                        b"100644 blob 0000000000000000000000000000000000000000\tbig.rs\0".to_vec(),
+                    ),
+                    "ls-tree -z X -- cut.rs" => Ok(
+                        b"100644 blob 0000000000000000000000000000000000000000\tcut.rs\0".to_vec(),
+                    ),
                     "show --no-ext-diff --no-textconv X:./big.rs" => {
                         Ok(vec![
                             b'a';
@@ -1051,11 +1047,13 @@ mod tests {
         impl GitCommand for Latin1Tree {
             fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
                 match args.join(" ").as_str() {
-                    "ls-tree -r -z X" => Ok([
-                        &b"100644 blob 0000000000000000000000000000000000000000\ta\xff.rs\0"[..],
-                        b"100644 blob 0000000000000000000000000000000000000000\tb.rs\0",
-                    ]
-                    .concat()),
+                    "ls-tree -z X -- a\u{FFFD}.rs" => Ok(
+                        b"100644 blob 0000000000000000000000000000000000000000\ta\xff.rs\0"
+                            .to_vec(),
+                    ),
+                    "ls-tree -z X -- b.rs" => Ok(
+                        b"100644 blob 0000000000000000000000000000000000000000\tb.rs\0".to_vec(),
+                    ),
                     "show --no-ext-diff --no-textconv X:./b.rs" => Ok(b"fn b() {}\n".to_vec()),
                     other => Err(ReviewError::Git(format!("unexpected: {other}"))),
                 }
@@ -1076,11 +1074,9 @@ mod tests {
         impl GitCommand for Capped {
             fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
                 match args.join(" ").as_str() {
-                    "ls-tree -r -z X" => Ok(concat!(
-                        "100644 blob 0000000000000000000000000000000000000000\t",
-                        "a.rs\0"
-                    )
-                    .into()),
+                    "ls-tree -z X -- a.rs" => Ok(
+                        b"100644 blob 0000000000000000000000000000000000000000\ta.rs\0".to_vec(),
+                    ),
                     other => Err(ReviewError::Git(format!("uncapped: {other}"))),
                 }
             }

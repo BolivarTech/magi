@@ -1682,7 +1682,7 @@ mod tests {
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
             (
-                "ls-tree -r -z abc",
+                "ls-tree -z abc -- gone.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\tgone.rs\0"),
             ),
             (
@@ -1775,7 +1775,7 @@ mod tests {
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
             (
-                "ls-tree -r -z abc",
+                "ls-tree -z abc -- gone.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\tgone.rs\0"),
             ),
             (
