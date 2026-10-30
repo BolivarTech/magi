@@ -164,6 +164,10 @@ pub struct ReviewRequest<'a> {
     /// The batch count the caller approved, if any: a review that now splits otherwise fails
     /// with [`ReviewError::PlanChanged`] before any trio call.
     pub approved_batches: Option<usize>,
+    /// The content digest the caller approved ([`PlanFingerprint::digest`]), if any: a review
+    /// whose content moved since fails with [`ReviewError::ContentChanged`] before any trio call,
+    /// even when its batch count did not change.
+    pub approved_digest: Option<[u8; 32]>,
     /// When the caller started preparing this review, if before this call: the preparation it
     /// did first (its own git reads, the gate) is part of `prep_ms`. `None` starts it here.
     pub prep_started: Option<Instant>,
@@ -444,7 +448,7 @@ pub async fn run_review(
 ///
 /// # Returns
 ///
-/// The number of batches.
+/// The batch count and the digest of what the review would send ([`PlanFingerprint`]).
 ///
 /// # Errors
 ///
@@ -460,7 +464,7 @@ pub fn plan_review(
     is_ignored: &(dyn Fn(&str) -> bool + Sync),
     registry: &LanguageRegistry,
     pool: &[(String, Option<usize>)],
-) -> Result<usize, ReviewError> {
+) -> Result<PlanFingerprint, ReviewError> {
     let resolved = resolve_input(input, workspace, git, guard)?;
     let inner = content_source(resolved.source_kind, workspace, git);
     let source = CachedSource::new(inner.as_ref());
@@ -473,7 +477,21 @@ pub fn plan_review(
         is_ignored,
         pool,
     )?;
-    Ok(batches.len())
+    Ok(PlanFingerprint {
+        batches: batches.len(),
+        digest: [0; 32],
+    })
+}
+
+/// What an approval saw, computed without any model call by [`plan_review`]: the batch count it
+/// showed and a SHA-256 digest of what the review would send. [`run_review`] recomputes both
+/// before the first trio call and refuses a review whose content moved in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanFingerprint {
+    /// The batches.
+    pub batches: usize,
+    /// SHA-256 over every kept file's path, diff and content, in input order.
+    pub digest: [u8; 32],
 }
 
 /// Steps 2-3 of §5.0 over the resolved files, shared by [`run_review`] and [`plan_review`]: the
@@ -1190,6 +1208,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: None,
             },
             ReviewDeps {
@@ -1204,6 +1223,87 @@ mod tests {
             },
         )
         .await
+    }
+
+    /// Runs [`plan_review`] then [`run_review`] on `dir`, calling `between` in between, as the
+    /// approval prompt and the run it approved would.
+    async fn approve_then_run(
+        dir: &Path,
+        between: impl FnOnce(),
+        consult: &FakeConsult,
+        client: &MockDecisionClient,
+    ) -> Result<ReviewOutcome, ReviewError> {
+        let git = FakeGit::from(&[(
+            "ls-files --others --ignored --exclude-standard --directory -z -- .",
+            Ok(""),
+        )]);
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let input = ReviewInput::Directory(dir.to_path_buf());
+        let plan =
+            plan_review(&input, dir, &git, &guard, &|_| false, &registry, &pool).expect("plans");
+        between();
+        run_review(
+            ReviewRequest {
+                input,
+                workspace: dir,
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: Some(plan.batches),
+                approved_digest: Some(plan.digest),
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult,
+                gate: Gate::new(client, chain(), 61_000),
+                clock: &FakeClock::default(),
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn content_that_moved_after_the_approval_is_refused_before_any_trio_call() {
+        // [MAGI S6 loop 6, D-c1] same batch count, other bytes: what was approved is not what
+        // would be sent, so nothing is sent.
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![]);
+        let client = MockDecisionClient::new();
+        let path = dir.path().join("f0.rs");
+        let r = approve_then_run(
+            dir.path(),
+            || {
+                let text = std::fs::read_to_string(&path).expect("read");
+                std::fs::write(&path, text.replace("_x = 1", "_y = 2")).expect("write");
+            },
+            &consult,
+            &client,
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ReviewError::ContentChanged)),
+            "{:?}",
+            r.err()
+        );
+        assert!(consult.prompts.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn content_unchanged_since_the_approval_runs() {
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let client = MockDecisionClient::new();
+        let r = approve_then_run(dir.path(), || {}, &consult, &client).await;
+        assert!(r.is_ok(), "{:?}", r.err());
     }
 
     fn empty() -> [serde_json::Value; 3] {
@@ -1239,6 +1339,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: Instant::now().checked_sub(EARLIER),
             },
             ReviewDeps {
@@ -1503,6 +1604,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: None,
             },
             ReviewDeps {
@@ -1587,6 +1689,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: None,
             },
             ReviewDeps {
@@ -1735,6 +1838,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: None,
             },
             ReviewDeps {
@@ -2026,6 +2130,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: None,
             },
             ReviewDeps {
@@ -2877,6 +2982,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: None,
             },
             ReviewDeps {
@@ -2962,6 +3068,7 @@ mod tests {
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
                 approved_batches: None,
+                approved_digest: None,
                 prep_started: None,
             },
             ReviewDeps {

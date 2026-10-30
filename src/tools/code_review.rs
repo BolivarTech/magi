@@ -117,6 +117,10 @@ pub(crate) struct ReviewPlan {
     pub input: ReviewInput,
     /// The batches.
     pub batches: usize,
+    /// What the approval saw ([`magi_rs::review::pipeline::PlanFingerprint::digest`]), checked
+    /// again before the first trio call; `None` skips that check (test doubles only). Boxed to
+    /// keep the plan small where the TUI carries it in an enum variant.
+    pub digest: Option<Box<[u8; 32]>>,
     /// `batches × (1 + max_rotations) × 2 × agent_timeout_secs`: an upper bound, never the
     /// expected duration.
     pub worst_case_secs: u64,
@@ -479,7 +483,7 @@ pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
         ReviewError::Protected(_) => "protected",
         ReviewError::NotRegularFile(_) => "not_regular_file",
         ReviewError::EgressSecret { .. } => "egress_secret",
-        ReviewError::PlanChanged { .. } => "plan_changed",
+        ReviewError::PlanChanged { .. } | ReviewError::ContentChanged => "plan_changed",
     }
 }
 
@@ -921,7 +925,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
         let ignored = self.ignored(&input)?;
         let guard = |p: &Path| self.guard(p);
         let is_ignored = |p: &str| ignored.contains(p);
-        let batches = plan_review(
+        let planned = plan_review(
             &input,
             &self.workspace,
             &self.git,
@@ -932,9 +936,10 @@ impl CodeReviewRunner for ProductionReviewRunner {
         )?;
         Ok(ReviewPlan {
             input,
-            batches,
+            batches: planned.batches,
+            digest: Some(Box::new(planned.digest)),
             worst_case_secs: tui_worst_case_secs(
-                batches,
+                planned.batches,
                 self.parts.max_rotations,
                 self.parts.agent_timeout_secs,
             ),
@@ -977,6 +982,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     retry_disabled: self.parts.retry_disabled,
                     agent_timeout_secs: self.parts.agent_timeout_secs,
                     approved_batches: Some(plan.batches),
+                    approved_digest: plan.digest.map(|d| *d),
                     prep_started: Some(prep_started),
                 },
                 ReviewDeps {
@@ -1025,6 +1031,7 @@ mod tests {
             Ok(ReviewPlan {
                 input: input.clone(),
                 batches: self.batches,
+                digest: None,
                 worst_case_secs: self.worst_case_secs,
             })
         }
@@ -1604,6 +1611,7 @@ mod tests {
             Ok(ReviewPlan {
                 input: ReviewInput::Commit(Some(format!("sha-{n}"))),
                 batches: n,
+                digest: None,
                 worst_case_secs: 9,
             })
         }
@@ -1695,6 +1703,7 @@ mod tests {
         ReviewPlan {
             input,
             batches: 0,
+            digest: None,
             worst_case_secs: 0,
         }
     }

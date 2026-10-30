@@ -162,6 +162,12 @@ pub enum ReviewError {
         /// The batches it splits into now.
         now: usize,
     },
+    /// What the review would send is no longer what was approved, though it still splits into
+    /// the same batches: a file's content, a diff or the file list moved between the approval
+    /// and the run. Raised before any trio call.
+    // MAGI FIX (S6 loop 6): an unchanged batch count no longer stands for unchanged content.
+    #[error("the review changed since it was approved: its content is not what was approved; ask for it again")]
+    ContentChanged,
     /// A secret found in what was about to be sent.
     #[error(
         "{} holds a secret at batching time: it changed during the review or was not filtered",

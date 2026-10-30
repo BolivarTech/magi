@@ -9311,6 +9311,7 @@ end"
         crate::tools::code_review::ReviewPlan {
             input: magi_rs::review::input::ReviewInput::Commit(Some("approved".into())),
             batches: 3,
+            digest: None,
             worst_case_secs: 42_030,
         }
     }
@@ -9329,6 +9330,7 @@ end"
             Ok(crate::tools::code_review::ReviewPlan {
                 input: magi_rs::review::input::ReviewInput::Commit(Some("replanned".into())),
                 batches: 3,
+                digest: None,
                 worst_case_secs: 42_030,
             })
         }
