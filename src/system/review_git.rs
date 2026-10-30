@@ -1209,6 +1209,25 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_key_with_no_driver_name_is_inert_and_never_refuses_the_review() {
+        // [MAGI S6 loop 7, A1-m2] git reads a driver only from `filter.<driver>.<variable>`; a
+        // two-level `filter.<key>` (no subsection) configures nothing, yet it failed the whole
+        // review as "unexpected key". It is skipped; a real driver next to it is still neutralized.
+        assert_eq!(
+            filter_overrides(b"local\0filter.foo\ntrue\0global\0filter.bar\0").expect("inert"),
+            Vec::<String>::new()
+        );
+        let want: Vec<String> = ["clean=", "smudge=", "process=", "required=false"]
+            .map(|v| format!("filter.a.{v}"))
+            .to_vec();
+        assert_eq!(
+            filter_overrides(b"local\0filter.foo\ntrue\0local\0filter.a.clean\nx\0")
+                .expect("parses"),
+            want
+        );
+    }
+
+    #[test]
     fn the_filter_probe_reads_exit_one_as_no_drivers_and_fails_closed_on_any_other_failure() {
         // `git config --get-regexp` exits 1 when nothing matches: a host with no filter config at all.
         let probe = |code: Option<i32>, stdout: &[u8], stderr: &str| Finished {
