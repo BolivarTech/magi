@@ -324,7 +324,14 @@ impl WorktreeSource<'_> {
         let still_inside = now
             .strip_prefix(canonical_root)
             .is_ok_and(|r| !is_never_reviewed(&r.to_string_lossy()));
-        if !still_inside || same_file::Handle::from_path(&now).map_err(io)? != opened {
+        if !still_inside {
+            return Err(ReviewError::OutsideWorkspace(path.to_string()));
+        }
+        // MAGI FIX (S6 loop 7): the path is opened again through `open_for_review`, never a
+        // plain open: a FIFO swapped in after the first open opens at once and fails the
+        // identity comparison instead of blocking the preparation.
+        let named = same_file::Handle::from_file(open_for_review(&now).map_err(io)?).map_err(io)?;
+        if named != opened {
             return Err(ReviewError::OutsideWorkspace(path.to_string()));
         }
         match read_bounded(opened.as_file(), MAX_REVIEW_FILE_BYTES).map_err(io)? {
