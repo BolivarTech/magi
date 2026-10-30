@@ -682,8 +682,10 @@ impl CodeScanner {
 
     /// Scan all lines of a source file.
     ///
-    /// Convenience method that splits on `\n` and calls
-    /// [`scan_line`](Self::scan_line) for each line.
+    /// Convenience method that splits `content` with [`str::lines`] and calls
+    /// [`scan_line`](Self::scan_line) for each line: a trailing `\r` is dropped from each line
+    /// and content ending in a newline has no empty last line, the same splitting every
+    /// extractor applies before it maps scanned indices onto its own lines.
     pub fn scan_all(&mut self, content: &str) -> Vec<ScannedLine> {
         content
             .lines()

@@ -161,6 +161,8 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
         return Vec::new();
     }
     // `content` is the block's lines joined by '\n': splitting on it gives them back exactly.
+    // Every extractor builds it with `str::lines`, so a CRLF file reaches here without its '\r'
+    // and the pieces carry the same text the unpieced unit did.
     let lines: Vec<&str> = block.content.split('\n').collect();
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
     let base = block.start_line.saturating_sub(1);
@@ -767,6 +769,23 @@ mod tests {
         for path in ["a.rs", "src/b.test.ts", "C:\\x\\y.go"] {
             assert!(registry.get(path).is_some(), "{path}");
         }
+    }
+
+    #[test]
+    fn a_crlf_file_gives_the_same_text_whole_split_or_through_the_fallback() {
+        // [MAGI S6 loop 6, B2a-m3] declared green: every unit path splits with `str::lines`,
+        // so no path keeps a '\r' another drops.
+        let code = "impl A {\r\n    fn a() {\r\n        x();\r\n    }\r\n}\r\n";
+        let registry = LanguageRegistry::new();
+        let ext = registry.get("a.rs").expect("registered");
+        let units = ext.extract_units(code, "a.rs", ChangedLines::All);
+        let parts: Vec<SemanticUnit> = units.iter().flat_map(|u| ext.split_block(u)).collect();
+        let every: HashSet<u32> = (1..=5).collect();
+        let fallback = fallback_extract(code, "a.rs", &every, &FileContext::default());
+        for unit in units.iter().chain(&parts).chain(&fallback) {
+            assert!(!unit.content.contains('\r'), "{:?}", unit.content);
+        }
+        assert!(!parts.is_empty(), "the impl splits");
     }
 
     #[test]
