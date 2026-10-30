@@ -897,21 +897,11 @@ mod tests {
         // [MAGI S6 loop 6, F2-c1] a hard link's path is inside the workspace but its inode may
         // be anything on the same filesystem: a file with more than one link is never read.
         let outer = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            outer.path().join("secret.txt"),
-            "outside
-",
-        )
-        .expect("write");
+        std::fs::write(outer.path().join("secret.txt"), "outside\n").expect("write");
         let root = outer.path().join("ws");
         std::fs::create_dir_all(&root).expect("mkdir");
         std::fs::hard_link(outer.path().join("secret.txt"), root.join("copy.rs")).expect("link");
-        std::fs::write(
-            root.join("own.rs"),
-            "fn f() {}
-",
-        )
-        .expect("write");
+        std::fs::write(root.join("own.rs"), "fn f() {}\n").expect("write");
         let src = WorktreeSource::new(root);
         assert!(
             matches!(src.read("copy.rs"), Err(ReviewError::OutsideWorkspace(ref p)) if p == "copy.rs"),
@@ -920,11 +910,7 @@ mod tests {
         );
         assert_eq!(
             src.read("own.rs").expect("reads"),
-            Some(
-                b"fn f() {}
-"
-                .to_vec()
-            )
+            Some(b"fn f() {}\n".to_vec())
         );
     }
 

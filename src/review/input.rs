@@ -1334,68 +1334,42 @@ mod tests {
         let d = tempfile::tempdir().expect("tempdir");
         let ws = d.path().join("ws");
         std::fs::create_dir_all(&ws).expect("mkdir");
-        std::fs::write(
-            d.path().join("secret.txt"),
-            "s
-",
-        )
-        .expect("write");
-        std::fs::write(
-            ws.join("a.rs"),
-            "fn a() {}
-",
-        )
-        .expect("write");
+        std::fs::write(d.path().join("secret.txt"), "s\n").expect("write");
+        std::fs::write(ws.join("a.rs"), "fn a() {}\n").expect("write");
         let cases = [
             (
                 ReviewInput::Uncommitted,
                 FakeGit::from(&[
-                    (
-                        "rev-parse --is-inside-work-tree",
-                        Ok("true
-"),
-                    ),
-                    (
-                        "rev-parse --verify --quiet HEAD^{commit}",
-                        Ok("abc
-"),
-                    ),
+                    ("rev-parse --is-inside-work-tree", Ok("true\n")),
+                    ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
                     (
                         "diff --no-color --no-ext-diff --no-textconv --relative abc",
                         Ok(""),
                     ),
                     (
                         "ls-files --others --exclude-standard -z",
-                        Ok("a.rs ../secret.txt "),
+                        Ok("a.rs\0../secret.txt\0"),
                     ),
                 ]),
             ),
             (
                 ReviewInput::Uncommitted,
                 FakeGit::from(&[
-                    (
-                        "rev-parse --is-inside-work-tree",
-                        Ok("true
-"),
-                    ),
+                    ("rev-parse --is-inside-work-tree", Ok("true\n")),
                     ("rev-parse --verify --quiet HEAD^{commit}", Err("")),
                     (
                         "ls-files --cached --others --exclude-standard -z",
-                        Ok("a.rs ../secret.txt "),
+                        Ok("a.rs\0../secret.txt\0"),
                     ),
                 ]),
             ),
             (
                 ReviewInput::Directory(".".into()),
                 FakeGit::from(&[
-                    (
-                        "rev-parse --is-inside-work-tree",
-                        Ok("true
-"),
-                    ),
+                    ("rev-parse --is-inside-work-tree", Ok("true\n")),
                     (
                         "ls-files --cached --others --exclude-standard -z -- .",
-                        Ok("a.rs ../secret.txt "),
+                        Ok("a.rs\0../secret.txt\0"),
                     ),
                 ]),
             ),

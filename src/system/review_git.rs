@@ -555,7 +555,8 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
                     .map(String::as_str)
                     .collect();
                 return Err(ReviewError::Git(format!(
-                    "git's config defines more filter drivers than a review can disable (over                      {MAX_FILTER_OVERRIDE_BYTES} bytes of overrides after {} drivers, among them: {})",
+                    "git's config defines more filter drivers than a review can disable (over \
+                     {MAX_FILTER_OVERRIDE_BYTES} bytes of overrides after {} drivers, among them: {})",
                     names.len(),
                     shown.join(", ")
                 )));
@@ -1274,13 +1275,7 @@ mod tests {
         // before the cap was checked: a config with many drivers grew both without bound.
         let mut z = Vec::new();
         for i in 0..50_000 {
-            z.extend_from_slice(
-                format!(
-                    "local filter.driver{i}.clean
-cat "
-                )
-                .as_bytes(),
-            );
+            z.extend_from_slice(format!("local\0filter.driver{i}.clean\ncat\0").as_bytes());
         }
         let message = filter_overrides(&z).expect_err("over the cap").to_string();
         assert!(
