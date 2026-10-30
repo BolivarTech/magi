@@ -484,7 +484,8 @@ pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBu
 /// # Errors
 ///
 /// [`ReviewError::Git`] for a truncated record, a key outside `filter.<name>.<variable>`, a
-/// driver name with `=` (which `-c` cannot express), or overrides over
+/// driver name with `=` or one that is not UTF-8 (which `-c` cannot express exactly), or
+/// overrides over
 /// [`MAX_FILTER_OVERRIDE_BYTES`].
 pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewError> {
     let unreadable = |what: String| {
@@ -501,7 +502,15 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
             split_at_nul(after).ok_or_else(|| unreadable("a truncated record".into()))?;
         rest = after;
         let key = entry.split(|b| *b == b'\n').next().unwrap_or_default();
-        let key = String::from_utf8_lossy(key);
+        // MAGI FIX (S6 loop 5): a lossy decode turned a non-UTF-8 driver name into U+FFFD, so the
+        // override neutralized another driver and the repository's own ran; `-c` cannot carry
+        // arbitrary bytes on every platform, so such a name fails closed before any command.
+        let key = std::str::from_utf8(key).map_err(|_| {
+            unreadable(format!(
+                "a filter driver name that is not UTF-8: {:?}",
+                String::from_utf8_lossy(key)
+            ))
+        })?;
         let name = key
             .strip_prefix("filter.")
             .and_then(|tail| tail.rsplit_once('.'))
