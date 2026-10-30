@@ -969,4 +969,43 @@ mod tests {
         });
         assert!(!render_text(&c, &s).contains("hunter2"));
     }
+
+    #[tokio::test]
+    async fn both_report_forms_mask_a_named_secret_in_a_finding_file_title_and_detail() {
+        // [MAGI S6 loop 6, C2-c1 / C1-c2] RV22: the report is an egress point, so its own
+        // redaction runs the product's detector, not only the URL-credential one.
+        let github = format!("ghp_{}", "A".repeat(36));
+        let openai = format!("sk-{}", "b".repeat(30));
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+        let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        let answered = report.agents.iter().map(|a| a.agent).collect();
+        let mut c = consolidate(&[BatchOutcome {
+            batch: 0,
+            agents: report.agents.clone(),
+            answered,
+        }])
+        .expect("consolidates");
+        c.findings[0].file = Some(format!("src/{github}.rs"));
+        c.findings[0].titles = vec![format!("key {openai}")];
+        c.findings[0].details = vec![format!("token {github}")];
+        let verdict = GateVerdict {
+            state: GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: Some("m".into()),
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+            status: None,
+        };
+        let mut s = ReviewSummary::default();
+        s.findings.push((c.findings[0].clone(), verdict));
+        let text = render_text(&c, &s);
+        let json = summary_json(&s).to_string();
+        for form in [text, json] {
+            assert!(!form.contains(&github), "{form}");
+            assert!(!form.contains(&openai), "{form}");
+            assert!(form.contains("<redacted: "), "{form}");
+        }
+    }
 }
