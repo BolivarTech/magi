@@ -10,6 +10,7 @@ use std::path::Path;
 use magi_core::schema::{AgentName, AgentOutput, Finding, Severity};
 
 use super::index::{LexicalIndex, Reviewed, PATH_SEPARATOR};
+use crate::redact::redact_foreign_text;
 
 /// Why a finding left the main list.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -32,7 +33,7 @@ pub struct Discarded {
     pub agent: AgentName,
     /// Zero-based batch index.
     pub batch: usize,
-    /// The finding as the mage reported it.
+    /// The finding as the mage reported it, its model text redacted.
     pub finding: Finding,
     /// The failed check.
     pub cause: DiscardCause,
@@ -201,6 +202,17 @@ fn check(
     None
 }
 
+/// `finding` with every credential in an embedded URL of its model text (`title`, `detail`,
+/// `file`) redacted, as `consult` writes model text. O(bytes).
+fn redacted_finding(finding: &Finding) -> Finding {
+    let redact = |text: &str| redact_foreign_text(text).as_str().to_string();
+    let mut clean = finding.clone();
+    clean.title = redact(&finding.title);
+    clean.detail = redact(&finding.detail);
+    clean.file = finding.file.as_deref().map(redact);
+    clean
+}
+
 /// Removes from `agents` every finding the review cannot support and returns what was removed.
 ///
 /// Runs per batch **after** every completed batch filled `reviewed` (U24: "reviewed" is the union
@@ -217,7 +229,9 @@ fn check(
 ///
 /// Discarded findings are removed from `agents[i].findings`. Every finding that stays leaves with
 /// the `file`/`line` of `normalize_location`, the one point of normalization, so later stages
-/// see the same path as `reviewed`. A discarded finding is returned as the mage reported it.
+/// see the same path as `reviewed`. A discarded (or symbol-unverified) finding is recorded as
+/// the mage reported it, with its model text (`title`, `detail`, `file`) redacted as
+/// consolidation redacts it.
 ///
 /// A finding that names a renamed file by its old path is checked, and kept, under the new path:
 /// `reviewed` holds both sides of a rename's hunks under the new path (`renames` maps old path
@@ -255,10 +269,12 @@ pub fn validate_batch(
                 }
             }
             let verdict = check(&finding, &location, reviewed, index);
+            // MAGI FIX (S6 loop 5): RV09's lists are made before consolidation, which redacts on
+            // its way in, so they are redacted here, where they are made.
             let record = |cause, symbol| Discarded {
                 agent: name,
                 batch,
-                finding: finding.clone(),
+                finding: redacted_finding(&finding),
                 cause,
                 symbol,
             };
