@@ -20,8 +20,6 @@ use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
 use super::source::{is_never_reviewed, ContentSource, GitCommand};
 
-/// Bytes git inspects for a NUL to call a file binary; the same heuristic here.
-const BINARY_SNIFF_BYTES: usize = 8_000;
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
 pub(crate) const MISSING: &str = "missing";
 /// The tracing target of the filter's run-log entries.
@@ -130,7 +128,7 @@ enum Verdict {
 /// reads (a `.git` or `.magi` component, or a name that starts with `.magi-rs-memory.db`,
 /// whatever `is_ignored` says) or one `is_ignored` names → `ignored`; a path that holds a
 /// secret → `secret`, without reading it; a file that does not exist → an error, never a skip;
-/// over the byte cap → `too large`; a NUL in the first 8 000 bytes → `binary`; not UTF-8 →
+/// over the byte cap → `too large`; a NUL anywhere in a side → `binary`; not UTF-8 →
 /// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker is
 /// `binary` without reading anything ([`is_binary_section`]).
@@ -247,12 +245,11 @@ fn classify(
     }
     // MAGI FIX (S6 loop 4): both sides, not the new one alone: a text file whose old side was
     // binary or Latin-1 carried old-side bytes into the review.
+    // MAGI FIX (S6 loop 7): the whole side, not git's first 8 000 bytes: a text prefix hid a
+    // binary payload, which is valid UTF-8 (NUL is a code point). One pass over bytes already
+    // read and capped (MAX_REVIEW_FILE_BYTES), so the cost stays O(file).
     let sides = [new.as_deref(), old.as_deref()];
-    if sides
-        .iter()
-        .flatten()
-        .any(|side| side.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0))
-    {
+    if sides.iter().flatten().any(|side| side.contains(&0)) {
         return Ok(Verdict::Skip(SkipCause::Binary));
     }
     if sides
