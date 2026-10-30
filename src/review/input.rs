@@ -159,6 +159,7 @@ pub fn validate_ref(r: &str) -> Result<(), ReviewError> {
 ///
 /// [`ReviewError::InvalidRef`] before any git call for a hostile ref,
 /// [`ReviewError::RefNotFound`] for a ref that names no commit, [`ReviewError::OutsideWorkspace`]
+/// for a listed name that climbs out of the workspace or is absolute, or
 /// from the guard, [`ReviewError::NotReviewable`] for a `File` that is a directory or a
 /// `Directory` that does not exist (`missing`), [`ReviewError::Git`] when git fails (inside a repository, a failing git never falls back to a
 /// walk that would ignore `.gitignore`), [`ReviewError::Io`] for a failing walk, and
@@ -217,6 +218,12 @@ pub fn resolve_input(
         }
         ReviewInput::Uncommitted => resolve_uncommitted(git, workspace)?,
     };
+    // MAGI FIX (S6 loop 6): one choke point for every listing. git scopes `ls-files` and
+    // `diff --relative` to the workspace, but a name that climbs out or is absolute is refused
+    // here, before any read, whatever produced it.
+    if let Some(escaping) = resolved.files.iter().find(|f| !is_confined(&f.path)) {
+        return Err(ReviewError::OutsideWorkspace(escaping.path.clone()));
+    }
     if resolved.files.is_empty() && resolved.not_utf8.is_empty() {
         return Err(ReviewError::NothingToReview {
             skipped: Vec::new(),
@@ -583,6 +590,15 @@ fn resolve_uncommitted(
 fn is_dangling_link(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
         && std::fs::metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Whether `path` is a workspace-relative path made only of plain components: no `..`, no root,
+/// no drive prefix, not empty. O(path length).
+fn is_confined(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 /// Splits NUL-separated names; the ones that are not UTF-8 come back apart, decoded lossily.
