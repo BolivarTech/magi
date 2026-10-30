@@ -1148,6 +1148,48 @@ function h() {
     }
 
     #[test]
+    fn a_cpp_raw_string_keeps_its_quotes_and_braces_as_text() {
+        // [MAGI S6 loop 6, B2a-b1/c2] C++ had no raw-string state: `R"({"a": 1})"` read as
+        // ordinary strings, so its braces and its unbalanced quotes moved the depth.
+        let code = r#"void f() {
+    auto j = R"({"a": 1} " })";
+    auto k = u8R"x(say ")" } )x";
+    auto m = R"(
+{ " {
+)";
+    g();
+}
+void h() {
+}
+"#;
+        let results = CodeScanner::new(LexicalRules::cpp()).scan_all(code);
+        for idx in [1, 2, 3, 4, 5] {
+            assert_eq!(results[idx].brace_delta, 0, "line {}", idx + 1);
+        }
+        assert!(results[4].starts_in_literal, "line 5 is raw-string text");
+        assert!(
+            !results[6].starts_in_literal,
+            "the raw string closed on line 6"
+        );
+        assert_eq!(
+            find_closing_brace(&results, 0),
+            7,
+            "f ends on its own brace"
+        );
+        assert_eq!(
+            find_closing_brace(&results, 8),
+            9,
+            "h is still found after f"
+        );
+        let mut c = CodeScanner::new(LexicalRules::cpp());
+        assert_eq!(
+            c.scan_line(1, r#"int FOOR = 1; s = "{"; {"#).brace_delta,
+            1,
+            "an identifier ending in R before a string is no raw string"
+        );
+    }
+
+    #[test]
     fn a_template_nested_in_a_template_expression_leaves_the_depth_unchanged() {
         // [MAGI S6 loop 4, B2] declared heuristic: `${...}` is not tracked, and a nested
         // template must not drift the depth of the code after it.
