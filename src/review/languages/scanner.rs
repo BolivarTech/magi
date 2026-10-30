@@ -1327,6 +1327,19 @@ void h() {
     }
 
     #[test]
+    fn any_configured_line_comment_token_hides_its_braces() {
+        // [MAGI S6 loop 6, B2a-b3] only `//` and `#` were recognized, so another configured
+        // token was ignored and the braces after it counted.
+        let rules = LexicalRules {
+            line_comment: "--",
+            ..LexicalRules::c()
+        };
+        let mut scanner = CodeScanner::new(rules);
+        assert_eq!(scanner.scan_line(1, "x = 1; -- { note").brace_delta, 0);
+        assert_eq!(scanner.scan_line(2, "y = a - b; {").brace_delta, 1);
+    }
+
+    #[test]
     fn a_template_nested_in_a_template_expression_leaves_the_depth_unchanged() {
         // [MAGI S6 loop 4, B2] a nested template inside `${...}` (lexed as code since loop 6)
         // must not drift the depth of the code after it.
