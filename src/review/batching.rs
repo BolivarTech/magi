@@ -33,6 +33,10 @@ const UNKNOWN_LANGUAGE: &str = "unknown";
 /// The marker that opens a hunk header line (`@@ -a,b +c,d @@`).
 const HUNK_MARKER: &str = "@@";
 
+/// The marker that opens a combined-diff hunk header (`@@@ -a,b -c,d +e,f @@@`), which git writes
+/// for a merge commit shown against all its parents.
+const COMBINED_HUNK_MARKER: &str = "@@@";
+
 /// The Unicode line separator, which a model may read as a line break.
 const LINE_SEPARATOR: char = '\u{2028}';
 
@@ -281,7 +285,7 @@ pub fn plan_batches(
 ///   in an empty batch, or a whole file without an extractor (or without units) does not.
 /// * [`ReviewError::Io`] when a file reviewed whole has disappeared from the source.
 /// * [`ReviewError::NotReviewable`] when a file reviewed whole is no longer UTF-8.
-/// * [`ReviewError::Git`] when a hunk header cannot be parsed.
+/// * [`ReviewError::Git`] when a hunk header cannot be parsed or is a combined (merge) diff's.
 /// * [`ReviewError::NothingToReview`] when no file produces an item.
 /// * Any error of `source` or `companion`, unchanged.
 ///
@@ -331,6 +335,13 @@ fn hunk_items(path: &str, diff: &str) -> Result<Vec<BatchItem>, ReviewError> {
         let Some(marker) = hunk.content.lines().find(|l| l.starts_with(HUNK_MARKER)) else {
             continue;
         };
+        // MAGI FIX (S6 loop 5): a combined diff failed as a malformed header, hiding its cause.
+        if marker.starts_with(COMBINED_HUNK_MARKER) {
+            return Err(ReviewError::Git(format!(
+                "combined (merge) diff hunks are not supported in {}: review the merge against one                  parent",
+                display_path(path)
+            )));
+        }
         let ((old_first_line, old_last_line), (first_line, last_line)) = hunk_ranges(marker)
             .ok_or_else(|| {
                 ReviewError::Git(format!("malformed hunk header in {}", display_path(path)))
