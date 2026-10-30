@@ -540,6 +540,13 @@ def _omissions(stderr):
     belong to an entry: a rendering the harness no longer understands is a
     failure, never an empty list that would pass.
 
+    A path may hold `` (<cause>)`` itself: an entry ends only at a cause
+    followed by ``, `` or the end, so the shortest such split is taken and the
+    rest stays in the path. The one rendering the product's text cannot tell
+    apart is a path holding `` (<cause>), ``; it splits early, and when the
+    early half is protected it reads as protected and not ``ignored``, so the
+    ambiguity fails S51 rather than passing it.
+
     Args:
         stderr: The decoded stderr.
 
@@ -555,6 +562,8 @@ def _omissions(stderr):
         True
         >>> _omissions("x; left out: ")[0] is None
         True
+        >>> _omissions("x; left out: foo (binary).rs (secret)")
+        ([('foo (binary).rs', 'secret')], '')
     """
     listed = OMISSION_LIST_PATTERN.search(stderr)
     if listed is None:
