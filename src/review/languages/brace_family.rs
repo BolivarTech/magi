@@ -984,7 +984,13 @@ impl BraceFamilyExtractor {
                 "use ".to_string(),
             ],
             modifiers: &RUST_MODIFIERS,
-            doc_comment_prefixes: vec!["///".to_string(), "//!".to_string()],
+            // MAGI FIX (S6 loop 6): a `/** ... */` rustdoc above an item fell into a gap.
+            doc_comment_prefixes: vec![
+                "///".to_string(),
+                "//!".to_string(),
+                "/**".to_string(),
+                "/*!".to_string(),
+            ],
             attribute_prefixes: vec!["#[".to_string()],
             lexical_rules: LexicalRules::rust(),
             signature_functions: false,
