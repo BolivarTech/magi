@@ -149,6 +149,18 @@ class VisibilityPreflightTests(unittest.TestCase):
             runs.verify_visible(root, ("gen/a.rs",))
 
 
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_repository_selecting_environment_does_not_redirect_the_query(self) -> None:
+        # [MAGI §6 MS2 loop 6, F1a-c2] an inherited GIT_DIR / GIT_WORK_TREE would point git at another
+        # repository; the product scrubs its git environment, so the harness must too.
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            root = self._repo(tmp, None)
+            hostile = {"GIT_DIR": str(pathlib.Path(other) / "nowhere.git"),
+                       "GIT_WORK_TREE": other, "GIT_INDEX_FILE": str(pathlib.Path(other) / "index")}
+            with mock.patch.dict("os.environ", hostile):
+                runs.verify_visible(root, ("gen/a.rs",))
+
+
 class ReviewWorkspaceTests(unittest.TestCase):
     """R12-R15 run in a nested git repository under the scratch area."""
 
@@ -178,6 +190,17 @@ class ReviewWorkspaceTests(unittest.TestCase):
                 ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
                 check=True, capture_output=True, text=True).stdout.strip()
             self.assertEqual(workspace.resolve(), pathlib.Path(top).resolve())
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_an_inherited_git_dir_does_not_redirect_the_workspace_init(self) -> None:
+        # [MAGI §6 MS2 loop 6, F1a-c2] `git init` under an inherited GIT_DIR initialises THAT directory.
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            elsewhere = pathlib.Path(other) / "elsewhere.git"
+            with mock.patch.dict("os.environ", {"GIT_DIR": str(elsewhere)}):
+                workspace = _executor(pathlib.Path(tmp))._prepare_review_workspace(
+                    runs.DEFINITIONS["R14"])
+            self.assertTrue((workspace / ".git").is_dir())
+            self.assertFalse(elsewhere.exists())
 
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_second_preparation_starts_from_a_clean_workspace(self) -> None:
