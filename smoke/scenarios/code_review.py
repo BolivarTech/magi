@@ -541,18 +541,22 @@ def an_insufficient_timeout_is_refused_before_spending(run):
 
 
 def _budget_fields_ok(match):
-    """Whether a parsed refusal names sane batches, floor and minimum.
+    """Whether a parsed refusal names sane batches, floor, ceiling and minimum.
 
     Args:
         match: The :data:`BUDGET_PATTERN` match, or ``None``.
 
     Returns:
         bool: ``True`` for at least :data:`MIN_REFUSED_BATCHES` batch, the
-        :data:`FLOOR_SECS` floor and a minimum above the total the run asked for.
+        :data:`FLOOR_SECS` floor, a per-batch ceiling at or above that floor
+        (``derive_ceiling_from_timeout`` never returns less) and a minimum
+        above the total the run asked for.
     """
+    # MAGI FIX (S6 loop 7): the ceiling was captured but never checked (F1a-c3).
     return (match is not None
             and int(match.group("batches")) >= MIN_REFUSED_BATCHES
             and int(match.group("floor")) == FLOOR_SECS
+            and int(match.group("ceiling")) >= FLOOR_SECS
             and int(match.group("minimum")) > runs.REVIEW_TOO_SHORT_TIMEOUT_S)
 
 
