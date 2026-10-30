@@ -266,6 +266,13 @@ impl BraceFamilyExtractor {
             let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
 
             let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
+            // MAGI FIX (S6 loop 7): Go's `type (` opened one nameless struct and its later
+            // members fell into gaps; each member is a construct of its own.
+            if let Some((last, group)) = self.grouped_types(lines, scanned, i) {
+                constructs.extend(group);
+                i = last + 1;
+                continue;
+            }
             if let Some((kind, name)) = self.construct_keyword(trimmed) {
                 let start = self.scan_back_for_docs(lines, scanned, i);
                 let end = brace_block_end(lines, scanned, i, line_num, &stops);
@@ -361,6 +368,71 @@ impl BraceFamilyExtractor {
         }
 
         constructs
+    }
+
+    /// The members of a grouped type declaration at line `i` (Go's `type (` ... `)`) and the
+    /// group's last line (0-based, its `)`), or `None` when line `i` opens none. Each member is a
+    /// construct with its doc comments: a struct, an interface (as a trait) or a defined type or
+    /// alias (as a struct, as a lone `type ID int` is), named by its first word and ending at
+    /// its closing brace, or on its own line when it opens none. The `type (` and `)` lines
+    /// belong to no member, so they fall into gap units. O(k) for the k lines of the group.
+    ///
+    /// The group's end is found by counting parentheses on the line text ([`paren_delta`]); a
+    /// group that never closes runs to the end of the file, its members still found one by one,
+    /// so every line stays in exactly one unit either way.
+    fn grouped_types(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        i: usize,
+    ) -> Option<(usize, Vec<Construct>)> {
+        if !self.block_keywords.iter().any(|k| k == "type ") {
+            return None;
+        }
+        let rest = keyword_rest(lines.get(i)?.trim(), "type ")?;
+        if !rest.trim_start().starts_with('(') {
+            return None;
+        }
+        let mut depth = 0i64;
+        let close = (i..lines.len()).find(|&j| {
+            depth += paren_delta(lines, scanned, j);
+            depth <= 0
+        });
+        let last = close.unwrap_or(lines.len().saturating_sub(1));
+        let body_end = close.unwrap_or(lines.len());
+        let mut members = Vec::new();
+        let mut floor = i + 1;
+        let mut j = i + 1;
+        while j < body_end {
+            let trimmed = lines.get(j).map_or("", |l| l.trim());
+            let name: String = trimmed
+                .chars()
+                .take_while(|&c| is_identifier_char(c))
+                .collect();
+            if scanned.get(j).is_none_or(|s| s.is_non_code) || name.is_empty() {
+                j += 1;
+                continue;
+            }
+            let kind = match trimmed.split_whitespace().nth(1) {
+                Some(word) if word.starts_with("interface") => UnitKind::Trait,
+                _ => UnitKind::Struct,
+            };
+            let end = if scanned.get(j).is_some_and(|s| s.brace_delta > 0) {
+                find_closing_brace(scanned, j).min(body_end - 1).max(j)
+            } else {
+                j
+            };
+            let start = self.scan_back_for_docs(lines, scanned, j).max(floor);
+            members.push(Construct {
+                kind,
+                name,
+                start_line: u32::try_from(start + 1).unwrap_or(u32::MAX),
+                end_line: u32::try_from(end + 1).unwrap_or(u32::MAX),
+            });
+            floor = end + 1;
+            j = end + 1;
+        }
+        Some((last, members))
     }
 
     /// The kind and name of the block or function construct a trimmed line opens, matched on
