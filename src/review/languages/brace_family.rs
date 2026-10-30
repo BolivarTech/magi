@@ -2386,4 +2386,23 @@ mod tests {
         assert_each_line_in_one_unit(&units, 5);
         assert!(units.iter().any(|u| u.name == "B"), "{:?}", spans(&units));
     }
+
+    #[test]
+    fn a_javascript_generator_method_is_a_member() {
+        // [MAGI S6 loop 7, B2b-b2] a line opening with `*` was taken for a comment line, so
+        // `*items() {` was no member and a large class could not split there.
+        let code = "class Gen {\n  /**\n   * Calls helper(x).\n   */\n  *items() {\n    yield 1;\n  }\n  async *more() {\n    yield 2;\n  }\n}\n";
+        let parts = split(
+            &BraceFamilyExtractor::javascript(),
+            code,
+            6,
+            UnitKind::Class,
+        );
+        let methods: Vec<&str> = parts
+            .iter()
+            .filter(|p| p.kind == UnitKind::Method)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(methods, vec!["items", "more"]);
+    }
 }
