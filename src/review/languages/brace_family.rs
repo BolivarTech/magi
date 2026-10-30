@@ -260,7 +260,7 @@ impl BraceFamilyExtractor {
 
             let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
             if let Some((kind, name)) = self.construct_keyword(trimmed) {
-                let start = self.scan_back_for_docs(lines, i);
+                let start = self.scan_back_for_docs(lines, scanned, i);
                 let end = brace_block_end(lines, scanned, i, line_num, &stops);
                 constructs.push(Construct {
                     kind,
@@ -276,7 +276,7 @@ impl BraceFamilyExtractor {
             if let Some(name) = self.signature_name(line, scanned.get(i), prototypes) {
                 let opens = open_brace_line(lines, scanned, i, &stops).is_some();
                 if opens || trimmed.ends_with('}') || prototypes {
-                    let start = self.scan_back_for_docs(lines, i);
+                    let start = self.scan_back_for_docs(lines, scanned, i);
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
                     let end = if opens || trimmed.ends_with('}') {
@@ -300,7 +300,7 @@ impl BraceFamilyExtractor {
                 // MAGI FIX (S6 loop 5): `const f = () => {` ended on its first line and its body
                 // fell into a gap; a function expression is a function, with its whole body.
                 if let Some((name, end)) = self.function_expression(lines, scanned, i, &stops) {
-                    let start = self.scan_back_for_docs(lines, i);
+                    let start = self.scan_back_for_docs(lines, scanned, i);
                     constructs.push(Construct {
                         kind: UnitKind::Function,
                         name,
@@ -334,7 +334,7 @@ impl BraceFamilyExtractor {
                         break;
                     }
                 }
-                let doc_start = self.scan_back_for_docs(lines, group_start);
+                let doc_start = self.scan_back_for_docs(lines, scanned, group_start);
                 let name = self.declaration_group_name(self.strip_modifiers(trimmed, false));
                 constructs.push(Construct {
                     kind: UnitKind::DeclarationGroup,
@@ -535,8 +535,11 @@ impl BraceFamilyExtractor {
         false
     }
 
-    /// Scan backward from `idx` to include doc comments and attributes.
-    fn scan_back_for_docs(&self, lines: &[&str], idx: usize) -> usize {
+    /// The 0-based first line of the construct whose declaration is at `idx`: `idx` moved up
+    /// over the doc comments and attributes right above it. A doc line opens with a doc prefix
+    /// (`///`, `/**`); a block comment that spans lines (`/**` ... `*/`) counts whole when its
+    /// opening line does ([`Self::block_doc_start`]). O(k) for the k lines passed over.
+    fn scan_back_for_docs(&self, lines: &[&str], scanned: &[ScannedLine], idx: usize) -> usize {
         let mut start = idx;
         while start > 0 {
             let Some(prev) = lines.get(start - 1).map(|l| l.trim()) else {
@@ -552,11 +555,42 @@ impl BraceFamilyExtractor {
                 .any(|p| prev.starts_with(p.as_str()));
             if is_doc || is_attr {
                 start -= 1;
+            } else if let Some(open) = self.block_doc_start(lines, scanned, start - 1) {
+                start = open;
             } else {
                 break;
             }
         }
         start
+    }
+
+    /// The 0-based opening line of the doc block comment that ends on line `last` (its `*/`):
+    /// the lines above it that start inside the comment are passed over up to the line that
+    /// opens it, which must open with a doc prefix (`/**`). `None` when `last` ends no block
+    /// comment or the comment is no doc comment (`/* plain */`). O(k) for the k lines of the
+    /// comment.
+    fn block_doc_start(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        last: usize,
+    ) -> Option<usize> {
+        // MAGI FIX (S6 loop 5): the line above a declaration is `*/` for a multi-line JavaDoc,
+        // JSDoc or C doc block, so the whole comment was left out of the unit.
+        if !lines.get(last)?.trim_end().ends_with("*/") {
+            return None;
+        }
+        let mut open = last;
+        while scanned.get(open)?.starts_in_literal {
+            open = open.checked_sub(1)?;
+        }
+        let opener = lines.get(open)?.trim();
+        (open < last
+            && self
+                .doc_comment_prefixes
+                .iter()
+                .any(|p| p.starts_with("/*") && opener.starts_with(p.as_str())))
+        .then_some(open)
     }
 
     /// The name and last line (0-based) of the function expression the declaration at line `i`
