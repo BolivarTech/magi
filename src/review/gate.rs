@@ -856,8 +856,7 @@ mod tests {
             .times(1)
             .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
-        let v = g.judge(&f, Some("x
-"), None).await;
+        let v = g.judge(&f, Some("x\n"), None).await;
         assert_eq!(
             (v.state, v.cause, v.causes),
             (
