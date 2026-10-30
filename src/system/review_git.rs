@@ -70,6 +70,10 @@ const WAIT_POLL_MAX: Duration = Duration::from_millis(50);
 /// Total bytes the filter `-c` overrides may take: Windows caps a command line near 32 KiB, and a
 /// repository with thousands of drivers would push every call past it and fail opaquely.
 pub(crate) const MAX_FILTER_OVERRIDE_BYTES: usize = 8 * 1024;
+/// The key prefix of a filter driver setting (`filter.<name>.<variable>`).
+const FILTER_KEY_PREFIX: &str = "filter.";
+/// How many driver names the over-the-cap error names; the error stays short whatever the config.
+const FILTER_DRIVERS_NAMED_IN_ERROR: usize = 10;
 
 /// The probe of the filter drivers git sees, with the scope of each entry (git 2.26 or later).
 const FILTER_PROBE: &[&str] = &[
@@ -506,6 +510,7 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
         ))
     };
     let mut names = BTreeSet::new();
+    let mut override_bytes = 0usize;
     let mut rest = config_z;
     while !rest.is_empty() {
         let (_scope, after) =
@@ -524,7 +529,7 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
             ))
         })?;
         let name = key
-            .strip_prefix("filter.")
+            .strip_prefix(FILTER_KEY_PREFIX)
             .and_then(|tail| tail.rsplit_once('.'))
             .filter(|(name, variable)| !name.is_empty() && !variable.is_empty())
             .map(|(name, _)| name)
@@ -536,25 +541,35 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
                 "a filter driver name with '=': {name:?}"
             )));
         }
-        names.insert(name.to_string());
+        // MAGI FIX (S6 loop 6): the cap is checked as each new driver arrives, so neither the
+        // overrides nor the error grow past it on a config with millions of drivers.
+        if names.insert(name.to_string()) {
+            override_bytes += NEUTRALIZED_FILTER_SETTINGS
+                .iter()
+                .map(|s| FILTER_KEY_PREFIX.len() + name.len() + 1 + s.len())
+                .sum::<usize>();
+            if override_bytes > MAX_FILTER_OVERRIDE_BYTES {
+                let shown: Vec<&str> = names
+                    .iter()
+                    .take(FILTER_DRIVERS_NAMED_IN_ERROR)
+                    .map(String::as_str)
+                    .collect();
+                return Err(ReviewError::Git(format!(
+                    "git's config defines more filter drivers than a review can disable (over                      {MAX_FILTER_OVERRIDE_BYTES} bytes of overrides after {} drivers, among them: {})",
+                    names.len(),
+                    shown.join(", ")
+                )));
+            }
+        }
     }
-    let overrides: Vec<String> = names
+    Ok(names
         .iter()
         .flat_map(|name| {
             NEUTRALIZED_FILTER_SETTINGS
                 .iter()
-                .map(move |s| format!("filter.{name}.{s}"))
+                .map(move |s| format!("{FILTER_KEY_PREFIX}{name}.{s}"))
         })
-        .collect();
-    if overrides.iter().map(String::len).sum::<usize>() > MAX_FILTER_OVERRIDE_BYTES {
-        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
-        return Err(ReviewError::Git(format!(
-            "git's config defines more filter drivers than a review can disable ({} drivers: {})",
-            listed.len(),
-            listed.join(", ")
-        )));
-    }
-    Ok(overrides)
+        .collect())
 }
 
 /// Splits at the first NUL: the bytes before it and after it.
