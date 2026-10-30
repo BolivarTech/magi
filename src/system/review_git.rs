@@ -601,6 +601,25 @@ mod tests {
     }
 
     #[test]
+    fn names_taken_ahead_in_the_temp_directory_never_block_the_empty_repository() {
+        // [MAGI S6 loop 5, A1-c1] another local user could take `<prefix>-<pid>-<n>` for the next
+        // attempts; a random name leaves nothing to predict. nextest runs each test in its own
+        // process, so this process's sequence starts at 0.
+        let taken: Vec<_> = (0..u64::from(EMPTY_GIT_DIR_ATTEMPTS) * 4)
+            .map(|n| {
+                std::env::temp_dir()
+                    .join(format!("{EMPTY_GIT_DIR_PREFIX}-{}-{n}", std::process::id()))
+            })
+            .filter(|p| std::fs::create_dir(p).is_ok())
+            .collect();
+        let made = EmptyGitDir::create();
+        for p in &taken {
+            let _ = std::fs::remove_dir(p);
+        }
+        assert!(made.is_ok(), "{:?}", made.err());
+    }
+
+    #[test]
     fn a_replace_ref_never_changes_the_content_a_revision_review_reads() {
         // [MAGI S6 loop 5, A1-b2] `refs/replace/*` is repository data: honoring it would review
         // a substitute blob instead of what the pinned commit holds (RV21).
