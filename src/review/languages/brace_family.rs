@@ -1765,4 +1765,37 @@ mod tests {
         }
         assert_each_line_in_one_unit(&parts, 4);
     }
+
+    #[test]
+    fn a_multi_line_doc_block_comment_belongs_to_the_declaration_below_it() {
+        // [MAGI S6 loop 5, B2-m4] only the line right above a declaration was looked at, and for a
+        // `/** ... */` block that line is `*/`, so JavaDoc, JSDoc and C doc blocks were left out.
+        for (ext, code, name, end) in [
+            (
+                BraceFamilyExtractor::java(),
+                "/**\n * Runs.\n * @param x the x\n */\n@Override\npublic void run(int x) {\n    a();\n}\n",
+                "run",
+                8,
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "/**\n * Adds.\n */\nexport function add(a, b) {\n  return a + b;\n}\n",
+                "add",
+                6,
+            ),
+            (
+                c_extractor(),
+                "/** Doc.\n *  More.\n */\nint f(void) {\n    return 0;\n}\n",
+                "f",
+                6,
+            ),
+        ] {
+            let units = extract(&ext, code, &[end - 1]);
+            assert_eq!(spans(&units), vec![(name, UnitKind::Function, 1, end)], "{code}");
+        }
+        // A plain block comment is no doc comment and stays out, as a plain line comment does.
+        let code = "/*\n * plain\n */\nint f(void) {\n    return 0;\n}\n";
+        let units = extract(&c_extractor(), code, &[5]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 4, 6)]);
+    }
 }
