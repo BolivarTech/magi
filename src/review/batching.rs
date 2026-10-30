@@ -54,6 +54,9 @@ pub struct ReviewBatch {
     /// Companions ([`plan_batches_with`]) are not included: whoever adds them charges them and
     /// scans their text for secrets.
     pub tokens: usize,
+    /// Tokens of the distinct companions ([`plan_batches_with`]) charged to the batch, once per
+    /// key; 0 with no companion. `tokens + companion_tokens` never passes the batch limit.
+    pub companion_tokens: usize,
 }
 
 /// One piece of reviewed content.
@@ -575,6 +578,7 @@ impl<'c> Packer<'c> {
             index: self.done.len(),
             items: std::mem::take(&mut self.items),
             tokens: self.tokens,
+            companion_tokens: 0,
         });
         self.tokens = 0;
         self.companion_tokens = 0;
@@ -1051,6 +1055,33 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn each_batch_records_the_tokens_of_the_companions_it_charged() {
+        // [MAGI S6 loop 5, B1-c3] the companions' tokens were dropped after packing, so the
+        // per-batch token totals REQ-RV13 reports could not include the retrieved context.
+        let hunk = |n: u32| format!("@@ -{n},1 +{n},1 @@\n+{}\n", "x".repeat(150));
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(format!("{}{}{}", hunk(1), hunk(2), hunk(30))),
+        }];
+        let src = MapSource::new(&[("a.rs", "x\n")], &[]);
+        let reg = LanguageRegistry::new();
+        let by_unit = |i: &BatchItem| -> Result<Option<Companion>, ReviewError> {
+            Ok(match i {
+                BatchItem::Hunk { first_line, .. } if *first_line < 10 => {
+                    Some(("a.rs:1-9".to_string(), 50))
+                }
+                BatchItem::Hunk { .. } => Some(("a.rs:30-39".to_string(), 30)),
+                _ => None,
+            })
+        };
+        let b = plan_batches_with(&files, &src, &reg, 10_000, &by_unit).expect("plans");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].companion_tokens, 80, "each key once");
+        let none = plan_batches(&files, &src, &reg, 10_000).expect("plans");
+        assert_eq!(none[0].companion_tokens, 0);
     }
 
     #[test]

@@ -2081,6 +2081,7 @@ mod tests {
             index: 0,
             items: vec![unit(1, 3), unit(6, 8)],
             tokens: 0,
+            companion_tokens: 0,
         }];
         let reviewed = reviewed_of(&batches, &BTreeSet::from([0]), &Failing);
         assert!(reviewed.contains_line("a.rs", 2) && reviewed.contains_line("a.rs", 7));
