@@ -552,19 +552,34 @@ pub fn outward_text(text: &str) -> String {
     escape_controls(&mask_secrets(text))
 }
 
-/// The format characters (Unicode category Cf) that can reorder or hide text on a terminal or a
-/// log viewer: the soft hyphen, the Arabic letter mark, the Mongolian vowel separator, the
-/// zero-width and directional marks, the bidi embeddings, overrides and isolates, the invisible
-/// operators and the byte-order mark.
+/// The characters that can break, reorder or hide text on a terminal or a log viewer: every
+/// format character (Unicode category Cf, as of Unicode 16; the unassigned code points of the
+/// tag block are included) and the line and paragraph separators (Zl, Zp, U+2028..U+2029).
+/// The table is hand-kept to avoid a Unicode-data dependency; its test walks every range.
+// MAGI FIX (S6 loop 5): the first list missed the separators, the interlinear annotations, the
+// tags and the Cf characters outside the BMP.
 const HIDDEN_FORMAT_CHARS: &[std::ops::RangeInclusive<char>] = &[
     '\u{00ad}'..='\u{00ad}',
+    '\u{0600}'..='\u{0605}',
     '\u{061c}'..='\u{061c}',
+    '\u{06dd}'..='\u{06dd}',
+    '\u{070f}'..='\u{070f}',
+    '\u{0890}'..='\u{0891}',
+    '\u{08e2}'..='\u{08e2}',
     '\u{180e}'..='\u{180e}',
     '\u{200b}'..='\u{200f}',
-    '\u{202a}'..='\u{202e}',
+    '\u{2028}'..='\u{202e}',
     '\u{2060}'..='\u{2064}',
     '\u{2066}'..='\u{206f}',
     '\u{feff}'..='\u{feff}',
+    '\u{fff9}'..='\u{fffb}',
+    '\u{110bd}'..='\u{110bd}',
+    '\u{110cd}'..='\u{110cd}',
+    '\u{13430}'..='\u{1343f}',
+    '\u{1bca0}'..='\u{1bca3}',
+    '\u{1d173}'..='\u{1d17a}',
+    '\u{e0001}'..='\u{e0001}',
+    '\u{e0020}'..='\u{e007f}',
 ];
 
 /// `text` with every control character escaped ([`char::escape_default`]) and every
