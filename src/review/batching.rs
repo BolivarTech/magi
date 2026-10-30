@@ -984,6 +984,42 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_file_that_fits_only_without_its_companion_splits_into_units() {
+        // [MAGI S6 loop 5, B1-c1] the whole-file-or-units decision ignored the companion, so a
+        // file that fit alone but not with its companion failed as too large instead of being
+        // split into units that fit with theirs (REQ-RV03, REQ-RV04 counts the context).
+        let body = "x".repeat(200);
+        let code = format!("fn a() {{\n    {body}();\n}}\nfn b() {{\n    {body}();\n}}\n");
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: None,
+        }];
+        let src = MapSource::new(&[("a.rs", code.as_str())], &[]);
+        let reg = LanguageRegistry::new();
+        let hdr = estimate_tokens(&file_header("a.rs"));
+        let whole = estimate_tokens(&code);
+        let companion_tokens = 40;
+        let limit = hdr + whole + companion_tokens / 2;
+        let companion = |i: &BatchItem| -> Result<Option<Companion>, ReviewError> {
+            Ok(Some((format!("ctx:{}", i.describe()), companion_tokens)))
+        };
+        assert!(
+            hdr + whole <= limit && hdr + whole + companion_tokens > limit,
+            "precondition: the file fits alone, not with its companion"
+        );
+        let b = plan_batches_with(&files, &src, &reg, limit, &companion).expect("plans");
+        let names: Vec<&str> = b
+            .iter()
+            .flat_map(|x| &x.items)
+            .map(|i| match i {
+                BatchItem::Unit { name, .. } => name.as_str(),
+                other => panic!("expected units, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
     fn a_companion_is_charged_once_per_batch_against_the_full_limit() {
         // [enmienda autorizada por el usuario 2026-10-20 (CP2 MS3 loop 12, opción 1)] Two hunks of one unit share their
         // companion; a hunk of another unit opens a batch; a hunk that cannot carry its companion alone is too large.
