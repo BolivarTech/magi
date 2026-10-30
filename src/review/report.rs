@@ -35,7 +35,7 @@ const LOG_TARGET: &str = "magi_rs::review";
 ///
 /// Batch indices are 0-based here; the text and JSON forms show them 1-based, the
 /// same base as the `[batch k]` labels of the consolidated summaries. In the JSON form the
-/// renumbering is part of each index field's type-level `Serialize` ([`serialize_batch`] and its
+/// renumbering is part of each index field's type-level `Serialize` (`serialize_batch` and its
 /// siblings, declared on the field), so no pass over the serialized layout names fields.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ReviewSummary {
