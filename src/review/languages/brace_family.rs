@@ -2286,4 +2286,32 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_grouped_go_type_declaration_yields_each_member() {
+        // [MAGI S6 loop 7, B2b-m1] `type (` opened one nameless struct that ended at the first
+        // member's brace, so the later members fell into gap units.
+        let code = "type (\n\tPoint struct {\n\t\tX int\n\t}\n\n\t// Reader reads.\n\tReader interface {\n\t\tRead() error\n\t}\n\tID int\n)\n\nfunc f() {\n}\n";
+        let total = u32::try_from(code.lines().count()).expect("small");
+        let units = extract(&BraceFamilyExtractor::go(), code, &all_lines(code));
+        assert_each_line_in_one_unit(&units, total);
+        let named: Vec<_> = spans(&units)
+            .into_iter()
+            .filter(|s| s.1 != UnitKind::TopLevel)
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("Point", UnitKind::Struct, 2, 4),
+                ("Reader", UnitKind::Trait, 6, 9),
+                ("ID", UnitKind::Struct, 10, 10),
+                ("f", UnitKind::Function, 13, 14)
+            ]
+        );
+        // An unclosed group still finds its members and covers every line once.
+        let code = "type (\n\tA struct {\n\t\tX int\n\t}\n\tB int\n";
+        let units = extract(&BraceFamilyExtractor::go(), code, &all_lines(code));
+        assert_each_line_in_one_unit(&units, 5);
+        assert!(units.iter().any(|u| u.name == "B"), "{:?}", spans(&units));
+    }
 }
