@@ -2434,4 +2434,53 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn construct_ranges_are_sorted_and_disjoint() {
+        // [MAGI S6 loop 7, B2a] `ChangedLines::assign` gives the same units for a diff and a
+        // whole file only when the ranges are sorted and disjoint; this pins it per extractor.
+        let corpus = [
+            (rust_extractor(), "use a::b;\n\n/// Doc.\nimpl Foo {\n    fn a() {}\n}\nconst N: u8 = 1;\nfn f(\n    x: u8,\n) {\n}\nmod m {\n    fn g() {}\n}\n"),
+            (c_extractor(), "#define MAX(a, b) \\n    ((a) > (b))\nstruct Point make_point(void) {\n    return p;\n}\nstruct S {\n    int a;\n};\nint g;\nvoid foo(\n    int (*cb)(int)\n) {\n}\n"),
+            (BraceFamilyExtractor::cpp(), "namespace n {\nclass A {\n    void f();\n};\n}\nenum class E {\n    X,\n};\nstruct Foo x{1};\n"),
+            (BraceFamilyExtractor::go(), "import \"fmt\"\n\ntype (\n\tA struct {\n\t\tX int\n\t}\n\tB int\n)\nfunc f() {\n}\ntype C struct {\n}\n"),
+            (BraceFamilyExtractor::java(), "package p;\n\npublic class A {\n    /** Doc. */\n    void run() {\n    }\n}\ninterface I {\n    void f();\n}\n"),
+            (BraceFamilyExtractor::javascript(), "import x from 'y';\nconst f = () => {\n};\nclass G {\n  *items() {}\n}\nexport function h() {\n}\n"),
+            (BraceFamilyExtractor::typescript(), "type T = number;\ninterface I {\n  f(): void;\n}\nexport class C {\n  run() {}\n}\n"),
+        ];
+        for (ext, code) in corpus {
+            let lines: Vec<&str> = code.lines().collect();
+            let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(code);
+            let constructs = ext.detect_constructs(&lines, &scanned, false);
+            assert!(!constructs.is_empty(), "{code}");
+            for c in &constructs {
+                assert!(c.start_line <= c.end_line, "{}: {code}", c.name);
+            }
+            for pair in constructs.windows(2) {
+                assert!(
+                    pair[0].end_line < pair[1].start_line,
+                    "{} overlaps {}: {code}",
+                    pair[0].name,
+                    pair[1].name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_without_members_gives_no_pieces_so_the_caller_keeps_it_whole() {
+        // [MAGI S6 loop 7, B2a] an empty split means "do not split": the one caller,
+        // `review::batching`, keeps the unit whole when `split_block` returns nothing, so no line
+        // of a memberless block is dropped.
+        for (ext, code, kind) in [
+            (rust_extractor(), "impl Foo {}\n", UnitKind::Impl),
+            (
+                BraceFamilyExtractor::java(),
+                "class A {\n    int x;\n}\n",
+                UnitKind::Class,
+            ),
+        ] {
+            assert!(split(&ext, code, 1, kind).is_empty(), "{code}");
+        }
+    }
 }
