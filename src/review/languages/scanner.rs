@@ -76,10 +76,11 @@ enum LexicalState {
     TripleQuote { quote: char },
     /// Inside a character literal (`'...'` in C/Rust/Java).
     CharLiteral,
-    /// Inside a JS/TS template literal (`` `...` ``). The braces of a `${...}` expression are
-    /// not counted: they balance in valid code, and a template nested inside one reads as the
-    /// outer template closing and a new one opening, which leaves the depth unchanged too. Only
-    /// an unbalanced expression (invalid code) can move the depth, by its own imbalance.
+    /// Inside the text of a JS/TS template literal (`` `...` ``). A `${` returns to code for the
+    /// expression, lexed like any code (its strings, regexes, comments and nested templates
+    /// included), until the `}` that balances it brings the text back; the scanner's stack of
+    /// open expressions records where each one ends. The braces of an expression are not
+    /// counted: the template is one operand.
     TemplateLiteral,
     /// Inside a JS/TS regular expression literal (`/.../`); `in_class` is `true` inside a
     /// character class (`[...]`), where `/` does not close it.
@@ -277,6 +278,9 @@ pub struct CodeScanner {
     /// For each open `(` of a regex-literal language, whether it opens the condition of a
     /// [`CONDITION_KEYWORDS`] keyword. It lives across lines, as a condition may span them.
     parens: Vec<bool>,
+    /// For each open `${...}` template expression, innermost last, how many `{` it holds still
+    /// open: its `}` with none open returns to the template text.
+    templates: Vec<u32>,
 }
 
 impl CodeScanner {
@@ -287,6 +291,7 @@ impl CodeScanner {
             state: LexicalState::Code,
             depth: 0,
             parens: Vec::new(),
+            templates: Vec::new(),
         }
     }
 
@@ -303,13 +308,14 @@ impl CodeScanner {
         let mut min_delta: i32 = 0;
         // The last non-blank character read in code context (a string counts as its quote).
         let mut last_code: Option<char> = None;
-        let was_code_at_start = self.state == LexicalState::Code;
+        // A line that starts inside a template expression starts inside the template literal.
+        let was_code_at_start = self.state == LexicalState::Code && self.templates.is_empty();
         let mut entered_code = false;
 
         while i < len {
             match &self.state {
                 LexicalState::Code => {
-                    entered_code = true;
+                    entered_code |= self.templates.is_empty();
 
                     // Check for line comment
                     if !self.rules.line_comment.is_empty() {
@@ -470,14 +476,33 @@ impl CodeScanner {
                         }
                     }
 
-                    // Count braces
-                    if char_at(&chars, i) == '{' {
-                        delta += 1;
-                        self.depth = self.depth.saturating_add(1);
-                    } else if char_at(&chars, i) == '}' {
-                        delta -= 1;
-                        min_delta = min_delta.min(delta);
-                        self.depth = self.depth.saturating_sub(1);
+                    // Count braces; those of a template expression are not structure.
+                    let open_in_template = self.templates.last().copied();
+                    if c == '{' {
+                        if let Some(open) = self.templates.last_mut() {
+                            *open = open.saturating_add(1);
+                        } else {
+                            delta += 1;
+                            self.depth = self.depth.saturating_add(1);
+                        }
+                    } else if c == '}' {
+                        match open_in_template {
+                            Some(0) => {
+                                self.templates.pop();
+                                last_code = Some(STRING_MARK);
+                                self.state = LexicalState::TemplateLiteral;
+                            }
+                            Some(_) => {
+                                if let Some(open) = self.templates.last_mut() {
+                                    *open = open.saturating_sub(1);
+                                }
+                            }
+                            None => {
+                                delta -= 1;
+                                min_delta = min_delta.min(delta);
+                                self.depth = self.depth.saturating_sub(1);
+                            }
+                        }
                     }
 
                     i += 1;
@@ -615,6 +640,16 @@ impl CodeScanner {
 
                 LexicalState::TemplateLiteral => {
                     if char_at(&chars, i) == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    // MAGI FIX (S6 loop 6): the expression was read as template text, so a
+                    // backtick in one of its strings or regexes closed the template.
+                    if char_at(&chars, i) == '$' && char_at(&chars, i + 1) == '{' {
+                        self.templates.push(0);
+                        // An expression starts like an operand: a `/` there opens a regex.
+                        last_code = Some('{');
+                        self.state = LexicalState::Code;
                         i += 2;
                         continue;
                     }
@@ -1293,8 +1328,8 @@ void h() {
 
     #[test]
     fn a_template_nested_in_a_template_expression_leaves_the_depth_unchanged() {
-        // [MAGI S6 loop 4, B2] declared heuristic: `${...}` is not tracked, and a nested
-        // template must not drift the depth of the code after it.
+        // [MAGI S6 loop 4, B2] a nested template inside `${...}` (lexed as code since loop 6)
+        // must not drift the depth of the code after it.
         let mut scanner = CodeScanner::new(LexicalRules::javascript());
         let r = scanner.scan_all("const s = `a${ `b${ {k: 1}.k }` }c`;\nfunction f() {\n}\n");
         assert_eq!(
