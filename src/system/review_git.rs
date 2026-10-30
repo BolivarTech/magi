@@ -520,7 +520,8 @@ pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBu
 ///
 /// # Errors
 ///
-/// [`ReviewError::Git`] for a truncated record, a key outside `filter.<name>.<variable>`, a
+/// [`ReviewError::Git`] for a truncated record, a key outside `filter.` or with an empty driver
+/// name or variable (a two-level `filter.<key>` names no driver and is skipped), a
 /// driver name with `=` or one that is not UTF-8 (which `-c` cannot express exactly), or
 /// overrides over
 /// [`MAX_FILTER_OVERRIDE_BYTES`].
@@ -549,12 +550,16 @@ pub(crate) fn filter_overrides(config_z: &[u8]) -> Result<Vec<String>, ReviewErr
                 String::from_utf8_lossy(key)
             ))
         })?;
-        let name = key
-            .strip_prefix(FILTER_KEY_PREFIX)
-            .and_then(|tail| tail.rsplit_once('.'))
-            .filter(|(name, variable)| !name.is_empty() && !variable.is_empty())
-            .map(|(name, _)| name)
-            .ok_or_else(|| unreadable(format!("unexpected key {key:?}")))?;
+        let unexpected = || unreadable(format!("unexpected key {key:?}"));
+        let tail = key.strip_prefix(FILTER_KEY_PREFIX).ok_or_else(unexpected)?;
+        // MAGI FIX (S6 loop 7): git reads a driver only from `filter.<driver>.<variable>`; a
+        // two-level `filter.<key>` has no subsection, configures nothing, and failed the review.
+        let Some((name, variable)) = tail.rsplit_once('.') else {
+            continue;
+        };
+        if name.is_empty() || variable.is_empty() {
+            return Err(unexpected());
+        }
         // MAGI FIX (S6 loop 3): every scope, the operator's too: a filter gets the worktree bytes
         // before the review scans them (RV22), wherever it is defined.
         if name.contains('=') {
@@ -1198,7 +1203,7 @@ mod tests {
             &b"local\0filter.a.clean\nx"[..],
             b"local",
             b"local\0notfilter.a.clean\nx\0",
-            b"local\0filter.clean\nx\0",
+            b"local\0filter..clean\nx\0",
         ] {
             assert!(
                 filter_overrides(bad).is_err(),
