@@ -35,9 +35,10 @@ fn budget_advice(limit: BudgetLimit, min_secs: u64) -> String {
 /// (stderr, the run log, the JSON envelope, the TUI, a tool result): every path and ref passes
 /// through [`display_path`] and every other foreign text (git's stderr, an I/O or consolidation
 /// message) through [`outward_text`], so no secret the RV22 detector names and no control
-/// character leaves in it. The fields keep the raw text for callers that match on it.
+/// character leaves in it. The fields keep the raw text for callers that match on it. The
+/// [`std::fmt::Debug`] form is the message too, so a `{:?}` is no way around the mask.
 // MAGI FIX (S6 loop 3): one outward scrubber, at Display, for every surface at once.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum ReviewError {
     /// A requested path resolves outside the workspace (or a worktree read would leave it).
     #[error("path is outside the workspace: {}", display_path(.0))]
@@ -205,6 +206,21 @@ fn omissions(skipped: &[Skipped]) -> String {
         String::new()
     };
     format!("; left out: {}{more}", shown.join(", "))
+}
+
+// MAGI FIX (S6 loop 7): a derived Debug printed the raw fields (paths, refs, git's stderr).
+impl std::fmt::Debug for ReviewError {
+    /// Writes `ReviewError("<message>")`: the masked [`std::fmt::Display`] text, never the raw
+    /// fields.
+    ///
+    /// # Errors
+    ///
+    /// Any error of the formatter.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ReviewError")
+            .field(&self.to_string())
+            .finish()
+    }
 }
 
 #[cfg(test)]
