@@ -223,6 +223,23 @@ class CodeReviewScenarioTests(unittest.TestCase):
         r = _result("R15", 2, None, _with_id(text))
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
 
+    def test_s50_passes_when_a_measured_window_plans_fewer_than_three_batches(self) -> None:
+        # [MAGI S6 MS2 loop 5, F1-m1] the refusal fires at any batch count, and a pool that measured a
+        # window larger than the unmeasured default plans fewer batches over the same tree: an
+        # environmental reason, not a regression, so the range check asks only what the refusal
+        # guarantees (one batch or more).
+        text = _BUDGET_STDERR.replace(b"3 batches leave 10 s", b"1 batches leave 30 s").replace(
+            b"--timeout 2349", b"--timeout 783")
+        log = _BUDGET_LOG.replace(b"3 batches leave 10 s", b"1 batches leave 30 s").replace(
+            b"--timeout 2349", b"--timeout 783") % RUN_ID.encode()
+        r = _result("R15", 2, None, _with_id(text))
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S50", r, log=log).values()))
+
+    def test_s50_fails_when_the_refusal_names_no_batch(self) -> None:
+        text = _BUDGET_STDERR.replace(b"3 batches", b"0 batches")
+        r = _result("R15", 2, None, _with_id(text))
+        self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
+
     def test_s50_fails_when_the_floor_is_not_the_15_s_one(self) -> None:
         text = _BUDGET_STDERR.replace(b"the 15 s floor", b"the 20 s floor")
         r = _result("R15", 2, None, _with_id(text))
