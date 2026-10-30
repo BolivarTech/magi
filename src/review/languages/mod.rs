@@ -743,6 +743,26 @@ mod tests {
     }
 
     #[test]
+    fn a_file_name_without_an_extension_has_no_extractor() {
+        // [MAGI S6 loop 6, B2a-m2] the text after the last dot was taken even when the name had
+        // no dot, so a file named `rs` or `.rs` was scanned as Rust.
+        let registry = LanguageRegistry::new();
+        for path in [
+            "rs",
+            "src/py",
+            ".rs",
+            "src/.js",
+            "dir.rs/file",
+            "dir.rs\\file",
+        ] {
+            assert!(registry.get(path).is_none(), "{path}");
+        }
+        for path in ["a.rs", "src/b.test.ts", "C:\\x\\y.go"] {
+            assert!(registry.get(path).is_some(), "{path}");
+        }
+    }
+
+    #[test]
     fn an_upper_case_extension_finds_its_extractor() {
         // [MAGI S6 loop 4, B1] a whole file named `A.RS` too large for one batch had no
         // extractor to split it, so the review failed as too large.
