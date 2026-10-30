@@ -1652,4 +1652,30 @@ mod tests {
             vec![("constants", UnitKind::DeclarationGroup, 1, 1)]
         );
     }
+
+    #[test]
+    fn an_extern_c_block_keeps_every_line_of_its_contents_in_a_unit() {
+        // [MAGI S6 loop 5, B2-c3, verified as a false positive] the report said the contents of
+        // `extern "C" {` fell into the gap fallback. They do not: the block only sets linkage, so
+        // its prototypes, globals and functions are top-level constructs (the header joins the
+        // declarations right after it), and its closing brace is a unit of its own; no line is
+        // lost or reviewed twice.
+        let code = "extern \"C\" {\n    int add(int a, int b);\n    extern int count;\n\n    int sub(int a, int b) {\n        return a - b;\n    }\n}\n";
+        for ext in [c_extractor(), BraceFamilyExtractor::cpp()] {
+            let every: HashSet<u32> = (1..=8).collect();
+            let units = ext.extract_units(code, "a.h", &every);
+            let found = spans(&units);
+            assert!(
+                found.contains(&("sub", UnitKind::Function, 5, 7)),
+                "{found:?}"
+            );
+            assert!(
+                found
+                    .iter()
+                    .any(|(_, k, s, e)| *k == UnitKind::DeclarationGroup && (*s, *e) == (1, 3)),
+                "{found:?}"
+            );
+            assert_each_line_in_one_unit(&units, 8);
+        }
+    }
 }
