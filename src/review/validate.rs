@@ -31,7 +31,8 @@ pub enum DiscardCause {
 pub struct Discarded {
     /// The mage that reported it.
     pub agent: AgentName,
-    /// Zero-based batch index.
+    /// Zero-based batch index, serialized 1-based.
+    #[serde(serialize_with = "super::report::serialize_batch")]
     pub batch: usize,
     /// The finding as the mage reported it, its model text redacted.
     pub finding: Finding,

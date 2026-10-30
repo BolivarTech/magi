@@ -34,7 +34,9 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// What every stage of a review declared.
 ///
 /// Batch indices are 0-based here; the text and JSON forms show them 1-based, the
-/// same base as the `[batch k]` labels of the consolidated summaries.
+/// same base as the `[batch k]` labels of the consolidated summaries. In the JSON form the
+/// renumbering is part of each index field's type-level `Serialize` ([`serialize_batch`] and its
+/// siblings, declared on the field), so no pass over the serialized layout names fields.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ReviewSummary {
     /// Findings per gate state (`kept`, `filtered`, `low_confidence`, `unfiltered`).
@@ -72,7 +74,8 @@ pub struct ReviewSummary {
     /// Whether the ceiling of the initial split of `--timeout` is below
     /// `[magi].agent_timeout_secs` (a declaration of that split, not of each batch).
     pub ceiling_below_configured: bool,
-    /// Batches that did not complete, with why.
+    /// Batches that did not complete, with why; each index serialized 1-based.
+    #[serde(serialize_with = "serialize_failed_batches")]
     pub failed_batches: Vec<(usize, String)>,
     /// The cause that stopped the gate, declared once.
     pub gate_stopped: Option<String>,
@@ -87,7 +90,8 @@ pub struct ReviewSummary {
 /// The metrics of one batch that ran (completed or not).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BatchMetrics {
-    /// Zero-based batch index.
+    /// Zero-based batch index, serialized 1-based.
+    #[serde(serialize_with = "serialize_batch")]
     pub index: usize,
     /// Prompt tokens of every completion of the batch (0 where the backend did not count).
     pub input_tokens: u64,
@@ -344,7 +348,6 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
             json!({"input_tokens": input, "output_tokens": output, "ms": ms}),
         );
         fields.insert("rejected_skips".into(), json!(rejected_skips(s)));
-        number_batches_from_one(fields);
     }
     redact_strings(&mut v);
     v
@@ -383,42 +386,39 @@ fn shown(batch: usize) -> usize {
     batch.saturating_add(1)
 }
 
-/// Rewrites every batch index of the JSON form 1-based ([`shown`]): `failed_batches[][0]`,
-/// `batches[].index`, `discarded[].batch`, `symbol_unverified[].batch` and the `batches` of
-/// each finding of `findings` and `filtered`.
-fn number_batches_from_one(fields: &mut Map<String, Value>) {
-    let renumber = |value: &mut Value| {
-        if let Some(n) = value.as_u64().and_then(|n| usize::try_from(n).ok()) {
-            *value = json!(shown(n));
-        }
-    };
-    for (list, key) in [
-        ("batches", "index"),
-        ("discarded", "batch"),
-        ("symbol_unverified", "batch"),
-    ] {
-        if let Some(Value::Array(items)) = fields.get_mut(list) {
-            items
-                .iter_mut()
-                .filter_map(|item| item.get_mut(key))
-                .for_each(renumber);
-        }
-    }
-    if let Some(Value::Array(items)) = fields.get_mut("failed_batches") {
-        items
-            .iter_mut()
-            .filter_map(|pair| pair.get_mut(0))
-            .for_each(renumber);
-    }
-    for list in ["findings", "filtered"] {
-        if let Some(Value::Array(items)) = fields.get_mut(list) {
-            for batches in items.iter_mut().filter_map(|f| f.get_mut("batches")) {
-                if let Value::Array(numbers) = batches {
-                    numbers.iter_mut().for_each(renumber);
-                }
-            }
-        }
-    }
+/// Serializes a 0-based batch index 1-based ([`shown`]), for `#[serde(serialize_with)]` on every
+/// batch-index field of the review's types.
+///
+/// # Errors
+/// The serializer's.
+// MAGI FIX (S6 loop 5): the renumbering lives on the fields, not in a pass over JSON paths.
+pub(crate) fn serialize_batch<S: serde::Serializer>(
+    batch: &usize,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_u64(u64::try_from(shown(*batch)).unwrap_or(u64::MAX))
+}
+
+/// Serializes a list of 0-based batch indices 1-based, as [`serialize_batch`] does each.
+///
+/// # Errors
+/// The serializer's.
+pub(crate) fn serialize_batches<S: serde::Serializer>(
+    batches: &[usize],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_seq(batches.iter().map(|&b| shown(b)))
+}
+
+/// Serializes `(batch, why)` pairs with each batch 1-based, as [`serialize_batch`] does.
+///
+/// # Errors
+/// The serializer's.
+fn serialize_failed_batches<S: serde::Serializer>(
+    failed: &[(usize, String)],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_seq(failed.iter().map(|(b, why)| (shown(*b), why)))
 }
 
 /// The findings with their verdict under [`GATE_KEY`].
@@ -647,8 +647,8 @@ mod tests {
 
     #[test]
     fn every_batch_index_of_the_json_form_is_one_based() {
-        // [MAGI S6 loop 4, C2] the renumbering patches the serialized JSON by field name: a renamed
-        // field would leave its indices 0-based while the text form stays 1-based.
+        // [MAGI S6 loop 4, C2] a renamed or new batch field must not stay 0-based while the text
+        // form is 1-based. Since S6 loop 5 the renumbering is each field's `serialize_with`.
         let finding = |batches: Vec<usize>| ConsolidatedFinding {
             file: Some("a.rs".into()),
             line: Some(1),
@@ -698,6 +698,25 @@ mod tests {
         assert_eq!(v["batches"][0]["index"], 1, "{v}");
         assert_eq!(v["discarded"][0]["batch"], 1, "{v}");
         assert_eq!(v["symbol_unverified"][0]["batch"], 1, "{v}");
+        // [MAGI S6 loop 5, C2-b2] and by shape, not by path: every batch index above is 0 in
+        // memory, so a 0 under a key that names batch indices (`batch`, `index`, or a list
+        // ending in `batches`; the `batches_*` keys are counts) is one some field forgot.
+        fn zeros_under_batch_keys(v: &Value, under_batch_key: bool, out: &mut usize) {
+            match v {
+                Value::Number(n) if under_batch_key && n.as_u64() == Some(0) => *out += 1,
+                Value::Array(items) => items
+                    .iter()
+                    .for_each(|i| zeros_under_batch_keys(i, under_batch_key, out)),
+                Value::Object(fields) => fields.iter().for_each(|(k, i)| {
+                    let names_indices = k == "batch" || k == "index" || k.ends_with("batches");
+                    zeros_under_batch_keys(i, names_indices, out)
+                }),
+                _ => {}
+            }
+        }
+        let mut zeros = 0;
+        zeros_under_batch_keys(&v, false, &mut zeros);
+        assert_eq!(zeros, 0, "{v}");
     }
 
     #[tokio::test]

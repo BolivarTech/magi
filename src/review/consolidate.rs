@@ -60,7 +60,8 @@ pub struct ConsolidatedFinding {
     pub sources: Vec<AgentName>,
     /// Marks set by consolidation and by the agreement weight.
     pub marks: Vec<FindingMark>,
-    /// The batches where it appeared, ascending.
+    /// The batches where it appeared, ascending; 0-based, serialized 1-based.
+    #[serde(serialize_with = "super::report::serialize_batches")]
     pub batches: Vec<usize>,
 }
 
