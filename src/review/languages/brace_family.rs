@@ -1455,4 +1455,30 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_generic_rust_impl_is_an_impl_block_that_splits_into_its_methods() {
+        // [MAGI S6 loop 5, B2-m2] the keyword was the literal `impl `, so `impl<T> Foo<T>` was no
+        // block: its methods became top-level functions without the impl header and bounds.
+        for (code, name) in [
+            ("impl<T> Foo<T> {\n    fn a(&self) {\n        x();\n    }\n}\n", "Foo"),
+            (
+                "unsafe impl<T: Send> Send for Foo<T> {\n    fn a(&self) {\n        x();\n    }\n}\n",
+                "Send",
+            ),
+            (
+                "pub(crate) impl<'a, T: Iterator<Item = u8>> Trait for Wrap<'a, T> {\n    fn a(&self) {\n        x();\n    }\n}\n",
+                "Trait",
+            ),
+        ] {
+            let units = extract(&rust_extractor(), code, &[3]);
+            assert_eq!(spans(&units), vec![(name, UnitKind::Impl, 1, 5)], "{code}");
+            let parts = split(&rust_extractor(), code, 3, UnitKind::Impl);
+            assert!(
+                spans(&parts).contains(&("a", UnitKind::Method, 2, 4)),
+                "{code}: {:?}",
+                spans(&parts)
+            );
+        }
+    }
 }
