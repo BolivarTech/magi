@@ -481,6 +481,11 @@ pub fn display_path(path: &str) -> String {
 /// O(n · s) for a text of n bytes and s searches (one per token prefix, one per other pattern):
 /// each search keeps its next span and runs again, from the mask's end, only when a mask passed
 /// its start; the others check only whether a token opens at the mask's end.
+///
+/// Maintenance: the cached spans are correct only while every boundary a search over the whole
+/// text can miss after a mask is the one [`token_after_mask`] checks. A change to a [`Matcher`]
+/// or to a left-boundary rule needs the same change there; the property test against the
+/// rescanning loop (`one_pass_masking_equals_the_rescanning_loop_…`) is what catches a mismatch.
 // MAGI FIX (S6 loop 4): each turn rescanned the rest for every pattern, O(k · n · p).
 pub fn mask_secrets(text: &str) -> String {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
