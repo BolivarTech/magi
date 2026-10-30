@@ -1502,6 +1502,28 @@ mod tests {
     }
 
     #[test]
+    fn an_anonymous_default_class_is_a_class() {
+        // [MAGI S6 loop 6, B2b-c5] `class {` already matched `class `; `class{`, with no blank
+        // after the keyword, matched none, and its body fell into gap units.
+        for head in ["export default class {", "export default class{"] {
+            let code = format!("{head}\n  run() {{\n    go();\n  }}\n}}\nconst x = 1;\n");
+            assert_an_anonymous_class(&code);
+        }
+    }
+
+    fn assert_an_anonymous_class(code: &str) {
+        let ext = BraceFamilyExtractor::typescript();
+        let units = extract(&ext, code, &(1..=6).collect::<Vec<u32>>());
+        let class = units
+            .iter()
+            .find(|u| u.kind == UnitKind::Class)
+            .unwrap_or_else(|| panic!("no class: {:?}", spans(&units)));
+        assert_eq!((class.start_line, class.end_line), (1, 5));
+        assert!(ext.split_block(class).iter().any(|p| p.name == "run"));
+        assert_each_line_in_one_unit(&units, 6);
+    }
+
+    #[test]
     fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
         let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
         let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
