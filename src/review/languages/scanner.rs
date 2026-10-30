@@ -1071,4 +1071,15 @@ mod tests {
         assert_eq!(r[1].depth_after, 1);
         assert_eq!(r[2].depth_after, 0);
     }
+
+    #[test]
+    fn an_escaped_quote_does_not_close_a_triple_quoted_string() {
+        // [MAGI S6 loop 5, B2-c4] the triple-quote state skipped no escape, so `\"""` closed the
+        // string on the escaped quote and the rest of it was scanned as code.
+        let mut scanner = CodeScanner::new(LexicalRules::python());
+        let results = scanner.scan_all("s = \"\"\"a \\\"\"\" b {\"\"\"\nx = {\n");
+        assert_eq!(results[0].brace_delta, 0, "the brace is string text");
+        assert!(!results[1].starts_in_literal, "the string closed on line 1");
+        assert_eq!(results[1].brace_delta, 1);
+    }
 }
