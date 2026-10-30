@@ -1734,7 +1734,6 @@ mod tests {
 
     /// Resolves `input` in `ws` with the real git and filters it through the review's
     /// worktree source, as a review does before batching.
-    #[cfg(unix)]
     fn resolve_and_filter(
         ws: &std::path::Path,
         input: &ReviewInput,
@@ -1753,6 +1752,45 @@ mod tests {
             explicit,
             &|_| false,
         )
+    }
+
+    #[test]
+    fn a_repository_listing_never_keeps_a_never_reviewed_path() {
+        // [MAGI S6 loop 7, A1-m1/A1-c2] the repository branch of a directory review lists with
+        // `ls-files` and does not prune `.magi`, `.git` or the memory database itself: the
+        // filter is the one enforcement point (RV22 clause 1) for every listing. Pinned with a
+        // repository that neither ignores nor untracks them.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join(".magi")).expect("mkdir");
+        std::fs::write(d.path().join(".magi/magi.toml"), "x = 1\n").expect("write");
+        std::fs::write(d.path().join(".magi-rs-memory.db"), "db\n").expect("write");
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        git(d.path(), &["add", "-f", ".magi-rs-memory.db", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let f = resolve_and_filter(d.path(), &ReviewInput::Directory(".".into())).expect("a.rs");
+        assert_eq!(
+            f.kept.iter().map(|k| k.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs"]
+        );
+        let mut skipped: Vec<_> = f
+            .skipped
+            .iter()
+            .map(|s| (s.path.clone(), s.cause))
+            .collect();
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            skipped,
+            vec![
+                (
+                    ".magi-rs-memory.db".to_string(),
+                    magi_rs::review::filter::SkipCause::Ignored
+                ),
+                (
+                    ".magi/magi.toml".to_string(),
+                    magi_rs::review::filter::SkipCause::Ignored
+                ),
+            ]
+        );
     }
 
     /// The marker the outside file holds; no kept file may carry it.
