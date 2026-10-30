@@ -81,6 +81,9 @@ pub struct ResolvedInput {
 /// The diff flags every diff of a review carries: no colour, no external driver, no textconv,
 /// paths relative to the workspace (and only what lies under it).
 const DIFF_FLAGS: &[&str] = &["--no-color", "--no-ext-diff", "--no-textconv", "--relative"];
+/// The git setting that reads `.gitattributes` from a tree instead of the working tree (git
+/// 2.46 or later; an older git ignores an unknown setting and keeps the working tree's).
+const ATTR_TREE_SETTING: &str = "attr.tree";
 /// What `ls-files` lists: tracked and untracked files git does not ignore, NUL-separated.
 const LS_FILES_ALL: &[&str] = &[
     "ls-files",
@@ -191,10 +194,11 @@ pub fn resolve_input(
             // The diff is taken against that pinned parent, so it matches `old_rev`: `diff-tree
             // <sha>` prints nothing for a merge commit. Only a root commit needs `--root`.
             let text = match &old_rev {
-                Some(parent) => diff(git, &format!("{parent}..{sha}"))?,
+                Some(parent) => diff(git, parent, &sha)?,
                 None => {
                     ensure_root_commit(git, &sha)?;
-                    let mut args = vec!["diff-tree", "-p", "-r", "--root"];
+                    let attributes = attributes_of(&sha);
+                    let mut args = vec!["-c", &attributes, "diff-tree", "-p", "-r", "--root"];
                     args.extend_from_slice(DIFF_FLAGS);
                     args.push(&sha);
                     git.run_bytes(&args)?
@@ -206,14 +210,14 @@ pub fn resolve_input(
             validate_ref(from)?;
             validate_ref(to)?;
             let (old, new) = (verify(git, from)?, verify(git, to)?);
-            from_diff(&diff(git, &format!("{old}..{new}"))?, new, Some(old))
+            from_diff(&diff(git, &old, &new)?, new, Some(old))
         }
         ReviewInput::Branches { base, head } => {
             validate_ref(base)?;
             validate_ref(head)?;
             let (base_sha, head_sha) = (verify(git, base)?, verify(git, head)?);
             let merge_base = merge_base(git, base, head, &base_sha, &head_sha)?;
-            let text = diff(git, &format!("{merge_base}..{head_sha}"))?;
+            let text = diff(git, &merge_base, &head_sha)?;
             from_diff(&text, head_sha, Some(merge_base))
         }
         ReviewInput::Uncommitted => resolve_uncommitted(git, workspace)?,
@@ -384,12 +388,44 @@ fn ensure_root_commit(git: &dyn GitCommand, sha: &str) -> Result<(), ReviewError
     Ok(())
 }
 
-/// `diff <DIFF_FLAGS> <spec>`.
-fn diff(git: &dyn GitCommand, spec: &str) -> Result<Vec<u8>, ReviewError> {
+/// `-c attr.tree=<new> diff <DIFF_FLAGS> <old>..<new>`: the diff between two pinned SHAs, with
+/// `.gitattributes` read from the reviewed revision.
+///
+/// A revision diff otherwise reads the attributes of the working tree, so a later commit (or a
+/// local edit) marking a path `-diff` or `binary` turned the reviewed change into "Binary files
+/// differ" and left the file out, and the same pinned SHAs could plan and run differently.
+/// Only `.gitattributes` moves to the tree: `$GIT_DIR/info/attributes` and `core.attributesFile`
+/// are the operator's own settings and still apply. Uncommitted reviews keep the working tree's.
+///
+/// # Errors
+///
+/// Any error of `git`.
+// MAGI FIX (S6 loop 7): the attribute source was the working tree, not the reviewed revision.
+fn diff(git: &dyn GitCommand, old: &str, new: &str) -> Result<Vec<u8>, ReviewError> {
+    let attributes = attributes_of(new);
+    let spec = format!("{old}..{new}");
+    let mut args = vec!["-c", &attributes, "diff"];
+    args.extend_from_slice(DIFF_FLAGS);
+    args.push(&spec);
+    git.run_bytes(&args)
+}
+
+/// `diff <DIFF_FLAGS> <head>`: the working tree against the pinned `head`, with the working
+/// tree's `.gitattributes` (the content reviewed is the working tree's, so are its attributes).
+///
+/// # Errors
+///
+/// Any error of `git`.
+fn worktree_diff(git: &dyn GitCommand, head: &str) -> Result<Vec<u8>, ReviewError> {
     let mut args = vec!["diff"];
     args.extend_from_slice(DIFF_FLAGS);
-    args.push(spec);
+    args.push(head);
     git.run_bytes(&args)
+}
+
+/// The `-c` value that reads `.gitattributes` from the tree of commit `sha`.
+fn attributes_of(sha: &str) -> String {
+    format!("{ATTR_TREE_SETTING}={sha}")
 }
 
 /// The merge base of two pinned SHAs, or an error that names both refs and what to do instead.
@@ -583,7 +619,7 @@ fn resolve_uncommitted(
     let present = |name: &String| !is_dangling_link(&workspace.join(name));
     match verify(git, "HEAD") {
         Ok(head) => {
-            let mut resolved = from_diff(&diff(git, &head)?, String::new(), None);
+            let mut resolved = from_diff(&worktree_diff(git, &head)?, String::new(), None);
             resolved.source_kind = SourceKind::Worktree {
                 old_rev: Some(head),
             };
@@ -998,7 +1034,7 @@ mod tests {
                     Ok("p\n".to_string()),
                 ),
                 (
-                    "diff --no-color --no-ext-diff --no-textconv --relative p..abc".to_string(),
+                    "-c attr.tree=abc diff --no-color --no-ext-diff --no-textconv --relative p..abc".to_string(),
                     Ok(
                         "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n"
                             .to_string(),
@@ -1029,7 +1065,7 @@ mod tests {
             ("rev-parse --verify --quiet HEAD^{commit}", Ok("r\n")),
             ("rev-parse --verify --quiet r^^{commit}", Err("")),
             ("cat-file commit r", Ok("tree t\nauthor a <a@x> 0 +0000\n\nparent in a message\n")),
-            ("diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative r",
+            ("-c attr.tree=r diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative r",
              Ok("diff --git a/a.rs b/a.rs\nnew file mode 100644\n--- /dev/null\n+++ b/a.rs\n@@ -0,0 +1 @@\n+fn f() {}\n")),
         ]);
         let r = resolve_input(
@@ -1107,7 +1143,7 @@ mod tests {
                 Ok("tree t\nparent p\nauthor a <a@x> 0 +0000\n\nm\n"),
             ),
             (
-                "diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative abc",
+                "-c attr.tree=abc diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative abc",
                 Ok(ONE_HUNK),
             ),
         ]);
@@ -1132,7 +1168,7 @@ mod tests {
                 Err("fatal: git rev-parse did not finish in 300 s"),
             ),
             (
-                "diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative abc",
+                "-c attr.tree=abc diff-tree -p -r --root --no-color --no-ext-diff --no-textconv --relative abc",
                 Ok(ONE_HUNK),
             ),
         ]);
@@ -1194,7 +1230,7 @@ mod tests {
             ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
             ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
             (
-                "diff --no-color --no-ext-diff --no-textconv --relative a..b",
+                "-c attr.tree=b diff --no-color --no-ext-diff --no-textconv --relative a..b",
                 Ok(ONE_HUNK),
             ),
         ]);
@@ -1226,7 +1262,7 @@ mod tests {
             ("rev-parse --verify --quiet feature/x^{commit}", Ok("b\n")),
             ("merge-base a b", Ok("mb1\n")),
             (
-                "diff --no-color --no-ext-diff --no-textconv --relative mb1..b",
+                "-c attr.tree=b diff --no-color --no-ext-diff --no-textconv --relative mb1..b",
                 Ok(ONE_HUNK),
             ),
         ]);
@@ -1553,7 +1589,7 @@ mod tests {
                 match args.join(" ").as_str() {
                     "rev-parse --verify --quiet v1^{commit}"
                     | "rev-parse --verify --quiet v2^{commit}" => Ok(b"x\n".to_vec()),
-                    "diff --no-color --no-ext-diff --no-textconv --relative x..x" => {
+                    "-c attr.tree=x diff --no-color --no-ext-diff --no-textconv --relative x..x" => {
                         Ok(self.0.clone())
                     }
                     other => Err(ReviewError::Git(format!("unexpected: {other}"))),
@@ -1587,7 +1623,7 @@ mod tests {
             ("rev-parse --verify --quiet M^{commit}", Ok("m\n")),
             ("rev-parse --verify --quiet m^^{commit}", Ok("p\n")),
             (
-                "diff --no-color --no-ext-diff --no-textconv --relative p..m",
+                "-c attr.tree=m diff --no-color --no-ext-diff --no-textconv --relative p..m",
                 Ok(ONE_HUNK),
             ),
         ]);
@@ -1853,7 +1889,7 @@ mod tests {
             ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
             ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
             (
-                "diff --no-color --no-ext-diff --no-textconv --relative a..b",
+                "-c attr.tree=b diff --no-color --no-ext-diff --no-textconv --relative a..b",
                 Ok(diff),
             ),
         ]);
@@ -1906,7 +1942,7 @@ mod tests {
                 ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
                 ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
                 (
-                    "diff --no-color --no-ext-diff --no-textconv --relative a..b",
+                    "-c attr.tree=b diff --no-color --no-ext-diff --no-textconv --relative a..b",
                     Ok(&hostile[..end]),
                 ),
             ]);
@@ -1960,7 +1996,7 @@ mod tests {
             ("rev-parse --verify --quiet v1^{commit}", Ok("a\n")),
             ("rev-parse --verify --quiet v2^{commit}", Ok("b\n")),
             (
-                "diff --no-color --no-ext-diff --no-textconv --relative a..b",
+                "-c attr.tree=b diff --no-color --no-ext-diff --no-textconv --relative a..b",
                 Ok(diff),
             ),
         ]);
