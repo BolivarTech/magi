@@ -1120,4 +1120,21 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn an_aws_secret_key_under_a_quoted_name_is_a_secret_and_masked_whole() {
+        // [MAGI S6 loop 7, A2-b1] the closing quote of a JSON property, and a Ruby or PHP `=>`,
+        // stood between the name and its separator, so the key was sent.
+        let tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let name = concat!("aws_secret", "_access_key");
+        for text in [
+            format!("{{\"{name}\": \"{tail}\"}}"),
+            format!("{{\"{name}\":\"{tail}\"}}"),
+            format!("'{name}' => '{tail}'"),
+            format!("{name} => \"{tail}\""),
+        ] {
+            assert_eq!(find_secret(&text), Some("aws-secret-key"), "{text}");
+            assert!(!mask_secrets(&text).contains(tail), "{text}");
+        }
+    }
 }
