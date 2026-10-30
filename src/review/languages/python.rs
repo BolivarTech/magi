@@ -328,8 +328,9 @@ const NOT_ASSIGNMENT_WORDS: &[&str] = &[
     "yield", "await", "pass", "lambda", "not",
 ];
 
-/// Whether an unindented, trimmed line is a module-level assignment (`X = 1`, `x: int = 1`):
-/// it holds `=` or `:`, is no comment or decorator, and does not open with a word of
+/// Whether an unindented, trimmed line is a module-level assignment (`X = 1`, `x: int = 1`,
+/// `y += 1`): it holds an assignment `=` or an annotation `:` outside every bracket and string
+/// ([`has_top_level_assignment`]), is no comment or decorator, and does not open with a word of
 /// [`NOT_ASSIGNMENT_WORDS`]. O(n) in the line.
 fn is_module_assignment(trimmed: &str) -> bool {
     let first_word = trimmed
@@ -340,7 +341,56 @@ fn is_module_assignment(trimmed: &str) -> bool {
         && !trimmed.starts_with('#')
         && !trimmed.starts_with('@')
         && !NOT_ASSIGNMENT_WORDS.contains(&first_word)
-        && (trimmed.contains('=') || trimmed.contains(':'))
+        && has_top_level_assignment(trimmed)
+}
+
+/// Whether `line` holds, outside every bracket, string and comment, an assignment `=` (plain or
+/// augmented: `+=`, `<<=`; not the comparisons `==`, `!=`, `<=`, `>=`) or an annotation `:`
+/// (not `:=`). A call's keyword argument (`f(level=1)`) and a string's `:` (`print("a:b")`) are
+/// inside a bracket or a string and do not count. O(n) in the line.
+fn has_top_level_assignment(line: &str) -> bool {
+    // MAGI FIX (S6 loop 5): any `=` or `:` made a call (`setup(level=1)`) an assignment.
+    let chars: Vec<char> = line.chars().collect();
+    let at = |k: usize| chars.get(k).copied();
+    let mut depth = 0u32;
+    let mut quote: Option<char> = None;
+    let mut k = 0;
+    while let Some(c) = at(k) {
+        if let Some(q) = quote {
+            if c == '\\' {
+                k += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            k += 1;
+            continue;
+        }
+        match c {
+            '#' => return false,
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' | '{' => depth = depth.saturating_add(1),
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ':' if depth == 0 => return at(k + 1) != Some('='),
+            '=' if depth == 0 => {
+                if at(k + 1) == Some('=') {
+                    k += 2;
+                    continue;
+                }
+                let prev = k.checked_sub(1).and_then(at);
+                let shift = k.checked_sub(2).and_then(at) == prev;
+                return match prev {
+                    Some('!') => false,
+                    Some('<' | '>') => shift,
+                    _ => true,
+                };
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    false
 }
 
 /// Get indentation level (number of leading spaces/tabs).
