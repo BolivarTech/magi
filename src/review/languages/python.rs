@@ -858,6 +858,22 @@ def g():
     }
 
     #[test]
+    fn a_backslash_continued_single_quoted_string_stays_with_its_statement() {
+        // [MAGI S6 loop 6, B2b-m2] declared green: the bracket reader drops a one-quote string
+        // at its line's end, but the scanner keeps it open past an escaped newline, so the
+        // continuation lines are marked continued and never read as a definition.
+        let code = "x = 'abc\\\ndef g():\\\nend'\ny = 1\n\ndef h():\n    return 1\n";
+        let units = extract(code, &[2, 7]);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("x", UnitKind::DeclarationGroup, 1, 4),
+                ("h", UnitKind::Function, 6, 7),
+            ]
+        );
+    }
+
+    #[test]
     fn a_wrapped_import_is_one_unit_with_its_header() {
         // [MAGI S6 loop 5, B2-c2] the import group ended on `from foo import (`, so its
         // continuation lines became orphan units reviewed without the header.
