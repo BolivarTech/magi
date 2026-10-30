@@ -99,7 +99,9 @@ const BLANKS: &[u8] = b" \t";
 const QUOTES: &[u8] = b"\"'";
 
 /// The patterns, in the order that decides the name of a match: `anthropic-key` comes before
-/// `openai-key` because an Anthropic key also starts with `sk-`.
+/// `openai-key` because an Anthropic key also starts with `sk-`. A Stripe key needs no such
+/// care: `sk_live_` opens with an underscore, never with `sk-`, so it is always `stripe-key`
+/// whatever the order (pinned by `common_provider_keys_and_the_aws_secret_key_are_secrets`).
 pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
     SecretPattern {
         name: "anthropic-key",
