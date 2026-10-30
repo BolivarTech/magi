@@ -325,6 +325,21 @@ mod tests {
     }
 
     #[test]
+    fn file_extensions_are_matched_without_regard_to_ascii_case() {
+        // [MAGI S6 loop 5, B1-c4] a reviewed file's extension was kept as written and a
+        // citation's compared as written, so `notes.zzz` was no file name after `FOO.ZZZ` was
+        // reviewed, nor `MAIN.RS` beside the registry's `rs`, and the citation was checked as a
+        // symbol.
+        let i = LexicalIndex::build(
+            &[("FOO.ZZZ".to_string(), "x".to_string())],
+            &LanguageRegistry::new(),
+        );
+        for file in ["notes.zzz", "notes.ZZZ", "MAIN.RS", "src/Lib.Rs"] {
+            assert!(i.is_file_name(file), "{file}");
+        }
+    }
+
+    #[test]
     fn overlapping_and_adjacent_ranges_merge_and_gaps_stay() {
         let mut r = Reviewed::default();
         r.add_lines("a.rs", 10, 20);
