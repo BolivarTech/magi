@@ -28,6 +28,8 @@ const GATE_KEY: &str = "gate";
 const TITLE_JOINER: &str = " / ";
 /// The key under which a value of the JSON form that could not be serialized declares why.
 const SERIALIZATION_ERROR_KEY: &str = "serialization_error";
+/// The run-log target of the report.
+const LOG_TARGET: &str = "magi_rs::review";
 
 /// What every stage of a review declared.
 ///
@@ -326,10 +328,6 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
 ///
 /// The JSON object. O(size of the summary).
 pub fn summary_json(s: &ReviewSummary) -> Value {
-    // Serializing these types cannot fail: every map key is a string and no field has a fallible
-    // `Serialize`. The invariant is pinned by a test, not by this fallback:
-    // `the_summary_json_counts_states_and_models_and_never_carries_raw_model_text_unredacted`
-    // requires every documented key, which a `Null` here would lose.
     let mut v = to_json(s, "summary");
     if let Value::Object(fields) = &mut v {
         fields.insert("findings".into(), with_gate(&s.findings));
@@ -492,9 +490,16 @@ pub(crate) fn name<T: serde::Serialize + std::fmt::Debug>(value: &T) -> String {
 /// fallible `Serialize`), but were one to, the failure is never silent: the value becomes
 /// `{"serialization_error": "<what>: <error>"}` and one ERROR entry goes to the run log.
 fn to_json<T: serde::Serialize>(value: &T, what: &str) -> Value {
-    serde_json::to_value(value).unwrap_or_else(|_| {
-        let _ = (what, SERIALIZATION_ERROR_KEY);
-        Value::Null
+    // MAGI FIX (S6 loop 5): never a silent `Null` that drops the whole envelope.
+    serde_json::to_value(value).unwrap_or_else(|e| {
+        let error = redacted(&format!("{what}: {e}"));
+        tracing::event!(
+            target: LOG_TARGET,
+            tracing::Level::ERROR,
+            error = error.as_str(),
+            "a value of the review report could not be serialized"
+        );
+        json!({ SERIALIZATION_ERROR_KEY: error })
     })
 }
 
