@@ -751,6 +751,32 @@ mod tests {
     }
 
     #[test]
+    fn a_token_after_a_run_of_hyphens_that_opens_a_line_is_a_secret() {
+        // [MAGI S6 loop 5, A2-c1] a `--` comment (Haskell, SQL, Lua) before a token becomes
+        // `---` on a removed line and `+--` on an added one; the single-marker rule missed both.
+        let lines = [
+            concat!("---", "gh", "p_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            concat!("+--", "sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA"),
+            concat!(" --", "AK", "IA", "ABCDEFGHIJKLMNOP"),
+            concat!("--", "gh", "p_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        ];
+        for line in lines {
+            let hunk = format!("@@ -1,2 +1,1 @@\n context\n{line}\n");
+            assert!(find_secret(line).is_some(), "{line}");
+            assert!(find_secret(&hunk).is_some(), "{hunk}");
+        }
+        // A run of hyphens glued to a word is still part of that word.
+        let glued = concat!(
+            "x\n",
+            "-task--",
+            "gh",
+            "p_",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+        assert_eq!(find_secret(glued), None);
+    }
+
+    #[test]
     fn a_shown_path_escapes_control_characters() {
         // [CP2 MS2 S1b1 loop 16] a file name can carry a terminal escape; the report never replays it.
         assert_eq!(display_path("a\u{1b}[31m.rs"), "a\\u{1b}[31m.rs");
