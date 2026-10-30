@@ -1744,6 +1744,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_line_the_hunk_deleted_whose_number_is_live_is_never_filtered() {
+        // [MAGI S6 loop 7, D-b3/D-c3] line 5 was replaced: its number names the deleted old line
+        // and the live new one, and a finding does not say which side it meant. A confident
+        // false positive judged on the new side may be about the deleted code, so it is not
+        // filtered; a line the hunk did not delete (3) is filtered as before.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let new: String = (1..=10)
+            .map(|i| {
+                if i == 5 {
+                    "new5\n".to_string()
+                } else {
+                    format!("old{i}\n")
+                }
+            })
+            .collect();
+        std::fs::write(dir.path().join("a.rs"), &new).expect("write");
+        let old: String = (1..=10).map(|i| format!("old{i}\n")).collect();
+        let body: String = (1..=10)
+            .map(|i| match i {
+                5 => "-old5\n+new5\n".to_string(),
+                _ => format!(" old{i}\n"),
+            })
+            .collect();
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,10 +1,10 @@\n{body}");
+        let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --relative abc",
+                Ok(diff.as_str()),
+            ),
+            ("ls-files --others --exclude-standard -z", Ok("")),
+            (
+                "ls-tree -z abc -- a.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
+            ),
+            (
+                "show --no-ext-diff --no-textconv abc:./a.rs",
+                Ok(old.as_str()),
+            ),
+        ]);
+        let f = serde_json::json!([
+            {"severity":"warning","title":"t5","detail":"d","file":"a.rs","line":5},
+            {"severity":"warning","title":"t3","detail":"d","file":"a.rs","line":3}
+        ]);
+        let consult =
+            FakeConsult::new(vec![Ok(
+                real_report([f.clone(), f, serde_json::json!([])]).await
+            )]);
+        let client = gate_always("false_positive");
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let out = run_review(
+            ReviewRequest {
+                input: ReviewInput::Uncommitted,
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                approved_digest: None,
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+            },
+        )
+        .await
+        .expect("runs");
+        let state_of = |line: u32| {
+            out.summary
+                .findings
+                .iter()
+                .chain(out.summary.filtered.iter())
+                .find(|(f, _)| f.line == Some(line))
+                .map(|(_, v)| (v.state, v.cause))
+        };
+        assert_eq!(
+            state_of(5),
+            Some((GateState::LowConfidence, Some("ambiguous diff side")))
+        );
+        assert_eq!(state_of(3), Some((GateState::Filtered, None)));
+    }
+
+    #[tokio::test]
     async fn each_side_of_each_file_is_read_from_git_once_per_review() {
         // [CP2 MS2 S2a loop 6] run_review wraps its source in CachedSource: the filter, the index and the gate all read the
         // old side of gone.rs, and git answers it once.
