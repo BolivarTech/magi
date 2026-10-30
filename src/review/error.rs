@@ -128,7 +128,10 @@ pub enum ReviewError {
         limit: u64,
     },
     /// The review reads more bytes in total than the per-review cap.
-    #[error("the review reads more than {limit} bytes in total")]
+    #[error(
+        "the review reads more than {limit} bytes in total ({held} held when {} was read)",
+        display_path(path)
+    )]
     InputTooLarge {
         /// The cap in bytes.
         limit: u64,

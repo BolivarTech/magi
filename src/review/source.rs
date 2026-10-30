@@ -531,10 +531,12 @@ impl<'a> CachedSource<'a> {
             .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX));
         let total = held.bytes.saturating_add(len);
         if total > self.cap {
+            // MAGI FIX (S6 loop 5): the error named no path and no total, so an operator could
+            // not tell a higher cap from fewer files.
             return Err(ReviewError::InputTooLarge {
                 limit: self.cap,
-                held: 0,
-                path: String::new(),
+                held: held.bytes,
+                path: path.to_string(),
             });
         }
         held.bytes = total;
