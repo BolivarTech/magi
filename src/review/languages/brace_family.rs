@@ -2124,4 +2124,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_multi_line_define_keeps_its_continuation_lines() {
+        // [MAGI S6 loop 7, B2b-c2] a `\` did not continue a declaration, so a macro body was
+        // reviewed in a gap without its `#define` line.
+        for (code, changed, end) in [
+            (
+                "#define MAX(a, b) \\\n    ((a) > (b) ? (a) : (b))\n#define ONE 1\n\nint f(void) {\n    return MAX(1, 2);\n}\n",
+                2,
+                3,
+            ),
+            (
+                "#define SWAP(a, b) do { \\\n    int t = a; \\\n    a = b; b = t; \\\n} while (0)\n\nint f(void) {\n    return 0;\n}\n",
+                3,
+                4,
+            ),
+        ] {
+            let units = extract(&c_extractor(), code, &[changed]);
+            assert_eq!(
+                spans(&units),
+                vec![("defines", UnitKind::DeclarationGroup, 1, end)],
+                "{code}"
+            );
+        }
+    }
 }
