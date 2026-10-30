@@ -578,8 +578,12 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 4): a trailing comment ending in `;` is not a prototype's `;`.
         let prototype = scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement);
         // An annotation or decorator (`@SuppressWarnings("x")`) is no signature either.
+        // MAGI FIX (S6 loop 7): a `*` opens a comment's continuation line only when the line
+        // starts inside the comment; in code it is a generator method (`*items() {`).
+        let comment_star = trimmed.starts_with('*') && scanned.is_none_or(|s| s.starts_in_literal);
         if (prototype && !prototypes)
-            || ["#", "//", "/*", "*", "}", "@"]
+            || comment_star
+            || ["#", "//", "/*", "}", "@"]
                 .iter()
                 .any(|p| trimmed.starts_with(p))
         {
