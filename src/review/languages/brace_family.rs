@@ -377,8 +377,13 @@ impl BraceFamilyExtractor {
             .find_map(|&text| {
                 // MAGI FIX (S6 loop 6): `struct Foo x = {1};` is a variable of a struct type,
                 // a declaration, not a struct.
+                // MAGI FIX (S6 loop 7): `struct Point make_point(void) {` is a function returning
+                // a struct; the signature path names it.
                 self.match_block_keyword(text)
-                    .filter(|(_, rest)| !(self.semicolon_declarations && declares_variable(rest)))
+                    .filter(|(_, rest)| {
+                        !(self.semicolon_declarations
+                            && (declares_variable(rest) || returns_from_function(rest)))
+                    })
                     .map(|(kind, rest)| (kind, construct_name(rest, text)))
             })
             .or_else(|| {
@@ -817,6 +822,25 @@ fn declares_variable(rest: &str) -> bool {
     names_variable
         && rest.trim_end().ends_with(';')
         && head.split_whitespace().last() != Some("final")
+}
+
+/// Whether the text after a C block keyword is the return type of a function rather than the
+/// type: a `(` comes before any `{` and two words or more stand before it (`Point make_point(`,
+/// `Point *origin(`), so a single word before it is an attribute (`__attribute__((packed)) Hdr`,
+/// `alignas(8) Foo`). O(n) in the text.
+fn returns_from_function(rest: &str) -> bool {
+    let Some(paren) = rest.find('(') else {
+        return false;
+    };
+    if rest.find('{').is_some_and(|brace| brace < paren) {
+        return false;
+    }
+    rest.get(..paren)
+        .unwrap_or("")
+        .split(|c: char| c.is_whitespace() || c == '*' || c == '&')
+        .filter(|w| !w.is_empty())
+        .count()
+        >= 2
 }
 
 /// Whether a trimmed line opens an initializer it continues on the next lines: it ends in `=`
