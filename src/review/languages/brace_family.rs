@@ -119,7 +119,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// open more than they close. A header line before it that leaves a brace open (a const
     /// generic argument wrapped over lines, `impl Foo<{` then `N` then `}> {`) is taken for the
     /// block, so the members are searched in the wrong span and the block may not split, or split
-    /// at fewer members. Nothing is lost either way: [`split_into_members`] covers every line of
+    /// at fewer members. Nothing is lost either way: `split_into_members` covers every line of
     /// the unit with exactly one piece, and an unsplit unit is batched whole.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         // MAGI FIX (S6 loop 3): a block too large for one batch is reviewed method by method.
