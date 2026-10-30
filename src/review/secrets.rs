@@ -612,6 +612,12 @@ pub fn outward_text(text: &str) -> String {
 /// format character (Unicode category Cf, as of Unicode 16; the unassigned code points of the
 /// tag block are included) and the line and paragraph separators (Zl, Zp, U+2028..U+2029).
 /// The table is hand-kept to avoid a Unicode-data dependency; its test walks every range.
+///
+/// The bidirectional embeddings and overrides U+202A..U+202E (U+202E, RIGHT-TO-LEFT OVERRIDE,
+/// included) sit in the `U+2028..=U+202E` range together with the separators, and the isolates
+/// U+2066..U+2069 in `U+2066..=U+206F`: a review that reads the table as missing them (S6
+/// loop 7, A2-b2) is a false positive, pinned by
+/// `a_shown_path_escapes_format_characters_that_reorder_or_hide_text` with a literal U+202E.
 // MAGI FIX (S6 loop 5): the first list missed the separators, the interlinear annotations, the
 // tags and the Cf characters outside the BMP.
 const HIDDEN_FORMAT_CHARS: &[std::ops::RangeInclusive<char>] = &[
