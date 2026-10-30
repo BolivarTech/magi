@@ -545,12 +545,15 @@ def _omissions(stderr):
 
     Returns:
         tuple: ``(entries, failure)``: ``(path, cause)`` pairs in order, or
-        ``None`` and why the list is unusable (absent, or text left over).
+        ``None`` and why the list is unusable (absent, empty, or text left
+        over).
 
     Example:
         >>> _omissions("x; left out: a, b (binary), c (secret)")
         ([('a, b', 'binary'), ('c', 'secret')], '')
         >>> _omissions("x; left out: a [binary]")[0] is None
+        True
+        >>> _omissions("x; left out: ")[0] is None
         True
     """
     listed = OMISSION_LIST_PATTERN.search(stderr)
@@ -564,6 +567,10 @@ def _omissions(stderr):
             return None, "the omission list does not parse from %r" % text[position:]
         entries.append((entry.group("path"), entry.group("cause")))
         position = entry.end()
+    # MAGI FIX (S6 loop 5): the product writes the marker only before at least
+    # one entry, so an empty list is drift, never a vacuous pass (F1-m3, F1-c1).
+    if not entries:
+        return None, "the omission list after '; left out: ' is empty"
     return entries, ""
 
 
