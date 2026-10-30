@@ -283,23 +283,39 @@ impl BraceFamilyExtractor {
             }
             // Check declaration keywords
             if self.is_declaration(trimmed) {
+                // MAGI FIX (S6 loop 5): `const f = () => {` ended on its first line and its body
+                // fell into a gap; a function expression is a function, with its whole body.
+                if let Some((name, end)) = self.function_expression(lines, scanned, i, &stops) {
+                    let start = self.scan_back_for_docs(lines, i);
+                    constructs.push(Construct {
+                        kind: UnitKind::Function,
+                        name,
+                        start_line: u32::try_from(start + 1).unwrap_or(1),
+                        end_line: u32::try_from(end + 1).unwrap_or(line_num),
+                    });
+                    i = end + 1;
+                    continue;
+                }
                 let group_start = i;
-                let mut group_end = i;
-                // Scan forward for contiguous declarations of the same kind
-                while group_end + 1 < lines.len() {
-                    let next = lines.get(group_end + 1).map_or("", |l| l.trim());
-                    if self.is_declaration(next) {
-                        group_end += 1;
-                    } else if next.is_empty() {
-                        // Allow blank lines within groups
-                        if lines
-                            .get(group_end + 2)
-                            .is_some_and(|l| self.is_declaration(l.trim()))
-                        {
-                            group_end += 2;
-                        } else {
-                            break;
-                        }
+                let end_of =
+                    |j: usize| declaration_block(lines, scanned, j, &stops).map_or(j, |b| b.1);
+                // A declaration joins the group unless it is a function expression, its own unit.
+                let joins = |j: usize| {
+                    lines.get(j).is_some_and(|l| self.is_declaration(l.trim()))
+                        && self
+                            .function_expression(lines, scanned, j, &stops)
+                            .is_none()
+                };
+                let mut group_end = end_of(i);
+                // Scan forward for contiguous declarations, one blank line allowed between two.
+                loop {
+                    let next = group_end + 1;
+                    if joins(next) {
+                        group_end = end_of(next);
+                    } else if lines.get(next).is_some_and(|l| l.trim().is_empty())
+                        && joins(next + 1)
+                    {
+                        group_end = end_of(next + 1);
                     } else {
                         break;
                     }
@@ -514,6 +530,33 @@ impl BraceFamilyExtractor {
         start
     }
 
+    /// The name and last line (0-based) of the function expression the declaration at line `i`
+    /// assigns (`const f = () => {`, `let g = async function (x) {`, an arrow whose parameters
+    /// wrap over several lines): a `const`, `let` or `var` whose value is a `function` or whose
+    /// lines up to the block's opening brace hold `=>`, and whose value opens a block
+    /// ([`declaration_block`]). O(k) for the k lines of its header and body.
+    fn function_expression(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        i: usize,
+        stops: &dyn Fn(usize) -> bool,
+    ) -> Option<(String, usize)> {
+        let text = self.strip_modifiers(lines.get(i)?.trim(), false);
+        let rest = FUNCTION_EXPRESSION_KEYWORDS
+            .iter()
+            .find_map(|kw| text.strip_prefix(kw))?;
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        let value = rest.split_once('=')?.1.trim_start();
+        let (open, close) = declaration_block(lines, scanned, i, stops)?;
+        let arrow = lines.get(i..=open)?.iter().any(|l| l.contains("=>"));
+        let function = value.starts_with("function") || value.starts_with("async function");
+        (!name.is_empty() && (arrow || function)).then_some((name, close))
+    }
+
     /// Generate a descriptive name for a declaration group.
     fn declaration_group_name(&self, first_line: &str) -> String {
         let trimmed = first_line.trim();
@@ -582,6 +625,51 @@ fn open_brace_line(
                 && (opens(j) || !ends_statement(j))
         })
         .find(|&j| opens(j))
+}
+
+/// The words that open a JavaScript or TypeScript variable declaration, whose value may be a
+/// function expression.
+const FUNCTION_EXPRESSION_KEYWORDS: [&str; 3] = ["const ", "let ", "var "];
+
+/// What a declaration line may end with when its value goes on to the next line (`const f = (`,
+/// `const t = [`, `int a,`).
+const DECLARATION_CONTINUATIONS: [char; 4] = ['=', '(', '[', ','];
+
+/// The opening and closing lines (0-based) of the block a declaration at line `i` holds: an
+/// object or struct literal, a wrapped `use a::{`, a function expression's body. There is one
+/// when the declaration's line opens a brace, or ends in a [`DECLARATION_CONTINUATIONS`]
+/// character and a later line opens one before the declaration ends ([`open_brace_line`]). A
+/// complete one-line declaration (`const a = 1`) takes no later block. A linkage block
+/// (`extern "C" {`, [`opens_linkage_block`]) holds none: its contents stay top-level constructs.
+/// O(k) for the k lines of the block.
+fn declaration_block(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    i: usize,
+    stops: &dyn Fn(usize) -> bool,
+) -> Option<(usize, usize)> {
+    let opens = scanned.get(i).is_some_and(|s| s.brace_delta > 0);
+    let continues = lines
+        .get(i)
+        .is_some_and(|l| l.trim_end().ends_with(DECLARATION_CONTINUATIONS));
+    if !(opens || continues) || lines.get(i).is_some_and(|l| opens_linkage_block(l.trim())) {
+        return None;
+    }
+    let open = open_brace_line(lines, scanned, i, stops)?;
+    Some((open, find_closing_brace(scanned, open)))
+}
+
+/// Whether a trimmed line opens a C or C++ linkage block (`extern "C" {`, `extern "C++" {`).
+/// Such a block only sets the linkage of what it holds, so its functions, prototypes and globals
+/// are found as top-level constructs (indented signatures count, [`BraceFamilyExtractor::signature_name`])
+/// and its header and closing brace are units of their own: no line of it is lost. O(n).
+fn opens_linkage_block(trimmed: &str) -> bool {
+    trimmed
+        .strip_prefix("extern")
+        .map(str::trim_start)
+        .and_then(|r| r.strip_prefix('"'))
+        .and_then(|r| r.split_once('"'))
+        .is_some_and(|(_, after)| after.trim_start().starts_with('{'))
 }
 
 /// Find the 1-indexed line where the construct starting at line index `i` ends.
