@@ -1602,4 +1602,52 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn a_rename_from_a_never_reviewed_or_ignored_path_is_ignored() {
+        // [MAGI S6 loop 7, A2-m2] only the new path met the name rule: a crafted commit carried a
+        // blob stored under `.git/` or an ignored name into the review as a rename's old side.
+        let rename = |from: &str, to: &str| {
+            format!(
+                "diff --git a/{from} b/{to}\nsimilarity index 90%\nrename from {from}\n\
+                 rename to {to}\n--- a/{from}\n+++ b/{to}\n@@ -1,1 +1,1 @@\n-fn g() {{}}\n+fn h() {{}}\n"
+            )
+        };
+        let src = MapSource::new(
+            &[
+                ("x.rs", "fn h() {}\n"),
+                ("y.rs", "fn h() {}\n"),
+                ("a.rs", "fn a() {}\n"),
+            ],
+            &[
+                (".git/hooks/x.rs", "fn g() {}\n"),
+                ("local.env", "fn g() {}\n"),
+            ],
+        );
+        let files = vec![
+            ReviewFile {
+                path: "x.rs".into(),
+                diff: Some(rename(".git/hooks/x.rs", "x.rs")),
+            },
+            ReviewFile {
+                path: "y.rs".into(),
+                diff: Some(rename("local.env", "y.rs")),
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|p| {
+            p == "local.env"
+        })
+        .expect("a.rs kept");
+        assert_eq!(
+            f.skipped
+                .iter()
+                .map(|s| (s.path.as_str(), s.cause))
+                .collect::<Vec<_>>(),
+            vec![("x.rs", SkipCause::Ignored), ("y.rs", SkipCause::Ignored)]
+        );
+    }
 }
