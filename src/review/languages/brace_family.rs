@@ -609,7 +609,7 @@ impl BraceFamilyExtractor {
             .find_map(|kw| text.strip_prefix(kw))?;
         let name: String = rest
             .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .take_while(|&c| is_identifier_char(c))
             .collect();
         let value = rest.split_once('=')?.1.trim_start();
         let (open, close) = declaration_block(lines, scanned, i, stops)?;
@@ -805,6 +805,12 @@ fn brace_block_end(
     }
 }
 
+/// Whether `c` can be part of an identifier in a brace-family language: a letter or digit
+/// (Unicode included), `_`, or `$` (JavaScript and TypeScript; GCC accepts it in C too).
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
 /// The identifier just before the first `(` of `line` (`int *parse(` gives `parse`,
 /// `public static <T> List<T> wrap(` gives `wrap`).
 ///
@@ -821,11 +827,12 @@ fn identifier_before_paren(line: &str) -> Option<String> {
     if before.contains('=') {
         return None;
     }
+    // MAGI FIX (S6 loop 6): `$get() {` named no member, so a class could not split there.
     let name: String = before
         .trim_end()
         .chars()
         .rev()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .take_while(|&c| is_identifier_char(c))
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
@@ -889,11 +896,7 @@ fn skip_generics(text: &str) -> &str {
 /// The name of a construct: the identifier that opens `rest`, the text after its keyword, or,
 /// when none does, the identifier of the second word of `text`, the matched line.
 fn construct_name(rest: &str, text: &str) -> String {
-    let ident = |t: &str| -> String {
-        t.chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect()
-    };
+    let ident = |t: &str| -> String { t.chars().take_while(|&c| is_identifier_char(c)).collect() };
     let name = ident(rest);
     if !name.is_empty() {
         return name;
