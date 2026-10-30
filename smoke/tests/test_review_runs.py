@@ -71,6 +71,13 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                          argv[argv.index("--timeout") + 1])
         self.assertEqual("error", argv[argv.index("--log-level") + 1])
 
+    def test_the_too_short_timeout_refuses_one_batch_under_the_most_lenient_config(self) -> None:
+        # [MAGI §6 MS2 loop 6, F1a-c1] the refusal must fire at ANY batch count: one batch needs the
+        # wall clock the floor derives with no rotation and no retry (the smallest attempt factor).
+        from smoke.scenarios import trio
+        lenient = trio.floor_activation_threshold(trio.attempt_factor(0, True))
+        self.assertLess(runs.REVIEW_TOO_SHORT_TIMEOUT_S, lenient)
+
     def test_the_root_run_reviews_the_workspace_root_with_a_too_short_timeout(self) -> None:
         # [MAGI §6 MS2 loop 3, F2] the root of the nested workspace, holding .magi and .git; a
         # protected file taken for review would end at the budget refusal, never at a model.
