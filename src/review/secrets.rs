@@ -634,8 +634,8 @@ const HIDDEN_FORMAT_CHARS: &[std::ops::RangeInclusive<char>] = &[
     '\u{13430}'..='\u{1343f}',
     '\u{1bca0}'..='\u{1bca3}',
     '\u{1d173}'..='\u{1d17a}',
-    '\u{e0001}'..='\u{e0001}',
-    '\u{e0020}'..='\u{e007f}',
+    // MAGI FIX (S6 loop 7): the whole tag block, U+E0000 and U+E0002..U+E001F included.
+    '\u{e0000}'..='\u{e007f}',
 ];
 
 /// `text` with every control character escaped ([`char::escape_default`]) and every
