@@ -1397,6 +1397,44 @@ mod tests {
     }
 
     #[test]
+    fn an_input_whose_every_name_is_not_utf8_is_nothing_to_review_and_names_them() {
+        // [MAGI S6 loop 6, A1-c3] with only non-UTF-8 names left, resolve_input returned Ok with
+        // no file and the omissions were lost from the later `nothing to review` error.
+        use crate::review::filter::{SkipCause, Skipped};
+        struct NotUtf8Git;
+        impl GitCommand for NotUtf8Git {
+            fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                match args.join(" ").as_str() {
+                    "rev-parse --is-inside-work-tree" => Ok(b"true\n".to_vec()),
+                    "rev-parse --verify --quiet HEAD^{commit}" => {
+                        Err(ReviewError::Git(String::new()))
+                    }
+                    "ls-files --cached --others --exclude-standard -z" => {
+                        Ok(b"caf\xe9.rs\0".to_vec())
+                    }
+                    other => Err(ReviewError::Git(other.to_string())),
+                }
+            }
+        }
+        let r = resolve_input(
+            &ReviewInput::Uncommitted,
+            Path::new("/w"),
+            &NotUtf8Git,
+            &allow_all,
+        );
+        let Err(ReviewError::NothingToReview { skipped }) = r else {
+            panic!("expected NothingToReview, got {:?}", r.err());
+        };
+        assert_eq!(
+            skipped,
+            vec![Skipped {
+                path: "caf\u{fffd}.rs".into(),
+                cause: SkipCause::NotUtf8
+            }]
+        );
+    }
+
+    #[test]
     fn a_hostile_ref_is_rejected_by_resolve_input_before_any_git_call() {
         // [CP2 MS2 S1 loop 2] FakeGit has no entries: any git call is a `Git` error, so only validate_ref yields InvalidRef.
         let git = FakeGit(Default::default());
