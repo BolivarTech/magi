@@ -781,6 +781,47 @@ mod tests {
     }
 
     #[test]
+    fn a_revision_diff_reads_attributes_from_the_reviewed_revision() {
+        // [MAGI S6 loop 7, A1-b1, measured with git 2.56] a revision diff read `.gitattributes`
+        // from the working tree, so a later commit marking `*.rs -diff` turned the reviewed
+        // change into "Binary files differ" and the file was left out as binary.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "one\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join("a.rs"), "two\n").expect("write");
+        git(d.path(), &["commit", "-q", "-am", "2"]);
+        std::fs::write(d.path().join(".gitattributes"), "*.rs -diff\n").expect("write");
+        git(d.path(), &["add", ".gitattributes"]);
+        git(d.path(), &["commit", "-q", "-m", "3"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        for (input, added) in [
+            (ReviewInput::Commit(Some("HEAD~1".into())), "+two"),
+            (
+                ReviewInput::Range {
+                    from: "HEAD~2".into(),
+                    to: "HEAD~1".into(),
+                },
+                "+two",
+            ),
+            (ReviewInput::Commit(Some("HEAD~2".into())), "+one"),
+        ] {
+            let r = magi_rs::review::input::resolve_input(&input, d.path(), &g, &allow)
+                .expect("resolves");
+            let diff = r
+                .files
+                .iter()
+                .find(|f| f.path == "a.rs")
+                .and_then(|f| f.diff.clone())
+                .expect("a.rs has a diff");
+            assert!(diff.contains(added), "{diff}");
+        }
+    }
+
+    #[test]
     fn a_merge_commit_is_reviewed_against_its_first_parent() {
         // [MAGI §6 MS2 A loop 2] `diff-tree <merge>` prints no diff, so a HEAD reached through
         // `git merge` used to be "nothing to review"; what the merge brought in is reviewed.
