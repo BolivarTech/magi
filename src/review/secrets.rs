@@ -79,6 +79,13 @@ const PEM_BEGIN: &str = concat!("-----", "BEGIN ");
 /// The longest type word a PEM private-key header may name (`RSA`, `EC`, `ECDSA`, `OPENSSH`,
 /// `ENCRYPTED`, …), so a header is checked in constant time.
 const PEM_MAX_TYPE_WORD: usize = 16;
+/// The most type words a PEM private-key header may name before `PRIVATE KEY` (`SSH2
+/// ENCRYPTED`, `RSA ENCRYPTED`), so a header is checked in constant time.
+const PEM_MAX_TYPE_WORDS: usize = 4;
+/// The header of an SSH2 private key (RFC 4716 armor: four dashes and spaces; split so the
+/// source holds no such header). Its `END` line has the same armor, so its mask runs to the end
+/// of the text: the safe direction.
+const SSH2_PRIVATE_KEY: &str = concat!("---- BEGIN SSH2 ", "ENCRYPTED PRIVATE KEY ----");
 /// The end of a PEM private-key header.
 const PEM_PRIVATE_KEY: &str = "PRIVATE KEY-----";
 /// The header of an armored OpenPGP private key (split so the source holds no such header).
@@ -163,6 +170,10 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
     SecretPattern {
         name: "pem-private-key",
         matcher: Matcher::PemPrivateKey,
+    },
+    SecretPattern {
+        name: "pem-private-key",
+        matcher: Matcher::Header(SSH2_PRIVATE_KEY),
     },
     SecretPattern {
         name: "pgp-private-key",
@@ -293,8 +304,15 @@ impl Matcher {
             Self::PemPrivateKey => text.match_indices(PEM_BEGIN).find_map(|(at, _)| {
                 let mut rest = at + PEM_BEGIN.len();
                 // MAGI FIX (S6 loop 4): any one type word, not a closed list (`ECDSA` was sent).
-                if !word_at(bytes, rest, PEM_PRIVATE_KEY) {
-                    rest += pem_type_word(bytes, rest).map_or(0, |word| word + 1);
+                // MAGI FIX (S6 loop 7): up to PEM_MAX_TYPE_WORDS of them (`SSH2 ENCRYPTED`).
+                for _ in 0..PEM_MAX_TYPE_WORDS {
+                    if word_at(bytes, rest, PEM_PRIVATE_KEY) {
+                        break;
+                    }
+                    match pem_type_word(bytes, rest) {
+                        Some(word) => rest += word + 1,
+                        None => break,
+                    }
                 }
                 bytes
                     .get(rest..)
