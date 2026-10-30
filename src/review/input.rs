@@ -508,6 +508,11 @@ pub const NOT_A_DIRECTORY: &str = "not a directory";
 /// every non-directory entry except a link whose target is gone, a never-reviewed path
 /// ([`is_never_reviewed`], never entered) and what `ignored` names (a file by its path, a
 /// directory by its path and a trailing `/`, never entered). O(entries).
+///
+/// A link to a directory, a FIFO, a socket or a device file is collected on purpose (reviews
+/// of S6 loop 6 asked to drop them here): the reader refuses each one and the filter lists it
+/// as `not a regular file`, so the report names it instead of passing over it in silence.
+/// Pinned by `an_enumerated_link_to_a_directory_or_fifo_is_skipped_as_not_a_regular_file`.
 fn walk(
     dir: &Path,
     rel: &str,
