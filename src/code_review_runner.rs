@@ -154,7 +154,11 @@ impl TrioBatchConsult {
     /// # Errors
     /// The builder's message, redacted as every other error of [`build_code_review_runner`].
     fn check(&self) -> Result<(), String> {
-        self.factory.build(self.ceiling(None)).map(|_| ())
+        // MAGI FIX (S6 loop 5): the builder's message is not yet redacted (`TrioBuilder::build`).
+        self.factory
+            .build(self.ceiling(None))
+            .map(|_| ())
+            .map_err(|e| redact_foreign_text(&e).to_string())
     }
 
     /// The ceiling of a batch: derived from its wall clock as headless derives it from a
