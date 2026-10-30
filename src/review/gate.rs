@@ -97,8 +97,8 @@ pub enum GateState {
 pub struct GateVerdict {
     /// The state.
     pub state: GateState,
-    /// Why, for `unfiltered` and for a critical kept as `low_confidence`: the first of
-    /// [`Self::causes`].
+    /// Why, for `unfiltered` and `low_confidence`: the first of [`Self::causes`]. Always `None`
+    /// for `kept` and `filtered`, even when [`Self::causes`] names unasked claims.
     pub cause: Option<&'static str>,
     /// Every cause that applies, the state's own first: a finding with (title, detail) pairs
     /// that were never put to the chain also carries `not every claim judged`.
@@ -473,9 +473,14 @@ impl<'a> Gate<'a> {
                 "finding passed the gate unjudged"
             );
         }
+        // MAGI FIX (S6 loop 6): `kept` has no cause of its own; its unasked claims stay in `causes`.
+        let cause = match outcome.state {
+            GateState::Kept => None,
+            _ => causes.first().copied(),
+        };
         GateVerdict {
             state: outcome.state,
-            cause: causes.first().copied(),
+            cause,
             causes,
             model: outcome.model,
             lean: outcome.lean,
