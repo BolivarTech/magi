@@ -1529,6 +1529,25 @@ mod tests {
     }
 
     #[test]
+    fn a_c_global_with_a_multi_line_initializer_is_one_declaration() {
+        // [MAGI S6 loop 6, B2b-c4] only a line ending in `;` was a C declaration, so an
+        // initializer opened on its first line fell into gap units.
+        let code = "int arr[] = {\n    1, 2,\n    3,\n};\nstatic int n =\n    4;\nint f(void) {\n    return 0;\n}\n";
+        let units = extract(&c_extractor(), code, &(1..=9).collect::<Vec<u32>>());
+        let kinds: Vec<(UnitKind, u32, u32)> = spans(&units)
+            .into_iter()
+            .map(|(_, kind, start, end)| (kind, start, end))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (UnitKind::DeclarationGroup, 1, 6),
+                (UnitKind::Function, 7, 9),
+            ]
+        );
+    }
+
+    #[test]
     fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
         let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
         let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
