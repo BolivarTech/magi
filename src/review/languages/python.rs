@@ -284,7 +284,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
 
         // import / from ... import at indent 0 → DeclarationGroup
         if (trimmed.starts_with("import ") || trimmed.starts_with("from ")) && indent == 0 {
-            let group_end = find_import_group_end(lines, i);
+            let group_end = find_import_group_end(lines, &continued, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::DeclarationGroup,
                 name: "imports".to_string(),
@@ -431,9 +431,19 @@ fn find_block_end(lines: &[&str], continued: &[bool], def_line: usize) -> usize 
 }
 
 /// Find end of a contiguous import group.
-fn find_import_group_end(lines: &[&str], start: usize) -> usize {
+///
+/// A line that continues a logical line (`continued[j]`: inside the brackets of
+/// `from a import (`, or after a `\`) belongs to the import that opened it, so it extends the
+/// group. O(n) in the lines after `start`.
+fn find_import_group_end(lines: &[&str], continued: &[bool], start: usize) -> usize {
     let mut end = start;
     for (j, line) in lines.iter().enumerate().skip(start + 1) {
+        // MAGI FIX (S6 loop 5): a wrapped import ended on its header line, and its names became
+        // orphan units reviewed without it.
+        if continued.get(j).copied().unwrap_or(false) {
+            end = j;
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
             end = j;
