@@ -1443,6 +1443,68 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // a symlink needs Developer Mode on Windows, a FIFO has no Windows form
+    #[test]
+    fn an_enumerated_link_to_a_directory_or_fifo_is_skipped_as_not_a_regular_file() {
+        // [MAGI S6 loop 6, A1-b1/A1-b2, by design] the walk lists them so the report names them;
+        // the reader refuses them, and the filter lists them as `not a regular file` (README).
+        use crate::review::filter::{filter_files, SkipCause, Skipped};
+        use crate::review::languages::LanguageRegistry;
+        use crate::review::source::WorktreeSource;
+        let d = tempfile::tempdir().expect("tempdir");
+        assert!(
+            d.path().ancestors().all(|a| !a.join(".git").exists()),
+            "TMPDIR sits inside a git repository"
+        );
+        std::fs::create_dir_all(d.path().join("sub")).expect("mkdir");
+        std::fs::write(d.path().join("sub/a.rs"), "fn a() {}\n").expect("write");
+        std::os::unix::fs::symlink(d.path().join("sub"), d.path().join("link")).expect("link");
+        let made = std::process::Command::new("mkfifo")
+            .arg(d.path().join("pipe"))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success());
+        let git = FakeGit::from(&[
+            (
+                "rev-parse --is-inside-work-tree",
+                Err("fatal: not a git repository"),
+            ),
+            (
+                "ls-files --others --ignored --exclude-standard --directory -z -- .",
+                Ok(""),
+            ),
+        ]);
+        let r = resolve_input(
+            &ReviewInput::Directory(".".into()),
+            d.path(),
+            &git,
+            &allow_all,
+        )
+        .expect("resolves");
+        let source = WorktreeSource::new(d.path().to_path_buf());
+        let f = filter_files(r.files, &source, &LanguageRegistry::new(), false, &|_| {
+            false
+        })
+        .expect("sub/a.rs is kept");
+        assert_eq!(
+            f.kept.iter().map(|k| k.path.as_str()).collect::<Vec<_>>(),
+            vec!["sub/a.rs"]
+        );
+        assert_eq!(
+            f.skipped,
+            vec![
+                Skipped {
+                    path: "link".into(),
+                    cause: SkipCause::NotRegularFile
+                },
+                Skipped {
+                    path: "pipe".into(),
+                    cause: SkipCause::NotRegularFile
+                },
+            ]
+        );
+    }
+
     #[test]
     fn a_hostile_ref_is_rejected_by_resolve_input_before_any_git_call() {
         // [CP2 MS2 S1 loop 2] FakeGit has no entries: any git call is a `Git` error, so only validate_ref yields InvalidRef.
