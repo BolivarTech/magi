@@ -1560,6 +1560,32 @@ mod tests {
     }
 
     #[test]
+    fn a_receiver_an_arrow_bound_or_a_struct_variable_names_the_right_unit() {
+        // [MAGI S6 loop 6, B2b-m4] a Go method with a receiver was unnamed, the `->` of an
+        // impl bound closed its generics, and a `struct Foo x = {1};` global was a struct.
+        let go = "package p\n\nfunc (r *T) Name() string {\n\treturn r.n\n}\n";
+        let units = extract(&BraceFamilyExtractor::go(), go, &[4]);
+        assert!(
+            units.iter().any(|u| u.name == "Name"),
+            "{:?}",
+            spans(&units)
+        );
+        let rust = "impl<T: Fn(u32) -> u32> Foo<T> {\n    fn a() {}\n}\n";
+        let units = extract(&rust_extractor(), rust, &[2]);
+        assert!(units.iter().any(|u| u.name == "Foo"), "{:?}", spans(&units));
+        let c = "struct Foo x = {1};\nstruct Bar {\n    int n;\n};\n";
+        let units = extract(&c_extractor(), c, &[1, 3]);
+        let kinds: Vec<(UnitKind, u32, u32)> = spans(&units)
+            .into_iter()
+            .map(|(_, kind, start, end)| (kind, start, end))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![(UnitKind::DeclarationGroup, 1, 1), (UnitKind::Struct, 2, 4)]
+        );
+    }
+
+    #[test]
     fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
         let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
         let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
