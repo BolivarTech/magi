@@ -135,6 +135,29 @@ class StderrWordingTests(unittest.TestCase):
         self.assertIn(code_review.NOTHING_TO_REVIEW_TEXT, "nothing to review: no reviewable file")
 
 
+class ReportKeyTests(unittest.TestCase):
+    """The JSON keys S47 reads exist in the product's report and envelope."""
+
+    # MAGI FIX (S6 loop 6): S47's keys sat outside the drift guard, so a rename
+    # would surface as an unexplained FAIL at SMOKE time (F1a-m2).
+    def test_every_summary_key_s47_reads_is_one_the_report_pins(self) -> None:
+        scenario = _source("smoke/scenarios/code_review.py")
+        read = set(re.findall(r'section\.get\("(\w+)"\)', scenario))
+        read.update(re.findall(r'_list_under\(section, "(\w+)"\)', scenario))
+        self.assertTrue(read, "no code_review key read by S47 was found")
+        report = _source("src/review/report.rs")
+        pinned = re.search(r"every documented key is present.*?for k in \[(.*?)\]", report, re.S)
+        self.assertIsNotNone(pinned, "the summary key list was not found in src/review/report.rs")
+        self.assertEqual(set(), read - set(re.findall(r'"(\w+)"', pinned.group(1))))
+
+    def test_the_consensus_s47_reads_is_the_one_the_envelope_writes(self) -> None:
+        self.assertIn('"consensus".into(),\n        crate::tools::consult::consensus_json(&c.consensus)',
+                      _source("src/tools/code_review.rs"))
+        consult = _source("src/tools/consult.rs")
+        for key in code_review.CONSENSUS_TEXT_KEYS:
+            self.assertIn('"%s": c.%s,' % (key, key), consult)
+
+
 class SecretPrefixDocTests(unittest.TestCase):
     """The README never names a secret prefix the detector does not check."""
 
