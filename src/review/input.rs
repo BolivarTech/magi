@@ -311,6 +311,16 @@ fn is_git_evidence(probe: &std::io::Result<()>) -> bool {
 /// [`ReviewError::Git`] when git answers anything but `true`, or fails while a `.git` exists
 /// (treating that as "no repository" would bypass the repository's rules), and any other error
 /// of `git`.
+///
+/// # Not a defect: `false` is not "no repository"
+///
+/// Outside any repository git does not answer `false`: it exits 128 ("not a git repository"),
+/// which is the `Err` arm, so the caller reaches its walk. git answers `false` with exit 0
+/// only inside a git directory (a bare repository, or a `.git` itself); walking there would
+/// read the repository's internals, so that answer fails closed. Measured with git 2.56 and
+/// pinned with the real git by `a_directory_outside_any_repository_is_walked_through_the_real_git`
+/// and `git_answers_false_only_inside_a_git_directory_where_the_review_fails_closed` (mutating
+/// this arm to `Ok(false)` walks the bare repository). S6 loop 7, A1-c1.
 pub(crate) fn in_work_tree(
     git: &dyn GitCommand,
     workspace: &Path,
