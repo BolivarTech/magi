@@ -68,6 +68,10 @@ pub struct SemanticUnit {
     /// Lines within this unit that were modified in the PR.
     pub changed_lines: Vec<u32>,
     /// File context metadata for this unit's file.
+    ///
+    /// The extractors leave it at [`FileContext::default`] in v0.25.0 and no stage reads it: a
+    /// batch names its file's language in its [`file_header`](crate::review::batching::file_header),
+    /// computed from the path. It is kept for the retrieval stage that will fill it.
     pub context: FileContext,
 }
 
