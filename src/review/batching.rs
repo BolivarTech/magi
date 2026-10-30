@@ -51,8 +51,8 @@ pub struct ReviewBatch {
     /// What the batch reviews, in input order.
     pub items: Vec<BatchItem>,
     /// Estimated tokens of the items plus one [`file_header`] per distinct file of the batch.
-    /// Companions ([`plan_batches_with`]) are not included: whoever adds them charges them and
-    /// scans their text for secrets.
+    /// Companions ([`plan_batches_with`]) are not included: they are in `companion_tokens`, and
+    /// whoever adds their text scans it for secrets.
     pub tokens: usize,
     /// Tokens of the distinct companions ([`plan_batches_with`]) charged to the batch, once per
     /// key; 0 with no companion. `tokens + companion_tokens` never passes the batch limit.
@@ -578,7 +578,7 @@ impl<'c> Packer<'c> {
             index: self.done.len(),
             items: std::mem::take(&mut self.items),
             tokens: self.tokens,
-            companion_tokens: 0,
+            companion_tokens: self.companion_tokens,
         });
         self.tokens = 0;
         self.companion_tokens = 0;
