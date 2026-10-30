@@ -336,6 +336,14 @@ assertions.
 | S50 | `--timeout 30 --log-level error` over the S47 tree exits 2, `stderr` names the batches (at least one: a pool that measured a larger window plans fewer than three over the same tree, and the refusal fires at any count), the per-batch ceiling, the 15 s floor and a minimum `--timeout` above the 30 s asked for, and the review workspace's run log holds a line with this run's id and that same text. The numbers are the product's formula and are only range-checked | none. A run that published no run id, or a missing log directory, is `FAIL` for the log half: the run is deterministic and RV-S7 requires the log. The log is the copy the executor captured right after R15 (`RunResult.review_log`), never the live directory, which the next review run rebuilds |
 | S51 | `--timeout 30 .` over the review workspace's root, which holds its `.magi` and `.git` beside R14's binary and secret, exits 2 and `stderr` says there is nothing to review, and every `.magi/` or `.git/` path `stderr` names is left out as `ignored`. A protected file taken for review would make the input reviewable and end at the budget refusal instead; one opened and classified would carry `binary`, `secret` or `not utf-8`. The omission list is parsed entry by entry, each anchored on one of the product's causes, so a path may hold commas, semicolons or spaces; a list that is missing, empty (the product writes the marker only before an entry) or does not parse to the end is `FAIL`, never an empty pass | none |
 
+**What they copy from the product.** S50 and S51 read refusals, and a refusal writes no JSON, so
+`stderr` is the only place their numbers and omission lists appear. The scenarios parse it with
+patterns tied to the product's wording, and R12's input is sized with copies of the batch constants.
+`smoke/tests/test_rust_sync.py` reads the Rust source (`src/review/window.rs`, `src/review/error.rs`,
+`src/review/filter.rs`, `src/magi/mod.rs`) and fails when a copy or a pattern no longer matches, so a
+wording or constant change in the product shows up in the harness's own tests, not as an unexplained
+`FAIL` at SMOKE time.
+
 **How the input exists.** A review reads files from disk, and the product leaves out whatever
 `.gitignore` excludes when it reviews a directory inside a git repository. The environment's own
 `.gitignore` is `*`, so the review runs do not execute there. R12 to R16 name a separate workspace,

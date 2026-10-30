@@ -88,5 +88,52 @@ class BatchConstantTests(unittest.TestCase):
         self.assertEqual(sum(found.values()), code_review.FLOOR_SECS)
 
 
+class StderrWordingTests(unittest.TestCase):
+    """The texts S48-S51 parse out of the product's ``stderr``."""
+
+    # MAGI FIX (S6 loop 5): the regexes were tied to the product's wording with
+    # nothing to say when that wording moved (F1-b1).
+    def setUp(self) -> None:
+        self.error = _source("src/review/error.rs")
+        self.filter = _source("src/review/filter.rs")
+
+    def test_the_omission_causes_are_the_products(self) -> None:
+        body = re.search(r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n", self.filter, re.S)
+        self.assertIsNotNone(body, "SkipCause::as_str not found in src/review/filter.rs")
+        causes = re.findall(r'Self::\w+ => "([^"]+)"', body.group(1))
+        self.assertTrue(causes)
+        self.assertEqual(sorted(causes), sorted(code_review.OMISSION_CAUSES))
+
+    def test_the_omission_list_is_rendered_as_the_patterns_expect(self) -> None:
+        self.assertIn('write!(f, "{} ({})", self.path, self.cause.as_str())', self.filter)
+        self.assertIn('format!("; left out: {}{more}", shown.join(", "))', self.error)
+        self.assertIn('format!(", and {rest} more")', self.error)
+        rendered = "error: x; left out: a b (binary), .magi/c (ignored), and 2 more"
+        entries, failure = code_review._omissions(rendered)
+        self.assertEqual("", failure)
+        self.assertEqual([("a b", "binary"), (".magi/c", "ignored")], entries)
+
+    def test_the_budget_refusal_template_matches_the_pattern(self) -> None:
+        template = re.search(r'#\[error\(\s*"(\{batches\} batches leave.*?)",\s*budget_advice', self.error, re.S)
+        self.assertIsNotNone(template, "the Budget message was not found in src/review/error.rs")
+        self.assertIn('BudgetLimit::Timeout => format!("pass --timeout {min_secs} or more")', self.error)
+        text = re.sub(r"\\\n\s*", "", template.group(1))
+        values = {"batches": "2", "per_batch_wall_clock_secs": "15", "min_per_batch_secs": "783",
+                  "floor_secs": "15", "per_batch_ceiling_secs": "15"}
+        for name, value in values.items():
+            text = text.replace("{%s}" % name, value)
+        text = text.replace("{}", "pass --timeout 1566 or more")
+        match = code_review.BUDGET_PATTERN.fullmatch(text)
+        self.assertIsNotNone(match, text)
+        self.assertEqual(("2", "15", "15", "1566"),
+                         match.group("batches", "floor", "ceiling", "minimum"))
+
+    def test_the_fixed_phrases_are_the_products(self) -> None:
+        self.assertIn('"path is outside the workspace: {}"', self.error)
+        self.assertIn(code_review.OUTSIDE_WORKSPACE_TEXT, "path is outside the workspace")
+        self.assertIn('"nothing to review: no reviewable file in the input{}"', self.error)
+        self.assertIn(code_review.NOTHING_TO_REVIEW_TEXT, "nothing to review: no reviewable file")
+
+
 if __name__ == "__main__":
     unittest.main()
