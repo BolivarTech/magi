@@ -1058,6 +1058,28 @@ mod tests {
         assert_eq!(v["gate"]["criteria"]["false_positive"], GATE_FALSE_POSITIVE);
     }
 
+    #[tokio::test]
+    async fn the_request_sent_holds_forty_lines_each_side_not_the_whole_file() {
+        // [MAGI S6 loop 7, D-m1, refuted] the pipeline hands the gate the whole side
+        // (`gate_code`); what reaches `decide` is only RV10's +/-40 numbered lines around it.
+        let code: String = (1..=200).map(|i| format!("l{i}\n")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .withf(|r| {
+                let shown = r.state()["code"].as_str().unwrap_or_default();
+                shown.starts_with("60: l60\n")
+                    && shown.trim_end().ends_with("140: l140")
+                    && shown.lines().count() == 81
+            })
+            .returning(|r| answer(r.model().unwrap_or(""), REAL_DEFECT, 0.95));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g
+            .judge(&finding(Severity::Warning, Some(100)), Some(&code), None)
+            .await;
+        assert_eq!(v.state, GateState::Kept);
+    }
+
     #[test]
     fn the_state_carries_the_finding_and_forty_numbered_lines_each_side() {
         let code: String = (1..=200).map(|i| format!("l{i}\n")).collect();
