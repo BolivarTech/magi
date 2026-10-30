@@ -582,7 +582,9 @@ def _run_log_finding(run, match):
                         "the run published no run id, so its log lines cannot be told apart")
     # MAGI FIX (S6 loop 3): the log captured at run time, not the live directory (F4).
     captured = run.review_log
-    needle = ("run=%s" % run_id).encode("utf-8")
+    # MAGI FIX (S6 loop 7): the needle comes from logs.run_needle, which the
+    # sync test ties to the product's RUN_FIELD (F1a-m1).
+    needle = logs.run_needle(run_id)
     exact = match.group(0).encode("utf-8") if match else None
 
     def matcher(data):

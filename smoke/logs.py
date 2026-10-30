@@ -38,6 +38,30 @@ LOG_DIR_PARTS = runs.LOG_DIR_PARTS
 #: The prefix REQ-L63 puts on stderr, ahead of the run id.
 STDERR_RUN_PREFIX = "run: "
 
+#: The field that names the run on every log line (``RUN_FIELD`` in
+#: ``src/logging/render.rs``; ``smoke/tests/test_rust_sync.py`` pins the two).
+RUN_FIELD = "run="
+
+
+def run_needle(run_id):
+    """The bytes that bind a log line to one run: ``run=<id>``.
+
+    The needle ends at the id, not at the separator after it: an id is
+    ``<pid>-<16 hex>`` with the hex half a fixed width, so no id is a prefix
+    of another and the bare field still binds the line to exactly this run.
+
+    Args:
+        run_id: The id the run published.
+
+    Returns:
+        bytes: The field and the id, encoded as UTF-8.
+
+    Example:
+        >>> run_needle("4242-deadbeef")
+        b'run=4242-deadbeef'
+    """
+    return (RUN_FIELD + run_id).encode("utf-8")
+
 
 def log_directory() -> pathlib.Path:
     """The workspace's log directory.
