@@ -33,7 +33,9 @@ use magi_rs::review::pipeline::{
     plan_review, run_review, BatchConsult, ReviewDeps, ReviewOutcome, ReviewRequest,
     SystemReviewClock,
 };
-use magi_rs::review::report::{render_batch_reports, render_text, summary_json};
+use magi_rs::review::report::{
+    failed_batch_lines, render_batch_reports, render_text, summary_json,
+};
 use magi_rs::review::secrets::mask_secrets;
 use serde_json::{json, Map, Value};
 use tokio_util::sync::CancellationToken;
@@ -239,8 +241,9 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
 ///
 /// On success: `text` = the consolidated report, `json` = the summary, `consult` = the
 /// consensus (and the consolidated agents when `structured`). When consolidation failed or no
-/// batch completed: `text` = the paid batch reports, `json` = the summary, `consult` = null,
-/// `failure` = the redacted reason. The raw batch reports reach text only through the report
+/// batch completed: `text` = the paid batch reports, then one line per batch that did not
+/// complete with its cause, `json` = the summary, `consult` = null, `failure` = the redacted
+/// reason, followed by those causes joined by `; ` so the stderr line says why. The raw batch reports reach text only through the report
 /// renderers, which redact.
 ///
 /// # Arguments
@@ -258,16 +261,25 @@ pub(crate) fn render_outcome(o: ReviewOutcome, structured: bool) -> Rendered {
             consult: consult_object(&c, structured),
             failure: None,
         },
-        (_, error) => Rendered {
-            text: render_batch_reports(&o.batch_reports),
-            json,
-            consult: Value::Null,
-            failure: Some(
-                error
-                    .map(|e| redact_foreign_text(&e).as_str().to_string())
-                    .unwrap_or_else(|| NO_REPORT_MESSAGE.to_string()),
-            ),
-        },
+        // MAGI FIX (S6 loop 7, D-b2): the batch causes reach the text and the failure line, not
+        // only the JSON summary.
+        (_, error) => {
+            let causes = failed_batch_lines(&o.summary);
+            let reason = error
+                .map(|e| redact_foreign_text(&e).as_str().to_string())
+                .unwrap_or_else(|| NO_REPORT_MESSAGE.to_string());
+            let failure = if causes.is_empty() {
+                reason
+            } else {
+                format!("{reason} ({})", causes.trim_end().replace('\n', "; "))
+            };
+            Rendered {
+                text: format!("{}{causes}", render_batch_reports(&o.batch_reports)),
+                json,
+                consult: Value::Null,
+                failure: Some(failure),
+            }
+        }
     };
     egress_safe(rendered)
 }

@@ -170,9 +170,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
         "batches: {} of {} completed",
         s.batches_completed, s.batches_planned
     )?;
-    for (k, why) in &s.failed_batches {
-        writeln!(out, "batch {} did not complete: {why}", shown(*k))?;
-    }
+    out.push_str(&failed_batch_lines(s));
     if let Some(cause) = &s.gate_stopped {
         writeln!(out, "gate stopped: {cause}")?;
     }
@@ -352,6 +350,27 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
     }
     redact_strings(&mut v);
     v
+}
+
+/// One line per batch that did not complete, `batch k did not complete: <cause>` with `k` its
+/// 1-based number, in the order they failed; empty when every batch completed. The text is
+/// redacted, since the causes carry provider and transport text.
+///
+/// # Arguments
+///
+/// * `s` - The review's summary.
+///
+/// # Returns
+///
+/// The lines, each ending in a newline.
+// MAGI FIX (S6 loop 7, D-b2): one renderer of the batch causes for the report and the failure.
+pub fn failed_batch_lines(s: &ReviewSummary) -> String {
+    let mut out = String::new();
+    for (k, why) in &s.failed_batches {
+        // Writing into a `String` cannot fail.
+        let _ = writeln!(out, "batch {} did not complete: {why}", shown(*k));
+    }
+    redacted(&out)
 }
 
 /// The paid batch reports, when consolidation failed (M-9).
