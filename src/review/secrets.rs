@@ -1184,4 +1184,14 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn a_shown_path_escapes_every_code_point_of_the_tag_block() {
+        // [MAGI S6 loop 7, A2-c4] the table said the tag block's unassigned code points were
+        // included, but U+E0000 and U+E0002..U+E001F were left out and reached the output as is.
+        for c in ('\u{e0000}'..='\u{e007f}').filter(|c| !c.is_control()) {
+            let shown = display_path(&format!("a{c}b"));
+            assert!(!shown.contains(c), "{} kept", c.escape_unicode());
+        }
+    }
 }
