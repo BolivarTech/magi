@@ -121,7 +121,7 @@ pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
     consensus.findings = s
         .findings
         .iter()
-        .filter_map(|(f, _)| key_finding(f))
+        .filter_map(|(f, _)| key_finding(c.consensus.findings.first(), f))
         .collect();
     let unshown = s.findings.len().saturating_sub(consensus.findings.len());
     let mut out = ReportFormatter::new().format_report(&c.agents, &consensus);
@@ -136,19 +136,25 @@ pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
 /// The finding as magi-core's `Key Findings` lists it: the review's severity (after the
 /// agreement weight), its titles, its first detail and its sources.
 ///
-/// Built through `Deserialize`, the only constructor magi-core offers; `None` when that shape
-/// stops deserializing, which [`render_text`] declares instead of dropping the finding silently.
-fn key_finding(f: &ConsolidatedFinding) -> Option<DedupFinding> {
-    serde_json::from_value(json!({
-        "severity": f.severity,
-        "title": f.titles.join(TITLE_JOINER),
-        "detail": f.details.first().cloned().unwrap_or_default(),
-        "sources": f.sources,
-        "file": f.file,
-        "line": f.line,
-        "category": f.categories.first().cloned().unwrap_or_default(),
-    }))
-    .ok()
+/// magi-core offers no constructor for a `#[non_exhaustive]` [`DedupFinding`] (E4), so the
+/// value is a clone of `template`, a finding magi-core itself produced for this review, with
+/// every field assigned by name. A field magi-core renames or removes is a compile error here,
+/// never a runtime drop; a field it adds keeps the template's value, which magi-core made. A
+/// compile-time constructor proper (or a `trybuild` test of it) would need an API magi-core does
+/// not have, or a new dependency for an assertion this assignment already makes at compile time.
+/// `None` without a template, which [`render_text`] declares instead of dropping the finding.
+// MAGI FIX (S6 loop 5): field assignment on magi-core's own value, not a JSON round trip.
+fn key_finding(template: Option<&DedupFinding>, f: &ConsolidatedFinding) -> Option<DedupFinding> {
+    let mut key = template?.clone();
+    key.severity = f.severity;
+    key.title = f.titles.join(TITLE_JOINER);
+    key.detail = f.details.first().cloned().unwrap_or_default();
+    key.sources.clone_from(&f.sources);
+    key.file.clone_from(&f.file);
+    key.line = f.line;
+    key.category = f.categories.first().cloned().unwrap_or_default();
+    key.id = None;
+    Some(key)
 }
 
 /// Writes the review's own sections of [`render_text`].
@@ -718,7 +724,7 @@ mod tests {
             skipped: vec![],
             status: None,
         };
-        assert!(key_finding(&c.findings[0]).is_some());
+        assert!(key_finding(c.consensus.findings.first(), &c.findings[0]).is_some());
         let mut s = ReviewSummary::default();
         s.findings.push((c.findings[0].clone(), verdict));
         let text = render_text(&c, &s);
