@@ -505,21 +505,18 @@ impl BraceFamilyExtractor {
     fn match_block_keyword<'t>(&self, trimmed: &'t str) -> Option<(UnitKind, &'t str)> {
         for kw in &self.block_keywords {
             if let Some(rest) = keyword_rest(trimmed, kw) {
+                // MAGI FIX (S6 loop 5): the tables hold bare keywords and the modifiers are
+                // stripped before they are matched, so the `pub struct` and `export class` arms
+                // could never match; a bare keyword names the kind.
                 let kind = match kw.trim() {
-                    "struct" => Some(UnitKind::Struct),
-                    "pub struct" => Some(UnitKind::Struct),
-                    "pub(crate) struct" => Some(UnitKind::Struct),
-                    "enum" | "pub enum" | "pub(crate) enum" => Some(UnitKind::Enum),
-                    "trait" | "pub trait" | "pub(crate) trait" => Some(UnitKind::Trait),
-                    "impl" => Some(UnitKind::Impl),
-                    "class" | "pub class" | "export class" => Some(UnitKind::Class),
-                    "mod" | "pub mod" | "pub(crate) mod" => Some(UnitKind::Function), // module as function-like
-                    "interface" | "pub interface" | "export interface" => Some(UnitKind::Trait),
-                    "namespace" => Some(UnitKind::Class),
-                    "union" | "type" => Some(UnitKind::Struct),
-                    _ => Some(UnitKind::Class),
+                    "struct" | "union" | "type" => UnitKind::Struct,
+                    "enum" => UnitKind::Enum,
+                    "trait" | "interface" => UnitKind::Trait,
+                    "impl" => UnitKind::Impl,
+                    "mod" => UnitKind::Function, // module as function-like
+                    _ => UnitKind::Class,        // class, namespace, record, @interface
                 };
-                return kind.map(|k| (k, rest));
+                return Some((kind, rest));
             }
         }
         None
@@ -1017,18 +1014,10 @@ impl BraceFamilyExtractor {
         Self {
             language: "javascript".to_string(),
             exts: &["js", "jsx", "mjs"],
-            function_keywords: vec![
-                "function ".to_string(),
-                "async function ".to_string(),
-                "export function ".to_string(),
-                "export async function ".to_string(),
-                "export default function ".to_string(),
-            ],
-            block_keywords: vec![
-                "class ".to_string(),
-                "export class ".to_string(),
-                "export default class ".to_string(),
-            ],
+            // `export`, `default`, `async` and `abstract` are stripped before these tables are
+            // matched ([`JS_MODIFIERS`]), so they hold the bare keywords.
+            function_keywords: vec!["function ".to_string()],
+            block_keywords: vec!["class ".to_string()],
             declaration_keywords: vec![
                 "import ".to_string(),
                 "export ".to_string(),
@@ -1054,7 +1043,6 @@ impl BraceFamilyExtractor {
         ext.language = "typescript".to_string();
         ext.exts = &["ts", "tsx", "mts"];
         ext.block_keywords.push("interface ".to_string());
-        ext.block_keywords.push("export interface ".to_string());
         ext.declaration_keywords.push("type ".to_string());
         ext.declaration_keywords.push("export type ".to_string());
         ext.lexical_rules = LexicalRules::typescript();
