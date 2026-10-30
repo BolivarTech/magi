@@ -1474,6 +1474,31 @@ mod tests {
     }
 
     #[test]
+    fn a_js_identifier_with_a_dollar_names_its_function_and_its_member() {
+        // [MAGI S6 loop 6, B2b-c2] `$` was not an identifier character, so `$get() {` was no
+        // member to split at and `function $bar()` was unnamed.
+        let code =
+            "class K {\n  $get() {\n    return 1;\n  }\n  a$b() {\n  }\n}\nfunction $bar() {\n}\n";
+        let ext = BraceFamilyExtractor::javascript();
+        let units = extract(&ext, code, &(1..=9).collect::<Vec<u32>>());
+        assert!(
+            units.iter().any(|u| u.name == "$bar"),
+            "{:?}",
+            spans(&units)
+        );
+        let class = units
+            .iter()
+            .find(|u| u.kind == UnitKind::Class)
+            .expect("the class");
+        let parts = ext.split_block(class);
+        let names: Vec<&str> = parts.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            names.contains(&"$get") && names.contains(&"a$b"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
     fn a_java_class_and_a_cpp_namespace_split_into_their_members() {
         let java = "public class Foo {\n    private int n;\n\n    public void run() {\n        a();\n    }\n}\n";
         let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
