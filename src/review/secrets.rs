@@ -208,17 +208,25 @@ fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
-/// Whether the byte before `at` is a removed-line marker: a `-` that opens a line. A diff marks
-/// a removed line with `-`, which [`is_word`] counts as part of a token, so without this every
-/// token on a removed line would fail its left boundary.
+/// Whether `at` follows a run of `-` that no word character precedes: a removed-line marker (a
+/// `-` that opens a line), a `--` comment (`---` on a removed line, `+--` on an added one) or an
+/// option-like `--`. [`is_word`] counts `-` as part of a token, so without this every token on a
+/// removed line, or after a `--` comment, would fail its left boundary. A run glued to a word
+/// (`task--`) is still part of that word. O(length of the run).
+// MAGI FIX (S6 loop 5): only one `-` after a newline was a boundary, so `---ghp_…` was sent.
 fn after_diff_marker(bytes: &[u8], at: usize) -> bool {
-    let Some(marker) = at.checked_sub(1) else {
-        return false;
-    };
-    bytes.get(marker) == Some(&b'-')
-        && marker
-            .checked_sub(1)
-            .is_none_or(|before| bytes.get(before) == Some(&b'\n'))
+    let run = bytes
+        .get(..at)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .take_while(|b| **b == b'-')
+        .count();
+    run > 0
+        && at
+            .checked_sub(run + 1)
+            .and_then(|before| bytes.get(before))
+            .is_none_or(|b| !is_word(*b))
 }
 
 /// Whether at least `min` bytes of class `tail` start at `at`. O(min).
@@ -512,15 +520,19 @@ pub fn mask_secrets(text: &str) -> String {
 
 /// The token of `pattern`'s search `lane` whose left boundary is the end of a mask: the only
 /// tokens of `rest` (what follows the mask) that a search over the whole text can miss. One
-/// opens at the start of `rest`, which is a boundary; or one byte later behind a `-`, which
-/// opens `rest` like a removed-line marker opens a line. Every other match is decided by bytes
-/// inside `rest`, so the cached span already holds it. O(min).
+/// opens at the start of `rest`, which is a boundary; or right behind a run of `-` that opens
+/// `rest`, as [`after_diff_marker`] reads a run that opens a line. Every other match is decided
+/// by bytes inside `rest`, so the cached span already holds it. A change to the boundary rules
+/// must be mirrored here: the property test against the rescanning loop is what catches a
+/// mismatch. O(min + length of the run).
 // MAGI FIX (S6 loop 4): a token right after a mask and a `-` was left in the clear.
+// MAGI FIX (S6 loop 5): a run of hyphens after a mask is a boundary too, as after a newline.
 fn token_after_mask(pattern: &SecretPattern, lane: usize, rest: &str) -> Option<Range<usize>> {
     let bytes = rest.as_bytes();
+    let run = bytes.iter().take_while(|b| **b == b'-').count();
     pattern.matcher.token_at(lane, bytes, 0).or_else(|| {
-        (bytes.first() == Some(&b'-'))
-            .then(|| pattern.matcher.token_at(lane, bytes, 1))
+        (run > 0)
+            .then(|| pattern.matcher.token_at(lane, bytes, run))
             .flatten()
     })
 }
