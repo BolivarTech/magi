@@ -485,8 +485,9 @@ class RunResult:
     #: SOME history is there, and a rotation that destroyed most of it passes.
     baseline: dict | None = None
     #: The bytes of every file under the review workspace's ``.magi/logs``,
-    #: in sorted path order, read right after the run. ``None`` means the run
-    #: used no review workspace or the directory did not exist. Captured at run
+    #: in sorted path order, read right after the run. The workspace starts
+    #: without that directory, so this is what the run wrote. ``None`` means the
+    #: run used no review workspace or the directory did not exist. Captured at run
     #: time because the next review run rebuilds the workspace from nothing, so
     #: a scenario reading the live directory would depend on run order.
     review_log: tuple[bytes, ...] | None = None
@@ -797,6 +798,29 @@ def verify_visible(workspace, paths) -> None:
         raise HarnessError(
             "git cannot see the review input %s in %s; an ignore rule hides "
             "it from the product too" % (", ".join(hidden), workspace))
+
+
+def _skip_top_level_logs(magi_dir):
+    """A ``copytree`` filter that leaves out the ``logs`` directory of *magi_dir*.
+
+    The review workspace is built from the environment's ``.magi``, whose
+    ``logs/`` holds what earlier runs wrote. Leaving it out makes the log a
+    review run captures exactly what that run wrote.
+
+    Args:
+        magi_dir: The ``.magi`` directory being copied.
+
+    Returns:
+        callable: The ``ignore`` argument of :func:`shutil.copytree`.
+    """
+    top = os.path.normcase(os.path.abspath(magi_dir))
+
+    def ignore(directory, names):
+        if os.path.normcase(os.path.abspath(directory)) != top:
+            return set()
+        return {name for name in names if name == LOG_DIR_PARTS[1]}
+
+    return ignore
 
 
 def review_skipped_files() -> tuple[tuple[str, bytes], ...]:
@@ -1268,7 +1292,10 @@ class RunExecutor:
             if workspace.exists():
                 shutil.rmtree(workspace)
             workspace.mkdir(parents=True)
-            shutil.copytree(self._env.magi_dir, workspace / ".magi")
+            # MAGI FIX (S6 loop 6): the environment's logs/ came along, so the
+            # captured review log carried earlier runs' lines too (F1a-m4).
+            shutil.copytree(self._env.magi_dir, workspace / ".magi",
+                            ignore=_skip_top_level_logs(self._env.magi_dir))
             subprocess.run(git_command(workspace, "init", "-q"), check=True,
                            env=git_env(), capture_output=True,
                            timeout=GIT_TIMEOUT_S)
