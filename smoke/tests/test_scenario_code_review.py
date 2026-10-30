@@ -82,6 +82,12 @@ _ROOT_STDERR = (
     b"review.error=nothing_to_review" + _NL)
 
 
+#: R14's stderr: the ``skipped`` directory's binary and secret, each left out with its cause.
+_SKIPPED_STDERR = (
+    b"error: nothing to review: no reviewable file in the input; left out: "
+    b"skipped/leak.txt (secret), skipped/pixel.png (binary) review.error=nothing_to_review" + _NL)
+
+
 class WorkspaceRootScenarioTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 3, F2] S51: reviewing the workspace root never takes .magi or .git."""
 
@@ -211,8 +217,21 @@ class CodeReviewScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, _outcomes("S48", r)[code_review.S48_ASSERTIONS[1]])
 
     def test_s49_passes_on_nothing_to_review(self) -> None:
-        r = _result("R14", 2, None, b"error: nothing to review: no reviewable file in the input\n")
+        # [MAGI §6 MS2 loop 6, F1a-c4] the refusal must leave out R14's two files with their causes.
+        r = _result("R14", 2, None, _SKIPPED_STDERR)
         self.assertEqual({Outcome.PASS}, set(_outcomes("S49", r).values()))
+
+    def test_s49_fails_when_the_omission_causes_are_missing_or_wrong(self) -> None:
+        # [MAGI §6 MS2 loop 6, F1a-c4] "nothing to review" alone, swapped causes, a missing file or an
+        # extra one is not the classification R14 sets up.
+        bare = b"error: nothing to review: no reviewable file in the input" + _NL
+        swapped = _SKIPPED_STDERR.replace(b"(secret)", b"(tmp)").replace(b"(binary)", b"(secret)").replace(
+            b"(tmp)", b"(binary)")
+        missing = _SKIPPED_STDERR.replace(b", skipped/pixel.png (binary)", b"")
+        extra = _SKIPPED_STDERR.replace(b" review.error", b", skipped/x.rs (ignored) review.error")
+        for stderr in (bare, swapped, missing, extra):
+            r = _result("R14", 2, None, stderr)
+            self.assertEqual(Outcome.FAIL, _outcomes("S49", r)[code_review.S49_ASSERTIONS[1]], stderr)
 
     def test_s50_passes_when_stderr_and_the_run_log_carry_the_refusal(self) -> None:
         # [MAGI §6 MS2 F loop 2] RV-S7: stderr AND the run log, naming batches, ceiling, floor and minimum.
