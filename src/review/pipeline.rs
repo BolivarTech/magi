@@ -844,17 +844,37 @@ fn build_index(
     Ok(LexicalIndex::build(&texts, registry))
 }
 
-/// What the completed batches showed (U24): both ranges of each hunk, each whole file, and each
-/// file split by units whole when every batch holding one completed, else only its finished
-/// units. Never fails, because the batches are already paid: a unit-split file that cannot be
-/// read again (unreachable with the cache, which already holds it) counts only its finished
-/// units, with a WARN. O(items · log r).
-fn reviewed_of(
-    batches: &[ReviewBatch],
+/// One item a completed batch showed, as [`walk_completed`] hands it out.
+enum Shown<'b> {
+    /// A hunk: its new-side and old-side line ranges.
+    Hunk {
+        /// The file.
+        file: &'b str,
+        /// First and last line on the new side.
+        new: (u32, u32),
+        /// First and last line on the old side.
+        old: (u32, u32),
+    },
+    /// A file shown whole.
+    Whole {
+        /// The file.
+        file: &'b str,
+        /// Its line count.
+        lines: u32,
+    },
+}
+
+/// The one walk of the batches that [`reviewed_of`] (the validator's view) and [`faces_of`] (the
+/// gate's) share, so the two can never disagree on what was shown: `visit` gets each hunk and
+/// whole file of a completed batch, in batch order, and the result is each unit-split file's
+/// [`UnitProgress`] (every batch holding one of its units completed, and the ranges of the
+/// finished ones). O(items · log f) for f unit-split files.
+// MAGI FIX (S6 loop 6): one walk instead of two copies of the unit-progress logic (D-b1).
+fn walk_completed<'b>(
+    batches: &'b [ReviewBatch],
     completed: &BTreeSet<usize>,
-    source: &dyn ContentSource,
-) -> Reviewed {
-    let mut reviewed = Reviewed::default();
+    mut visit: impl FnMut(Shown<'b>),
+) -> BTreeMap<&'b str, UnitProgress> {
     let mut units: BTreeMap<&str, UnitProgress> = BTreeMap::new();
     for batch in batches {
         let done = completed.contains(&batch.index);
@@ -868,11 +888,17 @@ fn reviewed_of(
                     old_last_line,
                     ..
                 } if done => {
-                    reviewed.add_lines(file, *first_line, *last_line);
-                    reviewed.add_lines(file, *old_first_line, *old_last_line);
+                    visit(Shown::Hunk {
+                        file,
+                        new: (*first_line, *last_line),
+                        old: (*old_first_line, *old_last_line),
+                    });
                 }
                 BatchItem::WholeFile { file, lines, .. } if done => {
-                    reviewed.add_whole_file(file, *lines);
+                    visit(Shown::Whole {
+                        file,
+                        lines: *lines,
+                    });
                 }
                 BatchItem::Unit {
                     file,
@@ -893,6 +919,27 @@ fn reviewed_of(
             }
         }
     }
+    units
+}
+
+/// What the completed batches showed (U24): both ranges of each hunk, each whole file, and each
+/// file split by units whole when every batch holding one completed, else only its finished
+/// units. Never fails, because the batches are already paid: a unit-split file that cannot be
+/// read again (unreachable with the cache, which already holds it) counts only its finished
+/// units, with a WARN. O(items · log r).
+fn reviewed_of(
+    batches: &[ReviewBatch],
+    completed: &BTreeSet<usize>,
+    source: &dyn ContentSource,
+) -> Reviewed {
+    let mut reviewed = Reviewed::default();
+    let units = walk_completed(batches, completed, |shown| match shown {
+        Shown::Hunk { file, new, old } => {
+            reviewed.add_lines(file, new.0, new.1);
+            reviewed.add_lines(file, old.0, old.1);
+        }
+        Shown::Whole { file, lines } => reviewed.add_whole_file(file, lines),
+    });
     for (file, UnitProgress { all_done, finished }) in units {
         let whole = if all_done {
             match source.read(file) {
@@ -939,45 +986,14 @@ fn faces_of<'b>(
     completed: &BTreeSet<usize>,
 ) -> HashMap<&'b str, Faces> {
     let mut faces: HashMap<&str, Faces> = HashMap::new();
-    let mut units: BTreeMap<&str, UnitProgress> = BTreeMap::new();
-    for batch in batches {
-        let done = completed.contains(&batch.index);
-        for item in &batch.items {
-            match item {
-                BatchItem::Hunk {
-                    file,
-                    first_line,
-                    last_line,
-                    old_first_line,
-                    old_last_line,
-                    ..
-                } if done => {
-                    let f = faces.entry(file.as_str()).or_default();
-                    f.new.push((*first_line, *last_line));
-                    f.old.push((*old_first_line, *old_last_line));
-                }
-                BatchItem::WholeFile { file, .. } if done => {
-                    faces.entry(file.as_str()).or_default().whole = true;
-                }
-                BatchItem::Unit {
-                    file,
-                    first_line,
-                    last_line,
-                    ..
-                } => {
-                    let progress = units.entry(file.as_str()).or_insert(UnitProgress {
-                        all_done: true,
-                        finished: Vec::new(),
-                    });
-                    progress.all_done &= done;
-                    if done {
-                        progress.finished.push((*first_line, *last_line));
-                    }
-                }
-                BatchItem::Hunk { .. } | BatchItem::WholeFile { .. } => {}
-            }
+    let units = walk_completed(batches, completed, |shown| match shown {
+        Shown::Hunk { file, new, old } => {
+            let f = faces.entry(file).or_default();
+            f.new.push(new);
+            f.old.push(old);
         }
-    }
+        Shown::Whole { file, .. } => faces.entry(file).or_default().whole = true,
+    });
     for (file, UnitProgress { all_done, finished }) in units {
         if finished.is_empty() {
             continue;
