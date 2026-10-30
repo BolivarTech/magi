@@ -282,13 +282,16 @@ pub async fn run_review(
     let inner = content_source(resolved.source_kind, req.workspace, deps.git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(req.input, ReviewInput::File(_));
-    let (filtered, window, batches) = filter_and_plan(
-        resolved.files,
-        &source,
-        explicit,
-        deps.registry,
-        deps.is_ignored,
-        deps.pool,
+    let (filtered, window, batches) = with_not_utf8(
+        filter_and_plan(
+            resolved.files,
+            &source,
+            explicit,
+            deps.registry,
+            deps.is_ignored,
+            deps.pool,
+        ),
+        &resolved.not_utf8,
     )?;
     summary.skipped = filtered.skipped;
     summary
@@ -475,13 +478,16 @@ pub fn plan_review(
     let inner = content_source(resolved.source_kind, workspace, git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(input, ReviewInput::File(_));
-    let (filtered, _, batches) = filter_and_plan(
-        resolved.files,
-        &source,
-        explicit,
-        registry,
-        is_ignored,
-        pool,
+    let (filtered, _, batches) = with_not_utf8(
+        filter_and_plan(
+            resolved.files,
+            &source,
+            explicit,
+            registry,
+            is_ignored,
+            pool,
+        ),
+        &resolved.not_utf8,
     )?;
     Ok(PlanFingerprint {
         batches: batches.len(),
@@ -525,6 +531,15 @@ pub struct PlanFingerprint {
     pub batches: usize,
     /// SHA-256 over every kept file's path, diff and content, in input order.
     pub digest: [u8; 32],
+}
+
+/// `planned`, with every non-UTF-8 name of the input added to a `NothingToReview` error's
+/// omissions; any other result unchanged.
+fn with_not_utf8<T>(
+    planned: Result<T, ReviewError>,
+    _not_utf8: &[String],
+) -> Result<T, ReviewError> {
+    planned
 }
 
 /// Steps 2-3 of §5.0 over the resolved files, shared by [`run_review`] and [`plan_review`]: the
@@ -1091,6 +1106,41 @@ mod tests {
                 assert_eq!(
                     (skipped[0].path.as_str(), skipped[0].cause),
                     ("a.bin", SkipCause::Binary)
+                );
+            }
+            other => panic!("expected NothingToReview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nothing_to_review_names_the_non_utf8_names_beside_the_binaries() {
+        // [MAGI S6 loop 6, A] mixed case: a binary file and a non-UTF-8 name, nothing reviewable.
+        // The filter's error named the binary only; the non-UTF-8 name was dropped.
+        use crate::review::filter::SkipCause;
+        use crate::review::test_support::MapSource;
+        let files = vec![ReviewFile {
+            path: "a.bin".into(),
+            diff: None,
+        }];
+        let source = MapSource::new(&[("a.bin", "x\0y")], &[]);
+        let pool = [("m".to_string(), Some(POOL_WINDOW))];
+        let planned = filter_and_plan(
+            files,
+            &source,
+            false,
+            &LanguageRegistry::new(),
+            &|_| false,
+            &pool,
+        );
+        match with_not_utf8(planned, &["bad\u{fffd}.rs".to_string()]) {
+            Err(ReviewError::NothingToReview { skipped }) => {
+                let got: Vec<_> = skipped.iter().map(|s| (s.path.as_str(), s.cause)).collect();
+                assert_eq!(
+                    got,
+                    vec![
+                        ("a.bin", SkipCause::Binary),
+                        ("bad\u{fffd}.rs", SkipCause::NotUtf8)
+                    ]
                 );
             }
             other => panic!("expected NothingToReview, got {other:?}"),
