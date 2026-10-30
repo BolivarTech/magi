@@ -665,10 +665,12 @@ impl BraceFamilyExtractor {
 ///
 /// The search ends without a brace when line `i` already ends the declaration (its code ends in
 /// `;`), and before the first later line that is blank, is code ending in `;` (a statement: the
-/// declaration had no block; a comment ending in `;` does not count), or where `stops` holds (the next construct's start); comment lines
-/// are passed over. A line whose braces balance (`fn a() { x(); }`) opens nothing, so a one-line
-/// construct never takes the brace of the construct after it. O(k) for the k lines scanned,
-/// which never pass the next construct.
+/// declaration had no block; a comment ending in `;` does not count), opens a statement with a
+/// keyword of [`STATEMENT_KEYWORDS`] (`if (x) {`: a signature's brace is never there), or where
+/// `stops` holds (the next construct's start); comment lines are passed over. A line whose
+/// braces balance (`fn a() { x(); }`) opens nothing, so a one-line construct never takes the
+/// brace of the construct after it. O(k) for the k lines scanned, which never pass the next
+/// construct.
 fn open_brace_line(
     lines: &[&str],
     scanned: &[ScannedLine],
@@ -687,13 +689,32 @@ fn open_brace_line(
         return None;
     }
     // MAGI FIX (S6 loop 3): no fixed two-line cap; the declaration's own end bounds the search.
+    // MAGI FIX (S6 loop 6): a top-level `foo()` took the brace of the `if (x) {` after it.
     ((i + 1)..lines.len())
         .take_while(|&j| {
             !stops(j)
-                && !lines.get(j).is_some_and(|l| l.trim().is_empty())
+                && !lines
+                    .get(j)
+                    .is_some_and(|l| l.trim().is_empty() || opens_statement(l.trim()))
                 && (opens(j) || !ends_statement(j))
         })
         .find(|&j| opens(j))
+}
+
+/// Keywords that open a statement, never the rest of a declaration: the brace of a line that
+/// opens with one belongs to that statement.
+const STATEMENT_KEYWORDS: [&str; 10] = [
+    "if", "else", "for", "while", "do", "switch", "try", "catch", "finally", "return",
+];
+
+/// Whether a trimmed line opens with a keyword of [`STATEMENT_KEYWORDS`] as a whole word
+/// (`if (x) {`, `else {`; not `iffy()`). O(1): the keywords are short.
+fn opens_statement(trimmed: &str) -> bool {
+    STATEMENT_KEYWORDS.iter().any(|kw| {
+        trimmed.strip_prefix(kw).is_some_and(|rest| {
+            !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$')
+        })
+    })
 }
 
 /// The words that open a JavaScript or TypeScript variable declaration, whose value may be a
