@@ -116,6 +116,10 @@ PROTECTED_CAUSE = "ignored"
 #: Every cause the product prints for a file it leaves out
 #: (``SkipCause::as_str`` in ``src/review/filter.rs``). An entry is anchored on
 #: these words, so a path may hold commas, semicolons or spaces.
+#: ``missing`` (``filter::MISSING``) is deliberately absent: it is the cause of
+#: the ``<path> is not reviewable: missing`` error for a file named explicitly,
+#: never an entry of this list, and a listed file that vanishes mid-review is
+#: an I/O error (``disappeared during the review``), not an omission.
 OMISSION_CAUSES = ("binary", "not utf-8", "secret", "ignored",
                    "outside workspace", "too large", "not a regular file")
 
@@ -418,6 +422,13 @@ def _consensus_ok(consult, stdout):
 @scenario("S47", assertions=S47_ASSERTIONS, run="R12", needs_backend=True)
 def a_large_review_yields_one_report(run):
     """Check that a review over three or more batches yields one report.
+
+    A timed-out R12 never reaches this body. The executor builds a hung run's
+    output with ``exit_code`` 0, so asked directly the first assertion would
+    pass on a hang; the runner answers first instead, because S47 does not
+    declare ``inspects_timeouts``: the whole scenario is one ``CANNOT_TEST``
+    (``runner.py``, SS5.1). That is pinned end to end by
+    ``test_s47_never_judges_the_exit_of_a_timed_out_r12``.
 
     Args:
         run: R12's ``RunResult``, or ``None`` when the run produced no capture.
