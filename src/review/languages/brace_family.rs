@@ -382,8 +382,10 @@ impl BraceFamilyExtractor {
     /// body is never taken for one. O(k + n).
     fn is_declaration(&self, trimmed: &str) -> bool {
         // MAGI FIX (S6 loop 4): a C global with no declaration keyword fell into a gap.
+        // MAGI FIX (S6 loop 6): so did one whose initializer opens on a later line
+        // (`int a[] = {`, `int n =`); its value is the declaration's block or next statement.
         let semicolon = self.semicolon_declarations
-            && trimmed.ends_with(';')
+            && (trimmed.ends_with(';') || opens_initializer(trimmed))
             && !["}", "#", "//", "/*", "*"]
                 .iter()
                 .any(|p| trimmed.starts_with(p));
@@ -747,6 +749,16 @@ fn declaration_block(
     }
     let open = open_brace_line(lines, scanned, i, stops)?;
     Some((open, find_closing_brace(scanned, open)))
+}
+
+/// Whether a trimmed line opens an initializer it continues on the next lines: it ends in `=`
+/// (`static int n =`) or in `= {` (`int a[] = {`). O(n) in the line.
+fn opens_initializer(trimmed: &str) -> bool {
+    trimmed
+        .strip_suffix('{')
+        .unwrap_or(trimmed)
+        .trim_end()
+        .ends_with('=')
 }
 
 /// Whether a trimmed line opens a C or C++ linkage block (`extern "C" {`, `extern "C++" {`).
