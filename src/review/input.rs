@@ -2135,12 +2135,7 @@ mod tests {
             .expect("link");
         let git = FakeGit(Default::default());
         for (name, expected) in [("to_dir", "directory"), ("dangling.rs", "missing")] {
-            let r = resolve_input(
-                &ReviewInput::File(name.into()),
-                d.path(),
-                &git,
-                &allow_all,
-            );
+            let r = resolve_input(&ReviewInput::File(name.into()), d.path(), &git, &allow_all);
             assert!(
                 matches!(&r, Err(ReviewError::NotReviewable { cause, .. }) if *cause == expected),
                 "{name}: {:?}",
