@@ -745,6 +745,14 @@ fn regex_may_start(chars: &[char], i: usize, last_code: Option<char>) -> bool {
 ///
 /// Index into `scanned` of the line containing the matching closing brace.
 /// If no closing brace is found, returns the last line index (graceful degradation).
+///
+/// # Precondition
+///
+/// `scanned[open_idx]` opens a block (`brace_delta > 0`), as every caller guarantees: the
+/// extractors pass the line [`ScannedLine::brace_delta`] says opens one. For a line that opens
+/// none, the target depth is the depth after it, so the result is the first later line that
+/// closes below that depth, or the last line; never a panic. It is not asserted: a
+/// `debug_assert!` would hold the precondition only in debug builds.
 pub fn find_closing_brace(scanned: &[ScannedLine], open_idx: usize) -> usize {
     let Some(open_line) = scanned.get(open_idx) else {
         return scanned.len().saturating_sub(1);
