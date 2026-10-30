@@ -833,4 +833,16 @@ def g():
             assert!(!is_module_assignment(line), "{line}");
         }
     }
+
+    #[test]
+    fn a_wrapped_import_is_one_unit_with_its_header() {
+        // [MAGI S6 loop 5, B2-c2] the import group ended on `from foo import (`, so its
+        // continuation lines became orphan units reviewed without the header.
+        let code = "from foo import (\n    a,\n    b,\n)\nimport os, \\\n    sys\n\nx = 1\n";
+        let units = extract(code, &[3, 6]);
+        assert_eq!(
+            spans(&units),
+            vec![("imports", UnitKind::DeclarationGroup, 1, 6)]
+        );
+    }
 }
