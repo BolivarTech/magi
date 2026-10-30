@@ -271,6 +271,14 @@ class CodeReviewScenarioTests(unittest.TestCase):
         r = _result("R15", 2, None, _with_id(text))
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
 
+    def test_s50_fails_when_the_per_batch_ceiling_is_below_the_floor(self) -> None:
+        # [MAGI §6 MS2 loop 7, F1a-c3] derive_ceiling_from_timeout lifts every ceiling to the floor, so a
+        # refusal naming a ceiling below 15 s is not the product's arithmetic.
+        for ceiling in (b"0", b"14"):
+            text = _BUDGET_STDERR.replace(b"(per-batch ceiling 15 s)", b"(per-batch ceiling " + ceiling + b" s)")
+            r = _result("R15", 2, None, _with_id(text))
+            self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], ceiling)
+
     def test_s50_fails_when_the_floor_is_not_the_15_s_one(self) -> None:
         text = _BUDGET_STDERR.replace(b"the 15 s floor", b"the 20 s floor")
         r = _result("R15", 2, None, _with_id(text))
