@@ -134,6 +134,14 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
             r = _result("R16", 2, None, _with_id(stderr))
             self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], stderr)
 
+    def test_s51_fails_when_the_omission_list_is_empty(self) -> None:
+        # [MAGI S6 MS2 loop 5, F1-m3/F1-c1] the product writes "; left out: " only before at least one
+        # entry (``omissions`` in src/review/error.rs), so an empty list is drift and must not pass.
+        for tail in (b"", b" review.error=nothing_to_review"):
+            stderr = b"error: nothing to review: no reviewable file in the input; left out: " + tail + _NL
+            r = _result("R16", 2, None, _with_id(stderr))
+            self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], tail)
+
     def test_s51_reads_an_omission_list_cut_at_the_display_cap(self) -> None:
         stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)", b"skipped/pixel.png (binary), and 3 more")
         r = _result("R16", 2, None, _with_id(stderr))
