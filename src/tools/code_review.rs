@@ -666,6 +666,13 @@ impl CodeReviewTool {
 /// The bound holds for any `cap` that fits the result's skeleton with the summary's scalars
 /// (well under a kilobyte); below that the summary's scalars are kept and the cap is passed.
 ///
+/// Memory: the report and the summary are already held whole when this runs, and serializing
+/// them to measure holds one more copy of the same size, so the peak is about twice what the
+/// review already holds, never an unbounded amount. What the review holds is bounded upstream:
+/// the content by [`magi_rs::review::source::MAX_REVIEW_TOTAL_BYTES`] and each mage's reply by
+/// magi-core's response cap (`ResponseTooLarge`), per batch.
+// MAGI FIX (S6 loop 7, D-c2): the serialization's memory bound, stated.
+///
 /// # Arguments
 /// * `report` - The report text, redacted.
 /// * `summary` - The review's summary, redacted.

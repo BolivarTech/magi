@@ -840,6 +840,10 @@ fn renamed_old_paths(files: &[ReviewFile]) -> HashMap<String, String> {
 }
 
 /// The lexical index over both sides of every reviewed file. O(bytes reviewed).
+///
+/// `read_old` cannot panic here: it is a required method of [`ContentSource`] with no default
+/// body, and every implementation returns `Ok(None)` when the source has no old side (the
+/// worktree with no git revision behind it) or the path is absent from it.
 fn build_index(
     files: &[ReviewFile],
     source: &dyn ContentSource,
@@ -1078,7 +1082,11 @@ struct GateCode {
 /// `None` (the gate's `no location`) without a line, without a face that holds
 /// it, or when the read fails, with a WARN; with the cache that read is unreachable, because
 /// every face of a reviewed file was read during the preparation. The full side is returned:
-/// the gate's state shows only RV10's ±40 numbered lines of it (`gate::gate_state_of`).
+/// the gate's state shows only RV10's ±40 numbered lines of it (`gate::gate_state_of`; pinned by
+/// `the_request_sent_holds_forty_lines_each_side_not_the_whole_file`). Each finding copies its
+/// side out of the cache and decodes it once: at most two copies of one file
+/// ([`super::source::MAX_REVIEW_FILE_BYTES`]) live at a time, and the copy costs milliseconds
+/// against the seconds of the `decide` call it feeds, so no per-file decoded cache is kept.
 // MAGI FIX (S6 loop 6, D-m1): the new-side preference on a colliding line, stated.
 // MAGI FIX (S6 loop 7, D-b3/D-c3): a deleted line whose number is live is ambiguous, not new.
 fn gate_code(
@@ -1124,6 +1132,13 @@ fn gate_code(
 /// `\\srv\share\w`. Any other path (a volume GUID path, a device path, any path off Windows) is
 /// returned as it is. It works on the path's components, so a component that is not Unicode
 /// keeps every unit it had. O(components).
+///
+/// It is no sandbox check: it is applied to the workspace root only, so that RV09 can compare a
+/// model's reported absolute location with it, and nothing is opened or read through the
+/// result. The sandbox is the `guard` a review is given (the binary's `PathGuard`) at input
+/// resolution, and every read goes through the review's [`ContentSource`]. A path whose prefix is
+/// left in place only fails to match, and its finding is discarded (`file not reviewed`).
+// MAGI FIX (S6 loop 7, D-c4): why a prefix it leaves in place cannot widen the sandbox.
 fn without_verbatim_prefix(path: &Path) -> PathBuf {
     let mut components = path.components();
     let Some(Component::Prefix(prefix)) = components.next() else {

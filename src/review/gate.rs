@@ -79,6 +79,15 @@ const CAUSE_AMBIGUOUS_DIFF_SIDE: &str = "ambiguous diff side";
 /// batches, several mages) would otherwise spend the review clock on itself; pairs past the cap
 /// are not asked. A finding is `filtered` only when it has no unasked pair and every pair is;
 /// with pairs left unasked it stays `low_confidence`.
+///
+/// RV10's "once per consolidated finding" is read as one gate verdict per finding, not one
+/// call: a finding merged from different claims (RV12 keeps every title and detail) asks about
+/// each, because filtering on the answer to one claim would drop the others unjudged. The walk
+/// stops at the first answer that is not a confident false positive: a `kept` with later claims
+/// unasked stays `kept` (it is in the main list, so nothing was lost) and names them in
+/// [`GateVerdict::causes`] (`not every claim judged`, the rule settled in S6 loop 6). The cost is
+/// bounded by this cap and by the review clock, which every call of every walk is charged to.
+// MAGI FIX (S6 loop 7, C1-c1): the per-claim walk is a declared reading of RV10, not a defect.
 pub const MAX_GATE_QUESTIONS_PER_FINDING: usize = 3;
 
 /// What the gate made of a finding.
