@@ -1010,10 +1010,15 @@ fn faces_of<'b>(
 
 /// The code the gate sees for a finding (RV10 + RV21): the new side when the line lies in a new
 /// range or the file was shown whole, else the old side when it lies in an old range, numbered
-/// as that side; the old side of a renamed file is read under its old path (`old_paths`).
+/// as that side; the old side of a renamed file is read under its old path (`old_paths`). A
+/// line number that falls in both a new and an old range is read on the new side (RV21: the new
+/// side first, the old side for deleted lines), so a finding about a deleted line whose number
+/// collides with a live line is judged against the live one; the gate fails open, so the cost is
+/// a judgment on the wrong code, never a finding lost.
 /// `None` (the gate's `no location`) without a line, without a face that holds
 /// it, or when the read fails, with a WARN; with the cache that read is unreachable, because
 /// every face of a reviewed file was read during the preparation.
+// MAGI FIX (S6 loop 6, D-m1): the new-side preference on a colliding line, stated.
 fn gate_code(
     file: Option<&str>,
     line: Option<u32>,
