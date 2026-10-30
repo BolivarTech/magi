@@ -1503,4 +1503,65 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn an_arrow_function_or_function_expression_keeps_its_body() {
+        // [MAGI S6 loop 5, B2-m1] `const f = () => {` was a one-line declaration, so its body fell
+        // into a gap reviewed without the signature.
+        let js = "export const f = () => {\n  return 1;\n};\n\nfunction g() {\n  x();\n}\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &[2]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 1, 3)]);
+        for (ext, code, name, end) in [
+            (
+                BraceFamilyExtractor::typescript(),
+                "const h = async (a: number): Promise<void> => {\n  await a;\n};\n",
+                "h",
+                3,
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "const k = function (x) {\n  return x;\n};\n",
+                "k",
+                3,
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "let w = (\n  a,\n  b,\n) => {\n  return a;\n};\n",
+                "w",
+                6,
+            ),
+        ] {
+            let units = extract(&ext, code, &[2]);
+            assert_eq!(
+                spans(&units),
+                vec![(name, UnitKind::Function, 1, end)],
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaration_whose_value_opens_a_block_keeps_the_block() {
+        // [MAGI S6 loop 5, B2-m1] an object literal or a wrapped `use` ended on its first line and
+        // the rest of the declaration fell into a gap.
+        let js = "const o = {\n  a: 1,\n};\nconst p = 2;\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &[2]);
+        assert_eq!(
+            spans(&units),
+            vec![("constants", UnitKind::DeclarationGroup, 1, 4)]
+        );
+        let rust = "use a::{\n    b,\n    c,\n};\n\nfn f() {}\n";
+        let units = extract(&rust_extractor(), rust, &[2]);
+        assert_eq!(
+            spans(&units),
+            vec![("imports", UnitKind::DeclarationGroup, 1, 4)]
+        );
+        // A complete declaration takes no later block: the `if` stays out of it.
+        let js = "const a = 1\nif (a) {\n  x()\n}\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &[1]);
+        assert_eq!(
+            spans(&units),
+            vec![("constants", UnitKind::DeclarationGroup, 1, 1)]
+        );
+    }
 }
