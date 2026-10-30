@@ -31,9 +31,10 @@ use crate::tools::proc_group::tool_child_env;
 ///
 /// No hook, fsmonitor, external diff or pager runs; paths come back in UTF-8 and unquoted when
 /// possible; the `a/`/`b/` prefixes and three lines of context the diff split relies on are fixed
-/// (a repository's `diff.context=0` would silently shrink what the review sees); and
-/// `protocol.allow=never` cuts every transport. On Git for Windows `/dev/null` names a directory
-/// that does not exist, which disables hooks the same way.
+/// (a repository's `diff.context=0` would silently shrink what the review sees);
+/// `protocol.allow=never` cuts every transport; and `core.useReplaceRefs=false` reads the
+/// objects the pinned commit names, never a repository's replacements. On Git for Windows
+/// `/dev/null` names a directory that does not exist, which disables hooks the same way.
 pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
     "core.fsmonitor=false",
     "core.hooksPath=/dev/null",
@@ -47,6 +48,9 @@ pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
     "diff.context=3",
     "diff.interHunkContext=0",
     "protocol.allow=never",
+    // MAGI FIX (S6 loop 5): `refs/replace/*` is repository data; honoring it reviewed a
+    // substitute object instead of what the pinned commit holds (RV21).
+    "core.useReplaceRefs=false",
 ];
 
 /// The longest a git call may run: a git hung on a foreign lock or a network file system must
