@@ -1471,6 +1471,46 @@ mod tests {
     }
 
     #[test]
+    fn git_answers_false_only_inside_a_git_directory_where_the_review_fails_closed() {
+        // [MAGI S6 loop 7, A1-c1, false positive, measured with git 2.56] outside any repository
+        // `rev-parse --is-inside-work-tree` exits 128 ("not a git repository"), so the walk is
+        // reached (a_directory_outside_any_repository_is_walked_through_the_real_git). git
+        // prints `false` with exit 0 only inside a git directory (a bare repository, a `.git`):
+        // walking there would read the repository's internals, so the review refuses.
+        let d = tempfile::tempdir().expect("tempdir");
+        assert!(
+            d.path().ancestors().all(|a| !a.join(".git").exists()),
+            "TMPDIR sits inside a git repository"
+        );
+        let outside = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d.path())
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .expect("git runs");
+        assert!(!outside.status.success(), "outside a repository git fails");
+        let bare = d.path().join("b.git");
+        git(d.path(), &["init", "-q", "--bare", "b.git"]);
+        std::fs::write(bare.join("x.rs"), "fn x() {}\n").expect("write");
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let r = magi_rs::review::input::resolve_input(
+            &ReviewInput::Directory(".".into()),
+            &bare,
+            &ScrubbedGit::new(bare.clone()),
+            &allow,
+        );
+        match r {
+            Err(ReviewError::Git(msg)) => {
+                assert!(msg.contains("not inside a git work tree"), "{msg}")
+            }
+            Err(other) => panic!("expected a fail-closed git error, got {other:?}"),
+            Ok(_) => panic!("a git directory was walked"),
+        }
+    }
+
+    #[test]
     fn a_directory_outside_any_repository_still_honors_its_gitignore() {
         // [MAGI §6 MS2 A loop 1] RV22: a directory respects `.gitignore`, repository or not. Outside one, git
         // itself reads the rules (root and nested) through an empty repository of the review's own.
