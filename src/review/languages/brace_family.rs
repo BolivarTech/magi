@@ -72,7 +72,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
         let scanned = scanner.scan_all(content);
 
         // Detect all constructs
-        let constructs = self.detect_constructs(&lines, &scanned);
+        let constructs = self.detect_constructs(&lines, &scanned, false);
         let ranges: Vec<(u32, u32)> = constructs
             .iter()
             .map(|c| (c.start_line, c.end_line))
@@ -139,7 +139,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
         };
         let offset = u32::try_from(open + 1).unwrap_or(u32::MAX);
         let members: Vec<Member> = self
-            .detect_constructs(inner_lines, inner_scanned)
+            .detect_constructs(inner_lines, inner_scanned, true)
             .into_iter()
             .map(|c| {
                 (
@@ -238,8 +238,14 @@ struct Construct {
 }
 
 impl BraceFamilyExtractor {
-    /// Detect all constructs in the file.
-    fn detect_constructs(&self, lines: &[&str], scanned: &[ScannedLine]) -> Vec<Construct> {
+    /// Detect all constructs in the file or, with `members`, in a block's body, where a
+    /// signature that ends in `;` is a member too ([`Self::member_prototypes`]).
+    fn detect_constructs(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        members: bool,
+    ) -> Vec<Construct> {
         let mut constructs = Vec::new();
         let mut i = 0;
 
@@ -252,7 +258,7 @@ impl BraceFamilyExtractor {
             let trimmed = line.trim();
             let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
 
-            let stops = |j: usize| self.starts_construct(lines, scanned, j);
+            let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
             if let Some((kind, name)) = self.construct_keyword(trimmed) {
                 let start = self.scan_back_for_docs(lines, i);
                 let end = brace_block_end(lines, scanned, i, line_num, &stops);
@@ -266,11 +272,19 @@ impl BraceFamilyExtractor {
                 i = (end as usize).max(i + 1);
                 continue;
             }
-            if let Some(name) = self.signature_name(line, scanned.get(i)) {
+            let prototypes = members && self.member_prototypes();
+            if let Some(name) = self.signature_name(line, scanned.get(i), prototypes) {
                 let opens = open_brace_line(lines, scanned, i, &stops).is_some();
-                if opens || trimmed.ends_with('}') {
+                if opens || trimmed.ends_with('}') || prototypes {
                     let start = self.scan_back_for_docs(lines, i);
-                    let end = brace_block_end(lines, scanned, i, line_num, &stops);
+                    // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
+                    // `;`, which may sit on a later line of a wrapped signature.
+                    let end = if opens || trimmed.ends_with('}') {
+                        brace_block_end(lines, scanned, i, line_num, &stops)
+                    } else {
+                        u32::try_from(statement_end(lines, scanned, i, &stops) + 1)
+                            .unwrap_or(line_num)
+                    };
                     constructs.push(Construct {
                         kind: UnitKind::Function,
                         name,
@@ -417,7 +431,13 @@ impl BraceFamilyExtractor {
     /// Whether line `j` (0-based) is code that opens a construct: a function, block or
     /// declaration keyword, or a signature where [`Self::signature_name`] applies. O(k) in the
     /// keywords.
-    fn starts_construct(&self, lines: &[&str], scanned: &[ScannedLine], j: usize) -> bool {
+    fn starts_construct(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        j: usize,
+        members: bool,
+    ) -> bool {
         if scanned.get(j).is_none_or(|s| s.is_non_code) {
             return false;
         }
@@ -427,7 +447,9 @@ impl BraceFamilyExtractor {
         let trimmed = line.trim();
         self.construct_keyword(trimmed).is_some()
             || self.is_declaration(trimmed)
-            || self.signature_name(line, scanned.get(j)).is_some()
+            || self
+                .signature_name(line, scanned.get(j), members && self.member_prototypes())
+                .is_some()
     }
 
     /// The function name of a C-family signature line, for extractors with
@@ -443,11 +465,18 @@ impl BraceFamilyExtractor {
     ///
     /// * `line` - The line, untrimmed.
     /// * `scanned` - The scanner's record of the line; `None` falls back to the trimmed text.
+    /// * `prototypes` - Whether a line whose code ends in `;` is a signature too: an abstract
+    ///   member of an interface or class body ([`Self::member_prototypes`]).
     ///
     /// # Returns
     ///
     /// The function name, or `None` when the line is no signature.
-    fn signature_name(&self, line: &str, scanned: Option<&ScannedLine>) -> Option<String> {
+    fn signature_name(
+        &self,
+        line: &str,
+        scanned: Option<&ScannedLine>,
+        prototypes: bool,
+    ) -> Option<String> {
         // MAGI FIX (S6 loop 3): indentation no longer disqualifies a signature.
         if !self.signature_functions {
             return None;
@@ -456,7 +485,7 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 4): a trailing comment ending in `;` is not a prototype's `;`.
         let prototype = scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement);
         // An annotation or decorator (`@SuppressWarnings("x")`) is no signature either.
-        if prototype
+        if (prototype && !prototypes)
             || ["#", "//", "/*", "*", "}", "@"]
                 .iter()
                 .any(|p| trimmed.starts_with(p))
@@ -555,6 +584,14 @@ impl BraceFamilyExtractor {
         let arrow = lines.get(i..=open)?.iter().any(|l| l.contains("=>"));
         let function = value.starts_with("function") || value.starts_with("async function");
         (!name.is_empty() && (arrow || function)).then_some((name, close))
+    }
+
+    /// Whether a signature ending in `;` is a member of a block body: in Java, JavaScript and
+    /// TypeScript an interface or abstract class declares its methods so (`User find(long id);`).
+    /// C and C++ read such a line as a declaration instead (`semicolon_declarations`), which
+    /// groups the prototypes of a class body. O(1).
+    fn member_prototypes(&self) -> bool {
+        self.signature_functions && !self.semicolon_declarations
     }
 
     /// Generate a descriptive name for a declaration group.
@@ -670,6 +707,29 @@ fn opens_linkage_block(trimmed: &str) -> bool {
         .and_then(|r| r.strip_prefix('"'))
         .and_then(|r| r.split_once('"'))
         .is_some_and(|(_, after)| after.trim_start().starts_with('{'))
+}
+
+/// The 0-based line where the statement that starts at line `i` ends: the first line from `i`
+/// whose code ends in `;`, searched up to a blank line or the next construct (`stops`); `i`
+/// when none does. O(k) for the k lines searched.
+fn statement_end(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    i: usize,
+    stops: &dyn Fn(usize) -> bool,
+) -> usize {
+    let ends = |j: usize| {
+        scanned
+            .get(j)
+            .is_some_and(|s| !s.is_non_code && s.ends_statement)
+    };
+    if ends(i) {
+        return i;
+    }
+    ((i + 1)..lines.len())
+        .take_while(|&j| !stops(j) && !lines.get(j).is_some_and(|l| l.trim().is_empty()))
+        .find(|&j| ends(j))
+        .unwrap_or(i)
 }
 
 /// Find the 1-indexed line where the construct starting at line index `i` ends.
@@ -1484,7 +1544,7 @@ mod tests {
             (BraceFamilyExtractor::javascript(), "  function (e) {"),
             (BraceFamilyExtractor::javascript(), "  switch (k) {"),
         ] {
-            assert_eq!(ext.signature_name(line, None), None, "{line}");
+            assert_eq!(ext.signature_name(line, None, false), None, "{line}");
         }
     }
 
