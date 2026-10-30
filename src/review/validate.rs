@@ -52,6 +52,16 @@ pub struct Validation {
 }
 
 /// Whether `s` is `[A-Za-z_][A-Za-z0-9_]*`.
+///
+/// ASCII only, on purpose: the lexical index is built from ASCII identifier runs, so a citation
+/// it could not hold (a non-ASCII name such as `café`, a sigil name such as `$foo`, a Rust raw
+/// identifier such as `r#type`) is never a candidate, and the check fails open for it rather
+/// than discarding the finding. A language keyword is no exception to the shape: it is checked
+/// like any name, and found whenever the reviewed code uses it (the index keeps every run,
+/// keywords included). A cited name the code does not contain, a keyword the code never uses
+/// or an API the finding suggests, is the case the RV09 symbol check exists for, and its
+/// precision is measured under PM-S-2; a `critical` one is never discarded for it (RV-S35).
+// MAGI FIX (S6 loop 7, C1-c4): the ASCII rule and its fail-open direction, stated.
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     chars
@@ -578,6 +588,13 @@ mod tests {
         // The index splits non-ASCII identifiers into fragments; the citation rule skips them,
         // so a finding naming one is kept rather than discarded as an unknown symbol.
         assert!(cited_identifiers("calls `h\u{e9}llo` and `\u{4f60}\u{597d}`").is_empty());
+    }
+
+    #[test]
+    fn a_sigil_or_raw_identifier_citation_is_never_checked_so_it_cannot_be_discarded() {
+        // [MAGI S6 loop 7, C1-c4] `$foo` (JavaScript, PHP) and `r#type` (Rust) are not ASCII
+        // identifier shapes: like a non-ASCII name they are skipped, so the check fails open.
+        assert!(cited_identifiers("reads `$foo` and `r#type`").is_empty());
     }
 
     #[test]
