@@ -16,7 +16,8 @@ and refusing the inputs it must refuse before a model is paid for.
   discarded.
 * **S48** (R13): a path outside the workspace is refused with exit 2.
 * **S49** (R14): a directory holding only a binary and a file with a secret has
-  nothing to review: exit 2.
+  nothing to review: exit 2, and the omission list names each file with its
+  cause, ``binary`` and ``secret``, and nothing else.
 * **S50** (R15): ``--timeout 20`` over three batches is refused before any model
   call, naming the floor and the ``--timeout`` that would do.
 * **S51** (R16): reviewing the workspace ROOT, which holds ``.magi`` and
@@ -49,7 +50,10 @@ S47_ASSERTIONS = (
     "every discarded finding carries its cause",
 )
 S48_ASSERTIONS = ("exit 2", "stderr names the outside path")
-S49_ASSERTIONS = ("exit 2", "stderr says nothing to review")
+S49_ASSERTIONS = (
+    "exit 2",
+    "stderr says nothing to review, leaving out the binary as binary and the secret as secret",
+)
 S50_ASSERTIONS = (
     "exit 2",
     "stderr names the batches, the per-batch ceiling, the 15 s floor and a minimum --timeout",
@@ -90,6 +94,12 @@ CONSENSUS_TEXT_KEYS = ("consensus", "consensus_verdict")
 #: workspace). The scenario compares findings against what it knows on its own
 #: account, so the product's summary gains no field for the purpose.
 S47_FILES = runs.REVIEW_GEN_PATHS
+
+#: What R14's refusal must leave out: its binary as ``binary`` and its
+#: key-shaped file as ``secret`` (``runs.review_skipped_files``, in that order).
+S49_EXPECTED_OMISSIONS = tuple(
+    (path, cause) for (path, _), cause
+    in zip(runs.review_skipped_files(), ("binary", "secret")))
 
 #: The product's wording that S48 and S49 look for in stderr.
 OUTSIDE_WORKSPACE_TEXT = "outside the workspace"
@@ -474,9 +484,14 @@ def only_skipped_files_are_nothing_to_review(run):
     Yields:
         Finding: One per entry of :data:`S49_ASSERTIONS`, in that order.
     """
+    # MAGI FIX (S6 loop 6): the phrase alone passed a refusal that left out
+    # both files with the wrong causes, or none at all (F1a-c4).
     yield from _refusal(S49_ASSERTIONS, "R14", run,
-                        lambda text: NOTHING_TO_REVIEW_TEXT in text,
-                        "stderr does not say there is nothing to review")
+                        lambda text: NOTHING_TO_REVIEW_TEXT in text
+                        and _skipped_as_expected(text),
+                        "stderr does not say there is nothing to review with "
+                        "%s left out" % ", ".join(
+                            "%s (%s)" % entry for entry in S49_EXPECTED_OMISSIONS))
 
 
 @scenario("S50", assertions=S50_ASSERTIONS, run="R15")
@@ -642,6 +657,24 @@ def _omissions(stderr):
     if not entries:
         return None, "the omission list after '; left out: ' is empty"
     return entries, ""
+
+
+def _skipped_as_expected(stderr):
+    """Whether the refusal leaves out exactly R14's files with their causes.
+
+    Args:
+        stderr: The decoded stderr.
+
+    Returns:
+        bool: ``True`` when the omission list parses and, with ``\\``
+        separators read as ``/``, equals :data:`S49_EXPECTED_OMISSIONS` in any
+        order.
+    """
+    entries, _ = _omissions(stderr)
+    if entries is None:
+        return False
+    found = sorted((path.replace("\\", "/"), cause) for path, cause in entries)
+    return found == sorted(S49_EXPECTED_OMISSIONS)
 
 
 def _protected_read(stderr):
