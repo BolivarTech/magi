@@ -611,6 +611,35 @@ mod tests {
             Err(_) => panic!("opening the FIFO blocked"),
         }
     }
+    #[cfg(unix)] // a FIFO is a unix file type; Windows has no open that blocks this way.
+    #[test]
+    fn a_file_swapped_for_a_fifo_after_the_open_is_refused_without_blocking() {
+        // [MAGI S6 loop 7, A2-m1/A2-c1] TOCTOU: the re-verification after the open opened the
+        // path again with a plain, blocking open, so a FIFO swapped in after the first open hung
+        // the preparation (outside the review clock). The swap happens inside the first open.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("a.rs"), "fn f() {}\n").expect("write");
+        let src = WorktreeSource::new(root.path().to_path_buf());
+        let dir = root.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let swap_after_open = |p: &std::path::Path| {
+                let file = open_for_review(p)?;
+                std::fs::rename(dir.join("a.rs"), dir.join("a.old"))?;
+                let made = std::process::Command::new("mkfifo")
+                    .arg(dir.join("a.rs"))
+                    .status()?;
+                assert!(made.success(), "mkfifo");
+                Ok(file)
+            };
+            let _ = tx.send(src.read_with("a.rs", &swap_after_open));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Err(ReviewError::OutsideWorkspace(p))) => assert_eq!(p, "a.rs"),
+            Ok(other) => panic!("expected OutsideWorkspace, got {other:?}"),
+            Err(_) => panic!("the re-verification blocked on the FIFO"),
+        }
+    }
     use crate::review::test_support::FakeGit;
 
     #[test]
