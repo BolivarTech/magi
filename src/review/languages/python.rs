@@ -845,6 +845,15 @@ def g():
     }
 
     #[test]
+    fn a_decorator_wrapped_over_several_lines_belongs_to_its_function() {
+        // [MAGI S6 loop 6, B2b-c3] only lines opening with `@` were taken back, so the
+        // continuation lines of a wrapped decorator were reviewed apart from the function.
+        let code = "x = 1\n\n@route(\n    \"/a\",\n)\n@cache\ndef f():\n    return 1\n";
+        let units = extract(code, &[4]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 3, 8)]);
+    }
+
+    #[test]
     fn a_wrapped_import_is_one_unit_with_its_header() {
         // [MAGI S6 loop 5, B2-c2] the import group ended on `from foo import (`, so its
         // continuation lines became orphan units reviewed without the header.
