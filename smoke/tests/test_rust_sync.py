@@ -104,6 +104,14 @@ class StderrWordingTests(unittest.TestCase):
         self.assertTrue(causes)
         self.assertEqual(sorted(causes), sorted(code_review.OMISSION_CAUSES))
 
+    def test_missing_is_an_error_cause_never_an_omission_cause(self) -> None:
+        # [MAGI §6 MS2 loop 7, F1a-c2] "missing" names an explicit file in NotReviewable; it is not a
+        # SkipCause, so it can never reach the omission list and OMISSION_CAUSES must not carry it.
+        self.assertIn('pub(crate) const MISSING: &str = "missing";', self.filter)
+        self.assertIn('#[error("{} is not reviewable: {cause}", display_path(.path))]', self.error)
+        self.assertNotIn('=> "missing"', self.filter)
+        self.assertNotIn("missing", code_review.OMISSION_CAUSES)
+
     def test_the_omission_list_is_rendered_as_the_patterns_expect(self) -> None:
         self.assertIn('write!(f, "{} ({})", self.path, self.cause.as_str())', self.filter)
         self.assertIn('format!("; left out: {}{more}", shown.join(", "))', self.error)
