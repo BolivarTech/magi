@@ -919,4 +919,29 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn construct_ranges_are_sorted_and_disjoint_and_a_memberless_class_does_not_split() {
+        // [MAGI S6 loop 7, B2a] `ChangedLines::assign` needs sorted, disjoint ranges; and an
+        // empty split means "keep the class whole" to its one caller, `review::batching`.
+        let code = "import os\n\n\nX = 1\n\n@dec\ndef f(\n    a,\n):\n    return a\n\nclass A:\n    y = 2\n\nclass B:\n    def m(self):\n        pass\n";
+        let lines: Vec<&str> = code.lines().collect();
+        let constructs = detect_python_constructs(&lines);
+        assert_eq!(constructs.len(), 5);
+        for pair in constructs.windows(2) {
+            assert!(pair[0].start_line <= pair[0].end_line);
+            assert!(
+                pair[0].end_line < pair[1].start_line,
+                "{} overlaps {}",
+                pair[0].name,
+                pair[1].name
+            );
+        }
+        let all: Vec<u32> = (1..=u32::try_from(lines.len()).expect("small")).collect();
+        let class_a = extract(code, &all)
+            .into_iter()
+            .find(|u| u.name == "A")
+            .expect("class A");
+        assert!(PythonExtractor.split_block(&class_a).is_empty());
+    }
 }
