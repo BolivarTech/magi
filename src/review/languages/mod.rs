@@ -618,8 +618,29 @@ mod tests {
             ("a.ts", "export abstract class A {\n  abstract run(): void;\n  async go() {\n    await x();\n  }\n}\n"),
             ("a.py", "def f(\n    x,\n) -> None:\n    y = call(\n1,\n)\n    return y\n\nclass C(\n        Base,\n):\n    def a(self):\n        return 1\n"),
             ("a.go", "package p\n\nfunc f() {\n\tif x {\n\t} else {\n\t}\n}\n"),
+            // [MAGI S6 loop 6, B2a] the lexical forms that loop 6 named.
+            ("b.cpp", "void f() {\n    auto j = R\"x({\" })x\";\n}\nclass K {\n    void g() {\n    }\n};\n"),
+            ("b.js", "function f() {\n  if (ok) /}/.test(s);\n  const t = `a ${\"`\"} {`;\n}\nfunction g() {\n}\n"),
         ];
         let registry = LanguageRegistry::new();
+        // [MAGI S6 loop 6, B2a-c3] the extractors' ranges must be sorted and disjoint; nothing
+        // asserts it at runtime, so every registered extractor must have a sample here.
+        let sampled: HashSet<String> = samples
+            .iter()
+            .filter_map(|(path, _)| registry.get(path))
+            .map(|e| e.language_id().to_string())
+            .collect();
+        for ext in registry.extensions() {
+            let id = registry
+                .get(&format!("x.{ext}"))
+                .expect("registered")
+                .language_id()
+                .to_string();
+            assert!(
+                sampled.contains(&id),
+                "no coverage sample for {id} (.{ext})"
+            );
+        }
         for (path, code) in samples {
             let ext = registry.get(path).expect("a registered extension");
             let total = u32::try_from(code.lines().count()).expect("small");
