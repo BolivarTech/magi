@@ -192,6 +192,21 @@ class ReviewWorkspaceTests(unittest.TestCase):
             self.assertEqual(workspace.resolve(), pathlib.Path(top).resolve())
 
     @unittest.skipUnless(_git_available(), "git is required")
+    def test_the_environments_old_logs_are_not_copied_into_the_workspace(self) -> None:
+        # [MAGI §6 MS2 loop 6, F1a-m4] the captured review log must be what THIS run wrote, not a
+        # superset carrying the environment's earlier runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            old = root / ".magi" / "logs" / "magi-old.log"
+            old.parent.mkdir(parents=True)
+            old.write_bytes(b"ERROR run=old-run an earlier line\n")
+            workspace = executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertTrue((workspace / ".magi" / "magi.toml").is_file())
+            self.assertFalse((workspace / ".magi" / "logs").exists())
+            self.assertIsNone(executor._capture_review_log(runs.DEFINITIONS["R14"]))
+
+    @unittest.skipUnless(_git_available(), "git is required")
     def test_an_inherited_git_dir_does_not_redirect_the_workspace_init(self) -> None:
         # [MAGI §6 MS2 loop 6, F1a-c2] `git init` under an inherited GIT_DIR initialises THAT directory.
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
