@@ -38,6 +38,15 @@ const MAX_CHAR_ESCAPE_CHARS: usize = 10;
 /// character but `;` would do, since a literal is an operand.
 const STRING_MARK: char = '"';
 
+/// What `last_code` records for the `)` that closes the condition of an `if`, `while`, `for`
+/// or `with`: a statement follows it, not an operator, so a `/` there opens a regex literal.
+/// Any character that is neither an operand nor `;` would do; a control character never
+/// appears in code.
+const CONDITION_END_MARK: char = '\u{1}';
+
+/// Keywords whose parenthesized condition is followed by a statement (`if (x) /re/.test(s)`).
+const CONDITION_KEYWORDS: [&str; 4] = ["if", "while", "for", "with"];
+
 /// Lexical context states for the code scanner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LexicalState {
@@ -250,6 +259,9 @@ pub struct CodeScanner {
     rules: LexicalRules,
     state: LexicalState,
     depth: u32,
+    /// For each open `(` of a regex-literal language, whether it opens the condition of a
+    /// [`CONDITION_KEYWORDS`] keyword. It lives across lines, as a condition may span them.
+    parens: Vec<bool>,
 }
 
 impl CodeScanner {
@@ -259,6 +271,7 @@ impl CodeScanner {
             rules,
             state: LexicalState::Code,
             depth: 0,
+            parens: Vec::new(),
         }
     }
 
@@ -420,6 +433,17 @@ impl CodeScanner {
                     let c = char_at(&chars, i);
                     if !c.is_whitespace() {
                         last_code = Some(c);
+                    }
+                    // MAGI FIX (S6 loop 6): `if (ok) /}/.test(s)` read the `/` as a division,
+                    // so the regex's brace closed the enclosing block.
+                    if self.rules.regex_literals {
+                        if c == '(' {
+                            let word = word_before(&chars, i);
+                            self.parens
+                                .push(CONDITION_KEYWORDS.contains(&word.as_str()));
+                        } else if c == ')' && self.parens.pop() == Some(true) {
+                            last_code = Some(CONDITION_END_MARK);
+                        }
                     }
 
                     // Count braces
@@ -691,31 +715,23 @@ const REGEX_PRECEDING_KEYWORDS: [&str; 13] = [
 /// Whether the `/` at `i` (not `//` nor `/*`) starts a JS regular expression literal, by what
 /// precedes it on the line (`last_code`, the last non-blank code character): nothing, an
 /// operator or an opening bracket (`= /x/`, `(/x/`, `, /x/`), or a keyword of
-/// [`REGEX_PRECEDING_KEYWORDS`]. After an operand (an identifier, a number, a literal, `)`,
-/// `]`, `}`, `++`, `--`) it is a division.
+/// [`REGEX_PRECEDING_KEYWORDS`], or the `)` closing an `if`/`while`/`for`/`with` condition
+/// ([`CONDITION_END_MARK`]), or a `}`. After an operand (an identifier, a number, a literal,
+/// any other `)`, `]`, `++`, `--`) it is a division.
 ///
-/// A heuristic, declared: `}` and `)` always read as the end of an operand, so a regex that
-/// opens a statement after a block (`} /x/.test(s)`) or after an `if (...)` reads as a
-/// division; its braces then count, as they did before regex literals were known. An unclosed
-/// `/` misread as a regex ends with its line, so the misreading never spreads past it.
+/// A heuristic, declared: a `}` reads as the end of a block, so `/` after it opens a regex
+/// (`} /x/.test(s)`); dividing an object literal (`{a: 1} / 2`) is the case it misreads, and it
+/// yields `NaN`, never meaningful code. A `)` that closes a call or a group, and `]`, read as
+/// an operand's end. A condition keyword is recognized only on the line of its `(`. An unclosed
+/// `/` misread as a regex ends with its line, so a misreading never spreads past it.
 /// O(k) for the k characters before `i`.
 fn regex_may_start(chars: &[char], i: usize, last_code: Option<char>) -> bool {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     let before = chars.get(..i).unwrap_or(&[]);
     match last_code {
         None => true,
-        Some(c) if c == STRING_MARK || matches!(c, ')' | ']' | '}') => false,
-        Some(c) if is_word(c) => {
-            let word: String = before
-                .iter()
-                .rev()
-                .skip_while(|c| c.is_whitespace())
-                .take_while(|&&c| is_word(c))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            REGEX_PRECEDING_KEYWORDS.contains(&word.as_str())
+        Some(c) if c == STRING_MARK || matches!(c, ')' | ']') => false,
+        Some(c) if is_js_word_char(c) => {
+            REGEX_PRECEDING_KEYWORDS.contains(&word_before(chars, i).as_str())
         }
         // `a++ / 2` divides; a single `+` or `-` is an operator, so a regex may follow it.
         Some(c @ ('+' | '-')) => !before
@@ -726,6 +742,26 @@ fn regex_may_start(chars: &[char], i: usize, last_code: Option<char>) -> bool {
             .all(|&p| p == c),
         Some(_) => true,
     }
+}
+
+/// Whether `c` can be part of a JS identifier or keyword (`$` included).
+fn is_js_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// The identifier or keyword that ends right before `i`, blanks skipped (`if (` gives `if`);
+/// empty when a non-word character precedes. O(k) for the k characters before `i`.
+fn word_before(chars: &[char], i: usize) -> String {
+    let before = chars.get(..i).unwrap_or(&[]);
+    let mut word: Vec<char> = before
+        .iter()
+        .rev()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|&&c| is_js_word_char(c))
+        .copied()
+        .collect();
+    word.reverse();
+    word.into_iter().collect()
 }
 
 /// Find the closing brace for a construct that opens at `open_idx`.
