@@ -364,7 +364,10 @@ impl BraceFamilyExtractor {
         candidates
             .iter()
             .find_map(|&text| {
+                // MAGI FIX (S6 loop 6): `struct Foo x = {1};` is a variable of a struct type,
+                // a declaration, not a struct.
                 self.match_block_keyword(text)
+                    .filter(|(_, rest)| !(self.semicolon_declarations && declares_variable(rest)))
                     .map(|(kind, rest)| (kind, construct_name(rest, text)))
             })
             .or_else(|| {
@@ -751,6 +754,20 @@ fn declaration_block(
     Some((open, find_closing_brace(scanned, open)))
 }
 
+/// Whether the text after a C block keyword declares a variable of that type rather than the
+/// type: before its first `{`, `=` or `;` stand two words or more (`Foo x = {1};`,
+/// `Foo *p;`), with no `:` or `<` (a base clause or a template, which only a type has). A type
+/// names itself once (`Foo {`, `Foo;`). O(n) in the text.
+fn declares_variable(rest: &str) -> bool {
+    let Some(end) = rest.find(['{', '=', ';']) else {
+        return false;
+    };
+    let head = rest.get(..end).unwrap_or("");
+    !rest.get(end..).is_some_and(|t| t.starts_with('{'))
+        && !head.contains([':', '<'])
+        && head.split_whitespace().count() >= 2
+}
+
 /// Whether a trimmed line opens an initializer it continues on the next lines: it ends in `=`
 /// (`static int n =`) or in `= {` (`int a[] = {`). O(n) in the line.
 fn opens_initializer(trimmed: &str) -> bool {
@@ -892,12 +909,16 @@ fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
 }
 
 /// `text` after the balanced `<...>` it opens with, trimmed at its start; empty when the list
-/// never closes. O(n) in the text.
+/// never closes. The `>` of a `->` (`impl<T: Fn(u8) -> u8>`) closes nothing. O(n) in the text.
 fn skip_generics(text: &str) -> &str {
     let mut depth = 0u32;
+    let mut previous = '\0';
     for (i, c) in text.char_indices() {
+        let after_dash = std::mem::replace(&mut previous, c) == '-';
         match c {
             '<' => depth = depth.saturating_add(1),
+            // MAGI FIX (S6 loop 6): the `>` of a `->` in a bound closed the list early.
+            '>' if after_dash => {}
             '>' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
@@ -910,10 +931,18 @@ fn skip_generics(text: &str) -> &str {
     ""
 }
 
-/// The name of a construct: the identifier that opens `rest`, the text after its keyword, or,
-/// when none does, the identifier of the second word of `text`, the matched line.
+/// The name of a construct: the identifier that opens `rest`, the text after its keyword (after
+/// a parenthesized receiver it opens with, as in Go's `func (r *T) Name(`), or, when none
+/// does, the identifier of the second word of `text`, the matched line.
 fn construct_name(rest: &str, text: &str) -> String {
     let ident = |t: &str| -> String { t.chars().take_while(|&c| is_identifier_char(c)).collect() };
+    // MAGI FIX (S6 loop 6): a Go method's receiver left it unnamed.
+    let rest = match rest.trim_start().strip_prefix('(') {
+        Some(inner) => inner
+            .split_once(')')
+            .map_or(rest, |(_, after)| after.trim_start()),
+        None => rest,
+    };
     let name = ident(rest);
     if !name.is_empty() {
         return name;
