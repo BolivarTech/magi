@@ -285,4 +285,15 @@ mod tests {
         let none = ReviewError::NothingToReview { skipped: vec![] }.to_string();
         assert_eq!(none, "nothing to review: no reviewable file in the input");
     }
+
+    #[test]
+    fn the_debug_form_of_an_error_is_as_safe_as_its_message() {
+        // [MAGI S6 loop 7, A2-m3] the fields keep the raw text, so a derived `{:?}` printed the
+        // path, the ref or git's stderr unmasked; a `{:?}` anywhere was a way around Display.
+        for e in carrying(&format!("fatal: bad object {} a\u{1b}[2Jb", key())) {
+            let debug = format!("{e:?}");
+            assert_eq!(find_secret(&debug), None, "{debug}");
+            assert!(!debug.contains('\u{1b}'), "{debug}");
+        }
+    }
 }
