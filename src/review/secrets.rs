@@ -820,6 +820,45 @@ mod tests {
     }
 
     #[test]
+    fn a_shown_path_escapes_every_format_and_separator_character() {
+        // [MAGI S6 loop 5, review of A2-m3] the whole Cf set plus the line and paragraph
+        // separators (Zl, Zp): each can break, reorder or hide a report or run-log line.
+        let expected: &[(char, char)] = &[
+            ('\u{00ad}', '\u{00ad}'),
+            ('\u{0600}', '\u{0605}'),
+            ('\u{061c}', '\u{061c}'),
+            ('\u{06dd}', '\u{06dd}'),
+            ('\u{070f}', '\u{070f}'),
+            ('\u{0890}', '\u{0891}'),
+            ('\u{08e2}', '\u{08e2}'),
+            ('\u{180e}', '\u{180e}'),
+            ('\u{200b}', '\u{200f}'),
+            ('\u{2028}', '\u{202e}'),
+            ('\u{2060}', '\u{2064}'),
+            ('\u{2066}', '\u{206f}'),
+            ('\u{feff}', '\u{feff}'),
+            ('\u{fff9}', '\u{fffb}'),
+            ('\u{110bd}', '\u{110bd}'),
+            ('\u{110cd}', '\u{110cd}'),
+            ('\u{13430}', '\u{1343f}'),
+            ('\u{1bca0}', '\u{1bca3}'),
+            ('\u{1d173}', '\u{1d17a}'),
+            ('\u{e0001}', '\u{e0001}'),
+            ('\u{e0020}', '\u{e007f}'),
+        ];
+        for &(first, last) in expected {
+            for c in (first..=last).filter(|c| !c.is_control()) {
+                let shown = display_path(&format!("a{c}b"));
+                assert!(
+                    !shown.contains(c),
+                    "{:?} kept in {shown:?}",
+                    c.escape_unicode()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_shown_path_escapes_control_characters() {
         // [CP2 MS2 S1b1 loop 16] a file name can carry a terminal escape; the report never replays it.
         assert_eq!(display_path("a\u{1b}[31m.rs"), "a\\u{1b}[31m.rs");
