@@ -111,9 +111,16 @@ impl LanguageExtractor for BraceFamilyExtractor {
         units
     }
 
-    /// Splits an `impl`, class, trait, interface or namespace at its members: the constructs
-    /// between the block's opening brace and its matching closing brace, found as at the top
-    /// level (indented functions included). O(n) in the block's lines.
+    /// Splits an `impl`, class, trait, interface, namespace or Rust module at its members: the
+    /// constructs between the block's opening brace and its matching closing brace, found as at
+    /// the top level (indented functions included). O(n) in the block's lines.
+    ///
+    /// A heuristic, declared: the opening brace is the first code line of the unit whose braces
+    /// open more than they close. A header line before it that leaves a brace open (a const
+    /// generic argument wrapped over lines, `impl Foo<{` then `N` then `}> {`) is taken for the
+    /// block, so the members are searched in the wrong span and the block may not split, or split
+    /// at fewer members. Nothing is lost either way: [`split_into_members`] covers every line of
+    /// the unit with exactly one piece, and an unsplit unit is batched whole.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         // MAGI FIX (S6 loop 3): a block too large for one batch is reviewed method by method.
         if !matches!(
@@ -1025,6 +1032,12 @@ impl BraceFamilyExtractor {
     }
 
     /// C++ extractor.
+    ///
+    /// A `.h` header is C ([`Self::c`]): the extension does not say which language a header is
+    /// written in, and C is the one both languages parse. A C++ header named `.h` is scanned
+    /// with C rules, so its classes and namespaces are not units of their own (their lines fall
+    /// into gap units, each line in exactly one) and a C++ raw string in it is read as ordinary
+    /// strings; name C++ headers `.hpp` or `.hxx` to get the C++ extractor.
     pub fn cpp() -> Self {
         let mut ext = Self::c();
         ext.language = "cpp".to_string();

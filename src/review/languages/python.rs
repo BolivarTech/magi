@@ -164,6 +164,12 @@ struct OpenString {
 /// What carries a Python logical line over to the next physical line: open brackets, an open
 /// triple-quoted string, or a trailing `\`. Strings and comments are read so that their
 /// brackets do not count.
+///
+/// It overlaps [`CodeScanner`] on purpose: the scanner counts braces only and knows nothing of
+/// `(` and `[`, which carry a Python line as much as `{` does. [`continued_lines`] takes the
+/// union of both, so a string state this reader drops (a one-quote string continued by an
+/// escaped newline) is still marked by the scanner's `starts_in_literal`. A change to Python's
+/// string syntax must reach both.
 #[derive(Default)]
 struct LogicalLines {
     depth: u32,
