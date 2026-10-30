@@ -637,10 +637,16 @@ GIT_TIMEOUT_S = 60
 REVIEW_OUTSIDE_COMPONENT = "smoke-hostile-target"
 REVIEW_OUTSIDE_PATH = "../" + REVIEW_OUTSIDE_COMPONENT
 
-#: The total R15 asks for: three batches cannot each get the product's floor
-#: out of it. R16 asks for it too, so a protected file wrongly taken for review
-#: ends at the budget refusal instead of at a model.
-REVIEW_TOO_SHORT_TIMEOUT_S = 30
+#: The total R15 asks for, below what even ONE batch needs at the product's
+#: floor under the most lenient config: no rotation and no retry give an attempt
+#: factor of 1.2, so a batch needs 6 s (classifier) + 15 s x 1.2 = 24 s. The
+#: refusal therefore fires at any batch count and any ``[magi]`` setting. R16
+#: asks for it too, so a protected file wrongly taken for review ends at the
+#: budget refusal instead of at a model.
+# MAGI FIX (S6 loop 6): 30 s refused one batch only with rotation or retry on;
+# under ``max_rotations = 0`` and retry disabled one batch got 30 s >= 24 s and
+# reached the trio (F1a-c1).
+REVIEW_TOO_SHORT_TIMEOUT_S = 20
 
 #: The input R16 reviews: the review workspace's root, which holds its
 #: ``.magi`` and ``.git`` beside the files the run writes.

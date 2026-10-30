@@ -27,7 +27,7 @@ def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",
 
 
 RUN_ID = "4242-0123456789abcdef"
-#: [MAGI §6 MS2 loop 4, F1-g34] the product's arithmetic for R15's 30 s over three batches: 30 / 3 = 10 s
+#: [MAGI §6 MS2 loop 4, F1-g34] the product's arithmetic for a 30 s total over three batches: 30 / 3 = 10 s
 #: per batch, a ceiling the derivation lifts to the 15 s floor, and a minimum of 3 x 783 = 2349 s.
 _BUDGET_MSG = (b"3 batches leave 10 s per batch, less than the 783 s a batch needs at the 15 s floor "
                b"(per-batch ceiling 15 s); pass --timeout 2349 or more")
@@ -100,7 +100,7 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
 
     def test_s51_fails_when_a_protected_file_was_taken_for_review(self) -> None:
         # A .magi/magi.toml taken for review makes the input reviewable: the run reaches the budget
-        # refusal (--timeout 30) instead of "nothing to review".
+        # refusal (--timeout 20) instead of "nothing to review".
         r = _result("R16", 2, None, _with_id(_BUDGET_STDERR))
         outcomes = _outcomes("S51", r)
         self.assertEqual(Outcome.FAIL, outcomes[code_review.S51_ASSERTIONS[1]])
@@ -227,7 +227,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
                 code_review.S50_ASSERTIONS[1]], text)
 
     def test_s50_fails_when_the_minimum_does_not_exceed_the_total_asked_for(self) -> None:
-        text = _BUDGET_STDERR.replace(b"--timeout 2349", b"--timeout 30")
+        text = _BUDGET_STDERR.replace(b"--timeout 2349", b"--timeout %d" % runs.REVIEW_TOO_SHORT_TIMEOUT_S)
         r = _result("R15", 2, None, _with_id(text))
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
 

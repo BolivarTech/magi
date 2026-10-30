@@ -17,13 +17,13 @@ and refusing the inputs it must refuse before a model is paid for.
 * **S48** (R13): a path outside the workspace is refused with exit 2.
 * **S49** (R14): a directory holding only a binary and a file with a secret has
   nothing to review: exit 2.
-* **S50** (R15): ``--timeout 30`` over three batches is refused before any model
+* **S50** (R15): ``--timeout 20`` over three batches is refused before any model
   call, naming the floor and the ``--timeout`` that would do.
 * **S51** (R16): reviewing the workspace ROOT, which holds ``.magi`` and
   ``.git`` beside a binary and a secret, is "nothing to review": no protected
   file was taken for review, and any protected path the refusal names is left
   out as ``ignored`` (never read and classified by its content). Under
-  ``--timeout 30``, a protected file wrongly taken for review ends at the
+  ``--timeout 20``, a protected file wrongly taken for review ends at the
   budget refusal, never at a model.
 
 S48-S51 need no backend. That no model was contacted is not observable from
@@ -68,7 +68,8 @@ EXIT_MISUSE = 2
 MIN_BATCHES = runs.REVIEW_MIN_BATCHES
 
 #: Batches S50's refusal must name: the refusal fires at any batch count
-#: (30 s is below what even one batch needs at the floor), and a pool that
+#: (20 s is below what even one batch needs at the floor, see
+#: ``runs.REVIEW_TOO_SHORT_TIMEOUT_S``), and a pool that
 #: measured a window larger than the unmeasured default plans fewer than
 #: :data:`MIN_BATCHES` over the same tree. Requiring three there would be a
 #: FAIL for the environmental reason S47 reports as CANNOT_TEST; the tree's
@@ -612,7 +613,7 @@ def the_workspace_root_never_reviews_magi_or_git(run):
     untested (F2). R16 reviews the root, which holds only the environment's
     ``.magi``, git's ``.git`` and R14's binary and secret: the product must have
     nothing to review. A protected file taken for review would make the input
-    reviewable and end at the budget refusal of ``--timeout 30`` instead; one
+    reviewable and end at the budget refusal of ``--timeout 20`` instead; one
     read and classified by its content would be named with that cause.
 
     Args:
