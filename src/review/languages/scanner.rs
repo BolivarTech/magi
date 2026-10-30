@@ -1263,6 +1263,35 @@ void h() {
     }
 
     #[test]
+    fn a_backtick_inside_a_template_expression_string_or_regex_is_text() {
+        // [MAGI S6 loop 6, B2a-m1] the template state ignored the lexical context of `${...}`,
+        // so a backtick in a string or a regex there closed the template and the scanner lost
+        // its place for the rest of the file.
+        for template in [
+            r#"const a = `x ${"`"} y`;"#,
+            "const b = `x ${/`/.source} y`;",
+            "const c = `x ${'`' + `n${'}'}`} y`;",
+            "const d = `x ${ {k: '`'}.k } y`;",
+        ] {
+            let code = format!("{template}\nfunction f() {{\n}}\n");
+            let r = CodeScanner::new(LexicalRules::javascript()).scan_all(&code);
+            assert_eq!(
+                r.iter().map(|l| l.depth_after).collect::<Vec<_>>(),
+                vec![0, 1, 0],
+                "{template}"
+            );
+            assert!(!r[1].starts_in_literal, "{template}");
+        }
+        let code = "const e = `x ${\n  \"`\"\n} y`;\nfunction f() {\n}\n";
+        let r = CodeScanner::new(LexicalRules::javascript()).scan_all(code);
+        assert_eq!(
+            r.iter().map(|l| l.depth_after).collect::<Vec<_>>(),
+            vec![0, 0, 0, 1, 0],
+            "an expression spanning lines"
+        );
+    }
+
+    #[test]
     fn a_template_nested_in_a_template_expression_leaves_the_depth_unchanged() {
         // [MAGI S6 loop 4, B2] declared heuristic: `${...}` is not tracked, and a nested
         // template must not drift the depth of the code after it.
