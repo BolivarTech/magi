@@ -1076,4 +1076,27 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn the_aws_secret_key_is_found_under_its_common_aliases() {
+        // [MAGI S6 loop 7, A2-c3] `AWS_SECRET_KEY` and the STS `SecretAccessKey` field name the
+        // same key and were sent. A name with neither `aws` nor `access` stays ordinary text.
+        let tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        for name in [
+            concat!("AWS_SECRET", "_KEY"),
+            concat!("aws-secret", "-key"),
+            concat!("Secret", "AccessKey"),
+            concat!("secret_", "access_key"),
+        ] {
+            assert_eq!(
+                find_secret(&format!("{name}={tail}")),
+                Some("aws-secret-key"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            find_secret(&format!("{}={tail}", concat!("secret", "_key"))),
+            None
+        );
+    }
 }
