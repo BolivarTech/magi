@@ -253,8 +253,7 @@ impl BraceFamilyExtractor {
             let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
 
             let stops = |j: usize| self.starts_construct(lines, scanned, j);
-            if let Some((kind, keywords, matched)) = self.construct_keyword(trimmed) {
-                let name = extract_name_from_line(matched, keywords);
+            if let Some((kind, name)) = self.construct_keyword(trimmed) {
                 let start = self.scan_back_for_docs(lines, i);
                 let end = brace_block_end(lines, scanned, i, line_num, &stops);
                 constructs.push(Construct {
@@ -323,12 +322,12 @@ impl BraceFamilyExtractor {
         constructs
     }
 
-    /// The keyword that opens a block or function construct on a trimmed line, its table, and
-    /// the text it matched: the line with its visibility and qualifiers stripped
-    /// ([`Self::strip_modifiers`]) or, failing that, the line as written. Block keywords are
-    /// tried before function keywords: Java's `public class` would otherwise read as a function
-    /// named `class`. O(k + n) for k keywords and a line of n characters.
-    fn construct_keyword<'t>(&self, trimmed: &'t str) -> Option<(UnitKind, &[String], &'t str)> {
+    /// The kind and name of the block or function construct a trimmed line opens, matched on
+    /// the line with its visibility and qualifiers stripped ([`Self::strip_modifiers`]) or,
+    /// failing that, on the line as written. Block keywords are tried before function keywords:
+    /// Java's `public class` would otherwise read as a function named `class`. O(k + n) for k
+    /// keywords and a line of n characters.
+    fn construct_keyword(&self, trimmed: &str) -> Option<(UnitKind, String)> {
         // MAGI FIX (S6 loop 4): qualifiers combine freely (`pub(super) async unsafe fn`); the
         // tables of fixed prefixes missed most combinations.
         let candidates = [self.strip_modifiers(trimmed, true), trimmed];
@@ -336,12 +335,12 @@ impl BraceFamilyExtractor {
             .iter()
             .find_map(|&text| {
                 self.match_block_keyword(text)
-                    .map(|kind| (kind, self.block_keywords.as_slice(), text))
+                    .map(|(kind, rest)| (kind, construct_name(rest, text)))
             })
             .or_else(|| {
                 candidates.iter().find_map(|&text| {
                     self.match_function_keyword(text)
-                        .map(|kind| (kind, self.function_keywords.as_slice(), text))
+                        .map(|rest| (UnitKind::Function, construct_name(rest, text)))
                 })
             })
     }
@@ -392,14 +391,11 @@ impl BraceFamilyExtractor {
         }
     }
 
-    /// Check if the line starts a function declaration.
-    fn match_function_keyword(&self, trimmed: &str) -> Option<UnitKind> {
-        for kw in &self.function_keywords {
-            if trimmed.starts_with(kw.as_str()) {
-                return Some(UnitKind::Function);
-            }
-        }
-        None
+    /// The text after the function keyword `trimmed` opens with ([`keyword_rest`]), if any.
+    fn match_function_keyword<'t>(&self, trimmed: &'t str) -> Option<&'t str> {
+        self.function_keywords
+            .iter()
+            .find_map(|kw| keyword_rest(trimmed, kw))
     }
 
     /// Whether line `j` (0-based) is code that opens a construct: a function, block or
@@ -459,11 +455,12 @@ impl BraceFamilyExtractor {
         Some(name)
     }
 
-    /// Check if the line starts a block declaration.
-    fn match_block_keyword(&self, trimmed: &str) -> Option<UnitKind> {
+    /// The kind of the block `trimmed` opens and the text after its keyword
+    /// ([`keyword_rest`]), if it opens one.
+    fn match_block_keyword<'t>(&self, trimmed: &'t str) -> Option<(UnitKind, &'t str)> {
         for kw in &self.block_keywords {
-            if trimmed.starts_with(kw.as_str()) {
-                return match kw.trim() {
+            if let Some(rest) = keyword_rest(trimmed, kw) {
+                let kind = match kw.trim() {
                     "struct" => Some(UnitKind::Struct),
                     "pub struct" => Some(UnitKind::Struct),
                     "pub(crate) struct" => Some(UnitKind::Struct),
@@ -477,6 +474,7 @@ impl BraceFamilyExtractor {
                     "union" | "type" => Some(UnitKind::Struct),
                     _ => Some(UnitKind::Class),
                 };
+                return kind.map(|k| (k, rest));
             }
         }
         None
@@ -654,28 +652,52 @@ fn strip_modifier<'t>(text: &'t str, word: &str) -> Option<&'t str> {
     }
 }
 
-/// Extract a name from a line given a set of keywords.
-fn extract_name_from_line(trimmed: &str, keywords: &[String]) -> String {
-    for kw in keywords {
-        if let Some(rest) = trimmed.strip_prefix(kw.as_str()) {
-            // Take the first identifier-like token
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() {
-                return name;
+/// The text after keyword `kw` at the start of `text`. A table keyword ends in a blank
+/// (`impl `), and the word may also be followed directly by a generic parameter list
+/// (`impl<T: Clone> Foo<T>`), which is passed over. `None` when `text` does not open with the
+/// keyword. O(n) in the text.
+fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
+    if let Some(rest) = text.strip_prefix(kw) {
+        return Some(rest);
+    }
+    // MAGI FIX (S6 loop 5): `impl<T> Foo<T>` matched no `impl ` and its methods lost the header.
+    let word = kw.strip_suffix(' ')?;
+    let rest = text.strip_prefix(word)?;
+    rest.starts_with('<').then(|| skip_generics(rest))
+}
+
+/// `text` after the balanced `<...>` it opens with, trimmed at its start; empty when the list
+/// never closes. O(n) in the text.
+fn skip_generics(text: &str) -> &str {
+    let mut depth = 0u32;
+    for (i, c) in text.char_indices() {
+        match c {
+            '<' => depth = depth.saturating_add(1),
+            '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return text.get(i + c.len_utf8()..).unwrap_or("").trim_start();
+                }
             }
+            _ => {}
         }
     }
-    // Fallback: take first word-like token
-    trimmed
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("unnamed")
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect::<String>()
+    ""
+}
+
+/// The name of a construct: the identifier that opens `rest`, the text after its keyword, or,
+/// when none does, the identifier of the second word of `text`, the matched line.
+fn construct_name(rest: &str, text: &str) -> String {
+    let ident = |t: &str| -> String {
+        t.chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect()
+    };
+    let name = ident(rest);
+    if !name.is_empty() {
+        return name;
+    }
+    ident(text.split_whitespace().nth(1).unwrap_or("unnamed"))
 }
 
 /// Return all pre-configured brace-family extractors.
