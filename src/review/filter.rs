@@ -319,6 +319,15 @@ fn read_side(read: Result<Option<Vec<u8>>, ReviewError>) -> Result<Side, ReviewE
 /// excludes, which the enumeration lists (untracked ignored files are never enumerated).
 /// Outside any repository the set is empty.
 ///
+/// `pathspec` is a literal path, never a glob: the production git sets
+/// `GIT_LITERAL_PATHSPECS=1` on every call, so a name holding `*`, `?` or `[` matches only
+/// itself. Measured with git 2.56 (reviews of S6 loops 5 and 6 raised it twice): a tracked or
+/// untracked ignored file named `a[1].rs` is listed with or without the variable, because git
+/// tries the exact name before the glob; without it the glob also names `a1.rs`. Pinned by
+/// `a_tracked_ignored_file_named_with_glob_characters_keeps_its_ignore_verdict` and
+/// `an_ignored_file_with_glob_characters_in_its_name_keeps_its_ignore_verdict`
+/// (`src/system/review_git.rs`).
+///
 /// # Arguments
 ///
 /// * `input` - What the caller asked to review.
