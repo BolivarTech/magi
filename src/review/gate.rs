@@ -844,6 +844,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_merged_finding_kept_on_its_first_claim_with_claims_unasked_is_low_confidence() {
+        // [MAGI S6 loop 6, C1] a `real_defect` on the first pair ends the walk: the later pairs
+        // were never judged, so the finding is not fully `kept`, and no model decided its state.
+        let mut f = finding(Severity::Warning, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING + 1;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x
+"), None).await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("not every claim judged"),
+                vec!["not every claim judged"]
+            )
+        );
+        assert_eq!(v.lean.as_deref(), Some("real_defect"));
+        assert!(g.per_model().is_empty(), "{:?}", g.per_model());
+    }
+
+    #[tokio::test]
     async fn a_critical_with_unasked_claims_carries_both_causes() {
         // [MAGI §6 MS2 C loop 3] `critical never filtered` does not replace the unasked claims.
         let mut f = finding(Severity::Critical, Some(1));
