@@ -1678,4 +1678,31 @@ mod tests {
             assert_each_line_in_one_unit(&units, 8);
         }
     }
+
+    #[test]
+    fn an_interface_splits_into_its_abstract_method_signatures() {
+        // [MAGI S6 loop 5, B2-m3] a member signature ending in `;` was read as a C prototype and
+        // skipped, so a Java or TypeScript interface had no members and could not split.
+        let java = "public interface Repo {\n    /** Finds. */\n    User find(long id);\n\n    void save(\n        User u);\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), java, 3, UnitKind::Trait);
+        let found = spans(&parts);
+        for member in [
+            ("find", UnitKind::Method, 2, 3),
+            ("save", UnitKind::Method, 5, 6),
+        ] {
+            assert!(found.contains(&member), "{found:?}");
+        }
+        assert_each_line_in_one_unit(&parts, 7);
+        let ts =
+            "export interface Api {\n  get(id: string): Promise<User>;\n  put(u: User): void;\n}\n";
+        let parts = split(&BraceFamilyExtractor::typescript(), ts, 2, UnitKind::Trait);
+        let found = spans(&parts);
+        for member in [
+            ("get", UnitKind::Method, 2, 2),
+            ("put", UnitKind::Method, 3, 3),
+        ] {
+            assert!(found.contains(&member), "{found:?}");
+        }
+        assert_each_line_in_one_unit(&parts, 4);
+    }
 }
