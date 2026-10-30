@@ -217,6 +217,7 @@ fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidat
         .enumerate()
         .filter_map(|(i, g)| g.id.clone().map(|id| (id, i)))
         .collect();
+    let mut unlocated = Unlocated::new(&groups);
     let mut ungrouped_unlocated = 0usize;
     for (k, r) in reported.iter().enumerate() {
         let located = located(&r.finding);
@@ -225,12 +226,17 @@ fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidat
                 let id = generate_finding_id(file, line, NEUTRAL_CATEGORY);
                 by_id.get(&id).copied().ok_or(Some(id))
             }
-            None => unlocated_slot(&groups, &r.finding.title, &probe).ok_or(None),
+            None => unlocated
+                .slot(&groups, &r.finding.title, &probe)
+                .ok_or(None),
         };
         match slot {
             Ok(i) => {
                 if let Some(g) = groups.get_mut(i) {
                     g.members.push(k);
+                }
+                if located.is_none() {
+                    unlocated.place(&r.finding.title, i, false);
                 }
             }
             Err(id) => {
@@ -243,8 +249,11 @@ fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidat
                         "a finding no consolidated group claimed was kept as its own finding"
                     );
                 }
-                if let Some(id) = &id {
-                    by_id.insert(id.clone(), groups.len());
+                match &id {
+                    Some(id) => {
+                        by_id.insert(id.clone(), groups.len());
+                    }
+                    None => unlocated.place(&r.finding.title, groups.len(), true),
                 }
                 groups.push(Group {
                     dedup: None,
@@ -274,18 +283,46 @@ fn consolidate_capped(batches: &[BatchOutcome], cap: usize) -> Result<Consolidat
     })
 }
 
-/// The group (index into `groups`) an unlocated title belongs to, among the groups without an
-/// id; resets `probe.refused` so the caller can tell a refused probe from no match.
-fn unlocated_slot(groups: &[Group], title: &str, probe: &Prober<'_>) -> Option<usize> {
-    // MAGI FIX (S6 loop 4): the representatives are borrowed, not cloned, on every lookup.
-    let (candidates, reps): (Vec<usize>, Vec<&str>) = groups
-        .iter()
-        .enumerate()
-        .filter(|(_, g)| g.id.is_none())
-        .map(|(i, g)| (i, g.rep.as_str()))
-        .unzip();
-    probe.refused.set(false);
-    group_of(title, &reps, &|a, b| probe.same(a, b)).and_then(|j| candidates.get(j).copied())
+/// The unlocated groups of a review (the groups without an id), indexed by title.
+struct Unlocated {
+    /// Indices into the review's groups of the groups without an id, in creation order.
+    slots: Vec<usize>,
+    /// Every unlocated title already placed, to the group it went to (the first placement wins).
+    by_title: HashMap<String, usize>,
+}
+
+impl Unlocated {
+    /// The index over the groups magi-core formed: each one without an id, under its title.
+    fn new(groups: &[Group]) -> Self {
+        let mut index = Self {
+            slots: Vec::new(),
+            by_title: HashMap::new(),
+        };
+        for (i, g) in groups.iter().enumerate().filter(|(_, g)| g.id.is_none()) {
+            index.place(&g.rep, i, true);
+        }
+        index
+    }
+
+    /// Records that `title` went to group `slot`; `new_group` when that group was just made.
+    fn place(&mut self, title: &str, slot: usize, new_group: bool) {
+        if new_group {
+            self.slots.push(slot);
+        }
+        self.by_title.entry(title.to_string()).or_insert(slot);
+    }
+
+    /// The group (index into `groups`) an unlocated title belongs to; resets `probe.refused`
+    /// so the caller can tell a refused probe from no match.
+    fn slot(&self, groups: &[Group], title: &str, probe: &Prober<'_>) -> Option<usize> {
+        let reps: Vec<&str> = self
+            .slots
+            .iter()
+            .filter_map(|&i| groups.get(i).map(|g| g.rep.as_str()))
+            .collect();
+        probe.refused.set(false);
+        group_of(title, &reps, &|a, b| probe.same(a, b)).and_then(|j| self.slots.get(j).copied())
+    }
 }
 
 /// Builds one synthetic output per mage and the list of reported findings.
@@ -430,6 +467,9 @@ struct Prober<'a> {
     refused: Cell<bool>,
     /// Whether any lookup of the review was refused a probe.
     exhausted: Cell<bool>,
+    /// Calls of [`Self::same`], so a test can see what a lookup cost.
+    #[cfg(test)]
+    same_calls: Cell<usize>,
 }
 
 impl<'a> Prober<'a> {
@@ -450,12 +490,16 @@ impl<'a> Prober<'a> {
             memo: RefCell::new(HashMap::new()),
             refused: Cell::new(false),
             exhausted: Cell::new(false),
+            #[cfg(test)]
+            same_calls: Cell::new(0),
         }
     }
 
     /// Whether magi-core keys `title` and `rep` as one finding; `false` once the budget is
     /// spent (recorded in `refused` and `exhausted`).
     fn same(&self, title: &str, rep: &str) -> bool {
+        #[cfg(test)]
+        self.same_calls.set(self.same_calls.get() + 1);
         let key = (title.to_string(), rep.to_string());
         if let Some(&known) = self.memo.borrow().get(&key) {
             return known;
@@ -578,6 +622,44 @@ fn group_of(title: &str, reps: &[&str], same: &dyn Fn(&str, &str) -> bool) -> Op
 mod tests {
     use super::*;
     use crate::review::test_support::{out, real_report};
+
+    /// `n` unlocated groups titled `r0`, `r1`, ...
+    fn unlocated_groups(n: usize) -> Vec<Group> {
+        (0..n)
+            .map(|i| Group {
+                dedup: None,
+                id: None,
+                rep: format!("r{i}"),
+                members: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_spent_probe_budget_places_an_unlocated_title_without_asking_any_group() {
+        // [MAGI S6 loop 5, C1-c2] the cap bounds the work, not only the `determine` calls: once
+        // it is spent, a new title is its own group at no cost per group.
+        let groups = unlocated_groups(1_000);
+        let engine = ConsensusEngine::default();
+        let probe = Prober::new(&engine, None, 0);
+        let index = Unlocated::new(&groups);
+        assert_eq!(index.slot(&groups, "new title", &probe), None);
+        assert!(probe.refused.get() && probe.exhausted.get());
+        assert_eq!(probe.same_calls.get(), 0);
+    }
+
+    #[test]
+    fn a_title_already_placed_finds_its_group_without_asking_any_group() {
+        let groups = unlocated_groups(1_000);
+        let engine = ConsensusEngine::default();
+        let probe = Prober::new(&engine, None, 10);
+        let mut index = Unlocated::new(&groups);
+        index.place("seen", 999, false);
+        assert_eq!(index.slot(&groups, "seen", &probe), Some(999));
+        assert_eq!(index.slot(&groups, "r500", &probe), Some(500));
+        assert!(!probe.refused.get());
+        assert_eq!(probe.same_calls.get(), 0);
+    }
     use magi_core::schema::Verdict;
 
     fn test_finding() -> ConsolidatedFinding {
