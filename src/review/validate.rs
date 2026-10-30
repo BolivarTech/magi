@@ -324,6 +324,38 @@ mod tests {
     }
 
     #[test]
+    fn a_discarded_or_symbol_unverified_finding_leaves_validation_with_its_model_text_redacted() {
+        // [MAGI S6 loop 5, C1-c1] RV09's lists are filled before consolidation, which redacts
+        // on its way in: they must be redacted where they are made, not only at the report.
+        let mut reviewed = Reviewed::default();
+        reviewed.add_lines("src/a.rs", 1, 5);
+        let index = LexicalIndex::build(
+            &[("src/a.rs".to_string(), "fn present() {}\n".to_string())],
+            &LanguageRegistry::new(),
+        );
+        let secret = "https://user:hunter2@example.invalid/x";
+        let mut agents = vec![agent(serde_json::json!([
+            {"severity":"warning","title":format!("t {secret}"),"detail":format!("d {secret}"),
+             "file":"src/a.rs","line":99},
+            {"severity":"critical","title":"calls `absent`","detail":format!("d {secret}"),
+             "file":"src/a.rs","line":2}
+        ]))];
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        );
+        assert_eq!((v.discarded.len(), v.symbol_unverified.len()), (1, 1));
+        for d in v.discarded.iter().chain(&v.symbol_unverified) {
+            let text = format!("{} {}", d.finding.title, d.finding.detail);
+            assert!(!text.contains("hunter2"), "{text}");
+        }
+    }
+
+    #[test]
     fn a_line_less_finding_on_an_unreviewed_file_is_discarded_and_one_without_a_file_is_kept() {
         // [CP2 MS2 S1 loop 2] the file check does not depend on the line.
         let mut reviewed = Reviewed::default();
