@@ -848,13 +848,24 @@ fn reviewed_of(
     reviewed
 }
 
-/// The faces each file showed in the completed batches. O(items).
+/// The faces each file showed in the completed batches: both ranges of each hunk, each whole
+/// file, and each unit-split file whole only when every batch holding one of its units
+/// completed (as [`reviewed_of`] decides), else only its finished units, as new-side ranges.
+/// O(items).
+///
+/// Within a face the gate's state is RV10's ±40 lines around the finding's line, read from the
+/// revision (RV21): as for a hunk, that window may reach lines no batch reviewed. They are lines
+/// of a file that passed RV22 whole (a file with a secret is never sent) and the state itself is
+/// scanned for a secret before any call.
+// MAGI FIX (S6 loop 5): a unit-split file with an unfinished unit is not whole for the gate.
 fn faces_of<'b>(
     batches: &'b [ReviewBatch],
     completed: &BTreeSet<usize>,
 ) -> HashMap<&'b str, Faces> {
     let mut faces: HashMap<&str, Faces> = HashMap::new();
-    for batch in batches.iter().filter(|b| completed.contains(&b.index)) {
+    let mut units: BTreeMap<&str, UnitProgress> = BTreeMap::new();
+    for batch in batches {
+        let done = completed.contains(&batch.index);
         for item in &batch.items {
             match item {
                 BatchItem::Hunk {
@@ -864,15 +875,42 @@ fn faces_of<'b>(
                     old_first_line,
                     old_last_line,
                     ..
-                } => {
+                } if done => {
                     let f = faces.entry(file.as_str()).or_default();
                     f.new.push((*first_line, *last_line));
                     f.old.push((*old_first_line, *old_last_line));
                 }
-                BatchItem::Unit { file, .. } | BatchItem::WholeFile { file, .. } => {
+                BatchItem::WholeFile { file, .. } if done => {
                     faces.entry(file.as_str()).or_default().whole = true;
                 }
+                BatchItem::Unit {
+                    file,
+                    first_line,
+                    last_line,
+                    ..
+                } => {
+                    let progress = units.entry(file.as_str()).or_insert(UnitProgress {
+                        all_done: true,
+                        finished: Vec::new(),
+                    });
+                    progress.all_done &= done;
+                    if done {
+                        progress.finished.push((*first_line, *last_line));
+                    }
+                }
+                BatchItem::Hunk { .. } | BatchItem::WholeFile { .. } => {}
             }
+        }
+    }
+    for (file, UnitProgress { all_done, finished }) in units {
+        if finished.is_empty() {
+            continue;
+        }
+        let f = faces.entry(file).or_default();
+        if all_done {
+            f.whole = true;
+        } else {
+            f.new.extend(finished);
         }
     }
     faces
