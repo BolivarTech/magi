@@ -1235,4 +1235,22 @@ mod tests {
         );
         assert_eq!(src.read("gone.rs").expect("absent"), None);
     }
+
+    #[test]
+    fn a_revision_source_refuses_a_path_that_climbs_out_or_is_absolute_before_any_git_call() {
+        // [MAGI S6 loop 13, A2-c4, security] `RevisionSource` took any path to `ls-tree` and
+        // `show <rev>:./<path>`: a `..` resolved against the workspace read a file outside it
+        // (inside the repository), and only the callers kept such a path out. No git call is
+        // expected here: the fake answers none.
+        let git = crate::review::test_support::FakeGit::from(&[]);
+        let src = RevisionSource::new(&git, "abc".into(), Some("def".into()));
+        for path in ["../secrets.env", "a/../../b.rs", "/etc/passwd"] {
+            for read in [src.read(path), src.read_old(path)] {
+                assert!(
+                    matches!(read, Err(ReviewError::OutsideWorkspace(ref p)) if p == path),
+                    "{path}: {read:?}"
+                );
+            }
+        }
+    }
 }
