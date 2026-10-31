@@ -11,6 +11,15 @@
 //! gets only the tool environment allowlist plus `GIT_NO_LAZY_FETCH=1` (a partial clone never
 //! downloads during a review) and `GIT_LITERAL_PATHSPECS=1` (a path is never a glob).
 //!
+//! A repository's `[alias]` entries are not overridden because they cannot reach a call: every
+//! subcommand the review runs (`config`, `rev-parse`, `cat-file`, `merge-base`, `diff`,
+//! `diff-tree`, `ls-files`, `ls-tree`, `show`) is a git built-in, and git ignores an alias whose
+//! name is a built-in command (documented in `git help config`, `alias.*`; measured with git
+//! 2.56: a `!touch` alias named like each of them never runs, while one named `zz` does).
+//! Pinned by `a_repo_alias_never_shadows_a_git_subcommand_the_review_runs`; a new call must use a
+//! built-in and join that test's list.
+// MAGI FIX (S6 loop 10): A1-c1 refuted with real git; the alias boundary is stated here.
+//!
 //! It parses untrusted bytes (the filter probe, git's listings, a bounded stderr), so it carries
 //! the same no-panic net as `magi_rs::review`: `panic = "abort"` would end the process on hostile
 //! input with no report.
@@ -1124,6 +1133,55 @@ mod tests {
         assert!(
             !d.path().join("PWNED").exists(),
             "the reviewed repo's filter ran"
+        );
+    }
+
+    #[test]
+    fn a_repo_alias_never_shadows_a_git_subcommand_the_review_runs() {
+        // [MAGI S6 loop 10, A1-c1, false positive] a `!` alias in the reviewed repo's config
+        // named like each subcommand the review calls would create a sentinel file if git ran
+        // it. Measured with git 2.56: git ignores an alias whose name is a built-in command.
+        // The control alias `zz` (no built-in) proves the sentinel fires through this runner.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "one\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let calls: &[&[&str]] = &[
+            &["config", "--get-regexp", "^core\\."],
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            &["cat-file", "commit", "HEAD"],
+            &["merge-base", "HEAD", "HEAD"],
+            &["diff", "--no-color", "HEAD"],
+            &["diff-tree", "-p", "-r", "--root", "HEAD"],
+            &["ls-files", "-z"],
+            &["ls-tree", "-z", "HEAD", "--", "a.rs"],
+            &["show", "HEAD:./a.rs"],
+        ];
+        for call in calls {
+            let name = call.first().copied().expect("subcommand");
+            git(
+                d.path(),
+                &[
+                    "config",
+                    &format!("alias.{name}"),
+                    &format!("!touch PWNED-{name}"),
+                ],
+            );
+        }
+        git(d.path(), &["config", "alias.zz", "!touch PWNED-zz"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        for call in calls {
+            g.run_bytes(call).expect("the built-in runs");
+            let name = call.first().copied().expect("subcommand");
+            assert!(
+                !d.path().join(format!("PWNED-{name}")).exists(),
+                "the alias `{name}` ran"
+            );
+        }
+        let _ = g.run_bytes(&["zz"]);
+        assert!(
+            d.path().join("PWNED-zz").exists(),
+            "the control alias did not run: the sentinel proves nothing"
         );
     }
 
