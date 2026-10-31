@@ -108,6 +108,13 @@ class StderrWordingTests(unittest.TestCase):
         body = re.search(r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n", self.filter, re.S)
         self.assertIsNotNone(body, "SkipCause::as_str not found in src/review/filter.rs")
         causes = re.findall(r'Self::\w+ => "([^"]+)"', body.group(1))
+        # [MAGI §6 MS2 loop 12] an arm may name a constant instead of a literal (HARD_LINK_CAUSE, which
+        # src/review/source.rs defines because the explicit-file error shares it); resolve it there.
+        source = _source("src/review/source.rs")
+        for name in re.findall(r"Self::\w+ => ([A-Z_]+),", body.group(1)):
+            value = re.search(r'pub const %s: &str = "([^"]+)";' % name, source)
+            self.assertIsNotNone(value, "%s not found in src/review/source.rs" % name)
+            causes.append(value.group(1))
         self.assertTrue(causes)
         self.assertEqual(sorted(causes), sorted(code_review.OMISSION_CAUSES))
 
