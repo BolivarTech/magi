@@ -8,6 +8,8 @@
 //! brace counting and keyword detection to extract complete semantic
 //! units (functions, structs, classes, declaration groups).
 
+use std::borrow::Cow;
+
 use super::scanner::{find_closing_brace, CodeScanner, LexicalRules, ScannedLine};
 use super::{
     gap_units, split_into_members, ChangedLines, LanguageExtractor, Member, SemanticUnit, UnitKind,
@@ -581,7 +583,10 @@ impl BraceFamilyExtractor {
         // tables of fixed prefixes missed most combinations.
         // MAGI FIX (S6 loop 8): `template<typename T> class Box {` was no construct at all.
         // MAGI FIX (S6 loop 10): `@Deprecated public class A {` was no construct at all.
-        let trimmed = self.without_template_header(self.without_annotations(trimmed));
+        // MAGI FIX (S6 loop 13): `struct __attribute__((packed)) Hdr {` was named after the
+        // attribute; the C attributes are read past first.
+        let attributes = self.without_c_attributes(trimmed);
+        let trimmed = self.without_template_header(self.without_annotations(&attributes));
         let candidates = [self.strip_modifiers(trimmed, true), trimmed];
         candidates
             .iter()
@@ -769,6 +774,16 @@ impl BraceFamilyExtractor {
         rest
     }
 
+    /// `trimmed` without its C and C++ attributes ([`strip_c_attributes`]), for extractors with
+    /// `semicolon_declarations` (C and C++); `trimmed` otherwise. O(n) in the line.
+    fn without_c_attributes<'t>(&self, trimmed: &'t str) -> Cow<'t, str> {
+        if self.semicolon_declarations {
+            strip_c_attributes(trimmed)
+        } else {
+            Cow::Borrowed(trimmed)
+        }
+    }
+
     /// The text after the function keyword `trimmed` opens with ([`keyword_rest`]), if any.
     fn match_function_keyword<'t>(&self, trimmed: &'t str) -> Option<&'t str> {
         self.function_keywords
@@ -860,7 +875,10 @@ impl BraceFamilyExtractor {
         }
         // MAGI FIX (S6 loop 8): `template <void (*F)(int)> void call() {` was named `void`; a
         // header alone on its line (`template <typename T>`) is no signature: nothing follows it.
-        let name = identifier_before_paren(self.without_template_header(trimmed))?;
+        // MAGI FIX (S6 loop 13): `__attribute__((noreturn)) void die(void) {` was a function
+        // named `__attribute__`; the C attributes are read past first.
+        let attributes = self.without_c_attributes(trimmed);
+        let name = identifier_before_paren(self.without_template_header(&attributes))?;
         // MAGI FIX (S6 loop 4): `catch (e) {` read as a function named `catch`.
         if NOT_FUNCTION_NAMES.contains(&name.as_str()) {
             return None;
@@ -1577,6 +1595,91 @@ fn strip_template_header(text: &str) -> &str {
 
 /// The C++ keyword that opens a template header (`template <typename T>`).
 const TEMPLATE_KEYWORD: &str = "template";
+
+/// The C and C++ attribute words whose argument list in parentheses is no call: GCC's
+/// `__attribute__((packed))`, MSVC's `__declspec(dllexport)`, and the alignment specifiers
+/// `alignas(16)` (C++11, C23) and `_Alignas(16)` (C11).
+const C_ATTRIBUTE_WORDS: [&str; 4] = ["__attribute__", "__declspec", "alignas", "_Alignas"];
+
+/// `text` without its C and C++ attributes, wherever they stand on the line: a standard
+/// attribute (`[[nodiscard]]`, `[[gnu::packed]]`) and a word of [`C_ATTRIBUTE_WORDS`] with its
+/// argument list in balanced parentheses. The blanks are collapsed to one space, so the
+/// keyword and name read as without them (`struct __attribute__((packed)) Hdr {` reads
+/// `struct Hdr {`). An attribute that does not close on the line is kept with the rest of the
+/// line, so the line reads as before. The text is only matched, never reviewed: the unit keeps
+/// the line as written. O(n × k) in the line, for k attribute words.
+///
+/// # Arguments
+///
+/// * `text` - A trimmed line.
+///
+/// # Returns
+///
+/// The line without its attributes, borrowed when it holds none.
+fn strip_c_attributes(text: &str) -> Cow<'_, str> {
+    if !text.contains("[[") && !C_ATTRIBUTE_WORDS.iter().any(|w| text.contains(w)) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((at, end)) = next_c_attribute(rest) {
+        out.push_str(rest.get(..at).unwrap_or(""));
+        out.push(' ');
+        rest = rest.get(end..).unwrap_or("");
+    }
+    out.push_str(rest);
+    Cow::Owned(out.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// The byte span (`start`, `end`) of the first complete C or C++ attribute in `text`
+/// ([`strip_c_attributes`]), or `None` when there is none: an attribute word starts only where
+/// no identifier character comes before it, and is followed, after any blanks, by a `(` whose
+/// match closes on the line; a `[[` is matched by its closing `]]`. O(n × k) in the text.
+fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
+    let mut previous: Option<char> = None;
+    for (at, c) in text.char_indices() {
+        let word_starts = previous.is_none_or(|p| !is_identifier_char(p));
+        previous = Some(c);
+        let rest = text.get(at..).unwrap_or("");
+        if rest.starts_with("[[") {
+            return balanced_end(rest, '[', ']').map(|end| (at, at + end));
+        }
+        if !word_starts {
+            continue;
+        }
+        let Some(word) = C_ATTRIBUTE_WORDS.iter().find(|w| {
+            rest.strip_prefix(**w)
+                .is_some_and(|after| !after.starts_with(is_identifier_char))
+        }) else {
+            continue;
+        };
+        let after = rest.get(word.len()..).unwrap_or("");
+        let args = after.trim_start();
+        if !args.starts_with('(') {
+            continue;
+        }
+        let offset = at + word.len() + (after.len() - args.len());
+        return balanced_end(args, '(', ')').map(|end| (at, offset + end));
+    }
+    None
+}
+
+/// The byte offset just past the `close` that matches the `open` `text` starts with, or `None`
+/// when it never closes. O(n) in the text.
+fn balanced_end(text: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0u32;
+    for (at, c) in text.char_indices() {
+        if c == open {
+            depth = depth.saturating_add(1);
+        } else if c == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(at + c.len_utf8());
+            }
+        }
+    }
+    None
+}
 
 /// The name of a construct: the identifier that opens `rest`, the text after its keyword (after
 /// a parenthesized receiver it opens with, as in Go's `func (r *T) Name(`), or, when none
