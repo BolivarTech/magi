@@ -81,6 +81,9 @@ pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
 /// The longest a git call may run: a git hung on a foreign lock or a network file system must
 /// not hang the preparation, which runs before the review's clock starts.
 pub(crate) const GIT_CALL_TIMEOUT_SECS: u64 = 300;
+/// How long git's stderr may still be drained after git exited, when the call's deadline is
+/// closer: a descendant that kept the pipe open must not hold the preparation past it.
+const STDERR_DRAIN_GRACE_MS: u64 = 1_000;
 
 /// The first pause while waiting for a git whose output is closed to exit; it usually has.
 const WAIT_POLL_FIRST: Duration = Duration::from_millis(1);
@@ -315,7 +318,10 @@ impl ScrubbedGit {
             kill(&mut child);
             return Err(ReviewError::Git("cannot read git's output".to_string()));
         };
-        let stderr_reader = std::thread::spawn(move || drain_bounded(stderr, MAX_GIT_STDERR_BYTES));
+        let (err_tx, err_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = err_tx.send(drain_bounded(stderr, MAX_GIT_STDERR_BYTES));
+        });
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(read_bounded(stdout, cap));
@@ -338,7 +344,13 @@ impl ScrubbedGit {
             }
         };
         let status = wait_within(&mut child, deadline)?;
-        let stderr = stderr_reader.join().unwrap_or_default();
+        // MAGI FIX (S6 loop 8): the stderr drain was joined without a bound; a descendant that
+        // inherited the pipe (hooks, filters and protocols are off, so unlikely) could hold it
+        // open past the deadline. Its text is waited for until the deadline, or a short grace.
+        let drain_for = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(STDERR_DRAIN_GRACE_MS));
+        let stderr = err_rx.recv_timeout(drain_for).unwrap_or_default();
         Ok(Finished {
             code: status.code(),
             stdout,
