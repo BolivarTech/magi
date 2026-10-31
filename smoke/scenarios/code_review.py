@@ -146,6 +146,13 @@ OMISSION_PATTERN = re.compile(
     r"(?P<path>.+?) \((?P<cause>%s)\)(?:, |$)"
     % "|".join(re.escape(cause) for cause in OMISSION_CAUSES))
 
+#: A path holding `` (<cause>)`` followed by ``, `` or its end: in the
+#: omission list it reads the same as an entry boundary, so the list cannot
+#: say where such a path ends.
+AMBIGUOUS_PATH_PATTERN = re.compile(
+    r" \((?:%s)\)(?:, |$)"
+    % "|".join(re.escape(cause) for cause in OMISSION_CAUSES))
+
 #: The floor of a per-batch ceiling in seconds
 #: (``AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS`` = ``MIN_OPERATION_BUDGET`` 10 s +
 #: ``MIN_CLIENT_TIMEOUT`` 5 s in ``src/magi/mod.rs``).
@@ -927,9 +934,9 @@ def _omissions(stderr):
     A path may hold `` (<cause>)`` itself: an entry ends only at a cause
     followed by ``, `` or the end, so the shortest such split is taken and the
     rest stays in the path. The one rendering the product's text cannot tell
-    apart is a path holding `` (<cause>), ``; it splits early, and when the
-    early half is protected it reads as protected and not ``ignored``, so the
-    ambiguity fails S51 rather than passing it.
+    apart is a path holding `` (<cause>), ``: it splits early. S51 does not
+    judge a list over such a name (``CANNOT_TEST``, see
+    :func:`_exclusion_finding`); S49's names are the harness's own.
 
     Args:
         stderr: The decoded stderr.
@@ -1074,7 +1081,9 @@ def _exclusion_finding(run, stderr):
         Finding: ``FAIL`` when the omission list is unusable or names a
         protected path with a cause other than ``ignored``; ``CANNOT_TEST``
         when git listed no ``.magi/`` file, so none was an enumeration
-        candidate; ``FAIL`` when git listed some and the list names none of
+        candidate, or when one of their names holds `` (<cause>), `` or ends
+        in `` (<cause>)`` (:data:`AMBIGUOUS_PATH_PATTERN`), so the list
+        cannot be split around it; ``FAIL`` when git listed some and the list names none of
         them as ``ignored``; else ``PASS``. Names are compared with ``\\``
         read as ``/``.
     """
@@ -1089,6 +1098,17 @@ def _exclusion_finding(run, stderr):
             S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
             "git lists no .magi/ file in the review workspace (an ignore rule "
             "hides it from the product too), so the exclusion was not exercised")
+    # MAGI FIX (S6 loop 13): a .magi name holding " (<cause>), " split in two,
+    # so the product reading it for its content passed as a protected path
+    # left out plus another file (F1a-c3).
+    ambiguous = [path for path in run.protected_visible
+                 if AMBIGUOUS_PATH_PATTERN.search(path)]
+    if ambiguous:
+        return _finding(
+            S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
+            "git lists %s, whose name the omission list cannot tell from an "
+            "entry boundary, so what the product did with it is unreadable"
+            % ", ".join(ambiguous))
     entries, _ = _omissions(stderr)
     named = {_slashed(path) for path, cause in entries
              if cause == PROTECTED_CAUSE}
