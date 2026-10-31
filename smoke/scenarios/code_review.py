@@ -803,7 +803,7 @@ def _skipped_as_expected(stderr):
     entries, _ = _omissions(stderr)
     if entries is None:
         return False
-    found = sorted((path.replace("\\", "/"), cause) for path, cause in entries)
+    found = sorted((_slashed(path), cause) for path, cause in entries)
     return found == sorted(S49_EXPECTED_OMISSIONS)
 
 
@@ -899,7 +899,7 @@ def _exclusion_finding(run, stderr):
             "git lists no .magi/ file in the review workspace (an ignore rule "
             "hides it from the product too), so the exclusion was not exercised")
     entries, _ = _omissions(stderr)
-    named = {path.replace("\\", "/") for path, cause in entries
+    named = {_slashed(path) for path, cause in entries
              if cause == PROTECTED_CAUSE}
     return _verdict(S51_ASSERTIONS, 2, "R16",
                     bool(named & set(run.protected_visible)),
