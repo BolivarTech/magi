@@ -316,6 +316,32 @@ class ReviewLogCaptureTests(unittest.TestCase):
             self.assertIsNone(result.review_log)
 
 
+class ProtectedCandidateTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 9, F1a-c1/F1a-m2] what tells S51 whether its exclusion half ran."""
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_review_run_records_the_magi_files_git_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            output = runs.ProductOutput(stdout=b"", stderr=b"", exit_code=2, command=["magi-rs"])
+            with mock.patch.object(executor, "_invoke", return_value=output):
+                result = executor.execute(runs.DEFINITIONS["R16"])
+            self.assertEqual((".magi/magi.toml",), result.protected_visible)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_magi_directory_an_ignore_rule_hides_is_no_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".magi").mkdir()
+            (root / ".magi" / "magi.toml").write_text("# toy\n", encoding="utf-8")
+            (root / "a.rs").write_text("fn a() {}\n", encoding="utf-8")
+            self.assertEqual((".magi/magi.toml",), runs.protected_candidates(root))
+            (root / ".gitignore").write_text(".magi/\n", encoding="utf-8")
+            self.assertEqual((), runs.protected_candidates(root))
+
+
 class ReviewLineCountTests(unittest.TestCase):
 
     def test_the_line_counts_match_the_generated_bytes(self) -> None:

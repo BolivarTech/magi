@@ -19,13 +19,24 @@ from smoke.runner import Ambient, Runner
 from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
 
+#: The ``.magi/`` files git lists in R16's workspace when the environment's ``.magi`` is copied in (the three
+#: :data:`_ROOT_STDERR` names). [MAGI §6 MS2 loop 9, F1a-c1] S51 reads them off the result.
+_R16_PROTECTED = (".magi/.magi-rs-memory.db", ".magi/logs/magi-2026-10-29.log", ".magi/magi.toml")
+
+
 def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"", timed_out: bool = False,
-            review_log=None) -> RunResult:
-    """A real ``RunResult`` for *run_id* whose stdout is *document* serialised (``None`` → empty stdout)."""
+            review_log=None, protected_visible=None) -> RunResult:
+    """A real ``RunResult`` for *run_id* whose stdout is *document* serialised (``None`` → empty stdout).
+
+    *protected_visible* defaults to :data:`_R16_PROTECTED` for R16 and to nothing for every other run.
+    """
     body = b"" if document is None else json.dumps(document).encode()
+    if protected_visible is None:
+        protected_visible = _R16_PROTECTED if run_id == "R16" else ()
     return RunResult(run_id=run_id,
                      output=ProductOutput(stdout=body, stderr=stderr, exit_code=exit_code, command=["magi-rs"]),
-                     duration_s=1.0, timed_out=timed_out, planted=(), review_log=review_log)
+                     duration_s=1.0, timed_out=timed_out, planted=(), review_log=review_log,
+                     protected_visible=protected_visible)
 
 
 RUN_ID = "4242-0123456789abcdef"
@@ -102,10 +113,29 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         r = _result("R16", 2, None, _with_id(_ROOT_STDERR))
         self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
 
-    def test_s51_passes_when_no_protected_path_is_named_at_all(self) -> None:
+    def test_s51_fails_when_git_lists_a_magi_file_the_refusal_never_names(self) -> None:
+        # [MAGI §6 MS2 loop 9, F1a-c1/F1a-m2] this used to PASS: a refusal naming no protected path left the
+        # third assertion vacuous. Git listed .magi/ files, so the product must name them as ignored.
         r = _result("R16", 2, None, _with_id(
             b"error: nothing to review: no reviewable file in the input; left out: "
             b"skipped/leak.txt (secret), skipped/pixel.png (binary)" + _NL))
+        outcomes = _outcomes("S51", r)
+        self.assertEqual(Outcome.PASS, outcomes[code_review.S51_ASSERTIONS[1]])
+        self.assertEqual(Outcome.FAIL, outcomes[code_review.S51_ASSERTIONS[2]])
+
+    def test_s51_cannot_test_the_exclusion_when_git_lists_no_magi_file(self) -> None:
+        # [MAGI §6 MS2 loop 9, F1a-c1/F1a-m2] a global ignore rule hiding .magi/ hides it from the product too:
+        # no protected path was an enumeration candidate, so the exclusion half did not run.
+        r = _result("R16", 2, None, _with_id(_ROOT_STDERR.replace(
+            b".magi/.magi-rs-memory.db (ignored), .magi/logs/magi-2026-10-29.log (ignored), "
+            b".magi/magi.toml (ignored), ", b"")), protected_visible=())
+        outcomes = _outcomes("S51", r)
+        self.assertEqual(Outcome.PASS, outcomes[code_review.S51_ASSERTIONS[1]])
+        self.assertEqual(Outcome.CANNOT_TEST, outcomes[code_review.S51_ASSERTIONS[2]])
+
+    def test_s51_matches_a_backslash_separated_magi_name_against_what_git_lists(self) -> None:
+        stderr = _ROOT_STDERR.replace(b".magi/magi.toml (ignored)", b".magi\\magi.toml (ignored)")
+        r = _result("R16", 2, None, _with_id(stderr), protected_visible=(".magi/magi.toml",))
         self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
 
     def test_s51_fails_when_a_protected_file_was_taken_for_review(self) -> None:

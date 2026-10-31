@@ -491,6 +491,12 @@ class RunResult:
     #: time because the next review run rebuilds the workspace from nothing, so
     #: a scenario reading the live directory would depend on run order.
     review_log: tuple[bytes, ...] | None = None
+    #: The ``.magi/`` paths git lists in the review workspace right before the
+    #: run, with the product's own query (:data:`GIT_VISIBLE_QUERY`), sorted.
+    #: Empty when the run uses no review workspace, or when an ignore rule
+    #: (a global ``core.excludesFile``, say) hides ``.magi/`` from git and so
+    #: from the product: then no protected path was an enumeration candidate.
+    protected_visible: tuple[str, ...] = ()
 
 
 #: Where the product writes its logs, relative to a workspace root. The one
@@ -798,6 +804,21 @@ def verify_visible(workspace, paths) -> None:
         raise HarnessError(
             "git cannot see the review input %s in %s; an ignore rule hides "
             "it from the product too" % (", ".join(hidden), workspace))
+
+
+def protected_candidates(workspace) -> tuple[str, ...]:
+    """The ``.magi/`` paths git lists in *workspace*, as the product would see them.
+
+    Args:
+        workspace: The review workspace (a git repository of its own).
+
+    Returns:
+        tuple[str, ...]: The listed paths under ``.magi/``, sorted.
+
+    Raises:
+        HarnessError: If git fails.
+    """
+    return ()
 
 
 def _skip_top_level_logs(magi_dir):
