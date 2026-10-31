@@ -144,6 +144,13 @@ fn same_prefix(head: &str, workspace: &str) -> bool {
 
 /// Normalizes a reported location to a workspace-relative path with `/` and `line = 0` to `None`.
 ///
+/// `line = 0` never comes from a model: magi-core's `Finding` deserializer maps a reported `0`
+/// (and any negative, fractional or non-numeric line) to `None` before Magi sees the finding, so
+/// an explicit zero cannot be told from a missing line here and leaves as an unlocated finding
+/// (the gate's `no location`). Only a finding built in memory carries `Some(0)`.
+// MAGI FIX (S6 loop 8, C1-c2): refuted, not changed; pinned by
+// `a_model_reported_line_zero_reaches_validation_as_no_line`.
+///
 /// Works on the text, not on `Path`, so the result is the same on every platform: `\` becomes `/`
 /// in both arguments, the workspace is removed as a prefix only at a component boundary (`/w2/a.rs`
 /// does not start with `/w`), the drive letter is compared ignoring case, and a leading `/` left
@@ -1013,6 +1020,31 @@ mod tests {
         )
         .discarded
         .is_empty());
+        assert_eq!(agents[0].findings[0].line, None);
+    }
+
+    #[test]
+    fn a_model_reported_line_zero_reaches_validation_as_no_line() {
+        // [MAGI S6 loop 8, C1-c2] magi-core's fail-soft line deserializer drops a model's `0`:
+        // the distinction between a missing line and an explicit zero is gone before RV09, so a
+        // `line out of range` for it is unbuildable. Red here means magi-core changed it and the
+        // range check must then treat `Some(0)` as out of range.
+        let mut agents = vec![agent(serde_json::json!([
+            {"severity":"critical","title":"t","detail":"d","file":"src/a.rs","line":0}
+        ]))];
+        assert_eq!(agents[0].findings[0].line, None);
+        let mut reviewed = Reviewed::default();
+        reviewed.add_lines("src/a.rs", 1, 5);
+        let index = LexicalIndex::build(&[], &LanguageRegistry::new());
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        );
+        assert!(v.discarded.is_empty());
         assert_eq!(agents[0].findings[0].line, None);
     }
 }
