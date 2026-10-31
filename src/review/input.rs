@@ -1729,6 +1729,35 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_whose_source_climbs_out_of_the_workspace_is_refused() {
+        // [MAGI S6 loop 10, A1-m2] `renamed_from` names the path the old side is read at; it
+        // goes through the same confinement check as `files[].path`, before any read.
+        let section = "diff --git a/../outside.rs b/a.rs\nsimilarity index 75%\nrename from ../outside.rs\nrename to a.rs\n--- a/../outside.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n";
+        let git = FakeGit::from(&[
+            ("rev-parse --verify --quiet v1^{commit}", Ok("x\n")),
+            ("rev-parse --verify --quiet v2^{commit}", Ok("x\n")),
+            (
+                "-c attr.tree=x diff --no-color --no-ext-diff --no-textconv --relative x..x",
+                Ok(section),
+            ),
+        ]);
+        let r = resolve_input(
+            &ReviewInput::Range {
+                from: "v1".into(),
+                to: "v2".into(),
+            },
+            Path::new("/w"),
+            &git,
+            &allow_all,
+        );
+        assert!(
+            matches!(r, Err(ReviewError::OutsideWorkspace(ref p)) if p == "../outside.rs"),
+            "{:?}",
+            r.as_ref().map(|r| &r.files)
+        );
+    }
+
+    #[test]
     fn a_commit_with_a_parent_is_diffed_against_that_pinned_parent() {
         // [MAGI §6 MS2 A loop 2] `diff-tree <merge>` prints nothing for a merge commit; the diff
         // against the pinned first parent is what the review reads (`old_rev`), merge or not.

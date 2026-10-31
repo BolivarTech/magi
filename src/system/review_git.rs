@@ -1178,6 +1178,47 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_from_outside_a_sub_workspace_is_reviewed_as_an_addition() {
+        // [MAGI S6 loop 10, A1-m2] measured with git 2.56: `diff --relative` leaves out the
+        // paths outside the workspace before rename detection, so a file moved in from outside
+        // is an addition with no `rename from`, and no old side is read outside the workspace.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("ws")).expect("mkdir");
+        std::fs::write(
+            d.path().join("outside.rs"),
+            "fn o() {}\nfn p() {}\nfn q() {}\n",
+        )
+        .expect("write");
+        std::fs::write(d.path().join("ws/k.rs"), "fn k() {}\n").expect("write");
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "0"]);
+        git(d.path(), &["mv", "outside.rs", "ws/a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let ws = d.path().join("ws");
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let r = magi_rs::review::input::resolve_input(
+            &ReviewInput::Commit(None),
+            &ws,
+            &ScrubbedGit::new(ws.clone()),
+            &allow,
+        )
+        .expect("resolves");
+        assert_eq!(
+            r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs"]
+        );
+        let diff = r
+            .files
+            .first()
+            .and_then(|f| f.diff.as_deref())
+            .unwrap_or_default();
+        assert!(diff.contains("new file mode"), "{diff}");
+        assert!(!diff.contains("rename from"), "{diff}");
+    }
+
+    #[test]
     fn a_filter_driver_from_the_reviewed_repos_config_never_runs() {
         // [CP2 MS2 S1a loop 10, measured with git 2.56] `diff <sha>` against the worktree runs the repo's `clean` filter;
         // --no-ext-diff and --no-textconv do not stop it. The filter would create PWNED in the repo root.
