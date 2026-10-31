@@ -1256,6 +1256,26 @@ mod tests {
     }
 
     #[test]
+    fn an_aws_secret_key_in_a_comparison_is_a_secret_and_masked_whole() {
+        // [MAGI S6 loop 11, A2-m1, security] `==`, `!=` and JavaScript's `===`/`!==` failed the
+        // operator check (or left an `=` before the key), so a literal key compared against the
+        // name was sent while the same key after `=` was masked.
+        let tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let name = concat!("aws_secret", "_access_key");
+        for text in [
+            format!("if {name} == \"{tail}\""),
+            format!("if {name}!={tail}"),
+            format!("if ({name} === '{tail}')"),
+            format!("if ({name} !== \"{tail}\")"),
+        ] {
+            assert_eq!(find_secret(&text), Some("aws-secret-key"), "{text}");
+            assert!(!mask_secrets(&text).contains(tail), "{text}");
+        }
+        // An operator that is none of the accepted ones still names no key.
+        assert_eq!(find_secret(&format!("{name} <= {tail}")), None);
+    }
+
+    #[test]
     fn a_token_that_runs_into_a_pem_header_masks_the_whole_pem_block() {
         // [MAGI S6 loop 9, A2-b1, security] an OpenAI-shaped token glued to a PEM header ate
         // its `-----BEGIN`, so the PEM search over what followed the mask found no header and
