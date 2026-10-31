@@ -1661,4 +1661,25 @@ mod tests {
             "{attempts:?}"
         );
     }
+
+    #[test]
+    fn a_missing_model_is_recognized_with_or_without_its_default_tag_either_way() {
+        // [MAGI S6 loop 13, C2-m2] the canonical form was added to a bare name only: a configured
+        // `nimble:latest` whose 404 echoes `model 'nimble' not found` read as a generic 404.
+        for (body, model) in [
+            ("model 'nimble:latest' not found", "nimble"),
+            ("model 'nimble' not found", "nimble:latest"),
+            ("model 'nimble' not found", "nimble"),
+        ] {
+            assert!(names_missing_model(body, model), "{model}: {body}");
+        }
+        assert!(!names_missing_model(
+            "model 'nimble' not found",
+            "nimble:7b"
+        ));
+        assert!(!names_missing_model(
+            "model 'other' not found",
+            "nimble:latest"
+        ));
+    }
 }
