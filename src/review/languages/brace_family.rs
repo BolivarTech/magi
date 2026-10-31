@@ -859,6 +859,12 @@ impl BraceFamilyExtractor {
 /// own, and stopping there cut the function at that line. The parentheses are counted on the
 /// line text ([`paren_delta`]), so a `(` or `)` inside a string or a comment of the parameter
 /// list miscounts them; the search then still ends at a blank line, a statement or a brace.
+///
+/// A brace on a parameter line is taken for the construct's brace, declared: a default argument
+/// that opens a lambda body on that line (`void f(int cb = []() {`) or an anonymous struct
+/// parameter makes the function end at that parameter's closing brace, and the rest of its body
+/// falls into later units. No line is lost: every line stays in exactly one unit, so the body is
+/// still reviewed, only split from its signature.
 fn open_brace_line(
     lines: &[&str],
     scanned: &[ScannedLine],
@@ -2514,6 +2520,23 @@ mod tests {
         let cpp = "Foo::Foo(int a)\n    : a_{a},\n      b_{0},\n      c_{1} {\n    run();\n}\n";
         let units = extract(&BraceFamilyExtractor::cpp(), cpp, &all_lines(cpp));
         assert_eq!(spans(&units), vec![("Foo", UnitKind::Function, 1, 6)]);
+    }
+
+    #[test]
+    fn a_brace_in_an_open_parameter_list_loses_no_line() {
+        // [MAGI S6 loop 8, B2b-m2] declared on `open_brace_line`: a lambda default argument's
+        // brace is taken for the function's, so the body is split from its signature, but every
+        // line stays in exactly one unit.
+        let code = "void f(int cb = []() {
+           return 0;
+       }) {
+    run();
+}
+void g(void) {
+}
+";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &all_lines(code));
+        assert_each_line_in_one_unit(&units, 7);
     }
 
     #[test]
