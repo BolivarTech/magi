@@ -2680,6 +2680,27 @@ void g() {
     }
 
     #[test]
+    fn a_rust_union_is_a_struct_like_unit() {
+        // [MAGI S6 loop 9, B2b-b3] `union` was missing from Rust's block keywords, so a union's
+        // lines fell into a gap unit instead of a type unit.
+        let code = "pub union U {
+    a: u32,
+    b: f32,
+}
+fn g() {
+}
+";
+        let units = extract(&rust_extractor(), code, &all_lines(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("U", UnitKind::Struct, 1, 4),
+                ("g", UnitKind::Function, 5, 6)
+            ]
+        );
+    }
+
+    #[test]
     fn a_brace_in_an_open_parameter_list_loses_no_line() {
         // [MAGI S6 loop 8, B2b-m2] declared on `open_brace_line`: a lambda default argument's
         // brace is taken for the function's, so the body is split from its signature, but every
