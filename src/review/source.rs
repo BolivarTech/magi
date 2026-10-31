@@ -143,17 +143,24 @@ pub trait ContentSource: Send + Sync {
     /// As [`ContentSource::read`].
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError>;
 
-    /// Drops whatever is held for `path` on both sides, so a file the review left out costs
-    /// nothing afterwards. A no-op for a source that holds nothing (the default); a later read
-    /// of `path` reads the inner source again.
+    /// Drops whatever is held for `path` on side `face` only, so a file the review left out
+    /// costs nothing afterwards. A no-op for a source that holds nothing (the default); a later
+    /// read of that side of `path` reads the inner source again.
+    ///
+    /// One side at a time because a path is not private to one file: a rename's old path can be
+    /// another file's new path, and releasing both sides under it evicted the bytes that file was
+    /// scanned with.
     ///
     /// # Arguments
     ///
-    /// * `path` - The path to forget.
+    /// * `face` - The side to forget.
+    /// * `path` - The path to forget on that side.
     // MAGI FIX (S6 loop 12, A2-c1 / A2-c5): the cache kept the sides of skipped files, charged
     // against the review total and, for a secret-bearing file, held in memory for the whole run.
-    fn release(&self, path: &str) {
-        let _ = path;
+    // MAGI FIX (S6 loop 13, A2-m2 / A2-b1): side-specific, so a skipped rename's old path no
+    // longer evicts another file's new side.
+    fn release(&self, face: Face, path: &str) {
+        let _ = (face, path);
     }
 }
 
@@ -557,7 +564,8 @@ impl ContentSource for RevisionSource<'_> {
 /// Every stage of a review (the filter, the batches, the index and the gate) reads through one
 /// cache, so a file is read once per side and every stage sees the bytes the filter scanned,
 /// even if the file changes on disk meanwhile. An `Err` is never kept, and the filter releases
-/// every file it leaves out ([`ContentSource::release`]), so the cap and the memory count only
+/// every side of a file it leaves out that no kept file was scanned with
+/// ([`ContentSource::release`]), so the cap and the memory count only
 /// what is reviewed and no skipped secret stays held. The bytes held are
 /// bounded by [`MAX_REVIEW_TOTAL_BYTES`]: a read that would pass it is refused and not kept,
 /// while a read of what is already held costs nothing. Memory is O(bytes reviewed); a lookup is
@@ -579,9 +587,9 @@ struct Held {
     bytes: u64,
 }
 
-/// Which side of a file a read is for.
-#[derive(Clone, Copy)]
-enum Face {
+/// Which side of a file a read is for, or a release is of ([`ContentSource::release`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Face {
     /// The new side, or the worktree.
     New,
     /// The old side.
@@ -666,15 +674,16 @@ impl ContentSource for CachedSource<'_> {
         self.get(Face::Old, path)
     }
 
-    /// Removes both sides of `path` and gives their bytes back to the total cap. O(1) expected.
-    fn release(&self, path: &str) {
+    /// Removes side `face` of `path` and gives its bytes back to the total cap. O(1) expected.
+    fn release(&self, face: Face, path: &str) {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
-        let freed: u64 = [held.new.remove(path), held.old.remove(path)]
-            .into_iter()
+        let removed = match face {
+            Face::New => held.new.remove(path),
+            Face::Old => held.old.remove(path),
+        };
+        let freed = removed
             .flatten()
-            .flatten()
-            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-            .fold(0, u64::saturating_add);
+            .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         held.bytes = held.bytes.saturating_sub(freed);
     }
 }

@@ -18,7 +18,7 @@ use super::input::{
 };
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
-use super::source::{is_never_reviewed, ContentSource, GitCommand, HARD_LINK_CAUSE};
+use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LINK_CAUSE};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
 pub(crate) const MISSING: &str = "missing";
@@ -181,12 +181,15 @@ pub fn filter_files(
         skipped: Vec::new(),
         no_extractor: Vec::new(),
     };
+    // The sides a kept file was scanned with: never released, whoever else names their path.
+    let mut kept_sides: HashSet<(Face, String)> = HashSet::new();
     for file in files {
         match classify(&file, source, is_ignored, explicit)? {
             Verdict::Keep => {
                 if registry.get(&file.path).is_none() {
                     filtered.no_extractor.push(display_path(&file.path));
                 }
+                kept_sides.extend(sides_of(&file));
                 filtered.kept.push(file);
             }
             Verdict::Skip(cause) if explicit => {
@@ -198,9 +201,12 @@ pub fn filter_files(
             Verdict::Skip(cause) => {
                 // MAGI FIX (S6 loop 12, A2-c1 / A2-c5): a skipped file is never sent, so the
                 // cache keeps none of it: the total cap bounds what is reviewed.
-                source.release(&file.path);
-                if let Some(old) = file.diff.as_deref().and_then(renamed_from) {
-                    source.release(&old);
+                // MAGI FIX (S6 loop 13, A2-m2 / A2-b1): side by side, and never a side a kept file
+                // was scanned with: a rename's old path can be a kept file's path.
+                for (face, path) in sides_of(&file) {
+                    if !kept_sides.contains(&(face, path.clone())) {
+                        source.release(face, &path);
+                    }
                 }
                 filtered.skipped.push(Skipped {
                     path: display_path(&file.path),
@@ -216,6 +222,17 @@ pub fn filter_files(
         });
     }
     Ok(filtered)
+}
+
+/// The sides [`classify`] reads for `file`, each with the path it is read under: the new side
+/// under its path and, for a diff, the old side under its `rename from` path or its own. O(1).
+fn sides_of(file: &ReviewFile) -> Vec<(Face, String)> {
+    let mut sides = vec![(Face::New, file.path.clone())];
+    if let Some(diff) = file.diff.as_deref() {
+        let old = renamed_from(diff).unwrap_or_else(|| file.path.clone());
+        sides.push((Face::Old, old));
+    }
+    sides
 }
 
 /// Classifies one file (see [`filter_files`] for the order).
