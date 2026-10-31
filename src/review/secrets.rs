@@ -15,7 +15,9 @@
 //! word character is not a token, because base64 runs and kebab-case names hold them by chance; the distinctive
 //! `sk-ant-` and `github_pat_` match wherever they occur. A PEM or OpenPGP header must be in
 //! upper case as every standard tool writes it: a hand-made `-----begin private key-----` is
-//! not detected.
+//! not detected. A password in a URL (`scheme://user:password@host`) is a secret unless it is a
+//! placeholder (`{password}`, `$PASSWORD`, `<password>`, `***`); a URL with a user and no
+//! password is not.
 
 use std::ops::Range;
 
@@ -66,6 +68,8 @@ enum Matcher {
     Header(&'static str),
     /// The AWS secret access key, recognized by its name and an assignment.
     AwsSecretKey,
+    /// A password in a URL's authority: `scheme://user:password@host`.
+    UrlCredential,
 }
 
 /// One named secret pattern.
@@ -122,6 +126,21 @@ const QUOTES: &[u8] = b"\"'";
 /// and comparisons (`==`, `!=`, JavaScript's `===` and `!==`).
 // MAGI FIX (S6 loop 11): a key compared against its name (`==`, `!=`) was sent.
 const AWS_OPERATORS: &[&[u8]] = &[b"===", b"!==", b"==", b"!=", b"=>", b":=", b"=", b":"];
+/// What separates a URL's scheme from its authority.
+const URL_AUTHORITY_START: &str = "://";
+/// The longest userinfo (`user:password`) a URL credential may have, so each `://` reads a
+/// bounded run and the search stays linear.
+const MAX_URL_USERINFO: usize = 256;
+/// How far past [`MAX_URL_USERINFO`] the search for the authority's last `@` reads, so a host
+/// after a long userinfo is still seen and the read stays bounded.
+const MAX_URL_HOST_PEEK: usize = 256;
+/// The bytes that end a URL's userinfo without an `@`: blanks, the authority's other
+/// delimiters, quotes and the brackets of prose or markup.
+const URL_USERINFO_STOP: &[u8] = b" \t\r\n/?#\"'`<>()";
+/// What a password that is a placeholder opens with: a template (`{password}`), a variable
+/// (`$PASSWORD`, `%s`), a markup or documentation slot (`<password>`, `[password]`), or a mask
+/// already applied (`***`). None of them is a credential.
+const URL_PLACEHOLDER_OPENERS: &[u8] = b"{$<[%*";
 
 /// The patterns, in the order that decides the name of a match: `anthropic-key` comes before
 /// `openai-key` because an Anthropic key also starts with `sk-`. A Stripe key needs no such
@@ -238,6 +257,11 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
         name: "aws-secret-key",
         matcher: Matcher::AwsSecretKey,
     },
+    // MAGI FIX (S6 loop 13, A2-c2): a database URL's password in a reviewed file was sent.
+    SecretPattern {
+        name: "url-credential",
+        matcher: Matcher::UrlCredential,
+    },
 ];
 
 /// `[A-Za-z0-9_-]`: the characters of a token, and the ones a left boundary may not be.
@@ -340,8 +364,46 @@ impl Matcher {
             Self::AwsSecretKey => {
                 (0..bytes.len()).find_map(|at| aws_secret_end(bytes, at).map(|end| at..end))
             }
+            Self::UrlCredential => text.match_indices(URL_AUTHORITY_START).find_map(|(at, _)| {
+                let from = at + URL_AUTHORITY_START.len();
+                url_userinfo_end(bytes, from).map(|end| from..end)
+            }),
         }
     }
+}
+
+/// Where the userinfo of a URL credential that opens at `from` (just past `://`) ends: past the
+/// authority's last `@` (a password may hold an unencoded one), when the userinfo holds a `:`
+/// followed by a password that is not a placeholder ([`URL_PLACEHOLDER_OPENERS`]) and the `@`
+/// is followed by a host (an ASCII letter or digit, or `[` for an IPv6 literal). The user may be
+/// empty (`redis://:password@host`). The authority ends at a [`URL_USERINFO_STOP`] byte or a
+/// control character; `None` when it holds no such `@` within [`MAX_URL_USERINFO`] bytes.
+/// O([`MAX_URL_USERINFO`] + [`MAX_URL_HOST_PEEK`]).
+fn url_userinfo_end(bytes: &[u8], from: usize) -> Option<usize> {
+    let rest = bytes.get(from..).unwrap_or_default();
+    let window = rest
+        .get(..rest.len().min(MAX_URL_USERINFO + 1 + MAX_URL_HOST_PEEK))
+        .unwrap_or_default();
+    let stop = window
+        .iter()
+        .position(|b| URL_USERINFO_STOP.contains(b) || b.is_ascii_control())
+        .unwrap_or(window.len());
+    // The authority's last `@`, as `redact_url` reads it: a password may hold an unencoded `@`.
+    let run = window.get(..stop)?;
+    let at_sign = run.iter().rposition(|b| *b == b'@')?;
+    if at_sign > MAX_URL_USERINFO {
+        return None;
+    }
+    let userinfo = run.get(..at_sign)?;
+    let colon = userinfo.iter().position(|b| *b == b':')?;
+    let password = userinfo.get(colon + 1..)?;
+    let real = password
+        .first()
+        .is_some_and(|b| !URL_PLACEHOLDER_OPENERS.contains(b));
+    let host = run
+        .get(at_sign + 1)
+        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'[');
+    (real && host).then_some(from + at_sign + 1)
 }
 
 /// The length of the PEM type word that starts at `at` (1 to [`PEM_MAX_TYPE_WORD`] characters of
