@@ -165,7 +165,7 @@ enum Verdict {
 /// # Errors
 ///
 /// [`ReviewError::NotReviewable`] when `explicit` and the file is skipped or missing,
-/// [`ReviewError::Io`] when an enumerated file disappeared, [`ReviewError::NothingToReview`]
+/// [`ReviewError::Io`] when a file named explicitly cannot be read, [`ReviewError::NothingToReview`]
 /// when no file is kept, and any other error of `source`.
 ///
 /// O(total bytes read) time.
@@ -235,12 +235,16 @@ fn classify(
     if file.diff.as_deref().is_some_and(is_binary_section) {
         return Ok(Verdict::Skip(SkipCause::Binary));
     }
-    let new = match read_side(source.read(path))? {
+    let new = match read_side(source.read(path), path, explicit)? {
         Side::Content(bytes) => bytes,
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
     let old = match &file.diff {
-        Some(_) => match read_side(source.read_old(old_path.as_deref().unwrap_or(path)))? {
+        Some(_) => match read_side(
+            source.read_old(old_path.as_deref().unwrap_or(path)),
+            path,
+            explicit,
+        )? {
             Side::Content(bytes) => bytes,
             Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
         },
@@ -258,17 +262,16 @@ fn classify(
     // by `an_input_left_with_only_dangling_links_is_nothing_to_review_and_names_them`), and they
     // are reported as `SkipCause::NotRegularFile`. Only a file removed after listing lands here.
     if new.is_none() && file.diff.is_none() {
-        return Err(if explicit {
-            ReviewError::NotReviewable {
+        if explicit {
+            return Err(ReviewError::NotReviewable {
                 path: display_path(path),
                 cause: MISSING,
-            }
-        } else {
-            ReviewError::Io(format!(
-                "{} disappeared during the review",
-                display_path(path)
-            ))
-        });
+            });
+        }
+        // MAGI FIX (S6 loop 12, A2-m5 / A2-c2): an omission, not a failure: an editor's
+        // write-then-rename or a checkout in another window unlinked a listed path for a moment
+        // and the whole review died.
+        return Ok(Verdict::Skip(SkipCause::Disappeared));
     }
     // MAGI FIX (S6 loop 4): both sides, not the new one alone: a text file whose old side was
     // binary or Latin-1 carried old-side bytes into the review.
@@ -321,8 +324,40 @@ enum Side {
 }
 
 /// Maps a read to its content or to the skip its refusal stands for.
-fn read_side(read: Result<Option<Vec<u8>>, ReviewError>) -> Result<Side, ReviewError> {
+///
+/// An I/O failure of a listed file (`explicit` false) is the skip [`SkipCause::Unreadable`],
+/// logged at WARN with the shown path and the scrubbed error; for a file named explicitly it
+/// stays an error. Nothing of the file is sent either way.
+///
+/// # Arguments
+///
+/// * `read` - The source's answer.
+/// * `path` - The file's path, for the log entry.
+/// * `explicit` - Whether the file was requested by name.
+///
+/// # Errors
+///
+/// Every error of `read` that is not a skip.
+// MAGI FIX (S6 loop 12, A2-c2): one file held open by a sync client or an indexer (a Windows
+// sharing violation) failed the whole review after its preparation.
+fn read_side(
+    read: Result<Option<Vec<u8>>, ReviewError>,
+    path: &str,
+    explicit: bool,
+) -> Result<Side, ReviewError> {
     match read {
+        Err(error @ ReviewError::Io(_)) if !explicit => {
+            let shown = display_path(path);
+            let error = error.to_string();
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                path = shown.as_str(),
+                error = error.as_str(),
+                "a listed file could not be read and was left out of the review"
+            );
+            Ok(Side::Skip(SkipCause::Unreadable))
+        }
         Ok(bytes) => Ok(Side::Content(bytes)),
         Err(ReviewError::OutsideWorkspace(_)) => Ok(Side::Skip(SkipCause::OutsideWorkspace)),
         Err(ReviewError::TooLarge { .. }) => Ok(Side::Skip(SkipCause::TooLarge)),
