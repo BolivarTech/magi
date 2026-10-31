@@ -864,6 +864,34 @@ def _is_link(path) -> bool:
     return os.path.islink(path) or bool(is_junction and is_junction(path))
 
 
+def _linked_component(base, relative):
+    """The first link on the way from *base* down to ``base / relative``.
+
+    *base* itself is not tested: it is the area the path is contained in, and
+    the containment check resolves it on both sides.
+
+    Args:
+        base: The directory the walk starts under.
+        relative: The path below *base*, one or more components.
+
+    Returns:
+        pathlib.Path | None: The first component that is a symlink or a
+        junction (see :func:`_is_link`), or ``None`` when there is none.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     _linked_component(pathlib.Path(tmp), "a/b") is None
+        True
+    """
+    path = pathlib.Path(base)
+    for part in pathlib.PurePath(relative).parts:
+        path = path / part
+        if _is_link(path):
+            return path
+    return None
+
+
 def _reject_links(top) -> None:
     """Refuse a tree that holds a symlink or a junction, *top* included.
 
@@ -1390,10 +1418,16 @@ class RunExecutor:
         # repository under the environment's lock, rmtree removes links inside
         # the tree without following them, and whoever can swap a directory
         # there already controls the harness's own code.
-        if _is_link(workspace):
+        # MAGI FIX (S6 loop 12): only the leaf was checked, so a parent inside
+        # the scratch area that is a link resolved under it too and rmtree
+        # deleted the tree it names (F1a-c1). Every component below the scratch
+        # area is checked, the leaf included.
+        linked = _linked_component(pathlib.Path(self._env.scratch_dir),
+                                   REVIEW_WORKSPACE_DIR)
+        if linked is not None:
             raise HarnessError(
-                "refusing to delete the review workspace at %s: it is a "
-                "link" % workspace)
+                "refusing to delete the review workspace at %s: %s is a "
+                "link" % (workspace, linked))
         _reject_links(self._env.magi_dir)
         try:
             if workspace.exists():
