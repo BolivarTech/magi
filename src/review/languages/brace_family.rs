@@ -1061,6 +1061,13 @@ impl BraceFamilyExtractor {
 /// the signature above it, though it ends in `,` ([`open_brace_line`]).
 const LINE_OPENING_COMMENTS: [&str; 2] = ["//", "/*"];
 
+/// The most lines past a construct's first line that [`open_brace_line`] looks at for its
+/// opening brace. A starting point, not a measurement: a signature wrapped over more lines
+/// than this (a generated parameter list) is read as having no brace, so its lines fall into
+/// later units, reviewed but split from their signature. It bounds the search at
+/// O(n × `MAX_BRACE_SEARCH_LINES`) line visits for a file of n lines.
+const MAX_BRACE_SEARCH_LINES: usize = 1_024;
+
 /// The 0-based line holding the opening brace of the construct that starts at line `i`: line
 /// `i` when it opens one, else the first later line that does, so a signature wrapped over any
 /// number of lines (rustfmt's `fn f(\n    a: u8,\n) -> u8 {`) finds its brace.
@@ -1088,6 +1095,11 @@ const LINE_OPENING_COMMENTS: [&str; 2] = ["//", "/*"];
 /// parameter makes the function end at that parameter's closing brace, and the rest of its body
 /// falls into later units. No line is lost: every line stays in exactly one unit, so the body is
 /// still reviewed, only split from its signature.
+///
+/// The search looks at most [`MAX_BRACE_SEARCH_LINES`] lines past line `i` and then degrades to
+/// "no brace found", which already means the construct ends on its own line: the lines after it
+/// fall into later units, so none is lost. Preparation runs before the review clock (RV06), so
+/// this budget is the only bound on a file built to keep a parameter list open.
 fn open_brace_line(
     lines: &[&str],
     scanned: &[ScannedLine],
@@ -1109,7 +1121,13 @@ fn open_brace_line(
     // MAGI FIX (S6 loop 6): a top-level `foo()` took the brace of the `if (x) {` after it.
     // MAGI FIX (S6 loop 7): a parameter line inside the open list no longer stops the search.
     let mut parens = paren_delta(lines, scanned, i);
-    for j in (i + 1)..lines.len() {
+    // MAGI FIX (S6 loop 12): inside an open parameter list the search ran to the end of the
+    // file, quadratic over a file of `f(a` lines and outside any clock; it is now bounded.
+    let budget_end = i
+        .saturating_add(1)
+        .saturating_add(MAX_BRACE_SEARCH_LINES)
+        .min(lines.len());
+    for j in (i + 1)..budget_end {
         // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
         // the next construct; a line after one ending in `,` continues the declaration.
         // MAGI FIX (S6 loop 11): a comment line ending in `,` (`// note,`) between two signatures
