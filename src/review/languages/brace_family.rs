@@ -779,7 +779,10 @@ impl BraceFamilyExtractor {
                 .any(|p| prev.starts_with(p.as_str()));
             if is_doc || is_attr {
                 start -= 1;
-            } else if let Some(open) = self.block_doc_start(lines, scanned, start - 1) {
+            } else if let Some(open) = self
+                .block_doc_start(lines, scanned, start - 1)
+                .or_else(|| self.multi_line_attribute_start(lines, scanned, start - 1))
+            {
                 start = open;
             } else {
                 break;
@@ -815,6 +818,51 @@ impl BraceFamilyExtractor {
                 .iter()
                 .any(|p| p.starts_with("/*") && opener.starts_with(p.as_str())))
         .then_some(open)
+    }
+
+    /// The 0-based opening line of the attribute that spans lines and ends on line `last`
+    /// (Rust's `#[serde(` ... `)]`): the lines above `last` are walked up while its square
+    /// brackets stay unbalanced, up to the line that balances them, which must open with an
+    /// attribute prefix ending in `[` (`#[`). `None` when `last` does not end in `]`, the
+    /// extractor has no such prefix, a line on the way is not code, or the line that balances
+    /// the brackets opens no attribute (a macro call `list! [` ... `]`).
+    ///
+    /// Brackets are counted on the line text, as [`paren_delta`] counts parentheses: a bracket
+    /// inside a string may miscount, and the attribute then falls into a gap unit as before, so
+    /// no line is lost. O(k) for the k lines walked.
+    fn multi_line_attribute_start(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        last: usize,
+    ) -> Option<usize> {
+        // MAGI FIX (S6 loop 10): the line above an item under a multi-line attribute is `)]`,
+        // so the attribute was cut from the item it controls and reviewed as a gap unit.
+        if !lines.get(last)?.trim_end().ends_with(']') {
+            return None;
+        }
+        let opens_attribute = |text: &str| {
+            self.attribute_prefixes
+                .iter()
+                .any(|p| p.ends_with('[') && text.starts_with(p.as_str()))
+        };
+        let mut unclosed = 0i64;
+        let mut j = last;
+        loop {
+            if scanned.get(j).is_none_or(|s| s.is_non_code) {
+                return None;
+            }
+            let line = lines.get(j)?;
+            unclosed += line.chars().fold(0, |n, c| match c {
+                ']' => n + 1,
+                '[' => n - 1,
+                _ => n,
+            });
+            if unclosed <= 0 {
+                return (unclosed == 0 && j < last && opens_attribute(line.trim())).then_some(j);
+            }
+            j = j.checked_sub(1)?;
+        }
     }
 
     /// The name and last line (0-based) of the function expression the declaration at line `i`
