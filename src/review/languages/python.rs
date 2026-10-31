@@ -116,11 +116,12 @@ impl LanguageExtractor for PythonExtractor {
             if code(j) && is_def && indentation(line) == body_indent {
                 let start = scan_back_decorators(&lines, &continued, j);
                 let end = find_block_end(&lines, &continued, j);
+                let (first, last) = member_span(start, end).unwrap_or((u32::MAX, u32::MAX));
                 members.push((
                     UnitKind::Function,
                     extract_python_name(trimmed, "def "),
-                    u32::try_from(start + 1).unwrap_or(u32::MAX),
-                    u32::try_from(end + 1).unwrap_or(u32::MAX),
+                    first,
+                    last,
                 ));
                 j = end + 1;
             } else {
@@ -129,6 +130,23 @@ impl LanguageExtractor for PythonExtractor {
         }
         split_into_members(unit, members)
     }
+}
+
+/// The 1-based, inclusive line span of a member found at the 0-based lines `start..=end`.
+///
+/// # Arguments
+///
+/// * `start` - The member's first line, 0-based.
+/// * `end` - The member's last line, 0-based.
+///
+/// # Returns
+///
+/// The span, or `None` when a line number does not fit `u32`. O(1).
+fn member_span(start: usize, end: usize) -> Option<(u32, u32)> {
+    Some((
+        u32::try_from(start.saturating_add(1)).unwrap_or(u32::MAX),
+        u32::try_from(end.saturating_add(1)).unwrap_or(u32::MAX),
+    ))
 }
 
 /// Whether each of `lines` continues a logical line begun on an earlier one: it starts inside a
@@ -943,5 +961,15 @@ def g():
             .find(|u| u.name == "A")
             .expect("class A");
         assert!(PythonExtractor.split_block(&class_a).is_empty());
+    }
+
+    #[test]
+    fn a_method_line_that_does_not_fit_u32_has_no_span() {
+        // [MAGI S6 loop 9, B2b-c2] a `u32::MAX` fallback split a class at a fabricated range.
+        assert_eq!(member_span(0, 4), Some((1, 5)));
+        let max = usize::try_from(u32::MAX).expect("usize holds u32");
+        assert_eq!(member_span(0, max), None);
+        assert_eq!(member_span(max, max), None);
+        assert_eq!(member_span(0, usize::MAX), None);
     }
 }
