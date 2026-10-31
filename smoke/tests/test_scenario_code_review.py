@@ -374,6 +374,26 @@ class CodeReviewScenarioTests(unittest.TestCase):
                 self.assertEqual(Outcome.FAIL,
                                  _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
 
+    def test_s47_fails_on_zero_or_negative_batch_counts_even_with_every_model_measured(self) -> None:
+        # [MAGI §6 MS2 loop 9, F1a-c3] R12 reviews non-empty files, so zero batches is impossible however large
+        # a measured window is, and a negative count is malformed: FAIL, never the fully measured CANNOT_TEST.
+        for count in (0, -1, -3):
+            doc = _review(count)
+            doc["code_review"]["unmeasured_models"] = []
+            with self.subTest(count=count):
+                self.assertEqual(Outcome.FAIL,
+                                 _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
+    def test_s47_with_every_model_measured_cannot_test_only_one_or_two_batches(self) -> None:
+        # [MAGI §6 MS2 loop 9, F1a-c3] the environmental CANNOT_TEST covers exactly the counts a larger
+        # measured window can produce: one or two batches.
+        for count in (1, 2):
+            doc = _review(count)
+            doc["code_review"]["unmeasured_models"] = []
+            with self.subTest(count=count):
+                self.assertEqual(Outcome.CANNOT_TEST,
+                                 _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
     def test_s47_without_the_findings_key_fails_never_an_empty_pass(self) -> None:
         doc = _review(3)
         del doc["code_review"]["findings"]
