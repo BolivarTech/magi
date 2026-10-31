@@ -1693,4 +1693,34 @@ mod tests {
             assert!(!has_forged_line(&paid), "break {b:?}: {paid}");
         }
     }
+
+    #[test]
+    fn no_label_name_writes_a_line_break_raw_whatever_its_type() {
+        // [MAGI S6 loop 13, C2-c1, security] `name` returned the serialized text, or the `Debug`
+        // form, as it was; every caller then had to remember `escape_controls`, and four did not
+        // (`Discarded.agent`, `Discarded.cause`, a finding's severity, a verdict's state). Their
+        // types are closed today; a type whose serialized text or `Debug` form carries model text
+        // (a foreign `#[non_exhaustive]` enum with a `String` payload) wrote it straight in.
+        struct Prose;
+        impl serde::Serialize for Prose {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_u8(0)
+            }
+        }
+        impl std::fmt::Debug for Prose {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("x\nFORGED")
+            }
+        }
+        for b in BREAKS {
+            let text = name(&format!("x{b}FORGED"));
+            assert!(text.contains("FORGED"), "{text:?}");
+            assert!(!has_forged_line(&text), "break {b:?}: {text:?}");
+        }
+        let debug = name(&Prose);
+        assert!(
+            debug.contains("FORGED") && !has_forged_line(&debug),
+            "{debug:?}"
+        );
+    }
 }
