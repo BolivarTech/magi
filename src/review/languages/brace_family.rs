@@ -45,6 +45,10 @@ pub struct BraceFamilyExtractor {
     /// globals (`int counter = 0;`, `static int state;`) and prototypes have no declaration
     /// keyword.
     semicolon_declarations: bool,
+    /// Whether a C++ `template <...>` header may open a construct's line
+    /// ([`strip_template_header`]) or stand on its own line above it (then it is one of the
+    /// `attribute_prefixes`): C++ only.
+    template_headers: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -443,6 +447,8 @@ impl BraceFamilyExtractor {
     fn construct_keyword(&self, trimmed: &str) -> Option<(UnitKind, String)> {
         // MAGI FIX (S6 loop 4): qualifiers combine freely (`pub(super) async unsafe fn`); the
         // tables of fixed prefixes missed most combinations.
+        // MAGI FIX (S6 loop 8): `template<typename T> class Box {` was no construct at all.
+        let trimmed = self.without_template_header(trimmed);
         let candidates = [self.strip_modifiers(trimmed, true), trimmed];
         candidates
             .iter()
@@ -511,6 +517,16 @@ impl BraceFamilyExtractor {
                 return rest;
             };
             rest = after;
+        }
+    }
+
+    /// `trimmed` without the C++ template header it opens with ([`strip_template_header`]), for
+    /// extractors with `template_headers`; `trimmed` otherwise. O(n) in the line.
+    fn without_template_header<'t>(&self, trimmed: &'t str) -> &'t str {
+        if self.template_headers {
+            strip_template_header(trimmed)
+        } else {
+            trimmed
         }
     }
 
@@ -589,7 +605,9 @@ impl BraceFamilyExtractor {
         {
             return None;
         }
-        let name = identifier_before_paren(trimmed)?;
+        // MAGI FIX (S6 loop 8): `template <void (*F)(int)> void call() {` was named `void`; a
+        // header alone on its line (`template <typename T>`) is no signature: nothing follows it.
+        let name = identifier_before_paren(self.without_template_header(trimmed))?;
         // MAGI FIX (S6 loop 4): `catch (e) {` read as a function named `catch`.
         if NOT_FUNCTION_NAMES.contains(&name.as_str()) {
             return None;
@@ -1108,6 +1126,24 @@ fn skip_generics(text: &str) -> &str {
     ""
 }
 
+/// `text` after the C++ template header it opens with: the word `template` followed, after any
+/// blanks, by a balanced `<...>` ([`skip_generics`]), trimmed at its start; empty when the
+/// header is the whole line or never closes on it. `text` when it opens with no such header
+/// (`templated()`, `template class Foo<int>;`). O(n) in the text.
+///
+/// A header wrapped over several lines (`template <typename T,` then `typename U>`) is not
+/// recognised past its first line: the first line attaches to the construct only when it is the
+/// line right above it, so such a header's lines fall into a gap unit, each line in exactly one.
+fn strip_template_header(text: &str) -> &str {
+    match text.strip_prefix(TEMPLATE_KEYWORD).map(str::trim_start) {
+        Some(rest) if rest.starts_with('<') => skip_generics(rest),
+        _ => text,
+    }
+}
+
+/// The C++ keyword that opens a template header (`template <typename T>`).
+const TEMPLATE_KEYWORD: &str = "template";
+
 /// The name of a construct: the identifier that opens `rest`, the text after its keyword (after
 /// a parenthesized receiver it opens with, as in Go's `func (r *T) Name(`), or, when none
 /// does, the identifier of the second word of `text`, the matched line.
@@ -1172,6 +1208,7 @@ impl BraceFamilyExtractor {
             lexical_rules: LexicalRules::rust(),
             signature_functions: false,
             semicolon_declarations: false,
+            template_headers: false,
         }
     }
 
@@ -1198,6 +1235,7 @@ impl BraceFamilyExtractor {
             lexical_rules: LexicalRules::c(),
             signature_functions: true,
             semicolon_declarations: true,
+            template_headers: false,
         }
     }
 
@@ -1208,6 +1246,9 @@ impl BraceFamilyExtractor {
     /// with C rules, so its classes and namespaces are not units of their own (their lines fall
     /// into gap units, each line in exactly one) and a C++ raw string in it is read as ordinary
     /// strings; name C++ headers `.hpp` or `.hxx` to get the C++ extractor.
+    ///
+    /// A `template <...>` header belongs to the class or function it declares, on the line
+    /// right above it or on the construct's own line ([`strip_template_header`]).
     pub fn cpp() -> Self {
         let mut ext = Self::c();
         ext.language = "cpp".to_string();
@@ -1215,6 +1256,11 @@ impl BraceFamilyExtractor {
         ext.block_keywords
             .extend(["class ".to_string(), "namespace ".to_string()]);
         ext.lexical_rules = LexicalRules::cpp();
+        // MAGI FIX (S6 loop 8): a `template <...>` header above a class or a function was left
+        // out of the unit it declares.
+        ext.template_headers = true;
+        ext.attribute_prefixes
+            .extend(["template<".to_string(), "template <".to_string()]);
         ext
     }
 
@@ -1236,6 +1282,7 @@ impl BraceFamilyExtractor {
             lexical_rules: LexicalRules::go(),
             signature_functions: false,
             semicolon_declarations: false,
+            template_headers: false,
         }
     }
 
@@ -1266,6 +1313,7 @@ impl BraceFamilyExtractor {
             lexical_rules: LexicalRules::java(),
             signature_functions: true,
             semicolon_declarations: false,
+            template_headers: false,
         }
     }
 
@@ -1302,6 +1350,7 @@ impl BraceFamilyExtractor {
             // signature, as in C and Java.
             signature_functions: true,
             semicolon_declarations: false,
+            template_headers: false,
         }
     }
 
