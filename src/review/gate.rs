@@ -384,6 +384,12 @@ impl Outcome {
 /// out). The thresholds are applied here, so the client must be built with no `min_confidence`
 /// in its chain; a model without one decides with any confidence, as in `[decision]`.
 ///
+/// That rule is not prose only: the one production client, `gate_client` in
+/// `code_review_runner.rs`, clears every `min_confidence` of the configured chain, and
+/// `an_answer_under_the_threshold_reaches_the_gate_as_low_confidence` there drives a
+/// below-threshold `false_positive` through that client into this gate and asserts
+/// `low_confidence`, not `filtered`.
+///
 /// # Examples
 /// ```no_run
 /// # async fn demo(client: &dyn magi_rs::decision::DecisionClient,
@@ -398,6 +404,7 @@ impl Outcome {
 /// println!("{:?} {:?}", verdict.state, verdict.cause);
 /// # }
 /// ```
+// MAGI FIX (S6 loop 10, C1-m2): the threshold-free client is pinned by a wiring test, named above.
 pub struct Gate<'a> {
     client: &'a dyn DecisionClient,
     /// Shared, so a walk holds it without cloning every model per question.
