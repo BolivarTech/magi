@@ -200,8 +200,13 @@ fn split_declaration_group(unit: &SemanticUnit) -> Vec<SemanticUnit> {
 ///
 /// The span, or `None` when a line number does not fit `u32`. O(1).
 fn member_span(start: usize, end: usize) -> Option<(u32, u32)> {
-    let line = |idx: usize| u32::try_from(idx.checked_add(1)?).ok();
-    Some((line(start)?, line(end)?))
+    Some((line_number(start)?, line_number(end)?))
+}
+
+/// The 1-based line number of the 0-based line `idx`, or `None` when it does not fit `u32`.
+/// O(1).
+fn line_number(idx: usize) -> Option<u32> {
+    u32::try_from(idx.checked_add(1)?).ok()
 }
 
 /// Whether each of `lines` continues a logical line begun on an earlier one: it starts inside a
@@ -314,7 +319,20 @@ struct PythonConstruct {
 }
 
 /// Detect Python constructs using indentation.
+///
+/// No constructs when a line number does not fit `u32` ([`try_detect_python_constructs`]): the
+/// file's changed lines then fall into gap units, never into fabricated ranges.
 fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
+    try_detect_python_constructs(lines).unwrap_or_default()
+}
+
+/// The constructs of [`detect_python_constructs`], or `None` when a line number does not fit
+/// `u32`. The 8 MiB file cap keeps that out of reach (8 388 608 lines at most); the check makes
+/// the failure mode explicit, as the brace family's detection and [`member_span`] do. O(n) in
+/// the lines.
+fn try_detect_python_constructs(lines: &[&str]) -> Option<Vec<PythonConstruct>> {
+    // MAGI FIX (S6 loop 12): the conversions fell back to `u32::MAX`, `1` or the line number,
+    // unlike the brace family since loop 10; an unrepresentable line now aborts detection.
     let continued = continued_lines(lines);
     let mut constructs = Vec::new();
     let mut i = 0;
@@ -329,7 +347,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         }
         let trimmed = line.trim();
         let indent = indentation(line);
-        let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
+        let line_num = line_number(i)?;
 
         // def / async def at indent 0 → Function
         if (trimmed.starts_with("def ") || trimmed.starts_with("async def ")) && indent == 0 {
@@ -339,8 +357,8 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
             constructs.push(PythonConstruct {
                 kind: UnitKind::Function,
                 name,
-                start_line: u32::try_from(start + 1).unwrap_or(1),
-                end_line: u32::try_from(end + 1).unwrap_or(line_num),
+                start_line: line_number(start)?,
+                end_line: line_number(end)?,
             });
             i = end + 1;
             continue;
@@ -354,8 +372,8 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
             constructs.push(PythonConstruct {
                 kind: UnitKind::Class,
                 name,
-                start_line: u32::try_from(start + 1).unwrap_or(1),
-                end_line: u32::try_from(end + 1).unwrap_or(line_num),
+                start_line: line_number(start)?,
+                end_line: line_number(end)?,
             });
             i = end + 1;
             continue;
@@ -368,7 +386,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
                 kind: UnitKind::DeclarationGroup,
                 name: "imports".to_string(),
                 start_line: line_num,
-                end_line: u32::try_from(group_end + 1).unwrap_or(line_num),
+                end_line: line_number(group_end)?,
             });
             i = group_end + 1;
             continue;
@@ -386,7 +404,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
                 kind: UnitKind::DeclarationGroup,
                 name,
                 start_line: line_num,
-                end_line: u32::try_from(group_end + 1).unwrap_or(line_num),
+                end_line: line_number(group_end)?,
             });
             i = group_end + 1;
             continue;
@@ -395,7 +413,7 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
         i += 1;
     }
 
-    constructs
+    Some(constructs)
 }
 
 /// Words that open a statement which is never a module-level assignment: definitions, imports,
