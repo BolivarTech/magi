@@ -405,6 +405,14 @@ fn ensure_root_commit(git: &dyn GitCommand, sha: &str) -> Result<(), ReviewError
 /// Only `.gitattributes` moves to the tree: `$GIT_DIR/info/attributes` and `core.attributesFile`
 /// are the operator's own settings and still apply. Uncommitted reviews keep the working tree's.
 ///
+/// Declared, not isolated further (S6 loop 9, A1-c3): a git older than 2.46 ignores
+/// `attr.tree` and reads the working tree's `.gitattributes`, and every git reads
+/// `$GIT_DIR/info/attributes`. Neither changes which revision's bytes are diffed (RV21 holds):
+/// an attribute only decides whether a section shows as binary, so the worst case is the file
+/// left out as `binary`, which the report names. Refusing revision reviews below 2.46 would cut
+/// supported gits for no gain in what is sent. Pinned by
+/// `a_non_revision_attribute_only_hides_a_revision_section_never_changes_its_bytes`.
+///
 /// # Errors
 ///
 /// Any error of `git`.
