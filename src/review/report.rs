@@ -1922,4 +1922,63 @@ mod tests {
         );
         assert_eq!(keys(&consensus["conditions"][0]), ["agent", "condition"]);
     }
+
+    #[tokio::test]
+    async fn both_report_forms_cap_the_omission_lists_and_declare_the_rest() {
+        // [MAGI S6 loop 13, C2-c4 / C2-m3, performance] `skipped` and `no_extractor` grew with the
+        // reviewed tree, one line or entry per file, in the text and the JSON alike; the error
+        // path already capped the same kind of list. Both forms now list the first
+        // `MAX_OMISSIONS_SHOWN` and declare how many more there are.
+        use crate::review::error::MAX_OMISSIONS_SHOWN;
+        let extra = 3;
+        let mut s = ReviewSummary::default();
+        for i in 0..MAX_OMISSIONS_SHOWN + extra {
+            s.skipped.push(Skipped {
+                path: format!("bin{i}.dat"),
+                cause: crate::review::filter::SkipCause::Binary,
+            });
+            s.no_extractor.push(format!("doc{i}.txt"));
+        }
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+        let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        let c = consolidate(&[BatchOutcome {
+            batch: 0,
+            agents: report.agents.clone(),
+            answered: report.agents.iter().map(|a| a.agent).collect(),
+        }])
+        .expect("consolidates");
+        let text = render_text(&c, &s);
+        let last = MAX_OMISSIONS_SHOWN - 1;
+        for shown in [format!("bin{last}.dat"), format!("doc{last}.txt")] {
+            assert!(text.contains(&shown), "{text}");
+        }
+        for hidden in [
+            format!("bin{MAX_OMISSIONS_SHOWN}.dat"),
+            format!("doc{MAX_OMISSIONS_SHOWN}.txt"),
+        ] {
+            assert!(!text.contains(&hidden), "{text}");
+        }
+        assert_eq!(
+            text.matches(&format!("- ... and {extra} more")).count(),
+            2,
+            "{text}"
+        );
+        let v = summary_json(&s);
+        for (list, rest) in [
+            ("skipped", "skipped_unlisted"),
+            ("no_extractor", "no_extractor_unlisted"),
+        ] {
+            assert_eq!(
+                v[list].as_array().map(Vec::len),
+                Some(MAX_OMISSIONS_SHOWN),
+                "{v}"
+            );
+            assert_eq!(v[rest], extra, "{v}");
+        }
+        let none = summary_json(&ReviewSummary::default());
+        assert_eq!(
+            (&none["skipped_unlisted"], &none["no_extractor_unlisted"]),
+            (&json!(0), &json!(0))
+        );
+    }
 }
