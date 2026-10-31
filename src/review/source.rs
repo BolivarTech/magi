@@ -432,6 +432,16 @@ pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File>
 /// an error. Every revision argument follows [`END_OF_OPTIONS`], so the source is safe on its
 /// own: a rev shaped like an option (`--output=<file>`) is never one, whatever the caller checked.
 ///
+/// Cost: two git processes per (side, path) that exists, one per absent side, each once thanks
+/// to [`CachedSource`]. Measured 2026-10-31 on Windows 11 with git 2.56 (a 300-file commit, from
+/// a shell loop whose own spawn cost a trivial executable puts at ~34 ms): ~58 ms per `ls-tree`
+/// or `show`, so ~35 s for the new side of 300 added files and ~17 s more for their absent old
+/// side, off the clock (RV06) and reported as preparation time (RV13); a few percent of one
+/// batch's trio time. One `git cat-file --batch` session over stdin would answer type, size and
+/// content in one process with the same per-path bound, but [`GitCommand`] has no stdin channel
+/// and its production runner lives in `src/system/review_git.rs`; left as a follow-up.
+// MAGI FIX (S6 loop 12, A2-m2 / A2-b3): measured and documented, not changed (see above).
+///
 /// A symlink (mode `120000`) is a blob whose content is its target path, so a revision review
 /// reads that path as the file's text, where the worktree source follows the link: the same
 /// logical file can read differently on the two sides. Nothing extra leaves the process: the
