@@ -854,8 +854,9 @@ def protected_candidates(workspace) -> tuple[str, ...]:
                         if path.startswith(prefix)))
 
 
-#: The reparse tag of a Windows junction (``IO_REPARSE_TAG_MOUNT_POINT``),
-#: ``None`` where :mod:`stat` has none (every platform without junctions).
+#: The reparse tag of a Windows junction (``IO_REPARSE_TAG_MOUNT_POINT``).
+#: Off Windows ``os.lstat`` reports no ``st_reparse_tag``, read as 0, so
+#: nothing matches it.
 JUNCTION_REPARSE_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
 
 
