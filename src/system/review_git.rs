@@ -1435,6 +1435,37 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // creating a symlink needs Developer Mode on Windows.
+    #[test]
+    fn a_dangling_link_is_missing_not_outside_the_workspace() {
+        // [MAGI S6 loop 9, A1-c5] the guard canonicalizes, and a link whose target is gone
+        // cannot be canonicalized, so it was refused as outside the workspace before the input
+        // could call it missing. Whatever its target, nothing is read through it.
+        let outer = tempfile::tempdir().expect("tempdir");
+        let ws = outer.path().join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir");
+        std::os::unix::fs::symlink(ws.join("gone.rs"), ws.join("inside.rs")).expect("symlink");
+        std::os::unix::fs::symlink(outer.path().join("gone"), ws.join("outside")).expect("symlink");
+        let guard = PathGuard::new(ws.clone()).expect("guard");
+        let check = |p: &std::path::Path| review_path_guard(&guard, p);
+        let git = ScrubbedGit::new(ws.clone());
+        for input in [
+            magi_rs::review::input::ReviewInput::File("inside.rs".into()),
+            magi_rs::review::input::ReviewInput::File("outside".into()),
+            magi_rs::review::input::ReviewInput::Directory("outside".into()),
+        ] {
+            match magi_rs::review::input::resolve_input(&input, &ws, &git, &check) {
+                Err(ReviewError::NotReviewable { cause, .. }) => assert_eq!(cause, "missing"),
+                Err(other) => panic!("{other}"),
+                Ok(_) => panic!("a dangling link resolved"),
+            }
+        }
+        assert!(matches!(
+            review_path_guard(&guard, &ws.join("outside").join("x.rs")),
+            Err(ReviewError::OutsideWorkspace(_))
+        ));
+    }
+
     #[test]
     fn too_many_filter_drivers_to_neutralize_fail_closed() {
         // [CP2 MS2 S1a loop 13] thousands of drivers would push every git call past the OS command-line limit.
