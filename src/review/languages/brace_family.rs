@@ -2783,6 +2783,17 @@ void g(void) {
     }
 
     #[test]
+    fn commonjs_extensions_are_claimed_by_their_language() {
+        // [MAGI S6 loop 9, B2b-b2] `.cjs` and `.cts` had no extractor, so a CommonJS file got no
+        // lexical language context.
+        let registry = crate::review::languages::LanguageRegistry::new();
+        for (path, language) in [("a.cjs", "javascript"), ("a.cts", "typescript")] {
+            let extractor = registry.get(path).map(|e| e.language_id().to_string());
+            assert_eq!(extractor.as_deref(), Some(language), "{path}");
+        }
+    }
+
+    #[test]
     fn construct_ranges_are_sorted_and_disjoint() {
         // [MAGI S6 loop 7, B2a] `ChangedLines::assign` gives the same units for a diff and a
         // whole file only when the ranges are sorted and disjoint; this pins it per extractor.
