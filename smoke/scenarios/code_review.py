@@ -383,14 +383,35 @@ def _locations_finding(section, run_id):
                         "the trio reported no located finding, so there is "
                         "no location to check")
     counts = runs.review_gen_line_counts()
-    outside = [f.get("file") for f in located if f.get("file") not in S47_FILES]
+    # MAGI FIX (S6 loop 10): S49 and S51 read a backslash as "/", S47 did
+    # not, so a Windows rendering of a generated file false-FAILed (F1a-b1).
+    outside = [f.get("file") for f in located
+               if _slashed(f.get("file")) not in S47_FILES]
     if outside:
         return _finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
                         "findings point outside the reviewed files: %s" % outside)
     beyond = [(f["file"], f.get("line")) for f in located
-              if not _line_inside(f.get("line"), counts[f["file"]])]
+              if not _line_inside(f.get("line"), counts[_slashed(f["file"])])]
     return _verdict(S47_ASSERTIONS, 4, run_id, not beyond,
                     "findings point outside the lines of their file: %s" % beyond)
+
+
+def _slashed(path):
+    """Read *path* with every backslash as ``/``, the separator S47-S51 compare.
+
+    Args:
+        path: A path as the product printed it; anything else is returned
+            unchanged, so a non-string ``file`` stays outside every file.
+
+    Returns:
+        The path with ``/`` separators, or *path* itself when it is not a
+        string.
+
+    Example:
+        >>> _slashed("gen\\\\a.rs"), _slashed(None)
+        ('gen/a.rs', None)
+    """
+    return path.replace("\\", "/") if isinstance(path, str) else path
 
 
 def _line_inside(line, count):
