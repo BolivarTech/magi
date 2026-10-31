@@ -273,8 +273,13 @@ fn redacted_finding(finding: &Finding) -> Finding {
 
 /// Removes from `agents` every finding the review cannot support and returns what was removed.
 ///
-/// Runs per batch **after** every completed batch filled `reviewed` (U24: "reviewed" is the union
-/// of all batches). Checks are independent and run in this order, the first failure naming the
+/// Precondition: call it only after every completed batch filled `reviewed` (U24: "reviewed" is
+/// the union of all batches); a call made right after its own batch would discard a finding on a
+/// file only a later batch reviewed. `run_review` builds `reviewed` from every completed batch
+/// before its first call, pinned by the pipeline test
+/// `a_finding_on_a_later_batchs_file_is_kept_because_validation_sees_the_union` (RV-S29).
+///
+/// Checks are independent and run in this order, the first failure naming the
 /// cause: the file was shown, the line lies in a shown range, every symbol cited in backticks in
 /// `title` and `detail` occurs in the code (only for files with a language extractor, and only
 /// with a complete index). A finding without `file`, or with a blank one, skips the first two and
@@ -297,6 +302,7 @@ fn redacted_finding(finding: &Finding) -> Finding {
 ///
 /// Complexity: O(f log r + c) for f findings, r ranges per file and c characters of title and
 /// detail.
+// MAGI FIX (S6 loop 10, C1-m1): the ordering is a stated precondition, not an ambiguous "runs".
 pub fn validate_batch(
     agents: &mut [AgentOutput],
     batch: usize,
