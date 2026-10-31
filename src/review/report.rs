@@ -811,6 +811,49 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_in_a_model_name_is_masked_in_the_keys_of_the_summary_json() {
+        // [MAGI S6 loop 11, C2-c1, security] `redact_strings` visited values only, so a model
+        // name shaped like a key reached the JSON unmasked as a key of `per_model` or
+        // `rejected_skips` (RV22: every byte that leaves the process passes the detector).
+        let secret = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let finding = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: Severity::Warning,
+            reported_severity: Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![Category::Other],
+            sources: vec![AgentName::Melchior, AgentName::Caspar],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let verdict = GateVerdict {
+            state: GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: Some("clef:cloud".into()),
+            lean: None,
+            confidence: Some(0.9),
+            skipped: vec![secret.into()],
+            status: None,
+        };
+        let mut s = ReviewSummary::default();
+        s.per_model.insert(secret.into(), 1);
+        s.per_model.insert("clef:cloud".into(), 2);
+        s.findings.push((finding, verdict));
+        let v = summary_json(&s);
+        assert!(!v.to_string().contains(secret), "{v}");
+        assert_eq!(v["per_model"]["clef:cloud"], 2, "{v}");
+        assert_eq!(v["per_model"].as_object().map(|m| m.len()), Some(2), "{v}");
+        assert_eq!(
+            v["rejected_skips"].as_object().map(|m| m.len()),
+            Some(1),
+            "{v}"
+        );
+    }
+
+    #[test]
     fn every_batch_index_of_the_json_form_is_one_based() {
         // [MAGI S6 loop 4, C2] a renamed or new batch field must not stay 0-based while the text
         // form is 1-based. Since S6 loop 5 the renumbering is each field's `serialize_with`.
