@@ -625,7 +625,8 @@ pub const NOT_A_DIRECTORY: &str = "not a directory";
 /// ([`is_never_reviewed`], never entered) and what `ignored` names (a file by its path, a
 /// directory by its path and a trailing `/`, never entered). O(entries).
 ///
-/// Every name listed (a non-UTF-8 one too) is paid from `budget` ([`spend`]), so a directory
+/// Every name listed (a non-UTF-8 one too) and every directory entered is paid from `budget`
+/// ([`spend`]), so a deep or wide tree, or a directory
 /// of millions of files stops at the cap a repository's listing has instead of being held
 /// whole before any content cap applies.
 ///
@@ -667,6 +668,8 @@ fn walk(
             continue;
         }
         if entry.file_type().map_err(io)?.is_dir() {
+            // MAGI FIX (S6 loop 9): an empty directory cost the walk without paying the cap.
+            spend(budget, &path)?;
             walk(&entry.path(), &path, ignored, found, not_utf8, budget)?;
         } else {
             spend(budget, &path)?;
