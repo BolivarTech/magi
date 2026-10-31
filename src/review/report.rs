@@ -679,12 +679,31 @@ fn redacted(text: &str) -> String {
     mask_secrets(redact_foreign_text(text).as_str())
 }
 
-/// Redacts every string of `value` in place (keys are field names, model names, states and causes). O(bytes).
+/// Redacts every string of `value` in place, object keys included: besides field names, the
+/// keys are model names, states and causes, and a model name is operator text. Two keys that
+/// redact to the same text are both kept, the later one suffixed ` (n)` with the first free `n`
+/// from 2, so no count is lost. O(bytes).
+// MAGI FIX (S6 loop 11, C2-c1): keys were written as is, so a model name shaped like a key left
+// the process unmasked as a key of `per_model` or `rejected_skips` (RV22).
 fn redact_strings(value: &mut Value) {
     match value {
         Value::String(text) => *text = redacted(text),
         Value::Array(items) => items.iter_mut().for_each(redact_strings),
-        Value::Object(fields) => fields.values_mut().for_each(redact_strings),
+        Value::Object(fields) => {
+            let mut safe = serde_json::Map::with_capacity(fields.len());
+            for (key, mut item) in std::mem::take(fields) {
+                redact_strings(&mut item);
+                let base = redacted(&key);
+                let mut key = base.clone();
+                let mut n = 2_usize;
+                while safe.contains_key(&key) {
+                    key = format!("{base} ({n})");
+                    n = n.saturating_add(1);
+                }
+                safe.insert(key, item);
+            }
+            *fields = safe;
+        }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
