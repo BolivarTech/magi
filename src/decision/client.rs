@@ -28,6 +28,12 @@ pub const RESPONSE_BODY_CAP: usize = 1024 * 1024;
 /// `{"error":"model '<m>' not found"}`, which names the model and is matched by
 /// the missing-model check of the 404 handler instead.
 pub const MODEL_NOT_FOUND_MARKERS: &[&str] = &["not found, try pulling it first"];
+/// The marker after the single-quoted name in Ollama's 0.40 text `model '<m>' not found`
+/// (measured on 0.40.6, 2026-10-21).
+pub const MODEL_NOT_FOUND_0_40_MARKER: &str = "not found";
+/// The tag Ollama adds to a bare model name when it echoes it: asking for `nimble` can answer
+/// about `nimble:latest`.
+pub const OLLAMA_DEFAULT_TAG: &str = ":latest";
 /// OpenRouter, E4: "0 endpoints out of 1 requested are available matching your guardrail
 /// restrictions and data policy...".
 pub const ACCOUNT_POLICY_MARKERS: &[&str] = &["guardrail restrictions and data policy"];
@@ -291,12 +297,23 @@ impl SystemOneClient {
 /// quotes JSON-escaped in the body, or bare), or the 0.40 form `model '<model>' not found`, each
 /// with the requested name between the quotes: a generic 404 (a proxy, another model's name) is
 /// not this model missing.
+///
+/// A bare `model` (no `:`) also matches its canonical form with [`OLLAMA_DEFAULT_TAG`]; any
+/// other spelling (an abbreviated tag, other quoting) is a generic 404, which still rotates.
+/// O(bytes of `body`).
 // MAGI FIX (S6 loop 3): the legacy marker is name-checked like the 0.40 form.
+// MAGI FIX (S6 loop 12, C2-m3 / C2-b6 / C2-c3): Ollama echoes a bare name with `:latest`, which
+// the exact check read as a generic 404 and lost the "model not available" detail.
 fn names_missing_model(body: &str, model: &str) -> bool {
-    MODEL_NOT_FOUND_MARKERS.iter().any(|marker| {
-        body.contains(&format!("\\\"{model}\\\" {marker}"))
-            || body.contains(&format!("\"{model}\" {marker}"))
-    }) || body.contains(&format!("model '{model}' not found"))
+    let canonical = (!model.contains(':')).then(|| format!("{model}{OLLAMA_DEFAULT_TAG}"));
+    std::iter::once(model)
+        .chain(canonical.as_deref())
+        .any(|name| {
+            MODEL_NOT_FOUND_MARKERS.iter().any(|marker| {
+                body.contains(&format!("\\\"{name}\\\" {marker}"))
+                    || body.contains(&format!("\"{name}\" {marker}"))
+            }) || body.contains(&format!("model '{name}' {MODEL_NOT_FOUND_0_40_MARKER}"))
+        })
 }
 
 /// Whether `body` contains any of the `markers`.
