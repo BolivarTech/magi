@@ -1270,6 +1270,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_merged_claim_carrying_a_secret_is_withheld_and_the_others_are_still_judged() {
+        // [MAGI S6 loop 10, C1-c2] one reworded claim with a secret pattern made the whole merged
+        // finding `unfiltered` with no question asked and no `not every claim judged`.
+        let mut f = finding(Severity::Warning, Some(1));
+        f.titles = vec!["a".into(), "b".into()];
+        f.details = vec![
+            "token ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA leaks".into(), // allow-secret-scan
+            "db".into(),
+        ];
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("not every claim judged"),
+                vec!["not every claim judged", "secret"]
+            )
+        );
+        assert_eq!(g.questions(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_merged_claim_over_the_state_limit_is_withheld_and_a_kept_one_names_it() {
+        // [MAGI S6 loop 10, C1-c2] the oversized claim is never sent nor truncated; the other
+        // claim is asked, and the verdict names both what withheld one and that it went unasked.
+        let mut f = finding(Severity::Warning, Some(1));
+        f.titles = vec!["a".into(), "b".into()];
+        f.details = vec!["da".into(), "y".repeat(400)];
+        let small = gate_state_of(&f, 0, "x\nx\nx\n").to_string().len();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.9));
+        let mut g = Gate::new(&c, chain(), small + 10);
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::Kept,
+                None,
+                vec!["state too large", "not every claim judged"]
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn a_bad_request_head_is_skipped_for_the_rest_of_the_review() {
         let mut c = MockDecisionClient::new();
         c.expect_decide()
