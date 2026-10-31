@@ -186,6 +186,20 @@ class ReportKeyTests(unittest.TestCase):
             self.assertIn('"%s": c.%s,' % (key, key), consult)
 
 
+class GitConfigTests(unittest.TestCase):
+    """The harness's git settings are a subset of the product's."""
+
+    # MAGI FIX (S6 loop 8): HARNESS_GIT_CONFIG claimed to be a subset of
+    # NEUTRAL_GIT_CONFIG with nothing checking it (F1a-m3).
+    def test_every_harness_git_setting_is_one_the_product_passes(self) -> None:
+        listing = re.search(r"pub\(crate\) const NEUTRAL_GIT_CONFIG: &\[&str\] = &\[(.*?)\];",
+                            _source("src/system/review_git.rs"), re.S)
+        self.assertIsNotNone(listing, "NEUTRAL_GIT_CONFIG was not found in src/system/review_git.rs")
+        product = set(re.findall(r'"([^"]*)"', listing.group(1)))
+        self.assertTrue(runs.HARNESS_GIT_CONFIG)
+        self.assertEqual(set(), set(runs.HARNESS_GIT_CONFIG) - product)
+
+
 class SecretPrefixDocTests(unittest.TestCase):
     """The README never names a secret prefix the detector does not check."""
 
