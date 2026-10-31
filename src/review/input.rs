@@ -888,6 +888,13 @@ pub fn is_binary_section(section: &str) -> bool {
 ///
 /// `decode` undoes git's quoting of a path ([`unquote`], or [`unquote_lossy`] for the lists of
 /// paths that are not UTF-8).
+///
+/// A gitlink test on any mode line drops no regular content: git prints a type change between a
+/// gitlink and a regular file as two sections (a deletion, then an addition), so the gitlink's
+/// section holds only `Subproject commit` and the regular file's section carries no `160000`
+/// (measured with git 2.56; pinned by
+/// `a_gitlink_replaced_by_a_file_or_the_reverse_keeps_the_regular_side`, `src/system/review_git.rs`).
+// MAGI FIX (S6 loop 10): A1-m1/A1-b1 refuted with real git; both transitions are pinned.
 fn reviewable_path(section: &str, decode: Decode) -> Option<String> {
     let mut lines = section.lines();
     let first = lines.next()?;

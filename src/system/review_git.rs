@@ -1127,6 +1127,57 @@ mod tests {
     }
 
     #[test]
+    fn a_gitlink_replaced_by_a_file_or_the_reverse_keeps_the_regular_side() {
+        // [MAGI S6 loop 10, A1-m1/A1-b1, false positive] measured with git 2.56: a type change
+        // between a gitlink and a regular file is printed as two sections, a deletion and an
+        // addition, never as one `old mode 160000`/`new mode 100644` section; only the gitlink's
+        // own section is dropped, and the regular file's section reaches the review.
+        let d = repo();
+        std::fs::write(d.path().join("r.rs"), "fn r() {}\n").expect("write");
+        git(d.path(), &["add", "r.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "0"]);
+        let commit_id = "1111111111111111111111111111111111111111";
+        git(
+            d.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{commit_id},sub"),
+            ],
+        );
+        git(d.path(), &["commit", "-q", "-m", "gitlink"]);
+        git(d.path(), &["tag", "G"]);
+        git(d.path(), &["rm", "-q", "--cached", "sub"]);
+        std::fs::write(d.path().join("sub"), "fn s() {}\n").expect("write");
+        git(d.path(), &["add", "sub"]);
+        git(d.path(), &["commit", "-q", "-m", "file"]);
+        git(d.path(), &["tag", "F"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        for (from, to, line) in [("G", "F", "+fn s() {}"), ("F", "G", "-fn s() {}")] {
+            let input = ReviewInput::Range {
+                from: from.into(),
+                to: to.into(),
+            };
+            let r = magi_rs::review::input::resolve_input(&input, d.path(), &g, &allow)
+                .expect("resolves");
+            let diffs: Vec<&str> = r
+                .files
+                .iter()
+                .filter(|f| f.path == "sub")
+                .filter_map(|f| f.diff.as_deref())
+                .collect();
+            assert_eq!(diffs.len(), 1, "{from}..{to}: {diffs:?}");
+            let diff = diffs.first().copied().unwrap_or_default();
+            assert!(diff.contains(line), "{from}..{to}: {diff}");
+            assert!(!diff.contains("Subproject commit"), "{from}..{to}: {diff}");
+        }
+    }
+
+    #[test]
     fn a_filter_driver_from_the_reviewed_repos_config_never_runs() {
         // [CP2 MS2 S1a loop 10, measured with git 2.56] `diff <sha>` against the worktree runs the repo's `clean` filter;
         // --no-ext-diff and --no-textconv do not stop it. The filter would create PWNED in the repo root.
