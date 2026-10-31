@@ -1493,7 +1493,9 @@ class RunExecutor:
         root = str(self._env.root)
         resolved = {WORKSPACE_TOKEN: root}
         if REVIEW_WORKSPACE_TOKEN in definition.argv:
-            resolved[REVIEW_WORKSPACE_TOKEN] = str(self._review_workspace())
+            # MAGI FIX (S6 loop 11, F1a-m1): resolved, because the product starts with
+            # cwd = this workspace and a relative -w would be joined to it a second time.
+            resolved[REVIEW_WORKSPACE_TOKEN] = str(self._review_workspace().resolve())
         return [resolved.get(word, word) for word in definition.argv]
 
     def _invoke(self, definition: RunDefinition,
