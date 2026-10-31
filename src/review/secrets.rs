@@ -1200,4 +1200,19 @@ mod tests {
             assert!(!shown.contains(c), "{} kept", c.escape_unicode());
         }
     }
+
+    #[test]
+    fn an_aws_secret_key_under_a_colon_equals_assignment_is_a_secret_and_masked_whole() {
+        // [MAGI S6 loop 9, A2-m1] Go's `:=` and Make's `:=` left the `=` after the `:`, so the
+        // base64 check failed at it and the key was sent.
+        let tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        for text in [
+            format!("{} := \"{tail}\"", concat!("awsSecret", "AccessKey")),
+            format!("{} := {tail}", concat!("AWS_SECRET", "_ACCESS_KEY")),
+            format!("{}:={tail}", concat!("aws_secret", "_access_key")),
+        ] {
+            assert_eq!(find_secret(&text), Some("aws-secret-key"), "{text}");
+            assert!(!mask_secrets(&text).contains(tail), "{text}");
+        }
+    }
 }
