@@ -873,6 +873,24 @@ mod tests {
     }
 
     #[test]
+    fn two_model_names_masked_alike_keep_both_counts_in_the_summary_json() {
+        // [MAGI S6 loop 11, C2-c1] masking keys must not merge two of them into one entry.
+        let a = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let b = concat!("ghp_", "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        let mut s = ReviewSummary::default();
+        s.per_model.insert(a.into(), 1);
+        s.per_model.insert(b.into(), 2);
+        let v = summary_json(&s);
+        let models = v["per_model"].as_object().cloned().unwrap_or_default();
+        assert_eq!(models.len(), 2, "{v}");
+        assert_eq!(models.values().filter_map(Value::as_u64).sum::<u64>(), 3);
+        assert!(
+            !v.to_string().contains(a) && !v.to_string().contains(b),
+            "{v}"
+        );
+    }
+
+    #[test]
     fn every_batch_index_of_the_json_form_is_one_based() {
         // [MAGI S6 loop 4, C2] a renamed or new batch field must not stay 0-based while the text
         // form is 1-based. Since S6 loop 5 the renumbering is each field's `serialize_with`.
