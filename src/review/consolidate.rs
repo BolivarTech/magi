@@ -430,25 +430,26 @@ fn finding_of(
     let members: Vec<&Reported> = g.members.iter().filter_map(|&k| reported.get(k)).collect();
     let present: BTreeSet<AgentName> = members.iter().map(|r| r.agent).collect();
     let from_core = g.dedup.and_then(|i| dedup.get(i));
-    // magi-core's sources as they are; a group the probe cap split keeps only the mages whose
-    // findings it still holds, so no source counts in two groups.
-    let sources: Vec<AgentName> = match from_core {
-        Some(d) => d
-            .sources
-            .iter()
-            .copied()
-            .filter(|a| present.contains(a))
-            .collect(),
-        None => {
-            let mut s = Vec::new();
-            for r in &members {
-                if !s.contains(&r.agent) {
-                    s.push(r.agent);
-                }
-            }
-            s
+    // magi-core's sources first, in its order; a group the probe cap split keeps only the mages
+    // whose findings it still holds, so no source counts in two groups. Then every other mage
+    // whose finding the group holds, in order of appearance.
+    // MAGI FIX (S6 loop 9, C1-m1): past magi-core's findings cap, a mage's finding it dropped
+    // joins another mage's group at the same location; magi-core's list does not name that mage,
+    // and reading only that list made a finding of two mages `single_mage`.
+    let mut sources: Vec<AgentName> = from_core
+        .map(|d| {
+            d.sources
+                .iter()
+                .copied()
+                .filter(|a| present.contains(a))
+                .collect()
+        })
+        .unwrap_or_default();
+    for r in &members {
+        if !sources.contains(&r.agent) {
+            sources.push(r.agent);
         }
-    };
+    }
     let reported_severity = members
         .iter()
         .map(|r| r.finding.severity)
