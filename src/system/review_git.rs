@@ -78,6 +78,20 @@ pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
     "core.useReplaceRefs=false",
 ];
 
+/// The file name git has in a PATH entry.
+#[cfg(windows)]
+const GIT_PROGRAM: &str = "git.exe";
+/// The file name git has in a PATH entry.
+#[cfg(not(windows))]
+const GIT_PROGRAM: &str = "git";
+
+/// The git executable a review runs, found in the entries of `path_var` (a `PATH` value).
+fn resolve_git(path_var: &std::ffi::OsStr, _workdir: &Path) -> Option<PathBuf> {
+    std::env::split_paths(path_var)
+        .map(|dir| dir.join(GIT_PROGRAM))
+        .find(|candidate| candidate.is_file())
+}
+
 /// The longest a git call may run: a git hung on a foreign lock or a network file system must
 /// not hang the preparation, which runs before the review's clock starts.
 pub(crate) const GIT_CALL_TIMEOUT_SECS: u64 = 300;
@@ -299,7 +313,10 @@ impl ScrubbedGit {
     fn execute_capped(&self, args: &[&str], cap: u64) -> Result<Finished, ReviewError> {
         let command = args.first().copied().unwrap_or_default();
         let deadline = Instant::now() + Duration::from_secs(GIT_CALL_TIMEOUT_SECS);
-        let mut command_line = Command::new("git");
+        let path_var = std::env::var_os("PATH").unwrap_or_default();
+        let program = resolve_git(&path_var, &self.workdir)
+            .ok_or_else(|| ReviewError::Git("cannot find git on PATH".to_string()))?;
+        let mut command_line = Command::new(program);
         command_line
             .args(self.argv(args))
             .env_clear()
@@ -2061,5 +2078,45 @@ mod tests {
             Err(ReviewError::GitOutputTooLarge { limit: 1_024 })
         ));
         assert_eq!(g.run_bytes_capped(&show, 4_096).expect("fits").len(), 2_048);
+    }
+
+    #[test]
+    fn git_is_resolved_from_an_absolute_path_entry_outside_the_workspace() {
+        // [MAGI S6 loop 9, A1-c1, security] git was spawned by bare name, so a relative PATH
+        // entry (`.`, an empty one) or one inside the reviewed repository could run a planted
+        // git before any config was neutralized. Only an absolute entry outside the workspace
+        // may provide it.
+        let workspace = tempfile::tempdir().expect("workspace");
+        let inner = workspace.path().join("tools");
+        std::fs::create_dir(&inner).expect("inner dir");
+        let trusted = tempfile::tempdir().expect("trusted");
+        // Relative to the test's working directory (the package root under cargo and nextest).
+        let planted = tempfile::tempdir_in("target").expect("planted dir in target");
+        let relative = Path::new("target").join(planted.path().file_name().expect("name"));
+        for dir in [
+            workspace.path(),
+            inner.as_path(),
+            trusted.path(),
+            planted.path(),
+        ] {
+            std::fs::write(dir.join(GIT_PROGRAM), b"").expect("plant");
+        }
+        assert!(
+            relative.join(GIT_PROGRAM).is_file(),
+            "the relative entry must resolve"
+        );
+        let path_var = std::env::join_paths([
+            relative.as_path(),
+            workspace.path(),
+            inner.as_path(),
+            trusted.path(),
+        ])
+        .expect("join");
+        assert_eq!(
+            resolve_git(&path_var, workspace.path()),
+            Some(trusted.path().join(GIT_PROGRAM))
+        );
+        let none = std::env::join_paths([relative.as_path(), workspace.path()]).expect("join");
+        assert_eq!(resolve_git(&none, workspace.path()), None);
     }
 }
