@@ -1452,6 +1452,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_key_finding_file_is_line_safe_before_the_formatter_sees_it() {
+        // [MAGI S6 loop 12, C2-m1 / C2-c1, security] `line_safe` scrubbed only a Key Finding's
+        // title and detail; the file is repository text (a Unix path may hold a line break), and
+        // a formatter that starts rendering it must inherit the line safety of the other fields.
+        for b in BREAKS {
+            let forged = format!("a{b}FORGED.rs");
+            let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":forged,"line":1}]);
+            let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+            let (_, consensus) = line_safe(&report.agents, &report.consensus);
+            let file = consensus.findings[0].file.clone().unwrap_or_default();
+            assert!(file.contains("FORGED"), "{file}");
+            assert!(!has_forged_line(&file), "break {b:?}: {file:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_category_is_a_closed_vocabulary_and_cannot_forge_a_report_line() {
+        // [MAGI S6 loop 12, C2-m1 / C2-b1 / C2-c1] reviewed as a false positive: `category` is
+        // magi-core's closed `Category` enum (`#[serde(other)]`), so model text with a line break
+        // deserializes to `other` and never reaches the report as text. Pinned so a magi-core bump
+        // that gives `Category` a data-carrying variant turns this red.
+        for b in BREAKS {
+            let forged = format!("logic{b}FORGED");
+            let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1,"category":forged}]);
+            let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+            let answered = report.agents.iter().map(|a| a.agent).collect();
+            let c = consolidate(&[BatchOutcome {
+                batch: 0,
+                agents: report.agents.clone(),
+                answered,
+            }])
+            .expect("consolidates");
+            assert!(c.findings[0].categories.iter().all(|k| name(k) == "other"));
+            let verdict = GateVerdict {
+                state: GateState::Kept,
+                cause: None,
+                causes: vec![],
+                model: None,
+                lean: None,
+                confidence: None,
+                skipped: vec![],
+                status: None,
+            };
+            let mut s = ReviewSummary::default();
+            s.findings.push((c.findings[0].clone(), verdict));
+            let text = render_text(&c, &s);
+            assert!(!has_forged_line(&text), "break {b:?}: {text}");
+            let paid = render_batch_reports(&[(0, report)]);
+            assert!(!has_forged_line(&paid), "break {b:?}: {paid}");
+        }
+    }
+    #[tokio::test]
     async fn a_prose_field_opening_with_a_heading_cannot_open_a_report_section() {
         // [MAGI S6 loop 11, C2-m1 / C2-b2, security] only the continuation lines were indented,
         // so a prose field whose first line was `## …` relied on magi-core's formatter writing a
