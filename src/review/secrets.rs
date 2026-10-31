@@ -454,7 +454,7 @@ fn aws_name_end(bytes: &[u8], at: usize) -> Option<usize> {
 }
 
 /// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), an
-/// optional quote that closes it (a JSON property, a quoted hash key), blanks, `=`, `=>` or `:`,
+/// optional quote that closes it (a JSON property, a quoted hash key), blanks, `=`, `=>`, `:` or `:=`,
 /// blanks, an optional quote, and a key of at least 40 characters. `None` when none opens there.
 // MAGI FIX (S6 loop 7): `"aws_secret_access_key": "…"` and `=>` were not assignments.
 fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
@@ -467,7 +467,13 @@ fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
         return None;
     }
     pos += 1;
-    if bytes.get(pos - 1) == Some(&b'=') && bytes.get(pos) == Some(&b'>') {
+    // MAGI FIX (S6 loop 9): Go's and Make's `:=` left its `=` before the key, which was sent.
+    let follows = if bytes.get(pos - 1) == Some(&b'=') {
+        b'>'
+    } else {
+        b'='
+    };
+    if bytes.get(pos) == Some(&follows) {
         pos += 1;
     }
     pos = skip_bytes(bytes, pos, BLANKS);
