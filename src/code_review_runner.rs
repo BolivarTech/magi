@@ -210,6 +210,13 @@ impl BatchConsult for TrioBatchConsult {
         prompt: &str,
         wall_clock: Option<Duration>,
     ) -> Result<MagiReport, ConsultFailure> {
+        // MAGI FIX (S6 loop 8, C2-c2): a spent wall clock is a batch not run (RV06), never a
+        // ceiling derived from zero: `derive_ceiling_from_timeout` clamps that to the floor, and
+        // a zero `tokio::time::timeout` still polls the batch until the timer fires, long enough
+        // for a build and its first requests.
+        if wall_clock.is_some_and(|w| w.is_zero()) {
+            return Err(ConsultFailure::ClockExpired);
+        }
         let factory = Arc::clone(&self.factory);
         let ceiling = self.ceiling(wall_clock);
         run_with_wall_clock(wall_clock, async move {
