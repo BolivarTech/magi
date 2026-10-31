@@ -1138,10 +1138,15 @@ fn is_identifier_char(c: char) -> bool {
 ///
 /// # Returns
 ///
+/// A C++ operator overload is named by [`operator_name`] (`operator=`) before the `=` rule applies.
 /// `None` when the line has no `(`, holds `=` before it (an assignment or initializer), or no
 /// identifier ends right before it. O(n) in the line.
 fn identifier_before_paren(line: &str) -> Option<String> {
     let (before, _) = line.split_once('(')?;
+    // MAGI FIX (S6 loop 9): `Foo& operator=(` held an `=` before its `(` and named nothing.
+    if let Some(name) = operator_name(before) {
+        return Some(name);
+    }
     if before.contains('=') {
         return None;
     }
@@ -1156,6 +1161,33 @@ fn identifier_before_paren(line: &str) -> Option<String> {
         .rev()
         .collect();
     Some(name).filter(|n| !n.is_empty())
+}
+
+/// The characters a C++ overloaded operator's symbol is made of (`=`, `==`, `<<=`, `[]`).
+const OPERATOR_SYMBOL_CHARS: &str = "=!<>+-*/%&|^~[],";
+
+/// The name of the C++ operator overload `before` declares, when it ends in the word `operator`
+/// and a symbol (`Foo& operator=` gives `operator=`, `bool operator==` gives `operator==`).
+///
+/// # Arguments
+///
+/// * `before` - The text of a line before its first `(`.
+///
+/// # Returns
+///
+/// `operator` followed by the symbol, or `None` when `before` names no symbol operator (a
+/// call operator, `operator()`, has its symbol after the first `(` and is named by
+/// [`identifier_before_paren`]'s general rule). O(n) in the text.
+fn operator_name(before: &str) -> Option<String> {
+    let (head, symbol) = before.trim_end().rsplit_once("operator")?;
+    // The symbol touches the word, so a JavaScript `const operator = (x) => {` is no overload.
+    let symbol = symbol.trim_end();
+    let word_starts = head
+        .chars()
+        .next_back()
+        .is_none_or(|c| !is_identifier_char(c));
+    let is_symbol = !symbol.is_empty() && symbol.chars().all(|c| OPERATOR_SYMBOL_CHARS.contains(c));
+    (word_starts && is_symbol).then(|| format!("operator{symbol}"))
 }
 
 /// `text` without the modifier `word` it opens with, and what belongs to the word: a `(...)`
