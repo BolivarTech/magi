@@ -1154,4 +1154,32 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn a_blank_or_comment_line_between_a_decorator_and_its_definition_keeps_them_together() {
+        // [MAGI S6 loop 13, B2b2-c2] the scan back stopped at the first line that was no
+        // decorator, so a decorator above a blank or comment line (legal Python) was reviewed
+        // apart from its function. A comment with no decorator above it is still left out.
+        let code = "x = 1\n\n@cache\n\n# keeps state\ndef f():\n    return 1\n";
+        assert_eq!(
+            spans(&extract(code, &[3])),
+            vec![("f", UnitKind::Function, 3, 7)]
+        );
+        let code = "x = 1\n\n# note\ndef g():\n    pass\n";
+        assert_eq!(
+            spans(&extract(code, &[4])),
+            vec![("g", UnitKind::Function, 4, 5)]
+        );
+        let code = "class A:\n    def a(self):\n        pass\n\n    @property\n    # cached\n    def b(self):\n        return 1\n";
+        let units = extract(code, &[5]);
+        assert_eq!(
+            spans(&PythonExtractor.split_block(&units[0])),
+            vec![
+                ("A", UnitKind::Class, 1, 1),
+                ("a", UnitKind::Method, 2, 3),
+                ("A", UnitKind::Class, 4, 4),
+                ("b", UnitKind::Method, 5, 8)
+            ]
+        );
+    }
 }
