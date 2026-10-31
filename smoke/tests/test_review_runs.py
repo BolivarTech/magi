@@ -196,6 +196,22 @@ class ReviewWorkspaceTests(unittest.TestCase):
             expected = str(root / "scratch" / runs.REVIEW_WORKSPACE_DIR)
             self.assertEqual(expected, command[command.index("-w") + 1])
 
+    def test_a_relative_scratch_area_still_hands_the_product_an_absolute_workspace(self) -> None:
+        # MAGI FIX (S6 loop 11, F1a-m1): the product starts with cwd = the review workspace, so a
+        # relative -w would resolve a second time against it and name a directory that does not exist.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = pathlib.Path(tmp.name)
+        self.addCleanup(os.chdir, os.getcwd())  # runs first: leave the directory before it is removed
+        os.chdir(root)
+        env = types.SimpleNamespace(root=pathlib.Path("."), magi_dir=pathlib.Path(".magi"),
+                                    scratch_dir=pathlib.Path("scratch"))
+        executor = runs.RunExecutor(binary=None, env=env, config=None)
+        command = executor._command(runs.DEFINITIONS["R13"])
+        workspace = pathlib.Path(command[command.index("-w") + 1])
+        self.assertTrue(workspace.is_absolute(), workspace)
+        self.assertEqual((root / "scratch" / runs.REVIEW_WORKSPACE_DIR).resolve(), workspace)
+
     @unittest.skipUnless(_git_available(), "git is required")
     def test_the_workspace_is_its_own_repo_with_the_config_and_the_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
