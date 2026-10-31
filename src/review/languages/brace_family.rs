@@ -3128,6 +3128,29 @@ void g(void) {
     }
 
     #[test]
+    fn a_multi_line_annotation_belongs_to_its_member() {
+        // [MAGI S6 loop 12, B2b-m1] the line above the member was `)` or `})`, so the scan back
+        // stopped there and the annotation that governs the member landed in a gap unit.
+        let java = BraceFamilyExtractor::java();
+        let code = "public class A {\n    void before() {\n    }\n    @SuppressWarnings(\n        \"unchecked\"\n    )\n    public void f() {\n        a();\n    }\n}\n";
+        let parts = split(&java, code, 8, UnitKind::Class);
+        let found = spans(&parts);
+        assert!(
+            found.contains(&("f", UnitKind::Method, 4, 9)),
+            "f with its annotation in {found:?}"
+        );
+        assert_each_line_in_one_unit(&parts, 10);
+        let ts = BraceFamilyExtractor::typescript();
+        let code = "import x from 'y';\n\n@Component({\n  selector: 'app',\n})\nexport class C {\n  run() {}\n}\n";
+        let units = extract(&ts, code, &[4, 7]);
+        let found = spans(&units);
+        assert!(
+            found.contains(&("C", UnitKind::Class, 3, 8)),
+            "C with its decorator in {found:?}"
+        );
+    }
+
+    #[test]
     fn a_line_number_that_does_not_fit_u32_is_none_not_a_fallback() {
         // [MAGI S6 loop 10, B2b-b2] construct detection fell back to `u32::MAX`, `1` or the
         // current line where `shift_members` aborted; both now abort on the same check.
