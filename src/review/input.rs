@@ -482,8 +482,8 @@ fn merge_base(
 /// The shape is read through links, whatever `guard` resolved: a link to a directory is a
 /// `directory` and a link whose target is gone is `missing`. The binary's guard
 /// (`PathGuard::validate`, wrapped by `review_path_guard` in the binary) canonicalizes, so
-/// there a link to a directory arrives as the directory and a dangling link is refused before
-/// this as outside the workspace (it cannot be resolved); both fail closed.
+/// there a link to a directory arrives as the directory; a dangling link arrives as itself under
+/// its guarded parent (S6 loop 9, A1-c5) and is `missing` here.
 fn resolve_file(
     p: &Path,
     workspace: &Path,
