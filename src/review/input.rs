@@ -2442,11 +2442,12 @@ mod tests {
             let u = tempfile::tempdir().expect("tempdir");
             std::fs::write(u.path().join(std::ffi::OsStr::from_bytes(b"x\xff")), "x\n")
                 .expect("write");
+            // Listed lossily as `x\u{fffd}`: four bytes, five with its separator.
             assert!(matches!(
-                walk_in(u.path(), 2),
+                walk_in(u.path(), 4),
                 Err(ReviewError::InputTooLarge { .. })
             ));
-            assert!(walk_in(u.path(), 3).is_ok());
+            assert!(walk_in(u.path(), 5).is_ok());
         }
     }
 }
