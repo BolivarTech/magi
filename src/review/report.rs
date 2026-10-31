@@ -469,8 +469,9 @@ pub fn render_batch_reports(reports: &[(usize, MagiReport)]) -> String {
 /// conditions and the recommendations raw. Titles become one line ([`escape_controls`]); the
 /// prose fields keep their line breaks as indented continuation lines ([`indented_prose`]), so
 /// none starts at column 0 where it would read as a report line. The agents' summary, reasoning
-/// and recommendation, and each dissent's reasoning, are not rendered by magi-core 4.2.0; they
-/// get the same treatment so a formatter that starts rendering them inherits the safety. The
+/// and recommendation, each dissent's reasoning and each Key Finding's detail are not
+/// rendered by magi-core 4.2.0; they get the same treatment so a formatter that starts rendering
+/// them inherits the safety. The
 /// deprecated `majority_summary` is neither rendered nor touched (assigning it is a deprecation
 /// warning, and the build denies warnings).
 ///
@@ -494,8 +495,11 @@ fn line_safe(
         agent.recommendation = indented_prose(&agent.recommendation);
     }
     let mut consensus = consensus.clone();
+    // MAGI FIX (S6 loop 10, C2-m1): the Key Finding detail, unrendered by magi-core 4.2.0, gets
+    // the indented treatment of the agents' unrendered prose.
     for finding in &mut consensus.findings {
         finding.title = escape_controls(&finding.title);
+        finding.detail = indented_prose(&finding.detail);
     }
     for dissent in &mut consensus.dissent {
         dissent.summary = indented_prose(&dissent.summary);
