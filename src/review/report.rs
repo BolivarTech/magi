@@ -1856,8 +1856,9 @@ mod tests {
 
     /// The free-text fields `line_safe` leaves raw on purpose: the deprecated
     /// `majority_summary` (assigning it is a deprecation warning), which magi-core 4.2.0 does
-    /// not render; the test below turns red the day it does.
-    const LEFT_RAW: [&str; 1] = ["/majority_summary"];
+    /// not render; the test below turns red the day it does. Top-level keys of the consensus,
+    /// each written as a JSON key literal (the deprecated-surface guard allows exactly that).
+    const LEFT_RAW: [&str; 1] = ["majority_summary"];
 
     #[tokio::test]
     async fn every_free_text_field_of_magi_cores_report_types_is_line_safe() {
@@ -1908,7 +1909,8 @@ mod tests {
             &consensus_fields,
         ));
         for (value, fields) in &checks {
-            for p in fields.iter().filter(|p| !LEFT_RAW.contains(&p.as_str())) {
+            let left_raw = |p: &str| p.strip_prefix('/').is_some_and(|k| LEFT_RAW.contains(&k));
+            for p in fields.iter().filter(|p| !left_raw(p)) {
                 let text = value.pointer(p).and_then(Value::as_str).unwrap_or_default();
                 assert!(text.contains("FORGED"), "{p}: {text:?}");
                 assert!(!has_forged_line(text), "{p} is written raw: {text:?}");
