@@ -3141,6 +3141,21 @@ void g(void) {
     }
 
     #[test]
+    fn the_brace_search_of_one_signature_stops_after_a_bounded_number_of_lines() {
+        // [MAGI S6 loop 12, B2b-c2] inside an open parameter list the search ran to the end of
+        // the file, so a file of `f(a` lines took quadratic time before the review clock started.
+        let ext = BraceFamilyExtractor::c();
+        let search = |params: usize| {
+            let code = format!("void f(\n{}) {{\n}}\n", "    a,\n".repeat(params));
+            let lines: Vec<&str> = code.lines().collect();
+            let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(&code);
+            open_brace_line(&lines, &scanned, 0, &|_| false)
+        };
+        assert_eq!(search(64), Some(65), "a long parameter list still finds its brace");
+        assert_eq!(search(100_000), None, "the search degrades to no brace");
+    }
+
+    #[test]
     fn a_multi_line_annotation_belongs_to_its_member() {
         // [MAGI S6 loop 12, B2b-m1] the line above the member was `)` or `})`, so the scan back
         // stopped there and the annotation that governs the member landed in a gap unit.
