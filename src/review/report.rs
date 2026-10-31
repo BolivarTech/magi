@@ -326,8 +326,11 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
         write!(out, " ({})", marks.join(", "))?;
     }
     // MAGI FIX (S6 loop 4): every category a merged finding conserves (RV-S18), as the JSON has.
+    // MAGI FIX (S6 loop 12, C2-m1 / C2-b1 / C2-c1): `Category` is a closed enum today, so its
+    // names are safe literals; escaped anyway, since a foreign `#[non_exhaustive]` enum may gain
+    // a variant that carries model text (`FinishReason::Other(String)` did).
     let categories: Vec<String> = f.categories.iter().map(name).collect();
-    write!(out, " [{}]", categories.join(", "))?;
+    write!(out, " [{}]", joined(&categories))?;
     write!(out, "; gate: {}", name(&v.state))?;
     // MAGI FIX (S6 loop 3): the text says of each verdict what its JSON says: every cause, the
     // answer that set it (model, lean, confidence) and the models skipped after an HTTP 400.
