@@ -1076,18 +1076,22 @@ impl BraceFamilyExtractor {
         self.signature_functions && !self.semicolon_declarations
     }
 
-    /// Generate a descriptive name for a declaration group.
+    /// Generate a descriptive name for a declaration group from its first line, with the
+    /// visibility words already stripped ([`Self::strip_modifiers`]): only bare keywords can
+    /// match here, so `pub use` reads as `use` and a JavaScript `export { a };` has no name of
+    /// its own (`declarations`).
     fn declaration_group_name(&self, first_line: &str) -> String {
+        // MAGI FIX (S6 loop 12): the `pub ...` and `export ` arms could never match, since the
+        // caller strips the visibility words first.
         let trimmed = first_line.trim();
         if trimmed.starts_with("use ")
-            || trimmed.starts_with("pub use ")
             || trimmed.starts_with("import ")
             || trimmed.starts_with("from ")
         {
             "imports".to_string()
-        } else if trimmed.starts_with("const ") || trimmed.starts_with("pub const ") {
+        } else if trimmed.starts_with("const ") {
             "constants".to_string()
-        } else if trimmed.starts_with("static ") || trimmed.starts_with("pub static ") {
+        } else if trimmed.starts_with("static ") {
             "statics".to_string()
         } else if trimmed.starts_with("#define ") {
             "defines".to_string()
@@ -1095,12 +1099,10 @@ impl BraceFamilyExtractor {
             "typedefs".to_string()
         } else if trimmed.starts_with("extern ") {
             "externs".to_string()
-        } else if trimmed.starts_with("type ") || trimmed.starts_with("pub type ") {
+        } else if trimmed.starts_with("type ") {
             "type aliases".to_string()
         } else if trimmed.starts_with("let ") || trimmed.starts_with("var ") {
             "variables".to_string()
-        } else if trimmed.starts_with("export ") {
-            "exports".to_string()
         } else if trimmed.starts_with("package ") {
             "package".to_string()
         } else {
