@@ -1632,4 +1632,32 @@ mod tests {
         );
         m.assert_async().await;
     }
+
+    #[tokio::test]
+    async fn a_failed_attempt_carries_its_http_status_so_a_400_and_a_413_are_told_apart() {
+        // [MAGI S6 loop 13, C2-b1 / C2-c3] a rotating 400 and a terminal 413/422 share the token
+        // `rejected`, and the status lived only in the prose `detail`; a consumer of the trace
+        // had to parse an English sentence. The failed attempt now serializes the status.
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "a", 400, r#"{"error":"a refuses"}"#.into()).await;
+        mock_model(&mut server, "b", 413, "{}".to_string()).await;
+        let r = decide(settings(&server.url(), &["a", "b"]), &request()).await;
+        let trace = r.as_ref().err().and_then(|e| e.trace()).expect("a trace");
+        let attempts: Vec<serde_json::Value> = trace
+            .attempts
+            .iter()
+            .map(|a| serde_json::to_value(a).expect("serializes"))
+            .collect();
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|a| (a["cause"].clone(), a["status"].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (json!("rejected"), json!(400)),
+                (json!("rejected"), json!(413))
+            ],
+            "{attempts:?}"
+        );
+    }
 }
