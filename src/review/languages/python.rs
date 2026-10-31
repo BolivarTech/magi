@@ -604,11 +604,29 @@ fn find_assignment_group_end(lines: &[&str], continued: &[bool], start: usize) -
 /// Scan backward for Python decorators (`@...`): the 0-based first line of the decorators
 /// right above line `idx`, or `idx` when there are none. A decorator is a whole logical line, so
 /// one wrapped over several lines (`@route(\n    "/a",\n)`) is taken with its continuation
-/// lines, as `continued` marks them ([`continued_lines`]). O(k) for the k lines taken.
+/// lines, as `continued` marks them ([`continued_lines`]). Blank and comment-only lines between
+/// two decorators or between a decorator and its definition are passed over, as Python's
+/// tokenizer does, and taken only when a decorator stands above them: a comment right above a
+/// definition with no decorator stays outside it. O(k) for the k lines looked at.
 fn scan_back_decorators(lines: &[&str], continued: &[bool], idx: usize) -> usize {
     // MAGI FIX (S6 loop 6): a wrapped decorator's continuation lines were left out.
+    // MAGI FIX (S6 loop 13): a blank or comment line between a decorator and its definition
+    // stopped the scan, so the decorator was reviewed apart from the function.
+    let is_code = |j: usize| !continued.get(j).copied().unwrap_or(false);
+    let is_filler = |j: usize| {
+        is_code(j)
+            && lines
+                .get(j)
+                .is_some_and(|l| l.trim().is_empty() || l.trim().starts_with('#'))
+    };
     let mut start = idx;
     while let Some(mut first) = start.checked_sub(1) {
+        while is_filler(first) {
+            let Some(above) = first.checked_sub(1) else {
+                return start;
+            };
+            first = above;
+        }
         while first > 0 && continued.get(first).copied().unwrap_or(false) {
             first -= 1;
         }
