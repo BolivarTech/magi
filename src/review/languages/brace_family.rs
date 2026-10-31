@@ -2373,6 +2373,24 @@ mod tests {
     }
 
     #[test]
+    fn a_cpp_template_header_belongs_to_the_construct_it_declares() {
+        // [MAGI S6 loop 8, B2b-m1, B2b-c1] a `template <...>` header on its own line fell into a
+        // gap unit, and on the construct's line (`template<typename T> class Box {`) the line
+        // was no construct at all, so its body was cut into gap units.
+        let code = "template <typename T>\nclass Vec {\n    T x;\n};\ntemplate<typename T> class Box {\n    T y;\n};\ntemplate <typename T>\nT twice(T x) {\n    return x;\n}\ntemplate <void (*F)(int)> void call() {\n    F(1);\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &all_lines(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("Vec", UnitKind::Class, 1, 4),
+                ("Box", UnitKind::Class, 5, 7),
+                ("twice", UnitKind::Function, 8, 11),
+                ("call", UnitKind::Function, 12, 14),
+            ]
+        );
+    }
+
+    #[test]
     fn a_grouped_go_type_declaration_yields_each_member() {
         // [MAGI S6 loop 7, B2b-m1] `type (` opened one nameless struct that ended at the first
         // member's brace, so the later members fell into gap units.
