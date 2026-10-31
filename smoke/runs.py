@@ -897,6 +897,19 @@ def _linked_component(base, relative):
     return None
 
 
+def _walk_failed(error: OSError) -> None:
+    """The ``onerror`` of :func:`_reject_links`'s walk: refuse what it cannot list.
+
+    Args:
+        error: The error ``os.walk`` met listing a directory.
+
+    Raises:
+        HarnessError: Always, naming the error.
+    """
+    raise HarnessError("refusing to copy the environment's .magi: could not "
+                       "list a directory to check it for links: %s" % error)
+
+
 def _reject_links(top) -> None:
     """Refuse a tree that holds a symlink or a junction, *top* included.
 
@@ -910,11 +923,16 @@ def _reject_links(top) -> None:
         top: The directory to check.
 
     Raises:
-        HarnessError: Naming the first link found.
+        HarnessError: Naming the first link found, or a directory the walk
+            could not list (a link inside it could not be ruled out).
+        OSError: When a link test itself fails; the executor turns it into a
+            :class:`HarnessError`.
     """
     if _is_link(top):
         raise HarnessError("refusing to copy %s: it is a link" % top)
-    for directory, dirs, files in os.walk(top):
+    # MAGI FIX (S6 loop 13): os.walk skipped a directory it could not list, so a
+    # link inside it went unchecked; the walk now fails instead (F1a-c1).
+    for directory, dirs, files in os.walk(top, onerror=_walk_failed):
         for name in dirs + files:
             path = os.path.join(directory, name)
             if _is_link(path):
@@ -1435,13 +1453,20 @@ class RunExecutor:
         # the scratch area that is a link resolved under it too and rmtree
         # deleted the tree it names (F1a-c1). Every component below the scratch
         # area is checked, the leaf included.
-        linked = _linked_component(pathlib.Path(self._env.scratch_dir),
-                                   REVIEW_WORKSPACE_DIR)
+        # MAGI FIX (S6 loop 13): an OSError raised by the link checks escaped the
+        # executor as a traceback instead of exit 3 (F1a-c1).
+        try:
+            linked = _linked_component(pathlib.Path(self._env.scratch_dir),
+                                       REVIEW_WORKSPACE_DIR)
+            if linked is None:
+                _reject_links(self._env.magi_dir)
+        except OSError as exc:
+            raise HarnessError("could not check the review workspace at %s "
+                               "for links: %s" % (workspace, exc)) from exc
         if linked is not None:
             raise HarnessError(
                 "refusing to delete the review workspace at %s: %s is a "
                 "link" % (workspace, linked))
-        _reject_links(self._env.magi_dir)
         try:
             if workspace.exists():
                 shutil.rmtree(workspace)
