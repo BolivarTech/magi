@@ -154,9 +154,31 @@ impl LanguageExtractor for BraceFamilyExtractor {
         else {
             return Vec::new();
         };
-        let offset = u32::try_from(open + 1).unwrap_or(u32::MAX);
-        let members: Vec<Member> = self
-            .detect_constructs(inner_lines, inner_scanned, true)
+        let members = shift_members(
+            self.detect_constructs(inner_lines, inner_scanned, true),
+            open,
+        )
+        .unwrap_or_default();
+        split_into_members(unit, members)
+    }
+}
+
+/// The members found in a block's body, `open` being the 0-based line of the block's opening
+/// brace, shifted from the body's line numbers to the block's.
+///
+/// # Arguments
+///
+/// * `constructs` - The constructs of the body, lines 1-based from the line after `open`.
+/// * `open` - The 0-based line of the opening brace in the block.
+///
+/// # Returns
+///
+/// The members, or `None` when a shifted line number does not fit `u32`: such a block is
+/// reviewed whole, never split at fabricated coordinates. O(m) in the members.
+fn shift_members(constructs: Vec<Construct>, open: usize) -> Option<Vec<Member>> {
+    let offset = u32::try_from(open + 1).unwrap_or(u32::MAX);
+    Some(
+        constructs
             .into_iter()
             .map(|c| {
                 (
@@ -166,9 +188,8 @@ impl LanguageExtractor for BraceFamilyExtractor {
                     c.end_line.saturating_add(offset),
                 )
             })
-            .collect();
-        split_into_members(unit, members)
-    }
+            .collect(),
+    )
 }
 
 /// The modifier words of a language, stripped before its keyword tables are matched.
@@ -2793,6 +2814,26 @@ void g(void) {
             let extractor = registry.get(path).map(|e| e.language_id().to_string());
             assert_eq!(extractor.as_deref(), Some(language), "{path}");
         }
+    }
+
+    #[test]
+    fn a_member_line_that_does_not_fit_u32_leaves_the_block_unsplit() {
+        // [MAGI S6 loop 9, B2b-c1] a `u32::MAX` fallback offset and saturating additions gave
+        // members fabricated ranges that no longer partitioned the block.
+        let member = |start, end| Construct {
+            kind: UnitKind::Function,
+            name: "a".to_string(),
+            start_line: start,
+            end_line: end,
+        };
+        assert_eq!(
+            shift_members(vec![member(1, 2)], 2),
+            Some(vec![(UnitKind::Function, "a".to_string(), 4, 5)])
+        );
+        let max = usize::try_from(u32::MAX).expect("usize holds u32");
+        assert_eq!(shift_members(vec![member(1, 2)], max - 1), None);
+        assert_eq!(shift_members(vec![member(1, 2)], max), None);
+        assert_eq!(shift_members(vec![member(1, 2)], usize::MAX), None);
     }
 
     #[test]
