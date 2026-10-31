@@ -192,4 +192,22 @@ mod tests {
     fn the_tui_worst_case_is_the_full_chain_per_batch() {
         assert_eq!(tui_worst_case_secs(3, 2, 2335), 3 * 3 * 2 * 2335);
     }
+
+    #[test]
+    fn a_timeout_exactly_enough_passes_the_budget_and_one_second_less_fails() {
+        // [MAGI S6 loop 13, C2-b5] the check is `<`: a `--timeout` that is exactly the minimum
+        // runs. Only a value below the floor was tested, so `<=` would have refused a review
+        // whose timeout is exactly sufficient with nothing turning red.
+        let min = crate::magi::headless_consult_timeout_secs(15, 2, false);
+        assert!(pre_budget(4 * min, 4, 2, false).is_ok());
+        assert!(pre_budget(4 * min - 1, 4, 2, false).is_err());
+    }
+
+    #[test]
+    fn the_tui_worst_case_saturates_instead_of_overflowing() {
+        // [MAGI S6 loop 13, C2-b5] the saturating paths were unexercised.
+        assert_eq!(tui_worst_case_secs(usize::MAX, 2, 2335), u64::MAX);
+        assert_eq!(tui_worst_case_secs(1, u32::MAX, u64::MAX), u64::MAX);
+        assert_eq!(tui_worst_case_secs(0, 2, u64::MAX), 0);
+    }
 }
