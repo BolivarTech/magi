@@ -1782,6 +1782,69 @@ mod tests {
     }
 
     #[test]
+    fn an_uncommitted_review_keeps_an_unmerged_path_with_its_conflict_markers() {
+        // [MAGI S6 loop 9, A1-c2, false positive] a review read `git diff HEAD` during a
+        // conflict as a combined `diff --cc`, which `split_diff` drops. Measured with git 2.56:
+        // a diff against a commit compares that tree with the working tree and prints a plain
+        // `diff --git` section for an unmerged path (only the index-vs-worktree `git diff`
+        // combines), so the conflicted file is reviewed with its markers.
+        let d = repo();
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn a() {}
+",
+        )
+        .expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        git(d.path(), &["checkout", "-q", "-b", "side"]);
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn b() {}
+",
+        )
+        .expect("write");
+        git(d.path(), &["commit", "-q", "-am", "b"]);
+        git(d.path(), &["checkout", "-q", "main"]);
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn c() {}
+",
+        )
+        .expect("write");
+        git(d.path(), &["commit", "-q", "-am", "c"]);
+        let merged = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d.path())
+            .args(["merge", "-q", "side"])
+            .output()
+            .expect("git runs");
+        assert!(!merged.status.success(), "the merge must conflict");
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let r = magi_rs::review::input::resolve_input(
+            &magi_rs::review::input::ReviewInput::Uncommitted,
+            d.path(),
+            &ScrubbedGit::new(d.path().to_path_buf()),
+            &allow,
+        )
+        .expect("resolves");
+        let a = r
+            .files
+            .iter()
+            .find(|f| f.path == "a.rs")
+            .expect("a.rs is reviewed");
+        assert!(
+            a.diff
+                .as_deref()
+                .is_some_and(|t| t.contains("+<<<<<<< HEAD")),
+            "{:?}",
+            a.diff
+        );
+    }
+
+    #[test]
     fn the_ignored_query_takes_a_glob_character_literally() {
         // [CP2 MS2 S1b loop 14, measured with git 2.56] as a glob, `src[0]` named the tracked-and-ignored `src0`.
         let d = repo();
