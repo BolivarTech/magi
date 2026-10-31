@@ -195,10 +195,18 @@ pub fn filter_files(
                     cause: cause.as_str(),
                 })
             }
-            Verdict::Skip(cause) => filtered.skipped.push(Skipped {
-                path: display_path(&file.path),
-                cause,
-            }),
+            Verdict::Skip(cause) => {
+                // MAGI FIX (S6 loop 12, A2-c1 / A2-c5): a skipped file is never sent, so the
+                // cache keeps none of it: the total cap bounds what is reviewed.
+                source.release(&file.path);
+                if let Some(old) = file.diff.as_deref().and_then(renamed_from) {
+                    source.release(&old);
+                }
+                filtered.skipped.push(Skipped {
+                    path: display_path(&file.path),
+                    cause,
+                });
+            }
         }
     }
     if filtered.kept.is_empty() {

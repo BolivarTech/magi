@@ -142,6 +142,19 @@ pub trait ContentSource: Send + Sync {
     ///
     /// As [`ContentSource::read`].
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError>;
+
+    /// Drops whatever is held for `path` on both sides, so a file the review left out costs
+    /// nothing afterwards. A no-op for a source that holds nothing (the default); a later read
+    /// of `path` reads the inner source again.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to forget.
+    // MAGI FIX (S6 loop 12, A2-c1 / A2-c5): the cache kept the sides of skipped files, charged
+    // against the review total and, for a secret-bearing file, held in memory for the whole run.
+    fn release(&self, path: &str) {
+        let _ = path;
+    }
 }
 
 /// Reads all of `reader`, but never more than `cap + 1` bytes.
@@ -533,7 +546,9 @@ impl ContentSource for RevisionSource<'_> {
 ///
 /// Every stage of a review (the filter, the batches, the index and the gate) reads through one
 /// cache, so a file is read once per side and every stage sees the bytes the filter scanned,
-/// even if the file changes on disk meanwhile. An `Err` is never kept. The bytes held are
+/// even if the file changes on disk meanwhile. An `Err` is never kept, and the filter releases
+/// every file it leaves out ([`ContentSource::release`]), so the cap and the memory count only
+/// what is reviewed and no skipped secret stays held. The bytes held are
 /// bounded by [`MAX_REVIEW_TOTAL_BYTES`]: a read that would pass it is refused and not kept,
 /// while a read of what is already held costs nothing. Memory is O(bytes reviewed); a lookup is
 /// O(1) expected plus the copy it returns.
@@ -639,6 +654,18 @@ impl ContentSource for CachedSource<'_> {
 
     fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
         self.get(Face::Old, path)
+    }
+
+    /// Removes both sides of `path` and gives their bytes back to the total cap. O(1) expected.
+    fn release(&self, path: &str) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let freed: u64 = [held.new.remove(path), held.old.remove(path)]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add);
+        held.bytes = held.bytes.saturating_sub(freed);
     }
 }
 
