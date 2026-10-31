@@ -300,6 +300,15 @@ impl BraceFamilyExtractor {
     /// The constructs of [`Self::detect_constructs`], or `None` when a line number does not
     /// fit `u32`. The 8 MiB file cap keeps that out of reach (8 388 608 lines at most); the
     /// check makes the failure mode explicit instead of a `u32::MAX` fallback.
+    ///
+    /// A heuristic of several rules, tried in this order on each line: a Go type group, a block
+    /// or function keyword, a C-family signature, then a declaration or a declaration group.
+    /// Each rule lives in its own helper and the order is the contract, since a later rule would
+    /// misread what an earlier one claims (Java's `public class` as a function): a new rule or
+    /// language goes into a helper placed in that order, and the test
+    /// `construct_ranges_are_sorted_and_disjoint` with the per-language tests pins the result.
+    /// A known maintenance hotspot, declared.
+    /// O(n) in the lines, plus the helpers' forward searches.
     fn try_detect_constructs(
         &self,
         lines: &[&str],
