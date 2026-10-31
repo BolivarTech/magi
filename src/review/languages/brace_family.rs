@@ -319,7 +319,8 @@ impl BraceFamilyExtractor {
     /// language goes into a helper placed in that order, and the test
     /// `construct_ranges_are_sorted_and_disjoint` with the per-language tests pins the result.
     /// A known maintenance hotspot, declared.
-    /// O(n) in the lines, plus the helpers' forward searches.
+    /// O(n) in the lines, plus the helpers' forward searches, which share `budget`
+    /// ([`SearchBudget`]) and so add O(n) line visits in all.
     fn try_detect_constructs(
         &self,
         lines: &[&str],
@@ -1151,8 +1152,8 @@ const LINE_OPENING_COMMENTS: [&str; 2] = ["//", "/*"];
 /// The most lines past a construct's first line that [`open_brace_line`] looks at for its
 /// opening brace. A starting point, not a measurement: a signature wrapped over more lines
 /// than this (a generated parameter list) is read as having no brace, so its lines fall into
-/// later units, reviewed but split from their signature. It bounds the search at
-/// O(n × `MAX_BRACE_SEARCH_LINES`) line visits for a file of n lines.
+/// later units, reviewed but split from their signature. It bounds one search; the searches of a
+/// whole detection pass share [`SearchBudget`], O(n) line visits for a text of n lines.
 const MAX_BRACE_SEARCH_LINES: usize = 1_024;
 
 /// What a forward brace search of one detection pass is bounded by: where the next construct
