@@ -546,7 +546,9 @@ impl BraceFamilyExtractor {
                 _ => UnitKind::Struct,
             };
             let end = if scanned.get(j).is_some_and(|s| s.brace_delta > 0) {
-                find_closing_brace(scanned, j).min(body_end - 1).max(j)
+                find_closing_brace(scanned, j)
+                    .min(body_end.saturating_sub(1))
+                    .max(j)
             } else {
                 j
             };
