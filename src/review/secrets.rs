@@ -527,7 +527,7 @@ pub fn display_path(path: &str) -> String {
 /// `text` with every secret [`find_secret`] would name replaced by `<redacted: <pattern name>>`.
 ///
 /// Each turn masks the earliest secret of what follows the last mask (ties go to table order),
-/// grown over every secret that overlaps it ([`merged_end`]), and the end of a mask counts as a
+/// grown over every secret that overlaps it (`merged_end`), and the end of a mask counts as a
 /// left boundary.
 ///
 /// # Arguments
