@@ -1221,4 +1221,21 @@ mod tests {
             assert!(!mask_secrets(&text).contains(tail), "{text}");
         }
     }
+
+    #[test]
+    fn a_token_that_runs_into_a_pem_header_masks_the_whole_pem_block() {
+        // [MAGI S6 loop 9, A2-b1, security] an OpenAI-shaped token glued to a PEM header ate
+        // its `-----BEGIN`, so the PEM search over what followed the mask found no header and
+        // the key body was sent in the clear.
+        let sk = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+        let end = concat!("-----", "END PRIVATE KEY-----");
+        let text = format!("a {sk}{PEM_BEGIN}{PEM_PRIVATE_KEY}\n{body}\n{end} b");
+        let masked = mask_secrets(&text);
+        assert!(!masked.contains(PEM_PRIVATE_KEY), "{masked}");
+        assert!(!masked.contains(body), "{masked}");
+        assert!(!masked.contains("AAAAAAAA"), "{masked}");
+        assert!(masked.starts_with("a <redacted: "), "{masked}");
+        assert!(masked.ends_with("> b"), "{masked}");
+    }
 }
