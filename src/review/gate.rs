@@ -737,6 +737,11 @@ impl<'a> Gate<'a> {
                 None => None,
             };
             let (cap, cut_by_clock) = call_cap(left, self.call_timeout);
+            // MAGI FIX (S6 loop 10, C1-m3): rebuilt per model on purpose, not a hot path. Each
+            // build clones a state already capped at `max_state_bytes` (61 000 by default), at
+            // most chain length x MAX_GATE_QUESTIONS_PER_FINDING times per finding (9 with the
+            // default chain), and the +/-40-line window is built once per pair; both are O(bytes)
+            // microseconds against a model call of seconds (p95 2.9 s, E7).
             // `new` only fails on a malformed state or question set; both are built here.
             let Ok(request) = DecisionRequest::new(state.clone(), gate_questions()) else {
                 return Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
