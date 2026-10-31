@@ -388,6 +388,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
         for log in (b"", _BUDGET_LOG % b"1-0000000000000000", other):
             self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=log)[code_review.S50_ASSERTIONS[2]], log)
 
+    def test_s50_cannot_test_the_log_when_a_log_file_could_not_be_read(self) -> None:
+        # [MAGI §6 MS2 loop 12, F1a-c2] a log file the executor could not open (held by the binary or an
+        # antivirus on Windows) is the environment refusing, never a product FAIL; what was read still counts.
+        r = dataclasses.replace(_result("R15", 2, None, _with_id(_BUDGET_STDERR)),
+                                review_log_unreadable=("magi-2026-10-31.log (locked)",))
+        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S50", r, log=b"")[code_review.S50_ASSERTIONS[2]])
+        self.assertEqual(Outcome.PASS, _outcomes("S50", r, log=_BUDGET_LOG % RUN_ID.encode())[
+            code_review.S50_ASSERTIONS[2]])
+
     def test_s50_fails_when_the_log_line_differs_from_stderr(self) -> None:
         r = _result("R15", 2, None, _with_id(_BUDGET_STDERR))
         log = (_BUDGET_LOG % RUN_ID.encode()).replace(b"342", b"9999")

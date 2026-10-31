@@ -241,6 +241,21 @@ class ReviewWorkspaceTests(unittest.TestCase):
             self.assertFalse((workspace / ".magi" / "logs").exists())
             self.assertIsNone(executor._capture_review_log(runs.DEFINITIONS["R14"]))
 
+    def test_an_unreadable_log_file_is_named_not_silently_dropped(self) -> None:
+        # [MAGI §6 MS2 loop 12, F1a-c2] the file that could not be read is reported, as logs.scan does.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            logs_dir.mkdir(parents=True)
+            (logs_dir / "magi-locked.log").write_bytes(b"x")
+            unreadable = []
+            with mock.patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError("locked")):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((), captured)
+            self.assertEqual(1, len(unreadable))
+            self.assertIn("magi-locked.log", unreadable[0])
+
     @unittest.skipUnless(_git_available(), "git is required")
     def test_an_inherited_git_dir_does_not_redirect_the_workspace_init(self) -> None:
         # [MAGI §6 MS2 loop 6, F1a-c2] `git init` under an inherited GIT_DIR initialises THAT directory.
