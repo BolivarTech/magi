@@ -334,6 +334,9 @@ struct Outcome {
     /// Whether the chain was asked about this finding and some of its (title, detail) pairs
     /// were never put to it.
     unasked: bool,
+    /// The cause that kept one of its pairs from being sent (`state too large`, `secret`) while
+    /// another pair was asked.
+    withheld: Option<&'static str>,
 }
 
 impl Outcome {
@@ -348,6 +351,7 @@ impl Outcome {
             status: None,
             decided: false,
             unasked: false,
+            withheld: None,
         }
     }
 
@@ -368,6 +372,7 @@ impl Outcome {
             status: None,
             decided: false,
             unasked: false,
+            withheld: None,
         }
     }
 }
@@ -450,8 +455,12 @@ impl<'a> Gate<'a> {
     /// Judges one finding, never failing: what cannot be judged passes as `unfiltered`.
     ///
     /// In order: no file, no line, no code, or code without that line (`no location`); a cause that already stopped the gate; a
-    /// spent review clock (`timeout`); a state over `max_state_bytes` (`state too large`, never
-    /// truncated) or carrying a secret (`secret`, never sent). Then each distinct (title,
+    /// spent review clock (`timeout`). Each distinct (title, detail) pair's state is then checked
+    /// on its own: one over `max_state_bytes` (`state too large`, never truncated) or carrying a
+    /// secret (`secret`, never sent) is withheld, and a finding whose every pair is withheld is
+    /// `unfiltered` with the first such cause. A withheld pair beside asked ones is named in
+    /// [`GateVerdict::causes`] with `not every claim judged`, and the finding is never `filtered`.
+    /// Then each distinct (title,
     /// detail) pair, up to [`MAX_GATE_QUESTIONS_PER_FINDING`], is asked once, walking the chain: a confident `false_positive` filters it
     /// (a `critical` stays `low_confidence` instead), a confident `real_defect` keeps it, an
     /// answer under the threshold passes to the next model, a 400 rotates and is remembered, a
@@ -534,6 +543,7 @@ impl<'a> Gate<'a> {
         {
             causes.push(guard);
         }
+        causes.extend(outcome.withheld);
         if outcome.unasked && !causes.contains(&CAUSE_NOT_EVERY_CLAIM_JUDGED) {
             causes.push(CAUSE_NOT_EVERY_CLAIM_JUDGED);
         }
@@ -630,17 +640,22 @@ impl<'a> Gate<'a> {
         }
         let pairs = constituents(finding).len();
         let asked = pairs.min(MAX_GATE_QUESTIONS_PER_FINDING);
+        // MAGI FIX (S6 loop 10, C1-c2): the checks run per pair. A pair too large or carrying a
+        // secret is withheld (never sent, never truncated) and the others are still asked; only
+        // a finding whose every pair is withheld leaves `unfiltered` with that pair's cause.
+        let mut withheld = None;
         let states: Vec<Value> = (0..asked)
             .map(|i| gate_state_of(finding, i, code))
+            .filter(|state| match self.withheld_cause(state) {
+                Some(cause) => {
+                    withheld.get_or_insert(cause);
+                    false
+                }
+                None => true,
+            })
             .collect();
-        if states
-            .iter()
-            .any(|s| s.to_string().len() > self.max_state_bytes)
-        {
-            return Outcome::unfiltered(CAUSE_STATE_TOO_LARGE);
-        }
-        if states.iter().any(carries_secret) {
-            return Outcome::unfiltered(CAUSE_SECRET);
+        if let (true, Some(cause)) = (states.is_empty(), withheld) {
+            return Outcome::unfiltered(cause);
         }
         let never_filter = if finding.reported_severity == Severity::Critical {
             Some(CAUSE_CRITICAL_NEVER_FILTERED)
@@ -658,6 +673,7 @@ impl<'a> Gate<'a> {
             }
         }
         outcome.unasked = put < pairs;
+        outcome.withheld = withheld;
         if outcome.state == GateState::Filtered && outcome.unasked {
             // The cap, not the model's answer, sets this state: it counts for no model.
             outcome.state = GateState::LowConfidence;
@@ -670,6 +686,18 @@ impl<'a> Gate<'a> {
             }
         }
         outcome
+    }
+
+    /// Why `state` cannot be sent, if it cannot: over `max_state_bytes` (`state too large`,
+    /// checked first) or carrying a secret pattern (`secret`). O(bytes of the state).
+    fn withheld_cause(&self, state: &Value) -> Option<&'static str> {
+        if state.to_string().len() > self.max_state_bytes {
+            Some(CAUSE_STATE_TOO_LARGE)
+        } else if carries_secret(state) {
+            Some(CAUSE_SECRET)
+        } else {
+            None
+        }
     }
 
     /// Asks one state down the chain; a confident `false_positive` is `low_confidence` with
