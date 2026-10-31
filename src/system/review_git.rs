@@ -1866,6 +1866,30 @@ mod tests {
     }
 
     #[test]
+    fn an_untracked_ignored_file_is_never_listed_in_a_directory_or_uncommitted_review() {
+        // [MAGI S6 loop 10, A2-m3] the filter's ignored set holds only tracked ignored files for
+        // these inputs; the untracked half of RV22 rests on the listing, pinned here with git.
+        let d = repo();
+        std::fs::write(d.path().join(".gitignore"), "*.env\n").expect("write");
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        git(d.path(), &["add", ".gitignore", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").expect("write");
+        std::fs::write(d.path().join("b.env"), "HOST=internal\n").expect("write");
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        for input in [ReviewInput::Directory(".".into()), ReviewInput::Uncommitted] {
+            let r =
+                magi_rs::review::input::resolve_input(&input, d.path(), &g, &allow).expect("lists");
+            let paths: Vec<&str> = r.files.iter().map(|f| f.path.as_str()).collect();
+            assert!(paths.contains(&"a.rs"), "{input:?}: {paths:?}");
+            assert!(!paths.contains(&"b.env"), "{input:?}: {paths:?}");
+        }
+    }
+
+    #[test]
     fn a_directory_outside_any_repository_still_honors_its_gitignore() {
         // [MAGI §6 MS2 A loop 1] RV22: a directory respects `.gitignore`, repository or not. Outside one, git
         // itself reads the rules (root and nested) through an empty repository of the review's own.
