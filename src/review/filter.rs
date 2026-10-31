@@ -242,6 +242,11 @@ fn classify(
     if new.is_none() && old.is_none() && file.diff.is_some() {
         return Ok(Verdict::Skip(SkipCause::NotRegularFile));
     }
+    // MAGI FIX (S6 loop 11): a dangling link reads as absent here too, but it never reaches this
+    // branch as "disappeared": every listing of `input` moves enumerated links whose target is
+    // gone to `ResolvedInput::dangling_links` before the filter runs (`without_dangling`, pinned
+    // by `an_input_left_with_only_dangling_links_is_nothing_to_review_and_names_them`), and they
+    // are reported as `SkipCause::NotRegularFile`. Only a file removed after listing lands here.
     if new.is_none() && file.diff.is_none() {
         return Err(if explicit {
             ReviewError::NotReviewable {
