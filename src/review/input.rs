@@ -232,6 +232,17 @@ pub fn resolve_input(
     if let Some(escaping) = resolved.files.iter().find(|f| !is_confined(&f.path)) {
         return Err(ReviewError::OutsideWorkspace(escaping.path.clone()));
     }
+    // MAGI FIX (S6 loop 10): A1-m2, the old side of a rename or copy is read at `renamed_from`,
+    // so that path goes through the same check (git's `--relative` never emits one that climbs
+    // out, pinned by `a_rename_from_outside_a_sub_workspace_is_reviewed_as_an_addition`).
+    if let Some(escaping) = resolved
+        .files
+        .iter()
+        .filter_map(|f| f.diff.as_deref().and_then(renamed_from))
+        .find(|old| !is_confined(old))
+    {
+        return Err(ReviewError::OutsideWorkspace(escaping));
+    }
     // MAGI FIX (S6 loop 6): with only non-UTF-8 names left, the input went on with no file and
     // the omissions never reached the `nothing to review` error (RV20).
     // MAGI FIX (S6 loop 8): the dangling links every listing leaves out are named too.
