@@ -1337,6 +1337,21 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_key_finding_detail_is_line_safe_before_the_formatter_sees_it() {
+        // [MAGI S6 loop 10, C2-m1] magi-core 4.2.0 does not render a Key Finding's detail, but a
+        // formatter that starts to must inherit the line safety the other fields have.
+        for b in BREAKS {
+            let forged = format!("x{b}FORGED");
+            let f = serde_json::json!([{"severity":"warning","title":"t","detail":forged,"file":"a.rs","line":1}]);
+            let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+            let (_, consensus) = line_safe(&report.agents, &report.consensus);
+            let detail = &consensus.findings[0].detail;
+            assert!(detail.contains("FORGED"), "{detail}");
+            assert!(!has_forged_line(detail), "break {b:?}: {detail:?}");
+        }
+    }
+
     /// Puts `forged` in every model-supplied string magi-core's formatter may render, and in the
     /// agents' own prose: the dissent, the conditions, the recommendations, the Key Findings'
     /// titles and each agent's summary, reasoning and recommendation.
