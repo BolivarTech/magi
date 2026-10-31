@@ -607,9 +607,12 @@ pub fn display_path(path: &str) -> String {
 /// # Returns
 /// The masked text; `text` unchanged when it holds no secret.
 ///
-/// O(n · s) for a text of n bytes and s searches (one per token prefix, one per other pattern):
-/// each search keeps its next span and runs again, from the mask's end, only when a mask passed
-/// its start; the others check only whether a token opens at the mask's end.
+/// O(n · s · (k + 1)) for a text of n bytes, s searches (one per token prefix, one per other
+/// pattern) and k masks: each search keeps its next span and runs again, from the mask's end,
+/// only when a mask passed its start, so a search whose spans are masked one by one rescans what
+/// follows each of them; the others check only whether a token opens at the mask's end. The
+/// texts it masks are small (paths, one-line errors, report fields), where k stays small.
+// MAGI FIX (S6 loop 13, A2-b6): the bound omitted the k factor of a search rerun after each mask.
 ///
 /// Maintenance: the cached spans are correct only while every boundary a search over the whole
 /// text can miss after a mask is the one `token_after_mask` checks. A change to a `Matcher`
