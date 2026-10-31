@@ -1177,23 +1177,52 @@ impl BraceSearch<'_> {
     }
 }
 
-/// The line visits the forward searches of one detection pass may spend.
+/// The line visits per line of the text that the forward searches of one detection pass may
+/// spend in all ([`SearchBudget`]). A starting point, not a measurement: a construct's searches
+/// walk its header, a few lines even when wrapped, two or three times, so ordinary code spends a
+/// small fraction of it; only a text built to keep one parameter list open per line reaches it.
+const BRACE_SEARCH_VISITS_PER_LINE: usize = 32;
+
+/// The line visits the forward searches of one detection pass may spend:
+/// [`BRACE_SEARCH_VISITS_PER_LINE`] per line of the text, plus [`MAX_BRACE_SEARCH_LINES`] so
+/// that a short text still allows one full search. Each search is bounded on its own
+/// ([`open_brace_line`]), but a file of `f(` lines starts one per line, O(n ×
+/// [`MAX_BRACE_SEARCH_LINES`]) visits (minutes for an 8 MiB file, before the review clock and
+/// with the TUI not cancellable); the shared budget keeps a pass O(n).
+///
+/// Once it is spent, every later search of the pass degrades as one past its own bound does:
+/// a construct whose brace is on its own line is still found, one whose brace is on a later line
+/// ends on its own line, and the lines after it fall into later units. No line is lost: every
+/// line stays in exactly one unit. Pinned by
+/// `the_brace_searches_of_a_whole_file_spend_a_budget_linear_in_its_lines`.
 struct SearchBudget {
+    /// The visits the pass may spend in all.
+    cap: usize,
     /// The visits spent so far.
     spent: Cell<usize>,
 }
 
 impl SearchBudget {
-    /// The budget of a detection pass over a text of `lines` lines.
-    fn for_lines(_lines: usize) -> Self {
+    /// The budget of a detection pass over a text of `lines` lines. O(1).
+    fn for_lines(lines: usize) -> Self {
+        // MAGI FIX (S6 loop 13): each search was bounded but a pass was not, so a file of `f(`
+        // lines took O(n × MAX_BRACE_SEARCH_LINES) before the review clock.
         Self {
+            cap: lines
+                .saturating_mul(BRACE_SEARCH_VISITS_PER_LINE)
+                .saturating_add(MAX_BRACE_SEARCH_LINES),
             spent: Cell::new(0),
         }
     }
 
-    /// Records one line visit; whether the search may go on.
+    /// Spends one line visit; `false` when the pass has none left, so the search stops there.
+    /// O(1).
     fn spend(&self) -> bool {
-        self.spent.set(self.spent.get().saturating_add(1));
+        let spent = self.spent.get();
+        if spent >= self.cap {
+            return false;
+        }
+        self.spent.set(spent + 1);
         true
     }
 
@@ -1232,10 +1261,11 @@ impl SearchBudget {
 /// falls into later units. No line is lost: every line stays in exactly one unit, so the body is
 /// still reviewed, only split from its signature.
 ///
-/// The search looks at most [`MAX_BRACE_SEARCH_LINES`] lines past line `i` and then degrades to
-/// "no brace found", which already means the construct ends on its own line: the lines after it
-/// fall into later units, so none is lost. Preparation runs before the review clock (RV06), so
-/// this budget is the only bound on a file built to keep a parameter list open.
+/// The search looks at most [`MAX_BRACE_SEARCH_LINES`] lines past line `i`, and no more than the
+/// detection pass has left ([`SearchBudget`]), and then degrades to "no brace found", which
+/// already means the construct ends on its own line: the lines after it fall into later units,
+/// so none is lost. Preparation runs before the review clock (RV06), so these two bounds are
+/// the only ones on a file built to keep a parameter list open.
 fn open_brace_line(
     lines: &[&str],
     scanned: &[ScannedLine],
