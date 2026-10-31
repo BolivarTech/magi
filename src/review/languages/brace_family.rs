@@ -543,10 +543,7 @@ impl BraceFamilyExtractor {
                 j += 1;
                 continue;
             }
-            let kind = match trimmed.split_whitespace().nth(1) {
-                Some(word) if word.starts_with("interface") => UnitKind::Trait,
-                _ => UnitKind::Struct,
-            };
+            let kind = go_type_kind(trimmed);
             let end = if scanned.get(j).is_some_and(|s| s.brace_delta > 0) {
                 find_closing_brace(scanned, j)
                     .min(body_end.saturating_sub(1))
@@ -895,7 +892,9 @@ impl BraceFamilyExtractor {
                 // stripped before they are matched, so the `pub struct` and `export class` arms
                 // could never match; a bare keyword names the kind.
                 let kind = match kw.trim() {
-                    "struct" | "union" | "type" => UnitKind::Struct,
+                    // MAGI FIX (S6 loop 13): `type Reader interface {` was a struct.
+                    "type" => go_type_kind(rest),
+                    "struct" | "union" => UnitKind::Struct,
                     "enum" => UnitKind::Enum,
                     "trait" | "interface" => UnitKind::Trait,
                     "impl" => UnitKind::Impl,
@@ -1622,6 +1621,35 @@ fn strip_template_header(text: &str) -> &str {
     match text.strip_prefix(TEMPLATE_KEYWORD).map(str::trim_start) {
         Some(rest) if rest.starts_with('<') => skip_generics(rest),
         _ => text,
+    }
+}
+
+/// The Go keyword that declares an interface type (`type Reader interface {`).
+const GO_INTERFACE_KEYWORD: &str = "interface";
+
+/// The kind of a Go type declaration from the text after `type` (or a member line of a
+/// `type (` group): its name, an optional type parameter list in brackets (`Box[T any]`), then
+/// the keyword [`GO_INTERFACE_KEYWORD`] makes a trait, anything else (a struct, a defined type,
+/// an alias) a struct. A Go interface's methods carry no keyword, so it is reviewed whole, never
+/// split at them. O(n) in the text.
+fn go_type_kind(rest: &str) -> UnitKind {
+    let rest = rest.trim_start();
+    let after_name = rest.trim_start_matches(is_identifier_char).trim_start();
+    let after_params = if after_name.starts_with('[') {
+        balanced_end(after_name, '[', ']')
+            .and_then(|end| after_name.get(end..))
+            .unwrap_or("")
+            .trim_start()
+    } else {
+        after_name
+    };
+    let interface = after_params
+        .strip_prefix(GO_INTERFACE_KEYWORD)
+        .is_some_and(|after| !after.starts_with(is_identifier_char));
+    if interface {
+        UnitKind::Trait
+    } else {
+        UnitKind::Struct
     }
 }
 
