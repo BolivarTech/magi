@@ -125,6 +125,12 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// block, so the members are searched in the wrong span and the block may not split, or split
     /// at fewer members. Nothing is lost either way: `split_into_members` covers every line of
     /// the unit with exactly one piece, and an unsplit unit is batched whole.
+    ///
+    /// Only those kinds split, declared: an enum, a struct or a declaration group is reviewed
+    /// whole, and a construct no keyword table names (TypeScript's `enum` or `namespace`, Rust's
+    /// `macro_rules!`, a JavaScript IIFE) is no construct at all, so its lines fall into gap
+    /// units. A single such unit too large for one batch therefore ends the review with the typed
+    /// `ReviewError::TooLargeForBatch` (RV03), never a silent cut.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         // MAGI FIX (S6 loop 3): a block too large for one batch is reviewed method by method.
         if !matches!(
