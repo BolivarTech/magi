@@ -834,6 +834,42 @@ mod tests {
     }
 
     #[test]
+    fn a_non_ascii_path_around_the_workspace_prefix_never_panics_and_strips_only_a_real_prefix() {
+        // [MAGI S6 loop 10, C1-c1] a byte index of the workspace's length that falls inside a
+        // multi-byte character of the reported path must not panic (`str::get` is checked).
+        for policy in [Backslash::Literal, Backslash::Separator] {
+            let cases: [(&str, &str, &str); 7] = [
+                // Byte 2 (the workspace's length) lies inside `é`, bytes 1..3 of `/é`.
+                ("/w", "/é/a.rs", "/é/a.rs"),
+                (
+                    "/home/üser/proj",
+                    "/home/user/projé/a.rs",
+                    "/home/user/projé/a.rs",
+                ),
+                ("/home/üser/proj", "/home/üser/proj/ñ.rs", "ñ.rs"),
+                ("/w", "/wé/a.rs", "/wé/a.rs"),
+                ("/wé", "/w", "/w"),
+                ("/wé", "/wé/日本.rs", "日本.rs"),
+                ("/ü", "ü", "ü"),
+            ];
+            for (ws, file, expected) in cases {
+                let (f, _) = normalize_location_with(Path::new(ws), file, Some(1), policy);
+                assert_eq!(f, expected, "{ws} {file} {policy:?}");
+            }
+        }
+        let windows = Backslash::Separator;
+        for (ws, file, expected) in [
+            (r"C:\ü", r"c:\ü\a.rs", "a.rs"),
+            (r"C:\ü", r"é:\ü\a.rs", r"é:/ü/a.rs"),
+            (r"C:\w", "Ç:/w/a.rs", "Ç:/w/a.rs"),
+            (r"C:\wé", r"c:\w", "c:/w"),
+        ] {
+            let (f, _) = normalize_location_with(Path::new(ws), file, None, windows);
+            assert_eq!(f, expected, "{ws} {file}");
+        }
+    }
+
+    #[test]
     fn a_backslash_in_a_unix_file_name_never_aliases_another_file() {
         // [MAGI S6 loop 9, C1-c1] `src/a\b.rs` and `src/a/b.rs` are two files on Unix; turning
         // every `\` into `/` made a finding on the first validate against the second.
