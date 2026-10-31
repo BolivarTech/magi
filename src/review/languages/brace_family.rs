@@ -1311,6 +1311,8 @@ impl BraceFamilyExtractor {
             function_keywords: vec!["fn ".to_string()],
             block_keywords: vec![
                 "struct ".to_string(),
+                // MAGI FIX (S6 loop 9): a `union` fell into a gap unit; it is a struct-like type.
+                "union ".to_string(),
                 "enum ".to_string(),
                 "trait ".to_string(),
                 "impl ".to_string(),
