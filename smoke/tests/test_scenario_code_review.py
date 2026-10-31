@@ -40,14 +40,31 @@ def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",
 
 
 RUN_ID = "4242-0123456789abcdef"
-#: [MAGI §6 MS2 loop 4, F1-g34] the product's arithmetic for a 30 s total over three batches: 30 / 3 = 10 s
-#: per batch, a ceiling the derivation lifts to the 15 s floor, and a minimum of 3 x 783 = 2349 s.
-_BUDGET_MSG = (b"3 batches leave 10 s per batch, less than the 783 s a batch needs at the 15 s floor "
-               b"(per-batch ceiling 15 s); pass --timeout 2349 or more")
+#: [MAGI §6 MS2 loop 10, F1a-c3] the product's arithmetic (``pre_budget``) for R15's 20 s total over three
+#: batches under the default ``max_rotations = 2`` with retries on: 20 // 3 = 6 s per batch; a batch needs
+#: 6 + 15 x 7.2 = 114 s; the per-batch ceiling is the RAW one, (6 - 6) x 100 // 720 = 0 s, never lifted to
+#: the floor; the minimum is 3 x 114 = 342 s.
+_BUDGET_MSG = (b"3 batches leave 6 s per batch, less than the 114 s a batch needs at the 15 s floor "
+               b"(per-batch ceiling 0 s); pass --timeout 342 or more")
 _NL = bytes([10])
 _BUDGET_STDERR = b"error: " + _BUDGET_MSG + _NL
 #: One run-log line of the refusal; ``%s`` is the run id.
 _BUDGET_LOG = b'ERROR run=%s target=magi_rs::code_review ' + _BUDGET_MSG + _NL
+
+
+def _product_refusal(batches: int, rotations: int, retry_disabled: bool) -> bytes:
+    """The refusal ``pre_budget`` renders for R15's total over *batches* under one ``[magi]`` config.
+
+    A mirror of ``src/review/clock.rs`` and ``src/magi/mod.rs`` for the tests only: classifier 6 s, attempt
+    factor ``calls x models x 120`` in hundredths, raw ceiling ``(wall - 6) x 100 // factor``.
+    """
+    factor = (1 if retry_disabled else 2) * (rotations + 1) * 120
+    wall = runs.REVIEW_TOO_SHORT_TIMEOUT_S // batches
+    need = 6 + 15 * factor // 100
+    ceiling = max(wall - 6, 0) * 100 // factor
+    return (b"error: %d batches leave %d s per batch, less than the %d s a batch needs at the 15 s floor "
+            b"(per-batch ceiling %d s); pass --timeout %d or more" % (batches, wall, need, ceiling, batches * need)
+            + _NL)
 
 
 def _with_id(tail: bytes) -> bytes:
@@ -298,7 +315,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
                 code_review.S50_ASSERTIONS[1]], text)
 
     def test_s50_fails_when_the_minimum_does_not_exceed_the_total_asked_for(self) -> None:
-        text = _BUDGET_STDERR.replace(b"--timeout 2349", b"--timeout %d" % runs.REVIEW_TOO_SHORT_TIMEOUT_S)
+        text = _BUDGET_STDERR.replace(b"--timeout 342", b"--timeout %d" % runs.REVIEW_TOO_SHORT_TIMEOUT_S)
         r = _result("R15", 2, None, _with_id(text))
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
 
@@ -307,10 +324,8 @@ class CodeReviewScenarioTests(unittest.TestCase):
         # window larger than the unmeasured default plans fewer batches over the same tree: an
         # environmental reason, not a regression, so the range check asks only what the refusal
         # guarantees (one batch or more).
-        text = _BUDGET_STDERR.replace(b"3 batches leave 10 s", b"1 batches leave 30 s").replace(
-            b"--timeout 2349", b"--timeout 783")
-        log = _BUDGET_LOG.replace(b"3 batches leave 10 s", b"1 batches leave 30 s").replace(
-            b"--timeout 2349", b"--timeout 783") % RUN_ID.encode()
+        text = _product_refusal(1, 2, False)
+        log = b"ERROR run=" + RUN_ID.encode() + b" target=magi_rs::code_review " + text[len(b"error: "):]
         r = _result("R15", 2, None, _with_id(text))
         self.assertEqual({Outcome.PASS}, set(_outcomes("S50", r, log=log).values()))
 
@@ -319,13 +334,38 @@ class CodeReviewScenarioTests(unittest.TestCase):
         r = _result("R15", 2, None, _with_id(text))
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]])
 
-    def test_s50_fails_when_the_per_batch_ceiling_is_below_the_floor(self) -> None:
-        # [MAGI §6 MS2 loop 7, F1a-c3] derive_ceiling_from_timeout lifts every ceiling to the floor, so a
-        # refusal naming a ceiling below 15 s is not the product's arithmetic.
-        for ceiling in (b"0", b"14"):
-            text = _BUDGET_STDERR.replace(b"(per-batch ceiling 15 s)", b"(per-batch ceiling " + ceiling + b" s)")
+    def test_s50_fails_when_the_per_batch_ceiling_reaches_the_floor_or_exceeds_the_wall_clock(self) -> None:
+        # [MAGI §6 MS2 loop 10, F1a-c3] the refusal shows the RAW ceiling of the per-batch wall clock, which a
+        # refused batch never lifts to the floor and never exceeds: 15 s, 999 s or 7 s over 6 s is not the
+        # product's arithmetic. (Loop 7 required the opposite, a ceiling of at least 15 s, which every real
+        # refusal of a 20 s total fails.)
+        for ceiling in (b"15", b"999", b"7"):
+            text = _BUDGET_STDERR.replace(b"(per-batch ceiling 0 s)", b"(per-batch ceiling " + ceiling + b" s)")
             r = _result("R15", 2, None, _with_id(text))
             self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], ceiling)
+
+    def test_s50_passes_the_products_refusal_at_every_batch_count_and_config(self) -> None:
+        # [MAGI §6 MS2 loop 10, F1a-c3, F1a-m1] the bounds hold for whatever the product renders: one batch
+        # or many (the count is printed as "N batches" at every N), rotation and retry on or off.
+        for batches in range(1, 7):
+            for rotations, retry_disabled in ((0, True), (0, False), (2, False), (4, False)):
+                text = _product_refusal(batches, rotations, retry_disabled)
+                match = code_review.BUDGET_PATTERN.search(text.decode())
+                self.assertTrue(code_review._budget_fields_ok(match), text)
+
+    def test_s50_fails_on_budget_numbers_the_product_cannot_print_together(self) -> None:
+        # [MAGI §6 MS2 loop 10, F1a-c3] the fixture knows the 20 s asked and the 24 s a batch needs at the
+        # floor under the most lenient config: each number must agree with the others.
+        incoherent = (
+            (b"3 batches leave 6 s", b"3 batches leave 7 s"),   # the wall clock is not 20 // 3
+            (b"the 114 s a batch", b"the 23 s a batch"),        # below the 24 s a batch needs at the least
+            (b"--timeout 342", b"--timeout 343"),               # the minimum is not batches x need
+            (b"--timeout 342", b"--timeout 21"),
+        )
+        for old, new in incoherent:
+            text = _BUDGET_STDERR.replace(old, new)
+            r = _result("R15", 2, None, _with_id(text))
+            self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], new)
 
     def test_s50_fails_when_the_floor_is_not_the_15_s_one(self) -> None:
         text = _BUDGET_STDERR.replace(b"the 15 s floor", b"the 20 s floor")
@@ -340,7 +380,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
 
     def test_s50_fails_when_the_log_line_differs_from_stderr(self) -> None:
         r = _result("R15", 2, None, _with_id(_BUDGET_STDERR))
-        log = (_BUDGET_LOG % RUN_ID.encode()).replace(b"2349", b"9999")
+        log = (_BUDGET_LOG % RUN_ID.encode()).replace(b"342", b"9999")
         self.assertEqual(Outcome.FAIL, _outcomes("S50", r, log=log)[code_review.S50_ASSERTIONS[2]])
 
     def test_s50_fails_the_log_without_a_run_id_or_a_log_directory(self) -> None:
