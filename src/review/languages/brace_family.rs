@@ -2534,6 +2534,55 @@ mod tests {
     }
 
     #[test]
+    fn a_cpp_constructor_initializer_or_trailing_clause_continues_its_signature() {
+        // [MAGI S6 loop 9, B2b-b1] `: value_(value) {` read as a signature named `value_`, so the
+        // brace search stopped there and the constructor fell into gap units.
+        let cases = [
+            (
+                "Widget::Widget(int value)\n    : value_(value),\n      count_(0) {\n    run();\n}\nvoid g() {\n}\n",
+                "Widget",
+                5,
+            ),
+            (
+                "Widget::Widget(int v)\n    : value_(v)\n    , count_(0)\n{\n    run();\n}\nvoid g() {\n}\n",
+                "Widget",
+                6,
+            ),
+            (
+                "Widget::Widget(int v) : value_(v) {\n    run();\n}\nvoid g() {\n}\n",
+                "Widget",
+                3,
+            ),
+            (
+                "template <typename T>\nvoid f(T t)\n    requires (sizeof(T) > 4)\n{\n    run();\n}\nvoid g() {\n}\n",
+                "f",
+                6,
+            ),
+            (
+                "auto add(int a, int b)\n    -> decltype(a + b)\n{\n    return a + b;\n}\nvoid g() {\n}\n",
+                "add",
+                5,
+            ),
+            (
+                "void h()\n    noexcept(true)\n{\n    run();\n}\nvoid g() {\n}\n",
+                "h",
+                5,
+            ),
+        ];
+        for (code, name, end) in cases {
+            let units = extract(&BraceFamilyExtractor::cpp(), code, &all_lines(code));
+            assert_eq!(
+                spans(&units),
+                vec![
+                    (name, UnitKind::Function, 1, end),
+                    ("g", UnitKind::Function, end + 1, end + 2),
+                ],
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn a_brace_in_an_open_parameter_list_loses_no_line() {
         // [MAGI S6 loop 8, B2b-m2] declared on `open_brace_line`: a lambda default argument's
         // brace is taken for the function's, so the body is split from its signature, but every
