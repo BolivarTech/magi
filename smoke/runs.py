@@ -33,6 +33,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -853,20 +854,43 @@ def protected_candidates(workspace) -> tuple[str, ...]:
                         if path.startswith(prefix)))
 
 
+#: The reparse tag of a Windows junction (``IO_REPARSE_TAG_MOUNT_POINT``),
+#: ``None`` where :mod:`stat` has none (every platform without junctions).
+JUNCTION_REPARSE_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+
+
 def _is_link(path) -> bool:
     """Whether *path* is a symlink or, on Windows, a junction.
 
-    ``os.path.isjunction`` exists from Python 3.12; the harness's 3.11 floor
-    has no junction test, and there a junction reads as not a link.
+    ``os.path.isjunction`` exists from Python 3.12. On the harness's 3.11
+    floor the junction is read from the reparse tag ``os.lstat`` reports on
+    Windows (``st_reparse_tag``, there since Python 3.8), so a junction is a
+    link on every supported version.
 
     Args:
         path: The path to test, which need not exist.
 
     Returns:
         bool: ``True`` for a symlink or a junction.
+
+    Raises:
+        OSError: When the path exists and cannot be inspected (``os.lstat``);
+            a missing path, or one under a file, is not a link.
     """
+    if os.path.islink(path):
+        return True
     is_junction = getattr(os.path, "isjunction", None)
-    return os.path.islink(path) or bool(is_junction and is_junction(path))
+    if is_junction is not None:
+        return bool(is_junction(path))
+    # MAGI FIX (S6 loop 13): on 3.11 a junction read as an ordinary directory,
+    # so copytree and rmtree went through it (F1a-m3, F1a-b2, F1a-c2).
+    if JUNCTION_REPARSE_TAG is None:
+        return False
+    try:
+        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return tag == JUNCTION_REPARSE_TAG
 
 
 def _linked_component(base, relative):
