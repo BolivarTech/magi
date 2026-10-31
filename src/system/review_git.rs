@@ -1845,6 +1845,69 @@ mod tests {
     }
 
     #[test]
+    fn a_non_revision_attribute_only_hides_a_revision_section_never_changes_its_bytes() {
+        // [MAGI S6 loop 9, A1-c3, declared] attributes outside the reviewed tree (a git older
+        // than 2.46 reads the working tree's `.gitattributes`; every git reads
+        // `$GIT_DIR/info/attributes`) were read as a breach of RV21. They decide only whether a
+        // section shows as binary, never which revision's bytes are diffed: the worst case is
+        // the file left out as binary, which the report declares. With git 2.46 or later the
+        // working tree's file is not read at all.
+        let d = repo();
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn a() {}
+",
+        )
+        .expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn b() {}
+",
+        )
+        .expect("write");
+        git(d.path(), &["commit", "-q", "-am", "2"]);
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let section = || {
+            let r = magi_rs::review::input::resolve_input(
+                &magi_rs::review::input::ReviewInput::Commit(None),
+                d.path(),
+                &ScrubbedGit::new(d.path().to_path_buf()),
+                &allow,
+            )
+            .expect("resolves");
+            r.files
+                .into_iter()
+                .find(|f| f.path == "a.rs")
+                .and_then(|f| f.diff)
+                .expect("a.rs has a section")
+        };
+        std::fs::write(
+            d.path().join(".gitattributes"),
+            "*.rs -diff
+",
+        )
+        .expect("write");
+        let shown = section();
+        assert!(shown.contains("+fn b() {}"), "{shown}");
+        std::fs::write(
+            d.path().join(".git/info/attributes"),
+            "*.rs -diff
+",
+        )
+        .expect("write");
+        let hidden = section();
+        assert!(
+            magi_rs::review::input::is_binary_section(&hidden),
+            "{hidden}"
+        );
+        assert!(!hidden.contains("fn "), "{hidden}");
+    }
+
+    #[test]
     fn the_ignored_query_takes_a_glob_character_literally() {
         // [CP2 MS2 S1b loop 14, measured with git 2.56] as a glob, `src[0]` named the tracked-and-ignored `src0`.
         let d = repo();
