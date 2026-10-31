@@ -947,6 +947,7 @@ fn unquote_bytes(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::source::{ContentSource, WorktreeSource};
     use crate::review::test_support::FakeGit;
 
     #[test]
@@ -1735,6 +1736,46 @@ mod tests {
             vec!["src/a.rs", "src/b.rs"]
         );
         assert!(r.files.iter().all(|f| f.diff.is_none()));
+    }
+
+    #[test]
+    fn a_listed_name_whose_metadata_cannot_be_read_is_kept_for_the_reader_to_report() {
+        // [MAGI S6 loop 8, A1-c2 Caspar] any metadata error but "not found" dropped the name in
+        // silence; it is kept, and the reader fails naming it.
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        // A component that is a file (Unix: not a directory) or a name Windows refuses.
+        let bad = if cfg!(windows) {
+            "bad<name.rs"
+        } else {
+            "a.rs/x.rs"
+        };
+        assert!(
+            std::fs::symlink_metadata(d.path().join(bad))
+                .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound),
+            "the fixture must fail with something other than not found"
+        );
+        let listing = format!("a.rs\0{bad}\0");
+        let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            (
+                "ls-files --cached --others --exclude-standard -z -- .",
+                Ok(listing.as_str()),
+            ),
+        ]);
+        let r = resolve_input(
+            &ReviewInput::Directory(".".into()),
+            d.path(),
+            &git,
+            &allow_all,
+        )
+        .expect("resolves");
+        assert_eq!(
+            r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["a.rs", bad]
+        );
+        let read = WorktreeSource::new(d.path().to_path_buf()).read(bad);
+        assert!(matches!(read, Err(ReviewError::Io(_))), "{read:?}");
     }
 
     #[test]
