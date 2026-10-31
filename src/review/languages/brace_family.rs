@@ -3347,4 +3347,31 @@ void g(void) {
             vec![("main", UnitKind::Function, 1, 2)]
         );
     }
+
+    #[test]
+    fn a_c_attribute_with_parentheses_is_no_function_and_no_name() {
+        // [MAGI S6 loop 13, B2b1-c1] an attribute's parentheses (`__attribute__((packed))`,
+        // `alignas(16)`) were read as a call: the struct was named `__attribute__`, and a
+        // function or struct opening with one was a function named after the attribute.
+        let c = "struct __attribute__((packed)) Hdr {\n    int a;\n};\n__attribute__((noreturn)) void die(void) {\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), c, &all_lines(c))),
+            vec![
+                ("Hdr", UnitKind::Struct, 1, 3),
+                ("die", UnitKind::Function, 4, 5)
+            ]
+        );
+        let cpp = "class [[deprecated]] W {\n};\n[[nodiscard]] int f(int a) {\n    return a;\n}\nalignas(16) struct V {\n    float x;\n};\nstruct alignas(8) B {\n};\n__declspec(dllexport) int g(void) {\n}\n";
+        let ext = BraceFamilyExtractor::cpp();
+        assert_eq!(
+            spans(&extract(&ext, cpp, &all_lines(cpp))),
+            vec![
+                ("W", UnitKind::Class, 1, 2),
+                ("f", UnitKind::Function, 3, 5),
+                ("V", UnitKind::Struct, 6, 8),
+                ("B", UnitKind::Struct, 9, 10),
+                ("g", UnitKind::Function, 11, 12)
+            ]
+        );
+    }
 }
