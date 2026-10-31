@@ -952,6 +952,12 @@ impl ProductionReviewRunner {
     }
 
     /// The paths `.gitignore` excludes that this input can reach.
+    ///
+    /// For a named file the set may hold that file: the plan then refuses it as `ignored`
+    /// (`ReviewError::NotReviewable`), it never drops it in silence (README, "What it never
+    /// sends"; REQ-RV22).
+    // MAGI FIX (S6 loop 9, D2-c1): refuted, not changed; pinned end to end by
+    // `a_named_file_that_gitignore_matches_is_refused_never_silently_omitted`.
     fn ignored(&self, input: &ReviewInput) -> Result<HashSet<String>, ReviewError> {
         let pathspec = match input {
             ReviewInput::File(p) | ReviewInput::Directory(p) => {
@@ -2353,6 +2359,33 @@ mod tests {
         assert_eq!(
             review_error_cause_name(&ReviewError::ContentChanged),
             "content_changed"
+        );
+    }
+
+    #[test]
+    fn a_named_file_that_gitignore_matches_is_refused_never_silently_omitted() {
+        // [MAGI S6 loop 9, D2-c1] refuted, pinned end to end over a real repository: a file the
+        // caller names that an ignore rule matches is refused with `ignored` (README, "What it
+        // never sends"; RV22: a requested file that would be left out is an error), never
+        // dropped from the plan.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        git_in(&ws, &["init", "-q"]);
+        std::fs::write(ws.join(".gitignore"), "local.rs\n").expect(".gitignore");
+        std::fs::write(ws.join("local.rs"), "fn local() {}\n").expect("local.rs");
+        let consult = Arc::new(CountingConsult::default());
+        let runner = production_runner(&ws, consult);
+        let plan = runner.plan(&ReviewInput::File("local.rs".into()));
+        assert!(
+            matches!(
+                plan,
+                Err(ReviewError::NotReviewable {
+                    cause: "ignored",
+                    ..
+                })
+            ),
+            "{:?}",
+            plan.map(|p| p.batches)
         );
     }
 }
