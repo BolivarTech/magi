@@ -3477,4 +3477,24 @@ void g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_nested_template_argument_closing_in_a_double_angle_ends_its_header() {
+        // [MAGI S6 loop 13, B2b1-c2] declared green, a false positive: each `>` of a `>>` closes
+        // one level of the list in `skip_generics`, so `std::vector<int>>` closes both the inner
+        // and the outer list and the construct after the header is found.
+        assert_eq!(
+            skip_generics("<typename T = std::vector<int>> class Box {"),
+            "class Box {"
+        );
+        let cpp = "template<typename T = std::vector<std::pair<int, int>>> class Box {\n    T t;\n};\ntemplate <typename T = std::vector<int>>\nstruct S {\n};\n";
+        let ext = BraceFamilyExtractor::cpp();
+        assert_eq!(
+            spans(&extract(&ext, cpp, &all_lines(cpp))),
+            vec![
+                ("Box", UnitKind::Class, 1, 3),
+                ("S", UnitKind::Struct, 4, 6)
+            ]
+        );
+    }
 }
