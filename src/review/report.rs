@@ -481,12 +481,15 @@ pub fn render_batch_reports(reports: &[(usize, MagiReport)]) -> String {
 /// magi-core's formatter writes the Key Findings' titles, the dissent's summaries, the
 /// conditions and the recommendations raw. Titles become one line ([`escape_controls`]); the
 /// prose fields keep their line breaks as indented continuation lines ([`indented_prose`]), so
-/// none starts at column 0 where it would read as a report line. The agents' summary, reasoning
-/// and recommendation, each dissent's reasoning and each Key Finding's detail and file are not
-/// rendered by magi-core 4.2.0; they get the same treatment so a formatter that starts rendering
-/// them inherits the safety. The
+/// none starts at column 0 where it would read as a report line. The agents' summary, reasoning,
+/// recommendation and findings, each dissent's reasoning and each Key Finding's detail, file and
+/// id are not rendered by magi-core 4.2.0; they get the same treatment so a formatter that starts
+/// rendering them inherits the safety. The
 /// deprecated `majority_summary` is neither rendered nor touched (assigning it is a deprecation
-/// warning, and the build denies warnings).
+/// warning, and the build denies warnings). Completeness is checked by construction, not by this
+/// list: `every_free_text_field_of_magi_cores_report_types_is_line_safe` forges every leaf that
+/// holds free text, so a field magi-core adds is red until it is handled here, and it renders
+/// the result to prove `majority_summary` stays unrendered.
 ///
 /// # Arguments
 ///
@@ -506,8 +509,19 @@ fn line_safe(
         agent.summary = indented_prose(&agent.summary);
         agent.reasoning = indented_prose(&agent.reasoning);
         agent.recommendation = indented_prose(&agent.recommendation);
+        // MAGI FIX (S6 loop 13, C2-m1): each agent's own findings, unrendered by magi-core
+        // 4.2.0, get the Key Findings' treatment.
+        for finding in &mut agent.findings {
+            finding.title = escape_controls(&finding.title);
+            finding.detail = indented_prose(&finding.detail);
+            finding.file = finding.file.as_deref().map(escape_controls);
+        }
     }
     let mut consensus = consensus.clone();
+    // MAGI FIX (S6 loop 13, C2-c2): the label and each Key Finding's id are magi-core's own text
+    // (identity here); escaped so every free-text field the formatter receives is line-safe, as
+    // `every_free_text_field_of_magi_cores_report_types_is_line_safe` checks by construction.
+    consensus.consensus = escape_controls(&consensus.consensus);
     // MAGI FIX (S6 loop 10, C2-m1): the Key Finding detail, unrendered by magi-core 4.2.0, gets
     // the indented treatment of the agents' unrendered prose.
     for finding in &mut consensus.findings {
@@ -516,6 +530,7 @@ fn line_safe(
         // MAGI FIX (S6 loop 12, C2-m1 / C2-c1): the file is repository text (a Unix path may hold
         // a line break), unrendered by magi-core 4.2.0; one line, like the title.
         finding.file = finding.file.as_deref().map(escape_controls);
+        finding.id = finding.id.as_deref().map(escape_controls);
     }
     for dissent in &mut consensus.dissent {
         dissent.summary = indented_prose(&dissent.summary);
