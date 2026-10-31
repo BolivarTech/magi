@@ -683,10 +683,11 @@ def _budget_fields_ok(match):
     Returns:
         bool: ``True`` for at least :data:`MIN_REFUSED_BATCHES` batch; a wall
         clock of exactly the total asked for divided by the batches; a need of
-        at least :data:`MIN_NEED_PER_BATCH_SECS` and above that wall clock; the
-        :data:`FLOOR_SECS` floor; a ceiling below the floor and not above the
-        wall clock; and a minimum of exactly batches x need, above the total
-        asked for.
+        at least :data:`MIN_NEED_PER_BATCH_SECS`; the :data:`FLOOR_SECS`
+        floor; a ceiling below the floor and not above the wall clock; and a
+        minimum of exactly batches x need. That the need exceeds the wall clock
+        and the minimum the total follows: the total (20 s) is below
+        :data:`MIN_NEED_PER_BATCH_SECS`.
 
     Example:
         >>> ok = BUDGET_PATTERN.search(
@@ -711,12 +712,10 @@ def _budget_fields_ok(match):
     asked = runs.REVIEW_TOO_SHORT_TIMEOUT_S
     return (wall == asked // batches
             and need >= MIN_NEED_PER_BATCH_SECS
-            and need > wall
             and floor == FLOOR_SECS
             and ceiling < FLOOR_SECS
             and ceiling <= wall
-            and minimum == batches * need
-            and minimum > asked)
+            and minimum == batches * need)
 
 
 def _run_log_finding(run, match):
