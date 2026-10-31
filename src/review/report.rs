@@ -1738,4 +1738,173 @@ mod tests {
             "{debug:?}"
         );
     }
+
+    /// Every JSON pointer of `value`'s string and null leaves, depth first.
+    fn leaf_pointers(value: &Value, at: &str, out: &mut Vec<String>) {
+        match value {
+            Value::String(_) | Value::Null => out.push(at.to_string()),
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    leaf_pointers(item, &format!("{at}/{i}"), out);
+                }
+            }
+            Value::Object(fields) => {
+                for (k, item) in fields {
+                    leaf_pointers(item, &format!("{at}/{k}"), out);
+                }
+            }
+            Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+
+    /// `value` with `probe` in every leaf that holds free text, and those leaves' pointers.
+    ///
+    /// A leaf holds free text when, set to `probe`, the value still deserializes as `T` and
+    /// serializes `probe` back at that pointer; an enum or a fail-soft field (a `category` that
+    /// reads unknown text as `other`) does not. The set is found by construction, so a text
+    /// field magi-core adds is probed without anyone listing it.
+    fn forge_free_text<T>(value: &T, probe: &str) -> (T, Vec<String>)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let mut current = serde_json::to_value(value).expect("serializes");
+        let mut pointers = Vec::new();
+        leaf_pointers(&current, "", &mut pointers);
+        let mut free = Vec::new();
+        for p in pointers {
+            let mut candidate = current.clone();
+            if let Some(leaf) = candidate.pointer_mut(&p) {
+                *leaf = Value::String(probe.to_string());
+            }
+            let back = serde_json::from_value::<T>(candidate.clone())
+                .ok()
+                .and_then(|t| serde_json::to_value(t).ok());
+            if back.as_ref().and_then(|b| b.pointer(&p)) == Some(&Value::String(probe.into())) {
+                current = candidate;
+                free.push(p);
+            }
+        }
+        (serde_json::from_value(current).expect("deserializes"), free)
+    }
+
+    /// The free-text fields `line_safe` leaves raw on purpose: the deprecated
+    /// `majority_summary` (assigning it is a deprecation warning), which magi-core 4.2.0 does
+    /// not render; the test below turns red the day it does.
+    const LEFT_RAW: [&str; 1] = ["/majority_summary"];
+
+    #[tokio::test]
+    async fn every_free_text_field_of_magi_cores_report_types_is_line_safe() {
+        // [MAGI S6 loop 13, C2-c2 / C2-m1 / C2-b3, security] `line_safe` assigned a hand-written
+        // list of fields: the agents' own findings were left out, and a field magi-core adds or
+        // starts rendering would have been written raw with no test turning red. The fields are
+        // now found by construction: every leaf that holds free text is forged.
+        let forged = "x\nFORGED";
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1,"category":"logic-error"}]);
+        let mut report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        forge_report_text(&mut report.agents, &mut report.consensus, "seed");
+        let (consensus, consensus_fields) = forge_free_text(&report.consensus, forged);
+        let mut agents = Vec::new();
+        let mut agent_fields = Vec::new();
+        for agent in &report.agents {
+            let (a, fields) = forge_free_text(agent, forged);
+            agents.push(a);
+            agent_fields.push(fields);
+        }
+        for needed in [
+            "/findings/0/title",
+            "/findings/0/detail",
+            "/findings/0/file",
+        ] {
+            assert!(
+                agent_fields[0].iter().any(|p| p == needed),
+                "{agent_fields:?}"
+            );
+        }
+        for needed in [
+            "/dissent/0/summary",
+            "/conditions/0/condition",
+            "/findings/0/id",
+        ] {
+            assert!(
+                consensus_fields.iter().any(|p| p == needed),
+                "{consensus_fields:?}"
+            );
+        }
+        let (safe_agents, safe_consensus) = line_safe(&agents, &consensus);
+        let mut checks: Vec<(Value, &Vec<String>)> = safe_agents
+            .iter()
+            .map(|a| serde_json::to_value(a).expect("serializes"))
+            .zip(&agent_fields)
+            .collect();
+        checks.push((
+            serde_json::to_value(&safe_consensus).expect("serializes"),
+            &consensus_fields,
+        ));
+        for (value, fields) in &checks {
+            for p in fields.iter().filter(|p| !LEFT_RAW.contains(&p.as_str())) {
+                let text = value.pointer(p).and_then(Value::as_str).unwrap_or_default();
+                assert!(text.contains("FORGED"), "{p}: {text:?}");
+                assert!(!has_forged_line(text), "{p} is written raw: {text:?}");
+            }
+        }
+        let rendered = ReportFormatter::new().format_report(&safe_agents, &safe_consensus);
+        assert!(
+            !has_forged_line(&rendered),
+            "a raw field is rendered: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn magi_cores_report_types_keep_the_fields_the_report_was_written_for() {
+        // [MAGI S6 loop 13, C2-c2] the serialized field set of each magi-core type the text
+        // report hands to the formatter, pinned like `DedupFinding`'s: a field added, renamed or
+        // removed upstream turns this red, so `line_safe` is reviewed with the bump.
+        fn keys(v: &Value) -> Vec<&str> {
+            v.as_object()
+                .map(|o| o.keys().map(String::as_str).collect())
+                .unwrap_or_default()
+        }
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+        let mut report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        forge_report_text(&mut report.agents, &mut report.consensus, "seed");
+        let agent = serde_json::to_value(&report.agents[0]).expect("serializes");
+        assert_eq!(
+            keys(&agent),
+            [
+                "agent",
+                "confidence",
+                "findings",
+                "reasoning",
+                "recommendation",
+                "summary",
+                "verdict"
+            ]
+        );
+        assert_eq!(
+            keys(&agent["findings"][0]),
+            ["category", "detail", "file", "line", "severity", "title"]
+        );
+        let consensus = serde_json::to_value(&report.consensus).expect("serializes");
+        assert_eq!(
+            keys(&consensus),
+            [
+                "agent_count",
+                "conditions",
+                "confidence",
+                "consensus",
+                "consensus_verdict",
+                "dissent",
+                "findings",
+                "majority_summary",
+                "recommendations",
+                "score",
+                "votes"
+            ]
+        );
+        assert_eq!(
+            keys(&consensus["dissent"][0]),
+            ["agent", "reasoning", "summary"]
+        );
+        assert_eq!(keys(&consensus["conditions"][0]), ["agent", "condition"]);
+    }
 }
