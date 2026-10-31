@@ -359,6 +359,30 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
             self.assertIn("mirror", str(caught.exception))
             self.assertTrue(keep.is_file())
 
+    def test_an_unreadable_directory_under_magi_is_a_harness_error(self) -> None:
+        # [MAGI §6 MS2 loop 13, F1a-c1] os.walk skips a directory it cannot list unless told otherwise, so a
+        # link inside it went unchecked; the walk must fail as a harness error (exit 3), never pass.
+        def walk(top, onerror=None, **_):
+            if onerror is not None:
+                onerror(PermissionError(13, "access denied", str(top)))
+            return iter(())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(runs.os, "walk", walk):
+                with self.assertRaises(HarnessError) as caught:
+                    runs._reject_links(pathlib.Path(tmp))
+            self.assertIn("access denied", str(caught.exception))
+
+    def test_an_os_error_in_the_link_checks_is_a_harness_error(self) -> None:
+        # [MAGI §6 MS2 loop 13, F1a-c1] the link checks ran outside the try that turns an OSError into a
+        # HarnessError, so a raised OSError escaped the executor as a traceback instead of exit 3.
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = _executor(pathlib.Path(tmp))
+            with mock.patch.object(runs, "_is_link", side_effect=PermissionError(13, "locked")):
+                with self.assertRaises(HarnessError) as caught:
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("locked", str(caught.exception))
+
 
 class ReviewWorkingDirectoryTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 4, F1-2] a review run's relative input means the same under either base."""
