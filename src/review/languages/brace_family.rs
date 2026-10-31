@@ -2440,6 +2440,25 @@ mod tests {
     }
 
     #[test]
+    fn a_c_declaration_list_wrapped_after_a_comma_is_one_declaration() {
+        // [MAGI S6 loop 8, B2b-b1] `int x,` opened no declaration, so the first line of a
+        // declaration list fell into a gap unit apart from the rest of it.
+        let code = "int x,\n    y;\nstatic const char *a = \"x\",\n                  *b = \"y\";\nint n = 1,\n    m[] = {\n        2,\n    };\nvoid f(void) {\n}\n";
+        let units = extract(&c_extractor(), code, &all_lines(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("declarations", UnitKind::DeclarationGroup, 1, 8),
+                ("f", UnitKind::Function, 9, 10),
+            ]
+        );
+        // A constructor's initializer lines end in `,` too; they stay part of its function.
+        let cpp = "Foo::Foo(int a)\n    : a_{a},\n      b_{0},\n      c_{1} {\n    run();\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), cpp, &all_lines(cpp));
+        assert_eq!(spans(&units), vec![("Foo", UnitKind::Function, 1, 6)]);
+    }
+
+    #[test]
     fn a_grouped_go_type_declaration_yields_each_member() {
         // [MAGI S6 loop 7, B2b-m1] `type (` opened one nameless struct that ended at the first
         // member's brace, so the later members fell into gap units.
