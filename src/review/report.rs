@@ -32,6 +32,8 @@ const LINE_BREAKS: [char; 7] = [
 ];
 /// What starts each continuation line of multi-line model prose in the text form.
 const CONTINUATION_INDENT: &str = "\n  ";
+/// The character that opens a section heading of the text report (`## Skipped`).
+const SECTION_MARK: char = '#';
 /// How the titles of a merged finding are joined on one line.
 const TITLE_JOINER: &str = " / ";
 /// The key under which a value of the JSON form that could not be serialized declares why.
@@ -518,13 +520,23 @@ fn line_safe(
 
 /// `text` split on every [`LINE_BREAKS`] character (`\r\n` counts once), each line passed
 /// through [`escape_controls`] and every line after the first indented
-/// ([`CONTINUATION_INDENT`]). O(n).
+/// ([`CONTINUATION_INDENT`]). The first line is indented too when it opens with
+/// [`SECTION_MARK`], so it cannot read as a section heading even where a formatter starts the
+/// field at column 0. O(n).
+// MAGI FIX (S6 loop 11, C2-m1 / C2-b2): a first line `## …` relied on magi-core writing a label
+// before the field, an assumption about a third-party formatter that is no longer needed.
 fn indented_prose(text: &str) -> String {
-    text.replace("\r\n", "\n")
+    let prose = text
+        .replace("\r\n", "\n")
         .split(|c| LINE_BREAKS.contains(&c))
         .map(escape_controls)
         .collect::<Vec<_>>()
-        .join(CONTINUATION_INDENT)
+        .join(CONTINUATION_INDENT);
+    if prose.trim_start().starts_with(SECTION_MARK) {
+        format!("{}{prose}", CONTINUATION_INDENT.trim_start_matches('\n'))
+    } else {
+        prose
+    }
 }
 
 /// The 1-based number a reader sees for a 0-based batch index: the one base every output uses,
