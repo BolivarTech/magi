@@ -76,6 +76,10 @@ pub enum SkipCause {
     /// A working-tree file with more than one hard link: its path is inside the workspace, its
     /// inode may be any file on the same file system.
     HardLink,
+    /// A listed file whose read failed (a sharing violation, a permission change).
+    Unreadable,
+    /// A listed file removed between the listing and its read.
+    Disappeared,
 }
 
 impl serde::Serialize for SkipCause {
@@ -103,6 +107,8 @@ impl SkipCause {
             Self::TooLarge => "too large",
             Self::NotRegularFile => "not a regular file",
             Self::HardLink => HARD_LINK_CAUSE,
+            Self::Unreadable => "unreadable",
+            Self::Disappeared => "disappeared",
         }
     }
 }
@@ -1440,10 +1446,18 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            filter_files(one(), &src, &LanguageRegistry::new(), false, &|_| false),
-            Err(ReviewError::Io(_))
-        ));
+        // [MAGI S6 loop 12, A2-m5 / A2-c2] an enumerated file removed after the listing is an
+        // omission with its own cause, not a failure of the whole review.
+        match filter_files(one(), &src, &LanguageRegistry::new(), false, &|_| false) {
+            Err(ReviewError::NothingToReview { skipped }) => assert_eq!(
+                skipped,
+                vec![Skipped {
+                    path: "gone.rs".into(),
+                    cause: SkipCause::Disappeared
+                }]
+            ),
+            other => panic!("expected nothing to review, got {other:?}"),
+        }
         // With a diff, an absent new side is a deletion and is kept.
         let del = vec![ReviewFile {
             path: "gone.rs".into(),
@@ -1457,6 +1471,53 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn an_enumerated_file_that_cannot_be_read_is_left_out_and_a_named_one_fails() {
+        // [MAGI S6 loop 12, A2-c2] a sharing violation (a file held open by a sync client or an
+        // indexer) on one listed file failed the whole review after its preparation; RV20 omits
+        // and declares. A file named explicitly still fails.
+        struct Locked;
+        impl ContentSource for Locked {
+            fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                if path == "locked.rs" {
+                    Err(ReviewError::Io("sharing violation".into()))
+                } else {
+                    Ok(Some(b"fn f() {}\n".to_vec()))
+                }
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let files = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| ReviewFile {
+                    path: (*n).into(),
+                    diff: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let reg = LanguageRegistry::new();
+        let f = filter_files(files(&["locked.rs", "a.rs"]), &Locked, &reg, false, &|_| {
+            false
+        })
+        .expect("a.rs kept");
+        assert_eq!(f.kept.len(), 1);
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "locked.rs".into(),
+                cause: SkipCause::Unreadable
+            }]
+        );
+        assert_eq!(f.skipped[0].to_string(), "locked.rs (unreadable)");
+        assert!(matches!(
+            filter_files(files(&["locked.rs"]), &Locked, &reg, true, &|_| false),
+            Err(ReviewError::Io(_))
+        ));
     }
 
     #[test]
