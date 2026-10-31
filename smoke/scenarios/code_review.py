@@ -306,10 +306,12 @@ def _batches_finding(section, run_id):
 
     Returns:
         Finding: ``FAIL`` when either count is missing or not an integer (a
-        ``bool`` is not one), or when ``batches_completed`` differs from
+        ``bool`` is not one), when ``batches_planned`` is below one (R12's
+        files are not empty, so no window plans zero batches), or when
+        ``batches_completed`` differs from
         ``batches_planned`` (one report over batches that never ran is not the
         multi-batch report RV-S2 asks for). Otherwise ``PASS`` at three batches
-        or more; below that, ``CANNOT_TEST`` when the whole pool measured a
+        or more; at one or two, ``CANNOT_TEST`` when the whole pool measured a
         window (the input is sized for the unmeasured default, so fewer batches
         is the environment's doing), else ``FAIL``. An absent
         ``unmeasured_models`` counts as unmeasured.
@@ -323,6 +325,14 @@ def _batches_finding(section, run_id):
             S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
             "batches_planned is %r and batches_completed is %r, expected two integers"
             % (planned, completed))
+    # MAGI FIX (S6 loop 9): 0 == 0 with every model measured read as
+    # CANNOT_TEST, and negative equal counts too. R12 reviews non-empty files,
+    # so fewer than one batch is a defect whatever the window (F1a-c3).
+    if planned < 1:
+        return _finding(
+            S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
+            "batches_planned is %r, expected a positive count: R12 reviews "
+            "non-empty files" % planned)
     if completed != planned:
         return _finding(
             S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
