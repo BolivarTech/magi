@@ -888,6 +888,19 @@ def the_workspace_root_never_reviews_magi_or_git(run):
     the run (``RunResult.protected_visible``) named as ``ignored``, and is
     ``CANNOT_TEST`` when git listed none.
 
+    What it observes is the product's REPORT, not its file accesses. A
+    product that opened a protected file and then reported it as ``ignored``,
+    or read ``.git/config`` and named it nowhere, would pass here: that no
+    protected file is read is the product's contract, held in Rust:
+    ``classify`` in ``src/review/filter.rs`` leaves a protected path out by
+    its name before any read of its content, and the unit tests there
+    (``ignored_files_and_never_reviewed_paths_are_left_out``) pin the cause.
+    This scenario adds no instrumentation to the
+    release binary. What S51 does establish is that the binary built for
+    release takes nothing under ``.magi/`` or ``.git/`` for review (the input
+    stays "nothing to review") and gives every protected path it names the
+    cause of a path left out by name.
+
     Args:
         run: R16's ``RunResult``, or ``None`` when the run produced no capture.
 
