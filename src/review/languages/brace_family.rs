@@ -3552,4 +3552,20 @@ void g(void) {
             vec![("k", UnitKind::Function, 1, 3)]
         );
     }
+
+    #[test]
+    fn a_standalone_go_interface_is_a_trait() {
+        // [MAGI S6 loop 13, B2b1-c6] the `type` keyword named a struct unconditionally, so
+        // `type Reader interface {` was a struct, unlike the same interface inside `type (`.
+        let go = "type Reader interface {\n\tRead() error\n}\ntype Box[T any] interface {\n\tGet() T\n}\ntype P struct {\n\tX int\n}\n";
+        let ext = BraceFamilyExtractor::go();
+        assert_eq!(
+            spans(&extract(&ext, go, &all_lines(go))),
+            vec![
+                ("Reader", UnitKind::Trait, 1, 3),
+                ("Box", UnitKind::Trait, 4, 6),
+                ("P", UnitKind::Struct, 7, 9)
+            ]
+        );
+    }
 }
