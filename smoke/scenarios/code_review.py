@@ -489,6 +489,25 @@ def a_large_review_yields_one_report(run):
     (``runner.py``, SS5.1). That is pinned end to end by
     ``test_s47_never_judges_the_exit_of_a_timed_out_r12``.
 
+    Every JSON key S47 reads is a copy of the product's, and each copy is
+    pinned against the Rust source in ``smoke/tests/test_rust_sync.py``, so a
+    rename fails the harness's own tests before SMOKE time (F1a-m1, S6 loop 9):
+
+    * the ``code_review`` summary keys (``batches_planned``,
+      ``batches_completed``, ``unmeasured_models``, ``findings``,
+      ``discarded``): ``test_every_summary_key_s47_reads_is_one_the_report_pins``
+      checks them against the key list ``src/review/report.rs`` pins;
+    * ``file`` and ``line`` of a main finding and ``cause`` of a discarded one:
+      ``test_the_entry_fields_s47_reads_are_serialized_under_their_own_names``
+      (``ConsolidatedFinding`` and ``Discarded``, no serde rename);
+    * ``consult.consensus`` and magi-core's ``consensus`` and
+      ``consensus_verdict`` inside it (:data:`CONSENSUS_TEXT_KEYS`):
+      ``test_the_consensus_s47_reads_is_the_one_the_envelope_writes`` checks
+      that ``src/tools/code_review.rs`` writes the key through
+      ``consensus_json`` and that ``src/tools/consult.rs`` serializes both
+      fields of magi-core's ``ConsensusResult`` under those names, so a field
+      renamed upstream stops the build there.
+
     Args:
         run: R12's ``RunResult``, or ``None`` when the run produced no capture.
 

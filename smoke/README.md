@@ -347,7 +347,9 @@ exit code 0 the executor gives a run it had to kill.
 `stderr` is the only place their numbers and omission lists appear. The scenarios parse it with
 patterns tied to the product's wording, and R12's input is sized with copies of the batch constants.
 `smoke/tests/test_rust_sync.py` reads the Rust source (`src/review/window.rs`, `src/review/error.rs`,
-`src/review/filter.rs`, `src/magi/mod.rs`) and fails when a copy or a pattern no longer matches, so a
+`src/review/filter.rs`, `src/magi/mod.rs`, and for the JSON keys S47 reads `src/review/report.rs`,
+`src/review/consolidate.rs`, `src/review/validate.rs`, `src/tools/code_review.rs` and
+`src/tools/consult.rs`) and fails when a copy or a pattern no longer matches, so a
 wording or constant change in the product shows up in the harness's own tests, not as an unexplained
 `FAIL` at SMOKE time.
 
