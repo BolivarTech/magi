@@ -298,14 +298,21 @@ impl SystemOneClient {
 /// with the requested name between the quotes: a generic 404 (a proxy, another model's name) is
 /// not this model missing.
 ///
-/// A bare `model` (no `:`) also matches its canonical form with [`OLLAMA_DEFAULT_TAG`]; any
-/// other spelling (an abbreviated tag, other quoting) is a generic 404, which still rotates.
+/// A bare `model` (no `:`) also matches its canonical form with [`OLLAMA_DEFAULT_TAG`], and a
+/// `model` with that tag also matches its bare name; any other spelling (an abbreviated tag,
+/// other quoting) is a generic 404, which still rotates.
 /// O(bytes of `body`).
 // MAGI FIX (S6 loop 3): the legacy marker is name-checked like the 0.40 form.
 // MAGI FIX (S6 loop 12, C2-m3 / C2-b6 / C2-c3): Ollama echoes a bare name with `:latest`, which
 // the exact check read as a generic 404 and lost the "model not available" detail.
 fn names_missing_model(body: &str, model: &str) -> bool {
-    let canonical = (!model.contains(':')).then(|| format!("{model}{OLLAMA_DEFAULT_TAG}"));
+    // MAGI FIX (S6 loop 13, C2-m2): both directions, so a configured `nimble:latest` matches an
+    // echoed `nimble` too.
+    let canonical = if let Some(bare) = model.strip_suffix(OLLAMA_DEFAULT_TAG) {
+        Some(bare.to_string())
+    } else {
+        (!model.contains(':')).then(|| format!("{model}{OLLAMA_DEFAULT_TAG}"))
+    };
     std::iter::once(model)
         .chain(canonical.as_deref())
         .any(|name| {
