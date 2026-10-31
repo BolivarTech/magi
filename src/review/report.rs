@@ -38,7 +38,7 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// same base as the `[batch k]` labels of the consolidated summaries. In the JSON form the
 /// renumbering is part of each index field's type-level `Serialize` (`serialize_batch` and its
 /// siblings, declared on the field), so no pass over the serialized layout names fields.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ReviewSummary {
     /// Findings per gate state (`kept`, `filtered`, `low_confidence`, `unfiltered`).
     pub gate_states: BTreeMap<String, usize>,
@@ -86,6 +86,37 @@ pub struct ReviewSummary {
     pub symbol_unverified: Vec<Discarded>,
     /// Unlocated findings grouped without the consensus engine.
     pub ungrouped_unlocated: usize,
+}
+
+// MAGI FIX (S6 loop 8, C2-c5): written out so `judged_fraction` starts at its documented 1.0
+// (nothing reached the gate, so nothing was left unjudged); a derived `Default` said 0.0.
+impl Default for ReviewSummary {
+    /// An empty summary: no finding, no batch, and `judged_fraction` 1.0.
+    fn default() -> Self {
+        Self {
+            gate_states: BTreeMap::new(),
+            gate_causes: BTreeMap::new(),
+            per_model: BTreeMap::new(),
+            gate_questions: 0,
+            judged_fraction: 1.0,
+            discarded: Vec::new(),
+            skipped: Vec::new(),
+            no_extractor: Vec::new(),
+            unmeasured_models: Vec::new(),
+            prep_ms: 0,
+            batches: Vec::new(),
+            batches_completed: 0,
+            batches_planned: 0,
+            findings: Vec::new(),
+            filtered: Vec::new(),
+            ceiling_below_configured: false,
+            failed_batches: Vec::new(),
+            gate_stopped: None,
+            symbol_check_skipped: false,
+            symbol_unverified: Vec::new(),
+            ungrouped_unlocated: 0,
+        }
+    }
 }
 
 /// The metrics of one batch that ran (completed or not).
