@@ -139,9 +139,14 @@ const HOST_BACKSLASH: Backslash = if cfg!(windows) {
     Backslash::Literal
 };
 
-/// `path` with `\` replaced by `/`.
-fn slashed(path: &str) -> String {
-    path.replace('\\', "/")
+/// `path` with `\` replaced by `/` when `backslash` is a [`Backslash::Separator`], else as is.
+// MAGI FIX (S6 loop 9, C1-c1): on Unix `\` is a file-name character, so translating it made
+// `src/a\b.rs` read as `src/a/b.rs`, another file.
+fn slashed(path: &str, backslash: Backslash) -> String {
+    match backslash {
+        Backslash::Separator => path.replace('\\', "/"),
+        Backslash::Literal => path.to_string(),
+    }
 }
 
 /// Whether `head` is `workspace` once a drive letter's case is ignored.
@@ -167,8 +172,9 @@ fn same_prefix(head: &str, workspace: &str) -> bool {
 // MAGI FIX (S6 loop 8, C1-c2): refuted, not changed; pinned by
 // `a_model_reported_line_zero_reaches_validation_as_no_line`.
 ///
-/// Works on the text, not on `Path`, so the result is the same on every platform: `\` becomes `/`
-/// in both arguments, the workspace is removed as a prefix only at a component boundary (`/w2/a.rs`
+/// Works on the text, not on `Path`. On Windows `\` becomes `/` in both arguments; elsewhere it is
+/// a file-name character and stays, so two distinct Unix files never alias ([`HOST_BACKSLASH`]).
+/// The workspace is removed as a prefix only at a component boundary (`/w2/a.rs`
 /// does not start with `/w`), the drive letter is compared ignoring case, and a leading `/` left
 /// by that removal and any leading `./` are dropped. An absolute path outside the workspace stays
 /// absolute. A workspace that is the filesystem root (`/`) holds every absolute path, so the
@@ -188,11 +194,11 @@ fn normalize_location_with(
     workspace: &Path,
     file: &str,
     line: Option<u32>,
-    _backslash: Backslash,
+    backslash: Backslash,
 ) -> (String, Option<u32>) {
-    let root = slashed(&workspace.to_string_lossy());
+    let root = slashed(&workspace.to_string_lossy(), backslash);
     let workspace = root.trim_end_matches('/');
-    let mut path = slashed(file);
+    let mut path = slashed(file, backslash);
     if workspace.is_empty() && !root.is_empty() {
         // MAGI FIX (S6 loop 3): the workspace is the filesystem root (`/`): every absolute path
         // is under it, so its leading `/` is the removed prefix.
