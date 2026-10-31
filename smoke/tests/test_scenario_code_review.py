@@ -263,6 +263,39 @@ class CodeReviewScenarioTests(unittest.TestCase):
             self.assertEqual(Outcome.FAIL,
                              _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]], failed)
 
+    def test_s47_fails_a_provider_shortfall_whose_batch_ids_are_not_the_missing_batches(self) -> None:
+        # [MAGI §6 MS2 loop 13, F1a-b1] the ids were never read: a repeated, zero-based, out-of-range or
+        # non-integer id, a completed batch declared failed, or a clock expiry that is not the tail all read as
+        # CANNOT_TEST beside a provider-class cause.
+        completed_batch = {"index": 2, "input_tokens": 900, "output_tokens": 80, "ms": 10}
+        cases = (
+            (3, [[2, "timeout: a"], [2, "timeout: b"]], None),
+            (4, [[0, "timeout: a"]], None),
+            (4, [[6, "timeout: a"]], None),
+            (4, [[True, "timeout: a"]], None),
+            (4, [[2.0, "timeout: a"]], None),
+            (4, [[2, "timeout: a"]], [completed_batch]),
+            (3, [[3, "clock expired"], [4, "timeout: a"]], None),
+            (3, [[3, "clock expired"], [4, "clock expired"]], None),
+        )
+        for completed, failed, metrics in cases:
+            doc = _review(5)
+            doc["code_review"].update(batches_completed=completed, failed_batches=failed)
+            if metrics is not None:
+                doc["code_review"]["batches"] = metrics
+            self.assertEqual(Outcome.FAIL,
+                             _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]], failed)
+
+    def test_s47_cannot_test_a_clock_expiry_over_the_last_batches(self) -> None:
+        # [MAGI §6 MS2 loop 13, F1a-b1] the product declares every batch from the one the clock cut to the
+        # last as clock expired, after any earlier provider failure.
+        doc = _review(5)
+        doc["code_review"].update(
+            batches_completed=2, failed_batches=[[2, "timeout: a"], [4, "clock expired"], [5, "clock expired"]],
+            batches=[{"index": 2, "input_tokens": 0, "output_tokens": 0, "ms": 10}])
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
     def test_s47_fails_when_the_counts_agree_but_a_batch_is_declared_failed(self) -> None:
         # [MAGI §6 MS2 loop 12, F1a-c3] "every one completed" is checked against the failed list too.
         doc = _review(3)
