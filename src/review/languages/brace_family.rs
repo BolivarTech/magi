@@ -941,6 +941,11 @@ impl BraceFamilyExtractor {
     /// Brackets are counted on the line text, as [`paren_delta`] counts parentheses: a bracket
     /// inside a string may miscount, and the attribute then falls into a gap unit as before, so
     /// no line is lost. O(k) for the k lines walked.
+    ///
+    /// An annotation of Java, JavaScript or TypeScript whose arguments wrap over lines
+    /// (`@SuppressWarnings(` ... `)`, `@Component({` ... `})`) is recovered the same way on its
+    /// parentheses: `last` ends in `)` and the line that balances them opens with an attribute
+    /// prefix that does not end in `[` (`@`).
     fn multi_line_attribute_start(
         &self,
         lines: &[&str],
@@ -949,13 +954,17 @@ impl BraceFamilyExtractor {
     ) -> Option<usize> {
         // MAGI FIX (S6 loop 10): the line above an item under a multi-line attribute is `)]`,
         // so the attribute was cut from the item it controls and reviewed as a gap unit.
-        if !lines.get(last)?.trim_end().ends_with(']') {
-            return None;
-        }
+        // MAGI FIX (S6 loop 12): a wrapped `@` annotation ends in `)` or `})`, which the `[`
+        // rule never matched, so it was cut from its member too.
+        let (open, close, bracket_prefix) = match lines.get(last)?.trim_end().chars().last()? {
+            ']' => ('[', ']', true),
+            ')' => ('(', ')', false),
+            _ => return None,
+        };
         let opens_attribute = |text: &str| {
             self.attribute_prefixes
                 .iter()
-                .any(|p| p.ends_with('[') && text.starts_with(p.as_str()))
+                .any(|p| p.ends_with('[') == bracket_prefix && text.starts_with(p.as_str()))
         };
         let mut unclosed = 0i64;
         let mut j = last;
@@ -964,10 +973,14 @@ impl BraceFamilyExtractor {
                 return None;
             }
             let line = lines.get(j)?;
-            unclosed += line.chars().fold(0, |n, c| match c {
-                ']' => n + 1,
-                '[' => n - 1,
-                _ => n,
+            unclosed += line.chars().fold(0, |n, c| {
+                if c == close {
+                    n + 1
+                } else if c == open {
+                    n - 1
+                } else {
+                    n
+                }
             });
             if unclosed <= 0 {
                 return (unclosed == 0 && j < last && opens_attribute(line.trim())).then_some(j);
