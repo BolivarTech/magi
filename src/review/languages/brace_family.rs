@@ -330,6 +330,12 @@ impl BraceFamilyExtractor {
 
             let trimmed = line.trim();
             let line_num = line_number(i)?;
+            // MAGI FIX (S6 loop 12): the scan back for docs crossed into a one-line construct
+            // that opens with an attribute prefix (`@Override public String toString() { .. }`),
+            // so two ranges overlapped; it now stops at the line after the previous construct.
+            let floor = constructs
+                .last()
+                .map_or(0, |c: &Construct| c.end_line as usize);
 
             let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
             // MAGI FIX (S6 loop 7): Go's `type (` opened one nameless struct and its later
@@ -340,7 +346,7 @@ impl BraceFamilyExtractor {
                 continue;
             }
             if let Some((kind, name)) = self.construct_keyword(trimmed) {
-                let start = self.scan_back_for_docs(lines, scanned, i);
+                let start = self.scan_back_for_docs(lines, scanned, i, floor);
                 let end = brace_block_end(lines, scanned, i, line_num, &stops)?;
                 constructs.push(Construct {
                     kind,
@@ -356,7 +362,7 @@ impl BraceFamilyExtractor {
             if let Some(name) = self.signature_name(line, scanned.get(i), prototypes) {
                 let opens = open_brace_line(lines, scanned, i, &stops).is_some();
                 if opens || trimmed.ends_with('}') || prototypes {
-                    let start = self.scan_back_for_docs(lines, scanned, i);
+                    let start = self.scan_back_for_docs(lines, scanned, i, floor);
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
                     let end = if opens || trimmed.ends_with('}') {
@@ -381,7 +387,7 @@ impl BraceFamilyExtractor {
                 // MAGI FIX (S6 loop 5): `const f = () => {` ended on its first line and its body
                 // fell into a gap; a function expression is a function, with its whole body.
                 if let Some((name, end)) = self.function_expression(lines, scanned, i, &stops) {
-                    let start = self.scan_back_for_docs(lines, scanned, i);
+                    let start = self.scan_back_for_docs(lines, scanned, i, floor);
                     constructs.push(Construct {
                         kind: UnitKind::Function,
                         name,
@@ -421,7 +427,7 @@ impl BraceFamilyExtractor {
                         break;
                     }
                 }
-                let doc_start = self.scan_back_for_docs(lines, scanned, group_start);
+                let doc_start = self.scan_back_for_docs(lines, scanned, group_start, floor);
                 let name = self.declaration_group_name(self.strip_modifiers(trimmed, false));
                 constructs.push(Construct {
                     kind: UnitKind::DeclarationGroup,
@@ -492,7 +498,7 @@ impl BraceFamilyExtractor {
             } else {
                 j
             };
-            let start = self.scan_back_for_docs(lines, scanned, j).max(floor);
+            let start = self.scan_back_for_docs(lines, scanned, j, floor);
             let member = line_number(start)
                 .zip(line_number(end))
                 .map(|(start_line, end_line)| Construct {
@@ -854,9 +860,23 @@ impl BraceFamilyExtractor {
     /// over the doc comments and attributes right above it. A doc line opens with a doc prefix
     /// (`///`, `/**`); a block comment that spans lines (`/**` ... `*/`) counts whole when its
     /// opening line does ([`Self::block_doc_start`]). O(k) for the k lines passed over.
-    fn scan_back_for_docs(&self, lines: &[&str], scanned: &[ScannedLine], idx: usize) -> usize {
+    ///
+    /// The walk never goes above `floor`, the 0-based line after the previous construct: a
+    /// one-line construct may itself open with an attribute prefix (Java's
+    /// `@Override public String toString() { .. }`, C++'s `template<typename T> void f() { .. }`),
+    /// and taking it would make two construct ranges overlap, which `ChangedLines::assign` and
+    /// `split_into_members` rule out. `floor` is also returned when a multi-line comment or
+    /// attribute recovered below it. O(k) for the k lines passed over, at most `idx - floor`
+    /// plus the lines of one such comment or attribute.
+    fn scan_back_for_docs(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        idx: usize,
+        floor: usize,
+    ) -> usize {
         let mut start = idx;
-        while start > 0 {
+        while start > floor {
             let Some(prev) = lines.get(start - 1).map(|l| l.trim()) else {
                 break;
             };
@@ -879,7 +899,7 @@ impl BraceFamilyExtractor {
                 break;
             }
         }
-        start
+        start.max(floor)
     }
 
     /// The 0-based opening line of the doc block comment that ends on line `last` (its `*/`):
