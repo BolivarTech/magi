@@ -3024,6 +3024,10 @@ void g(void) {
             (BraceFamilyExtractor::java(), "package p;\n\npublic class A {\n    /** Doc. */\n    void run() {\n    }\n}\ninterface I {\n    void f();\n}\n"),
             (BraceFamilyExtractor::javascript(), "import x from 'y';\nconst f = () => {\n};\nclass G {\n  *items() {}\n}\nexport function h() {\n}\n"),
             (BraceFamilyExtractor::typescript(), "type T = number;\ninterface I {\n  f(): void;\n}\nexport class C {\n  run() {}\n}\n"),
+            // [MAGI S6 loop 12, B2b-c1] a one-line construct that opens with an attribute prefix
+            // was taken by the scan back of the construct after it.
+            (BraceFamilyExtractor::java(), "@Override public String toString() { return \"x\"; }\npublic void g() {\n    int y = 1;\n}\n"),
+            (BraceFamilyExtractor::cpp(), "template<typename T> void f() { return; }\nvoid g() {\n    x();\n}\n"),
         ];
         for (ext, code) in corpus {
             let lines: Vec<&str> = code.lines().collect();
