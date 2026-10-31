@@ -678,7 +678,8 @@ const HIDDEN_FORMAT_CHARS: &[std::ops::RangeInclusive<char>] = &[
 /// `text` with every control character escaped ([`char::escape_default`]) and every
 /// [`HIDDEN_FORMAT_CHARS`] character escaped as `\u{…}`. O(n · r) for r ranges, a constant.
 // MAGI FIX (S6 loop 5): a right-to-left override in a file name could reorder a report line.
-fn escape_controls(text: &str) -> String {
+// MAGI FIX (S6 loop 9, C2-m1): shared with the text report, which writes model titles with it.
+pub(crate) fn escape_controls(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() {

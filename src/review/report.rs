@@ -19,7 +19,7 @@ use serde_json::{json, Map, Value};
 use super::consolidate::{Consolidated, ConsolidatedFinding};
 use super::filter::Skipped;
 use super::gate::GateVerdict;
-use super::secrets::mask_secrets;
+use super::secrets::{escape_controls, mask_secrets};
 use super::validate::Discarded;
 use crate::redact::redact_foreign_text;
 
@@ -185,7 +185,7 @@ pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
 fn key_finding(template: Option<&DedupFinding>, f: &ConsolidatedFinding) -> Option<DedupFinding> {
     let mut key = template?.clone();
     key.severity = f.severity;
-    key.title = f.titles.join(TITLE_JOINER);
+    key.title = escape_controls(&f.titles.join(TITLE_JOINER));
     key.detail = f.details.first().cloned().unwrap_or_default();
     key.sources.clone_from(&f.sources);
     key.file.clone_from(&f.file);
@@ -205,7 +205,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     )?;
     out.push_str(&failed_batch_lines(s));
     if let Some(cause) = &s.gate_stopped {
-        writeln!(out, "gate stopped: {cause}")?;
+        writeln!(out, "gate stopped: {}", escape_controls(cause))?;
     }
     writeln!(out, "gate states: {}", counts(&s.gate_states))?;
     if !s.gate_causes.is_empty() {
@@ -291,13 +291,18 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
 
 /// Writes one finding with its gate verdict: severity, location, titles, marks, categories, then
 /// its details.
+///
+/// Model text never starts a line of its own: the location and the titles go through
+/// [`escape_controls`], so a line break (`\n`, `\r`, U+2028, ...) is written as an escape, and
+/// each line of a detail is indented with every control left in it escaped the same way.
+// MAGI FIX (S6 loop 9, C2-m1 / C2-c1): titles and locations get the line safety details had.
 fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> std::fmt::Result {
     write!(
         out,
         "- [{}] {} {}",
         name(&f.severity),
         location(f.file.as_deref(), f.line),
-        f.titles.join(TITLE_JOINER)
+        escape_controls(&f.titles.join(TITLE_JOINER))
     )?;
     if !f.marks.is_empty() {
         let marks: Vec<String> = f.marks.iter().map(name).collect();
@@ -330,12 +335,16 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
     writeln!(out)?;
     // MAGI FIX (S6 loop 4): every line of a detail is indented, so none reads as a report line.
     for line in f.details.iter().flat_map(|detail| detail.lines()) {
-        writeln!(out, "  {line}")?;
+        writeln!(out, "  {}", escape_controls(line))?;
     }
     Ok(())
 }
 
 /// Writes one list of discarded findings under `title`, nothing when it is empty.
+///
+/// The file and the title failed validation, so they are the model's raw claims: both go through
+/// [`escape_controls`] and each entry stays on one line.
+// MAGI FIX (S6 loop 9, C2-m1): the discarded list was written raw.
 fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fmt::Result {
     if list.is_empty() {
         return Ok(());
@@ -347,7 +356,7 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
             "- {} [{}] {} (batch {}, {})",
             location(d.finding.file.as_deref(), d.finding.line),
             name(&d.cause),
-            d.finding.title,
+            escape_controls(&d.finding.title),
             shown(d.batch),
             name(&d.agent)
         )?;
@@ -401,7 +410,12 @@ pub fn failed_batch_lines(s: &ReviewSummary) -> String {
     let mut out = String::new();
     for (k, why) in &s.failed_batches {
         // Writing into a `String` cannot fail.
-        let _ = writeln!(out, "batch {} did not complete: {why}", shown(*k));
+        let _ = writeln!(
+            out,
+            "batch {} did not complete: {}",
+            shown(*k),
+            escape_controls(why)
+        );
     }
     redacted(&out)
 }
@@ -425,7 +439,12 @@ pub fn render_batch_reports(reports: &[(usize, MagiReport)]) -> String {
     for (batch, report) in reports {
         // Writing into a `String` cannot fail.
         let _ = writeln!(out, "## [batch {}]", shown(*batch));
-        out.push_str(&formatter.format_report(&report.agents, &report.consensus));
+        // MAGI FIX (S6 loop 9, C2-m1): a raw title cannot start a line of its own here either.
+        let mut consensus = report.consensus.clone();
+        for finding in &mut consensus.findings {
+            finding.title = escape_controls(&finding.title);
+        }
+        out.push_str(&formatter.format_report(&report.agents, &consensus));
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -525,11 +544,12 @@ fn counts(map: &BTreeMap<String, usize>) -> String {
     }
 }
 
-/// `file:line`, `file`, or `(no location)`.
+/// `file:line`, `file`, or `(no location)`, the file passed through [`escape_controls`] (a
+/// reported file is model text until validation says otherwise).
 fn location(file: Option<&str>, line: Option<u32>) -> String {
     match (file, line) {
-        (Some(f), Some(l)) => format!("{f}:{l}"),
-        (Some(f), None) => f.to_string(),
+        (Some(f), Some(l)) => format!("{}:{l}", escape_controls(f)),
+        (Some(f), None) => escape_controls(f),
         (None, _) => "(no location)".to_string(),
     }
 }
