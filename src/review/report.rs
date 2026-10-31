@@ -180,6 +180,8 @@ pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
 /// not have, or a new dependency for an assertion this assignment already makes at compile time.
 /// `None` without a template, which [`render_text`] declares instead of dropping the finding.
 // MAGI FIX (S6 loop 5): field assignment on magi-core's own value, not a JSON round trip.
+// MAGI FIX (S6 loop 8, C2-c1): a field magi-core adds is no longer silent: the test
+// `a_key_finding_overwrites_every_field_of_its_template` pins the serialized field set.
 fn key_finding(template: Option<&DedupFinding>, f: &ConsolidatedFinding) -> Option<DedupFinding> {
     let mut key = template?.clone();
     key.severity = f.severity;
@@ -1070,5 +1072,53 @@ mod tests {
         let s = ReviewSummary::default();
         assert_eq!(s.judged_fraction, 1.0);
         assert_eq!(summary_json(&s)["judged_fraction"], 1.0);
+    }
+
+    #[test]
+    fn a_key_finding_overwrites_every_field_of_its_template() {
+        // [MAGI S6 loop 8, C2-c1] `key_finding` clones one magi-core finding and assigns its
+        // fields by name, because `DedupFinding` is `#[non_exhaustive]`. A field magi-core adds
+        // would keep the template's value for every Key Finding; this guard turns that into a
+        // red test: the serialized key set must be exactly the fields assigned, and each of them
+        // must carry the consolidated finding's value, not the template's.
+        const ASSIGNED: [&str; 8] = [
+            "category", "detail", "file", "id", "line", "severity", "sources", "title",
+        ];
+        let template: DedupFinding = serde_json::from_value(serde_json::json!({
+            "severity": "critical", "title": "template", "detail": "template detail",
+            "sources": ["balthasar"], "file": "template.rs", "line": 99,
+            "category": "logic-error", "id": "template-id"
+        }))
+        .expect("a DedupFinding");
+        let f = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: Severity::Info,
+            reported_severity: Severity::Info,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![Category::Other],
+            sources: vec![AgentName::Melchior],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let before = serde_json::to_value(&template).expect("serializes");
+        let keys: Vec<&str> = before
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            keys, ASSIGNED,
+            "magi-core's DedupFinding changed its fields"
+        );
+        let key = key_finding(Some(&template), &f).expect("a template");
+        let after = serde_json::to_value(&key).expect("serializes");
+        for field in ASSIGNED {
+            assert_ne!(
+                after.get(field),
+                before.get(field),
+                "{field} kept the template's value"
+            );
+        }
     }
 }
