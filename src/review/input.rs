@@ -534,12 +534,16 @@ fn resolve_directory(
         resolved.not_utf8 = not_utf8;
         // A tracked file deleted from the tree, a link whose target is gone (which reads the
         // same) or a submodule (a directory) is not read.
+        // MAGI FIX (S6 loop 8): any other metadata error dropped the name in silence; it is kept,
+        // and the reader fails naming the path and the error.
         resolved.files = names
             .into_iter()
             .filter(|name| {
                 let path = workspace.join(name);
-                std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir())
-                    && !is_dangling_link(&path)
+                match std::fs::symlink_metadata(&path) {
+                    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+                    Ok(m) => !m.is_dir() && !is_dangling_link(&path),
+                }
             })
             .map(|path| ReviewFile { path, diff: None })
             .collect();
