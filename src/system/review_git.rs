@@ -85,11 +85,38 @@ const GIT_PROGRAM: &str = "git.exe";
 #[cfg(not(windows))]
 const GIT_PROGRAM: &str = "git";
 
-/// The git executable a review runs, found in the entries of `path_var` (a `PATH` value).
-fn resolve_git(path_var: &std::ffi::OsStr, _workdir: &Path) -> Option<PathBuf> {
+/// The git executable a review runs: [`GIT_PROGRAM`] in the first entry of `path_var` (a
+/// `PATH` value) that is absolute, lies outside `workdir` and holds it as a file.
+///
+/// A bare `Command::new("git")` let the platform search pick the program: a relative entry
+/// (`.`, an empty one) resolves against the process's working directory, often the reviewed
+/// repository, and an entry inside the repository (a vendored `tools/`) is repository data;
+/// either could run a planted git before any setting of [`NEUTRAL_GIT_CONFIG`] applied. On
+/// Windows the search also tries the directory of Magi's own executable first. (Rust 1.58 and
+/// later no longer search the working directory itself on Windows; a relative entry still
+/// does, which the test below reproduces.) Resolving to an absolute path once closes all of
+/// these; the cost is that a git reached only through a relative PATH entry is not found.
+///
+/// # Arguments
+/// * `path_var` - The `PATH` value to search.
+/// * `workdir` - The reviewed workspace; no entry inside it may provide git.
+///
+/// # Returns
+/// The absolute path of git, or `None` when no entry qualifies.
+// MAGI FIX (S6 loop 9): git was spawned by bare name, so a planted git could run (A1-c1).
+fn resolve_git(path_var: &std::ffi::OsStr, workdir: &Path) -> Option<PathBuf> {
+    let root = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
     std::env::split_paths(path_var)
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(GIT_PROGRAM))
-        .find(|candidate| candidate.is_file())
+        .filter(|candidate| candidate.is_file())
+        .find(|candidate| {
+            candidate
+                .canonicalize()
+                .is_ok_and(|real| !real.starts_with(&root) && !candidate.starts_with(workdir))
+        })
 }
 
 /// The longest a git call may run: a git hung on a foreign lock or a network file system must
@@ -150,6 +177,8 @@ pub(crate) struct ScrubbedGit {
     output_cap: u64,
     /// The filter overrides, probed once before the first command.
     filters: Mutex<Option<Vec<String>>>,
+    /// The git executable, resolved once ([`resolve_git`]).
+    program: std::sync::OnceLock<Option<PathBuf>>,
     /// Extra variables for every git child, so a test can point git at an operator config.
     #[cfg(test)]
     test_env: Vec<(String, String)>,
@@ -242,6 +271,7 @@ impl ScrubbedGit {
             workdir,
             output_cap: MAX_GIT_OUTPUT_BYTES,
             filters: Mutex::new(None),
+            program: std::sync::OnceLock::new(),
             #[cfg(test)]
             test_env: Vec::new(),
         }
@@ -313,9 +343,17 @@ impl ScrubbedGit {
     fn execute_capped(&self, args: &[&str], cap: u64) -> Result<Finished, ReviewError> {
         let command = args.first().copied().unwrap_or_default();
         let deadline = Instant::now() + Duration::from_secs(GIT_CALL_TIMEOUT_SECS);
-        let path_var = std::env::var_os("PATH").unwrap_or_default();
-        let program = resolve_git(&path_var, &self.workdir)
-            .ok_or_else(|| ReviewError::Git("cannot find git on PATH".to_string()))?;
+        let program = self
+            .program
+            .get_or_init(|| {
+                resolve_git(&std::env::var_os("PATH").unwrap_or_default(), &self.workdir)
+            })
+            .clone()
+            .ok_or_else(|| {
+                ReviewError::Git(
+                    "cannot find git in an absolute PATH entry outside the workspace".to_string(),
+                )
+            })?;
         let mut command_line = Command::new(program);
         command_line
             .args(self.argv(args))
