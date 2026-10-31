@@ -2033,4 +2033,30 @@ mod tests {
             (&json!(0), &json!(0))
         );
     }
+
+    #[test]
+    fn a_finding_has_no_own_field_the_gate_verdict_could_overwrite() {
+        // [MAGI S6 loop 13, C2-c5] `with_gate` inserts the verdict under `gate` into the
+        // finding's own object; a field of that name would vanish with valid JSON and no error,
+        // the trap `AppliedCaps` and `BudgetTelemetry` taught (serde has no disjointness check).
+        let finding = ConsolidatedFinding {
+            file: Some("a.rs".into()),
+            line: Some(1),
+            severity: Severity::Warning,
+            reported_severity: Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![Category::Other],
+            sources: vec![AgentName::Melchior],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let own = serde_json::to_value(&finding).expect("serializes");
+        let keys: Vec<&str> = own
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        assert!(!keys.is_empty(), "{own}");
+        assert!(!keys.contains(&GATE_KEY), "{keys:?}");
+    }
 }
