@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
@@ -511,7 +511,22 @@ impl<'g> RevisionSource<'g> {
     }
 
     /// Reads `path` at `rev`, with the per-file cap.
+    ///
+    /// A path that is empty, absolute or holds a `..` is refused before any git call
+    /// ([`ReviewError::OutsideWorkspace`]): `show <rev>:./<path>` resolves against the workspace,
+    /// so `..` would read a file outside it, and the source now holds that line itself instead of
+    /// relying on its callers (git-derived paths never hold one; explicit ones pass the guard).
+    /// The rule is the input's own `is_confined` (`src/review/input.rs`), restated here because
+    /// that one is private to the listing.
+    // MAGI FIX (S6 loop 13, A2-c4): the revision side enforced no containment of its own.
     fn read_at(&self, rev: &str, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+        let confined = !path.is_empty()
+            && Path::new(path)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+        if !confined {
+            return Err(ReviewError::OutsideWorkspace(path.to_string()));
+        }
         if !self.holds(rev, path)? {
             return Ok(None);
         }
