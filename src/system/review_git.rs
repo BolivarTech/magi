@@ -562,15 +562,27 @@ fn drain_bounded(mut reader: impl Read, cap: u64) -> Vec<u8> {
 ///
 /// # Returns
 ///
-/// The canonical path inside the workspace (a missing tail is appended lexically).
+/// The canonical path inside the workspace (a missing tail is appended lexically). A link whose
+/// target is gone cannot be canonicalized, so it comes back as itself under its guarded parent,
+/// for the input to call it missing: nothing is ever read through it, whatever its target.
 ///
 /// # Errors
 ///
 /// [`ReviewError::OutsideWorkspace`] for any path the guard refuses.
+// MAGI FIX (S6 loop 9): a dangling link was refused as outside the workspace (A1-c5).
 pub(crate) fn review_path_guard(guard: &PathGuard, path: &Path) -> Result<PathBuf, ReviewError> {
-    guard
-        .validate(path)
-        .map_err(|_| ReviewError::OutsideWorkspace(path.display().to_string()))
+    let outside = || ReviewError::OutsideWorkspace(path.display().to_string());
+    guard.validate(path).or_else(|_| {
+        let dangling = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+            && std::fs::metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        match (dangling, path.parent(), path.file_name()) {
+            (true, Some(parent), Some(name)) => guard
+                .validate(parent)
+                .map(|p| p.join(name))
+                .map_err(|_| outside()),
+            _ => Err(outside()),
+        }
+    })
 }
 
 /// The `-c` values that neutralize every filter driver git's config defines, in any scope
