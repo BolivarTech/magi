@@ -2884,4 +2884,20 @@ void g(void) {
             assert!(split(&ext, code, 1, kind).is_empty(), "{code}");
         }
     }
+
+    #[test]
+    fn a_multi_line_rust_attribute_belongs_to_its_item() {
+        // [MAGI S6 loop 10, B2b-m1] the line above the item was `)]`, so the scan back stopped
+        // there and a change to a `serde` or `cfg` attribute was reviewed without its item.
+        let code = "fn before() {\n}\n#[derive(Debug)]\n#[serde(\n    rename = \"x\",\n    default\n)]\npub struct Config {\n    pub x: u32,\n}\n#[cfg(all(\n    test,\n    unix\n))]\nfn only_unix() {\n    a();\n}\nlist! [\n    1\n]\nfn after() {\n    b();\n}\n";
+        let units = extract(&rust_extractor(), code, &[5, 9, 12, 16, 19, 22]);
+        let found = spans(&units);
+        for expected in [
+            ("Config", UnitKind::Struct, 3, 10),
+            ("only_unix", UnitKind::Function, 11, 17),
+            ("after", UnitKind::Function, 21, 23),
+        ] {
+            assert!(found.contains(&expected), "{expected:?} in {found:?}");
+        }
+    }
 }
