@@ -368,6 +368,7 @@ mod tests {
             ),
             (
                 exhausted(AttemptOutcome::Failed {
+                    status: None,
                     cause: Cause::Timeout,
                     detail: None,
                 }),

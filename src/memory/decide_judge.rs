@@ -288,6 +288,7 @@ mod tests {
         Attempt {
             model: model.into(),
             outcome: AttemptOutcome::Failed {
+                status: None,
                 cause,
                 detail: None,
             },

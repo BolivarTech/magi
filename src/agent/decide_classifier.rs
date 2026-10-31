@@ -317,6 +317,7 @@ mod tests {
                 attempts: vec![Attempt {
                     model: "nimble".into(),
                     outcome: AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Transport,
                         detail: None,
                     },
@@ -526,6 +527,7 @@ mod tests {
                 attempts: vec![Attempt {
                     model: "m".into(),
                     outcome: AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::NotFound,
                         detail: Some(hint),
                     },

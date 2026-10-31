@@ -350,6 +350,7 @@ mod tests {
                 attempts: vec![attempt(
                     "nimble",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::NotFound,
                         detail: Some("saw SECRET at \"x\"".into()),
                     },
@@ -374,6 +375,7 @@ mod tests {
                 attempts: vec![attempt(
                     "nimble",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Rejected,
                         detail: None,
                     },
@@ -405,6 +407,7 @@ mod tests {
                 attempts: vec![attempt(
                     "nimble",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::NotFound,
                         detail: Some(format!("{padding}{secret} tail")),
                     },
@@ -477,6 +480,7 @@ mod tests {
                 attempt(
                     "nimble",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::ModelNotFound,
                         detail: Some("model 'nimble' is not available on this endpoint".into()),
                     },
@@ -484,6 +488,7 @@ mod tests {
                 attempt(
                     "tev1",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Timeout,
                         detail: None,
                     },
@@ -552,6 +557,7 @@ mod tests {
                 attempts: vec![attempt(
                     "nimble",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Unauthorized,
                         detail: None,
                     },
@@ -570,6 +576,7 @@ mod tests {
                 attempts: vec![attempt(
                     "tev1",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Timeout,
                         detail: None,
                     },
@@ -594,6 +601,7 @@ mod tests {
                 attempts: vec![attempt(
                     "nimble",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Rejected,
                         detail: Some(note.into()),
                     },
@@ -641,6 +649,7 @@ mod tests {
                 attempts: vec![attempt(
                     "nimble",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Rejected,
                         detail: Some("provider rejected the request as invalid (HTTP 413)".into()),
                     },
@@ -674,6 +683,7 @@ mod tests {
             attempts: vec![attempt(
                 "m",
                 AttemptOutcome::Failed {
+                    status: None,
                     cause: Cause::NotFound,
                     detail: Some(hint),
                 },
@@ -704,6 +714,7 @@ mod tests {
                 attempts: vec![attempt(
                     "m",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::InvalidResponse,
                         detail: Some(detail),
                     },
@@ -725,6 +736,7 @@ mod tests {
                 attempts: vec![attempt(
                     "m",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::NotFound,
                         detail: Some(crate::decision::endpoint::not_found_hint(&url)),
                     },
@@ -749,6 +761,7 @@ mod tests {
                 attempts: vec![attempt(
                     "m",
                     AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Rejected,
                         detail: Some("provider rejected the request as invalid (HTTP 422)".into()),
                     },

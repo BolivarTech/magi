@@ -1558,6 +1558,7 @@ mod tests {
                 attempts: vec![Attempt {
                     model: model.into(),
                     outcome: AttemptOutcome::Failed {
+                        status: None,
                         cause: Cause::Timeout,
                         detail: None,
                     },

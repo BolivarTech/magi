@@ -401,6 +401,7 @@ mod tests {
                     Attempt {
                         model: "tev1".into(),
                         outcome: AttemptOutcome::Failed {
+                            status: None,
                             cause: Cause::Rejected,
                             detail: Some(
                                 "provider rejected the request as invalid (HTTP 413)".into(),

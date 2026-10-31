@@ -504,6 +504,7 @@ impl DecisionClient for SystemOneClient {
                         outcome: AttemptOutcome::Failed {
                             cause: failure.cause,
                             detail: failure.detail,
+                            status: failure.status,
                         },
                         usage: failure.usage,
                     };
@@ -598,7 +599,7 @@ mod tests {
     fn first_failure(r: &Result<Decision, DecisionError>) -> Option<(Cause, Option<String>)> {
         let attempt = r.as_ref().err()?.trace()?.attempts.first()?.clone();
         match attempt.outcome {
-            AttemptOutcome::Failed { cause, detail } => Some((cause, detail)),
+            AttemptOutcome::Failed { cause, detail, .. } => Some((cause, detail)),
             _ => None,
         }
     }
