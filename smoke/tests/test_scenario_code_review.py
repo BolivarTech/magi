@@ -97,7 +97,8 @@ def _review(batches: int = 3, findings=None, discarded=None) -> dict:
     # [MAGI §6 MS2 loop 6, F1a-c3] a consensus object with magi-core's label and verdict.
     return {"consult": {"consensus": {"consensus": "STRONG GO", "consensus_verdict": "approve",
                                       "agent_count": 3}},
-            "code_review": {"batches_planned": batches, "batches_completed": batches,
+            # [MAGI §6 MS2 loop 12, F1a-c3] the product always writes failed_batches, empty when all ran.
+            "code_review": {"batches_planned": batches, "batches_completed": batches, "failed_batches": [],
                             "unmeasured_models": ["kimi-k2.6:cloud"],
                             "findings": [{"file": "gen/a.rs", "line": 1}] if findings is None else findings,
                             "discarded": [{"cause": "file not reviewed"}] if discarded is None else discarded}}
@@ -237,6 +238,39 @@ class CodeReviewScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
         del doc["code_review"]["batches_completed"]
         self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
+    def test_s47_cannot_test_a_shortfall_whose_failures_are_all_provider_class(self) -> None:
+        # [MAGI §6 MS2 loop 12, F1a-m1/b1] a batch lost to quota, transport, a timeout or auth is the
+        # environment refusing (PM-S-8), never a product FAIL.
+        for why in ("http error 429: usage credits exhausted", "network error: connection reset",
+                    "timeout: the seat did not answer", "auth error: 401", "endpoint down: no lineage reachable (a)",
+                    "retry abandoned after 2 attempt(s): OperationBudgetExhausted",
+                    "insufficient agents: 0 succeeded, 2 required", "clock expired"):
+            doc = _review(5)
+            doc["code_review"].update(batches_completed=4, failed_batches=[[3, why]])
+            self.assertEqual(Outcome.CANNOT_TEST,
+                             _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]], why)
+
+    def test_s47_fails_a_shortfall_that_is_not_all_provider_class(self) -> None:
+        # [MAGI §6 MS2 loop 12, F1a-m1/b1] any other shortfall stays FAIL: a cause that is not the backend's,
+        # one provider failure beside it, or a shortfall the failed list does not account for.
+        cases = ([[3, "response contract violated: no verdict"]],
+                 [[3, "timeout: slow"], [4, "the trio build did not finish: panicked"]],
+                 [], [[3, "timeout: slow"], [4, "timeout: slow"]], [["3", 7]], "timeout")
+        for failed in cases:
+            doc = _review(5)
+            doc["code_review"].update(batches_completed=4, failed_batches=failed)
+            self.assertEqual(Outcome.FAIL,
+                             _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]], failed)
+
+    def test_s47_fails_when_the_counts_agree_but_a_batch_is_declared_failed(self) -> None:
+        # [MAGI §6 MS2 loop 12, F1a-c3] "every one completed" is checked against the failed list too.
+        doc = _review(3)
+        doc["code_review"]["failed_batches"] = [[2, "timeout: slow"]]
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+        del doc["code_review"]["failed_batches"]
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+        self.assertIn("failed_batches", code_review.S47_ASSERTIONS[2])
 
     def test_s47_below_three_batches_with_every_model_measured_cannot_test(self) -> None:
         # [CP2 MS2 S2b loop 8] the generator is sized for the 32 768-token unmeasured window (RV04); a pool that
