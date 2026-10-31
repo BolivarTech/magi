@@ -1457,7 +1457,8 @@ impl BraceFamilyExtractor {
         Self {
             language: "javascript".to_string(),
             // MAGI FIX (S6 loop 7): `.jsx` is not read with rules that have no JSX text mode.
-            exts: &["js", "mjs"],
+            // MAGI FIX (S6 loop 9): a CommonJS `.cjs` file had no extractor.
+            exts: &["js", "mjs", "cjs"],
             // `export`, `default`, `async` and `abstract` are stripped before these tables are
             // matched ([`JS_MODIFIERS`]), so they hold the bare keywords.
             function_keywords: vec!["function ".to_string()],
@@ -1487,7 +1488,8 @@ impl BraceFamilyExtractor {
         let mut ext = Self::javascript();
         ext.language = "typescript".to_string();
         // MAGI FIX (S6 loop 7): `.tsx` is not claimed, as `.jsx` is not ([`Self::javascript`]).
-        ext.exts = &["ts", "mts"];
+        // MAGI FIX (S6 loop 9): a CommonJS `.cts` file had no extractor.
+        ext.exts = &["ts", "mts", "cts"];
         ext.block_keywords.push("interface ".to_string());
         ext.declaration_keywords.push("type ".to_string());
         ext.declaration_keywords.push("export type ".to_string());
