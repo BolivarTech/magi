@@ -337,6 +337,23 @@ class CodeReviewScenarioTests(unittest.TestCase):
         self.assertEqual([(runner_module._RUN_TIMED_OUT, Outcome.CANNOT_TEST)],
                          [(f.assertion, f.outcome) for f in findings])
 
+    def test_s47_fails_on_missing_or_non_integer_batch_counts_even_with_every_model_measured(self) -> None:
+        # [MAGI §6 MS2 loop 8, F1a-c1] a missing or non-integer batch count is a contract defect: FAIL, never the
+        # CANNOT_TEST a fully measured pool earns for planning fewer batches.
+        cases = {"both missing": None, "float planned": (2.0, 2), "bool counts": (True, True),
+                 "string counts": ("2", "2")}
+        for label, counts in cases.items():
+            doc = _review(2)
+            doc["code_review"]["unmeasured_models"] = []
+            if counts is None:
+                del doc["code_review"]["batches_planned"]
+                del doc["code_review"]["batches_completed"]
+            else:
+                doc["code_review"]["batches_planned"], doc["code_review"]["batches_completed"] = counts
+            with self.subTest(label):
+                self.assertEqual(Outcome.FAIL,
+                                 _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
     def test_s47_without_the_findings_key_fails_never_an_empty_pass(self) -> None:
         doc = _review(3)
         del doc["code_review"]["findings"]
