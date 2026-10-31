@@ -387,7 +387,8 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
 /// Every field of [`ReviewSummary`], with `findings` and `filtered` as
 /// `[{<fields of the finding>, "gate": <verdict>}]`, plus `batch_totals`
 /// (`{input_tokens, output_tokens, ms}` summed over `batches`) and `rejected_skips`
-/// (`{model: n}`, the models skipped after an HTTP 400). Every string is redacted.
+/// (`{model: n}`, the models skipped after an HTTP 400). Every string and every object key is
+/// redacted, so a model name used as a key passes the RV22 detector too.
 ///
 /// # Arguments
 ///
