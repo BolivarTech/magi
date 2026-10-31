@@ -7,9 +7,11 @@
 //! Every byte a review sends to a model passes through [`find_secret`] first. The patterns are
 //! matched without dependencies (a prefix, a character class and a minimum length), in time
 //! linear in the text. Not covered, by design: JWTs (any base64url JSON looks like one), Azure
-//! keys, high-entropy strings with no prefix, and the base64 body of a PEM or armored OpenPGP
-//! private key without its `BEGIN` line. The minimum lengths can miss a shorter real key; that is the trade-off with
-//! false positives on ordinary code. So are the left boundaries: a short prefix (`sk-`, `ghp_`, `AKIA`, …) glued to a
+//! keys, high-entropy strings with no prefix, the base64 body of a PEM or armored OpenPGP
+//! private key without its `BEGIN` line, and an AWS secret key passed as an argument
+//! (`f(aws_secret_key, "…")`): only an assignment or a comparison after the key's name is detected.
+//! The minimum lengths can miss a shorter real key; that is the trade-off with false positives on
+//! ordinary code. So are the left boundaries: a short prefix (`sk-`, `ghp_`, `AKIA`, …) glued to a
 //! word character is not a token, because base64 runs and kebab-case names hold them by chance; the distinctive
 //! `sk-ant-` and `github_pat_` match wherever they occur. A PEM or OpenPGP header must be in
 //! upper case as every standard tool writes it: a hand-made `-----begin private key-----` is
@@ -111,6 +113,11 @@ const AWS_SECRET_MIN: usize = 40;
 const BLANKS: &[u8] = b" \t";
 /// The quotes allowed after an AWS secret key's name and before the key.
 const QUOTES: &[u8] = b"\"'";
+/// The operators that may stand between an AWS secret key's name and the key, longest first so
+/// a prefix (`=` of `==`) never wins over the whole operator: assignments (`=`, `:`, `:=`, `=>`)
+/// and comparisons (`==`, `!=`, JavaScript's `===` and `!==`).
+// MAGI FIX (S6 loop 11): a key compared against its name (`==`, `!=`) was sent.
+const AWS_OPERATORS: &[&[u8]] = &[b"===", b"!==", b"==", b"!=", b"=>", b":=", b"=", b":"];
 
 /// The patterns, in the order that decides the name of a match: `anthropic-key` comes before
 /// `openai-key` because an Anthropic key also starts with `sk-`. A Stripe key needs no such
@@ -454,8 +461,9 @@ fn aws_name_end(bytes: &[u8], at: usize) -> Option<usize> {
 }
 
 /// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), an
-/// optional quote that closes it (a JSON property, a quoted hash key), blanks, `=`, `=>`, `:` or `:=`,
-/// blanks, an optional quote, and a key of at least 40 characters. `None` when none opens there.
+/// optional quote that closes it (a JSON property, a quoted hash key), blanks, an operator of
+/// [`AWS_OPERATORS`] (an assignment or a comparison), blanks, an optional quote, and a key of at
+/// least 40 characters. `None` when none opens there.
 // MAGI FIX (S6 loop 7): `"aws_secret_access_key": "…"` and `=>` were not assignments.
 fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
     let mut pos = aws_name_end(bytes, at)?;
@@ -463,19 +471,12 @@ fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
         pos += 1;
     }
     pos = skip_bytes(bytes, pos, BLANKS);
-    if !bytes.get(pos).is_some_and(|b| *b == b'=' || *b == b':') {
-        return None;
-    }
-    pos += 1;
     // MAGI FIX (S6 loop 9): Go's and Make's `:=` left its `=` before the key, which was sent.
-    let follows = if bytes.get(pos - 1) == Some(&b'=') {
-        b'>'
-    } else {
-        b'='
-    };
-    if bytes.get(pos) == Some(&follows) {
-        pos += 1;
-    }
+    // MAGI FIX (S6 loop 11): `==` and `!=` were not accepted; the operator is now one of a table.
+    let operator = AWS_OPERATORS
+        .iter()
+        .find(|op| bytes.get(pos..).is_some_and(|rest| rest.starts_with(op)))?;
+    pos += operator.len();
     pos = skip_bytes(bytes, pos, BLANKS);
     if bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
         pos += 1;
