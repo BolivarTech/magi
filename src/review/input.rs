@@ -580,7 +580,15 @@ fn resolve_directory(
         let (ignored, _not_utf8) = split_nul(&git.run_bytes_without_repository(&args)?);
         let ignored: HashSet<String> = ignored.into_iter().collect();
         let mut found = Vec::new();
-        walk(&dir, &rel, &ignored, &mut found, &mut resolved.not_utf8)?;
+        let mut budget = MAX_WALK_LISTING_BYTES;
+        walk(
+            &dir,
+            &rel,
+            &ignored,
+            &mut found,
+            &mut resolved.not_utf8,
+            &mut budget,
+        )?;
         found.sort();
         resolved.files = without_dangling(found, workspace, &mut resolved.dangling_links);
     }
@@ -604,6 +612,10 @@ fn without_dangling(
         .collect()
 }
 
+/// The bytes of names a walk outside a repository may list (each name plus one, as `ls-files
+/// -z` counts its NUL): the cap a repository's listing has as git output.
+const MAX_WALK_LISTING_BYTES: u64 = super::source::MAX_GIT_OUTPUT_BYTES;
+
 /// The cause of a `Directory` input that names something other than a directory.
 pub const NOT_A_DIRECTORY: &str = "not a directory";
 
@@ -623,6 +635,7 @@ fn walk(
     ignored: &HashSet<String>,
     found: &mut Vec<String>,
     not_utf8: &mut Vec<String>,
+    budget: &mut u64,
 ) -> Result<(), ReviewError> {
     let io = |e: std::io::Error| ReviewError::Io(format!("{}: {e}", dir.display()));
     for entry in std::fs::read_dir(dir).map_err(io)? {
@@ -648,7 +661,7 @@ fn walk(
             continue;
         }
         if entry.file_type().map_err(io)?.is_dir() {
-            walk(&entry.path(), &path, ignored, found, not_utf8)?;
+            walk(&entry.path(), &path, ignored, found, not_utf8, budget)?;
         } else {
             found.push(path);
         }
@@ -2328,5 +2341,41 @@ mod tests {
             "{:?}",
             r.err()
         );
+    }
+
+    #[test]
+    fn a_walk_outside_a_repository_stops_at_its_listing_cap() {
+        // [MAGI S6 loop 9, A1-c4] the walk collected every name with no bound, so a directory
+        // of millions of files held them all before any content cap applied. It now stops at
+        // the cap a repository's listing has, with a typed error naming where it stopped.
+        let d = tempfile::tempdir().expect("tempdir");
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            std::fs::write(
+                d.path().join(name),
+                "x
+",
+            )
+            .expect("write");
+        }
+        let walk_with = |cap: u64| {
+            let mut found = Vec::new();
+            let mut not_utf8 = Vec::new();
+            let mut budget = cap;
+            walk(
+                d.path(),
+                "",
+                &HashSet::new(),
+                &mut found,
+                &mut not_utf8,
+                &mut budget,
+            )
+            .map(|()| found.len())
+        };
+        // Each name costs its bytes plus one: three names of four bytes take 15.
+        assert_eq!(walk_with(15).expect("fits"), 3);
+        assert!(matches!(
+            walk_with(14),
+            Err(ReviewError::InputTooLarge { .. })
+        ));
     }
 }
