@@ -128,6 +128,8 @@ pub struct Filtered {
 enum Verdict {
     /// Reviewed.
     Keep,
+    /// Reviewed whole, from its new side: a text file whose diff git printed as binary.
+    KeepWhole,
     /// Left out, with its cause.
     Skip(SkipCause),
 }
@@ -141,8 +143,10 @@ enum Verdict {
 /// secret → `secret`, without reading it; a file that does not exist → an error, never a skip;
 /// over the byte cap → `too large`; a NUL anywhere in a side → `binary`; not UTF-8 →
 /// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
-/// A diff section whose header lines (before the first `@@`) carry git's binary marker is
-/// `binary` without reading anything ([`is_binary_section`]).
+/// A diff section whose header lines (before the first `@@`) carry git's binary marker
+/// ([`is_binary_section`]) is judged by its bytes the same way, and when both sides are text it
+/// is kept with no diff, reviewed whole from its new side; it stays `binary` only when a side
+/// cannot be read or the file has no new side ([`suppressed_diff`]).
 /// The binary and UTF-8 checks run on both sides that exist (binary first). The
 /// secret scan covers both whole sides, not only what is sent: the safe direction. A renamed
 /// file's old side is read under its old path (`rename from`).
@@ -191,6 +195,16 @@ pub fn filter_files(
                 }
                 kept_sides.extend(sides_of(&file));
                 filtered.kept.push(file);
+            }
+            Verdict::KeepWhole => {
+                if registry.get(&file.path).is_none() {
+                    filtered.no_extractor.push(display_path(&file.path));
+                }
+                kept_sides.extend(sides_of(&file));
+                filtered.kept.push(ReviewFile {
+                    path: file.path,
+                    diff: None,
+                });
             }
             Verdict::Skip(cause) if explicit => {
                 return Err(ReviewError::NotReviewable {
@@ -258,7 +272,7 @@ fn classify(
         return Ok(secret(path, name));
     }
     if file.diff.as_deref().is_some_and(is_binary_section) {
-        return Ok(Verdict::Skip(SkipCause::Binary));
+        return Ok(suppressed_diff(file, source, old_path.as_deref()));
     }
     let new = match read_side(source.read(path), path, explicit)? {
         Side::Content(bytes) => bytes,
@@ -298,33 +312,94 @@ fn classify(
         // and the whole review died.
         return Ok(Verdict::Skip(SkipCause::Disappeared));
     }
-    // MAGI FIX (S6 loop 4): both sides, not the new one alone: a text file whose old side was
-    // binary or Latin-1 carried old-side bytes into the review.
-    // MAGI FIX (S6 loop 7): the whole side, not git's first 8 000 bytes: a text prefix hid a
-    // binary payload, which is valid UTF-8 (NUL is a code point). One pass over bytes already
-    // read and capped (MAX_REVIEW_FILE_BYTES), so the cost stays O(file).
-    let sides = [new.as_deref(), old.as_deref()];
+    Ok(
+        content_verdict(path, [new.as_deref(), old.as_deref()], file.diff.as_deref())
+            .unwrap_or(Verdict::Keep),
+    )
+}
+
+/// The skip the content of a file calls for, or `None` when it may be reviewed: a NUL in a side
+/// gives `binary`, a side that is not UTF-8 `not utf-8`, a secret in a side or in `diff`
+/// `secret`, in that order. O(bytes).
+///
+/// # Arguments
+///
+/// * `path` - The file's path, for the `secret` log entry.
+/// * `sides` - The new and old sides that exist.
+/// * `diff` - The file's diff section, if any.
+///
+/// # Returns
+///
+/// The skip, or `None`.
+// MAGI FIX (S6 loop 4): both sides, not the new one alone: a text file whose old side was
+// binary or Latin-1 carried old-side bytes into the review.
+// MAGI FIX (S6 loop 7): the whole side, not git's first 8 000 bytes: a text prefix hid a
+// binary payload, which is valid UTF-8 (NUL is a code point). One pass over bytes already
+// read and capped (MAX_REVIEW_FILE_BYTES), so the cost stays O(file).
+fn content_verdict(path: &str, sides: [Option<&[u8]>; 2], diff: Option<&str>) -> Option<Verdict> {
     if sides.iter().flatten().any(|side| side.contains(&0)) {
-        return Ok(Verdict::Skip(SkipCause::Binary));
+        return Some(Verdict::Skip(SkipCause::Binary));
     }
     if sides
         .iter()
         .flatten()
         .any(|side| std::str::from_utf8(side).is_err())
     {
-        return Ok(Verdict::Skip(SkipCause::NotUtf8));
+        return Some(Verdict::Skip(SkipCause::NotUtf8));
     }
-    let faces = [
-        new.as_deref(),
-        old.as_deref(),
-        file.diff.as_deref().map(str::as_bytes),
-    ];
-    for face in faces.into_iter().flatten() {
-        if let Some(name) = find_secret(&String::from_utf8_lossy(face)) {
-            return Ok(secret(path, name));
-        }
+    let [new, old] = sides;
+    [new, old, diff.map(str::as_bytes)]
+        .into_iter()
+        .flatten()
+        .find_map(|face| find_secret(&String::from_utf8_lossy(face)))
+        .map(|name| secret(path, name))
+}
+
+/// The verdict on a file whose diff section git printed as binary ([`is_binary_section`]).
+///
+/// The marker is a hint, never the answer: git prints it for any file the `diff` attribute
+/// turns off (`-diff`, `binary`), and the reviewed tree writes its own `.gitattributes`, so a
+/// change could mark itself out of the review. Both sides are read and judged by their bytes
+/// ([`content_verdict`]); a text file passes and is reviewed whole, from its new side, since
+/// git printed no hunks for it (one INFO entry says so). The marker decides only when the bytes
+/// cannot: a side that fails to read (an I/O error, over a cap, outside the workspace) or a
+/// file with no new side (a deletion) stays `binary`, the label the section carries.
+///
+/// # Arguments
+///
+/// * `file` - The file.
+/// * `source` - The review's content source.
+/// * `old_path` - Its `rename from` path, if any.
+///
+/// # Returns
+///
+/// [`Verdict::KeepWhole`] or the skip.
+// MAGI FIX (S6 loop 13, A2-m3 / A2-c1, security): `evil.rs -diff` in the reviewed commit left
+// `evil.rs` out as `binary` without a byte of it read.
+fn suppressed_diff(
+    file: &ReviewFile,
+    source: &dyn ContentSource,
+    old_path: Option<&str>,
+) -> Verdict {
+    let path = file.path.as_str();
+    let (Ok(new), Ok(old)) = (source.read(path), source.read_old(old_path.unwrap_or(path))) else {
+        return Verdict::Skip(SkipCause::Binary);
+    };
+    let sides = [new.as_deref(), old.as_deref()];
+    if let Some(skip) = content_verdict(path, sides, file.diff.as_deref()) {
+        return skip;
     }
-    Ok(Verdict::Keep)
+    if new.is_none() {
+        return Verdict::Skip(SkipCause::Binary);
+    }
+    let shown = display_path(path);
+    tracing::event!(
+        target: LOG_TARGET,
+        tracing::Level::INFO,
+        path = shown.as_str(),
+        "git printed a text file's diff as binary; it is reviewed whole"
+    );
+    Verdict::KeepWhole
 }
 
 /// A `secret` skip, logged with the shown path and the pattern's name (never the value).
