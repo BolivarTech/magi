@@ -1896,6 +1896,21 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_ending_in_a_comma_does_not_continue_a_signature_into_the_next_one() {
+        // [MAGI S6 loop 11, B2b-c1] the line before a construct counted as a wrapped
+        // continuation when its raw text ended in `,`, comment or not: `foo`'s brace search
+        // crossed `// note,` into `bar` and took `bar`'s brace, merging both into one unit.
+        let code = "int foo(void)
+// note,
+int bar(void) {
+    return 0;
+}
+";
+        let units = extract(&c_extractor(), code, &[4]);
+        assert_eq!(spans(&units), vec![("bar", UnitKind::Function, 3, 5)]);
+    }
+
+    #[test]
     fn a_function_opening_two_blocks_on_one_line_ends_at_its_own_brace() {
         let code = "fn f() { if x {\n        a();\n    }\n    b();\n}\n\nfn g() {\n    c();\n}\n";
         let units = extract(&rust_extractor(), code, &[4]);
