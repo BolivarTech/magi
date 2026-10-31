@@ -200,6 +200,16 @@ class ReportKeyTests(unittest.TestCase):
                       _source("src/logging/render.rs"))
         self.assertEqual(b"run=4242-deadbeef", logs.run_needle("4242-deadbeef"))
 
+    def test_the_stderr_run_id_is_printed_whatever_the_log_level(self) -> None:
+        # [MAGI §6 MS2 loop 12, F1a-m2/b4] S50 runs at --log-level error and reads `run: <id>` off stderr.
+        # The product prints it with eprint_audited, outside the tracing layer, so no level filters it; a
+        # move into a tracing macro would make S50's log half unreachable and must fail here first.
+        main = _source("src/main.rs")
+        needle = 'magi_rs::notices::eprint_audited(&format!("%s{}", magi_rs::logging::run_id()));'
+        self.assertIn(needle % logs.STDERR_RUN_PREFIX, main)
+        self.assertNotRegex(main, r'(?:info|warn|error|debug|trace|event)!\([^;]*"%s\{\}"'
+                            % re.escape(logs.STDERR_RUN_PREFIX))
+
     def test_the_consensus_s47_reads_is_the_one_the_envelope_writes(self) -> None:
         self.assertIn('"consensus".into(),\n        crate::tools::consult::consensus_json(&c.consensus)',
                       _source("src/tools/code_review.rs"))
