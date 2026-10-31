@@ -484,7 +484,7 @@ impl<'a> Gate<'a> {
     /// the live side of a diff line whose number also names a line its hunk deleted, and the
     /// finding does not say which side it meant (RV21). A confident `false_positive` is
     /// `low_confidence` with cause `ambiguous diff side` (a `critical` keeps `critical never
-    /// filtered`); every other answer is read as by [`Self::judge`], and the deciding model is
+    /// filtered` as its cause, with `ambiguous diff side` after it in `causes`); every other answer is read as by [`Self::judge`], and the deciding model is
     /// counted the same way.
     ///
     /// # Arguments
@@ -528,6 +528,12 @@ impl<'a> Gate<'a> {
         // MAGI FIX (S6 loop 3): unasked claims are named beside the state's own cause, never
         // replaced by it (`critical never filtered`) nor left out (a lean that ended the walk).
         let mut causes: Vec<&'static str> = outcome.cause.into_iter().collect();
+        // MAGI FIX (S6 loop 9, C1-c2): the critical rule sets the state's cause, but the guard
+        // applied too (it is only ever asked for by a confident `false_positive`): both are named.
+        if let Some(guard) = guard.filter(|_| outcome.cause == Some(CAUSE_CRITICAL_NEVER_FILTERED))
+        {
+            causes.push(guard);
+        }
         if outcome.unasked && !causes.contains(&CAUSE_NOT_EVERY_CLAIM_JUDGED) {
             causes.push(CAUSE_NOT_EVERY_CLAIM_JUDGED);
         }
