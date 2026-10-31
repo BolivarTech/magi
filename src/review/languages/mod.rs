@@ -14,6 +14,15 @@
 //! - [`LanguageExtractor`] trait defines the extraction interface.
 //! - [`ExtractorKind`] enum provides zero-cost dispatch to concrete extractors.
 //! - [`LanguageRegistry`] maps file extensions to extractors.
+//!
+//! # When to add an extractor rule
+//!
+//! The extractors are heuristics, and a file they misread loses no line: its lines fall into
+//! gap units and are still reviewed. A new rule therefore goes in only when a measured review
+//! lost context it needed, never to make a construct look tidier, and "this file gets no
+//! extractor" is a supported outcome, not a failure. When one language needs behavior the
+//! others do not share, it gets its own [`LanguageExtractor`] impl rather than another switch
+//! in the shared brace-family extractor.
 
 pub mod brace_family;
 pub mod python;
