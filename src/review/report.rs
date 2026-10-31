@@ -193,7 +193,9 @@ pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
 fn key_finding(template: Option<&DedupFinding>, f: &ConsolidatedFinding) -> Option<DedupFinding> {
     let mut key = template?.clone();
     key.severity = f.severity;
-    key.title = escape_controls(&f.titles.join(TITLE_JOINER));
+    // MAGI FIX (S6 loop 10, C2-m2): raw here; `line_safe` escapes every Key Finding title once,
+    // so the output no longer depends on `escape_controls` being idempotent.
+    key.title = f.titles.join(TITLE_JOINER);
     key.detail = f.details.first().cloned().unwrap_or_default();
     key.sources.clone_from(&f.sources);
     key.file.clone_from(&f.file);
