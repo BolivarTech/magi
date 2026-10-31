@@ -248,6 +248,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
             r = _result("R12", 0, _review(3, findings))
             self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]], findings)
 
+    def test_s47_reads_a_backslash_separated_file_as_the_generated_one(self) -> None:
+        # [MAGI §6 MS2 loop 10, F1a-b1] S49 and S51 read a backslash as ``/``; S47 must too, or a Windows
+        # rendering of a generated file false-FAILs. The line is still checked against that file.
+        count = runs.review_gen_line_counts()["gen/a.rs"]
+        r = _result("R12", 0, _review(3, [{"file": "gen\\a.rs", "line": count}]))
+        self.assertEqual(Outcome.PASS, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]])
+        r = _result("R12", 0, _review(3, [{"file": "gen\\a.rs", "line": count + 1}]))
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]])
+
     def test_s48_passes_on_a_misuse_exit_naming_the_path(self) -> None:
         r = _result("R13", 2, None, b"error: path is outside the workspace: C:\\ws\\..\\smoke-hostile-target\n")
         self.assertEqual({Outcome.PASS}, set(_outcomes("S48", r).values()))
