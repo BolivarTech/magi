@@ -975,4 +975,16 @@ def g():
         assert_eq!(member_span(max, max), None);
         assert_eq!(member_span(0, usize::MAX), None);
     }
+
+    #[test]
+    fn a_shift_assignment_is_an_assignment_and_a_comparison_is_not() {
+        // [MAGI S6 loop 9, B2b-c4] `<<=` and `>>=` are told from `<=` and `>=` by the character
+        // two places before the `=`; pin both sides so a refactor of the scan cannot flip them.
+        for line in ["x <<= 1", "x >>= 2", "x = 1", "x += 1", "x: int = 1"] {
+            assert!(has_top_level_assignment(line), "{line}");
+        }
+        for line in ["x <= y", "x >= y", "x == y", "x != y", "f(a=1)", "y := 1"] {
+            assert!(!has_top_level_assignment(line), "{line}");
+        }
+    }
 }
