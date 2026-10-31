@@ -449,7 +449,7 @@ impl<'a> Gate<'a> {
 
     /// Judges one finding, never failing: what cannot be judged passes as `unfiltered`.
     ///
-    /// In order: no line, no code, or code without that line (`no location`); a cause that already stopped the gate; a
+    /// In order: no file, no line, no code, or code without that line (`no location`); a cause that already stopped the gate; a
     /// spent review clock (`timeout`); a state over `max_state_bytes` (`state too large`, never
     /// truncated) or carrying a secret (`secret`, never sent). Then each distinct (title,
     /// detail) pair, up to [`MAX_GATE_QUESTIONS_PER_FINDING`], is asked once, walking the chain: a confident `false_positive` filters it
@@ -613,7 +613,8 @@ impl<'a> Gate<'a> {
     ) -> Outcome {
         // A finding with nothing to show is `no location` whatever stopped the gate: no call is
         // made either way, and the cause says what the finding lacks.
-        let (Some(line), Some(code)) = (finding.line, code) else {
+        // MAGI FIX (S6 loop 9, C1-c3): a location is a file and a line; a line alone is none.
+        let (Some(_), Some(line), Some(code)) = (&finding.file, finding.line, code) else {
             return Outcome::unfiltered(CAUSE_NO_LOCATION);
         };
         // MAGI FIX (S6 loop 7, C1-c3): code that does not reach the finding's line (empty, or
