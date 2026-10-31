@@ -1232,6 +1232,18 @@ mod tests {
     }
 
     #[test]
+    fn an_unencrypted_ssh2_private_key_is_a_secret_and_is_masked() {
+        // [MAGI S6 loop 12, A2-m1, security] only the `ENCRYPTED` RFC 4716 header was listed; the
+        // unencrypted ssh.com/Tectia armor matched no pattern and its file was sent.
+        let header = concat!("---- BEGIN SSH2 ", "PRIVATE KEY ----");
+        let file = format!("x = 1\n{header}\nAAAAB3NzaC1yc2EAAAADAQAB\n");
+        assert_eq!(find_secret(&file), Some("pem-private-key"));
+        let masked = mask_secrets(&file);
+        assert!(!masked.contains("BEGIN SSH2"), "{masked}");
+        assert!(!masked.contains("AAAAB3NzaC1yc2E"), "{masked}");
+    }
+
+    #[test]
     fn a_shown_path_escapes_every_code_point_of_the_tag_block() {
         // [MAGI S6 loop 7, A2-c4] the table said the tag block's unassigned code points were
         // included, but U+E0000 and U+E0002..U+E001F were left out and reached the output as is.
