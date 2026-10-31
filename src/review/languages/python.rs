@@ -752,6 +752,30 @@ def g():
         assert!(PythonExtractor.split_block(&def[0]).is_empty());
     }
 
+    #[test]
+    fn a_declaration_group_splits_at_its_statements() {
+        // [MAGI S6 loop 12, B2b-b1] a group was never split, so a generated constant table was
+        // one unit over the batch limit and the whole review was refused.
+        for (code, expected) in [
+            (
+                "A = 1\nB = (\n    2,\n)\n\nC = 3\n",
+                vec![(1, 1), (2, 4), (5, 5), (6, 6)],
+            ),
+            (
+                "import a\nfrom b import (\n    c,\n)\n",
+                vec![(1, 1), (2, 4)],
+            ),
+        ] {
+            let units = extract(code, &[1]);
+            assert_eq!(units.len(), 1, "one group: {code}");
+            assert_eq!(units[0].kind, UnitKind::DeclarationGroup);
+            let parts = PythonExtractor.split_block(&units[0]);
+            let found: Vec<(u32, u32)> = parts.iter().map(|u| (u.start_line, u.end_line)).collect();
+            assert_eq!(found, expected, "{code}");
+            assert!(parts.iter().all(|u| u.kind == UnitKind::DeclarationGroup));
+        }
+    }
+
     /// `(name, kind, start, end)` of each unit.
     fn spans(units: &[SemanticUnit]) -> Vec<(&str, UnitKind, u32, u32)> {
         units

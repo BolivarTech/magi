@@ -3159,6 +3159,41 @@ void g(void) {
     }
 
     #[test]
+    fn a_declaration_group_splits_at_its_declarations() {
+        // [MAGI S6 loop 12, B2b-b1] a group was never split, so a generated header of thousands
+        // of `#define`s was one unit over the batch limit and the whole review was refused.
+        let c = c_extractor();
+        let code = "#define A 1\n#define B 2\n\nint c;\nint d,\n    e;\n";
+        assert_eq!(
+            spans(&extract(&c, code, &[1])),
+            vec![("defines", UnitKind::DeclarationGroup, 1, 6)]
+        );
+        let parts = split(&c, code, 1, UnitKind::DeclarationGroup);
+        let ranges: Vec<(UnitKind, u32, u32)> = parts
+            .iter()
+            .map(|u| (u.kind, u.start_line, u.end_line))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (UnitKind::DeclarationGroup, 1, 1),
+                (UnitKind::DeclarationGroup, 2, 2),
+                (UnitKind::DeclarationGroup, 3, 3),
+                (UnitKind::DeclarationGroup, 4, 4),
+                (UnitKind::DeclarationGroup, 5, 6),
+            ]
+        );
+        assert_each_line_in_one_unit(&parts, 6);
+        let rust = "/// A.\nconst A: u8 = 1;\nconst B: [u8; 2] = [\n    1, 2,\n];\n";
+        let parts = split(&rust_extractor(), rust, 2, UnitKind::DeclarationGroup);
+        assert_eq!(
+            spans(&parts).iter().map(|s| (s.2, s.3)).collect::<Vec<_>>(),
+            vec![(1, 2), (3, 5)],
+            "a declaration keeps its doc comment"
+        );
+    }
+
+    #[test]
     fn the_brace_search_of_one_signature_stops_after_a_bounded_number_of_lines() {
         // [MAGI S6 loop 12, B2b-c2] inside an open parameter list the search ran to the end of
         // the file, so a file of `f(a` lines took quadratic time before the review clock started.
