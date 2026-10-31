@@ -1894,4 +1894,77 @@ mod tests {
             vec![("x.rs", SkipCause::Ignored), ("y.rs", SkipCause::Ignored)]
         );
     }
+
+    #[test]
+    fn a_skipped_rename_never_evicts_the_sides_a_kept_file_was_scanned_with() {
+        // [MAGI S6 loop 13, A2-m2 / A2-b1] `release` dropped both sides held under one path, and
+        // a skipped rename released its old path too: when that path was a kept file of the same
+        // review, its scanned bytes were evicted and a later stage read the disk again, so what
+        // was batched was no longer what the detector saw. Kept a.rs (scanned first), then a
+        // rename a.rs -> b.rs skipped for a secret: a.rs must stay held on both sides.
+        use std::sync::Mutex;
+        struct Counting {
+            inner: MapSource,
+            reads: Mutex<Vec<(bool, String)>>,
+        }
+        impl ContentSource for Counting {
+            fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.reads
+                    .lock()
+                    .expect("lock")
+                    .push((true, path.to_string()));
+                self.inner.read(path)
+            }
+            fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.reads
+                    .lock()
+                    .expect("lock")
+                    .push((false, path.to_string()));
+                self.inner.read_old(path)
+            }
+        }
+        let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        let leaked = format!("const K: &str = \"{key}\";\n");
+        let counting = Counting {
+            inner: MapSource::new(
+                &[("a.rs", "fn a() { 1 }\n"), ("b.rs", leaked.as_str())],
+                &[("a.rs", "fn a() {}\n")],
+            ),
+            reads: Mutex::new(Vec::new()),
+        };
+        let cache = crate::review::source::CachedSource::new(&counting);
+        let files = vec![
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: Some("@@ -1 +1 @@\n-fn a() {}\n+fn a() { 1 }\n".into()),
+            },
+            ReviewFile {
+                path: "b.rs".into(),
+                diff: Some(
+                    "diff --git a/a.rs b/b.rs\nsimilarity index 50%\nrename from a.rs\n\
+                     rename to b.rs\n--- a/a.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-fn a() {}\n+x\n"
+                        .into(),
+                ),
+            },
+        ];
+        let f = filter_files(files, &cache, &LanguageRegistry::new(), false, &|_| false)
+            .expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "b.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+        cache.read("a.rs").expect("read");
+        cache.read_old("a.rs").expect("read");
+        let reads = counting.reads.lock().expect("lock").clone();
+        for side in [true, false] {
+            let n = reads
+                .iter()
+                .filter(|(s, p)| *s == side && p == "a.rs")
+                .count();
+            assert_eq!(n, 1, "side new={side} of a.rs was read again: {reads:?}");
+        }
+    }
 }
