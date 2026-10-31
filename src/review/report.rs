@@ -1438,6 +1438,53 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_prose_field_opening_with_a_heading_cannot_open_a_report_section() {
+        // [MAGI S6 loop 11, C2-m1 / C2-b2, security] only the continuation lines were indented,
+        // so a prose field whose first line was `## …` relied on magi-core's formatter writing a
+        // label before it; a formatter that started the field at column 0 would print a forged
+        // section heading.
+        let forged = "## FORGED\nmore";
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":forged,"file":"a.rs","line":1}]);
+        let mut report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        forge_report_text(&mut report.agents, &mut report.consensus, forged);
+        let (agents, consensus) = line_safe(&report.agents, &report.consensus);
+        let mut prose: Vec<&str> = agents
+            .iter()
+            .flat_map(|a| [&a.summary, &a.reasoning, &a.recommendation])
+            .map(String::as_str)
+            .collect();
+        prose.extend(consensus.findings.iter().map(|f| f.detail.as_str()));
+        prose.extend(
+            consensus
+                .dissent
+                .iter()
+                .flat_map(|d| [d.summary.as_str(), d.reasoning.as_str()]),
+        );
+        prose.extend(consensus.conditions.iter().map(|c| c.condition.as_str()));
+        prose.extend(consensus.recommendations.values().map(String::as_str));
+        assert!(prose.len() > 3, "{prose:?}");
+        for field in prose {
+            assert!(field.contains("## FORGED"), "{field:?}");
+            assert!(
+                !field
+                    .split(|c| BREAKS.contains(&c))
+                    .any(|l| l.starts_with('#')),
+                "{field:?}"
+            );
+        }
+        let mut c = consolidate(&[BatchOutcome {
+            batch: 0,
+            agents: report.agents.clone(),
+            answered: report.agents.iter().map(|a| a.agent).collect(),
+        }])
+        .expect("consolidates");
+        forge_report_text(&mut c.agents, &mut c.consensus, forged);
+        let text = render_text(&c, &ReviewSummary::default());
+        assert!(text.contains("## FORGED"), "{text}");
+        assert!(!text.lines().any(|l| l.starts_with("## FORGED")), "{text}");
+    }
+
     /// Puts `forged` in every model-supplied string magi-core's formatter may render, and in the
     /// agents' own prose: the dissent, the conditions, the recommendations, the Key Findings'
     /// titles and each agent's summary, reasoning and recommendation.
