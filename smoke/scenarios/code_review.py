@@ -64,7 +64,7 @@ S50_ASSERTIONS = (
 S51_ASSERTIONS = (
     "exit 2",
     "stderr says nothing to review: no file under .magi/ or .git/ was taken for review",
-    "every .magi/ or .git/ path stderr names is left out as ignored, never read",
+    "a .magi/ file git lists is left out as ignored, and no .magi/ or .git/ path is read",
 )
 
 #: Exit codes of a successful run and of CLI misuse.
@@ -790,7 +790,10 @@ def the_workspace_root_never_reviews_magi_or_git(run):
     ``.magi``, git's ``.git`` and R14's binary and secret: the product must have
     nothing to review. A protected file taken for review would make the input
     reviewable and end at the budget refusal of ``--timeout 20`` instead; one
-    read and classified by its content would be named with that cause.
+    read and classified by its content would be named with that cause. The
+    third assertion also needs one of the ``.magi/`` files git listed before
+    the run (``RunResult.protected_visible``) named as ``ignored``, and is
+    ``CANNOT_TEST`` when git listed none.
 
     Args:
         run: R16's ``RunResult``, or ``None`` when the run produced no capture.
@@ -812,9 +815,45 @@ def the_workspace_root_never_reviews_magi_or_git(run):
     yield _verdict(S51_ASSERTIONS, 1, "R16", NOTHING_TO_REVIEW_TEXT in stderr,
                    "stderr does not say there is nothing to review, so a file "
                    "of the root was taken for review")
+    yield _exclusion_finding(run, stderr)
+
+
+def _exclusion_finding(run, stderr):
+    """Judge S51's third assertion: a visible ``.magi/`` file left out unread.
+
+    MAGI FIX (S6 loop 9): a refusal naming no protected path passed, so an
+    ignore rule hiding ``.magi/`` from git (and from the product), or a
+    product that dropped protected paths silently, passed without RV22's
+    exclusion ever running (F1a-c1, F1a-m2).
+
+    Args:
+        run: R16's ``RunResult``; ``protected_visible`` holds the ``.magi/``
+            paths git listed in the workspace before the run.
+        stderr: Its decoded stderr.
+
+    Returns:
+        Finding: ``FAIL`` when the omission list is unusable or names a
+        protected path with a cause other than ``ignored``; ``CANNOT_TEST``
+        when git listed no ``.magi/`` file, so none was an enumeration
+        candidate; ``FAIL`` when git listed some and the list names none of
+        them as ``ignored``; else ``PASS``. Names are compared with ``\\``
+        read as ``/``.
+    """
     read, failure = _protected_read(stderr)
     if read is None:
-        yield _finding(S51_ASSERTIONS, 2, Outcome.FAIL, "R16", failure)
-        return
-    yield _verdict(S51_ASSERTIONS, 2, "R16", not read,
-                   "protected paths were read and classified: %s" % read)
+        return _finding(S51_ASSERTIONS, 2, Outcome.FAIL, "R16", failure)
+    if read:
+        return _finding(S51_ASSERTIONS, 2, Outcome.FAIL, "R16",
+                        "protected paths were read and classified: %s" % read)
+    if not run.protected_visible:
+        return _finding(
+            S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
+            "git lists no .magi/ file in the review workspace (an ignore rule "
+            "hides it from the product too), so the exclusion was not exercised")
+    entries, _ = _omissions(stderr)
+    named = {path.replace("\\", "/") for path, cause in entries
+             if cause == PROTECTED_CAUSE}
+    return _verdict(S51_ASSERTIONS, 2, "R16",
+                    bool(named & set(run.protected_visible)),
+                    "git lists %s, and stderr names none of them as ignored"
+                    % ", ".join(run.protected_visible))

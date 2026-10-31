@@ -769,23 +769,24 @@ def review_gen_line_counts() -> dict[str, int]:
     return {path: body.count(b"\n") for path, body in review_input_files()}
 
 
-def verify_visible(workspace, paths) -> None:
-    """Check that git, run from *workspace*, lists every path of *paths*.
+def visible_paths(workspace) -> frozenset[str]:
+    """The paths git, run from *workspace*, lists as the product would.
 
     The product enumerates a directory with ``git ls-files --others
-    --exclude-standard``, so a file that query does not list is invisible to a
-    review. That is a fact about the harness's workspace and not a product
-    verdict, so it raises the harness error (exit 3) instead of letting a
-    scenario report ``FAIL`` over an input the product never saw.
+    --exclude-standard`` (:data:`GIT_VISIBLE_QUERY`), so a file this query does
+    not list is invisible to a review.
 
     Complexity: ``O(output bytes)``.
 
     Args:
         workspace: The review workspace (a git repository of its own).
-        paths: Workspace-relative paths that must be visible, ``/``-separated.
+
+    Returns:
+        frozenset[str]: The listed paths, ``/``-separated and relative to
+        *workspace*. The empty string the ``-z`` terminator leaves is dropped.
 
     Raises:
-        HarnessError: If git fails, or lists fewer than all of *paths*.
+        HarnessError: If git cannot be run or fails.
     """
     try:
         # MAGI FIX (S6 loop 6): git ran with the harness's own environment, so
@@ -798,7 +799,29 @@ def verify_visible(workspace, paths) -> None:
     if done.returncode != 0:
         raise HarnessError("git failed in %s: %s" % (
             workspace, done.stderr.decode("utf-8", errors="replace").strip()))
-    listed = set(done.stdout.decode("utf-8", errors="replace").split("\0"))
+    return frozenset(path for path in
+                     done.stdout.decode("utf-8", errors="replace").split("\0")
+                     if path)
+
+
+def verify_visible(workspace, paths) -> None:
+    """Check that git, run from *workspace*, lists every path of *paths*.
+
+    A file :func:`visible_paths` does not list is invisible to a review. That
+    is a fact about the harness's workspace and not a product verdict, so it
+    raises the harness error (exit 3) instead of letting a scenario report
+    ``FAIL`` over an input the product never saw.
+
+    Complexity: ``O(output bytes)``.
+
+    Args:
+        workspace: The review workspace (a git repository of its own).
+        paths: Workspace-relative paths that must be visible, ``/``-separated.
+
+    Raises:
+        HarnessError: If git fails, or lists fewer than all of *paths*.
+    """
+    listed = visible_paths(workspace)
     hidden = [path for path in paths if path not in listed]
     if hidden:
         raise HarnessError(
@@ -818,7 +841,11 @@ def protected_candidates(workspace) -> tuple[str, ...]:
     Raises:
         HarnessError: If git fails.
     """
-    return ()
+    # MAGI FIX (S6 loop 9): S51 passed vacuously when an ignore rule hid
+    # .magi/ from git and so from the product (F1a-c1, F1a-m2).
+    prefix = LOG_DIR_PARTS[0] + "/"
+    return tuple(sorted(path for path in visible_paths(workspace)
+                        if path.startswith(prefix)))
 
 
 def _skip_top_level_logs(magi_dir):
@@ -1207,7 +1234,10 @@ class RunExecutor:
                 result.
         """
         started = time.monotonic()
-        self._prepare_review_workspace(definition)
+        workspace = self._prepare_review_workspace(definition)
+        # A second listing, after the run's files are written and before the
+        # product starts: what the product's own enumeration will see.
+        protected = () if workspace is None else protected_candidates(workspace)
         stdin = self._stdin_for(definition)
         baseline = None
         try:
@@ -1237,6 +1267,7 @@ class RunExecutor:
             stdin_bytes=len(stdin),
             baseline=baseline,
             review_log=review_log,
+            protected_visible=protected,
         )
 
     def _review_workspace(self) -> pathlib.Path:
