@@ -1022,6 +1022,10 @@ impl BraceFamilyExtractor {
     }
 }
 
+/// The openers of a comment that make a line before a construct no wrapped continuation of
+/// the signature above it, though it ends in `,` ([`open_brace_line`]).
+const LINE_OPENING_COMMENTS: [&str; 2] = ["//", "/*"];
+
 /// The 0-based line holding the opening brace of the construct that starts at line `i`: line
 /// `i` when it opens one, else the first later line that does, so a signature wrapped over any
 /// number of lines (rustfmt's `fn f(\n    a: u8,\n) -> u8 {`) finds its brace.
@@ -1031,8 +1035,10 @@ impl BraceFamilyExtractor {
 /// declaration had no block; a comment ending in `;` does not count), opens a statement with a
 /// keyword of [`STATEMENT_KEYWORDS`] (`if (x) {`: a signature's brace is never there), or where
 /// `stops` holds (the next construct's start) while no parenthesis opened since line `i` is
-/// still open and the line before it does not end in `,` (a C++ constructor's initializer list
-/// wrapped after a comma, `count_(0) {`, continues the declaration); comment lines are passed over. A line whose braces balance (`fn a() { x(); }`)
+/// still open and the line before it is no code ending in `,` (a C++ constructor's initializer
+/// list wrapped after a comma, `count_(0) {`, continues the declaration; a comment line ending in
+/// `,` does not, while a trailing comment after the code, `int f() // a,`, still reads as one,
+/// declared); comment lines are passed over. A line whose braces balance (`fn a() { x(); }`)
 /// opens nothing, so a one-line construct never takes the brace of the construct after it.
 /// O(k) for the k lines scanned, which never pass the next construct.
 ///
@@ -1071,10 +1077,16 @@ fn open_brace_line(
     for j in (i + 1)..lines.len() {
         // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
         // the next construct; a line after one ending in `,` continues the declaration.
-        let continues = j
-            .checked_sub(1)
-            .and_then(|p| lines.get(p))
-            .is_some_and(|l| l.trim_end().ends_with(','));
+        // MAGI FIX (S6 loop 11): a comment line ending in `,` (`// note,`) between two signatures
+        // continued the first one into the second, which took the second's brace; the line before
+        // must be code (scanner record) and open with no comment.
+        let continues = j.checked_sub(1).is_some_and(|p| {
+            is_code(p)
+                && lines.get(p).is_some_and(|l| {
+                    let t = l.trim();
+                    t.ends_with(',') && !LINE_OPENING_COMMENTS.iter().any(|c| t.starts_with(c))
+                })
+        });
         let ends_search = (parens <= 0 && !continues && stops(j))
             || lines
                 .get(j)
