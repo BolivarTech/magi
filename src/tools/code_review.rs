@@ -1029,6 +1029,12 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 self.parts.max_state_bytes,
             )
             .with_call_timeout(self.parts.call_timeout);
+            // MAGI FIX (S6 loop 8, D2-b1): refuted, not changed. `call_timeout` is the ceiling,
+            // not the call's timeout: the pipeline hands the gate what is left of the review on
+            // every `judge`, and the gate re-reads it before each call of the chain, sending
+            // min(`timeout_secs`, remaining) (RV14 / N-10). Pinned in `review::gate::tests` by
+            // `each_call_is_capped_by_what_is_left_and_running_out_mid_gate_is_timeout` and
+            // `the_review_clock_is_re_read_before_each_call_of_the_chain`.
             let clock = SystemReviewClock::start();
             let outcome = run_review(
                 ReviewRequest {
