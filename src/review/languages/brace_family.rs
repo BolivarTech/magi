@@ -18,7 +18,8 @@ use crate::review::context::FileContext;
 ///
 /// Pre-configured constructors exist for 7 languages: Rust, C, C++,
 /// Go, Java, JavaScript, TypeScript.
-#[derive(Clone)]
+// MAGI FIX (S6 loop 11): `Debug`, so a failing review can print the extractor it chose.
+#[derive(Clone, Debug)]
 pub struct BraceFamilyExtractor {
     language: String,
     exts: &'static [&'static str],
@@ -193,6 +194,7 @@ fn shift_members(constructs: Vec<Construct>, open: usize) -> Option<Vec<Member>>
 }
 
 /// The modifier words of a language, stripped before its keyword tables are matched.
+#[derive(Debug)]
 struct Modifiers {
     /// Visibility words that may open any declaration (`pub`, `pub(crate)`, `public`,
     /// `export`): stripped, in any order and number, before every keyword table is matched.
