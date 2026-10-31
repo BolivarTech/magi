@@ -3497,4 +3497,27 @@ void g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_function_expression_whose_body_opens_on_the_next_line_keeps_it() {
+        // [MAGI S6 loop 13, B2b1-c3] a declaration continued only when its line ended in `=`,
+        // `(`, `[` or `,`, so `const f = () =>` or `const g = function (x)` with the brace on
+        // the next line ended on its own line and the body fell into a gap unit.
+        let js = "const f = () =>\n{\n  a();\n};\nconst g = async function (x)\n{\n  return x;\n};\nconst h = g(1)\nconst k = 2;\n";
+        let ext = BraceFamilyExtractor::javascript();
+        assert_eq!(
+            spans(&extract(&ext, js, &all_lines(js))),
+            vec![
+                ("f", UnitKind::Function, 1, 4),
+                ("g", UnitKind::Function, 5, 8),
+                ("constants", UnitKind::DeclarationGroup, 9, 10)
+            ]
+        );
+        let ts = "const k = (): void =>\n{\n};\n";
+        let ext = BraceFamilyExtractor::typescript();
+        assert_eq!(
+            spans(&extract(&ext, ts, &all_lines(ts))),
+            vec![("k", UnitKind::Function, 1, 3)]
+        );
+    }
 }
