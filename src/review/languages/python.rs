@@ -1200,4 +1200,32 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn a_backslash_before_a_quote_in_a_raw_string_never_closes_it() {
+        // [MAGI S6 loop 13, B2b2-c1] declared green, a false positive: in Python's tokenizer a
+        // backslash escapes the next character in a raw string too, as far as where the string
+        // ends (`r"\""` is the two characters `\"`; `r"""a\"""` never closes and CPython
+        // rejects it), so reading every string alike is Python's own rule. Each line below
+        // parses with CPython 3.15 as one assignment, and the definition after them is found.
+        let code = r#"x = r"\""
+y = r'a\'b'
+z = rb"""q\""""
+w = r"\\"
+v = "a\\"
+def f():
+    return 1
+"#;
+        for line in code.lines().take(5) {
+            assert!(has_top_level_assignment(line), "{line}");
+        }
+        let units = extract(code, &[1, 7]);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("x", UnitKind::DeclarationGroup, 1, 5),
+                ("f", UnitKind::Function, 6, 7)
+            ]
+        );
+    }
 }
