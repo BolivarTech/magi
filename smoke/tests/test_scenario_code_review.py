@@ -320,9 +320,29 @@ class CodeReviewScenarioTests(unittest.TestCase):
     def test_s47_leaves_a_timed_out_run_to_the_runner(self) -> None:
         # The runner turns a timed-out run into CANNOT_TEST (runner.py) for every scenario that does not
         # declare inspects_timeouts; S47 must not declare it, or a slow trio would read as a FAIL.
-        # [MAGI §6 MS2 loop 4, F1-g35] S51 too: a hung R16 is CANNOT_TEST, never per-assertion FAILs.
-        for sid in ("S47", "S48", "S49", "S50", "S51"):
-            self.assertFalse(DEFAULT_REGISTRY.get(sid).inspects_timeouts, sid)
+        # [MAGI §6 MS2 loop 9, F1a-c2] only S47: S48-S51 need no backend, so a hang there is a product
+        # defect they report themselves (test_a_hung_refusal_fails_every_assertion).
+        self.assertFalse(DEFAULT_REGISTRY.get("S47").inspects_timeouts)
+
+    def test_a_hung_refusal_fails_every_assertion(self) -> None:
+        # [MAGI §6 MS2 loop 9, F1a-c2] R13-R16 are refused before any model is reached, so no slow provider
+        # can explain a timeout: the runner must hand the hung run to the scenario, and every assertion is a
+        # FAIL naming the hang. The executor builds a hung run with exit_code 0, so this also pins that no
+        # assertion is judged on that synthetic exit.
+        for sid, run_id, texts in (("S48", "R13", code_review.S48_ASSERTIONS),
+                                   ("S49", "R14", code_review.S49_ASSERTIONS),
+                                   ("S50", "R15", code_review.S50_ASSERTIONS),
+                                   ("S51", "R16", code_review.S51_ASSERTIONS)):
+            with self.subTest(scenario=sid):
+                registry = Registry()
+                registry.add(DEFAULT_REGISTRY.get(sid))
+                hung = _result(run_id, 0, None, timed_out=True)
+                findings = Runner(registry, {run_id: hung}, backend_reachable=False,
+                                  ambient=Ambient(tree_snapshot=None, ceiling_fraction=None,
+                                                  memory_settings={})).run()
+                self.assertEqual([(text, Outcome.FAIL) for text in texts],
+                                 [(f.assertion, f.outcome) for f in findings])
+                self.assertTrue(all("timed out" in f.detail for f in findings), findings)
 
     def test_s47_never_judges_the_exit_of_a_timed_out_r12(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-c1] the executor builds a timed-out run with exit_code 0, so S47 asked
