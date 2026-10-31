@@ -703,10 +703,25 @@ fn location(file: Option<&str>, line: Option<u32>) -> String {
 
 /// The serialized name of a unit enum value (`warning`, `kept`, `file not reviewed`, ...), or its
 /// `Debug` form if it does not serialize to a string: the one enum-to-text helper of the review.
+///
+/// The text is passed through [`escape_controls`] here, so no caller can write a label raw: the
+/// review's labels are closed vocabularies today (identity for them), but a foreign
+/// `#[non_exhaustive]` enum may gain a variant whose serialized text or `Debug` form carries
+/// model text. O(length of the text).
+///
+/// # Arguments
+///
+/// * `value` - The value to name.
+///
+/// # Returns
+///
+/// Its line-safe name.
+// MAGI FIX (S6 loop 13, C2-c1): four callers (`Discarded.agent` and `.cause`, a finding's
+// severity, a verdict's state) wrote the name raw; the escape now lives in the one helper.
 pub(crate) fn name<T: serde::Serialize + std::fmt::Debug>(value: &T) -> String {
     match serde_json::to_value(value) {
-        Ok(Value::String(text)) => text,
-        _ => format!("{value:?}"),
+        Ok(Value::String(text)) => escape_controls(&text),
+        _ => escape_controls(&format!("{value:?}")),
     }
 }
 
