@@ -2550,4 +2550,54 @@ mod tests {
         let none = std::env::join_paths([relative.as_path(), workspace.path()]).expect("join");
         assert_eq!(resolve_git(&none, workspace.path()), None);
     }
+
+    #[test]
+    fn an_uncommitted_review_in_a_sub_workspace_names_ignored_files_like_its_diff() {
+        // [MAGI S6 loop 13, A2-m1, false positive] the review read `ls-files` as repository-root
+        // relative: it is relative to its cwd (the workspace, `-C`) unless `--full-name` is
+        // given, and the diff carries `--relative`, so both speak workspace-relative paths.
+        // Measured with git 2.56; adding `--full-name` (the proposed fix) turns this red.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("ws/sub")).expect("mkdir");
+        std::fs::write(d.path().join(".gitignore"), "*.env\n").expect("write");
+        std::fs::write(d.path().join("ws/sub/tracked.env"), "HOST=a\n").expect("write");
+        std::fs::write(d.path().join("ws/sub/a.rs"), "fn a() {}\n").expect("write");
+        git(
+            d.path(),
+            &[
+                "add",
+                "-f",
+                ".gitignore",
+                "ws/sub/tracked.env",
+                "ws/sub/a.rs",
+            ],
+        );
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join("ws/sub/tracked.env"), "HOST=b\n").expect("write");
+        std::fs::write(d.path().join("ws/sub/a.rs"), "fn a() { 1 }\n").expect("write");
+        let ws = d.path().join("ws");
+        let g = ScrubbedGit::new(ws.clone());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let input = ReviewInput::Uncommitted;
+        let listed =
+            magi_rs::review::input::resolve_input(&input, &ws, &g, &allow).expect("resolves");
+        let paths: Vec<&str> = listed.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"sub/tracked.env"), "{paths:?}");
+        assert!(
+            listed
+                .files
+                .iter()
+                .find(|f| f.path == "sub/tracked.env")
+                .is_some_and(|f| f.diff.is_some()),
+            "the path comes from the diff"
+        );
+        let ignored =
+            magi_rs::review::filter::ignored_paths(&input, ".", &ws, &g).expect("one git call");
+        assert_eq!(
+            ignored.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["sub/tracked.env"]
+        );
+    }
 }
