@@ -283,12 +283,31 @@ struct Construct {
 impl BraceFamilyExtractor {
     /// Detect all constructs in the file or, with `members`, in a block's body, where a
     /// signature that ends in `;` is a member too ([`Self::member_prototypes`]).
+    ///
+    /// No constructs when a line number does not fit `u32` ([`Self::try_detect_constructs`]):
+    /// the file's changed lines then fall into gap units and a block is reviewed whole, as
+    /// [`shift_members`] leaves it, never split at fabricated coordinates.
     fn detect_constructs(
         &self,
         lines: &[&str],
         scanned: &[ScannedLine],
         members: bool,
     ) -> Vec<Construct> {
+        self.try_detect_constructs(lines, scanned, members)
+            .unwrap_or_default()
+    }
+
+    /// The constructs of [`Self::detect_constructs`], or `None` when a line number does not
+    /// fit `u32`. The 8 MiB file cap keeps that out of reach (8 388 608 lines at most); the
+    /// check makes the failure mode explicit instead of a `u32::MAX` fallback.
+    fn try_detect_constructs(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        members: bool,
+    ) -> Option<Vec<Construct>> {
+        // MAGI FIX (S6 loop 10): the conversions fell back to `u32::MAX`, `1` or the line
+        // number, unlike `shift_members`; an unrepresentable line now aborts detection.
         let mut constructs = Vec::new();
         let mut i = 0;
 
@@ -299,23 +318,23 @@ impl BraceFamilyExtractor {
             }
 
             let trimmed = line.trim();
-            let line_num = u32::try_from(i + 1).unwrap_or(u32::MAX);
+            let line_num = line_number(i)?;
 
             let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
             // MAGI FIX (S6 loop 7): Go's `type (` opened one nameless struct and its later
             // members fell into gaps; each member is a construct of its own.
             if let Some((last, group)) = self.grouped_types(lines, scanned, i) {
-                constructs.extend(group);
+                constructs.extend(group?);
                 i = last + 1;
                 continue;
             }
             if let Some((kind, name)) = self.construct_keyword(trimmed) {
                 let start = self.scan_back_for_docs(lines, scanned, i);
-                let end = brace_block_end(lines, scanned, i, line_num, &stops);
+                let end = brace_block_end(lines, scanned, i, line_num, &stops)?;
                 constructs.push(Construct {
                     kind,
                     name,
-                    start_line: u32::try_from(start + 1).unwrap_or(1),
+                    start_line: line_number(start)?,
                     end_line: end,
                 });
                 // Skip past this construct
@@ -330,15 +349,14 @@ impl BraceFamilyExtractor {
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
                     let end = if opens || trimmed.ends_with('}') {
-                        brace_block_end(lines, scanned, i, line_num, &stops)
+                        brace_block_end(lines, scanned, i, line_num, &stops)?
                     } else {
-                        u32::try_from(statement_end(lines, scanned, i, &stops) + 1)
-                            .unwrap_or(line_num)
+                        line_number(statement_end(lines, scanned, i, &stops))?
                     };
                     constructs.push(Construct {
                         kind: UnitKind::Function,
                         name,
-                        start_line: u32::try_from(start + 1).unwrap_or(1),
+                        start_line: line_number(start)?,
                         end_line: end,
                     });
                     i = (end as usize).max(i + 1);
@@ -356,8 +374,8 @@ impl BraceFamilyExtractor {
                     constructs.push(Construct {
                         kind: UnitKind::Function,
                         name,
-                        start_line: u32::try_from(start + 1).unwrap_or(1),
-                        end_line: u32::try_from(end + 1).unwrap_or(line_num),
+                        start_line: line_number(start)?,
+                        end_line: line_number(end)?,
                     });
                     i = end + 1;
                     continue;
@@ -397,8 +415,8 @@ impl BraceFamilyExtractor {
                 constructs.push(Construct {
                     kind: UnitKind::DeclarationGroup,
                     name,
-                    start_line: u32::try_from(doc_start + 1).unwrap_or(1),
-                    end_line: u32::try_from(group_end + 1).unwrap_or(1),
+                    start_line: line_number(doc_start)?,
+                    end_line: line_number(group_end)?,
                 });
                 i = group_end + 1;
                 continue;
@@ -407,7 +425,7 @@ impl BraceFamilyExtractor {
             i += 1;
         }
 
-        constructs
+        Some(constructs)
     }
 
     /// The members of a grouped type declaration at line `i` (Go's `type (` ... `)`) and the
@@ -419,13 +437,14 @@ impl BraceFamilyExtractor {
     ///
     /// The group's end is found by counting parentheses on the line text ([`paren_delta`]); a
     /// group that never closes runs to the end of the file, its members still found one by one,
-    /// so every line stays in exactly one unit either way.
+    /// so every line stays in exactly one unit either way. The members are `None` when a line
+    /// number does not fit `u32`, which aborts detection ([`Self::try_detect_constructs`]).
     fn grouped_types(
         &self,
         lines: &[&str],
         scanned: &[ScannedLine],
         i: usize,
-    ) -> Option<(usize, Vec<Construct>)> {
+    ) -> Option<(usize, Option<Vec<Construct>>)> {
         if !self.block_keywords.iter().any(|k| k == "type ") {
             return None;
         }
@@ -440,7 +459,7 @@ impl BraceFamilyExtractor {
         });
         let last = close.unwrap_or(lines.len().saturating_sub(1));
         let body_end = close.unwrap_or(lines.len());
-        let mut members = Vec::new();
+        let mut members = Some(Vec::new());
         let mut floor = i + 1;
         let mut j = i + 1;
         while j < body_end {
@@ -463,11 +482,17 @@ impl BraceFamilyExtractor {
                 j
             };
             let start = self.scan_back_for_docs(lines, scanned, j).max(floor);
-            members.push(Construct {
-                kind,
-                name,
-                start_line: u32::try_from(start + 1).unwrap_or(u32::MAX),
-                end_line: u32::try_from(end + 1).unwrap_or(u32::MAX),
+            let member = line_number(start)
+                .zip(line_number(end))
+                .map(|(start_line, end_line)| Construct {
+                    kind,
+                    name,
+                    start_line,
+                    end_line,
+                });
+            members = members.zip(member).map(|(mut all, m)| {
+                all.push(m);
+                all
             });
             floor = end + 1;
             j = end + 1;
@@ -1237,14 +1262,24 @@ fn brace_block_end(
     i: usize,
     line_num: u32,
     stops: &dyn Fn(usize) -> bool,
-) -> u32 {
+) -> Option<u32> {
     match open_brace_line(lines, scanned, i, stops) {
-        Some(open_idx) => {
-            let close_idx = find_closing_brace(scanned, open_idx);
-            u32::try_from(close_idx + 1).unwrap_or(line_num)
-        }
-        None => line_num,
+        Some(open_idx) => line_number(find_closing_brace(scanned, open_idx)),
+        None => Some(line_num),
     }
+}
+
+/// The 1-based line number of the 0-based line `idx`.
+///
+/// # Arguments
+///
+/// * `idx` - A 0-based line index.
+///
+/// # Returns
+///
+/// `idx + 1`, or `None` when it does not fit `u32`. O(1).
+fn line_number(idx: usize) -> Option<u32> {
+    u32::try_from(idx.checked_add(1)?).ok()
 }
 
 /// Whether `c` can be part of an identifier in a brace-family language: a letter or digit
@@ -3028,5 +3063,16 @@ void g(void) {
                 ("Marker", UnitKind::Class, 4, 5)
             ]
         );
+    }
+
+    #[test]
+    fn a_line_number_that_does_not_fit_u32_is_none_not_a_fallback() {
+        // [MAGI S6 loop 10, B2b-b2] construct detection fell back to `u32::MAX`, `1` or the
+        // current line where `shift_members` aborted; both now abort on the same check.
+        assert_eq!(line_number(0), Some(1));
+        let max = usize::try_from(u32::MAX).expect("usize holds u32");
+        assert_eq!(line_number(max - 1), Some(u32::MAX));
+        assert_eq!(line_number(max), None);
+        assert_eq!(line_number(usize::MAX), None);
     }
 }
