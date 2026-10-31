@@ -374,7 +374,11 @@ names `.magi/`, which the product leaves out and lists among its omissions, but 
 own `.git/`: only the `.magi/` half of S51 exercises the product's exclusion, and the `.git/` half
 only checks that nothing the product reports names it. Right before the product starts, the executor lists the workspace again with the same query and records the `.magi/` paths it sees (`RunResult.protected_visible`), which is how S51 tells an exercised exclusion from one that had no candidate. The executor refuses to build the
 workspace (exit 3) unless its path resolves strictly under the scratch area, checked before anything
-is created or deleted. Every review run starts the product with the workspace as its working directory, so a relative input (`gen`, `.`, `../smoke-hostile-target`) names the same path whether the product joins it to `-w` or to its working directory.
+is created or deleted. It also refuses (exit 3) when the workspace path is itself a symlink or a
+junction, and when the environment's `.magi` holds one: copying would follow the link, and the
+environment never needs one. A parent directory swapped for a link between that check and the
+deletion is not guarded: the scratch area is inside the repository, under the environment's lock,
+and whoever can swap a directory there already controls the harness's own code. Every review run starts the product with the workspace as its working directory, so a relative input (`gen`, `.`, `../smoke-hostile-target`) names the same path whether the product joins it to `-w` or to its working directory.
 
 **Cost.** R13, R14, R15 and R16 never reach a model. R12 is a review of at least three batches by the
 real trio plus the gate. The tree is about 72 000 tokens and the product fills a batch to 50 % of
