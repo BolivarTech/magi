@@ -484,7 +484,8 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 4): qualifiers combine freely (`pub(super) async unsafe fn`); the
         // tables of fixed prefixes missed most combinations.
         // MAGI FIX (S6 loop 8): `template<typename T> class Box {` was no construct at all.
-        let trimmed = self.without_template_header(trimmed);
+        // MAGI FIX (S6 loop 10): `@Deprecated public class A {` was no construct at all.
+        let trimmed = self.without_template_header(self.without_annotations(trimmed));
         let candidates = [self.strip_modifiers(trimmed, true), trimmed];
         candidates
             .iter()
@@ -620,6 +621,58 @@ impl BraceFamilyExtractor {
         }
     }
 
+    /// `trimmed` without the complete annotations it opens with (`@Override`,
+    /// `@SuppressWarnings("x")`, `@Component({ a: 1 })`), for extractors whose
+    /// `attribute_prefixes` hold `@` (Java, JavaScript, TypeScript); `trimmed` otherwise.
+    ///
+    /// An annotation is `@`, a name of identifier characters and dots, and optionally its
+    /// arguments in balanced parentheses on the same line. `@interface` declares an annotation
+    /// type and is kept. An annotation whose arguments do not close on the line is kept with
+    /// everything after it, so the line still opens with `@` and is no signature, as before.
+    /// Parentheses are counted on the line text, as [`paren_delta`] does. O(n) in the line.
+    ///
+    /// # Arguments
+    ///
+    /// * `trimmed` - A trimmed line.
+    ///
+    /// # Returns
+    ///
+    /// The rest of the line after its leading annotations, trimmed at its start.
+    fn without_annotations<'t>(&self, trimmed: &'t str) -> &'t str {
+        if !self.attribute_prefixes.iter().any(|p| p == "@") {
+            return trimmed;
+        }
+        let mut rest = trimmed;
+        while let Some(after_at) = rest.strip_prefix('@') {
+            let name_len: usize = after_at
+                .chars()
+                .take_while(|&c| is_identifier_char(c) || c == '.')
+                .map(char::len_utf8)
+                .sum();
+            let (name, mut tail) = after_at.split_at(name_len);
+            if name.is_empty() || name == "interface" {
+                return rest;
+            }
+            if tail.starts_with('(') {
+                let mut depth = 0i64;
+                let close = tail.char_indices().find_map(|(at, c)| {
+                    depth += match c {
+                        '(' => 1,
+                        ')' => -1,
+                        _ => 0,
+                    };
+                    (depth == 0).then_some(at + c.len_utf8())
+                });
+                let Some(close) = close else {
+                    return rest;
+                };
+                tail = tail.get(close..).unwrap_or("");
+            }
+            rest = tail.trim_start();
+        }
+        rest
+    }
+
     /// The text after the function keyword `trimmed` opens with ([`keyword_rest`]), if any.
     fn match_function_keyword<'t>(&self, trimmed: &'t str) -> Option<&'t str> {
         self.function_keywords
@@ -686,7 +739,9 @@ impl BraceFamilyExtractor {
         if !self.signature_functions {
             return None;
         }
-        let trimmed = line.trim();
+        // MAGI FIX (S6 loop 10): `@Override public void run() {` opened with `@` and was no
+        // signature; the complete annotations on the line are read past first.
+        let trimmed = self.without_annotations(line.trim());
         // MAGI FIX (S6 loop 4): a trailing comment ending in `;` is not a prototype's `;`.
         let prototype = scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement);
         // An annotation or decorator (`@SuppressWarnings("x")`) is no signature either.
