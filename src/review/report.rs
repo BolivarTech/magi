@@ -59,6 +59,8 @@ pub struct ReviewSummary {
     /// `MAX_GATE_QUESTIONS_PER_FINDING` per finding.
     pub gate_questions: usize,
     /// Fraction of the findings that reached the gate and got an answer; 1.0 with none.
+    /// Both forms write it through [`shown_fraction`], so a non-finite value reads as 0.
+    #[serde(serialize_with = "serialize_fraction")]
     pub judged_fraction: f64,
     /// Findings removed by the deterministic validation, with their cause.
     pub discarded: Vec<Discarded>,
@@ -231,7 +233,10 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
         writeln!(out, "rejected skips: {}", counts(&skips))?;
     }
     writeln!(out, "gate questions: {}", s.gate_questions)?;
-    writeln!(out, "judged: {:.0} %", s.judged_fraction * 100.0)?;
+    // MAGI FIX (S6 loop 12, C2-m4 / C2-b2): truncated, never rounded: `{:.0}` printed 299 of
+    // 300 as `100 %`.
+    let tenths = (shown_fraction(s.judged_fraction) * PERCENT_TENTHS).floor() / TENTHS_PER_UNIT;
+    writeln!(out, "judged: {tenths:.1} %")?;
     let (input, output, ms) = totals(s);
     writeln!(
         out,
@@ -576,6 +581,40 @@ pub(crate) fn serialize_batches<S: serde::Serializer>(
     s.collect_seq(batches.iter().map(|&b| shown(b)))
 }
 
+/// Tenths of a percent in a whole fraction, for the text form's truncated percentage.
+const PERCENT_TENTHS: f64 = 1000.0;
+
+/// Tenths in a unit, turning [`PERCENT_TENTHS`] back into a percentage with one decimal.
+const TENTHS_PER_UNIT: f64 = 10.0;
+
+/// `fraction` as the report writes it: clamped to `[0, 1]`, and 0 when it is not finite, so
+/// coverage the review cannot vouch for is never claimed. O(1).
+///
+/// # Arguments
+///
+/// * `fraction` - A fraction computed elsewhere (the pipeline guards its own division).
+///
+/// # Returns
+///
+/// A finite value in `[0, 1]`.
+// MAGI FIX (S6 loop 12, C2-m2 / C2-b4 / C2-c6): `serde_json` writes NaN and infinity as `null`,
+// so a non-finite fraction reached a consumer as `null` and the text form as `NaN %`.
+fn shown_fraction(fraction: f64) -> f64 {
+    if fraction.is_finite() {
+        fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Serializes a fraction through [`shown_fraction`], for `#[serde(serialize_with)]`.
+///
+/// # Errors
+/// The serializer's.
+fn serialize_fraction<S: serde::Serializer>(fraction: &f64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(shown_fraction(*fraction))
+}
+
 /// Serializes `(batch, why)` pairs with each batch 1-based, as [`serialize_batch`] does.
 ///
 /// # Errors
@@ -674,7 +713,9 @@ pub(crate) fn name<T: serde::Serialize + std::fmt::Debug>(value: &T) -> String {
 /// `value` as JSON, `what` naming it in a failure.
 ///
 /// The review's types cannot fail to serialize (every map key is a string, no field has a
-/// fallible `Serialize`), but were one to, the failure is never silent: the value becomes
+/// fallible `Serialize`). `serde_json` does not fail on a non-finite float either: it writes
+/// `null`, which is why the review's one computed float goes through [`shown_fraction`]. Were a
+/// value to fail, the failure is never silent: the value becomes
 /// `{"serialization_error": "<what>: <error>"}` and one ERROR entry goes to the run log.
 fn to_json<T: serde::Serialize>(value: &T, what: &str) -> Value {
     // MAGI FIX (S6 loop 5): never a silent `Null` that drops the whole envelope.
