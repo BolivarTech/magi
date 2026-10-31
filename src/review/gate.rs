@@ -503,6 +503,12 @@ impl<'a> Gate<'a> {
     /// filtered` as its cause, with `ambiguous diff side` after it in `causes`); every other answer is read as by [`Self::judge`], and the deciding model is
     /// counted the same way.
     ///
+    /// The caller reads `code` from the reviewed revision (RV21) and routes an ambiguous line
+    /// here: `run_review` does both, pinned by the pipeline tests
+    /// `a_line_the_hunk_deleted_whose_number_is_live_is_never_filtered`,
+    /// `a_finding_on_a_deleted_file_reaches_the_gate_with_old_side_code` and
+    /// `a_renamed_and_edited_file_reads_its_old_side_under_its_old_path`.
+    ///
     /// # Arguments
     /// * `finding` - the consolidated finding.
     /// * `code` - the live side of the file it points into.
@@ -510,6 +516,7 @@ impl<'a> Gate<'a> {
     ///
     /// # Returns
     /// The verdict.
+    // MAGI FIX (S6 loop 10, C1-m2): the RV21 wiring of the gate's code is named, not assumed.
     // MAGI FIX (S6 loop 7, D-b3/D-c3): what may have been judged on the wrong side is never
     // filtered, as what was never judged is never filtered.
     pub async fn judge_ambiguous_side(
