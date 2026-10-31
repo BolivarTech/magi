@@ -1082,4 +1082,35 @@ def g():
             assert!(!has_top_level_assignment(line), "{line}");
         }
     }
+
+    #[test]
+    fn any_blank_separates_a_keyword_from_what_follows_it() {
+        // [MAGI S6 loop 13, B2b2-b2, B2b2-m2, B2b2-b1] the keywords matched with one literal
+        // space, so `def\tf():`, `class\t C:` or `import\tos` (legal Python) were no construct;
+        // a class is named by its own identifier, never by its keyword.
+        let code = "import\tos\nfrom\tx import y\n\ndef\tf():\n    pass\n\nasync  def g():\n    pass\n\nclass\t C:\n    def\tm(self):\n        pass\n";
+        let all: Vec<u32> = (1..=12).collect();
+        let units = extract(code, &all);
+        let found = spans(&units);
+        for expected in [
+            ("imports", UnitKind::DeclarationGroup, 1, 2),
+            ("f", UnitKind::Function, 4, 5),
+            ("g", UnitKind::Function, 7, 8),
+            ("C", UnitKind::Class, 10, 12),
+        ] {
+            assert!(found.contains(&expected), "{expected:?} in {found:?}");
+        }
+        let class = units
+            .iter()
+            .find(|u| u.kind == UnitKind::Class)
+            .expect("the class");
+        let parts = PythonExtractor.split_block(class);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("C", UnitKind::Class, 10, 10),
+                ("m", UnitKind::Method, 11, 12)
+            ]
+        );
+    }
 }
