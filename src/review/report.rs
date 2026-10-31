@@ -1214,4 +1214,66 @@ mod tests {
             assert!(!has_forged_line(&paid_forged), "break {b:?}: {paid_forged}");
         }
     }
+
+    /// Puts `forged` in every model-supplied string magi-core's formatter may render, and in the
+    /// agents' own prose: the dissent, the conditions, the recommendations, the Key Findings'
+    /// titles and each agent's summary, reasoning and recommendation.
+    fn forge_report_text(
+        agents: &mut [magi_core::schema::AgentOutput],
+        consensus: &mut magi_core::consensus::ConsensusResult,
+        forged: &str,
+    ) {
+        for agent in agents.iter_mut() {
+            agent.summary = forged.to_string();
+            agent.reasoning = forged.to_string();
+            agent.recommendation = forged.to_string();
+        }
+        for finding in &mut consensus.findings {
+            finding.title = forged.to_string();
+        }
+        consensus.dissent = vec![serde_json::from_value(serde_json::json!({
+            "agent": "caspar", "summary": forged, "reasoning": forged
+        }))
+        .expect("a Dissent")];
+        consensus.conditions = vec![serde_json::from_value(serde_json::json!({
+            "agent": "balthasar", "condition": forged
+        }))
+        .expect("a Condition")];
+        for rec in consensus.recommendations.values_mut() {
+            *rec = forged.to_string();
+        }
+    }
+
+    #[tokio::test]
+    async fn no_line_break_in_magi_cores_sections_or_listed_paths_can_forge_a_report_line() {
+        // [MAGI S6 loop 9, C2 commit review] magi-core's formatter writes the dissent, the
+        // conditions and the recommendations raw, and the review wrote the skipped and the
+        // no-extractor paths raw: a line break there put model or path text at column 0.
+        for b in BREAKS {
+            let forged = format!("x{b}FORGED");
+            let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+            let mut report = real_report([f.clone(), f, serde_json::json!([])]).await;
+            let answered = report.agents.iter().map(|a| a.agent).collect();
+            let mut c = consolidate(&[BatchOutcome {
+                batch: 0,
+                agents: report.agents.clone(),
+                answered,
+            }])
+            .expect("consolidates");
+            forge_report_text(&mut c.agents, &mut c.consensus, &forged);
+            let mut s = ReviewSummary::default();
+            s.skipped.push(Skipped {
+                path: forged.clone(),
+                cause: crate::review::filter::SkipCause::Binary,
+            });
+            s.no_extractor.push(forged.clone());
+            let text = render_text(&c, &s);
+            assert!(text.matches("FORGED").count() >= 5, "{text}");
+            assert!(!has_forged_line(&text), "break {b:?}: {text}");
+            forge_report_text(&mut report.agents, &mut report.consensus, &forged);
+            let paid = render_batch_reports(&[(0, report)]);
+            assert!(paid.matches("FORGED").count() >= 4, "{paid}");
+            assert!(!has_forged_line(&paid), "break {b:?}: {paid}");
+        }
+    }
 }
