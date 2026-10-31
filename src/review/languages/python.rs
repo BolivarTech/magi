@@ -93,7 +93,13 @@ impl LanguageExtractor for PythonExtractor {
     /// clock starts, never a silent cut. Pinned by
     /// `construct_ranges_are_sorted_and_disjoint_and_a_memberless_class_does_not_split` here and
     /// `review::batching`'s `a_single_unit_larger_than_the_limit_is_a_typed_error`.
+    ///
+    /// A declaration group (imports or module-level assignments) splits at its statements
+    /// instead ([`split_declaration_group`]).
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
+        if unit.kind == UnitKind::DeclarationGroup {
+            return split_declaration_group(unit);
+        }
         // MAGI FIX (S6 loop 3): a class too large for one batch is reviewed method by method.
         if unit.kind != UnitKind::Class {
             return Vec::new();
@@ -142,6 +148,45 @@ impl LanguageExtractor for PythonExtractor {
         }
         split_into_members(unit, members)
     }
+}
+
+/// The pieces of a declaration group too large for one batch: each statement (a logical line,
+/// with the lines that continue it, see [`continued_lines`]) as a piece of the group's kind and
+/// name, and each line between two (a blank line) as a stretch piece ([`split_into_members`]).
+/// Splitting at statements is no silent cut (RV03): every line stays in exactly one piece.
+///
+/// # Arguments
+///
+/// * `unit` - A [`UnitKind::DeclarationGroup`] unit of this extractor.
+///
+/// # Returns
+///
+/// The pieces in line order; empty when the group holds no statement or a line number does not
+/// fit `u32`, so the caller batches it whole. O(n) in the group's lines.
+fn split_declaration_group(unit: &SemanticUnit) -> Vec<SemanticUnit> {
+    // MAGI FIX (S6 loop 12): a group was never split, so a generated constant table over the
+    // batch limit refused the whole review although each statement fits.
+    let lines: Vec<&str> = unit.content.split('\n').collect();
+    let continued = continued_lines(&lines);
+    let continues = |j: usize| continued.get(j).copied().unwrap_or(false);
+    let mut members: Vec<Member> = Vec::new();
+    let mut j = 0;
+    while let Some(line) = lines.get(j) {
+        if continues(j) || line.trim().is_empty() {
+            j += 1;
+            continue;
+        }
+        let mut end = j;
+        while continues(end + 1) {
+            end += 1;
+        }
+        let Some((first, last)) = member_span(j, end) else {
+            return Vec::new();
+        };
+        members.push((UnitKind::DeclarationGroup, unit.name.clone(), first, last));
+        j = end + 1;
+    }
+    split_into_members(unit, members)
 }
 
 /// The 1-based, inclusive line span of a member found at the 0-based lines `start..=end`.
@@ -504,8 +549,9 @@ fn find_import_group_end(lines: &[&str], continued: &[bool], start: usize) -> us
 /// bracket, or after a `\`) belongs to the assignment that opened it, so it extends the group.
 /// O(n) in the lines after `start`.
 ///
-/// Declared: a group is never split, so a run of adjacent assignments too large for one batch
-/// is reported as too large rather than cut.
+/// A run of adjacent assignments too large for one batch is split at its statements by
+/// [`split_declaration_group`], never cut; one statement too large alone is reported as too
+/// large.
 fn find_assignment_group_end(lines: &[&str], continued: &[bool], start: usize) -> usize {
     let mut end = start;
     for (j, line) in lines.iter().enumerate().skip(start + 1) {

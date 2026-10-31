@@ -127,12 +127,17 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// at fewer members. Nothing is lost either way: `split_into_members` covers every line of
     /// the unit with exactly one piece, and an unsplit unit is batched whole.
     ///
-    /// Only those kinds split, declared: an enum, a struct or a declaration group is reviewed
-    /// whole, and a construct no keyword table names (TypeScript's `enum` or `namespace`, Rust's
-    /// `macro_rules!`, a JavaScript IIFE) is no construct at all, so its lines fall into gap
-    /// units. A single such unit too large for one batch therefore ends the review with the typed
-    /// `ReviewError::TooLargeForBatch` (RV03), never a silent cut.
+    /// A declaration group splits at its declarations instead
+    /// ([`Self::split_declaration_group`]). Only those kinds split, declared: an enum or a
+    /// struct is reviewed whole, and a construct no keyword table names (TypeScript's `enum` or
+    /// `namespace`, Rust's `macro_rules!`, a JavaScript IIFE) is no construct at all, so its
+    /// lines fall into gap units. A single such unit, or one declaration, too large for one
+    /// batch therefore ends the review with the typed `ReviewError::TooLargeForBatch` (RV03),
+    /// never a silent cut.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
+        if unit.kind == UnitKind::DeclarationGroup {
+            return self.split_declaration_group(unit);
+        }
         // MAGI FIX (S6 loop 3): a block too large for one batch is reviewed method by method.
         if !matches!(
             unit.kind,
@@ -399,12 +404,7 @@ impl BraceFamilyExtractor {
                 }
                 let group_start = i;
                 // MAGI FIX (S6 loop 7): a `#define` continued by `\` ends on its last line.
-                let end_of = |j: usize| {
-                    declaration_block(lines, scanned, j, &stops)
-                        .map_or(j, |b| b.1)
-                        .max(preprocessor_end(lines, j))
-                        .max(self.declaration_list_end(lines, scanned, j))
-                };
+                let end_of = |j: usize| self.declaration_end(lines, scanned, j, &stops);
                 // A declaration joins the group unless it is a function expression, its own unit.
                 let joins = |j: usize| {
                     lines.get(j).is_some_and(|l| {
@@ -443,6 +443,58 @@ impl BraceFamilyExtractor {
         }
 
         Some(constructs)
+    }
+
+    /// The 0-based last line of the declaration at line `j`: the end of the block its value
+    /// opens ([`declaration_block`]), of a `#define` continued by `\` ([`preprocessor_end`]) or
+    /// of a declaration list wrapped after a comma ([`Self::declaration_list_end`]), whichever
+    /// is last; `j` itself otherwise. O(k) for the k lines of the declaration.
+    fn declaration_end(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        j: usize,
+        stops: &dyn Fn(usize) -> bool,
+    ) -> usize {
+        declaration_block(lines, scanned, j, stops)
+            .map_or(j, |b| b.1)
+            .max(preprocessor_end(lines, j))
+            .max(self.declaration_list_end(lines, scanned, j))
+    }
+
+    /// The pieces of a declaration group too large for one batch: each declaration with its doc
+    /// comments and attributes, and each line between two (a blank line) as a piece with the
+    /// group's kind and name ([`split_into_members`]). Splitting at declarations is no silent
+    /// cut (RV03): every line stays in exactly one piece. Empty when the group holds no
+    /// declaration or a line number does not fit `u32`, so the caller batches it whole.
+    /// O(n) in the group's lines, plus each declaration's forward search.
+    fn split_declaration_group(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
+        // MAGI FIX (S6 loop 12): a group was never split, so a generated header or a constant
+        // table over the batch limit refused the whole review although each declaration fits.
+        let lines: Vec<&str> = unit.content.lines().collect();
+        let scanned = CodeScanner::new(self.lexical_rules.clone()).scan_all(&unit.content);
+        let stops = |j: usize| self.starts_construct(&lines, &scanned, j, false);
+        let mut members: Vec<Member> = Vec::new();
+        let mut floor = 0;
+        let mut j = 0;
+        while let Some(line) = lines.get(j) {
+            let trimmed = line.trim();
+            let declares = scanned.get(j).is_some_and(|s| !s.is_non_code)
+                && (self.is_declaration(trimmed) || self.opens_declaration_list(trimmed));
+            if !declares {
+                j += 1;
+                continue;
+            }
+            let end = self.declaration_end(&lines, &scanned, j, &stops).max(j);
+            let start = self.scan_back_for_docs(&lines, &scanned, j, floor);
+            let Some((first, last)) = line_number(start).zip(line_number(end)) else {
+                return Vec::new();
+            };
+            members.push((UnitKind::DeclarationGroup, unit.name.clone(), first, last));
+            floor = end + 1;
+            j = end + 1;
+        }
+        split_into_members(unit, members)
     }
 
     /// The members of a grouped type declaration at line `i` (Go's `type (` ... `)`) and the
