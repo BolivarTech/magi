@@ -491,6 +491,11 @@ class RunResult:
     #: time because the next review run rebuilds the workspace from nothing, so
     #: a scenario reading the live directory would depend on run order.
     review_log: tuple[bytes, ...] | None = None
+    #: The log files under ``.magi/logs`` that could not be read, each as
+    #: ``"<name> (<error>)"`` like :func:`smoke.logs.scan`'s list. A scenario
+    #: that finds nothing in :attr:`review_log` while this is not empty cannot
+    #: tell a product that never logged from a file it was refused.
+    review_log_unreadable: tuple[str, ...] = ()
     #: The ``.magi/`` paths git lists in the review workspace right before the
     #: run, with the product's own query (:data:`GIT_VISIBLE_QUERY`), sorted.
     #: Empty when the run uses no review workspace, or when an ignore rule
@@ -1327,7 +1332,8 @@ class RunExecutor:
                 stdout=b"", stderr=b"", exit_code=0,
                 command=self._command(definition))
             timed_out = True
-        review_log = self._capture_review_log(definition)
+        unreadable = []
+        review_log = self._capture_review_log(definition, unreadable)
         return RunResult(
             run_id=definition.run_id,
             output=output,
@@ -1337,6 +1343,7 @@ class RunExecutor:
             stdin_bytes=len(stdin),
             baseline=baseline,
             review_log=review_log,
+            review_log_unreadable=tuple(unreadable),
             protected_visible=protected,
         )
 
@@ -1348,21 +1355,26 @@ class RunExecutor:
         """
         return pathlib.Path(self._env.scratch_dir) / REVIEW_WORKSPACE_DIR
 
-    def _capture_review_log(self, definition: RunDefinition):
+    def _capture_review_log(self, definition: RunDefinition, unreadable=None):
         """Read the review workspace's run log right after a run.
 
         MAGI FIX (S6 loop 3): the next review run rebuilds the workspace from
         nothing, so a scenario that read the live directory after the runs
         depended on being evaluated before a later review run wiped it (F4).
 
+        MAGI FIX (S6 loop 12): a file that could not be read was dropped
+        without a word, so a locked log read as a product that never logged
+        (F1a-c2). It is now named in *unreadable*.
+
         Args:
             definition: The run that just finished.
+            unreadable: A list that receives ``"<name> (<error>)"`` for each
+                file that could not be read, or ``None`` to discard them.
 
         Returns:
-            tuple[bytes, ...] | None: Each file's bytes under ``.magi/logs``,
-            in sorted path order; ``None`` for a run without a review
-            workspace or when the directory does not exist. A file that cannot
-            be read is left out: the caller judges what is there.
+            tuple[bytes, ...] | None: Each readable file's bytes under
+            ``.magi/logs``, in sorted path order; ``None`` for a run without a
+            review workspace or when the directory does not exist.
         """
         if REVIEW_WORKSPACE_TOKEN not in definition.argv:
             return None
@@ -1375,8 +1387,9 @@ class RunExecutor:
                 continue
             try:
                 captured.append(path.read_bytes())
-            except OSError:
-                continue
+            except OSError as exc:
+                if unreadable is not None:
+                    unreadable.append("%s (%s)" % (path.name, exc))
         return tuple(captured)
 
     def _prepare_review_workspace(self, definition: RunDefinition):

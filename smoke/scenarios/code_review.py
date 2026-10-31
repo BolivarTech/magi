@@ -731,7 +731,9 @@ def _run_log_finding(run, match):
 
     Returns:
         Finding: ``PASS`` when a line carries ``run=<id>`` and the refusal
-        (the text stderr showed, when it matched); else ``FAIL``. A missing run
+        (the text stderr showed, when it matched); ``CANNOT_TEST`` when no
+        readable line does and some log file could not be read; else
+        ``FAIL``. A missing run
         id or log directory is a ``FAIL`` too: R15 is deterministic, needs no
         backend, and RV-S7 requires the refusal in the run log, so a product
         that refuses on stderr but never logs is the defect, not an
@@ -764,6 +766,13 @@ def _run_log_finding(run, match):
                         "the review workspace has no %s directory, so the refusal "
                         "was never logged" % "/".join(logs.LOG_DIR_PARTS))
     found = any(matcher(data) for data in captured)
+    # MAGI FIX (S6 loop 12): a log file the executor could not open is the
+    # environment refusing, as in logs.scan, never a product FAIL (F1a-c2).
+    if not found and run.review_log_unreadable:
+        return _finding(S50_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R15",
+                        "no readable line of the run log carries the refusal, "
+                        "and these files could not be read: %s"
+                        % ", ".join(run.review_log_unreadable))
     return _verdict(S50_ASSERTIONS, 2, "R15", found,
                     "no line of the run log carries run=%s and the budget refusal"
                     % run_id)
