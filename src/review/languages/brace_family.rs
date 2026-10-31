@@ -3596,4 +3596,23 @@ void g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_comment_line_ending_in_a_semicolon_joins_no_declaration_group() {
+        // [MAGI S6 loop 13, B2b1-m1] the group's forward scan asked the line text alone, so a
+        // block comment's body line ending in `;` (`note;`) was taken for a declaration and
+        // joined the group, unlike the main scan, which passes comment lines over.
+        let c = "int x,\n    y; /* c\nnote;\n*/\nint f(void) {\n}\n";
+        let units = extract(&c_extractor(), c, &all_lines(c));
+        let found = spans(&units);
+        assert!(
+            found.contains(&("declarations", UnitKind::DeclarationGroup, 1, 2)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&("f", UnitKind::Function, 5, 6)),
+            "{found:?}"
+        );
+        assert_each_line_in_one_unit(&units, 6);
+    }
 }
