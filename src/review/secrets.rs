@@ -84,10 +84,14 @@ const PEM_MAX_TYPE_WORD: usize = 16;
 /// The most type words a PEM private-key header may name before `PRIVATE KEY` (`SSH2
 /// ENCRYPTED`, `RSA ENCRYPTED`), so a header is checked in constant time.
 const PEM_MAX_TYPE_WORDS: usize = 4;
-/// The header of an SSH2 private key (RFC 4716 armor: four dashes and spaces; split so the
-/// source holds no such header). Its `END` line has the same armor, so its mask runs to the end
-/// of the text: the safe direction.
+/// The header of an encrypted SSH2 private key (RFC 4716 armor: four dashes and spaces; split
+/// so the source holds no such header). Its `END` line has the same armor, so its mask runs to
+/// the end of the text: the safe direction.
 const SSH2_PRIVATE_KEY: &str = concat!("---- BEGIN SSH2 ", "ENCRYPTED PRIVATE KEY ----");
+/// The header of an unencrypted SSH2 private key (the ssh.com/Tectia armor of
+/// [`SSH2_PRIVATE_KEY`] without `ENCRYPTED`), masked the same way.
+// MAGI FIX (S6 loop 12, A2-m1): the unencrypted armor matched no pattern and its file was sent.
+const SSH2_PLAIN_PRIVATE_KEY: &str = concat!("---- BEGIN SSH2 ", "PRIVATE KEY ----");
 /// The end of a PEM private-key header.
 const PEM_PRIVATE_KEY: &str = "PRIVATE KEY-----";
 /// The header of an armored OpenPGP private key (split so the source holds no such header).
@@ -181,6 +185,10 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
     SecretPattern {
         name: "pem-private-key",
         matcher: Matcher::Header(SSH2_PRIVATE_KEY),
+    },
+    SecretPattern {
+        name: "pem-private-key",
+        matcher: Matcher::Header(SSH2_PLAIN_PRIVATE_KEY),
     },
     SecretPattern {
         name: "pgp-private-key",
