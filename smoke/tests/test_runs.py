@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from unittest import mock
 
-from smoke import runs
+from smoke import logs, runs
 from smoke.binary import ReleaseBinary
 from smoke.config import ROTATION_MARKER, SmokeConfig
 from smoke.env import Environment
@@ -252,6 +252,13 @@ class AccessorTests(unittest.TestCase):
         self.assertEqual(self.root / "checkout", runs.repo_root())
         self.assertEqual(self.root, runs.workspace_root())
         self.assertEqual("opensesame1234", runs.passphrase())
+
+    def test_the_log_directory_is_magi_logs_under_the_workspace_root(self) -> None:
+        """[MAGI §6 MS2 loop 11, F1a-c1] ``logs.log_directory`` delegates to
+        :func:`runs.workspace_root`; it does not call itself. Executing it
+        here keeps that visible to the next review."""
+        runs.configure(self.binary, self.env, _config_double())
+        self.assertEqual(self.root / ".magi" / "logs", logs.log_directory())
 
     def test_the_scratch_area_is_created_on_demand(self) -> None:
         """``--init-env`` makes it, but a scenario asking for it after a manual
