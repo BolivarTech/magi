@@ -359,6 +359,24 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
             self.assertIn("mirror", str(caught.exception))
             self.assertTrue(keep.is_file())
 
+    @unittest.skipUnless(os.name == "nt", "junctions exist on Windows only")
+    def test_a_junction_is_a_link_without_os_path_isjunction(self) -> None:
+        # [MAGI §6 MS2 loop 13, F1a-m3/b2/c2] os.path.isjunction exists from Python 3.12; on the 3.11 floor a
+        # junction read as an ordinary directory, so copytree and rmtree went through it.
+        import _winapi
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            target = root / "target"
+            target.mkdir()
+            junction = root / "junction"
+            _winapi.CreateJunction(str(target), str(junction))
+            with mock.patch.object(os.path, "isjunction", None):
+                self.assertTrue(runs._is_link(junction))
+                self.assertFalse(runs._is_link(target))
+                self.assertFalse(runs._is_link(root / "absent"))
+                with self.assertRaises(HarnessError):
+                    runs._reject_links(root)
+
     def test_an_unreadable_directory_under_magi_is_a_harness_error(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-c1] os.walk skips a directory it cannot list unless told otherwise, so a
         # link inside it went unchecked; the walk must fail as a harness error (exit 3), never pass.
