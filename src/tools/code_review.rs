@@ -2330,4 +2330,21 @@ mod tests {
             assert!(part.contains("a[2Jbc31m\nd\te"), "{part:?}");
         }
     }
+
+    #[test]
+    fn a_content_change_and_a_plan_change_have_distinct_run_log_names() {
+        // [MAGI S6 loop 8, D2-b2] two failure modes (the batch count moved; the content moved
+        // under the same count) read apart in the run log.
+        assert_eq!(
+            review_error_cause_name(&ReviewError::PlanChanged {
+                approved: 1,
+                now: 2
+            }),
+            "plan_changed"
+        );
+        assert_eq!(
+            review_error_cause_name(&ReviewError::ContentChanged),
+            "content_changed"
+        );
+    }
 }
