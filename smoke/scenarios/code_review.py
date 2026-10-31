@@ -333,33 +333,87 @@ PROVIDER_FAILURE_PREFIXES = (
 )
 
 
-def _provider_failures_only(failed, shortfall):
-    """Whether *failed* accounts for *shortfall* batches, all lost to the backend.
+#: The cause the product gives every batch from the one the clock cut to the
+#: last (``CLOCK_EXPIRED`` in ``src/review/pipeline.rs``).
+CLOCK_EXPIRED_CAUSE = "clock expired"
+
+
+def _completed_by_metrics(metrics):
+    """The 1-based batches whose metrics show a report arrived.
+
+    A batch that failed keeps its time and no tokens (``spent`` in
+    ``src/review/pipeline.rs``), so a batch with tokens completed. A batch
+    with none may have completed too (a backend that does not count), so this
+    is a subset of the completed batches, never the whole set.
+
+    Args:
+        metrics: ``code_review.batches``, or anything else when it is absent.
+
+    Returns:
+        set: The ``index`` of every entry with input or output tokens.
+
+    Example:
+        >>> sorted(_completed_by_metrics([{"index": 2, "input_tokens": 9}, {"index": 3}]))
+        [2]
+    """
+    if not isinstance(metrics, list):
+        return set()
+    return {entry["index"] for entry in metrics
+            if isinstance(entry, dict) and _is_count(entry.get("index"))
+            and any(_is_count(entry.get(key)) and entry.get(key) > 0
+                    for key in ("input_tokens", "output_tokens"))}
+
+
+def _provider_failures_only(failed, planned, shortfall, metrics=None):
+    """Whether *failed* names the *shortfall* missing batches, all lost to the backend.
 
     Args:
         failed: ``code_review.failed_batches``: ``[batch, why]`` pairs.
+        planned: ``batches_planned``, at least one.
         shortfall: ``batches_planned - batches_completed``, at least one.
+        metrics: ``code_review.batches``, read by :func:`_completed_by_metrics`.
 
     Returns:
         bool: ``True`` when *failed* is a list of exactly *shortfall* pairs,
-        each with a text reason that starts with one of
-        :data:`PROVIDER_FAILURE_PREFIXES`.
+        each with a distinct 1-based integer batch no larger than *planned*
+        and a text reason that starts with one of
+        :data:`PROVIDER_FAILURE_PREFIXES`; when the clock expired, its entries
+        are the last ones and name every batch from the one it cut to
+        *planned* (the batches run in series); and when no named batch shows
+        a report in *metrics*. The completed batches are not published, so
+        that is the whole correspondence the JSON can prove.
 
     Example:
-        >>> _provider_failures_only([[3, "http error 429: quota"]], 1)
+        >>> _provider_failures_only([[3, "http error 429: quota"]], 5, 1)
         True
-        >>> _provider_failures_only([[3, "response contract violated: x"]], 1)
+        >>> _provider_failures_only([[3, "response contract violated: x"]], 5, 1)
+        False
+        >>> _provider_failures_only([[3, "timeout: a"], [3, "timeout: b"]], 5, 2)
         False
     """
+    # MAGI FIX (S6 loop 13): the batch ids were never read, so a repeated,
+    # zero-based or out-of-range id, or a completed batch, passed (F1a-b1).
     if not isinstance(failed, list) or len(failed) != shortfall:
         return False
+    batches, reasons = [], []
     for entry in failed:
         if not (isinstance(entry, list) and len(entry) == 2
+                and _is_count(entry[0]) and 1 <= entry[0] <= planned
                 and isinstance(entry[1], str)):
             return False
-        if not entry[1].lstrip().lower().startswith(PROVIDER_FAILURE_PREFIXES):
+        reason = entry[1].strip().lower()
+        if not reason.startswith(PROVIDER_FAILURE_PREFIXES):
             return False
-    return True
+        batches.append(entry[0])
+        reasons.append(reason)
+    if len(set(batches)) != len(batches):
+        return False
+    if CLOCK_EXPIRED_CAUSE in reasons:
+        first = reasons.index(CLOCK_EXPIRED_CAUSE)
+        if (any(reason != CLOCK_EXPIRED_CAUSE for reason in reasons[first:])
+                or batches[first:] != list(range(batches[first], planned + 1))):
+            return False
+    return not set(batches) & _completed_by_metrics(metrics)
 
 
 def _batches_finding(section, run_id):
@@ -407,7 +461,8 @@ def _batches_finding(section, run_id):
     # timeout, auth) read as a product FAIL, and equal counts beside a
     # declared failure passed "every one completed" (F1a-m1, F1a-b1, F1a-c3).
     if completed != planned:
-        if _provider_failures_only(failed, planned - completed):
+        if _provider_failures_only(failed, planned, planned - completed,
+                                   section.get("batches")):
             return _finding(
                 S47_ASSERTIONS, 2, Outcome.CANNOT_TEST, run_id,
                 "batches_completed is %r of %r planned, and every missing "

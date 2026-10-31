@@ -247,7 +247,8 @@ class CodeReviewScenarioTests(unittest.TestCase):
                     "retry abandoned after 2 attempt(s): OperationBudgetExhausted",
                     "insufficient agents: 0 succeeded, 2 required", "clock expired"):
             doc = _review(5)
-            doc["code_review"].update(batches_completed=4, failed_batches=[[3, why]])
+            # [MAGI §6 MS2 loop 13, F1a-b1] batch 5: a clock expiry names every batch from the cut one to the last.
+            doc["code_review"].update(batches_completed=4, failed_batches=[[5, why]])
             self.assertEqual(Outcome.CANNOT_TEST,
                              _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]], why)
 
