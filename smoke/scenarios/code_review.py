@@ -359,9 +359,10 @@ def _locations_finding(section, run_id):
 
     Returns:
         Finding: ``FAIL`` on a missing list, an entry that is not an object, a
-        file outside :data:`S47_FILES` or a ``line`` outside the generated
-        file's lines; ``CANNOT_TEST`` when no finding carries a file;
-        otherwise ``PASS``. A finding without a file is unlocated, not invented.
+        ``line`` without a file, a file outside :data:`S47_FILES` or a
+        ``line`` outside the generated file's lines; ``CANNOT_TEST`` when no
+        finding carries a file; otherwise ``PASS``. A finding with neither a
+        file nor a line is unlocated, not invented.
     """
     findings, failure = _list_under(section, "findings")
     if findings is None:
@@ -369,6 +370,13 @@ def _locations_finding(section, run_id):
     if not all(isinstance(f, dict) for f in findings):
         return _finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
                         "code_review.findings holds an entry that is not an object")
+    # MAGI FIX (S6 loop 10): a line with no file was dropped from every check,
+    # so a report of only such findings read as CANNOT_TEST (F1a-c1).
+    fileless = [f.get("line") for f in findings
+                if f.get("file") is None and f.get("line") is not None]
+    if fileless:
+        return _finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
+                        "findings carry a line but no file: %s" % fileless)
     located = [f for f in findings if f.get("file") is not None]
     if not located:
         return _finding(S47_ASSERTIONS, 4, Outcome.CANNOT_TEST, run_id,
