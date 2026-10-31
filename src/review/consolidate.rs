@@ -1329,4 +1329,45 @@ mod tests {
             "without a probe the second title is not claimed"
         );
     }
+
+    #[test]
+    fn a_member_magi_core_did_not_list_still_counts_as_a_source() {
+        // [MAGI S6 loop 9, C1-m1] past magi-core's findings cap, Melchior's finding at a.rs:3
+        // joins the group magi-core formed from Balthasar's alone: magi-core's `sources` says
+        // [balthasar], and the group holds both mages' findings. Reading only magi-core's list
+        // made the finding `single_mage` though two mages reported it.
+        let f = |title: &str| -> Finding {
+            serde_json::from_value(serde_json::json!({
+                "severity": "warning", "title": title, "detail": "d",
+                "file": "a.rs", "line": 3
+            }))
+            .expect("a Finding")
+        };
+        let reported = vec![
+            Reported {
+                batch: 0,
+                agent: AgentName::Balthasar,
+                finding: f("from balthasar"),
+            },
+            Reported {
+                batch: 0,
+                agent: AgentName::Melchior,
+                finding: f("from melchior"),
+            },
+        ];
+        let dedup: Vec<DedupFinding> = vec![serde_json::from_value(serde_json::json!({
+            "severity": "warning", "title": "from balthasar", "detail": "d",
+            "sources": ["balthasar"], "file": "a.rs", "line": 3, "category": "other"
+        }))
+        .expect("a DedupFinding")];
+        let group = Group {
+            dedup: Some(0),
+            id: None,
+            rep: "from balthasar".into(),
+            members: vec![0, 1],
+        };
+        let c = finding_of(&group, &reported, &dedup, false);
+        assert_eq!(c.sources, vec![AgentName::Balthasar, AgentName::Melchior]);
+        assert_eq!(c.titles, vec!["from balthasar", "from melchior"]);
+    }
 }
