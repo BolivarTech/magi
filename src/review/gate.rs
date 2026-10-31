@@ -1877,4 +1877,25 @@ mod tests {
         );
         assert_eq!(g.per_model().get("clef:cloud"), Some(&1));
     }
+
+    #[tokio::test]
+    async fn a_critical_on_an_ambiguous_side_keeps_both_causes() {
+        // [MAGI S6 loop 9, C1-c2] the critical rule set the cause and the ambiguity was dropped,
+        // though `causes` lists every cause that applies.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.99));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g
+            .judge_ambiguous_side(&finding(Severity::Critical, Some(3)), "x\nx\nx\n", None)
+            .await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("critical never filtered"),
+                vec!["critical never filtered", "ambiguous diff side"]
+            )
+        );
+    }
 }
