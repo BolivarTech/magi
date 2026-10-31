@@ -3184,7 +3184,7 @@ void g(void) {
             ]
         );
         assert_each_line_in_one_unit(&parts, 6);
-        let rust = "/// A.\nconst A: u8 = 1;\nconst B: [u8; 2] = [\n    1, 2,\n];\n";
+        let rust = "/// A.\nconst A: u8 = 1;\nconst B: S = S {\n    a: 1,\n};\n";
         let parts = split(&rust_extractor(), rust, 2, UnitKind::DeclarationGroup);
         assert_eq!(
             spans(&parts).iter().map(|s| (s.2, s.3)).collect::<Vec<_>>(),
