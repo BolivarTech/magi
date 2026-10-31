@@ -452,9 +452,10 @@ impl BraceFamilyExtractor {
     }
 
     /// The 0-based last line of the declaration at line `j`: the end of the block its value
-    /// opens ([`declaration_block`]), of a `#define` continued by `\` ([`preprocessor_end`]) or
-    /// of a declaration list wrapped after a comma ([`Self::declaration_list_end`]), whichever
-    /// is last; `j` itself otherwise. O(k) for the k lines of the declaration.
+    /// opens ([`declaration_block`]), of a `#define` continued by `\` ([`preprocessor_end`]), of
+    /// a declaration list wrapped after a comma ([`Self::declaration_list_end`]) or of a call
+    /// its initializer opens ([`call_initializer_end`]), whichever is last; `j` itself
+    /// otherwise. O(k) for the k lines of the declaration.
     fn declaration_end(
         &self,
         lines: &[&str],
@@ -466,6 +467,7 @@ impl BraceFamilyExtractor {
             .map_or(j, |b| b.1)
             .max(preprocessor_end(lines, j))
             .max(self.declaration_list_end(lines, scanned, j))
+            .max(call_initializer_end(lines, scanned, j))
     }
 
     /// The pieces of a declaration group too large for one batch: each declaration with its doc
@@ -1369,13 +1371,57 @@ fn returns_from_function(rest: &str) -> bool {
 }
 
 /// Whether a trimmed line opens an initializer it continues on the next lines: it ends in `=`
-/// (`static int n =`) or in `= {` (`int a[] = {`). O(n) in the line.
+/// (`static int n =`), in `= {` (`int a[] = {`) or in a call's `(` after the `=`
+/// ([`opens_call_initializer`]). O(n) in the line.
 fn opens_initializer(trimmed: &str) -> bool {
     trimmed
         .strip_suffix('{')
         .unwrap_or(trimmed)
         .trim_end()
         .ends_with('=')
+        || opens_call_initializer(trimmed)
+}
+
+/// Whether a trimmed line opens an initializer whose call wraps onto the next lines
+/// (`static const struct config c = make_config(`): it ends in `(` and holds a `=` before its
+/// first `(`, so a signature with a default argument (`void f(int a = g(`) is none. O(n).
+fn opens_call_initializer(trimmed: &str) -> bool {
+    // MAGI FIX (S6 loop 13): `T c = make(` was no declaration, so its header and arguments
+    // fell into a gap unit and its `);` became a declaration of its own.
+    trimmed.ends_with('(')
+        && trimmed
+            .split_once('(')
+            .is_some_and(|(before, _)| before.contains('='))
+}
+
+/// The 0-based line that closes the call an initializer opens at line `i`
+/// ([`opens_call_initializer`]): the first code line after it where the parentheses opened
+/// since line `i` all close, counted on the line text ([`paren_delta`]). The walk ends without
+/// one at a blank line or after [`MAX_BRACE_SEARCH_LINES`] lines; `i` then, and when line `i`
+/// opens no such call, so the declaration ends on its own line and the lines after it fall into
+/// later units, none lost. O(k) for the k lines walked.
+fn call_initializer_end(lines: &[&str], scanned: &[ScannedLine], i: usize) -> usize {
+    if !lines
+        .get(i)
+        .is_some_and(|l| opens_call_initializer(l.trim()))
+    {
+        return i;
+    }
+    let mut depth = paren_delta(lines, scanned, i);
+    let budget_end = i
+        .saturating_add(1)
+        .saturating_add(MAX_BRACE_SEARCH_LINES)
+        .min(lines.len());
+    for j in (i + 1)..budget_end {
+        if lines.get(j).is_some_and(|l| l.trim().is_empty()) {
+            return i;
+        }
+        depth += paren_delta(lines, scanned, j);
+        if depth <= 0 {
+            return j;
+        }
+    }
+    i
 }
 
 /// Whether a trimmed line opens a C or C++ linkage block (`extern "C" {`, `extern "C++" {`).
