@@ -94,6 +94,14 @@ class BatchConstantTests(unittest.TestCase):
         self.assertIn("pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = %d;" % code_review.SLACK_PCT, text)
         self.assertEqual(24, code_review.MIN_NEED_PER_BATCH_SECS)
 
+    def test_the_budget_split_and_ceiling_are_the_ones_s50_checks(self) -> None:
+        # [MAGI §6 MS2 loop 13, F1a-m2] _budget_fields_ok asserts wall == total // batches and a ceiling
+        # below the floor: pre_budget's integer split and its RAW (never floor-lifted) refusal ceiling.
+        text = _source("src/review/clock.rs")
+        self.assertRegex(text, r"Ok\(n\) => remaining_secs / n,")
+        self.assertRegex(text, r"let per_batch = batch_wall_clock_secs\(total_secs, batches\);")
+        self.assertRegex(text, r"per_batch_ceiling_secs: raw_ceiling_from_factor\(\s*per_batch,")
+
 
 class StderrWordingTests(unittest.TestCase):
     """The texts S48-S51 parse out of the product's ``stderr``."""
