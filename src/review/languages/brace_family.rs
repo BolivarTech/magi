@@ -314,7 +314,9 @@ impl BraceFamilyExtractor {
                 }
             }
             // Check declaration keywords
-            if self.is_declaration(trimmed) {
+            // MAGI FIX (S6 loop 8): `int x,` opened no declaration, so a declaration list
+            // wrapped after a comma lost its first line to a gap unit.
+            if self.is_declaration(trimmed) || self.opens_declaration_list(trimmed) {
                 // MAGI FIX (S6 loop 5): `const f = () => {` ended on its first line and its body
                 // fell into a gap; a function expression is a function, with its whole body.
                 if let Some((name, end)) = self.function_expression(lines, scanned, i, &stops) {
@@ -334,13 +336,15 @@ impl BraceFamilyExtractor {
                     declaration_block(lines, scanned, j, &stops)
                         .map_or(j, |b| b.1)
                         .max(preprocessor_end(lines, j))
+                        .max(self.declaration_list_end(lines, scanned, j))
                 };
                 // A declaration joins the group unless it is a function expression, its own unit.
                 let joins = |j: usize| {
-                    lines.get(j).is_some_and(|l| self.is_declaration(l.trim()))
-                        && self
-                            .function_expression(lines, scanned, j, &stops)
-                            .is_none()
+                    lines.get(j).is_some_and(|l| {
+                        self.is_declaration(l.trim()) || self.opens_declaration_list(l.trim())
+                    }) && self
+                        .function_expression(lines, scanned, j, &stops)
+                        .is_none()
                 };
                 let mut group_end = end_of(i);
                 // Scan forward for contiguous declarations, one blank line allowed between two.
@@ -489,6 +493,60 @@ impl BraceFamilyExtractor {
         semicolon
             || self.match_declaration_keyword(trimmed)
             || self.match_declaration_keyword(self.strip_modifiers(trimmed, false))
+    }
+
+    /// Whether a trimmed line opens a C or C++ declaration list wrapped after a comma (`int x,`,
+    /// `static const char *a = "x",`), for extractors with `semicolon_declarations`: code ending
+    /// in `,` that does not open with `}`, `#`, a comment, `:` or `,`. Only the main scan and its
+    /// declaration groups ask it, never [`Self::starts_construct`]: a constructor's initializer
+    /// line (`b_{0},`) ends in `,` too, and stopping a signature's brace search there cut the
+    /// function. A comment after the comma (`int x, // note`) hides it, declared: that line falls
+    /// into a gap unit as before. O(n) in the line.
+    fn opens_declaration_list(&self, trimmed: &str) -> bool {
+        self.semicolon_declarations
+            && trimmed.ends_with(',')
+            && !["}", "#", "//", "/*", "*", ":", ","]
+                .iter()
+                .any(|p| trimmed.starts_with(p))
+    }
+
+    /// The 0-based last line of the declaration list that line `i` opens
+    /// ([`Self::opens_declaration_list`]): the first later code line that ends in `;`. The walk
+    /// ends earlier, on the line before, at a blank line, a line whose braces do not balance (an
+    /// initializer block, which joins the group as a declaration of its own) or a line that opens
+    /// a block or function construct, so the list never takes a later construct. `i` when line `i`
+    /// opens no list. O(k) for the k lines walked.
+    fn declaration_list_end(&self, lines: &[&str], scanned: &[ScannedLine], i: usize) -> usize {
+        if !lines
+            .get(i)
+            .is_some_and(|l| self.opens_declaration_list(l.trim()))
+        {
+            return i;
+        }
+        let mut last = i;
+        for (k, line) in lines.iter().enumerate().skip(i + 1) {
+            let trimmed = line.trim();
+            let Some(record) = scanned.get(k) else {
+                break;
+            };
+            if trimmed.is_empty() {
+                break;
+            }
+            if record.is_non_code {
+                continue;
+            }
+            if record.ends_statement {
+                return k;
+            }
+            if record.brace_delta != 0
+                || self.construct_keyword(trimmed).is_some()
+                || self.signature_name(line, Some(record), false).is_some()
+            {
+                break;
+            }
+            last = k;
+        }
+        last
     }
 
     /// `trimmed` without the visibility words it opens with and, when `qualifiers`, the
