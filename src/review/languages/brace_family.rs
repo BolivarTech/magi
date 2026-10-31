@@ -3151,7 +3151,11 @@ void g(void) {
             let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(&code);
             open_brace_line(&lines, &scanned, 0, &|_| false)
         };
-        assert_eq!(search(64), Some(65), "a long parameter list still finds its brace");
+        assert_eq!(
+            search(64),
+            Some(65),
+            "a long parameter list still finds its brace"
+        );
         assert_eq!(search(100_000), None, "the search degrades to no brace");
     }
 
