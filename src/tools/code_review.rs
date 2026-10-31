@@ -532,7 +532,9 @@ pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
         ReviewError::Protected(_) => "protected",
         ReviewError::NotRegularFile(_) => "not_regular_file",
         ReviewError::EgressSecret { .. } => "egress_secret",
-        ReviewError::PlanChanged { .. } | ReviewError::ContentChanged => "plan_changed",
+        ReviewError::PlanChanged { .. } => "plan_changed",
+        // MAGI FIX (S6 loop 8, D2-b2): a content change is its own failure mode.
+        ReviewError::ContentChanged => "content_changed",
     }
 }
 
