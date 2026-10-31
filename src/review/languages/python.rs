@@ -86,6 +86,13 @@ impl LanguageExtractor for PythonExtractor {
     /// Splits a class at its methods: each `def` / `async def` at the indentation of the
     /// class body, with its decorators, on a line that starts a logical line (outside
     /// triple-quoted strings and brackets; see `continued_lines`). O(n) in the class's lines.
+    ///
+    /// A class with no such method (one holding only data attributes, as generated code may) or
+    /// a unit of another kind gives no pieces, and is batched whole: if it is larger than one
+    /// batch, the review ends with the typed `ReviewError::TooLargeForBatch` (RV03) before the
+    /// clock starts, never a silent cut. Pinned by
+    /// `construct_ranges_are_sorted_and_disjoint_and_a_memberless_class_does_not_split` here and
+    /// `review::batching`'s `a_single_unit_larger_than_the_limit_is_a_typed_error`.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         // MAGI FIX (S6 loop 3): a class too large for one batch is reviewed method by method.
         if unit.kind != UnitKind::Class {
