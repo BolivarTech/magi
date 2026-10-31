@@ -9,6 +9,7 @@
 //! units (functions, structs, classes, declaration groups).
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use super::scanner::{find_closing_brace, CodeScanner, LexicalRules, ScannedLine};
 use super::{
@@ -302,7 +303,8 @@ impl BraceFamilyExtractor {
         scanned: &[ScannedLine],
         members: bool,
     ) -> Vec<Construct> {
-        self.try_detect_constructs(lines, scanned, members)
+        let budget = SearchBudget::for_lines(lines.len());
+        self.try_detect_constructs(lines, scanned, members, &budget)
             .unwrap_or_default()
     }
 
@@ -323,11 +325,17 @@ impl BraceFamilyExtractor {
         lines: &[&str],
         scanned: &[ScannedLine],
         members: bool,
+        budget: &SearchBudget,
     ) -> Option<Vec<Construct>> {
         // MAGI FIX (S6 loop 10): the conversions fell back to `u32::MAX`, `1` or the line
         // number, unlike `shift_members`; an unrepresentable line now aborts detection.
         let mut constructs = Vec::new();
         let mut i = 0;
+        let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
+        let search = BraceSearch {
+            stops: &stops,
+            budget,
+        };
 
         while let Some(line) = lines.get(i) {
             if scanned.get(i).is_some_and(|s| s.is_non_code) {
@@ -344,7 +352,6 @@ impl BraceFamilyExtractor {
                 .last()
                 .map_or(0, |c: &Construct| c.end_line as usize);
 
-            let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
             // MAGI FIX (S6 loop 7): Go's `type (` opened one nameless struct and its later
             // members fell into gaps; each member is a construct of its own.
             if let Some((last, group)) = self.grouped_types(lines, scanned, i) {
@@ -354,7 +361,7 @@ impl BraceFamilyExtractor {
             }
             if let Some((kind, name)) = self.construct_keyword(trimmed) {
                 let start = self.scan_back_for_docs(lines, scanned, i, floor);
-                let end = brace_block_end(lines, scanned, i, line_num, &stops)?;
+                let end = brace_block_end(lines, scanned, i, line_num, &search)?;
                 constructs.push(Construct {
                     kind,
                     name,
@@ -367,15 +374,15 @@ impl BraceFamilyExtractor {
             }
             let prototypes = members && self.member_prototypes();
             if let Some(name) = self.signature_name(line, scanned.get(i), prototypes) {
-                let opens = open_brace_line(lines, scanned, i, &stops).is_some();
+                let opens = open_brace_line(lines, scanned, i, &search).is_some();
                 if opens || trimmed.ends_with('}') || prototypes {
                     let start = self.scan_back_for_docs(lines, scanned, i, floor);
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
                     let end = if opens || trimmed.ends_with('}') {
-                        brace_block_end(lines, scanned, i, line_num, &stops)?
+                        brace_block_end(lines, scanned, i, line_num, &search)?
                     } else {
-                        line_number(statement_end(lines, scanned, i, &stops))?
+                        line_number(statement_end(lines, scanned, i, &search))?
                     };
                     constructs.push(Construct {
                         kind: UnitKind::Function,
@@ -393,7 +400,7 @@ impl BraceFamilyExtractor {
             if self.is_declaration(trimmed) || self.opens_declaration_list(trimmed) {
                 // MAGI FIX (S6 loop 5): `const f = () => {` ended on its first line and its body
                 // fell into a gap; a function expression is a function, with its whole body.
-                if let Some((name, end)) = self.function_expression(lines, scanned, i, &stops) {
+                if let Some((name, end)) = self.function_expression(lines, scanned, i, &search) {
                     let start = self.scan_back_for_docs(lines, scanned, i, floor);
                     constructs.push(Construct {
                         kind: UnitKind::Function,
@@ -406,7 +413,7 @@ impl BraceFamilyExtractor {
                 }
                 let group_start = i;
                 // MAGI FIX (S6 loop 7): a `#define` continued by `\` ends on its last line.
-                let end_of = |j: usize| self.declaration_end(lines, scanned, j, &stops);
+                let end_of = |j: usize| self.declaration_end(lines, scanned, j, &search);
                 // A declaration joins the group unless it is a function expression, its own unit.
                 // MAGI FIX (S6 loop 13): a comment line ending in `;` joined the group; only code
                 // does, as in the main scan.
@@ -416,7 +423,7 @@ impl BraceFamilyExtractor {
                             self.is_declaration(l.trim()) || self.opens_declaration_list(l.trim())
                         })
                         && self
-                            .function_expression(lines, scanned, j, &stops)
+                            .function_expression(lines, scanned, j, &search)
                             .is_none()
                 };
                 let mut group_end = end_of(i);
@@ -461,13 +468,13 @@ impl BraceFamilyExtractor {
         lines: &[&str],
         scanned: &[ScannedLine],
         j: usize,
-        stops: &dyn Fn(usize) -> bool,
+        search: &BraceSearch<'_>,
     ) -> usize {
-        declaration_block(lines, scanned, j, stops)
+        declaration_block(lines, scanned, j, search)
             .map_or(j, |b| b.1)
             .max(preprocessor_end(lines, j))
             .max(self.declaration_list_end(lines, scanned, j))
-            .max(call_initializer_end(lines, scanned, j))
+            .max(call_initializer_end(lines, scanned, j, search))
     }
 
     /// The pieces of a declaration group too large for one batch: each declaration with its doc
@@ -482,6 +489,11 @@ impl BraceFamilyExtractor {
         let lines: Vec<&str> = unit.content.lines().collect();
         let scanned = CodeScanner::new(self.lexical_rules.clone()).scan_all(&unit.content);
         let stops = |j: usize| self.starts_construct(&lines, &scanned, j, false);
+        let budget = SearchBudget::for_lines(lines.len());
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &budget,
+        };
         let mut members: Vec<Member> = Vec::new();
         let mut floor = 0;
         let mut j = 0;
@@ -493,7 +505,7 @@ impl BraceFamilyExtractor {
                 j += 1;
                 continue;
             }
-            let end = self.declaration_end(&lines, &scanned, j, &stops).max(j);
+            let end = self.declaration_end(&lines, &scanned, j, &search).max(j);
             let start = self.scan_back_for_docs(&lines, &scanned, j, floor);
             let Some((first, last)) = line_number(start).zip(line_number(end)) else {
                 return Vec::new();
@@ -1074,7 +1086,7 @@ impl BraceFamilyExtractor {
         lines: &[&str],
         scanned: &[ScannedLine],
         i: usize,
-        stops: &dyn Fn(usize) -> bool,
+        search: &BraceSearch<'_>,
     ) -> Option<(String, usize)> {
         let text = self.strip_modifiers(lines.get(i)?.trim(), false);
         let rest = FUNCTION_EXPRESSION_KEYWORDS
@@ -1085,7 +1097,7 @@ impl BraceFamilyExtractor {
             .take_while(|&c| is_identifier_char(c))
             .collect();
         let value = rest.split_once('=')?.1.trim_start();
-        let (open, close) = declaration_block(lines, scanned, i, stops)?;
+        let (open, close) = declaration_block(lines, scanned, i, search)?;
         let arrow = lines.get(i..=open)?.iter().any(|l| l.contains("=>"));
         let function = opens_function_value(value);
         (!name.is_empty() && (arrow || function)).then_some((name, close))
@@ -1143,6 +1155,55 @@ const LINE_OPENING_COMMENTS: [&str; 2] = ["//", "/*"];
 /// O(n × `MAX_BRACE_SEARCH_LINES`) line visits for a file of n lines.
 const MAX_BRACE_SEARCH_LINES: usize = 1_024;
 
+/// What a forward brace search of one detection pass is bounded by: where the next construct
+/// starts (`stops`, [`BraceFamilyExtractor::starts_construct`]) and the line visits the pass may
+/// still spend ([`SearchBudget`]).
+struct BraceSearch<'s> {
+    /// Whether a line (0-based) starts the next construct.
+    stops: &'s dyn Fn(usize) -> bool,
+    /// The line visits left to the whole detection pass.
+    budget: &'s SearchBudget,
+}
+
+impl BraceSearch<'_> {
+    /// Whether line `j` (0-based) starts the next construct. O(k) in the keywords.
+    fn stops(&self, j: usize) -> bool {
+        (self.stops)(j)
+    }
+
+    /// Spends one line visit of the pass ([`SearchBudget::spend`]).
+    fn spend(&self) -> bool {
+        self.budget.spend()
+    }
+}
+
+/// The line visits the forward searches of one detection pass may spend.
+struct SearchBudget {
+    /// The visits spent so far.
+    spent: Cell<usize>,
+}
+
+impl SearchBudget {
+    /// The budget of a detection pass over a text of `lines` lines.
+    fn for_lines(_lines: usize) -> Self {
+        Self {
+            spent: Cell::new(0),
+        }
+    }
+
+    /// Records one line visit; whether the search may go on.
+    fn spend(&self) -> bool {
+        self.spent.set(self.spent.get().saturating_add(1));
+        true
+    }
+
+    /// The line visits spent so far.
+    #[cfg(test)]
+    fn spent(&self) -> usize {
+        self.spent.get()
+    }
+}
+
 /// The 0-based line holding the opening brace of the construct that starts at line `i`: line
 /// `i` when it opens one, else the first later line that does, so a signature wrapped over any
 /// number of lines (rustfmt's `fn f(\n    a: u8,\n) -> u8 {`) finds its brace.
@@ -1179,7 +1240,7 @@ fn open_brace_line(
     lines: &[&str],
     scanned: &[ScannedLine],
     i: usize,
-    stops: &dyn Fn(usize) -> bool,
+    search: &BraceSearch<'_>,
 ) -> Option<usize> {
     let opens = |idx: usize| scanned.get(idx).is_some_and(|s| s.brace_delta > 0);
     let is_code = |idx: usize| scanned.get(idx).is_some_and(|s| !s.is_non_code);
@@ -1203,6 +1264,9 @@ fn open_brace_line(
         .saturating_add(MAX_BRACE_SEARCH_LINES)
         .min(lines.len());
     for j in (i + 1)..budget_end {
+        if !search.spend() {
+            return None;
+        }
         // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
         // the next construct; a line after one ending in `,` continues the declaration.
         // MAGI FIX (S6 loop 11): a comment line ending in `,` (`// note,`) between two signatures
@@ -1215,7 +1279,7 @@ fn open_brace_line(
                     t.ends_with(',') && !LINE_OPENING_COMMENTS.iter().any(|c| t.starts_with(c))
                 })
         });
-        let ends_search = (parens <= 0 && !continues && stops(j))
+        let ends_search = (parens <= 0 && !continues && search.stops(j))
             || lines
                 .get(j)
                 .is_some_and(|l| l.trim().is_empty() || opens_statement(l.trim()));
@@ -1316,7 +1380,7 @@ fn declaration_block(
     lines: &[&str],
     scanned: &[ScannedLine],
     i: usize,
-    stops: &dyn Fn(usize) -> bool,
+    search: &BraceSearch<'_>,
 ) -> Option<(usize, usize)> {
     let opens = scanned.get(i).is_some_and(|s| s.brace_delta > 0);
     let continues = lines
@@ -1325,7 +1389,7 @@ fn declaration_block(
     if !(opens || continues) || lines.get(i).is_some_and(|l| opens_linkage_block(l.trim())) {
         return None;
     }
-    let open = open_brace_line(lines, scanned, i, stops)?;
+    let open = open_brace_line(lines, scanned, i, search)?;
     Some((open, find_closing_brace(scanned, open)))
 }
 
@@ -1400,7 +1464,12 @@ fn opens_call_initializer(trimmed: &str) -> bool {
 /// one at a blank line or after [`MAX_BRACE_SEARCH_LINES`] lines; `i` then, and when line `i`
 /// opens no such call, so the declaration ends on its own line and the lines after it fall into
 /// later units, none lost. O(k) for the k lines walked.
-fn call_initializer_end(lines: &[&str], scanned: &[ScannedLine], i: usize) -> usize {
+fn call_initializer_end(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    i: usize,
+    search: &BraceSearch<'_>,
+) -> usize {
     if !lines
         .get(i)
         .is_some_and(|l| opens_call_initializer(l.trim()))
@@ -1413,7 +1482,7 @@ fn call_initializer_end(lines: &[&str], scanned: &[ScannedLine], i: usize) -> us
         .saturating_add(MAX_BRACE_SEARCH_LINES)
         .min(lines.len());
     for j in (i + 1)..budget_end {
-        if lines.get(j).is_some_and(|l| l.trim().is_empty()) {
+        if !search.spend() || lines.get(j).is_some_and(|l| l.trim().is_empty()) {
             return i;
         }
         depth += paren_delta(lines, scanned, j);
@@ -1461,7 +1530,7 @@ fn statement_end(
     lines: &[&str],
     scanned: &[ScannedLine],
     i: usize,
-    stops: &dyn Fn(usize) -> bool,
+    search: &BraceSearch<'_>,
 ) -> usize {
     let ends = |j: usize| {
         scanned
@@ -1472,7 +1541,7 @@ fn statement_end(
         return i;
     }
     ((i + 1)..lines.len())
-        .take_while(|&j| !stops(j) && !lines.get(j).is_some_and(|l| l.trim().is_empty()))
+        .take_while(|&j| !search.stops(j) && !lines.get(j).is_some_and(|l| l.trim().is_empty()))
         .find(|&j| ends(j))
         .unwrap_or(i)
 }
@@ -1486,9 +1555,9 @@ fn brace_block_end(
     scanned: &[ScannedLine],
     i: usize,
     line_num: u32,
-    stops: &dyn Fn(usize) -> bool,
+    search: &BraceSearch<'_>,
 ) -> Option<u32> {
-    match open_brace_line(lines, scanned, i, stops) {
+    match open_brace_line(lines, scanned, i, search) {
         Some(open_idx) => line_number(find_closing_brace(scanned, open_idx)),
         None => Some(line_num),
     }
@@ -3490,7 +3559,15 @@ void g(void) {
             let code = format!("void f(\n{}) {{\n}}\n", "    a,\n".repeat(params));
             let lines: Vec<&str> = code.lines().collect();
             let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(&code);
-            open_brace_line(&lines, &scanned, 0, &|_| false)
+            open_brace_line(
+                &lines,
+                &scanned,
+                0,
+                &BraceSearch {
+                    stops: &|_| false,
+                    budget: &SearchBudget::for_lines(lines.len()),
+                },
+            )
         };
         assert_eq!(
             search(64),
@@ -3680,5 +3757,42 @@ void g(void) {
                 ("f", UnitKind::Function, 4, 5)
             ]
         );
+    }
+
+    #[test]
+    fn the_brace_searches_of_a_whole_file_spend_a_budget_linear_in_its_lines() {
+        // [MAGI S6 loop 13, B2b1-c5] each search was bounded, but a file of `f(` lines started
+        // one per line, O(n × MAX_BRACE_SEARCH_LINES) before the review clock; the searches of a
+        // pass now share one budget, and a construct whose brace is on its own line is still
+        // found once it is spent.
+        let lines_of_open_lists = 5_000;
+        let code = format!(
+            "{}\nint g(void) {{\n}}\n",
+            "f(\n".repeat(lines_of_open_lists)
+        );
+        let ext = c_extractor();
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(&code);
+        let budget = SearchBudget::for_lines(lines.len());
+        let constructs = ext
+            .try_detect_constructs(&lines, &scanned, false, &budget)
+            .expect("small line numbers");
+        // Linear in the lines, with room: an oracle of this test, not the production budget.
+        let linear_bound_per_line = 64;
+        let cap = lines.len() * linear_bound_per_line + MAX_BRACE_SEARCH_LINES;
+        assert!(
+            budget.spent() <= cap,
+            "{} visits for {} lines",
+            budget.spent(),
+            lines.len()
+        );
+        let g = constructs.iter().find(|c| c.name == "g").expect("g");
+        assert_eq!(
+            (g.kind, g.start_line, g.end_line),
+            (UnitKind::Function, 5_002, 5_003)
+        );
+        let total = u32::try_from(lines.len()).expect("small");
+        let units = extract(&ext, &code, &(1..=total).collect::<Vec<_>>());
+        assert_each_line_in_one_unit(&units, total);
     }
 }
