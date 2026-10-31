@@ -76,6 +76,10 @@ pub struct ResolvedInput {
     /// Diff sections and file names that are not UTF-8, by their lossily decoded path; their
     /// content is never sent.
     pub not_utf8: Vec<String>,
+    /// Listed names that are links whose target is gone. They read as files that do not exist,
+    /// so they are not reviewed (like a tracked file deleted from the tree); [`resolve_input`]
+    /// names them as `not a regular file` when nothing else is left to review.
+    pub dangling_links: Vec<String>,
 }
 
 /// The diff flags every diff of a review carries: no colour, no external driver, no textconv,
@@ -230,17 +234,21 @@ pub fn resolve_input(
     }
     // MAGI FIX (S6 loop 6): with only non-UTF-8 names left, the input went on with no file and
     // the omissions never reached the `nothing to review` error (RV20).
+    // MAGI FIX (S6 loop 8): the dangling links every listing leaves out are named too.
     if resolved.files.is_empty() {
-        return Err(ReviewError::NothingToReview {
-            skipped: resolved
-                .not_utf8
+        use super::filter::{SkipCause, Skipped};
+        let named = |paths: &[String], cause| {
+            paths
                 .iter()
-                .map(|path| super::filter::Skipped {
+                .map(move |path| Skipped {
                     path: super::secrets::display_path(path),
-                    cause: super::filter::SkipCause::NotUtf8,
+                    cause,
                 })
-                .collect(),
-        });
+                .collect::<Vec<_>>()
+        };
+        let mut skipped = named(&resolved.not_utf8, SkipCause::NotUtf8);
+        skipped.extend(named(&resolved.dangling_links, SkipCause::NotRegularFile));
+        return Err(ReviewError::NothingToReview { skipped });
     }
     Ok(resolved)
 }
@@ -485,6 +493,7 @@ fn resolve_file(
         files: vec![ReviewFile { path, diff: None }],
         source_kind: SourceKind::Worktree { old_rev: None },
         not_utf8: Vec::new(),
+        dangling_links: Vec::new(),
     })
 }
 
@@ -525,6 +534,7 @@ fn resolve_directory(
         files: Vec::new(),
         source_kind: SourceKind::Worktree { old_rev: None },
         not_utf8: Vec::new(),
+        dangling_links: Vec::new(),
     };
     let pathspec = if rel.is_empty() { "." } else { rel.as_str() };
     if in_work_tree(git, workspace, &dir)? {
@@ -532,21 +542,19 @@ fn resolve_directory(
         args.extend_from_slice(&["--", pathspec]);
         let (names, not_utf8) = split_nul(&git.run_bytes(&args)?);
         resolved.not_utf8 = not_utf8;
-        // A tracked file deleted from the tree, a link whose target is gone (which reads the
-        // same) or a submodule (a directory) is not read.
+        // A tracked file deleted from the tree is not read, and a link whose target is gone
+        // (which reads the same) is set aside.
         // MAGI FIX (S6 loop 8): any other metadata error dropped the name in silence; it is kept,
-        // and the reader fails naming the path and the error.
-        resolved.files = names
+        // and the reader fails naming the path and the error. A submodule (a directory) is kept
+        // too: the reader refuses it and the filter lists it as `not a regular file`.
+        let present = names
             .into_iter()
             .filter(|name| {
-                let path = workspace.join(name);
-                match std::fs::symlink_metadata(&path) {
-                    Err(e) => e.kind() != std::io::ErrorKind::NotFound,
-                    Ok(m) => !m.is_dir() && !is_dangling_link(&path),
-                }
+                std::fs::symlink_metadata(workspace.join(name))
+                    .map_or_else(|e| e.kind() != std::io::ErrorKind::NotFound, |_| true)
             })
-            .map(|path| ReviewFile { path, diff: None })
             .collect();
+        resolved.files = without_dangling(present, workspace, &mut resolved.dangling_links);
     } else {
         let mut args = LS_FILES_IGNORED_DIRECTORIES.to_vec();
         args.extend_from_slice(&["--", pathspec]);
@@ -555,19 +563,34 @@ fn resolve_directory(
         let mut found = Vec::new();
         walk(&dir, &rel, &ignored, &mut found, &mut resolved.not_utf8)?;
         found.sort();
-        resolved.files = found
-            .into_iter()
-            .map(|path| ReviewFile { path, diff: None })
-            .collect();
+        resolved.files = without_dangling(found, workspace, &mut resolved.dangling_links);
     }
     Ok(resolved)
+}
+
+/// `names` as files to read, with every link whose target is gone moved to `dangling` instead
+/// (relative to `workspace`), in order. O(names).
+fn without_dangling(
+    names: Vec<String>,
+    workspace: &Path,
+    dangling: &mut Vec<String>,
+) -> Vec<ReviewFile> {
+    let (gone, present): (Vec<String>, Vec<String>) = names
+        .into_iter()
+        .partition(|name| is_dangling_link(&workspace.join(name)));
+    dangling.extend(gone);
+    present
+        .into_iter()
+        .map(|path| ReviewFile { path, diff: None })
+        .collect()
 }
 
 /// The cause of a `Directory` input that names something other than a directory.
 pub const NOT_A_DIRECTORY: &str = "not a directory";
 
 /// Walks `dir` (whose workspace-relative path is `rel`) without following symlinks, collecting
-/// every non-directory entry except a link whose target is gone, a never-reviewed path
+/// every non-directory entry (a link whose target is gone too, which the caller sets aside with
+/// [`without_dangling`]) except a never-reviewed path
 /// ([`is_never_reviewed`], never entered) and what `ignored` names (a file by its path, a
 /// directory by its path and a trailing `/`, never entered). O(entries).
 ///
@@ -607,7 +630,7 @@ fn walk(
         }
         if entry.file_type().map_err(io)?.is_dir() {
             walk(&entry.path(), &path, ignored, found, not_utf8)?;
-        } else if !is_dangling_link(&entry.path()) {
+        } else {
             found.push(path);
         }
     }
@@ -617,8 +640,8 @@ fn walk(
 /// Uncommitted changes: the diff against the SHA of `HEAD` plus untracked files whole, or, in a
 /// repository without commits, every tracked and untracked file whole.
 ///
-/// An untracked link whose target is gone is not listed: it reads as a file that does not
-/// exist (`workspace` is where the names resolve).
+/// A listed link whose target is gone is set aside ([`without_dangling`]): it reads as a file
+/// that does not exist (`workspace` is where the names resolve).
 ///
 /// git must place the workspace inside its work tree first: a repository's `core.worktree` can
 /// move the work tree out of the workspace, and a diff against it would read files there.
@@ -632,7 +655,6 @@ fn resolve_uncommitted(
             workspace.display()
         )));
     }
-    let present = |name: &String| !is_dangling_link(&workspace.join(name));
     match verify(git, "HEAD") {
         Ok(head) => {
             let mut resolved = from_diff(&worktree_diff(git, &head)?, String::new(), None);
@@ -642,24 +664,18 @@ fn resolve_uncommitted(
             let (names, not_utf8) =
                 split_nul(&git.run_bytes(&["ls-files", "--others", "--exclude-standard", "-z"])?);
             resolved.not_utf8.extend(not_utf8);
-            resolved.files.extend(
-                names
-                    .into_iter()
-                    .filter(present)
-                    .map(|path| ReviewFile { path, diff: None }),
-            );
+            let untracked = without_dangling(names, workspace, &mut resolved.dangling_links);
+            resolved.files.extend(untracked);
             Ok(resolved)
         }
         Err(ReviewError::RefNotFound(_)) => {
             let (names, not_utf8) = split_nul(&git.run_bytes(LS_FILES_ALL)?);
+            let mut dangling_links = Vec::new();
             Ok(ResolvedInput {
-                files: names
-                    .into_iter()
-                    .filter(present)
-                    .map(|path| ReviewFile { path, diff: None })
-                    .collect(),
+                files: without_dangling(names, workspace, &mut dangling_links),
                 source_kind: SourceKind::Worktree { old_rev: None },
                 not_utf8,
+                dangling_links,
             })
         }
         Err(other) => Err(other),
@@ -733,6 +749,7 @@ fn from_diff(bytes: &[u8], new_rev: String, old_rev: Option<String>) -> Resolved
         files,
         source_kind: SourceKind::Revision { new_rev, old_rev },
         not_utf8,
+        dangling_links: Vec::new(),
     }
 }
 
