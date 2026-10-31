@@ -527,7 +527,8 @@ pub fn display_path(path: &str) -> String {
 /// `text` with every secret [`find_secret`] would name replaced by `<redacted: <pattern name>>`.
 ///
 /// Each turn masks the earliest secret of what follows the last mask (ties go to table order),
-/// and the end of a mask counts as a left boundary.
+/// grown over every secret that overlaps it ([`merged_end`]), and the end of a mask counts as a
+/// left boundary.
 ///
 /// # Arguments
 /// * `text` - Any text about to leave the process.
@@ -566,7 +567,7 @@ pub fn mask_secrets(text: &str) -> String {
         out.push_str(REDACTED_OPEN);
         out.push_str(name);
         out.push('>');
-        done = span.end;
+        done = merged_end(span.end, next.iter().flatten());
         let rest = text.get(done..).unwrap_or_default();
         for (slot, (p, lane)) in next.iter_mut().zip(&lanes) {
             if slot.as_ref().is_some_and(|s| s.start < done) {
@@ -578,6 +579,30 @@ pub fn mask_secrets(text: &str) -> String {
     }
     out.push_str(text.get(done..).unwrap_or_default());
     out
+}
+
+/// The end of a mask that ends at `end`, grown over every span of `spans` that opens inside it
+/// and ends past it, until none does. A span that overlaps the mask is a secret the mask cut
+/// (a token glued to a PEM header eats its `-----BEGIN`); searching what follows the mask
+/// would no longer find it, so the mask covers it whole. O(s²) for s spans, a constant.
+///
+/// # Arguments
+/// * `end` - Where the chosen span ends.
+/// * `spans` - The first span of each search, from where the last mask ended.
+///
+/// # Returns
+/// The end of the merged mask, at least `end`.
+// MAGI FIX (S6 loop 9): an overlapped PEM span was dropped and its body was sent in the clear.
+fn merged_end<'a>(mut end: usize, spans: impl Iterator<Item = &'a Range<usize>> + Clone) -> usize {
+    while let Some(grown) = spans
+        .clone()
+        .filter(|s| s.start < end && s.end > end)
+        .map(|s| s.end)
+        .max()
+    {
+        end = grown;
+    }
+    end
 }
 
 /// The token of `pattern`'s search `lane` whose left boundary is the end of a mask: the only
@@ -1062,20 +1087,25 @@ mod tests {
         );
     }
     /// The masking loop before S6 loop 4: each turn rescans what follows the last mask for every
-    /// pattern. O(k · n · p), kept as the reference the one-pass masking must equal.
+    /// pattern. O(k · n · p), kept as the reference the one-pass masking must equal. Since S6
+    /// loop 9 a mask grows over every first span that overlaps it, as `mask_secrets` does.
     fn mask_secrets_by_rescanning(text: &str) -> String {
         let mut out = String::new();
         let mut rest = text;
-        while let Some((span, name)) = SECRET_PATTERNS
-            .iter()
-            .filter_map(|p| p.matcher.first_span(rest).map(|r| (r, p.name)))
-            .min_by_key(|(r, _)| r.start)
-        {
+        loop {
+            let spans: Vec<(Range<usize>, &str)> = SECRET_PATTERNS
+                .iter()
+                .filter_map(|p| p.matcher.first_span(rest).map(|r| (r, p.name)))
+                .collect();
+            let Some((span, name)) = spans.iter().min_by_key(|(r, _)| r.start).cloned() else {
+                break;
+            };
             out.push_str(rest.get(..span.start).unwrap_or_default());
             out.push_str(REDACTED_OPEN);
             out.push_str(name);
             out.push('>');
-            rest = rest.get(span.end..).unwrap_or_default();
+            let end = merged_end(span.end, spans.iter().map(|(r, _)| r));
+            rest = rest.get(end..).unwrap_or_default();
         }
         out.push_str(rest);
         out
@@ -1110,6 +1140,8 @@ mod tests {
             format!("{aws}{ghp}"),
             format!("{aws_secret}-{aws}"),
             format!("x{ant}-{ghp}"),
+            format!("{sk}{pem}"),
+            format!("{aws}{pem}{sk}"),
         ];
         for text in &adjacent {
             assert_eq!(
