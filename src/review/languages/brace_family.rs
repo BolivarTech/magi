@@ -2948,4 +2948,30 @@ void g(void) {
             assert!(found.contains(&expected), "{expected:?} in {found:?}");
         }
     }
+
+    #[test]
+    fn a_java_annotation_on_the_declaration_line_is_part_of_the_declaration() {
+        // [MAGI S6 loop 10, B2b-m2] a line opening with `@` was never a signature, so
+        // `@Override public void run() {` was no method and an oversized class did not split there.
+        let java = BraceFamilyExtractor::java();
+        let code = "@Deprecated public class A {\n    @Override public void run() {\n        a();\n    }\n    @SuppressWarnings(\"x\") private int f() {\n        return 0;\n    }\n    @Override\n    public void g() {\n        b();\n    }\n}\n";
+        let parts = split(&java, code, 3, UnitKind::Class);
+        let found = spans(&parts);
+        for expected in [
+            ("run", UnitKind::Method, 2, 4),
+            ("f", UnitKind::Method, 5, 7),
+            ("g", UnitKind::Method, 8, 11),
+        ] {
+            assert!(found.contains(&expected), "{expected:?} in {found:?}");
+        }
+        assert_each_line_in_one_unit(&parts, 12);
+        let top = "@Override public void run() {\n    a();\n}\n@interface Marker {\n}\n";
+        assert_eq!(
+            spans(&extract(&java, top, &[2, 4])),
+            vec![
+                ("run", UnitKind::Function, 1, 3),
+                ("Marker", UnitKind::Class, 4, 5)
+            ]
+        );
+    }
 }
