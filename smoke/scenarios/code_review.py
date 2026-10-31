@@ -256,6 +256,18 @@ def _list_under(section, key):
     return items, ""
 
 
+def _is_count(value):
+    """Tell whether *value* is a JSON integer.
+
+    Args:
+        value: A value read from the product's JSON.
+
+    Returns:
+        bool: ``True`` for an ``int`` that is not a ``bool``.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _batches_finding(section, run_id):
     """Judge ``code_review.batches_planned`` and ``code_review.batches_completed``.
 
@@ -264,7 +276,8 @@ def _batches_finding(section, run_id):
         run_id: The shared run.
 
     Returns:
-        Finding: ``FAIL`` when ``batches_completed`` is not an integer equal to
+        Finding: ``FAIL`` when either count is missing or not an integer (a
+        ``bool`` is not one), or when ``batches_completed`` differs from
         ``batches_planned`` (one report over batches that never ran is not the
         multi-batch report RV-S2 asks for). Otherwise ``PASS`` at three batches
         or more; below that, ``CANNOT_TEST`` when the whole pool measured a
@@ -274,12 +287,19 @@ def _batches_finding(section, run_id):
     """
     planned = section.get("batches_planned")
     completed = section.get("batches_completed")
-    if not isinstance(completed, int) or completed != planned:
+    # [MAGI §6 MS2 loop 8, F1a-c1] a missing or non-integer count is a contract defect, never the
+    # CANNOT_TEST below: 2.0 == 2 and True == 1 would otherwise slip past the equality check.
+    if not (_is_count(planned) and _is_count(completed)):
+        return _finding(
+            S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
+            "batches_planned is %r and batches_completed is %r, expected two integers"
+            % (planned, completed))
+    if completed != planned:
         return _finding(
             S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
             "batches_completed is %r, expected every one of the %r planned"
             % (completed, planned))
-    if isinstance(planned, int) and planned >= MIN_BATCHES:
+    if planned >= MIN_BATCHES:
         return _finding(S47_ASSERTIONS, 2, Outcome.PASS, run_id)
     detail = "batches_planned is %r, expected at least %d" % (planned, MIN_BATCHES)
     unmeasured = section.get("unmeasured_models")
