@@ -736,6 +736,11 @@ impl<'a> Gate<'a> {
                 }
                 Err(DecisionError::Rejected { status, .. }) => {
                     // 413/422: the request itself is at fault; every model would repeat it.
+                    // MAGI FIX (S6 loop 8, C1-c1): refuted, not changed. Only a 400 or a 413/422
+                    // reaches this arm: for a request pinned to one model (`with_model`), the
+                    // client ends a 404 or a 5xx as `ModelUnavailable`, which the last arm rotates
+                    // past without the 400 memory. Pinned end to end over the production client by
+                    // `a_404_or_5xx_head_rotates_to_the_fallback_and_is_never_remembered_as_a_400`.
                     return Outcome {
                         status: Some(status),
                         ..Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED)
@@ -1753,5 +1758,101 @@ mod tests {
             (v.state, v.lean.as_deref()),
             (GateState::LowConfidence, Some("false_positive"))
         );
+    }
+
+    /// The production client against `url`, with the default chain and no threshold of its own.
+    fn served_gate_client(url: &str) -> crate::decision::client::SystemOneClient {
+        crate::decision::client::SystemOneClient::new(crate::decision::client::DecisionSettings {
+            base_url: url.to_string(),
+            api_key: None,
+            chain: chain(),
+            timeout: std::time::Duration::from_secs(10),
+            keep_alive: None,
+        })
+        .expect("client")
+    }
+
+    /// A mocked `/systemone` answer of `model` with `status` and `body`, expected `hits` times.
+    async fn served(
+        server: &mut mockito::ServerGuard,
+        model: &str,
+        status: usize,
+        body: String,
+        hits: usize,
+    ) -> mockito::Mock {
+        server
+            .mock("POST", "/v1/systemone")
+            .match_body(mockito::Matcher::PartialJson(json!({ "model": model })))
+            .with_status(status)
+            .with_body(body)
+            .expect(hits)
+            .create_async()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_404_or_5xx_head_rotates_to_the_fallback_and_is_never_remembered_as_a_400() {
+        // [MAGI S6 loop 8, C1-c1] refutation, end to end over the production client: for a
+        // pinned model a 404 or a 5xx ends as `ModelUnavailable`, never as `Rejected`, so the
+        // gate rotates past it and the per-review 400 memory stays empty (the head is asked
+        // again for the next finding).
+        for status in [404, 500] {
+            let mut server = mockito::Server::new_async().await;
+            let head = served(&mut server, "clef:cloud", status, "{}".into(), 2).await;
+            let body = json!({"model": "clef-flash", "answers": {GATE_QUESTION_NAME: {
+                "type": "choice", "choice": "real_defect",
+                "probabilities": {"real_defect": 0.95, "false_positive": 0.05}}}})
+            .to_string();
+            let fallback = served(&mut server, "clef-flash", 200, body, 2).await;
+            let client = served_gate_client(&server.url());
+            let mut g = Gate::new(&client, chain(), 61_000);
+            for line in [1, 2] {
+                let v = g
+                    .judge(
+                        &finding(Severity::Warning, Some(line)),
+                        Some("x\nx\nx\n"),
+                        None,
+                    )
+                    .await;
+                assert_eq!(
+                    (v.state, v.model.as_deref()),
+                    (GateState::Kept, Some("clef-flash")),
+                    "HTTP {status}"
+                );
+                assert!(v.skipped.is_empty(), "HTTP {status}: {:?}", v.skipped);
+            }
+            head.assert_async().await;
+            fallback.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_413_or_422_stops_the_finding_on_its_status_and_is_never_remembered() {
+        // [MAGI S6 loop 8, C2-c3] the memory keys on `DecisionError::Rejected { status }`, never
+        // on the serialized `rejected` token a 413/422 shares with a 400: the head is asked
+        // again for the next finding and the fallback never.
+        for status in [413_u16, 422] {
+            let mut server = mockito::Server::new_async().await;
+            let head = served(&mut server, "clef:cloud", status.into(), "{}".into(), 2).await;
+            let fallback = served(&mut server, "clef-flash", 200, "{}".into(), 0).await;
+            let client = served_gate_client(&server.url());
+            let mut g = Gate::new(&client, chain(), 61_000);
+            for line in [1, 2] {
+                let v = g
+                    .judge(
+                        &finding(Severity::Warning, Some(line)),
+                        Some("x\nx\nx\n"),
+                        None,
+                    )
+                    .await;
+                assert_eq!(
+                    (v.state, v.cause, v.status),
+                    (GateState::Unfiltered, Some("chain exhausted"), Some(status))
+                );
+                assert!(v.skipped.is_empty(), "HTTP {status}: {:?}", v.skipped);
+            }
+            head.assert_async().await;
+            fallback.assert_async().await;
+        }
     }
 }
