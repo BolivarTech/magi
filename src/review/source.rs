@@ -26,6 +26,9 @@ pub const MAX_REVIEW_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 /// The cause a working-tree file with more than one hard link is refused with
 /// ([`ReviewError::NotReviewable`]); the filter leaves an enumerated one out under it.
 pub const HARD_LINK_CAUSE: &str = "hard link";
+/// The git argument after which every argument is positional (git 2.24+): a revision placed
+/// after it is never read as an option (`--output=<file>` would write a file).
+const END_OF_OPTIONS: &str = "--end-of-options";
 /// The object type `git ls-tree` prints for a file (a submodule is `commit`).
 const LS_TREE_BLOB: &str = "blob";
 /// The memory database's file name; its `-wal`/`-shm` companions share the prefix.
@@ -410,9 +413,11 @@ pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File>
 
 /// Reads a git revision (`git show <rev>:./<path>`), never the worktree.
 ///
-/// "Absent" is decided by the revision's own entry for the path (`ls-tree -z <rev> -- <path>`,
-/// one call per read), never by the text of a git error: a path with no file entry is
-/// `Ok(None)`, and a failing `show` on a listed path is an error.
+/// "Absent" is decided by the revision's own entry for the path
+/// (`ls-tree -z --end-of-options <rev> -- <path>`, one call per read), never by the text of a
+/// git error: a path with no file entry is `Ok(None)`, and a failing `show` on a listed path is
+/// an error. Every revision argument follows [`END_OF_OPTIONS`], so the source is safe on its
+/// own: a rev shaped like an option (`--output=<file>`) is never one, whatever the caller checked.
 ///
 /// A symlink (mode `120000`) is a blob whose content is its target path, so a revision review
 /// reads that path as the file's text, where the worktree source follows the link: the same
@@ -456,7 +461,11 @@ impl<'g> RevisionSource<'g> {
     // MAGI FIX (S6 loop 7): the whole revision was listed (`ls-tree -r`) to answer for one path,
     // so a monorepo past the git output cap failed the review before any model call.
     fn holds(&self, rev: &str, path: &str) -> Result<bool, ReviewError> {
-        let out = self.git.run_bytes(&["ls-tree", "-z", rev, "--", path])?;
+        // MAGI FIX (S6 loop 12, A2-c3): `rev` follows `--end-of-options` (git 2.24+), so a rev
+        // shaped like an option is a revision here, whatever its caller validated.
+        let out = self
+            .git
+            .run_bytes(&["ls-tree", "-z", END_OF_OPTIONS, rev, "--", path])?;
         // Each record is `<mode> SP <type> SP <object> TAB <path>`.
         Ok(out.split(|b| *b == 0).any(|record| {
             record
@@ -482,7 +491,13 @@ impl<'g> RevisionSource<'g> {
         };
         let spec = format!("{rev}:./{path}");
         match self.git.run_bytes_capped(
-            &["show", "--no-ext-diff", "--no-textconv", &spec],
+            &[
+                "show",
+                "--no-ext-diff",
+                "--no-textconv",
+                END_OF_OPTIONS,
+                &spec,
+            ],
             MAX_REVIEW_FILE_BYTES,
         ) {
             Ok(bytes) => Ok(Some(bytes)),
