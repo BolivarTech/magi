@@ -359,8 +359,11 @@ the 32 768-token default window at four bytes per token. R14 writes `skipped/pix
 and `skipped/leak.txt` (a toy `sk-ant-` key), so its "nothing to review" comes from both files being
 skipped, as binary and as secret, and not from their being invisible. The product excludes `.magi/`
 and `.git/` from the review on its own, and the harness does nothing to help it. R16 is what tests
-that: it reviews the workspace root, the one input where both are enumeration candidates, and
-writes R14's two files so that nothing else there is reviewable. The executor refuses to build the
+that: it reviews the workspace root and writes R14's two files so that nothing else there is
+reviewable. The workspace is a git repository, so the product lists it with `git ls-files`. Git
+names `.magi/`, which the product leaves out and lists among its omissions, but never names its
+own `.git/`: only the `.magi/` half of S51 exercises the product's exclusion, and the `.git/` half
+only checks that nothing the product reports names it. The executor refuses to build the
 workspace (exit 3) unless its path resolves strictly under the scratch area, checked before anything
 is created or deleted. Every review run starts the product with the workspace as its working directory, so a relative input (`gen`, `.`, `../smoke-hostile-target`) names the same path whether the product joins it to `-w` or to its working directory.
 
