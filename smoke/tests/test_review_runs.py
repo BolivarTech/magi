@@ -3,6 +3,7 @@
 # Date: 2026-10-25
 """Unit tests for the code-review runs R12-R16 and the files they write."""
 
+import os
 import pathlib
 import shutil
 import subprocess
@@ -27,6 +28,24 @@ def _executor(root: pathlib.Path) -> runs.RunExecutor:
     env = types.SimpleNamespace(root=root, magi_dir=magi,
                                 scratch_dir=root / "scratch")
     return runs.RunExecutor(binary=None, env=env, config=None)
+
+
+def _make_directory_link(target: pathlib.Path, link: pathlib.Path) -> None:
+    """Make *link* a directory symlink to *target*, or a junction where symlinks need a privilege.
+
+    Raises:
+        unittest.SkipTest: When the platform allows neither.
+    """
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    try:
+        import _winapi  # Windows only; a junction needs no privilege
+        _winapi.CreateJunction(str(target), str(link))
+    except (ImportError, OSError) as exc:
+        raise unittest.SkipTest("cannot create a directory link here: %s" % exc) from exc
 
 
 def _git_available() -> bool:
@@ -253,6 +272,44 @@ class ReviewWorkspaceTests(unittest.TestCase):
                 with self.assertRaises(HarnessError):
                     executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
             self.assertFalse(outside.exists())
+
+
+class ReviewWorkspaceLinkTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 10, F1a-c4] links never steer what is copied in or deleted."""
+
+    def test_a_link_inside_the_environments_magi_is_refused_before_anything_changes(self) -> None:
+        # copytree follows a link: a .magi entry pointing outside would copy what it points at into the
+        # workspace the product reads and the run log may name.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "secret.txt").write_text("not for the workspace", encoding="utf-8")
+            _make_directory_link(outside, root / ".magi" / "linked")
+            workspace = root / "scratch" / runs.REVIEW_WORKSPACE_DIR
+            workspace.mkdir(parents=True)
+            (workspace / "marker").write_text("x", encoding="utf-8")
+            with self.assertRaises(HarnessError) as caught:
+                executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("linked", str(caught.exception))
+            self.assertTrue((workspace / "marker").is_file())
+            self.assertTrue((outside / "secret.txt").is_file())
+
+    def test_a_review_workspace_that_is_a_link_is_never_deleted_through(self) -> None:
+        # The workspace's own path being a link inside the scratch area passes the resolve() containment
+        # check; deleting through it would empty the directory it points at.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            other = root / "scratch" / "other"
+            other.mkdir(parents=True)
+            (other / "keep.txt").write_text("x", encoding="utf-8")
+            _make_directory_link(other, root / "scratch" / runs.REVIEW_WORKSPACE_DIR)
+            with self.assertRaises(HarnessError) as caught:
+                executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("link", str(caught.exception))
+            self.assertTrue((other / "keep.txt").is_file())
 
 
 class ReviewWorkingDirectoryTests(unittest.TestCase):
