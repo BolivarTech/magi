@@ -408,12 +408,16 @@ impl BraceFamilyExtractor {
                 // MAGI FIX (S6 loop 7): a `#define` continued by `\` ends on its last line.
                 let end_of = |j: usize| self.declaration_end(lines, scanned, j, &stops);
                 // A declaration joins the group unless it is a function expression, its own unit.
+                // MAGI FIX (S6 loop 13): a comment line ending in `;` joined the group; only code
+                // does, as in the main scan.
                 let joins = |j: usize| {
-                    lines.get(j).is_some_and(|l| {
-                        self.is_declaration(l.trim()) || self.opens_declaration_list(l.trim())
-                    }) && self
-                        .function_expression(lines, scanned, j, &stops)
-                        .is_none()
+                    scanned.get(j).is_some_and(|s| !s.is_non_code)
+                        && lines.get(j).is_some_and(|l| {
+                            self.is_declaration(l.trim()) || self.opens_declaration_list(l.trim())
+                        })
+                        && self
+                            .function_expression(lines, scanned, j, &stops)
+                            .is_none()
                 };
                 let mut group_end = end_of(i);
                 // Scan forward for contiguous declarations, one blank line allowed between two.
