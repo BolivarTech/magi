@@ -421,6 +421,12 @@ fn diff(git: &dyn GitCommand, old: &str, new: &str) -> Result<Vec<u8>, ReviewErr
 /// `diff <DIFF_FLAGS> <head>`: the working tree against the pinned `head`, with the working
 /// tree's `.gitattributes` (the content reviewed is the working tree's, so are its attributes).
 ///
+/// An unmerged path is reviewed too: a diff against a commit compares that tree with the
+/// working tree and prints a plain `diff --git` section with the conflict markers (measured
+/// with git 2.56); only the index-vs-worktree form, never used here, prints a combined
+/// `diff --cc` that [`split_diff`] would drop. A review of S6 loop 9 (A1-c2) read it otherwise;
+/// pinned by `an_uncommitted_review_keeps_an_unmerged_path_with_its_conflict_markers`.
+///
 /// # Errors
 ///
 /// Any error of `git`.
