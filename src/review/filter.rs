@@ -35,6 +35,14 @@ const LS_FILES_IGNORED_ANY: &[&str] = &[
 ];
 /// `ls-files` for a directory or uncommitted changes: the tracked files a rule excludes (the
 /// enumeration lists them; untracked ignored files are never enumerated).
+///
+/// The untracked half of RV22 rests on the enumeration of `src/review/input.rs`
+/// (`--exclude-standard`), not on this query: pinned with real git by
+/// `an_untracked_ignored_file_is_never_listed_in_a_directory_or_uncommitted_review`
+/// (`src/system/review_git.rs`), which turns red if a listing starts yielding them. Querying the
+/// untracked ignored files here too (`--others`) would list every file of an ignored build
+/// directory, a cost bounded only by git's output cap, for paths no input yields.
+// MAGI FIX (S6 loop 13, A2-c3): declined with the guardian that holds the invariant named.
 const LS_FILES_IGNORED_TRACKED: &[&str] = &[
     "ls-files",
     "--cached",
@@ -54,8 +62,12 @@ pub struct Skipped {
 
 /// Why a file was left out of a review.
 ///
-/// Serialized as the text the report shows (`"binary"`, `"not utf-8"`, `"secret"`, `"ignored"`,
-/// `"outside workspace"`, `"too large"`, `"not a regular file"`), the same text [`ReviewError::NotReviewable`] carries.
+/// Serialized as the text the report shows, spelled in one place (`SkipCause::as_str`, pinned by
+/// `skip_causes_serialize_with_the_spec_texts`): `binary`, `not utf-8`, `secret`, `ignored`,
+/// `outside workspace`, `too large`, `not a regular file`, `hard link`, `unreadable` and
+/// `disappeared`. A file named explicitly that is skipped fails with that same text as the cause
+/// of [`ReviewError::NotReviewable`].
+// MAGI FIX (S6 loop 13, A2-m6 / A2-b5): the list named 7 of the 10 causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipCause {
     /// A binary file.
@@ -475,7 +487,13 @@ fn read_side(
 /// The paths `.gitignore` excludes that a review can still reach.
 ///
 /// Paths are relative to `workspace` with `/` separators, the same space as
-/// [`ReviewFile::path`]: the production git runs with `-C <workspace>`. History inputs
+/// [`ReviewFile::path`]: the production git runs with `-C <workspace>`, `ls-files` prints paths
+/// relative to its cwd (no `--full-name`), and every diff carries `--relative`. A review of S6
+/// loop 13 (A2-m1) read `ls-files` as repository-root relative; measured with git 2.56 and
+/// pinned, with the workspace in a subdirectory of the repository, by
+/// `an_uncommitted_review_in_a_sub_workspace_names_ignored_files_like_its_diff` and
+/// `a_tracked_ignored_file_in_a_subdirectory_is_named_like_the_enumeration_names_it`
+/// (`src/system/review_git.rs`); `--full-name`, the proposed fix, turns the first red. History inputs
 /// (`Commit`, `Range`, `Branches`) ignore nothing and call no git: `.gitignore` is a worktree
 /// rule. Otherwise one `rev-parse --is-inside-work-tree`, then one `ls-files` call: for `File`,
 /// tracked and untracked files a rule excludes (a file that does not exist is not listed, so it
