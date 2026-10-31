@@ -336,6 +336,13 @@ assertions.
 | S50 | `--timeout 20 --log-level error` over the S47 tree exits 2, `stderr` names the batches (at least one: a pool that measured a larger window plans fewer than three over the same tree, and the refusal fires at any count), the per-batch ceiling, the 15 s floor and a minimum `--timeout` above the 20 s asked for (20 s is below the 24 s one batch needs at the floor even with no rotation and no retry), and the review workspace's run log holds a line with this run's id and that same text. The numbers are the product's formula and are only range-checked | none. A run that published no run id, or a missing log directory, is `FAIL` for the log half: the run is deterministic and RV-S7 requires the log. The log is the copy the executor captured right after R15 (`RunResult.review_log`), never the live directory, which the next review run rebuilds |
 | S51 | `--timeout 20 .` over the review workspace's root, which holds its `.magi` and `.git` beside R14's binary and secret, exits 2 and `stderr` says there is nothing to review, and every `.magi/` or `.git/` path `stderr` names is left out as `ignored`. A protected file taken for review would make the input reviewable and end at the budget refusal instead; one opened and classified would carry `binary`, `secret` or `not utf-8`. The omission list is parsed entry by entry, each anchored on one of the product's causes, so a path may hold commas, semicolons or spaces; a list that is missing, empty (the product writes the marker only before an entry) or does not parse to the end is `FAIL`, never an empty pass | none |
 
+**A hung refusal is `FAIL`.** Everywhere else a run that outlives its timeout is `CANNOT_TEST`,
+because a slow provider is not a product defect. R13 to R16 reach no provider: the product refuses
+them before any model call, so a timeout there is a hang in path validation, git handling or
+filtering, or a model call that should never have happened. S48 to S51 therefore declare
+`inspects_timeouts` and report every assertion of a timed-out run as `FAIL`, without judging the
+exit code 0 the executor gives a run it had to kill.
+
 **What they copy from the product.** S50 and S51 read refusals, and a refusal writes no JSON, so
 `stderr` is the only place their numbers and omission lists appear. The scenarios parse it with
 patterns tied to the product's wording, and R12's input is sized with copies of the batch constants.

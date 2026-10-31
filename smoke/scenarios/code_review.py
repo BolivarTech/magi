@@ -27,7 +27,9 @@ and refusing the inputs it must refuse before a model is paid for.
   ``--timeout 20``, a protected file wrongly taken for review ends at the
   budget refusal, never at a model.
 
-S48-S51 need no backend. That no model was contacted is not observable from
+S48-S51 need no backend, so they declare ``inspects_timeouts`` and report a
+timed-out run as ``FAIL`` themselves: a refusal reached before any model call
+has no slow provider to blame for a hang. That no model was contacted is not observable from
 outside the process; the Rust integration tests pin it with a stand-in that
 records every body.
 """
@@ -204,6 +206,30 @@ def _all_cannot_test(texts, run_id, detail):
         yield _finding(texts, index, Outcome.CANNOT_TEST, run_id, detail)
 
 
+def _all_hung(texts, run_id, run):
+    """One ``FAIL`` finding per assertion when a deterministic refusal hung.
+
+    MAGI FIX (S6 loop 9): S48-S51 declare ``inspects_timeouts`` because their
+    runs are refused before any model is reached, so a timeout there has no
+    slow provider to blame: it is a hang in path validation, git handling or
+    filtering, or a model call that should never have happened (F1a-c2). The
+    executor builds a hung run with ``exit_code`` 0, so no assertion is judged
+    on that synthetic exit.
+
+    Args:
+        texts: The scenario's assertion texts.
+        run_id: The shared run that hung.
+        run: Its ``RunResult``.
+
+    Yields:
+        Finding: ``FAIL`` for every entry of *texts*, in order.
+    """
+    detail = ("run %s timed out after %.0f s: a refusal that needs no model "
+              "must not hang" % (run_id, run.duration_s))
+    for index in range(len(texts)):
+        yield _finding(texts, index, Outcome.FAIL, run_id, detail)
+
+
 def _stderr_text(run):
     """Decode a run's stderr leniently.
 
@@ -217,7 +243,7 @@ def _stderr_text(run):
 
 
 def _refusal(texts, run_id, run, stderr_ok, stderr_detail):
-    """The two assertions shared by the refusal scenarios S48-S50.
+    """The two assertions shared by the refusal scenarios S48 and S49.
 
     Args:
         texts: The scenario's two assertion texts.
@@ -232,6 +258,9 @@ def _refusal(texts, run_id, run, stderr_ok, stderr_detail):
     if run is None:
         yield from _all_cannot_test(
             texts, run_id, "run %s produced no capture to inspect" % run_id)
+        return
+    if run.timed_out:
+        yield from _all_hung(texts, run_id, run)
         return
     code = run.output.exit_code
     yield _verdict(texts, 0, run_id, code == EXIT_MISUSE,
@@ -484,7 +513,8 @@ def a_large_review_yields_one_report(run):
     yield _causes_finding(section, "R12")
 
 
-@scenario("S48", assertions=S48_ASSERTIONS, run="R13")
+@scenario("S48", assertions=S48_ASSERTIONS, run="R13",
+          inspects_timeouts=True)
 def a_hostile_path_is_refused(run):
     """Check that a path outside the workspace is refused with exit 2.
 
@@ -505,7 +535,8 @@ def a_hostile_path_is_refused(run):
                         % runs.REVIEW_OUTSIDE_COMPONENT)
 
 
-@scenario("S49", assertions=S49_ASSERTIONS, run="R14")
+@scenario("S49", assertions=S49_ASSERTIONS, run="R14",
+          inspects_timeouts=True)
 def only_skipped_files_are_nothing_to_review(run):
     """Check that a directory of only skipped files is nothing to review.
 
@@ -525,7 +556,8 @@ def only_skipped_files_are_nothing_to_review(run):
                             "%s (%s)" % entry for entry in S49_EXPECTED_OMISSIONS))
 
 
-@scenario("S50", assertions=S50_ASSERTIONS, run="R15")
+@scenario("S50", assertions=S50_ASSERTIONS, run="R15",
+          inspects_timeouts=True)
 def an_insufficient_timeout_is_refused_before_spending(run):
     """Check that a too-short ``--timeout`` is refused in stderr and the run log.
 
@@ -547,6 +579,9 @@ def an_insufficient_timeout_is_refused_before_spending(run):
     if run is None:
         yield from _all_cannot_test(
             S50_ASSERTIONS, "R15", "run R15 produced no capture to inspect")
+        return
+    if run.timed_out:
+        yield from _all_hung(S50_ASSERTIONS, "R15", run)
         return
     code = run.output.exit_code
     yield _verdict(S50_ASSERTIONS, 0, "R15", code == EXIT_MISUSE,
@@ -734,7 +769,8 @@ def _protected_read(stderr):
             if _is_protected(path) and cause != PROTECTED_CAUSE], ""
 
 
-@scenario("S51", assertions=S51_ASSERTIONS, run="R16")
+@scenario("S51", assertions=S51_ASSERTIONS, run="R16",
+          inspects_timeouts=True)
 def the_workspace_root_never_reviews_magi_or_git(run):
     """Check that a review of the workspace root never takes ``.magi`` or ``.git``.
 
@@ -755,6 +791,9 @@ def the_workspace_root_never_reviews_magi_or_git(run):
     if run is None:
         yield from _all_cannot_test(
             S51_ASSERTIONS, "R16", "run R16 produced no capture to inspect")
+        return
+    if run.timed_out:
+        yield from _all_hung(S51_ASSERTIONS, "R16", run)
         return
     code = run.output.exit_code
     yield _verdict(S51_ASSERTIONS, 0, "R16", code == EXIT_MISUSE,
