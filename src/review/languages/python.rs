@@ -1228,4 +1228,30 @@ def f():
             ]
         );
     }
+
+    #[test]
+    fn an_escaped_backslash_or_a_comment_ending_in_one_continues_no_line() {
+        // [MAGI S6 loop 13, B2b2-b3] declared green, a false positive: only a `\` outside every
+        // string and comment continues a line, and Python accepts a `\` there only right before
+        // the newline. A string ending in an escaped backslash (`"a\\"`) closes on its quote,
+        // and a comment's backslash is comment text, so neither carries the line on.
+        let code = r#"v = "a\\"
+# dir C:\
+def f():
+    return 1
+w = 'b\\'
+def g():
+    return 2
+"#;
+        let units = extract(code, &[1, 4, 5, 7]);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("v", UnitKind::DeclarationGroup, 1, 1),
+                ("f", UnitKind::Function, 3, 4),
+                ("w", UnitKind::DeclarationGroup, 5, 5),
+                ("g", UnitKind::Function, 6, 7)
+            ]
+        );
+    }
 }
