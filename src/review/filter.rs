@@ -18,7 +18,7 @@ use super::input::{
 };
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
-use super::source::{is_never_reviewed, ContentSource, GitCommand};
+use super::source::{is_never_reviewed, ContentSource, GitCommand, HARD_LINK_CAUSE};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
 pub(crate) const MISSING: &str = "missing";
@@ -73,6 +73,9 @@ pub enum SkipCause {
     /// A path whose target is not a regular file: a link to a directory inside the workspace, a
     /// FIFO, a socket, a device file, or a submodule (a diff with neither side).
     NotRegularFile,
+    /// A working-tree file with more than one hard link: its path is inside the workspace, its
+    /// inode may be any file on the same file system.
+    HardLink,
 }
 
 impl serde::Serialize for SkipCause {
@@ -99,6 +102,7 @@ impl SkipCause {
             Self::OutsideWorkspace => "outside workspace",
             Self::TooLarge => "too large",
             Self::NotRegularFile => "not a regular file",
+            Self::HardLink => HARD_LINK_CAUSE,
         }
     }
 }
@@ -762,6 +766,57 @@ mod tests {
             "{line}"
         );
         assert!(!line.contains(key), "{line}");
+    }
+
+    #[test]
+    fn a_hard_linked_file_is_left_out_as_a_hard_link_not_as_outside_the_workspace() {
+        // [MAGI S6 loop 12, A2-b1 / A2-c4] the refusal stays, but its cause read `outside
+        // workspace` for a path inside it: an operator looked for an escape that did not exist.
+        let outer = tempfile::tempdir().expect("tempdir");
+        let root = outer.path().join("ws");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(outer.path().join("store.rs"), "fn s() {}\n").expect("write");
+        std::fs::hard_link(outer.path().join("store.rs"), root.join("linked.rs")).expect("link");
+        std::fs::write(root.join("a.rs"), "fn f() {}\n").expect("write");
+        let src = crate::review::source::WorktreeSource::new(root);
+        let files = |names: &[&str]| {
+            names
+                .iter()
+                .map(|n| ReviewFile {
+                    path: (*n).into(),
+                    diff: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let f = filter_files(
+            files(&["linked.rs", "a.rs"]),
+            &src,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        )
+        .expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "linked.rs".into(),
+                cause: SkipCause::HardLink
+            }]
+        );
+        assert_eq!(f.skipped[0].to_string(), "linked.rs (hard link)");
+        assert!(matches!(
+            filter_files(
+                files(&["linked.rs"]),
+                &src,
+                &LanguageRegistry::new(),
+                true,
+                &|_| false
+            ),
+            Err(ReviewError::NotReviewable {
+                cause: "hard link",
+                ..
+            })
+        ));
     }
 
     #[test]

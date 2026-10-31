@@ -23,6 +23,9 @@ pub const MAX_GIT_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_GIT_STDERR_BYTES: u64 = 4 * 1024;
 /// Byte cap of everything one review reads.
 pub const MAX_REVIEW_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// The cause a working-tree file with more than one hard link is refused with
+/// ([`ReviewError::NotReviewable`]); the filter leaves an enumerated one out under it.
+pub const HARD_LINK_CAUSE: &str = "hard link";
 /// The object type `git ls-tree` prints for a file (a submodule is `commit`).
 const LS_TREE_BLOB: &str = "blob";
 /// The memory database's file name; its `-wal`/`-shm` companions share the prefix.
@@ -970,8 +973,12 @@ mod tests {
         std::fs::hard_link(outer.path().join("secret.txt"), root.join("copy.rs")).expect("link");
         std::fs::write(root.join("own.rs"), "fn f() {}\n").expect("write");
         let src = WorktreeSource::new(root);
+        // [MAGI S6 loop 12, A2-b1 / A2-c4] refused with its own cause, never `outside workspace`.
         assert!(
-            matches!(src.read("copy.rs"), Err(ReviewError::OutsideWorkspace(ref p)) if p == "copy.rs"),
+            matches!(
+                src.read("copy.rs"),
+                Err(ReviewError::NotReviewable { ref path, cause: HARD_LINK_CAUSE }) if path == "copy.rs"
+            ),
             "{:?}",
             src.read("copy.rs")
         );
