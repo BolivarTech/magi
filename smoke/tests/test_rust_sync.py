@@ -87,6 +87,13 @@ class BatchConstantTests(unittest.TestCase):
                                r"MIN_OPERATION_BUDGET\.as_secs\(\) \+ MIN_CLIENT_TIMEOUT\.as_secs\(\);")
         self.assertEqual(sum(found.values()), code_review.FLOOR_SECS)
 
+    def test_the_least_need_per_batch_is_the_products_lenient_arithmetic(self) -> None:
+        # [MAGI §6 MS2 loop 10, F1a-c3] S50's bounds lean on the classifier reserve and the slack.
+        text = _source("src/magi/mod.rs")
+        self.assertIn("pub const CLASSIFY_TIMEOUT_SECS: u64 = %d;" % code_review.CLASSIFY_SECS, text)
+        self.assertIn("pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = %d;" % code_review.SLACK_PCT, text)
+        self.assertEqual(24, code_review.MIN_NEED_PER_BATCH_SECS)
+
 
 class StderrWordingTests(unittest.TestCase):
     """The texts S48-S51 parse out of the product's ``stderr``."""
@@ -125,16 +132,24 @@ class StderrWordingTests(unittest.TestCase):
         template = re.search(r'#\[error\(\s*"(\{batches\} batches leave.*?)",\s*budget_advice', self.error, re.S)
         self.assertIsNotNone(template, "the Budget message was not found in src/review/error.rs")
         self.assertIn('BudgetLimit::Timeout => format!("pass --timeout {min_secs} or more")', self.error)
-        text = re.sub(r"\\\n\s*", "", template.group(1))
-        values = {"batches": "2", "per_batch_wall_clock_secs": "15", "min_per_batch_secs": "783",
-                  "floor_secs": "15", "per_batch_ceiling_secs": "15"}
-        for name, value in values.items():
-            text = text.replace("{%s}" % name, value)
-        text = text.replace("{}", "pass --timeout 1566 or more")
-        match = code_review.BUDGET_PATTERN.fullmatch(text)
-        self.assertIsNotNone(match, text)
-        self.assertEqual(("2", "15", "15", "1566"),
-                         match.group("batches", "floor", "ceiling", "minimum"))
+        template_text = re.sub(r"\\\n\s*", "", template.group(1))
+        # [MAGI §6 MS2 loop 10, F1a-m1] the count is the bare "{batches} batches" at every N: no plural
+        # branch exists in the template, so one batch renders "1 batches" and the pattern still matches.
+        self.assertTrue(template_text.startswith("{batches} batches leave "), template_text)
+        # R15's 20 s under the default config: one batch gets 20 s (raw ceiling 1 s), two get 10 s (0 s).
+        for batches, wall, ceiling in (("1", "20", "1"), ("2", "10", "0")):
+            values = {"batches": batches, "per_batch_wall_clock_secs": wall, "min_per_batch_secs": "114",
+                      "floor_secs": "15", "per_batch_ceiling_secs": ceiling}
+            text = template_text
+            for name, value in values.items():
+                text = text.replace("{%s}" % name, value)
+            minimum = str(int(batches) * 114)
+            text = text.replace("{}", "pass --timeout %s or more" % minimum)
+            match = code_review.BUDGET_PATTERN.fullmatch(text)
+            self.assertIsNotNone(match, text)
+            self.assertEqual((batches, wall, "114", "15", ceiling, minimum),
+                             match.group("batches", "wall", "need", "floor", "ceiling", "minimum"))
+            self.assertTrue(code_review._budget_fields_ok(match), text)
 
     def test_the_fixed_phrases_are_the_products(self) -> None:
         self.assertIn('"path is outside the workspace: {}"', self.error)
