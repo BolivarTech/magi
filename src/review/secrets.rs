@@ -1312,4 +1312,40 @@ mod tests {
         assert!(masked.starts_with("a <redacted: "), "{masked}");
         assert!(masked.ends_with("> b"), "{masked}");
     }
+
+    #[test]
+    fn a_password_in_a_url_is_a_secret_and_a_url_without_one_is_not() {
+        // [MAGI S6 loop 13, A2-c2, security] no pattern matched `scheme://user:password@host`, so
+        // a reviewed `docker-compose.yml` or `settings.py` holding a database URL was batched
+        // whole and its password left the process, although the product already treats this
+        // very shape as a credential (REQ-A16c, `redact_url`).
+        let user = "svc";
+        let at = |scheme: &str, pass: &str, host: &str| format!("{scheme}://{user}:{pass}@{host}");
+        for secret in [
+            at("postgres", "S3cr3t", "db.internal/app"),
+            format!("DATABASE_URL=\"{}\"", at("mysql", "p", "10.0.0.1:3306")),
+            at("https", "x", "[::1]:8080/"),
+            format!("redis://:{}@cache:6379/0", "S3cr3t"),
+        ] {
+            assert_eq!(find_secret(&secret), Some("url-credential"), "{secret}");
+            let masked = mask_secrets(&secret);
+            assert!(masked.contains("<redacted: url-credential>"), "{masked}");
+            assert!(
+                !masked.contains("S3cr3t") && !masked.contains(":p@"),
+                "{masked}"
+            );
+        }
+        for plain in [
+            "https://example.com/a@b".to_string(),
+            format!("ssh://{user}@github.com:22/x"),
+            "http://host:8080/path".to_string(),
+            "let u = format!(\"{scheme}://{user}:{password}@{host}\");".to_string(),
+            format!("postgres://{user}:$PASSWORD@db"),
+            format!("postgres://{user}:<password>@db"),
+            "https://***@example.invalid/x".to_string(),
+            "mailto:a@b.c".to_string(),
+        ] {
+            assert_eq!(find_secret(&plain), None, "{plain}");
+        }
+    }
 }
