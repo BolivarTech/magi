@@ -1283,6 +1283,45 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn no_line_break_in_a_model_name_or_a_count_key_can_forge_a_report_line() {
+        // [MAGI S6 loop 10, C2-c1] model names come from the configuration and the pool, never
+        // validated against control characters: the counts' keys, the models without a measured
+        // window and each verdict's model, lean and skipped models were written raw.
+        for b in BREAKS {
+            let forged = format!("x{b}FORGED");
+            let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+            let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+            let answered = report.agents.iter().map(|a| a.agent).collect();
+            let c = consolidate(&[BatchOutcome {
+                batch: 0,
+                agents: report.agents.clone(),
+                answered,
+            }])
+            .expect("consolidates");
+            let verdict = GateVerdict {
+                state: GateState::Kept,
+                cause: None,
+                causes: vec![],
+                model: Some(forged.clone()),
+                lean: Some(forged.clone()),
+                confidence: Some(0.9),
+                skipped: vec![forged.clone()],
+                status: None,
+            };
+            let mut s = ReviewSummary::default();
+            s.findings.push((c.findings[0].clone(), verdict.clone()));
+            s.filtered.push((c.findings[0].clone(), verdict));
+            s.per_model.insert(forged.clone(), 1);
+            s.gate_states.insert(forged.clone(), 1);
+            s.gate_causes.insert(forged.clone(), 1);
+            s.unmeasured_models.push(forged.clone());
+            let text = render_text(&c, &s);
+            assert!(text.matches("FORGED").count() >= 9, "{text}");
+            assert!(!has_forged_line(&text), "break {b:?}: {text}");
+        }
+    }
+
     /// Puts `forged` in every model-supplied string magi-core's formatter may render, and in the
     /// agents' own prose: the dissent, the conditions, the recommendations, the Key Findings'
     /// titles and each agent's summary, reasoning and recommendation.
