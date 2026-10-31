@@ -624,4 +624,33 @@ mod tests {
         );
         m.assert_async().await;
     }
+
+    #[tokio::test]
+    async fn a_batch_whose_wall_clock_is_already_spent_never_builds_its_trio() {
+        // [MAGI S6 loop 8, C2-c2] RV06: a batch started with nothing left of `--timeout` is not
+        // run (declared `clock expired`), and no ceiling is derived from a zero wall clock,
+        // whose floor clamp would buy a batch past the deadline.
+        struct Signal(std::sync::Mutex<std::sync::mpsc::Sender<()>>);
+        impl TrioBuilder for Signal {
+            fn build(&self, _ceiling: ResolvedCeiling) -> Result<Arc<Magi>, String> {
+                if let Ok(tx) = self.0.lock() {
+                    let _ = tx.send(());
+                }
+                Err("built".into())
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let consult = TrioBatchConsult {
+            factory: Arc::new(Signal(std::sync::Mutex::new(tx))),
+            configured_ceiling: 120,
+            max_rotations: 0,
+            retry_disabled: false,
+        };
+        let r = consult.consult("p", Some(Duration::ZERO)).await;
+        assert!(matches!(r, Err(ConsultFailure::ClockExpired)), "{r:?}");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the trio was built for a batch with no time left"
+        );
+    }
 }
