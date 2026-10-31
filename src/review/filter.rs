@@ -322,6 +322,11 @@ fn read_side(read: Result<Option<Vec<u8>>, ReviewError>) -> Result<Side, ReviewE
         Err(ReviewError::TooLarge { .. }) => Ok(Side::Skip(SkipCause::TooLarge)),
         Err(ReviewError::Protected(_)) => Ok(Side::Skip(SkipCause::Ignored)),
         Err(ReviewError::NotRegularFile(_)) => Ok(Side::Skip(SkipCause::NotRegularFile)),
+        // The source's one `NotReviewable`, keyed on the constant it is built from.
+        Err(ReviewError::NotReviewable {
+            cause: HARD_LINK_CAUSE,
+            ..
+        }) => Ok(Side::Skip(SkipCause::HardLink)),
         Err(other) => Err(other),
     }
 }

@@ -212,7 +212,8 @@ pub fn is_never_reviewed(path: &str) -> bool {
 /// check and the open is refused as outside the workspace.
 ///
 /// A hard link names its inode from inside the workspace whatever file it is, so a file with
-/// more than one link is refused as outside the workspace too, on every platform (`link_count`).
+/// more than one link is refused too, on every platform (`link_count`), under its own cause:
+/// [`ReviewError::NotReviewable`] with [`HARD_LINK_CAUSE`].
 pub struct WorktreeSource<'g> {
     /// The root as given; paths are joined to it (a verbatim canonical root would not resolve `..`).
     root: PathBuf,
@@ -249,7 +250,8 @@ impl ContentSource for WorktreeSource<'_> {
     ///
     /// [`ReviewError::Io`] when the root did not resolve or a read fails,
     /// [`ReviewError::OutsideWorkspace`] when the path resolves outside the root or no longer
-    /// names the file opened (see [`WorktreeSource`]),
+    /// names the file opened (see [`WorktreeSource`]), [`ReviewError::NotReviewable`] with
+    /// [`HARD_LINK_CAUSE`] for a file with more than one hard link,
     /// [`ReviewError::Protected`] when it resolves to a never-reviewed path,
     /// [`ReviewError::NotRegularFile`] when it resolves to something other than a regular file
     /// (a link to a directory), and [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
@@ -314,8 +316,13 @@ impl WorktreeSource<'_> {
         // file on the filesystem; the containment check cannot tell, so more than one link is
         // refused.
         // MAGI FIX (S6 loop 7): on Windows too (it read the outside bytes there).
+        // MAGI FIX (S6 loop 12, A2-b1 / A2-c4): refused under its own cause; `outside workspace`
+        // named an escape the path does not have.
         if link_count(&file, &opened_meta).map_err(io)? > 1 {
-            return Err(ReviewError::OutsideWorkspace(path.to_string()));
+            return Err(ReviewError::NotReviewable {
+                path: path.to_string(),
+                cause: HARD_LINK_CAUSE,
+            });
         }
         let opened = same_file::Handle::from_file(file).map_err(io)?;
         // Re-resolved after the open: a component swapped for an escaping link before the open
