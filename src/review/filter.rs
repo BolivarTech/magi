@@ -1113,10 +1113,16 @@ mod tests {
     }
 
     #[test]
-    fn a_binary_section_as_git_prints_it_is_binary_without_reading_the_file() {
+    fn git_binary_marker_is_confirmed_against_the_bytes_before_a_file_is_left_out() {
         // The section comes from real `git diff` output through the input's own splitter, so it
         // carries its `diff --git` and `index` header lines. `.gitattributes` makes git call the
-        // file binary although its bytes are valid UTF-8 with no NUL: only the marker can say so.
+        // file binary although its bytes are valid UTF-8 with no NUL.
+        // [MAGI S6 loop 13, A2-m3 / A2-c1, security] the marker alone used to decide: a reviewed
+        // commit that marked its own `evil.rs -diff` was listed as `binary` and never sent, so a
+        // malicious change was certified unreviewed. The marker is now a hint: the sides are
+        // read, and a text file whose diff git suppressed is reviewed whole. Modified from
+        // `a_binary_section_as_git_prints_it_is_binary_without_reading_the_file`, which pinned
+        // the opposite.
         fn git(dir: &Path, args: &[&str]) -> Vec<u8> {
             let out = std::process::Command::new("git")
                 .arg("-C")
@@ -1137,33 +1143,42 @@ mod tests {
         ] {
             git(d.path(), &["config", k, v]);
         }
-        std::fs::write(d.path().join(".gitattributes"), "*.dat binary\n").expect("write");
+        std::fs::write(
+            d.path().join(".gitattributes"),
+            "*.dat binary\nevil.rs -diff\n",
+        )
+        .expect("write");
         std::fs::write(d.path().join("a.dat"), "hello\n").expect("write");
+        std::fs::write(d.path().join("evil.rs"), "fn f() {}\n").expect("write");
         git(d.path(), &["add", "."]);
         git(d.path(), &["commit", "-q", "-m", "1"]);
         std::fs::write(d.path().join("a.dat"), "world\n").expect("write");
+        std::fs::write(d.path().join("evil.rs"), "fn f() { danger() }\n").expect("write");
         let diff = git(
             d.path(),
             &["diff", "--no-color", "--no-ext-diff", "--no-textconv"],
         );
         let (sections, _) = crate::review::input::split_diff(&diff);
-        let section = sections
-            .into_iter()
-            .find(|f| f.path == "a.dat")
-            .expect("git lists the binary file");
-        assert!(
-            section
-                .diff
-                .as_deref()
-                .is_some_and(|s| s.starts_with("diff --git ")),
-            "{section:?}"
-        );
+        let copy = |f: &ReviewFile| ReviewFile {
+            path: f.path.clone(),
+            diff: f.diff.clone(),
+        };
+        let section = |name: &str| {
+            let s = sections
+                .iter()
+                .find(|f| f.path == name)
+                .map(copy)
+                .expect("git lists the file");
+            assert!(
+                s.diff.as_deref().is_some_and(is_binary_section),
+                "git marks {name} binary: {s:?}"
+            );
+            s
+        };
+        let (dat, evil) = (section("a.dat"), section("evil.rs"));
         let both = || {
             vec![
-                ReviewFile {
-                    path: section.path.clone(),
-                    diff: section.diff.clone(),
-                },
+                copy(&dat),
                 ReviewFile {
                     path: "a.rs".into(),
                     diff: None,
@@ -1174,7 +1189,8 @@ mod tests {
             path: "a.dat".into(),
             cause: SkipCause::Binary,
         }];
-        // Never read: a read of a.dat fails the whole review.
+        // When the sides cannot be read, the marker still decides: `binary`, not `unreadable`
+        // or `too large`.
         struct Unreadable(SkipOrFail);
         #[derive(Clone, Copy)]
         enum SkipOrFail {
@@ -1197,31 +1213,62 @@ mod tests {
             }
         }
         let reg = LanguageRegistry::new();
-        let f = filter_files(both(), &Unreadable(SkipOrFail::Fail), &reg, false, &|_| {
-            false
-        })
-        .expect("a.dat is not read");
-        assert_eq!(f.skipped, binary);
-        // Over the cap, it is still `binary`, not `too large`.
-        let f = filter_files(
-            both(),
-            &Unreadable(SkipOrFail::TooLarge),
-            &reg,
-            false,
-            &|_| false,
-        )
-        .expect("a.rs kept");
-        assert_eq!(f.skipped, binary);
-        // Valid UTF-8 with no NUL: git's marker still decides.
-        let src = MapSource::new(
-            &[("a.dat", "world\n"), ("a.rs", "fn f() {}\n")],
+        for mode in [SkipOrFail::Fail, SkipOrFail::TooLarge] {
+            let f = filter_files(both(), &Unreadable(mode), &reg, false, &|_| false)
+                .expect("a.rs kept");
+            assert_eq!(f.skipped, binary);
+        }
+        // Real binary bytes: still `binary`.
+        let nul = MapSource::new(
+            &[("a.dat", "wor\0ld\n"), ("a.rs", "fn f() {}\n")],
             &[("a.dat", "hello\n")],
         );
-        let f = filter_files(both(), &src, &reg, false, &|_| false).expect("a.rs kept");
+        let f = filter_files(both(), &nul, &reg, false, &|_| false).expect("a.rs kept");
         assert_eq!(f.skipped, binary);
+        // Valid UTF-8 with no NUL: reviewed, whole, from its new side.
+        let src = MapSource::new(
+            &[
+                ("a.dat", "world\n"),
+                ("evil.rs", "fn f() { danger() }\n"),
+                ("a.rs", "fn f() {}\n"),
+            ],
+            &[("a.dat", "hello\n"), ("evil.rs", "fn f() {}\n")],
+        );
+        let mut files = both();
+        files.push(copy(&evil));
+        let f = filter_files(files, &src, &reg, false, &|_| false).expect("all kept");
+        assert_eq!(f.skipped, vec![]);
         assert_eq!(
-            f.kept.iter().map(|k| k.path.as_str()).collect::<Vec<_>>(),
-            vec!["a.rs"]
+            f.kept
+                .iter()
+                .map(|k| (k.path.as_str(), k.diff.is_none()))
+                .collect::<Vec<_>>(),
+            vec![("a.dat", true), ("a.rs", true), ("evil.rs", true)]
+        );
+        // A secret on the old side still keeps the file out, as for any diff.
+        let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        let old_key = format!("const K: &str = \"{key}\";\n");
+        let leaky = MapSource::new(
+            &[
+                ("evil.rs", "fn f() { danger() }\n"),
+                ("a.rs", "fn f() {}\n"),
+            ],
+            &[("evil.rs", old_key.as_str())],
+        );
+        let files = vec![
+            evil,
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &leaky, &reg, false, &|_| false).expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "evil.rs".into(),
+                cause: SkipCause::Secret
+            }]
         );
     }
 
