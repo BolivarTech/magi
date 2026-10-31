@@ -495,6 +495,18 @@ fn merge_base(
 /// (`PathGuard::validate`, wrapped by `review_path_guard` in the binary) canonicalizes, so
 /// there a link to a directory arrives as the directory; a dangling link arrives as itself under
 /// its guarded parent (S6 loop 9, A1-c5) and is `missing` here.
+///
+/// The path is resolved, not read: the one read happens in the content source, which checks it
+/// again at that moment, so a swap between this resolution and the read is refused there (a link
+/// swapped in, a FIFO before or after the open, a hard link out, a protected target:
+/// `a_file_swapped_between_the_check_and_the_open_is_refused`,
+/// `a_file_swapped_for_a_fifo_before_the_open_is_refused_without_blocking`,
+/// `a_file_swapped_for_a_fifo_after_the_open_is_refused_without_blocking`,
+/// `a_hard_link_to_a_file_outside_the_workspace_is_refused`, `src/review/source.rs`). An explicit
+/// FIFO, socket or device reaches that reader and is refused without blocking
+/// (`an_explicit_fifo_or_missing_file_is_a_typed_error_without_blocking`,
+/// `src/system/review_git.rs`).
+// MAGI FIX (S6 loop 10): A1-c2/A1-c3 refuted; the read-time checks they ask for are pinned.
 fn resolve_file(
     p: &Path,
     workspace: &Path,

@@ -382,6 +382,11 @@ impl ScrubbedGit {
             kill(&mut child);
             return Err(ReviewError::Git("cannot read git's output".to_string()));
         };
+        // MAGI FIX (S6 loop 10): A1-c4. The two readers are not joined on an early return: they
+        // end when every writer of their pipe is gone, and `kill` ends git, the only writer. A
+        // descendant that could keep a pipe open needs a code path git runs (hook, filter,
+        // fsmonitor, pager, external diff, transport, or an alias, which cannot name the
+        // built-ins this runner calls), and each is off in every call.
         let (err_tx, err_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = err_tx.send(drain_bounded(stderr, MAX_GIT_STDERR_BYTES));
