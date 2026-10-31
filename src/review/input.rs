@@ -2406,4 +2406,44 @@ mod tests {
             Err(ReviewError::InputTooLarge { .. })
         ));
     }
+
+    #[test]
+    fn a_walk_pays_for_every_directory_it_enters_and_every_name_it_sets_aside() {
+        // [MAGI S6 loop 9, commit review of A1-c4, security] a tree of deep or wide empty
+        // directories cost the walk time and recursion without paying the cap, and a name that
+        // is not UTF-8 must pay it too. Each is refused with a typed error naming the path.
+        let walk_in = |root: &Path, cap: u64| {
+            let mut found = Vec::new();
+            let mut not_utf8 = Vec::new();
+            let mut budget = cap;
+            walk(
+                root,
+                "",
+                &HashSet::new(),
+                &mut found,
+                &mut not_utf8,
+                &mut budget,
+            )
+        };
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(d.path().join("d1/d2/d3/d4")).expect("mkdir");
+        // `d1` (3) + `d1/d2` (6) + `d1/d2/d3` (9) fit 18; `d1/d2/d3/d4` (12) does not.
+        match walk_in(d.path(), 18) {
+            Err(ReviewError::InputTooLarge { path, .. }) => assert_eq!(path, "d1/d2/d3/d4"),
+            other => panic!("{other:?}"),
+        }
+        assert!(walk_in(d.path(), 30).is_ok());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let u = tempfile::tempdir().expect("tempdir");
+            std::fs::write(u.path().join(std::ffi::OsStr::from_bytes(b"x\xff")), "x\n")
+                .expect("write");
+            assert!(matches!(
+                walk_in(u.path(), 2),
+                Err(ReviewError::InputTooLarge { .. })
+            ));
+            assert!(walk_in(u.path(), 3).is_ok());
+        }
+    }
 }
