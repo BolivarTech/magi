@@ -1121,4 +1121,77 @@ mod tests {
             );
         }
     }
+
+    /// Every character a terminal or a log viewer may take as the start of a new line.
+    const BREAKS: [char; 7] = [
+        '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
+    ];
+
+    /// Whether some line of `text`, split on every [`BREAKS`] character, starts with `FORGED`.
+    fn has_forged_line(text: &str) -> bool {
+        text.split(|c| BREAKS.contains(&c))
+            .any(|line| line.starts_with("FORGED"))
+    }
+
+    #[tokio::test]
+    async fn no_line_break_in_model_text_can_forge_a_line_of_the_text_report() {
+        // [MAGI S6 loop 9, C2-m1 / C2-c1] titles, the discarded list's file and title, a failed
+        // batch's cause and the gate's stop cause were written raw: a model-emitted line break
+        // put the text after it at column 0, where it read as a line of the report.
+        for b in BREAKS {
+            let forged = format!("x{b}FORGED");
+            let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+            let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+            let answered = report.agents.iter().map(|a| a.agent).collect();
+            let mut c = consolidate(&[BatchOutcome {
+                batch: 0,
+                agents: report.agents.clone(),
+                answered,
+            }])
+            .expect("consolidates");
+            c.findings[0].file = Some(format!("a{forged}.rs"));
+            c.findings[0].titles = vec![forged.clone()];
+            c.findings[0].details = vec![forged.clone()];
+            let verdict = GateVerdict {
+                state: GateState::Kept,
+                cause: None,
+                causes: vec![],
+                model: None,
+                lean: None,
+                confidence: None,
+                skipped: vec![],
+                status: None,
+            };
+            let discarded = Discarded {
+                agent: AgentName::Caspar,
+                batch: 0,
+                finding: serde_json::from_value(serde_json::json!({
+                    "severity": "critical", "title": forged, "detail": "d",
+                    "file": format!("b{forged}.rs"), "line": 7
+                }))
+                .expect("a Finding"),
+                cause: DiscardCause::FileNotReviewed,
+                symbol: None,
+            };
+            let mut s = ReviewSummary::default();
+            s.findings.push((c.findings[0].clone(), verdict));
+            s.discarded.push(discarded.clone());
+            s.symbol_unverified.push(discarded);
+            s.failed_batches.push((1, forged.clone()));
+            s.gate_stopped = Some(forged.clone());
+            let text = render_text(&c, &s);
+            assert!(!has_forged_line(&text), "break {b:?}: {text}");
+            let paid = render_batch_reports(&[(0, report)]);
+            let mut forged_report = real_report([
+                serde_json::json!([{"severity":"warning","title":forged,"detail":"d","file":"a.rs","line":1}]),
+                serde_json::json!([]),
+                serde_json::json!([]),
+            ])
+            .await;
+            forged_report.consensus.findings.truncate(1);
+            let paid_forged = render_batch_reports(&[(0, forged_report)]);
+            assert!(!has_forged_line(&paid), "{paid}");
+            assert!(!has_forged_line(&paid_forged), "break {b:?}: {paid_forged}");
+        }
+    }
 }
