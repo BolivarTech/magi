@@ -3619,4 +3619,20 @@ void g(void) {
         );
         assert_each_line_in_one_unit(&units, 6);
     }
+
+    #[test]
+    fn a_c_initializer_wrapped_after_a_calls_parenthesis_is_one_declaration() {
+        // [MAGI S6 loop 13, B2b1-m2] only a trailing `=` or `= {` opened an initializer, so
+        // `static const struct config c = make_config(` was no declaration: its header and
+        // argument lines fell into a gap unit and its `);` became a declaration of its own.
+        let c =
+            "static const struct config c = make_config(\n    DEFAULT_A\n);\nint f(void) {\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), c, &all_lines(c))),
+            vec![
+                ("statics", UnitKind::DeclarationGroup, 1, 3),
+                ("f", UnitKind::Function, 4, 5)
+            ]
+        );
+    }
 }
