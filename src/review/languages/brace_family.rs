@@ -3301,4 +3301,31 @@ void g(void) {
         assert_eq!(line_number(max), None);
         assert_eq!(line_number(usize::MAX), None);
     }
+
+    #[test]
+    fn any_blank_separates_a_keyword_from_the_name_it_declares() {
+        // [MAGI S6 loop 13, B2b1-c4] the keyword tables matched with one literal space, so a tab
+        // after the keyword (`fn\tfoo`, `const\tX`) left the construct in a gap unit.
+        let rust = "fn\tfoo() {\n}\npub\tstruct\tS {\n    a: u8,\n}\nconst\tX: u8 = 1;\n";
+        assert_eq!(
+            spans(&extract(&rust_extractor(), rust, &all_lines(rust))),
+            vec![
+                ("foo", UnitKind::Function, 1, 2),
+                ("S", UnitKind::Struct, 3, 5),
+                ("constants", UnitKind::DeclarationGroup, 6, 6)
+            ]
+        );
+        let js = "const\tf = () => {\n  a();\n};\n";
+        let ext = BraceFamilyExtractor::javascript();
+        assert_eq!(
+            spans(&extract(&ext, js, &all_lines(js))),
+            vec![("f", UnitKind::Function, 1, 3)]
+        );
+        let go = "func\tmain() {\n}\n";
+        let ext = BraceFamilyExtractor::go();
+        assert_eq!(
+            spans(&extract(&ext, go, &all_lines(go))),
+            vec![("main", UnitKind::Function, 1, 2)]
+        );
+    }
 }
