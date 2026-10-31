@@ -1102,6 +1102,31 @@ mod tests {
     }
 
     #[test]
+    fn a_revision_file_in_a_nested_directory_is_read() {
+        // [MAGI S6 loop 10, A2-c1, false positive] `holds` runs `ls-tree` without `-r`. Measured
+        // with git 2.56: a pathspec makes `ls-tree` descend the trees it names and list the blob
+        // itself (`100644 blob <id>\tsrc/a/b.rs`), from the root and from a sub-workspace alike.
+        let d = repo();
+        std::fs::create_dir_all(d.path().join("src/a")).expect("mkdir");
+        std::fs::write(d.path().join("src/a/b.rs"), "fn b() {}\n").expect("write");
+        git(d.path(), &["add", "src/a/b.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let src = RevisionSource::new(&g, "HEAD".into(), None);
+        assert_eq!(
+            src.read("src/a/b.rs").expect("read"),
+            Some(b"fn b() {}\n".to_vec())
+        );
+        assert_eq!(src.read("src/a").expect("read"), None, "a tree is no file");
+        let sub = ScrubbedGit::new(d.path().join("src"));
+        let src = RevisionSource::new(&sub, "HEAD".into(), None);
+        assert_eq!(
+            src.read("a/b.rs").expect("read"),
+            Some(b"fn b() {}\n".to_vec())
+        );
+    }
+
+    #[test]
     fn a_filter_driver_from_the_reviewed_repos_config_never_runs() {
         // [CP2 MS2 S1a loop 10, measured with git 2.56] `diff <sha>` against the worktree runs the repo's `clean` filter;
         // --no-ext-diff and --no-textconv do not stop it. The filter would create PWNED in the repo root.

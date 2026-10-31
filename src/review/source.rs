@@ -438,6 +438,11 @@ impl<'g> RevisionSource<'g> {
     /// is not UTF-8 never stands for a requested path, which is always UTF-8. Only files count:
     /// a submodule (a gitlink, type `commit`) is not content of the revision, so a path that
     /// names one there reads as absent, like in the worktree; a directory (type `tree`) too.
+    ///
+    /// No `-r` is needed for a nested path: a pathspec makes `ls-tree` descend the trees it
+    /// names and list the blob itself (`100644 blob <id>\tsrc/a/b.rs`, measured with git 2.56),
+    /// pinned by `a_revision_file_in_a_nested_directory_is_read` (`src/system/review_git.rs`).
+    // MAGI FIX (S6 loop 10): A2-c1 refuted with real git; the nested-path read is pinned.
     // MAGI FIX (S6 loop 7): the whole revision was listed (`ls-tree -r`) to answer for one path,
     // so a monorepo past the git output cap failed the review before any model call.
     fn holds(&self, rev: &str, path: &str) -> Result<bool, ReviewError> {
