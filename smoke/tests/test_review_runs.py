@@ -327,6 +327,23 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
             self.assertIn("link", str(caught.exception))
             self.assertTrue((other / "keep.txt").is_file())
 
+    def test_a_linked_parent_inside_the_scratch_area_is_never_deleted_through(self) -> None:
+        # [MAGI §6 MS2 loop 12, F1a-c1] a parent component that is a link resolves under the scratch area
+        # too, so the containment check passes and rmtree would empty the tree the link names.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            copy = root / "scratch" / "copy"
+            (copy / runs.REVIEW_WORKSPACE_DIR).mkdir(parents=True)
+            keep = copy / runs.REVIEW_WORKSPACE_DIR / "keep.txt"
+            keep.write_text("x", encoding="utf-8")
+            _make_directory_link(copy, root / "scratch" / "mirror")
+            with mock.patch.object(runs, "REVIEW_WORKSPACE_DIR", "mirror/" + runs.REVIEW_WORKSPACE_DIR):
+                with self.assertRaises(HarnessError) as caught:
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("mirror", str(caught.exception))
+            self.assertTrue(keep.is_file())
+
 
 class ReviewWorkingDirectoryTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 4, F1-2] a review run's relative input means the same under either base."""
