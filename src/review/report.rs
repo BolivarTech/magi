@@ -12,8 +12,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use magi_core::consensus::DedupFinding;
+use magi_core::consensus::{ConsensusResult, DedupFinding};
 use magi_core::reporting::{MagiReport, ReportFormatter};
+use magi_core::schema::AgentOutput;
 use serde_json::{json, Map, Value};
 
 use super::consolidate::{Consolidated, ConsolidatedFinding};
@@ -25,6 +26,12 @@ use crate::redact::redact_foreign_text;
 
 /// The key under which a finding of the JSON form carries its gate verdict.
 const GATE_KEY: &str = "gate";
+/// Every character a terminal or a log viewer may take as the start of a new line.
+const LINE_BREAKS: [char; 7] = [
+    '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
+];
+/// What starts each continuation line of multi-line model prose in the text form.
+const CONTINUATION_INDENT: &str = "\n  ";
 /// How the titles of a merged finding are joined on one line.
 const TITLE_JOINER: &str = " / ";
 /// The key under which a value of the JSON form that could not be serialized declares why.
@@ -160,7 +167,8 @@ pub fn render_text(c: &Consolidated, s: &ReviewSummary) -> String {
         .filter_map(|(f, _)| key_finding(c.consensus.findings.first(), f))
         .collect();
     let unshown = s.findings.len().saturating_sub(consensus.findings.len());
-    let mut out = ReportFormatter::new().format_report(&c.agents, &consensus);
+    let (agents, consensus) = line_safe(&c.agents, &consensus);
+    let mut out = ReportFormatter::new().format_report(&agents, &consensus);
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -277,13 +285,18 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     if !s.skipped.is_empty() {
         writeln!(out, "\n## Skipped")?;
         for skip in &s.skipped {
-            writeln!(out, "- {} ({})", skip.path, name(&skip.cause))?;
+            writeln!(
+                out,
+                "- {} ({})",
+                escape_controls(&skip.path),
+                name(&skip.cause)
+            )?;
         }
     }
     if !s.no_extractor.is_empty() {
         writeln!(out, "\n## Reviewed without language context")?;
         for path in &s.no_extractor {
-            writeln!(out, "- {path}")?;
+            writeln!(out, "- {}", escape_controls(path))?;
         }
     }
     Ok(())
@@ -439,17 +452,72 @@ pub fn render_batch_reports(reports: &[(usize, MagiReport)]) -> String {
     for (batch, report) in reports {
         // Writing into a `String` cannot fail.
         let _ = writeln!(out, "## [batch {}]", shown(*batch));
-        // MAGI FIX (S6 loop 9, C2-m1): a raw title cannot start a line of its own here either.
-        let mut consensus = report.consensus.clone();
-        for finding in &mut consensus.findings {
-            finding.title = escape_controls(&finding.title);
-        }
-        out.push_str(&formatter.format_report(&report.agents, &consensus));
+        // MAGI FIX (S6 loop 9, C2-m1): no model text starts a line of its own here either.
+        let (agents, consensus) = line_safe(&report.agents, &report.consensus);
+        out.push_str(&formatter.format_report(&agents, &consensus));
         if !out.ends_with('\n') {
             out.push('\n');
         }
     }
     redacted(&out)
+}
+
+/// Copies of `agents` and `consensus` whose model text cannot start a line of the text form.
+///
+/// magi-core's formatter writes the Key Findings' titles, the dissent's summaries, the
+/// conditions and the recommendations raw. Titles become one line ([`escape_controls`]); the
+/// prose fields keep their line breaks as indented continuation lines ([`indented_prose`]), so
+/// none starts at column 0 where it would read as a report line. The agents' summary, reasoning
+/// and recommendation, and each dissent's reasoning, are not rendered by magi-core 4.2.0; they
+/// get the same treatment so a formatter that starts rendering them inherits the safety. The
+/// deprecated `majority_summary` is neither rendered nor touched (assigning it is a deprecation
+/// warning, and the build denies warnings).
+///
+/// # Arguments
+///
+/// * `agents` - The agents' outputs.
+/// * `consensus` - The consensus magi-core renders.
+///
+/// # Returns
+///
+/// The line-safe copies. O(bytes of the text fields).
+// MAGI FIX (S6 loop 9, C2 commit review): every model string the formatter may render.
+fn line_safe(
+    agents: &[AgentOutput],
+    consensus: &ConsensusResult,
+) -> (Vec<AgentOutput>, ConsensusResult) {
+    let mut agents = agents.to_vec();
+    for agent in &mut agents {
+        agent.summary = indented_prose(&agent.summary);
+        agent.reasoning = indented_prose(&agent.reasoning);
+        agent.recommendation = indented_prose(&agent.recommendation);
+    }
+    let mut consensus = consensus.clone();
+    for finding in &mut consensus.findings {
+        finding.title = escape_controls(&finding.title);
+    }
+    for dissent in &mut consensus.dissent {
+        dissent.summary = indented_prose(&dissent.summary);
+        dissent.reasoning = indented_prose(&dissent.reasoning);
+    }
+    for condition in &mut consensus.conditions {
+        condition.condition = indented_prose(&condition.condition);
+    }
+    for recommendation in consensus.recommendations.values_mut() {
+        *recommendation = indented_prose(recommendation);
+    }
+    (agents, consensus)
+}
+
+/// `text` split on every [`LINE_BREAKS`] character (`\r\n` counts once), each line passed
+/// through [`escape_controls`] and every line after the first indented
+/// ([`CONTINUATION_INDENT`]). O(n).
+fn indented_prose(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .split(|c| LINE_BREAKS.contains(&c))
+        .map(escape_controls)
+        .collect::<Vec<_>>()
+        .join(CONTINUATION_INDENT)
 }
 
 /// The 1-based number a reader sees for a 0-based batch index: the one base every output uses,
