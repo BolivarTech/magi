@@ -1560,7 +1560,7 @@ mod tests {
         // [MAGI S6 loop 12, A2-c1 / A2-c5] the cache kept every side the filter read, skipped
         // ones included: committed binaries crossed the total cap before the files under review
         // did, and a secret-bearing file's bytes stayed in memory for the whole run.
-        let inner = MapSource::new(&[("big.dat", "\0123456789"), ("a.rs", "fn f() {}\n")], &[]);
+        let inner = MapSource::new(&[("big.dat", "\0abcdefghi"), ("a.rs", "fn f() {}\n")], &[]);
         let cache = crate::review::source::CachedSource::with_total_cap(&inner, 15);
         let files = ["big.dat", "a.rs"]
             .iter()
