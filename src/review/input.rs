@@ -625,6 +625,10 @@ pub const NOT_A_DIRECTORY: &str = "not a directory";
 /// ([`is_never_reviewed`], never entered) and what `ignored` names (a file by its path, a
 /// directory by its path and a trailing `/`, never entered). O(entries).
 ///
+/// Every name listed (a non-UTF-8 one too) is paid from `budget` ([`spend`]), so a directory
+/// of millions of files stops at the cap a repository's listing has instead of being held
+/// whole before any content cap applies.
+///
 /// A link to a directory, a FIFO, a socket or a device file is collected on purpose (reviews
 /// of S6 loop 6 asked to drop them here): the reader refuses each one and the filter lists it
 /// as `not a regular file`, so the report names it instead of passing over it in silence.
@@ -649,7 +653,9 @@ fn walk(
             }
         };
         let Some(path) = name.to_str().map(joined) else {
-            not_utf8.push(joined(&name.to_string_lossy()));
+            let lossy = joined(&name.to_string_lossy());
+            spend(budget, &lossy)?;
+            not_utf8.push(lossy);
             continue;
         };
         // MAGI FIX (S6 loop 3): `.git`, `.magi` and the memory database are pruned here, before
@@ -663,9 +669,31 @@ fn walk(
         if entry.file_type().map_err(io)?.is_dir() {
             walk(&entry.path(), &path, ignored, found, not_utf8, budget)?;
         } else {
+            spend(budget, &path)?;
             found.push(path);
         }
     }
+    Ok(())
+}
+
+/// Takes the cost of listing `path` (its bytes plus one) from `budget`, the bytes a walk may
+/// still list, which starts at [`MAX_WALK_LISTING_BYTES`].
+///
+/// # Errors
+///
+/// [`ReviewError::InputTooLarge`] naming `path` when its cost passes what is left.
+// MAGI FIX (S6 loop 9): the walk listed every name with no bound (A1-c4).
+fn spend(budget: &mut u64, path: &str) -> Result<(), ReviewError> {
+    let cost = u64::try_from(path.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    *budget = budget
+        .checked_sub(cost)
+        .ok_or_else(|| ReviewError::InputTooLarge {
+            limit: MAX_WALK_LISTING_BYTES,
+            held: MAX_WALK_LISTING_BYTES.saturating_sub(*budget),
+            path: path.to_string(),
+        })?;
     Ok(())
 }
 
