@@ -56,12 +56,13 @@ impl LanguageExtractor for PythonExtractor {
         let mut units = Vec::new();
         for (construct, changed_in_unit) in constructs.iter().zip(shares) {
             if !changed_in_unit.is_empty() {
-                let start_idx = construct.start_line.saturating_sub(1) as usize;
-                let end_idx = construct.end_line as usize;
-                let unit_content = lines
-                    .get(start_idx..end_idx.min(lines.len()))
-                    .unwrap_or(&[])
-                    .join("\n");
+                // MAGI FIX (S6 loop 9): the start is clamped to the end before slicing, so a
+                // range past the file never indexes out of it. A construct's lines always fit
+                // `u32`: a reviewed file is at most `MAX_REVIEW_FILE_BYTES` (8 MiB), so at most
+                // 8 388 608 lines, far below `u32::MAX`.
+                let end_idx = (construct.end_line as usize).min(lines.len());
+                let start_idx = (construct.start_line.saturating_sub(1) as usize).min(end_idx);
+                let unit_content = lines.get(start_idx..end_idx).unwrap_or(&[]).join("\n");
 
                 units.push(SemanticUnit {
                     kind: construct.kind,
@@ -116,7 +117,11 @@ impl LanguageExtractor for PythonExtractor {
             if code(j) && is_def && indentation(line) == body_indent {
                 let start = scan_back_decorators(&lines, &continued, j);
                 let end = find_block_end(&lines, &continued, j);
-                let (first, last) = member_span(start, end).unwrap_or((u32::MAX, u32::MAX));
+                // MAGI FIX (S6 loop 9): a `u32::MAX` fallback split the class at a fabricated
+                // range; a line that does not fit `u32` leaves the class whole.
+                let Some((first, last)) = member_span(start, end) else {
+                    return Vec::new();
+                };
                 members.push((
                     UnitKind::Function,
                     extract_python_name(trimmed, "def "),
@@ -143,10 +148,8 @@ impl LanguageExtractor for PythonExtractor {
 ///
 /// The span, or `None` when a line number does not fit `u32`. O(1).
 fn member_span(start: usize, end: usize) -> Option<(u32, u32)> {
-    Some((
-        u32::try_from(start.saturating_add(1)).unwrap_or(u32::MAX),
-        u32::try_from(end.saturating_add(1)).unwrap_or(u32::MAX),
-    ))
+    let line = |idx: usize| u32::try_from(idx.checked_add(1)?).ok();
+    Some((line(start)?, line(end)?))
 }
 
 /// Whether each of `lines` continues a logical line begun on an earlier one: it starts inside a
