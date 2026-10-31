@@ -238,7 +238,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
         writeln!(
             out,
             "models without a measured window: {}",
-            s.unmeasured_models.join(", ")
+            joined(&s.unmeasured_models)
         )?;
     }
     if s.ceiling_below_configured {
@@ -333,17 +333,18 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
     if !causes.is_empty() {
         write!(out, " ({})", causes.join("; "))?;
     }
+    // MAGI FIX (S6 loop 10, C2-c1): model names and the lean are line-safe like model text.
     if let Some(model) = &v.model {
-        write!(out, " by {model}")?;
+        write!(out, " by {}", escape_controls(model))?;
     }
     if let Some(lean) = &v.lean {
-        write!(out, ", lean {lean}")?;
+        write!(out, ", lean {}", escape_controls(lean))?;
     }
     if let Some(confidence) = v.confidence {
         write!(out, ", confidence {confidence:.2}")?;
     }
     if !v.skipped.is_empty() {
-        write!(out, "; skipped after HTTP 400: {}", v.skipped.join(", "))?;
+        write!(out, "; skipped after HTTP 400: {}", joined(&v.skipped))?;
     }
     writeln!(out)?;
     // MAGI FIX (S6 loop 4): every line of a detail is indented, so none reads as a report line.
@@ -602,14 +603,28 @@ fn totals(s: &ReviewSummary) -> (u64, u64, u64) {
     })
 }
 
-/// `k1 n1, k2 n2`, in key order.
+/// `k1 n1, k2 n2`, in key order, each key passed through [`escape_controls`]: a key is a model
+/// name (configuration or pool, never validated against control characters) or a label.
+// MAGI FIX (S6 loop 10, C2-c1): a model name with a line break forged a report line.
 fn counts(map: &BTreeMap<String, usize>) -> String {
-    let parts: Vec<String> = map.iter().map(|(k, n)| format!("{k} {n}")).collect();
+    let parts: Vec<String> = map
+        .iter()
+        .map(|(k, n)| format!("{} {n}", escape_controls(k)))
+        .collect();
     if parts.is_empty() {
         "none".to_string()
     } else {
         parts.join(", ")
     }
+}
+
+/// `names` joined with `, `, each passed through [`escape_controls`]. O(bytes).
+fn joined(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| escape_controls(n))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `file:line`, `file`, or `(no location)`, the file passed through [`escape_controls`] (a
