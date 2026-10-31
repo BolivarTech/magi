@@ -1323,7 +1323,7 @@ impl BraceFamilyExtractor {
     /// strings; name C++ headers `.hpp` or `.hxx` to get the C++ extractor.
     ///
     /// A `template <...>` header belongs to the class or function it declares, on the line
-    /// right above it or on the construct's own line ([`strip_template_header`]).
+    /// right above it or on the construct's own line (`template<typename T> class Box {`).
     pub fn cpp() -> Self {
         let mut ext = Self::c();
         ext.language = "cpp".to_string();
