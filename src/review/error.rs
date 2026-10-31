@@ -180,7 +180,8 @@ pub enum ReviewError {
     },
 }
 
-/// How many omissions a [`ReviewError::NothingToReview`] message names before it counts the rest.
+/// How many omissions a [`ReviewError::NothingToReview`] message names before it counts the rest;
+/// the review report caps its `skipped` and `no_extractor` lists the same way.
 pub const MAX_OMISSIONS_SHOWN: usize = 20;
 
 /// `; left out: a (cause), b (cause), and N more`, or nothing when no file was left out.

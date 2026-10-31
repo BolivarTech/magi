@@ -18,6 +18,7 @@ use magi_core::schema::AgentOutput;
 use serde_json::{json, Map, Value};
 
 use super::consolidate::{Consolidated, ConsolidatedFinding};
+use super::error::MAX_OMISSIONS_SHOWN;
 use super::filter::Skipped;
 use super::gate::GateVerdict;
 use super::secrets::{escape_controls, mask_secrets};
@@ -26,6 +27,14 @@ use crate::redact::redact_foreign_text;
 
 /// The key under which a finding of the JSON form carries its gate verdict.
 const GATE_KEY: &str = "gate";
+/// The JSON key of the skipped files (the [`ReviewSummary::skipped`] field).
+const SKIPPED_KEY: &str = "skipped";
+/// The JSON key that declares how many skipped files are not listed.
+const SKIPPED_UNLISTED_KEY: &str = "skipped_unlisted";
+/// The JSON key of the files reviewed without an extractor ([`ReviewSummary::no_extractor`]).
+const NO_EXTRACTOR_KEY: &str = "no_extractor";
+/// The JSON key that declares how many of those files are not listed.
+const NO_EXTRACTOR_UNLISTED_KEY: &str = "no_extractor_unlisted";
 /// Every character a terminal or a log viewer may take as the start of a new line.
 const LINE_BREAKS: [char; 7] = [
     '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
@@ -64,9 +73,10 @@ pub struct ReviewSummary {
     pub judged_fraction: f64,
     /// Findings removed by the deterministic validation, with their cause.
     pub discarded: Vec<Discarded>,
-    /// Files left out of the review, with their cause.
+    /// Files left out of the review, with their cause (both forms list at most
+    /// [`MAX_OMISSIONS_SHOWN`] and declare the rest).
     pub skipped: Vec<Skipped>,
-    /// Reviewed files with no language extractor.
+    /// Reviewed files with no language extractor (listed like `skipped`).
     pub no_extractor: Vec<String>,
     /// Pool models whose window was not measured.
     pub unmeasured_models: Vec<String>,
@@ -293,7 +303,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     )?;
     if !s.skipped.is_empty() {
         writeln!(out, "\n## Skipped")?;
-        for skip in &s.skipped {
+        for skip in s.skipped.iter().take(MAX_OMISSIONS_SHOWN) {
             writeln!(
                 out,
                 "- {} ({})",
@@ -301,14 +311,30 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
                 name(&skip.cause)
             )?;
         }
+        write_unlisted(out, &s.skipped)?;
     }
     if !s.no_extractor.is_empty() {
         writeln!(out, "\n## Reviewed without language context")?;
-        for path in &s.no_extractor {
+        for path in s.no_extractor.iter().take(MAX_OMISSIONS_SHOWN) {
             writeln!(out, "- {}", escape_controls(path))?;
         }
+        write_unlisted(out, &s.no_extractor)?;
     }
     Ok(())
+}
+
+/// How many entries of a list of `len` lie past [`MAX_OMISSIONS_SHOWN`] and are not listed.
+/// O(1).
+fn unlisted(len: usize) -> usize {
+    len.saturating_sub(MAX_OMISSIONS_SHOWN)
+}
+
+/// Writes `- ... and N more` for the [`unlisted`] entries of `list`, nothing when there are none.
+fn write_unlisted<T>(out: &mut String, list: &[T]) -> std::fmt::Result {
+    match unlisted(list.len()) {
+        0 => Ok(()),
+        rest => writeln!(out, "- ... and {rest} more"),
+    }
 }
 
 /// Writes one finding with its gate verdict: severity, location, titles, marks, categories, then
@@ -395,8 +421,11 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
 /// Every field of [`ReviewSummary`], with `findings` and `filtered` as
 /// `[{<fields of the finding>, "gate": <verdict>}]`, plus `batch_totals`
 /// (`{input_tokens, output_tokens, ms}` summed over `batches`) and `rejected_skips`
-/// (`{model: n}`, the models skipped after an HTTP 400). Every string and every object key is
-/// redacted, so a model name used as a key passes the RV22 detector too.
+/// (`{model: n}`, the models skipped after an HTTP 400). `skipped` and `no_extractor` list at
+/// most [`MAX_OMISSIONS_SHOWN`] entries each, and `skipped_unlisted` / `no_extractor_unlisted`
+/// declare how many more there are (0 when none), as the text form's `- ... and N more` does:
+/// both lists grow with the reviewed tree, not with the review's result. Every string and every
+/// object key is redacted, so a model name used as a key passes the RV22 detector too.
 ///
 /// # Arguments
 ///
@@ -416,6 +445,21 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
             json!({"input_tokens": input, "output_tokens": output, "ms": ms}),
         );
         fields.insert("rejected_skips".into(), json!(rejected_skips(s)));
+        // MAGI FIX (S6 loop 13, C2-c4 / C2-m3): the omission lists grew with the reviewed tree;
+        // capped like the error path's, the rest declared.
+        for (list, rest, len) in [
+            (SKIPPED_KEY, SKIPPED_UNLISTED_KEY, s.skipped.len()),
+            (
+                NO_EXTRACTOR_KEY,
+                NO_EXTRACTOR_UNLISTED_KEY,
+                s.no_extractor.len(),
+            ),
+        ] {
+            if let Some(Value::Array(items)) = fields.get_mut(list) {
+                items.truncate(MAX_OMISSIONS_SHOWN);
+            }
+            fields.insert(rest.into(), json!(unlisted(len)));
+        }
     }
     redact_strings(&mut v);
     v
