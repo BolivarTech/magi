@@ -1031,4 +1031,13 @@ mod tests {
             assert!(form.contains("<redacted: "), "{form}");
         }
     }
+
+    #[test]
+    fn a_default_summary_declares_everything_judged() {
+        // [MAGI S6 loop 8, C2-c5] the field's contract is 1.0 with no finding; a derived
+        // `Default` said 0.0, so a summary rendered before the gate ran declared nothing judged.
+        let s = ReviewSummary::default();
+        assert_eq!(s.judged_fraction, 1.0);
+        assert_eq!(summary_json(&s)["judged_fraction"], 1.0);
+    }
 }
