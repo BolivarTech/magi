@@ -1134,4 +1134,22 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn a_class_line_inside_a_decorator_string_is_not_the_class_header() {
+        // [MAGI S6 loop 13, B2b2-m1] the header was the first line opening with `class`, even
+        // one inside a decorator's triple-quoted argument, so the body's indentation was read
+        // from the wrong line and the class never split.
+        let code = "@doc(\"\"\"\nclass Fake:\n\"\"\")\nclass Real:\n    def a(self):\n        pass\n    def b(self):\n        pass\n";
+        let units = extract(code, &[6]);
+        assert_eq!(spans(&units), vec![("Real", UnitKind::Class, 1, 8)]);
+        assert_eq!(
+            spans(&PythonExtractor.split_block(&units[0])),
+            vec![
+                ("Real", UnitKind::Class, 1, 4),
+                ("a", UnitKind::Method, 5, 6),
+                ("b", UnitKind::Method, 7, 8)
+            ]
+        );
+    }
 }
