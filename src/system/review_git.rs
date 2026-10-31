@@ -2147,6 +2147,26 @@ mod tests {
     }
 
     #[test]
+    fn a_file_named_like_a_git_option_is_a_pathspec_not_an_option() {
+        // [MAGI S6 loop 10, D2-m2, false positive] `ignored_paths` puts `--` before the pathspec,
+        // so a file named `-x.rs` (or `--stdin`) keeps its ignore verdict and is never parsed as
+        // an option of `ls-files`.
+        let d = repo();
+        std::fs::write(d.path().join(".gitignore"), "-x.rs\n--stdin\n").expect("write");
+        for name in ["-x.rs", "--stdin", "-ok.rs"] {
+            std::fs::write(d.path().join(name), "fn f() {}\n").expect("write");
+        }
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        for (name, ignored) in [("-x.rs", true), ("--stdin", true), ("-ok.rs", false)] {
+            let input = magi_rs::review::input::ReviewInput::File(name.into());
+            let set = magi_rs::review::filter::ignored_paths(&input, name, d.path(), &g)
+                .expect("one git call");
+            assert_eq!(set.contains(name), ignored, "{name}: {set:?}");
+            assert!(set.len() <= 1, "{name}: {set:?}");
+        }
+    }
+
+    #[test]
     fn a_file_requested_by_name_is_ignored_whether_tracked_or_not() {
         // [CP2 MS2 S1b loop 12, measured with git 2.56] the File query returns tracked-ignored AND untracked-ignored.
         let d = repo();

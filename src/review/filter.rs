@@ -328,6 +328,10 @@ fn read_side(read: Result<Option<Vec<u8>>, ReviewError>) -> Result<Side, ReviewE
 /// excludes, which the enumeration lists (untracked ignored files are never enumerated).
 /// Outside any repository the set is empty.
 ///
+/// `pathspec` follows a `--`, so a name that begins with `-` (`-x.rs`, `--stdin`) is a path and
+/// never an option of `ls-files`; pinned by
+/// `a_file_named_like_a_git_option_is_a_pathspec_not_an_option` (`src/system/review_git.rs`).
+///
 /// `pathspec` is a literal path, never a glob: the production git sets
 /// `GIT_LITERAL_PATHSPECS=1` on every call, so a name holding `*`, `?` or `[` matches only
 /// itself. Measured with git 2.56 (reviews of S6 loops 5 and 6 raised it twice): a tracked or
@@ -367,6 +371,7 @@ pub fn ignored_paths(
         return Ok(HashSet::new());
     }
     let mut args = query.to_vec();
+    // MAGI FIX (S6 loop 10): D2-m2 refuted; the `--` keeps a leading-dash name a path.
     args.extend_from_slice(&["--", pathspec]);
     // A name that is not UTF-8 is never enumerated as a file to review (the input sets it
     // aside), so it needs no entry here.
