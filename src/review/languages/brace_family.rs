@@ -1082,7 +1082,7 @@ impl BraceFamilyExtractor {
         let value = rest.split_once('=')?.1.trim_start();
         let (open, close) = declaration_block(lines, scanned, i, stops)?;
         let arrow = lines.get(i..=open)?.iter().any(|l| l.contains("=>"));
-        let function = value.starts_with("function") || value.starts_with("async function");
+        let function = opens_function_value(value);
         (!name.is_empty() && (arrow || function)).then_some((name, close))
     }
 
@@ -1268,10 +1268,42 @@ const FUNCTION_EXPRESSION_KEYWORDS: [&str; 3] = ["const ", "let ", "var "];
 /// `const t = [`, `int a,`).
 const DECLARATION_CONTINUATIONS: [char; 4] = ['=', '(', '[', ','];
 
+/// The arrow a JavaScript or TypeScript arrow function ends its header with (`() =>`).
+const ARROW: &str = "=>";
+
+/// The words a JavaScript function expression's value opens with (`function (x) {`).
+const FUNCTION_VALUE_WORDS: [&str; 2] = ["function", "async function"];
+
+/// Whether a declaration's value (the text after its `=`, trimmed at its start) is a function
+/// expression ([`FUNCTION_VALUE_WORDS`], as whole words: `functional(x)` is a call). O(1).
+fn opens_function_value(value: &str) -> bool {
+    FUNCTION_VALUE_WORDS.iter().any(|w| {
+        value
+            .strip_prefix(w)
+            .is_some_and(|after| !after.starts_with(is_identifier_char))
+    })
+}
+
+/// Whether a trimmed declaration line goes on to the next line: it ends in a
+/// [`DECLARATION_CONTINUATIONS`] character, in an arrow ([`ARROW`], `const f = () =>`), or in
+/// the `)` of a function expression's parameters (`const g = function (x)`), whose body may open
+/// on the next line. A call's `)` (`const h = g(1)`) ends the declaration. O(n) in the line.
+fn continues_on_next_line(trimmed: &str) -> bool {
+    // MAGI FIX (S6 loop 13): an arrow or function expression whose brace opened on the next
+    // line ended on its own line, and its body fell into a gap unit.
+    trimmed.ends_with(DECLARATION_CONTINUATIONS)
+        || trimmed.ends_with(ARROW)
+        || (trimmed.ends_with(')')
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(_, value)| opens_function_value(value.trim_start())))
+}
+
 /// The opening and closing lines (0-based) of the block a declaration at line `i` holds: an
 /// object or struct literal, a wrapped `use a::{`, a function expression's body. There is one
-/// when the declaration's line opens a brace, or ends in a [`DECLARATION_CONTINUATIONS`]
-/// character and a later line opens one before the declaration ends ([`open_brace_line`]). A
+/// when the declaration's line opens a brace, or goes on to the next line
+/// ([`continues_on_next_line`]) and a later line opens one before the declaration ends
+/// ([`open_brace_line`]). A
 /// complete one-line declaration (`const a = 1`) takes no later block. A linkage block
 /// (`extern "C" {`, [`opens_linkage_block`]) holds none: its contents stay top-level constructs.
 /// O(k) for the k lines of the block.
@@ -1284,7 +1316,7 @@ fn declaration_block(
     let opens = scanned.get(i).is_some_and(|s| s.brace_delta > 0);
     let continues = lines
         .get(i)
-        .is_some_and(|l| l.trim_end().ends_with(DECLARATION_CONTINUATIONS));
+        .is_some_and(|l| continues_on_next_line(l.trim()));
     if !(opens || continues) || lines.get(i).is_some_and(|l| opens_linkage_block(l.trim())) {
         return None;
     }
