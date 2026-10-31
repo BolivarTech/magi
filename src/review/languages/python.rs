@@ -109,7 +109,7 @@ impl LanguageExtractor for PythonExtractor {
         let code = |j: usize| !continued.get(j).copied().unwrap_or(false);
         let Some(class_idx) = lines
             .iter()
-            .position(|l| l.trim_start().starts_with("class "))
+            .position(|l| after_keyword(l.trim(), "class").is_some())
         else {
             return Vec::new();
         };
@@ -126,8 +126,8 @@ impl LanguageExtractor for PythonExtractor {
         let mut j = class_idx + 1;
         while let Some(&line) = lines.get(j) {
             let trimmed = line.trim();
-            let is_def = trimmed.starts_with("def ") || trimmed.starts_with("async def ");
-            if code(j) && is_def && indentation(line) == body_indent {
+            let def = def_rest(trimmed);
+            if code(j) && def.is_some() && indentation(line) == body_indent {
                 let start = scan_back_decorators(&lines, &continued, j);
                 let end = find_block_end(&lines, &continued, j);
                 // MAGI FIX (S6 loop 9): a `u32::MAX` fallback split the class at a fabricated
@@ -135,12 +135,7 @@ impl LanguageExtractor for PythonExtractor {
                 let Some((first, last)) = member_span(start, end) else {
                     return Vec::new();
                 };
-                members.push((
-                    UnitKind::Function,
-                    extract_python_name(trimmed, "def "),
-                    first,
-                    last,
-                ));
+                members.push((UnitKind::Function, python_name(def), first, last));
                 j = end + 1;
             } else {
                 j += 1;
@@ -349,9 +344,11 @@ fn try_detect_python_constructs(lines: &[&str]) -> Option<Vec<PythonConstruct>> 
         let indent = indentation(line);
         let line_num = line_number(i)?;
 
+        // MAGI FIX (S6 loop 13): a keyword matched with one literal space, so `def\tf():` or
+        // `class  C:` (legal Python) was no construct; any blank separates it from its name.
         // def / async def at indent 0 → Function
-        if (trimmed.starts_with("def ") || trimmed.starts_with("async def ")) && indent == 0 {
-            let name = extract_python_name(trimmed, "def ");
+        if let Some(rest) = def_rest(trimmed).filter(|_| indent == 0) {
+            let name = python_name(Some(rest));
             let start = scan_back_decorators(lines, &continued, i);
             let end = find_block_end(lines, &continued, i);
             constructs.push(PythonConstruct {
@@ -365,8 +362,8 @@ fn try_detect_python_constructs(lines: &[&str]) -> Option<Vec<PythonConstruct>> 
         }
 
         // class at indent 0 → Class
-        if trimmed.starts_with("class ") && indent == 0 {
-            let name = extract_python_name(trimmed, "class ");
+        if let Some(rest) = after_keyword(trimmed, "class").filter(|_| indent == 0) {
+            let name = python_name(Some(rest));
             let start = scan_back_decorators(lines, &continued, i);
             let end = find_block_end(lines, &continued, i);
             constructs.push(PythonConstruct {
@@ -380,7 +377,7 @@ fn try_detect_python_constructs(lines: &[&str]) -> Option<Vec<PythonConstruct>> 
         }
 
         // import / from ... import at indent 0 → DeclarationGroup
-        if (trimmed.starts_with("import ") || trimmed.starts_with("from ")) && indent == 0 {
+        if opens_import(trimmed) && indent == 0 {
             let group_end = find_import_group_end(lines, &continued, i);
             constructs.push(PythonConstruct {
                 kind: UnitKind::DeclarationGroup,
@@ -542,12 +539,12 @@ fn find_import_group_end(lines: &[&str], continued: &[bool], start: usize) -> us
             continue;
         }
         let trimmed = line.trim();
-        if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
+        if opens_import(trimmed) {
             end = j;
         } else if trimmed.is_empty() {
             // Allow one blank line
             if let Some(next) = lines.get(j + 1).map(|l| l.trim()) {
-                if next.starts_with("import ") || next.starts_with("from ") {
+                if opens_import(next) {
                     continue;
                 }
             }
@@ -622,17 +619,41 @@ fn scan_back_decorators(lines: &[&str], continued: &[bool], idx: usize) -> usize
     start
 }
 
-/// Extract name from a Python def/class line.
-fn extract_python_name(trimmed: &str, prefix: &str) -> String {
-    let rest = if let Some(r) = trimmed.strip_prefix("async def ") {
-        r
-    } else if let Some(r) = trimmed.strip_prefix(prefix) {
-        r
-    } else {
-        trimmed
-    };
+/// The text after `keyword` at the start of a trimmed line, past the blanks that end the
+/// keyword: Python separates a keyword from what follows it with any run of spaces and tabs
+/// (`def\tf():`, `class  C:`). `None` when the line does not open with the keyword followed by
+/// a blank (`define = 1`, `classes = []`). O(n) in the line.
+///
+/// # Arguments
+///
+/// * `trimmed` - A trimmed line.
+/// * `keyword` - The bare keyword (`def`, `class`, `import`, `from`).
+///
+/// # Returns
+///
+/// The rest of the line, trimmed at its start, or `None`.
+fn after_keyword<'t>(trimmed: &'t str, keyword: &str) -> Option<&'t str> {
+    let rest = trimmed.strip_prefix(keyword)?;
+    rest.starts_with(char::is_whitespace)
+        .then(|| rest.trim_start())
+}
 
-    rest.chars()
+/// The text after `def` or `async def` at the start of a trimmed line ([`after_keyword`]), or
+/// `None` when the line opens no function definition. O(n) in the line.
+fn def_rest(trimmed: &str) -> Option<&str> {
+    after_keyword(trimmed, "def").or_else(|| after_keyword(after_keyword(trimmed, "async")?, "def"))
+}
+
+/// Whether a trimmed line opens an `import` or `from` statement ([`after_keyword`]). O(n).
+fn opens_import(trimmed: &str) -> bool {
+    after_keyword(trimmed, "import").is_some() || after_keyword(trimmed, "from").is_some()
+}
+
+/// The name of a definition: the identifier that opens `rest`, the text after its keyword
+/// ([`after_keyword`]); empty when there is no such text or identifier. O(n) in the name.
+fn python_name(rest: Option<&str>) -> String {
+    rest.unwrap_or("")
+        .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect()
 }
