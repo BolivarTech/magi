@@ -848,6 +848,48 @@ def protected_candidates(workspace) -> tuple[str, ...]:
                         if path.startswith(prefix)))
 
 
+def _is_link(path) -> bool:
+    """Whether *path* is a symlink or, on Windows, a junction.
+
+    ``os.path.isjunction`` exists from Python 3.12; the harness's 3.11 floor
+    has no junction test, and there a junction reads as not a link.
+
+    Args:
+        path: The path to test, which need not exist.
+
+    Returns:
+        bool: ``True`` for a symlink or a junction.
+    """
+    is_junction = getattr(os.path, "isjunction", None)
+    return os.path.islink(path) or bool(is_junction and is_junction(path))
+
+
+def _reject_links(top) -> None:
+    """Refuse a tree that holds a symlink or a junction, *top* included.
+
+    The review workspace is copied from the environment's ``.magi`` with
+    :func:`shutil.copytree`, which follows links: an entry pointing outside
+    would copy what it points at into the workspace the product reads. The
+    environment never needs one, so any link is refused rather than copied
+    as a link or followed.
+
+    Args:
+        top: The directory to check.
+
+    Raises:
+        HarnessError: Naming the first link found.
+    """
+    if _is_link(top):
+        raise HarnessError("refusing to copy %s: it is a link" % top)
+    for directory, dirs, files in os.walk(top):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            if _is_link(path):
+                raise HarnessError(
+                    "refusing to copy %s: %s is a link, and the review "
+                    "workspace never follows one" % (top, path))
+
+
 def _skip_top_level_logs(magi_dir):
     """A ``copytree`` filter that leaves out the ``logs`` directory of *magi_dir*.
 
@@ -1340,6 +1382,19 @@ class RunExecutor:
             raise HarnessError(
                 "refusing to build the review workspace at %s: it resolves "
                 "outside the scratch area %s" % (workspace, scratch))
+        # MAGI FIX (S6 loop 10): copytree followed a link in .magi, and a
+        # workspace path that is itself a link inside the scratch area passed
+        # the resolve() check above (F1a-c4). Both are refused before anything
+        # is deleted or copied. What is left is a parent swapped for a link
+        # between the check and rmtree: the scratch area lives inside the
+        # repository under the environment's lock, rmtree removes links inside
+        # the tree without following them, and whoever can swap a directory
+        # there already controls the harness's own code.
+        if _is_link(workspace):
+            raise HarnessError(
+                "refusing to delete the review workspace at %s: it is a "
+                "link" % workspace)
+        _reject_links(self._env.magi_dir)
         try:
             if workspace.exists():
                 shutil.rmtree(workspace)
