@@ -1904,4 +1904,20 @@ mod tests {
             )
         );
     }
+
+    #[tokio::test]
+    async fn a_finding_with_a_line_but_no_file_is_no_location_without_a_call() {
+        // [MAGI S6 loop 9, C1-c3] the gate checked the line and the code, never the file: a
+        // finding with `file: None` sent a state with a null file.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().times(0);
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let mut f = finding(Severity::Warning, Some(1));
+        f.file = None;
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause),
+            (GateState::Unfiltered, Some("no location"))
+        );
+    }
 }
