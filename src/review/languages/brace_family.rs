@@ -900,14 +900,12 @@ impl BraceFamilyExtractor {
         None
     }
 
-    /// Check if the line starts a declaration.
+    /// Whether the line opens with a declaration keyword followed by any blank
+    /// ([`blank_keyword_rest`]).
     fn match_declaration_keyword(&self, trimmed: &str) -> bool {
-        for kw in &self.declaration_keywords {
-            if trimmed.starts_with(kw.as_str()) {
-                return true;
-            }
-        }
-        false
+        self.declaration_keywords
+            .iter()
+            .any(|kw| blank_keyword_rest(trimmed, kw).is_some())
     }
 
     /// The 0-based first line of the construct whose declaration is at `idx`: `idx` moved up
@@ -1058,7 +1056,7 @@ impl BraceFamilyExtractor {
         let text = self.strip_modifiers(lines.get(i)?.trim(), false);
         let rest = FUNCTION_EXPRESSION_KEYWORDS
             .iter()
-            .find_map(|kw| text.strip_prefix(kw))?;
+            .find_map(|kw| blank_keyword_rest(text, kw))?;
         let name: String = rest
             .chars()
             .take_while(|&c| is_identifier_char(c))
@@ -1086,26 +1084,24 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 12): the `pub ...` and `export ` arms could never match, since the
         // caller strips the visibility words first.
         let trimmed = first_line.trim();
-        if trimmed.starts_with("use ")
-            || trimmed.starts_with("import ")
-            || trimmed.starts_with("from ")
-        {
+        let opens = |kw: &str| blank_keyword_rest(trimmed, kw).is_some();
+        if opens("use ") || opens("import ") || opens("from ") {
             "imports".to_string()
-        } else if trimmed.starts_with("const ") {
+        } else if opens("const ") {
             "constants".to_string()
-        } else if trimmed.starts_with("static ") {
+        } else if opens("static ") {
             "statics".to_string()
-        } else if trimmed.starts_with("#define ") {
+        } else if opens("#define ") {
             "defines".to_string()
-        } else if trimmed.starts_with("typedef ") {
+        } else if opens("typedef ") {
             "typedefs".to_string()
-        } else if trimmed.starts_with("extern ") {
+        } else if opens("extern ") {
             "externs".to_string()
-        } else if trimmed.starts_with("type ") {
+        } else if opens("type ") {
             "type aliases".to_string()
-        } else if trimmed.starts_with("let ") || trimmed.starts_with("var ") {
+        } else if opens("let ") || opens("var ") {
             "variables".to_string()
-        } else if trimmed.starts_with("package ") {
+        } else if opens("package ") {
             "package".to_string()
         } else {
             "declarations".to_string()
@@ -1505,7 +1501,7 @@ fn strip_modifier<'t>(text: &'t str, word: &str) -> Option<&'t str> {
 /// (`class{`), which is kept. `None` when `text` does not open with the keyword. O(n) in the
 /// text.
 fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
-    if let Some(rest) = text.strip_prefix(kw) {
+    if let Some(rest) = blank_keyword_rest(text, kw) {
         return Some(rest);
     }
     // MAGI FIX (S6 loop 5): `impl<T> Foo<T>` matched no `impl ` and its methods lost the header.
@@ -1516,6 +1512,29 @@ fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
         return Some(rest);
     }
     rest.starts_with('<').then(|| skip_generics(rest))
+}
+
+/// The text after keyword `kw` at the start of `text`: `text` past `kw` as written or, for a
+/// table keyword that ends in a blank (`fn `, `const `), past the bare word and any run of
+/// blanks after it (`fn\tfoo`, `const  X`), trimmed at its start. `None` when `text` does not
+/// open with the keyword followed by a blank (`constant`). O(n) in the text.
+///
+/// # Arguments
+///
+/// * `text` - A trimmed line, or its rest after the modifiers.
+/// * `kw` - A keyword of a table.
+///
+/// # Returns
+///
+/// The text after the keyword, or `None`.
+fn blank_keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
+    // MAGI FIX (S6 loop 13): a tab after the keyword (`fn\tfoo`) matched no `fn `.
+    if let Some(rest) = text.strip_prefix(kw) {
+        return Some(rest);
+    }
+    let rest = text.strip_prefix(kw.strip_suffix(' ')?)?;
+    rest.starts_with(char::is_whitespace)
+        .then(|| rest.trim_start())
 }
 
 /// `text` after the balanced `<...>` it opens with, trimmed at its start; empty when the list
