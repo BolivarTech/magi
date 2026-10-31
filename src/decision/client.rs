@@ -1253,6 +1253,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_404_naming_the_canonical_tag_of_a_bare_model_is_model_not_found() {
+        // [MAGI S6 loop 12, C2-m3 / C2-b6 / C2-c3] Ollama canonicalizes a bare name: asking for
+        // `nimble` can answer `model 'nimble:latest' not found`, which the name check read as a
+        // generic 404 and lost the "model not available" detail. Both body forms are covered.
+        for body in [
+            r#"{"error":"model 'nimble:latest' not found"}"#,
+            r#"{"error":"model \"nimble:latest\" not found, try pulling it first"}"#,
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("POST", "/v1/systemone")
+                .with_status(404)
+                .with_body(body)
+                .create_async()
+                .await;
+            let r = decide(settings(&server.url(), &["nimble"]), &request()).await;
+            assert_eq!(
+                first_failure(&r).map(|(c, _)| c),
+                Some(Cause::ModelNotFound),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn another_models_name_in_a_404_is_not_this_model_missing() {
         let mut server = mockito::Server::new_async().await;
         server
