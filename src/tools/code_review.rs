@@ -307,16 +307,36 @@ fn consult_object(c: &Consolidated, structured: bool) -> Value {
 /// * `r` - A rendered review.
 ///
 /// # Returns
-/// The same review with its secrets masked.
+/// The same review with its secrets masked, and its text and failure without terminal control
+/// characters ([`terminal_safe`], applied first so a control character inside a key cannot hide
+/// it from the detector).
 // MAGI FIX (S6 loop 3): `redact_foreign_text` only scrubs URL credentials; the product's own
 // detector runs here, the one point every surface (CLI text, JSON and `-o`, TUI, tool) reads.
 fn egress_safe(r: Rendered) -> Rendered {
     Rendered {
-        text: mask_secrets(&r.text),
+        text: mask_secrets(&terminal_safe(&r.text)),
         json: masked_json(r.json),
         consult: masked_json(r.consult),
-        failure: r.failure.map(|f| mask_secrets(&f)),
+        failure: r.failure.map(|f| mask_secrets(&terminal_safe(&f))),
     }
+}
+
+/// `text` without the control characters a terminal acts on: every C0 and C1 control but `\n`
+/// and `\t`, the report's own layout, is dropped, so an escape sequence a model echoes from
+/// the reviewed code arrives as inert text (`ESC [2J` becomes `[2J`). The JSON forms escape
+/// control characters themselves and are left as they are. O(len of `text`).
+///
+/// # Arguments
+/// * `text` - The text about to reach the screen.
+///
+/// # Returns
+/// The text with those characters removed.
+// MAGI FIX (S6 loop 8, C2-c6): the headless text output wrote model text to the terminal
+// verbatim; only the TUI ran it through `Agent::sanitize_text`.
+fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+        .collect()
 }
 
 /// `text` as an error may carry it out of the process: URL credentials redacted, then every
