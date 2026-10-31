@@ -176,20 +176,20 @@ impl LanguageExtractor for BraceFamilyExtractor {
 /// The members, or `None` when a shifted line number does not fit `u32`: such a block is
 /// reviewed whole, never split at fabricated coordinates. O(m) in the members.
 fn shift_members(constructs: Vec<Construct>, open: usize) -> Option<Vec<Member>> {
-    let offset = u32::try_from(open + 1).unwrap_or(u32::MAX);
-    Some(
-        constructs
-            .into_iter()
-            .map(|c| {
-                (
-                    c.kind,
-                    c.name,
-                    c.start_line.saturating_add(offset),
-                    c.end_line.saturating_add(offset),
-                )
-            })
-            .collect(),
-    )
+    // MAGI FIX (S6 loop 9): a `u32::MAX` fallback offset and saturating additions split a block
+    // at fabricated ranges; an unrepresentable line now leaves the block whole.
+    let offset = u32::try_from(open.checked_add(1)?).ok()?;
+    constructs
+        .into_iter()
+        .map(|c| {
+            Some((
+                c.kind,
+                c.name,
+                c.start_line.checked_add(offset)?,
+                c.end_line.checked_add(offset)?,
+            ))
+        })
+        .collect()
 }
 
 /// The modifier words of a language, stripped before its keyword tables are matched.
