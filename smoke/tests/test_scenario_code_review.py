@@ -239,6 +239,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
         r = _result("R12", 0, _review(3, [{"file": None, "line": None}]))
         self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]])
 
+    def test_s47_fails_on_a_finding_with_a_line_but_no_file(self) -> None:
+        # [MAGI §6 MS2 loop 10, F1a-c1] a line without a file is malformed, never an unlocated finding: a
+        # report holding only such findings must FAIL, not fall to CANNOT_TEST.
+        for findings in ([{"file": None, "line": 5}],
+                         [{"file": None, "line": 5}, {"file": "gen/a.rs", "line": 1}],
+                         [{"line": 99999}]):
+            r = _result("R12", 0, _review(3, findings))
+            self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]], findings)
+
     def test_s48_passes_on_a_misuse_exit_naming_the_path(self) -> None:
         r = _result("R13", 2, None, b"error: path is outside the workspace: C:\\ws\\..\\smoke-hostile-target\n")
         self.assertEqual({Outcome.PASS}, set(_outcomes("S48", r).values()))
