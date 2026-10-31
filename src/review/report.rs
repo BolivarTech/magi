@@ -1129,6 +1129,41 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_judged_fraction_is_written_as_nothing_judged_in_both_forms() {
+        // [MAGI S6 loop 12, C2-m2 / C2-b4 / C2-c6] `serde_json` writes NaN and infinity as
+        // `null`, so a non-finite fraction left a consumer a `null` where it reads a number, and
+        // the text form printed `NaN %`. Unknown coverage is never claimed: it reads as 0.
+        for fraction in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let s = ReviewSummary {
+                judged_fraction: fraction,
+                ..ReviewSummary::default()
+            };
+            assert_eq!(summary_json(&s)["judged_fraction"], 0.0, "{fraction}");
+            let mut out = String::new();
+            write_review_section(&mut out, &s, 0).expect("writes");
+            assert!(out.contains("judged: 0.0 %"), "{fraction}: {out}");
+        }
+    }
+
+    #[test]
+    fn an_incomplete_gate_never_reads_as_fully_judged_in_the_text_form() {
+        // [MAGI S6 loop 12, C2-m4 / C2-b2] `{:.0}` rounded 299 of 300 up to `100 %`, hiding the
+        // unjudged finding C-7 made visible; the JSON kept the exact value.
+        let s = ReviewSummary {
+            judged_fraction: 299.0 / 300.0,
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(out.contains("judged: 99.6 %"), "{out}");
+        assert!(!out.contains("judged: 100"), "{out}");
+        let full = ReviewSummary::default();
+        let mut out = String::new();
+        write_review_section(&mut out, &full, 0).expect("writes");
+        assert!(out.contains("judged: 100.0 %"), "{out}");
+    }
+
+    #[test]
     fn a_capped_lexical_index_is_declared_so_zero_symbol_discards_is_not_misread() {
         // [MAGI S6 loop 4, C1] with the index over its cap no symbol is checked: the report must
         // say so, or "no unknown symbol" would read as "none cited".
