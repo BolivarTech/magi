@@ -775,20 +775,20 @@ mod tests {
     fn a_path_absent_from_the_revision_is_none_and_a_failing_show_is_an_error() {
         let git = FakeGit::from(&[
             (
-                "ls-tree -z X -- a.rs",
+                "ls-tree -z --end-of-options X -- a.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
             ),
             (
-                "ls-tree -z X -- b.rs",
+                "ls-tree -z --end-of-options X -- b.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\tb.rs\0"),
             ),
-            ("ls-tree -z X -- missing.rs", Ok("")),
+            ("ls-tree -z --end-of-options X -- missing.rs", Ok("")),
             (
-                "show --no-ext-diff --no-textconv X:./a.rs",
+                "show --no-ext-diff --no-textconv --end-of-options X:./a.rs",
                 Ok("fn a() {}\n"),
             ),
             (
-                "show --no-ext-diff --no-textconv X:./b.rs",
+                "show --no-ext-diff --no-textconv --end-of-options X:./b.rs",
                 Err("fatal: bad object X:./b.rs"),
             ),
         ]);
@@ -901,20 +901,18 @@ mod tests {
         impl GitCommand for Big {
             fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
                 match args.join(" ").as_str() {
-                    "ls-tree -z X -- big.rs" => Ok(
+                    "ls-tree -z --end-of-options X -- big.rs" => Ok(
                         b"100644 blob 0000000000000000000000000000000000000000\tbig.rs\0".to_vec(),
                     ),
-                    "ls-tree -z X -- cut.rs" => Ok(
+                    "ls-tree -z --end-of-options X -- cut.rs" => Ok(
                         b"100644 blob 0000000000000000000000000000000000000000\tcut.rs\0".to_vec(),
                     ),
-                    "show --no-ext-diff --no-textconv X:./big.rs" => {
-                        Ok(vec![
+                    "show --no-ext-diff --no-textconv --end-of-options X:./big.rs" => Ok(vec![
                             b'a';
                             usize::try_from(MAX_REVIEW_FILE_BYTES).expect("fits")
                                 + 1
-                        ])
-                    }
-                    "show --no-ext-diff --no-textconv X:./cut.rs" => {
+                        ]),
+                    "show --no-ext-diff --no-textconv --end-of-options X:./cut.rs" => {
                         Err(ReviewError::GitOutputTooLarge {
                             limit: MAX_GIT_OUTPUT_BYTES,
                         })
@@ -1072,14 +1070,16 @@ mod tests {
         impl GitCommand for Latin1Tree {
             fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
                 match args.join(" ").as_str() {
-                    "ls-tree -z X -- a\u{FFFD}.rs" => Ok(
+                    "ls-tree -z --end-of-options X -- a\u{FFFD}.rs" => Ok(
                         b"100644 blob 0000000000000000000000000000000000000000\ta\xff.rs\0"
                             .to_vec(),
                     ),
-                    "ls-tree -z X -- b.rs" => Ok(
+                    "ls-tree -z --end-of-options X -- b.rs" => Ok(
                         b"100644 blob 0000000000000000000000000000000000000000\tb.rs\0".to_vec(),
                     ),
-                    "show --no-ext-diff --no-textconv X:./b.rs" => Ok(b"fn b() {}\n".to_vec()),
+                    "show --no-ext-diff --no-textconv --end-of-options X:./b.rs" => {
+                        Ok(b"fn b() {}\n".to_vec())
+                    }
                     other => Err(ReviewError::Git(format!("unexpected: {other}"))),
                 }
             }
@@ -1099,7 +1099,7 @@ mod tests {
         impl GitCommand for Capped {
             fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
                 match args.join(" ").as_str() {
-                    "ls-tree -z X -- a.rs" => Ok(
+                    "ls-tree -z --end-of-options X -- a.rs" => Ok(
                         b"100644 blob 0000000000000000000000000000000000000000\ta.rs\0".to_vec(),
                     ),
                     other => Err(ReviewError::Git(format!("uncapped: {other}"))),
@@ -1111,7 +1111,9 @@ mod tests {
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(cap);
                 match args.join(" ").as_str() {
-                    "show --no-ext-diff --no-textconv X:./a.rs" => Ok(b"fn a() {}\n".to_vec()),
+                    "show --no-ext-diff --no-textconv --end-of-options X:./a.rs" => {
+                        Ok(b"fn a() {}\n".to_vec())
+                    }
                     other => Err(ReviewError::Git(format!("unexpected: {other}"))),
                 }
             }
@@ -1129,17 +1131,39 @@ mod tests {
     }
 
     #[test]
+    fn a_revision_shaped_like_an_option_reaches_git_after_end_of_options() {
+        // [MAGI S6 loop 12, A2-c3, security] the revision reached `ls-tree` and `show` as a
+        // positional argument: a rev of `--output=<file>` read as an option of `git show` and
+        // wrote a file. `--end-of-options` makes the sink safe without trusting its caller.
+        let git = FakeGit::from(&[
+            (
+                "ls-tree -z --end-of-options --output=x -- a.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
+            ),
+            (
+                "show --no-ext-diff --no-textconv --end-of-options --output=x:./a.rs",
+                Ok("fn a() {}\n"),
+            ),
+        ]);
+        let src = RevisionSource::new(&git, "--output=x".into(), None);
+        assert_eq!(
+            src.read("a.rs").expect("read"),
+            Some(b"fn a() {}\n".to_vec())
+        );
+    }
+
+    #[test]
     fn a_revision_read_lists_only_the_requested_path_never_the_whole_tree() {
         // [MAGI S6 loop 7, A2-c5] the existence check listed every blob of the revision, so a
         // monorepo past the 64 MiB git output cap failed the review before any model call.
         let git = FakeGit::from(&[
             (
-                "ls-tree -z X -- a.rs",
+                "ls-tree -z --end-of-options X -- a.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
             ),
-            ("ls-tree -z X -- gone.rs", Ok("")),
+            ("ls-tree -z --end-of-options X -- gone.rs", Ok("")),
             (
-                "show --no-ext-diff --no-textconv X:./a.rs",
+                "show --no-ext-diff --no-textconv --end-of-options X:./a.rs",
                 Ok("fn a() {}\n"),
             ),
         ]);

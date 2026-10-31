@@ -1763,11 +1763,11 @@ mod tests {
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
             (
-                "ls-tree -z abc -- gone.rs",
+                "ls-tree -z --end-of-options abc -- gone.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\tgone.rs\0"),
             ),
             (
-                "show --no-ext-diff --no-textconv abc:./gone.rs",
+                "show --no-ext-diff --no-textconv --end-of-options abc:./gone.rs",
                 Ok(old.as_str()),
             ),
         ]);
@@ -1859,11 +1859,11 @@ mod tests {
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
             (
-                "ls-tree -z abc -- a.rs",
+                "ls-tree -z --end-of-options abc -- a.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
             ),
             (
-                "show --no-ext-diff --no-textconv abc:./a.rs",
+                "show --no-ext-diff --no-textconv --end-of-options abc:./a.rs",
                 Ok(old.as_str()),
             ),
         ]);
@@ -1952,11 +1952,11 @@ mod tests {
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
             (
-                "ls-tree -z abc -- gone.rs",
+                "ls-tree -z --end-of-options abc -- gone.rs",
                 Ok("100644 blob 0000000000000000000000000000000000000000\tgone.rs\0"),
             ),
             (
-                "show --no-ext-diff --no-textconv abc:./gone.rs",
+                "show --no-ext-diff --no-textconv --end-of-options abc:./gone.rs",
                 Ok(old.as_str()),
             ),
         ]);
@@ -1998,7 +1998,7 @@ mod tests {
         .expect("runs");
         let calls = git.1.lock().expect("lock");
         assert_eq!(
-            calls.get("show --no-ext-diff --no-textconv abc:./gone.rs"),
+            calls.get("show --no-ext-diff --no-textconv --end-of-options abc:./gone.rs"),
             Some(&1),
             "{calls:?}"
         );
