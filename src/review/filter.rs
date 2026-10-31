@@ -158,7 +158,7 @@ enum Verdict {
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker
 /// ([`is_binary_section`]) is judged by its bytes the same way, and when both sides are text it
 /// is kept with no diff, reviewed whole from its new side; it stays `binary` only when a side
-/// cannot be read or the file has no new side ([`suppressed_diff`]).
+/// cannot be read or the file has no new side (`suppressed_diff`).
 /// The binary and UTF-8 checks run on both sides that exist (binary first). The
 /// secret scan covers both whole sides, not only what is sent: the safe direction. A renamed
 /// file's old side is read under its old path (`rename from`).
