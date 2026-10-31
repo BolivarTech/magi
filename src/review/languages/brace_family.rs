@@ -2602,6 +2602,52 @@ mod tests {
     }
 
     #[test]
+    fn a_cpp_assignment_operator_overload_is_a_function() {
+        // [MAGI S6 loop 9, B2b-m1] the `=` of `operator=` read as an initializer before the `(`,
+        // so an overload was no function and a class made of them could not split.
+        let cases = [
+            (
+                "Foo& Foo::operator=(const Foo& o) {
+    return *this;
+}
+void g() {
+}
+",
+                "operator=",
+            ),
+            (
+                "bool operator==(const Foo& a, const Foo& b) {
+    return true;
+}
+void g() {
+}
+",
+                "operator==",
+            ),
+            (
+                "Foo& operator<<=(int n) {
+    return *this;
+}
+void g() {
+}
+",
+                "operator<<=",
+            ),
+        ];
+        for (code, name) in cases {
+            let units = extract(&BraceFamilyExtractor::cpp(), code, &all_lines(code));
+            assert_eq!(
+                spans(&units),
+                vec![
+                    (name, UnitKind::Function, 1, 3),
+                    ("g", UnitKind::Function, 4, 5)
+                ],
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn a_brace_in_an_open_parameter_list_loses_no_line() {
         // [MAGI S6 loop 8, B2b-m2] declared on `open_brace_line`: a lambda default argument's
         // brace is taken for the function's, so the body is split from its signature, but every
