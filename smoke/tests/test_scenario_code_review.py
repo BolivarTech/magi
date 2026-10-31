@@ -156,6 +156,15 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         r = _result("R16", 2, None, _with_id(stderr), protected_visible=(".magi/magi.toml",))
         self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
 
+    def test_s51_never_passes_over_a_protected_name_the_omission_list_cannot_split(self) -> None:
+        # [MAGI §6 MS2 loop 13, F1a-c3] a .magi name holding " (ignored), " reads as two entries, so the
+        # product classifying it as a secret looked like a protected path left out unread plus another file.
+        planted = ".magi/z (ignored), q"
+        stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)",
+                                      planted.encode() + b" (secret), skipped/pixel.png (binary)")
+        r = _result("R16", 2, None, _with_id(stderr), protected_visible=_R16_PROTECTED + (planted,))
+        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]])
+
     def test_s51_fails_when_a_protected_file_was_taken_for_review(self) -> None:
         # A .magi/magi.toml taken for review makes the input reviewable: the run reaches the budget
         # refusal (--timeout 20) instead of "nothing to review".
