@@ -216,7 +216,7 @@ const JAVA_MODIFIERS: Modifiers = Modifiers {
 /// Keywords that may stand right before a `(` without naming a function: control flow, operators
 /// and statements of the C family, Java and JavaScript (`catch (e) {`, `synchronized (lock) {`,
 /// `function (x) {`).
-const NOT_FUNCTION_NAMES: [&str; 20] = [
+const NOT_FUNCTION_NAMES: [&str; 23] = [
     "if",
     "for",
     "while",
@@ -237,6 +237,11 @@ const NOT_FUNCTION_NAMES: [&str; 20] = [
     "await",
     "yield",
     "case",
+    // MAGI FIX (S6 loop 9): a C++ trailing clause (`requires (C)`, `noexcept(true)`,
+    // `-> decltype(a + b)`) on a wrapped signature's line read as a function name.
+    "requires",
+    "noexcept",
+    "decltype",
 ];
 
 /// The words a JavaScript or TypeScript declaration may open with (`export default`,
@@ -628,7 +633,8 @@ impl BraceFamilyExtractor {
     /// The function name of a C-family signature line, for extractors with
     /// `signature_functions`: a line that holds `(`, whose code does not end in `;` (a prototype;
     /// with `scanned`, a comment after the code does not count), does not
-    /// open with `#`, a comment, `}` or `@`, has no `=` before its `(`, and names an identifier,
+    /// open with `#`, a comment, `}`, `@`, `,` or a single `:` (a C++ constructor's initializer line,
+    /// `: value_(v) {`, continues the signature above it), has no `=` before its `(`, and names an identifier,
     /// not a keyword of [`NOT_FUNCTION_NAMES`], just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
     /// `bar`). The line may be indented: a function inside a namespace, a class or an
     /// `extern "C"` block is a function too. Only lines outside every construct are asked, so a
@@ -666,8 +672,14 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 7): a `*` opens a comment's continuation line only when the line
         // starts inside the comment; in code it is a generator method (`*items() {`).
         let comment_star = trimmed.starts_with('*') && scanned.is_none_or(|s| s.starts_in_literal);
+        // MAGI FIX (S6 loop 9): a C++ constructor's initializer line (`: value_(v) {`,
+        // `, count_(0)`) read as a signature named after the member, so the constructor's brace
+        // search stopped there; it continues the signature above it.
+        let initializer =
+            trimmed.starts_with(',') || (trimmed.starts_with(':') && !trimmed.starts_with("::"));
         if (prototype && !prototypes)
             || comment_star
+            || initializer
             || ["#", "//", "/*", "}", "@"]
                 .iter()
                 .any(|p| trimmed.starts_with(p))
@@ -861,7 +873,8 @@ impl BraceFamilyExtractor {
 /// declaration had no block; a comment ending in `;` does not count), opens a statement with a
 /// keyword of [`STATEMENT_KEYWORDS`] (`if (x) {`: a signature's brace is never there), or where
 /// `stops` holds (the next construct's start) while no parenthesis opened since line `i` is
-/// still open; comment lines are passed over. A line whose braces balance (`fn a() { x(); }`)
+/// still open and the line before it does not end in `,` (a C++ constructor's initializer list
+/// wrapped after a comma, `count_(0) {`, continues the declaration); comment lines are passed over. A line whose braces balance (`fn a() { x(); }`)
 /// opens nothing, so a one-line construct never takes the brace of the construct after it.
 /// O(k) for the k lines scanned, which never pass the next construct.
 ///
@@ -898,7 +911,13 @@ fn open_brace_line(
     // MAGI FIX (S6 loop 7): a parameter line inside the open list no longer stops the search.
     let mut parens = paren_delta(lines, scanned, i);
     for j in (i + 1)..lines.len() {
-        let ends_search = (parens <= 0 && stops(j))
+        // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
+        // the next construct; a line after one ending in `,` continues the declaration.
+        let continues = j
+            .checked_sub(1)
+            .and_then(|p| lines.get(p))
+            .is_some_and(|l| l.trim_end().ends_with(','));
+        let ends_search = (parens <= 0 && !continues && stops(j))
             || lines
                 .get(j)
                 .is_some_and(|l| l.trim().is_empty() || opens_statement(l.trim()));
