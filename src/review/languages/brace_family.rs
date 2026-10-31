@@ -634,6 +634,11 @@ impl BraceFamilyExtractor {
     /// `extern "C"` block is a function too. Only lines outside every construct are asked, so a
     /// call inside a recognised function body is never taken for one. O(n) in the line.
     ///
+    /// A C++ template header is read past first ([`Self::without_template_header`]): alone on its
+    /// line (`template <typename T>`) it is no signature, since nothing follows it, so it never
+    /// names a function after its last parameter; it joins the construct below as one of the
+    /// extractor's `attribute_prefixes`.
+    ///
     /// # Arguments
     ///
     /// * `line` - The line, untrimmed.
