@@ -46,7 +46,8 @@ from smoke.registry import scenario
 S47_ASSERTIONS = (
     "exit 0",
     "stdout parses as JSON",
-    "code_review.batches_planned is at least 3, every one completed",
+    "code_review.batches_planned is at least 3, batches_completed equals it "
+    "and failed_batches is empty",
     "consult has one consensus",
     "every main finding points inside the reviewed files",
     "every discarded finding carries its cause",
@@ -316,6 +317,51 @@ def _is_count(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+#: How a batch failure the backend caused begins, in magi-core's error text
+#: (``MagiError``'s ``Display`` in magi-core 4.2.0 ``error.rs``) or the
+#: product's own ``clock expired`` (``CLOCK_EXPIRED`` in
+#: ``src/review/pipeline.rs``): transport, timeout, quota (an ``http error
+#: 429``), auth, and a trio that lost its quorum to them. ``insufficient
+#: agents`` names no seat cause, so it is counted here too: the product does not
+#: carry the seats' causes in the batch's text, and a real trio cannot be forced
+#: to answer. Matched as a prefix, so a wrapper such as ``the trio build did not
+#: finish: timeout`` is not taken for one.
+PROVIDER_FAILURE_PREFIXES = (
+    "http error", "network error", "timeout", "auth error", "retry abandoned",
+    "endpoint down", "external provider error", "insufficient agents",
+    "clock expired",
+)
+
+
+def _provider_failures_only(failed, shortfall):
+    """Whether *failed* accounts for *shortfall* batches, all lost to the backend.
+
+    Args:
+        failed: ``code_review.failed_batches``: ``[batch, why]`` pairs.
+        shortfall: ``batches_planned - batches_completed``, at least one.
+
+    Returns:
+        bool: ``True`` when *failed* is a list of exactly *shortfall* pairs,
+        each with a text reason that starts with one of
+        :data:`PROVIDER_FAILURE_PREFIXES`.
+
+    Example:
+        >>> _provider_failures_only([[3, "http error 429: quota"]], 1)
+        True
+        >>> _provider_failures_only([[3, "response contract violated: x"]], 1)
+        False
+    """
+    if not isinstance(failed, list) or len(failed) != shortfall:
+        return False
+    for entry in failed:
+        if not (isinstance(entry, list) and len(entry) == 2
+                and isinstance(entry[1], str)):
+            return False
+        if not entry[1].lstrip().lower().startswith(PROVIDER_FAILURE_PREFIXES):
+            return False
+    return True
+
+
 def _batches_finding(section, run_id):
     """Judge ``code_review.batches_planned`` and ``code_review.batches_completed``.
 
@@ -329,7 +375,11 @@ def _batches_finding(section, run_id):
         files are not empty, so no window plans zero batches), or when
         ``batches_completed`` differs from
         ``batches_planned`` (one report over batches that never ran is not the
-        multi-batch report RV-S2 asks for). Otherwise ``PASS`` at three batches
+        multi-batch report RV-S2 asks for) unless every missing batch is in
+        ``failed_batches`` with a cause the backend gave
+        (:func:`_provider_failures_only`), which is ``CANNOT_TEST``; ``FAIL``
+        too when the counts agree but ``failed_batches`` is not an empty list.
+        Otherwise ``PASS`` at three batches
         or more; at one or two, ``CANNOT_TEST`` when the whole pool measured a
         window (the input is sized for the unmeasured default, so fewer batches
         is the environment's doing), else ``FAIL``. An absent
@@ -352,11 +402,26 @@ def _batches_finding(section, run_id):
             S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
             "batches_planned is %r, expected a positive count: R12 reviews "
             "non-empty files" % planned)
+    failed = section.get("failed_batches")
+    # MAGI FIX (S6 loop 12): a batch lost to the backend (quota, transport,
+    # timeout, auth) read as a product FAIL, and equal counts beside a
+    # declared failure passed "every one completed" (F1a-m1, F1a-b1, F1a-c3).
     if completed != planned:
+        if _provider_failures_only(failed, planned - completed):
+            return _finding(
+                S47_ASSERTIONS, 2, Outcome.CANNOT_TEST, run_id,
+                "batches_completed is %r of %r planned, and every missing "
+                "batch failed for a reason the backend gave: %r"
+                % (completed, planned, failed))
         return _finding(
             S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
-            "batches_completed is %r, expected every one of the %r planned"
-            % (completed, planned))
+            "batches_completed is %r, expected every one of the %r planned; "
+            "failed_batches is %r" % (completed, planned, failed))
+    if failed != []:
+        return _finding(
+            S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
+            "failed_batches is %r, expected an empty list when every one of "
+            "the %r planned batches completed" % (failed, planned))
     if planned >= MIN_BATCHES:
         return _finding(S47_ASSERTIONS, 2, Outcome.PASS, run_id)
     detail = "batches_planned is %r, expected at least %d" % (planned, MIN_BATCHES)
