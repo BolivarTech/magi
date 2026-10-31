@@ -1201,8 +1201,11 @@ mod tests {
             "{PEM_BEGIN}EC {PEM_PRIVATE_KEY}\nMIIB\n{}",
             concat!("-----", "END EC PRIVATE KEY-----")
         );
+        // [MAGI S6 loop 13, A2-c2] the URL credential, whose match is decided before its span.
+        let url = concat!("db://", "u:", "pw@", "h");
         let fragments: Vec<&str> = vec![
-            sk, ant, ghp, aws, aws_secret, &pem, "-", "\n", "_", "a", " ", "x-", "-\n", ".",
+            sk, ant, ghp, aws, aws_secret, &pem, url, "-", "\n", "_", "a", " ", "x-", "-\n", ".",
+            "/", "@", ":",
         ];
         let adjacent = [
             format!("{aws}-{sk}"),
@@ -1388,6 +1391,8 @@ mod tests {
             format!("DATABASE_URL=\"{}\"", at("mysql", "p", "10.0.0.1:3306")),
             at("https", "x", "[::1]:8080/"),
             format!("redis://:{}@cache:6379/0", "S3cr3t"),
+            // An unencoded `@` in the password: the authority's last `@` ends the mask.
+            at("postgres", "S3cr3t@S3cr3t", "db"),
         ] {
             assert_eq!(find_secret(&secret), Some("url-credential"), "{secret}");
             let masked = mask_secrets(&secret);
@@ -1405,6 +1410,7 @@ mod tests {
             format!("postgres://{user}:$PASSWORD@db"),
             format!("postgres://{user}:<password>@db"),
             "https://***@example.invalid/x".to_string(),
+            format!("https://{user}@example.invalid:443/a:b@c"),
             "mailto:a@b.c".to_string(),
         ] {
             assert_eq!(find_secret(&plain), None, "{plain}");
