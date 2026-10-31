@@ -366,6 +366,16 @@ class CodeReviewScenarioTests(unittest.TestCase):
             text = _BUDGET_STDERR.replace(old, new)
             r = _result("R15", 2, None, _with_id(text))
             self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], new)
+        # Each of these breaks ONE bound and keeps every other number coherent, so each bound is needed.
+        one_batch = _product_refusal(1, 2, False)
+        alone = (
+            _BUDGET_STDERR.replace(b"the 114 s a batch", b"the 23 s a batch").replace(
+                b"--timeout 342", b"--timeout 69"),                      # need below 24 s, all else agreeing
+            one_batch.replace(b"(per-batch ceiling 1 s)", b"(per-batch ceiling 15 s)"),  # ceiling at the floor
+        )
+        for text in alone:
+            r = _result("R15", 2, None, _with_id(text))
+            self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], text)
 
     def test_s50_fails_when_the_floor_is_not_the_15_s_one(self) -> None:
         text = _BUDGET_STDERR.replace(b"the 15 s floor", b"the 20 s floor")
