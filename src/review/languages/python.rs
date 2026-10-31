@@ -109,7 +109,9 @@ impl LanguageExtractor for PythonExtractor {
         let code = |j: usize| !continued.get(j).copied().unwrap_or(false);
         let Some(class_idx) = lines
             .iter()
-            .position(|l| after_keyword(l.trim(), "class").is_some())
+            .enumerate()
+            // MAGI FIX (S6 loop 13): a `class` line inside a decorator's string was the header.
+            .position(|(j, l)| code(j) && after_keyword(l.trim(), "class").is_some())
         else {
             return Vec::new();
         };
