@@ -2286,4 +2286,28 @@ mod tests {
         junction(&ws.join("link"), &ws.join("src"));
         assert_explicit_is_refused(&ws, "link", "not a regular file");
     }
+
+    #[test]
+    fn egress_safe_strips_terminal_control_characters_from_the_text_and_the_failure() {
+        // [MAGI S6 loop 8, C2-c6] model text over untrusted code reaches the operator's
+        // terminal through the text output of `magi code-review` verbatim: an escape sequence a
+        // model echoes must not rewrite the screen. Newlines and tabs are the report's layout.
+        let hostile = "a\u{1b}[2Jb\u{7}c\u{9b}31m\r\nd\te".to_string();
+        let r = egress_safe(Rendered {
+            text: hostile.clone(),
+            json: serde_json::json!({}),
+            consult: serde_json::json!({}),
+            failure: Some(hostile),
+        });
+        let failure = r.failure.clone().unwrap_or_default();
+        for part in [r.text, failure] {
+            assert!(
+                !part
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t'),
+                "{part:?}"
+            );
+            assert!(part.contains("a[2Jbc31m\nd\te"), "{part:?}");
+        }
+    }
 }
