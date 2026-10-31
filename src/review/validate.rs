@@ -123,6 +123,22 @@ pub(crate) fn cited_identifiers(text: &str) -> Vec<String> {
     cited
 }
 
+/// What a `\\` in a path is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backslash {
+    /// A separator, as on Windows, where no file name can hold one.
+    Separator,
+    /// A character of a file name, as on Unix.
+    Literal,
+}
+
+/// What a `\\` is on the platform this process runs on.
+const HOST_BACKSLASH: Backslash = if cfg!(windows) {
+    Backslash::Separator
+} else {
+    Backslash::Literal
+};
+
 /// `path` with `\` replaced by `/`.
 fn slashed(path: &str) -> String {
     path.replace('\\', "/")
@@ -163,6 +179,16 @@ pub(crate) fn normalize_location(
     workspace: &Path,
     file: &str,
     line: Option<u32>,
+) -> (String, Option<u32>) {
+    normalize_location_with(workspace, file, line, HOST_BACKSLASH)
+}
+
+/// [`normalize_location`] under an explicit [`Backslash`] policy.
+fn normalize_location_with(
+    workspace: &Path,
+    file: &str,
+    line: Option<u32>,
+    _backslash: Backslash,
 ) -> (String, Option<u32>) {
     let root = slashed(&workspace.to_string_lossy());
     let workspace = root.trim_end_matches('/');
@@ -736,7 +762,13 @@ mod tests {
             "src/a.rs"
         );
         assert_eq!(
-            normalize_location(Path::new(r"C:\"), r"C:\src\a.rs", None).0,
+            normalize_location_with(
+                Path::new(r"C:\"),
+                r"C:\src\a.rs",
+                None,
+                Backslash::Separator
+            )
+            .0,
             "src/a.rs"
         );
     }
@@ -785,11 +817,43 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_absolute_path_is_normalized_on_every_platform() {
-        let (f, l) = normalize_location(Path::new(r"C:\w"), r"c:\w\src\a.rs", Some(3));
+    fn a_windows_absolute_path_is_normalized_under_the_windows_policy_on_every_platform() {
+        // [MAGI S6 loop 9, C1-c1] the policy is explicit: on Unix the host keeps `\`.
+        let windows = Backslash::Separator;
+        let (f, l) =
+            normalize_location_with(Path::new(r"C:\w"), r"c:\w\src\a.rs", Some(3), windows);
         assert_eq!((f.as_str(), l), ("src/a.rs", Some(3)));
-        let (f, _) = normalize_location(Path::new(r"C:\w"), r"src\b.rs", None);
+        let (f, _) = normalize_location_with(Path::new(r"C:\w"), r"src\b.rs", None, windows);
         assert_eq!(f, "src/b.rs");
+    }
+
+    #[test]
+    fn a_backslash_in_a_unix_file_name_never_aliases_another_file() {
+        // [MAGI S6 loop 9, C1-c1] `src/a\b.rs` and `src/a/b.rs` are two files on Unix; turning
+        // every `\` into `/` made a finding on the first validate against the second.
+        let unix = Backslash::Literal;
+        assert_eq!(
+            normalize_location_with(Path::new("/w"), r"src/a\b.rs", Some(1), unix).0,
+            r"src/a\b.rs"
+        );
+        assert_eq!(
+            normalize_location_with(Path::new("/w"), r"/w/src/a\b.rs", Some(1), unix).0,
+            r"src/a\b.rs"
+        );
+    }
+
+    #[test]
+    fn the_host_policy_reads_a_backslash_as_its_platform_does() {
+        // [MAGI S6 loop 9, C1-c1] the host default: a separator on Windows only.
+        let expected = if cfg!(windows) {
+            "src/a/b.rs"
+        } else {
+            r"src/a\b.rs"
+        };
+        assert_eq!(
+            normalize_location(Path::new("/w"), r"src/a\b.rs", None).0,
+            expected
+        );
     }
 
     #[test]
