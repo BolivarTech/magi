@@ -214,6 +214,18 @@ class GitConfigTests(unittest.TestCase):
         self.assertTrue(runs.HARNESS_GIT_CONFIG)
         self.assertEqual(set(), set(runs.HARNESS_GIT_CONFIG) - product)
 
+    # MAGI FIX (S6 loop 11, F1a-m2): GIT_VISIBLE_QUERY copies the product's
+    # enumeration query with nothing checking it; a product query that dropped
+    # one of its flags would surface as an opaque SMOKE FAIL.
+    def test_the_visibility_query_uses_only_flags_the_products_listing_passes(self) -> None:
+        listing = re.search(r"const LS_FILES_ALL: &\[&str\] = &\[(.*?)\];",
+                            _source("src/review/input.rs"), re.S)
+        self.assertIsNotNone(listing, "LS_FILES_ALL was not found in src/review/input.rs")
+        product = re.findall(r'"([^"]*)"', listing.group(1))
+        self.assertEqual("ls-files", runs.GIT_VISIBLE_QUERY[0])
+        self.assertEqual(product[0], runs.GIT_VISIBLE_QUERY[0])
+        self.assertEqual(set(), set(runs.GIT_VISIBLE_QUERY) - set(product))
+
 
 class SecretPrefixDocTests(unittest.TestCase):
     """The README never names a secret prefix the detector does not check."""
