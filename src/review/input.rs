@@ -542,6 +542,11 @@ fn resolve_directory(
         args.extend_from_slice(&["--", pathspec]);
         let (names, not_utf8) = split_nul(&git.run_bytes(&args)?);
         resolved.not_utf8 = not_utf8;
+        // `.git`, `.magi` and the memory database are not pruned here, unlike the walk: `ls-files`
+        // never enters `.git`, and the filter refuses every never-reviewed path from any listing
+        // before a read (one enforcement point, RV22 clause 1; a review of S6 loop 8 asked for a
+        // second one here). Pinned, with a tracked memory database and an unignored `.magi/` file, by
+        // `a_repository_listing_never_keeps_a_never_reviewed_path`.
         // A tracked file deleted from the tree is not read, and a link whose target is gone
         // (which reads the same) is set aside.
         // MAGI FIX (S6 loop 8): any other metadata error dropped the name in silence; it is kept,
