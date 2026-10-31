@@ -120,10 +120,14 @@ PROTECTED_CAUSE = "ignored"
 #: these words, so a path may hold commas, semicolons or spaces.
 #: ``missing`` (``filter::MISSING``) is deliberately absent: it is the cause of
 #: the ``<path> is not reviewable: missing`` error for a file named explicitly,
-#: never an entry of this list, and a listed file that vanishes mid-review is
-#: an I/O error (``disappeared during the review``), not an omission.
+#: never an entry of this list. A listed file that vanishes between the listing
+#: and the read is an omission (``disappeared``), as is one that cannot be read
+#: (``unreadable``) or has more than one hard link (``hard link``).
+# MAGI FIX (S6 loop 12): the three causes R1 added were missing, and the comment
+# still called a vanished listed file an I/O error.
 OMISSION_CAUSES = ("binary", "not utf-8", "secret", "ignored",
-                   "outside workspace", "too large", "not a regular file")
+                   "outside workspace", "too large", "not a regular file",
+                   "hard link", "unreadable", "disappeared")
 
 #: The omission list of a ``nothing to review`` refusal, to the end of its line.
 OMISSION_LIST_PATTERN = re.compile(r"; left out: (?P<list>.*)")
