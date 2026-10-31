@@ -146,13 +146,28 @@ OMISSION_PATTERN = re.compile(
 #: ``MIN_CLIENT_TIMEOUT`` 5 s in ``src/magi/mod.rs``).
 FLOOR_SECS = 15
 
+#: The classifier call every consult budget reserves first, in seconds
+#: (``CLASSIFY_TIMEOUT_SECS`` in ``src/magi/mod.rs``).
+CLASSIFY_SECS = 6
+
+#: The headless slack folded into the attempt factor, in percent
+#: (``HEADLESS_TIMEOUT_SLACK_PCT`` in ``src/magi/mod.rs``).
+SLACK_PCT = 20
+
+#: The least wall clock any batch needs at the floor: the most lenient
+#: ``[magi]`` (no rotation, no retry) gives an attempt factor of
+#: ``100 + SLACK_PCT`` hundredths, so 6 + 15 x 1.2 = 24 s.
+MIN_NEED_PER_BATCH_SECS = CLASSIFY_SECS + FLOOR_SECS * (100 + SLACK_PCT) // 100
+
 #: The product's refusal, as ``ReviewError::Budget`` renders it
 #: (``src/review/error.rs``): batches, wall clock per batch, the wall clock a
 #: batch needs at the floor, the floor, the per-batch ceiling and the smallest
-#: ``--timeout``. The numbers come from the product's formula and are only
-#: range-checked; the fields are what RV-S7 requires.
+#: ``--timeout``. The count is rendered as ``N batches`` at every N, one
+#: included (the template has no plural branch). The numbers come from the
+#: product's formula and are checked for coherence by :func:`_budget_fields_ok`;
+#: the fields are what RV-S7 requires.
 BUDGET_PATTERN = re.compile(
-    r"(?P<batches>\d+) batches leave \d+ s per batch, less than the \d+ s a "
+    r"(?P<batches>\d+) batches leave (?P<wall>\d+) s per batch, less than the (?P<need>\d+) s a "
     r"batch needs at the (?P<floor>\d+) s floor \(per-batch ceiling "
     r"(?P<ceiling>\d+) s\); pass --timeout (?P<minimum>\d+) or more")
 
@@ -621,9 +636,8 @@ def an_insufficient_timeout_is_refused_before_spending(run):
 
     RV-S7: the refusal names the batches, the per-batch ceiling, the floor and
     the smallest ``--timeout``, on stderr and in the run log. The numbers come
-    from the product's formula and are only range-checked: at least
-    :data:`MIN_REFUSED_BATCHES` batch, the 15 s floor, and a minimum above the
-    total the run asked for. The run log is the review workspace's own, and its line
+    from the product's formula and must agree with each other and with the total
+    the run asked for (:func:`_budget_fields_ok`). The run log is the review workspace's own, and its line
     must carry this run's id and the very text stderr showed. It is read from
     the copy the executor captured right after R15, never from the live
     directory, which a later review run rebuilds.
@@ -646,31 +660,63 @@ def an_insufficient_timeout_is_refused_before_spending(run):
                    "exited %d, expected %d" % (code, EXIT_MISUSE))
     match = BUDGET_PATTERN.search(_stderr_text(run))
     yield _verdict(S50_ASSERTIONS, 1, "R15", _budget_fields_ok(match),
-                   "stderr does not carry the budget refusal with at least %d "
-                   "batch, the %d s floor and a minimum --timeout above %d"
-                   % (MIN_REFUSED_BATCHES, FLOOR_SECS,
-                      runs.REVIEW_TOO_SHORT_TIMEOUT_S))
+                   "stderr does not carry a budget refusal whose batches, "
+                   "wall clock, need, %d s floor, ceiling and minimum agree "
+                   "with the %d s asked for"
+                   % (FLOOR_SECS, runs.REVIEW_TOO_SHORT_TIMEOUT_S))
     yield _run_log_finding(run, match)
 
 
 def _budget_fields_ok(match):
-    """Whether a parsed refusal names sane batches, floor, ceiling and minimum.
+    """Whether a parsed refusal's numbers are ones the product prints together.
+
+    ``pre_budget`` (``src/review/clock.rs``) splits the total over the batches
+    with integer division, needs ``headless_consult_timeout_secs(floor)`` per
+    batch, shows the RAW ceiling of the per-batch wall clock (never lifted to
+    the floor, so a refused batch's ceiling is below it) and asks for batches x
+    need. The checks hold under every ``[magi]`` config, so the harness need
+    not know the rotation or retry settings.
 
     Args:
         match: The :data:`BUDGET_PATTERN` match, or ``None``.
 
     Returns:
-        bool: ``True`` for at least :data:`MIN_REFUSED_BATCHES` batch, the
-        :data:`FLOOR_SECS` floor, a per-batch ceiling at or above that floor
-        (``derive_ceiling_from_timeout`` never returns less) and a minimum
-        above the total the run asked for.
+        bool: ``True`` for at least :data:`MIN_REFUSED_BATCHES` batch; a wall
+        clock of exactly the total asked for divided by the batches; a need of
+        at least :data:`MIN_NEED_PER_BATCH_SECS` and above that wall clock; the
+        :data:`FLOOR_SECS` floor; a ceiling below the floor and not above the
+        wall clock; and a minimum of exactly batches x need, above the total
+        asked for.
+
+    Example:
+        >>> ok = BUDGET_PATTERN.search(
+        ...     "3 batches leave 6 s per batch, less than the 114 s a batch "
+        ...     "needs at the 15 s floor (per-batch ceiling 0 s); "
+        ...     "pass --timeout 342 or more")
+        >>> _budget_fields_ok(ok)
+        True
     """
     # MAGI FIX (S6 loop 7): the ceiling was captured but never checked (F1a-c3).
-    return (match is not None
-            and int(match.group("batches")) >= MIN_REFUSED_BATCHES
-            and int(match.group("floor")) == FLOOR_SECS
-            and int(match.group("ceiling")) >= FLOOR_SECS
-            and int(match.group("minimum")) > runs.REVIEW_TOO_SHORT_TIMEOUT_S)
+    # MAGI FIX (S6 loop 10): loop 7 required a ceiling of at least the floor,
+    # which the product's raw ceiling never is in a refusal, and each number
+    # was checked alone, so a 999 s ceiling beside a 21 s minimum passed
+    # (F1a-c3).
+    if match is None:
+        return False
+    batches, wall, need, floor, ceiling, minimum = (
+        int(match.group(name)) for name in
+        ("batches", "wall", "need", "floor", "ceiling", "minimum"))
+    if batches < MIN_REFUSED_BATCHES:
+        return False
+    asked = runs.REVIEW_TOO_SHORT_TIMEOUT_S
+    return (wall == asked // batches
+            and need >= MIN_NEED_PER_BATCH_SECS
+            and need > wall
+            and floor == FLOOR_SECS
+            and ceiling < FLOOR_SECS
+            and ceiling <= wall
+            and minimum == batches * need
+            and minimum > asked)
 
 
 def _run_log_finding(run, match):
