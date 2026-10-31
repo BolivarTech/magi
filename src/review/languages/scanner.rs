@@ -215,6 +215,14 @@ impl LexicalRules {
 
     /// Python: `#` line comments, no block comments, no char literals,
     /// triple-quote raw strings.
+    ///
+    /// Python's string syntax is read in a second place, `LogicalLines` in
+    /// `review::languages::python`, which tracks `(` and `[` as well to find where a logical
+    /// line ends; that reader's rustdoc says why the two overlap. A change to Python's string
+    /// syntax here must reach it too (and the other way round): `continued_lines` takes the
+    /// union of both, so a drift only between them shows as wrong unit boundaries, not as a
+    /// lost line.
+    // MAGI FIX (S6 loop 8): cross-referenced so a fix to one Python string reader reaches both.
     pub fn python() -> Self {
         Self {
             line_comment: "#",
