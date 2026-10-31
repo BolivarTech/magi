@@ -204,6 +204,14 @@ fn normalize_location_with(
         // is under it, so its leading `/` is the removed prefix.
         path = path.trim_start_matches('/').to_string();
     } else if !workspace.is_empty() {
+        // MAGI FIX (S6 loop 10, C1-c1): no byte slicing can panic here. `str::get` returns `None`
+        // for an index that is not a char boundary (it never panics, which is why the module's
+        // `indexing_slicing`/`string_slice` lints have nothing to flag), and a path that really
+        // starts with `workspace` has a boundary at its length, so a `None` only ever means "not
+        // under the workspace" and the path stays as reported. The drive-letter comparison of
+        // `same_prefix` reads one byte through `get(..1)` as well, so a non-ASCII first character
+        // compares unequal. Pinned, multi-byte paths around the prefix and drive letters included,
+        // by `a_non_ascii_path_around_the_workspace_prefix_never_panics_and_strips_only_a_real_prefix`.
         let relative = path
             .get(..workspace.len())
             .filter(|head| same_prefix(head, workspace))
