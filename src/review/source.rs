@@ -429,7 +429,7 @@ pub fn open_for_review(path: &std::path::Path) -> std::io::Result<std::fs::File>
 /// "Absent" is decided by the revision's own entry for the path
 /// (`ls-tree -z --end-of-options <rev> -- <path>`, one call per read), never by the text of a
 /// git error: a path with no file entry is `Ok(None)`, and a failing `show` on a listed path is
-/// an error. Every revision argument follows [`END_OF_OPTIONS`], so the source is safe on its
+/// an error. Every revision argument follows `--end-of-options`, so the source is safe on its
 /// own: a rev shaped like an option (`--output=<file>`) is never one, whatever the caller checked.
 ///
 /// Cost: two git processes per (side, path) that exists, one per absent side, each once thanks

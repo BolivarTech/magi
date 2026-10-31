@@ -59,7 +59,7 @@ pub struct ReviewSummary {
     /// `MAX_GATE_QUESTIONS_PER_FINDING` per finding.
     pub gate_questions: usize,
     /// Fraction of the findings that reached the gate and got an answer; 1.0 with none.
-    /// Both forms write it through [`shown_fraction`], so a non-finite value reads as 0.
+    /// Both forms write it clamped to `[0, 1]`, and a non-finite value as 0.
     #[serde(serialize_with = "serialize_fraction")]
     pub judged_fraction: f64,
     /// Findings removed by the deterministic validation, with their cause.
