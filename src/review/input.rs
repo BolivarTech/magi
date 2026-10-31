@@ -1735,9 +1735,11 @@ mod tests {
             &allow_all,
         )
         .expect("resolves");
+        // [MAGI S6 loop 8, A1-b4 Balthasar] the submodule is kept: the reader refuses it and the
+        // filter lists it as `not a regular file`, instead of a silent drop.
         assert_eq!(
             r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
-            vec!["src/a.rs", "src/b.rs"]
+            vec!["src/a.rs", "src/b.rs", "src/vendored"]
         );
         assert!(r.files.iter().all(|f| f.diff.is_none()));
     }
@@ -2177,6 +2179,65 @@ mod tests {
             files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
             vec!["mode 160000"]
         );
+    }
+    #[cfg(unix)]
+    // Creating a symlink needs Developer Mode on Windows; the rule is the same there.
+    #[test]
+    fn an_input_left_with_only_dangling_links_is_nothing_to_review_and_names_them() {
+        // [MAGI S6 loop 8, A1-b4 Balthasar] every listing leaves a dangling link out (it reads as
+        // a file that does not exist), and with nothing else left the error named nothing.
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(d.path().join("src")).expect("mkdir");
+        std::os::unix::fs::symlink(d.path().join("gone.rs"), d.path().join("src/dangling.rs"))
+            .expect("link");
+        let in_repo = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            (
+                "ls-files --cached --others --exclude-standard -z -- src",
+                Ok("src/dangling.rs\0"),
+            ),
+            ("rev-parse --verify --quiet HEAD^{commit}", Err("")),
+            (
+                "ls-files --cached --others --exclude-standard -z",
+                Ok("src/dangling.rs\0"),
+            ),
+        ]);
+        let outside = FakeGit::from(&[
+            (
+                "rev-parse --is-inside-work-tree",
+                Err("fatal: not a git repository"),
+            ),
+            (
+                "ls-files --others --ignored --exclude-standard --directory -z -- src",
+                Ok(""),
+            ),
+        ]);
+        let cases: [(ReviewInput, &FakeGit); 3] = [
+            (ReviewInput::Directory("src".into()), &in_repo),
+            (ReviewInput::Uncommitted, &in_repo),
+            (ReviewInput::Directory("src".into()), &outside),
+        ];
+        for (input, git) in cases {
+            if std::ptr::eq(git, &outside) && d.path().ancestors().any(|a| a.join(".git").exists())
+            {
+                continue; // a `.git` above TMPDIR makes the walk (correctly) fail closed
+            }
+            let r = resolve_input(&input, d.path(), git, &allow_all);
+            let Err(ReviewError::NothingToReview { skipped }) = r else {
+                panic!(
+                    "{input:?}: expected NothingToReview, got {:?}",
+                    r.map(|r| r.files)
+                );
+            };
+            assert_eq!(
+                skipped,
+                vec![super::super::filter::Skipped {
+                    path: "src/dangling.rs".into(),
+                    cause: super::super::filter::SkipCause::NotRegularFile,
+                }],
+                "{input:?}"
+            );
+        }
     }
     #[cfg(unix)]
     // Creating a symlink needs Developer Mode on Windows; the rule is the same there.
