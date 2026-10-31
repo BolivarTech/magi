@@ -661,6 +661,11 @@ fn resolve_uncommitted(
             resolved.source_kind = SourceKind::Worktree {
                 old_rev: Some(head),
             };
+            // `ls-files` lists only what lies under its cwd (the workspace, `-C`), so an untracked
+            // file above a sub-workspace is never named here, with or without a pathspec (a
+            // review of S6 loop 8 read it as `../…`). Measured with git 2.56 and pinned by
+            // `an_uncommitted_review_in_a_sub_workspace_lists_nothing_outside_it`; whatever a
+            // listing names, `resolve_input` refuses a name that climbs out.
             let (names, not_utf8) =
                 split_nul(&git.run_bytes(&["ls-files", "--others", "--exclude-standard", "-z"])?);
             resolved.not_utf8.extend(not_utf8);
