@@ -95,7 +95,7 @@ impl LanguageExtractor for PythonExtractor {
     /// `review::batching`'s `a_single_unit_larger_than_the_limit_is_a_typed_error`.
     ///
     /// A declaration group (imports or module-level assignments) splits at its statements
-    /// instead ([`split_declaration_group`]).
+    /// instead (`split_declaration_group`).
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         if unit.kind == UnitKind::DeclarationGroup {
             return split_declaration_group(unit);

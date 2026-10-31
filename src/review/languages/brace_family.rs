@@ -128,7 +128,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// the unit with exactly one piece, and an unsplit unit is batched whole.
     ///
     /// A declaration group splits at its declarations instead
-    /// ([`Self::split_declaration_group`]). Only those kinds split, declared: an enum or a
+    /// (`split_declaration_group`). Only those kinds split, declared: an enum or a
     /// struct is reviewed whole, and a construct no keyword table names (TypeScript's `enum` or
     /// `namespace`, Rust's `macro_rules!`, a JavaScript IIFE) is no construct at all, so its
     /// lines fall into gap units. A single such unit, or one declaration, too large for one
