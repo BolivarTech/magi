@@ -245,6 +245,22 @@ struct OpenString {
 /// union of both, so a string state this reader drops (a one-quote string continued by an
 /// escaped newline) is still marked by the scanner's `starts_in_literal`. A change to Python's
 /// string syntax must reach both.
+///
+/// A string prefix (`r`, `b`, `f`, `rb`) is not read, on purpose: in Python's tokenizer a
+/// backslash escapes the next character in a raw string too as far as where the string ends
+/// (`r"\""` is the two characters `\"`, and `r"""a\"""` never closes), so every string ends
+/// where this reader ends it; the scanner skips the character after a backslash alike. Only a
+/// `\` outside every string and comment continues a line, and Python accepts one there only
+/// right before the newline, so no parity of backslashes is counted. Both are pinned by
+/// `a_backslash_before_a_quote_in_a_raw_string_never_closes_it` and
+/// `an_escaped_backslash_or_a_comment_ending_in_one_continues_no_line`.
+///
+/// Declared: one open string is tracked at a time, so a Python 3.12 f-string that nests the
+/// same quote inside a replacement field (`f"{"("}"`) is read as closing early, and a bracket
+/// inside it may stay counted open. The following lines are then marked continued and the
+/// construct open there takes them, up to the end of the file at worst; every line still lands
+/// in exactly one unit, so none is lost.
+// MAGI FIX (S6 loop 13): the raw-string, backslash and nested f-string behavior is declared.
 #[derive(Default)]
 struct LogicalLines {
     depth: u32,
