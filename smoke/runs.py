@@ -1105,6 +1105,9 @@ OVER_TOTAL_CAP = "past the %d byte capture total, not read"
 #: Why :func:`_regular_files_without_links` leaves a link out.
 LINK_NOT_FOLLOWED = "a link, not followed"
 
+#: Why :func:`_regular_files_without_links` leaves out a fifo, socket or device.
+NOT_A_REGULAR_FILE = "not a regular file, not read"
+
 
 def _regular_files_without_links(directory, refused):
     """The files under *directory*, sorted, without descending into or reading a link.
@@ -1119,7 +1122,9 @@ def _regular_files_without_links(directory, refused):
             :meth:`RunExecutor._capture_review_log` does).
         refused: A list that receives ``"<path> (<why>)"``, *path* relative
             to *directory* (:func:`_name_under`), for each entry
-            left out: a link (neither listed nor read), a directory that could
+            left out: a link (neither listed nor read), an entry that is
+            neither a directory nor a regular file (a fifo, socket or device,
+            never opened: reading a fifo can block), a directory that could
             not be listed, or an entry whose test failed.
 
     Returns:
@@ -1153,6 +1158,12 @@ def _regular_files_without_links(directory, refused):
                     pending.append(path)
                 elif entry.is_file(follow_symlinks=False):
                     files.append(path)
+                else:
+                    # MAGI FIX (S6 loop 16): a fifo, socket or device file was
+                    # dropped unnamed, so a scenario could not tell it from a
+                    # product that wrote nothing (F1a1-melchior).
+                    refused.append("%s (%s)" % (_name_under(root, path),
+                                                NOT_A_REGULAR_FILE))
             except OSError as exc:
                 refused.append("%s (%s)" % (_name_under(root, path), exc))
     return sorted(files)
