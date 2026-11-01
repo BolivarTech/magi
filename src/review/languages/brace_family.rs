@@ -5100,4 +5100,34 @@ void g(void) {
         let units = extract(&rust_extractor(), code, &[3]);
         assert_eq!(spans(&units), vec![("p", UnitKind::Function, 1, 5)]);
     }
+
+    #[test]
+    fn a_js_computed_or_private_method_is_a_member_named_as_written() {
+        // [MAGI S6 loop 17, B2-3] `[key]() {` ended in `]`, so no identifier named it, and
+        // `#m() {` opened with `#`, read as a preprocessor line: neither was a member, and a class
+        // holding one could not split there.
+        let code = "class A {\n  #secret() {\n    return 1;\n  }\n  *[Symbol.iterator]() {\n    yield 1;\n  }\n  static #s() {}\n  async [key]() {\n  }\n  get #x() {\n    return 2;\n  }\n}\n";
+        for ext in [
+            BraceFamilyExtractor::javascript(),
+            BraceFamilyExtractor::typescript(),
+        ] {
+            let parts = split(&ext, code, 3, UnitKind::Class);
+            let members: Vec<(&str, u32, u32)> = parts
+                .iter()
+                .filter(|u| u.kind == UnitKind::Function)
+                .map(|u| (u.name.as_str(), u.start_line, u.end_line))
+                .collect();
+            assert_eq!(
+                members,
+                vec![
+                    ("#secret", 2, 4),
+                    ("[Symbol.iterator]", 5, 7),
+                    ("#s", 8, 8),
+                    ("[key]", 9, 10),
+                    ("#x", 11, 13)
+                ]
+            );
+            assert_each_line_in_one_unit(&parts, 14);
+        }
+    }
 }
