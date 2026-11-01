@@ -1619,15 +1619,16 @@ impl SearchBudget {
 /// number of lines (rustfmt's `fn f(\n    a: u8,\n) -> u8 {`) finds its brace.
 ///
 /// The search ends without a brace when line `i` already ends the declaration (its code ends in
-/// `;`) or is a one-line construct (its code ends in `}`), and before the first later line that is blank, is code ending in `;` (a statement: the
-/// declaration had no block; a comment ending in `;` does not count), opens a statement with a
-/// keyword of [`STATEMENT_KEYWORDS`] (`if (x) {`: a signature's brace is never there), or where
-/// `stops` holds (the next construct's start) while no parenthesis opened since line `i` is
-/// still open and the line before it is no code ending in `,` (a C++ constructor's initializer
-/// list wrapped after a comma, `count_(0) {`, continues the declaration; a comment line ending in
-/// `,` does not, while a trailing comment after the code, `int f() // a,`, still reads as one,
-/// declared); comment lines are passed over. A line whose braces balance (`fn a() { x(); }`)
-/// opens nothing, so a one-line construct never takes the brace of the construct after it.
+/// `;`) or is a one-line construct (its code ends in `}` with nothing left open: `fn a() { x(); }`,
+/// `fn f() -> u8 { 1 }`), so a one-line construct never takes the brace of the block after it.
+/// Otherwise it ends before the first later line that is blank, is code ending in `;` (a
+/// statement: the declaration had no block; a comment ending in `;` does not count), opens a
+/// statement with a keyword of [`STATEMENT_KEYWORDS`] (`if (x) {`: a signature's brace is never
+/// there), or where `stops` holds (the next construct's start) while no parenthesis opened since
+/// line `i` is still open and the line before it is no code ending in `,` (a C++ constructor's
+/// initializer list wrapped after a comma, `count_(0) {`, continues the declaration; a comment
+/// line ending in `,` does not, while a trailing comment after the code, `int f() // a,`, still
+/// reads as one, declared); comment lines are passed over.
 /// O(k) for the k lines scanned, which never pass the next construct.
 ///
 /// Inside an open parameter list `stops` is not asked: a parameter line holding a `(` after a
