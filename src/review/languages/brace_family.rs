@@ -5036,4 +5036,31 @@ void g(void) {
         };
         assert_eq!(group_end(&lines, &scanned, 0, &search), 0);
     }
+
+    #[test]
+    fn a_rust_macro_rules_is_one_opaque_unit_and_no_item_is_read_inside_it() {
+        // [MAGI S6 loop 17, B2-2] `macro_rules!` was no construct, so the `fn generated() {}` of
+        // its token tree was read as a function of its own and the macro's header and arms fell
+        // into gap units around it.
+        let code = "#[macro_export]\nmacro_rules! make {\n    ($n:ident) => {\n        fn generated() {}\n    };\n}\nfn after() {}\n";
+        let units = extract(&rust_extractor(), code, &[4]);
+        assert_eq!(spans(&units), vec![("make", UnitKind::Function, 1, 6)]);
+        assert!(rust_extractor().split_block(&units[0]).is_empty());
+        let every = every_line(code);
+        let units = extract(&rust_extractor(), code, &every);
+        assert!(
+            !units.iter().any(|u| u.name == "generated"),
+            "{:?}",
+            spans(&units)
+        );
+        assert_each_line_in_one_unit(&units, 7);
+        let paren = "macro_rules! p (\n    () => { fn q() {} }\n);\nfn after() {}\n";
+        let units = extract(&rust_extractor(), paren, &[2]);
+        assert_eq!(spans(&units), vec![("p", UnitKind::Function, 1, 3)]);
+        let in_module = "mod m {\n    macro_rules! inner {\n        () => { fn hidden() {} };\n    }\n    fn real() {}\n}\n";
+        let parts = split(&rust_extractor(), in_module, 3, UnitKind::Module);
+        let names: Vec<&str> = parts.iter().map(|u| u.name.as_str()).collect();
+        assert!(names.contains(&"inner"), "{names:?}");
+        assert!(!names.contains(&"hidden"), "{names:?}");
+    }
 }
