@@ -330,7 +330,9 @@ impl LexicalRules {
 ///
 /// [`CodeScanner::scan_all`] keeps one per line, so its size bounds the scan's memory: 24 bytes,
 /// about 200 MiB for a capped file of 8 MiB of newlines, as much as the line slices every
-/// extractor already holds. Pinned by `a_scanned_line_takes_at_most_twenty_four_bytes`; packing
+/// extractor already holds. That bound is transient and linear: an extraction keeps the records
+/// of the one text it scans only while it runs and drops them on return, so they never add up
+/// across files. Pinned by `a_scanned_line_takes_at_most_twenty_four_bytes`; packing
 /// it further would narrow the per-line counts, which a line of the capped size can overflow.
 #[derive(Debug, Clone)]
 pub struct ScannedLine {
