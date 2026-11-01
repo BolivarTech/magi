@@ -452,7 +452,8 @@ def _batches_finding(section, run_id):
         ``batches_planned`` (one report over batches that never ran is not the
         multi-batch report RV-S2 asks for) unless every missing batch is in
         ``failed_batches`` with a cause the backend gave
-        (:func:`_provider_failures_only`), which is ``CANNOT_TEST``; ``FAIL``
+        (:func:`_provider_failures_only`), which is ``CANNOT_TEST`` unless the
+        planned count alone is a ``FAIL`` (:func:`_under_planned_finding`); ``FAIL``
         too when the counts agree but ``failed_batches`` is not an empty list.
         Otherwise ``PASS`` at three batches
         or more; at one or two, ``CANNOT_TEST`` when the whole pool measured a
@@ -484,6 +485,12 @@ def _batches_finding(section, run_id):
     if completed != planned:
         if _provider_failures_only(failed, planned, planned - completed,
                                    section.get("batches")):
+            # MAGI FIX (S6 loop 14): the planned count is judgeable whether or
+            # not every batch ran, and an under-planned run that also lost a
+            # batch to the backend read CANNOT_TEST (F1a2-m3).
+            under = _under_planned_finding(section, planned, run_id)
+            if under is not None and under.outcome is Outcome.FAIL:
+                return under
             return _finding(
                 S47_ASSERTIONS, 2, Outcome.CANNOT_TEST, run_id,
                 "batches_completed is %r of %r planned, and every missing "
@@ -498,8 +505,27 @@ def _batches_finding(section, run_id):
             S47_ASSERTIONS, 2, Outcome.FAIL, run_id,
             "failed_batches is %r, expected an empty list when every one of "
             "the %r planned batches completed" % (failed, planned))
+    under = _under_planned_finding(section, planned, run_id)
+    return under or _finding(S47_ASSERTIONS, 2, Outcome.PASS, run_id)
+
+
+def _under_planned_finding(section, planned, run_id):
+    """Judge a positive ``batches_planned`` against :data:`MIN_BATCHES`.
+
+    Args:
+        section: The ``code_review`` object, read for ``unmeasured_models``.
+        planned: ``batches_planned``, a positive integer.
+        run_id: The shared run.
+
+    Returns:
+        Finding | None: ``None`` at :data:`MIN_BATCHES` or more; below it,
+        ``CANNOT_TEST`` when the whole pool measured a window (the input is
+        sized for the unmeasured default, so fewer batches is the
+        environment's doing), else ``FAIL``. An absent ``unmeasured_models``
+        counts as unmeasured.
+    """
     if planned >= MIN_BATCHES:
-        return _finding(S47_ASSERTIONS, 2, Outcome.PASS, run_id)
+        return None
     detail = "batches_planned is %r, expected at least %d" % (planned, MIN_BATCHES)
     unmeasured = section.get("unmeasured_models")
     if isinstance(unmeasured, list) and not unmeasured:
