@@ -224,11 +224,7 @@ pub fn filter_files(
                 // to judge the file stayed cached and was charged against the review total.
                 let mut sides = sides_of(&file).into_iter();
                 kept_sides.extend(sides.next());
-                for (face, path) in sides {
-                    if !kept_sides.contains(&(face, path.clone())) {
-                        source.release(face, &path);
-                    }
-                }
+                release_unkept(source, &kept_sides, sides);
                 filtered.kept.push(ReviewFile {
                     path: file.path,
                     diff: None,
@@ -245,11 +241,7 @@ pub fn filter_files(
                 // cache keeps none of it: the total cap bounds what is reviewed.
                 // MAGI FIX (S6 loop 13, A2-m2 / A2-b1): side by side, and never a side a kept file
                 // was scanned with: a rename's old path can be a kept file's path.
-                for (face, path) in sides_of(&file) {
-                    if !kept_sides.contains(&(face, path.clone())) {
-                        source.release(face, &path);
-                    }
-                }
+                release_unkept(source, &kept_sides, sides_of(&file));
                 filtered.skipped.push(Skipped {
                     path: display_path(&file.path),
                     cause,
@@ -267,6 +259,27 @@ pub fn filter_files(
         });
     }
     Ok(filtered)
+}
+
+/// Releases each of `sides` from `source`, except a side a kept file was scanned with
+/// (`kept_sides`): a path is not private to one file, so a rename's old path can be a kept
+/// file's path. O(sides) expected.
+///
+/// # Arguments
+///
+/// * `source` - The review's content source.
+/// * `kept_sides` - The sides kept files were scanned with.
+/// * `sides` - The sides to forget.
+fn release_unkept(
+    source: &dyn ContentSource,
+    kept_sides: &HashSet<(Face, String)>,
+    sides: impl IntoIterator<Item = (Face, String)>,
+) {
+    for (face, path) in sides {
+        if !kept_sides.contains(&(face, path.clone())) {
+            source.release(face, &path);
+        }
+    }
 }
 
 /// The sides [`classify`] reads for `file`, each with the path it is read under: the new side
