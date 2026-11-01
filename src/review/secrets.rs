@@ -133,7 +133,24 @@ const QUOTES: &[u8] = b"\"'";
 /// a prefix (`=` of `==`) never wins over the whole operator: assignments (`=`, `:`, `:=`, `=>`)
 /// and comparisons (`==`, `!=`, JavaScript's `===` and `!==`).
 // MAGI FIX (S6 loop 11): a key compared against its name (`==`, `!=`) was sent.
-const AWS_OPERATORS: &[&[u8]] = &[b"===", b"!==", b"==", b"!=", b"=>", b":=", b"=", b":"];
+const AWS_OPERATORS: &[&[u8]] = &[
+    b"===",
+    b"!==",
+    b"==",
+    b"!=",
+    b"=>",
+    b":=",
+    b"=",
+    COLON_OPERATOR,
+];
+/// The operator of a YAML mapping (and a JSON property): the one whose value may start on the
+/// next line with no other mark ([`skip_continuation`]).
+const COLON_OPERATOR: &[u8] = b":";
+/// The chomping (`-`, `+`) and indentation (`1`-`9`) indicators a YAML block scalar header may
+/// carry after its `|` or `>`.
+const BLOCK_SCALAR_MODIFIERS: &[u8] = b"+-123456789";
+/// The most indicators a YAML block scalar header carries: one chomping and one indentation.
+const MAX_BLOCK_SCALAR_MODIFIERS: usize = 2;
 /// The bytes that may stand between an AWS secret key's name and a quoted key passed next to it
 /// as an argument or a collection item: blanks and line breaks, quotes, the separators of an
 /// argument list or a collection, and the bytes of [`AWS_OPERATORS`]. `<` is left out, so a
@@ -638,7 +655,8 @@ fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
 
 /// Where the key ends after an AWS secret key's name that ends at `name_end`: an optional quote
 /// that closes the name (a JSON property, a quoted hash key), blanks, an operator of
-/// [`AWS_OPERATORS`] (an assignment or a comparison), blanks, an optional quote, and a key of at
+/// [`AWS_OPERATORS`] (an assignment or a comparison), blanks, a continuation to the next line if
+/// any ([`skip_continuation`]), an optional quote, and a key of at
 /// least 40 characters. `None` when there is none.
 // MAGI FIX (S6 loop 7): `"aws_secret_access_key": "…"` and `=>` were not assignments.
 fn aws_assignment_end(bytes: &[u8], name_end: usize) -> Option<usize> {
@@ -654,11 +672,58 @@ fn aws_assignment_end(bytes: &[u8], name_end: usize) -> Option<usize> {
         .find(|op| bytes.get(pos..).is_some_and(|rest| rest.starts_with(op)))?;
     pos += operator.len();
     pos = skip_bytes(bytes, pos, BLANKS);
+    // MAGI FIX (S6 loop 16, A2-3, security): a YAML block scalar, a YAML value on the next line
+    // and a shell line continued with `\` put a line break before the key, which was sent.
+    pos = skip_continuation(bytes, pos, operator == &COLON_OPERATOR)?;
     if bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
         pos += 1;
     }
     tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN)
         .then(|| tail_end(bytes, pos, Tail::Base64))
+}
+
+/// Where the value starts after the line an assignment is continued from, at `at` (just past
+/// the operator and its blanks): unchanged when no continuation opens there; past a YAML block
+/// scalar header (`|` or `>`, at most [`MAX_BLOCK_SCALAR_MODIFIERS`] chomping or indentation
+/// indicators, blanks), a shell `\`, or nothing at all after a `:` (a YAML value on the next
+/// line), then one line break and the next line's indentation. A `=` with a bare line break
+/// after it continues nothing, so code that breaks a line after `=` is not read as a key.
+///
+/// # Arguments
+///
+/// * `bytes` - The text.
+/// * `at` - Just past the operator and the blanks after it.
+/// * `after_colon` - Whether the operator was `:` ([`COLON_OPERATOR`]).
+///
+/// # Returns
+///
+/// The position of the value, or `None` when a header or a `\` opens with no line break after
+/// it (no key follows on this line, and none on the next). O(blanks).
+fn skip_continuation(bytes: &[u8], at: usize, after_colon: bool) -> Option<usize> {
+    let header = match bytes.get(at) {
+        Some(b'|' | b'>') => {
+            let modifiers = bytes
+                .get(at + 1..)
+                .unwrap_or_default()
+                .iter()
+                .take(MAX_BLOCK_SCALAR_MODIFIERS)
+                .take_while(|b| BLOCK_SCALAR_MODIFIERS.contains(b))
+                .count();
+            Some(skip_bytes(bytes, at + 1 + modifiers, BLANKS))
+        }
+        Some(b'\\') => Some(at + 1),
+        _ => None,
+    };
+    let from = header.unwrap_or(at);
+    let after_break = [&b"\r\n"[..], b"\n"]
+        .iter()
+        .find(|nl| bytes.get(from..).is_some_and(|rest| rest.starts_with(nl)))
+        .map(|nl| from + nl.len());
+    match (header, after_break) {
+        (_, Some(next)) if header.is_some() || after_colon => Some(skip_bytes(bytes, next, BLANKS)),
+        (Some(_), _) => None,
+        (None, _) => Some(at),
+    }
 }
 
 /// Where a quoted key passed next to an AWS secret key's name that ends at `name_end` ends: at
