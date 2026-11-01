@@ -1299,6 +1299,14 @@ impl SearchBudget {
 /// line text ([`paren_delta`]), so a `(` or `)` inside a string or a comment of the parameter
 /// list miscounts them; the search then still ends at a blank line, a statement or a brace.
 ///
+/// A blank line does not end the search inside an open parameter list: while a parenthesis
+/// opened since line `i` is still open and the last non-blank line before it is code ending in
+/// a [`PARAMETER_LIST_CONTINUATIONS`] character (`a: u8,` or `fn f(`), it is passed over, so a
+/// blank line between two parameters keeps the body with its signature. Both conditions are
+/// required because the parentheses are counted on the text: a `(` inside a character literal
+/// (`fn p() -> char { '(' }`) leaves the count open, but that line ends in `}`, so the blank line
+/// after it still ends the search and the next construct keeps its own brace.
+///
 /// A brace on a parameter line is taken for the construct's brace, declared: a default argument
 /// that opens a lambda body on that line (`void f(int cb = []() {`) or an anonymous struct
 /// parameter makes the function end at that parameter's closing brace, and the rest of its body
@@ -1337,10 +1345,26 @@ fn open_brace_line(
         .saturating_add(1)
         .saturating_add(MAX_BRACE_SEARCH_LINES)
         .min(lines.len());
+    // MAGI FIX (S6 loop 14): a blank line between two parameters ended the search, so the body
+    // was cut from its signature; inside an open list it is passed over.
+    let leaves_list_open = |idx: usize| {
+        is_code(idx)
+            && lines
+                .get(idx)
+                .is_some_and(|l| l.trim_end().ends_with(PARAMETER_LIST_CONTINUATIONS))
+    };
+    let mut last_filled = i;
     for j in (i + 1)..budget_end {
         if !search.spend() {
             return None;
         }
+        if lines.get(j).is_some_and(|l| l.trim().is_empty()) {
+            if parens > 0 && leaves_list_open(last_filled) {
+                continue;
+            }
+            return None;
+        }
+        last_filled = j;
         // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
         // the next construct; a line after one ending in `,` continues the declaration.
         // MAGI FIX (S6 loop 11): a comment line ending in `,` (`// note,`) between two signatures
@@ -1354,9 +1378,7 @@ fn open_brace_line(
                 })
         });
         let ends_search = (parens <= 0 && !continues && search.stops(j))
-            || lines
-                .get(j)
-                .is_some_and(|l| l.trim().is_empty() || opens_statement(l.trim()));
+            || lines.get(j).is_some_and(|l| opens_statement(l.trim()));
         if ends_search {
             return None;
         }
@@ -1370,6 +1392,10 @@ fn open_brace_line(
     }
     None
 }
+
+/// What a line inside a wrapped parameter list ends with when the list goes on after it: a
+/// parameter's `,` or the list's opening `(` ([`open_brace_line`]).
+const PARAMETER_LIST_CONTINUATIONS: [char; 2] = [',', '('];
 
 /// The `(` minus the `)` of line `idx` when it is code; 0 for a line that starts inside a comment
 /// or a string and stays there, or that does not exist. The characters are counted on the line
@@ -1599,7 +1625,9 @@ fn preprocessor_end(lines: &[&str], i: usize) -> usize {
 
 /// The 0-based line where the statement that starts at line `i` ends: the first line from `i`
 /// whose code ends in `;`, searched up to a blank line or the next construct (`stops`); `i`
-/// when none does. O(k) for the k lines searched.
+/// when none does. Each line searched spends one visit of the pass ([`SearchBudget`]); with
+/// none left the search ends there, and the statement then ends on line `i`, its later lines
+/// falling into later units, none lost. O(k) for the k lines searched.
 fn statement_end(
     lines: &[&str],
     scanned: &[ScannedLine],
@@ -1615,15 +1643,35 @@ fn statement_end(
         return i;
     }
     ((i + 1)..lines.len())
-        .take_while(|&j| !search.stops(j) && !lines.get(j).is_some_and(|l| l.trim().is_empty()))
+        .take_while(|&j| {
+            search.spend() && !search.stops(j) && !lines.get(j).is_some_and(|l| l.trim().is_empty())
+        })
         .find(|&j| ends(j))
         .unwrap_or(i)
 }
 
 /// Find the 1-indexed line where the construct starting at line index `i` ends.
 ///
-/// The opening brace is the one [`open_brace_line`] finds. A construct with no brace (a
-/// single-line declaration) ends on `line_num`.
+/// The opening brace is the one [`open_brace_line`] finds. A construct with no brace ends at
+/// its statement's `;` ([`statement_end`]): a signature without a body wrapped over lines
+/// (`fn f(` ... `) -> u8;`, a trait method with a `where` clause) is one unit. That holds only
+/// when line `i` holds no `{`: a one-line construct whose braces balance (`run() {}`) ends on
+/// `line_num`, so it never takes a later statement (a class field `x = 1;`). A signature with
+/// no body and no `;` (a Go function implemented in assembly) ends on `line_num` too, as does
+/// any construct whose search runs out of budget; the lines after it fall into later units,
+/// none lost.
+///
+/// # Arguments
+///
+/// * `lines` - The text's lines.
+/// * `scanned` - The scanner's record of each line.
+/// * `i` - The 0-based line the construct starts on.
+/// * `line_num` - The 1-based number of line `i`.
+/// * `search` - The bounds of the forward searches ([`BraceSearch`]).
+///
+/// # Returns
+///
+/// The construct's last line, 1-based, or `None` when it does not fit `u32`.
 fn brace_block_end(
     lines: &[&str],
     scanned: &[ScannedLine],
@@ -1633,6 +1681,11 @@ fn brace_block_end(
 ) -> Option<u32> {
     match open_brace_line(lines, scanned, i, search) {
         Some(open_idx) => line_number(find_closing_brace(scanned, open_idx)),
+        // MAGI FIX (S6 loop 14): a wrapped signature without a body ended on its first line
+        // and the rest of it fell into the next unit.
+        None if lines.get(i).is_some_and(|l| !l.contains('{')) => {
+            line_number(statement_end(lines, scanned, i, search))
+        }
         None => Some(line_num),
     }
 }
