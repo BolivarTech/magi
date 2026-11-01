@@ -2600,4 +2600,92 @@ mod tests {
             vec!["sub/tracked.env"]
         );
     }
+
+    #[test]
+    fn an_ignored_file_staged_for_deletion_or_renamed_never_sends_its_old_side() {
+        // [MAGI S6 loop 16, A2-2, security] the ignore set came from the index alone, while the
+        // uncommitted diff's old side comes from HEAD: a tracked ignored file staged for deletion,
+        // or renamed away, was absent from the index and its HEAD content was kept.
+        let d = repo();
+        std::fs::write(
+            d.path().join(".gitignore"),
+            "*.env
+",
+        )
+        .expect("write");
+        std::fs::write(
+            d.path().join("gone.env"),
+            "HOST=a
+",
+        )
+        .expect("write");
+        std::fs::write(
+            d.path().join("moved.env"),
+            "HOST=b
+",
+        )
+        .expect("write");
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn a() {}
+",
+        )
+        .expect("write");
+        git(
+            d.path(),
+            &["add", "-f", ".gitignore", "gone.env", "moved.env", "a.rs"],
+        );
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        git(d.path(), &["rm", "-q", "gone.env"]);
+        git(d.path(), &["mv", "moved.env", "moved.rs"]);
+        std::fs::write(
+            d.path().join("moved.rs"),
+            "HOST=c
+",
+        )
+        .expect("write");
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn a() { 1 }
+",
+        )
+        .expect("write");
+        let ws = d.path();
+        let g = ScrubbedGit::new(ws.to_path_buf());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let input = ReviewInput::Uncommitted;
+        let ignored =
+            magi_rs::review::filter::ignored_paths(&input, ".", ws, &g).expect("ignore set");
+        let resolved =
+            magi_rs::review::input::resolve_input(&input, ws, &g, &allow).expect("resolves");
+        let magi_rs::review::input::SourceKind::Worktree {
+            old_rev: Some(old_rev),
+        } = resolved.source_kind
+        else {
+            panic!("a worktree source with an old side");
+        };
+        let src = magi_rs::review::source::WorktreeSource::with_old(ws.to_path_buf(), &g, old_rev);
+        let f = magi_rs::review::filter::filter_files(
+            resolved.files,
+            &src,
+            &magi_rs::review::languages::LanguageRegistry::new(),
+            false,
+            &|p| ignored.contains(p),
+        )
+        .expect("a.rs kept");
+        let kept: Vec<&str> = f.kept.iter().map(|k| k.path.as_str()).collect();
+        assert!(kept.contains(&"a.rs"), "{kept:?}");
+        for old in ["gone.env", "moved.env"] {
+            assert!(!kept.contains(&old), "{old} was kept: {kept:?}");
+        }
+        assert!(
+            f.kept.iter().all(|k| k
+                .diff
+                .as_deref()
+                .is_none_or(|d| !d.contains("HOST=a") && !d.contains("HOST=b"))),
+            "an ignored old side reached a kept diff"
+        );
+    }
 }
