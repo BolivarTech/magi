@@ -3831,13 +3831,13 @@ int bar(void) {
         );
         assert_each_line_in_one_unit(&parts, 7);
         let cpp = "namespace ns {\n    int f(int a) {\n        return a;\n    }\n}\n";
-        let parts = split(&BraceFamilyExtractor::cpp(), cpp, 3, UnitKind::Class);
+        let parts = split(&BraceFamilyExtractor::cpp(), cpp, 3, UnitKind::Module);
         assert_eq!(
             spans(&parts),
             vec![
-                ("ns", UnitKind::Class, 1, 1),
-                ("f", UnitKind::Method, 2, 4),
-                ("ns", UnitKind::Class, 5, 5)
+                ("ns", UnitKind::Module, 1, 1),
+                ("f", UnitKind::Function, 2, 4),
+                ("ns", UnitKind::Module, 5, 5)
             ]
         );
     }
@@ -5471,7 +5471,7 @@ void g(void) {
         let units = header.extract_units(code, "widget.h", ChangedLines::All);
         let found: Vec<(&str, UnitKind)> =
             units.iter().map(|u| (u.name.as_str(), u.kind)).collect();
-        assert_eq!(found, vec![("ui", UnitKind::Class)], "{:?}", spans(&units));
+        assert_eq!(found, vec![("ui", UnitKind::Module)], "{:?}", spans(&units));
     }
 
     #[test]
@@ -5853,7 +5853,7 @@ void g(void) {
             spans(&parts),
             vec![
                 ("m", UnitKind::Module, 1, 2),
-                ("a", UnitKind::Method, 3, 3),
+                ("a", UnitKind::Function, 3, 3),
                 ("m", UnitKind::Module, 4, 4)
             ]
         );
@@ -6384,6 +6384,39 @@ int g(void) {
         assert!(parts.iter().all(|p| p.name != "run"), "{:?}", spans(&parts));
         assert!(
             spans(&parts).contains(&("b", UnitKind::Method, 8, 10)),
+            "{:?}",
+            spans(&parts)
+        );
+    }
+
+    #[test]
+    fn a_free_function_in_a_module_or_a_namespace_stays_a_function_when_split() {
+        // [MAGI B2a 1] every block promoted its functions to methods, so a free function in a
+        // Rust `mod` or a C++ `namespace` was labelled a method; only a type's block has methods.
+        let rust = "mod m {\n    fn f() {\n        x();\n    }\n}\n";
+        let parts = split(&rust_extractor(), rust, 3, UnitKind::Module);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("m", UnitKind::Module, 1, 1),
+                ("f", UnitKind::Function, 2, 4),
+                ("m", UnitKind::Module, 5, 5)
+            ]
+        );
+        let cpp = "namespace n {\n    int f(int a) {\n        return a;\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::cpp(), cpp, 3, UnitKind::Module);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("n", UnitKind::Module, 1, 1),
+                ("f", UnitKind::Function, 2, 4),
+                ("n", UnitKind::Module, 5, 5)
+            ]
+        );
+        let impl_block = "impl S {\n    fn f() {\n        x();\n    }\n}\n";
+        let parts = split(&rust_extractor(), impl_block, 3, UnitKind::Impl);
+        assert!(
+            spans(&parts).contains(&("f", UnitKind::Method, 2, 4)),
             "{:?}",
             spans(&parts)
         );
