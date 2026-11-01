@@ -288,6 +288,20 @@ class ReviewWorkspaceTests(unittest.TestCase):
             executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
             self.assertFalse((workspace / "stale.rs").exists())
 
+    def test_a_failed_git_init_names_what_git_wrote_to_stderr(self) -> None:
+        # [MAGI §6 MS2 loop 15, F1a1-b1] CalledProcessError's str() carries no captured stderr, so the
+        # HarnessError said only "returned non-zero exit status" and dropped git's own reason.
+        def run(command, **kwargs):
+            raise subprocess.CalledProcessError(128, command, output=b"",
+                                                stderr=b"fatal: cannot copy template \xff files")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = _executor(pathlib.Path(tmp))
+            with mock.patch.object(runs.subprocess, "run", side_effect=run):
+                with self.assertRaises(HarnessError) as caught:
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("fatal: cannot copy template", str(caught.exception))
+
     def test_a_workspace_resolving_outside_the_scratch_area_is_not_deleted(self) -> None:
         # [MAGI §6 MS2 F loop 2] rmtree runs only on a path strictly under the scratch area.
         with tempfile.TemporaryDirectory() as tmp:
