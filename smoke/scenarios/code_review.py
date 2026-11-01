@@ -749,6 +749,11 @@ def a_large_review_yields_one_report(run):
                            "stdout is not a JSON document: %s" % exc)
         return
     yield _finding(S47_ASSERTIONS, 1, Outcome.PASS, "R12")
+    # MAGI FIX (S6 loop 15): F1a2-m2/c1 read document.get as able to meet a
+    # JSON array or scalar. It cannot: ProductOutput.json raises
+    # ProductOutputError for any top level that is not an object, so that
+    # stdout takes the per-assertion FAIL branch above (pinned by
+    # test_s47_fails_on_a_json_document_that_is_not_an_object).
     section = document.get(CODE_REVIEW_KEY)
     if not isinstance(section, dict):
         section = {}
