@@ -70,7 +70,10 @@ fn identifier_runs(text: &str) -> impl Iterator<Item = &str> {
 /// Every identifier of the reviewed code, plus the files that have a language extractor.
 ///
 /// The corpus is every ASCII identifier of the text given to [`LexicalIndex::build`], comments and
-/// strings included (a name invented in a comment passes: declared). It holds at most
+/// strings included (a name invented in a comment passes: declared). Indexing code only would
+/// need a lexer per language and would turn a name the scanner misreads into a discarded real
+/// finding; a wider corpus can only keep a finding (the fail-open direction of REQ-RV09), at the
+/// cost of a laxer `unknown symbol` count (PM-S-2). It holds at most
 /// [`MAX_INDEX_IDENTIFIERS`] distinct identifiers; an index that hit the cap is incomplete and
 /// cannot say that a symbol is absent.
 pub struct LexicalIndex {
@@ -167,6 +170,12 @@ impl LexicalIndex {
     /// [`Self::contains`], while `main.c` stays a file name. Cost declared: any other
     /// `<name>.<extension>` (`node.ts`) is ambiguous and reads as a file, which skips its symbol
     /// check and keeps the finding (the fail-open direction of REQ-RV09).
+    ///
+    /// The name of a reviewed file wins over the receiver rule: with `self.rs` reviewed, the
+    /// citation `self.rs` reads as that file, which skips one symbol check and keeps the finding
+    /// (fail-open, as above). An extensionless path that names no reviewed file (`src/foo`) is
+    /// not a file name; `cited_identifiers` never yields a `/` or `\`, so the path clauses only
+    /// serve direct callers.
     ///
     /// # Arguments
     ///
