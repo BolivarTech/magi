@@ -14,7 +14,9 @@
 //! The minimum lengths can miss a shorter real key; that is the trade-off with false positives on
 //! ordinary code. So are the left boundaries: a short prefix (`sk-`, `ghp_`, `AKIA`, …) glued to a
 //! word character is not a token, because base64 runs and kebab-case names hold them by chance; the distinctive
-//! `sk-ant-` and `github_pat_` match wherever they occur. A PEM or OpenPGP header must be in
+//! `sk-ant-` and `github_pat_` match wherever they occur. A token prefix and its exclusion match
+//! in any ASCII case, so `SK-ANT-…` is a key, and so is an upper-case name that opens like one
+//! (`GITHUB_PAT_…`) with a long enough tail: the safe direction. A PEM or OpenPGP header must be in
 //! upper case as every standard tool writes it: a hand-made `-----begin private key-----` is
 //! not detected. A password in a URL (`scheme://user:password@host`) is a secret unless it is a
 //! placeholder (`{password}`, `$PASSWORD`, `<password>`, `***`); a URL with a user and no
@@ -51,7 +53,7 @@ impl Tail {
 enum Matcher {
     /// A prefix with a left boundary, then a tail of at least `min` characters of a class.
     Token {
-        /// The prefixes, any of which opens the token.
+        /// The prefixes, any of which opens the token, in any ASCII case.
         prefixes: &'static [&'static str],
         /// The tail's character class.
         tail: Tail,
@@ -519,7 +521,9 @@ impl Matcher {
         };
         let prefix = prefixes.get(lane)?;
         let bytes = text.as_bytes();
-        text.match_indices(prefix).find_map(|(at, _)| {
+        // MAGI FIX (S6 loop 15, A2-2, security): the prefix was found case-sensitively while the
+        // `ant-` exclusion was not, so `sk-ANT-…` matched neither key and its file was sent.
+        prefix_indices(bytes, prefix).find_map(|at| {
             // MAGI FIX (S6 loop 4): a distinctive prefix glued to a word was sent.
             let bounded = *glued
                 || at
@@ -546,11 +550,18 @@ impl Matcher {
         };
         let prefix = prefixes.get(lane)?;
         let end = at + prefix.len();
-        let opens = bytes.get(at..end) == Some(prefix.as_bytes());
+        let opens = word_at(bytes, at, prefix);
         let excluded = not_followed_by.is_some_and(|n| word_at(bytes, end, n));
         (opens && !excluded && tail_at_least(bytes, end, *tail, *min))
             .then(|| at..tail_end(bytes, end, *tail))
     }
+}
+
+/// The indices at which `prefix` occurs in `bytes`, ignoring ASCII case as [`word_at`] does, so
+/// a prefix and its exclusion ([`Matcher::Token`]'s `not_followed_by`) read the same case.
+/// Every prefix is ASCII, so each index is a character boundary. O(n · prefix length).
+fn prefix_indices<'a>(bytes: &'a [u8], prefix: &'a str) -> impl Iterator<Item = usize> + 'a {
+    (0..bytes.len()).filter(move |at| word_at(bytes, *at, prefix))
 }
 
 /// The index past the run of class `tail` that starts at `at`.
