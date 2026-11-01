@@ -29,6 +29,7 @@ import contextlib
 import dataclasses
 import datetime
 import http.server
+import io
 import json
 import os
 import pathlib
@@ -1184,8 +1185,65 @@ LINK_NOT_FOLLOWED = "a link, not followed"
 #: Why :func:`_regular_files_without_links` leaves out a fifo, socket or device.
 NOT_A_REGULAR_FILE = "not a regular file, not read"
 
+#: Why a capture leaves out a file that, once opened, is not the one the walk
+#: listed (:func:`_open_listed`).
+CHANGED_AFTER_LISTING = "changed after it was listed, not read"
 
-def _regular_files_without_links(directory, refused):
+#: The flags :func:`_open_listed` opens a log file with. ``O_NOFOLLOW`` and
+#: ``O_NONBLOCK`` exist on POSIX only: there a link is refused by the open
+#: itself and a fifo cannot block it. Windows has neither, so there the
+#: identity check after the open is what refuses a swapped entry.
+_LOG_OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                   | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+
+
+def _identity(status) -> tuple[int, int]:
+    """The device and file number of a stat result: what names one file.
+
+    Args:
+        status: An ``os.stat_result``.
+
+    Returns:
+        tuple[int, int]: ``(st_dev, st_ino)``. On Windows they are the volume
+        serial number and the file index, which ``os.lstat`` and ``os.fstat``
+        report alike.
+    """
+    return status.st_dev, status.st_ino
+
+
+def _open_listed(path, expected):
+    """Open the log file *path*, only if it is still the file *expected* names.
+
+    MAGI FIX (S6 loop 19): the file was opened again by path, following
+    whatever stood there by then, so a link (or a hard link) swapped in after
+    the walk listed it had the harness read bytes outside the workspace
+    (F1a1-balthasar).
+
+    Args:
+        path: The file to open.
+        expected: Its ``(st_dev, st_ino)`` when it was checked
+            (:func:`_identity`).
+
+    Returns:
+        io.BufferedReader: The open file, binary; the caller closes it.
+
+    Raises:
+        OSError: When it cannot be opened (a link, on POSIX), or when the
+            object opened is not a regular file or not *expected*, with
+            :data:`CHANGED_AFTER_LISTING` as its text.
+    """
+    descriptor = os.open(path, _LOG_OPEN_FLAGS)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _identity(opened) != expected:
+            raise OSError(CHANGED_AFTER_LISTING)
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _regular_files_without_links(directory, refused, identities=None):
     """The files under *directory*, sorted, without descending into or reading a link.
 
     ``Path.rglob`` descends into a junction on Windows, and a file test follows
@@ -1202,6 +1260,10 @@ def _regular_files_without_links(directory, refused):
             neither a directory nor a regular file (a fifo, socket or device,
             never opened: reading a fifo can block), a directory that could
             not be listed, or an entry whose test failed.
+        identities: A dict that receives, for each file returned, its
+            :func:`_identity` as listed, so the read can refuse a file
+            swapped in afterwards (:func:`_open_listed`). ``None`` records
+            nothing.
 
     Returns:
         list[pathlib.Path]: The regular files found, in sorted path order.
@@ -1233,6 +1295,8 @@ def _regular_files_without_links(directory, refused):
                 elif entry.is_dir(follow_symlinks=False):
                     pending.append(path)
                 elif entry.is_file(follow_symlinks=False):
+                    if identities is not None:
+                        identities[path] = _identity(os.lstat(path))
                     files.append(path)
                 else:
                     # MAGI FIX (S6 loop 16): a fifo, socket or device file was
@@ -1249,11 +1313,11 @@ def _regular_files_without_links(directory, refused):
 READ_CHUNK_BYTES = 64 * 1024
 
 
-def _read_at_most(path, limit: int) -> bytes:
-    """Read *path* from the start, stopping once it holds more than *limit* bytes.
+def _read_at_most(handle, limit: int) -> bytes:
+    """Read the open file *handle*, stopping once it holds more than *limit* bytes.
 
     Args:
-        path: The file to read.
+        handle: A binary file open for reading (:func:`_open_listed`).
         limit: The most bytes the caller can keep, at least 0.
 
     Returns:
@@ -1261,28 +1325,23 @@ def _read_at_most(path, limit: int) -> bytes:
         its first ``limit + 1`` bytes, which tell the caller it is over.
 
     Raises:
-        OSError: When the file cannot be opened or read.
+        OSError: When the file cannot be read.
 
     Example:
-        >>> import tempfile
-        >>> with tempfile.TemporaryDirectory() as tmp:
-        ...     path = pathlib.Path(tmp) / "a.log"
-        ...     _ = path.write_bytes(b"12345")
-        ...     _read_at_most(path, 2), _read_at_most(path, 9)
+        >>> _read_at_most(io.BytesIO(b"12345"), 2), _read_at_most(io.BytesIO(b"12345"), 9)
         (b'123', b'12345')
     """
     chunks, held = [], 0
-    with path.open("rb") as handle:
-        while held <= limit:
-            chunk = handle.read(min(READ_CHUNK_BYTES, limit + 1 - held))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            held += len(chunk)
+    while held <= limit:
+        chunk = handle.read(min(READ_CHUNK_BYTES, limit + 1 - held))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        held += len(chunk)
     return b"".join(chunks)
 
 
-def _read_bounded(root, paths, refused) -> list:
+def _read_bounded(root, paths, refused, identities=None) -> list:
     """Read *paths* in order, within the per-file and total capture caps.
 
     MAGI FIX (S6 loop 16): every log file was read whole with no bound, so a
@@ -1300,6 +1359,11 @@ def _read_bounded(root, paths, refused) -> list:
     file that grew in between was held in memory unbounded (F1a1-caspar,
     F1a1-melchior, F1a1-balthasar).
 
+    The size is read with ``os.lstat``, which never follows a link, and the
+    file is opened only if it is still the file that was checked
+    (:func:`_open_listed`): the one the walk listed when *identities* names
+    it, otherwise the one ``os.lstat`` just saw.
+
     Complexity: ``O(bytes kept)``, at most :data:`MAX_REVIEW_LOG_TOTAL_BYTES`
     plus one chunk held at once.
 
@@ -1307,7 +1371,10 @@ def _read_bounded(root, paths, refused) -> list:
         root: The directory the files are named under (:func:`_name_under`).
         paths: The files to read, in the order they are kept.
         refused: A list that receives ``"<path> (<why>)"`` for each file that
-            could not be read or was over a cap.
+            could not be read, was over a cap, or was not the file checked
+            (:data:`CHANGED_AFTER_LISTING`).
+        identities: Each path's :func:`_identity` as the walk listed it
+            (:func:`_regular_files_without_links`), or ``None``.
 
     Returns:
         list[bytes]: The bytes of every file kept, in *paths* order.
@@ -1325,11 +1392,15 @@ def _read_bounded(root, paths, refused) -> list:
         name = _name_under(root, path)
         data = None
         try:
-            size = path.stat().st_size
+            checked = os.lstat(path)
+            size = checked.st_size
             if (size <= MAX_REVIEW_LOG_FILE_BYTES
                     and spent + size <= MAX_REVIEW_LOG_TOTAL_BYTES):
-                data = _read_at_most(path, min(MAX_REVIEW_LOG_FILE_BYTES,
-                                               MAX_REVIEW_LOG_TOTAL_BYTES - spent))
+                expected = (identities or {}).get(path, _identity(checked))
+                with _open_listed(path, expected) as handle:
+                    data = _read_at_most(handle, min(
+                        MAX_REVIEW_LOG_FILE_BYTES,
+                        MAX_REVIEW_LOG_TOTAL_BYTES - spent))
                 size = len(data)
         except OSError as exc:
             refused.append("%s (%s)" % (name, exc))
@@ -1881,9 +1952,9 @@ class RunExecutor:
         # MAGI FIX (S6 loop 14): rglob descended into a junction and read_bytes
         # followed a link, so a link under .magi/logs had the harness read what
         # it points at (F1a1-m3). Links are named in *unreadable*, never read.
-        refused = []
-        files = _regular_files_without_links(directory, refused)
-        captured = _read_bounded(directory, files, refused)
+        refused, identities = [], {}
+        files = _regular_files_without_links(directory, refused, identities)
+        captured = _read_bounded(directory, files, refused, identities)
         if unreadable is not None:
             unreadable.extend(refused)
         return tuple(captured)
