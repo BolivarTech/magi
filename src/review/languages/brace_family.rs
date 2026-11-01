@@ -2015,6 +2015,11 @@ fn is_identifier_char(c: char) -> bool {
 fn identifier_before_paren(line: &str) -> Option<String> {
     // MAGI FIX (S6 loop 15): `decltype(auto) f() {` was named `decltype`, its operand's `(`
     // being taken for the parameter list; the list's own `(` is looked for instead.
+    // MAGI FIX (S6 loop 17, B2-5): `bool operator()(int x) {` was named `operator`: its symbol is
+    // the line's first `()`, taken for the parameter list.
+    if call_operator(line) {
+        return Some(CALL_OPERATOR_NAME.to_string());
+    }
     let head = parameter_list_head(line)?;
     // MAGI FIX (S6 loop 9): `Foo& operator=(` held an `=` before its `(` and named nothing.
     if let Some(name) = operator_name(head.name_text) {
@@ -2230,9 +2235,9 @@ const OPERATOR_SYMBOL_CHARS: &str = "=!<>+-*/%&|^~[],";
 /// # Returns
 ///
 /// The operator's name, or `None` when `before` names no such operator (a call operator,
-/// `operator()`, has its symbol after the first `(` and is named by
-/// [`identifier_before_paren`]'s general rule; a conversion operator, `operator bool`, is named
-/// by that rule too, after its type). O(n) in the text.
+/// `operator()`, has its symbol after the first `(` and is named before this rule
+/// ([`call_operator`]); a conversion operator, `operator bool`, is named by
+/// [`identifier_before_paren`]'s general rule, after its type). O(n) in the text.
 fn operator_name(before: &str) -> Option<String> {
     let (head, symbol) = before.trim_end().rsplit_once("operator")?;
     // The symbol touches the word, so a JavaScript `const operator = (x) => {` is no overload.
@@ -2254,6 +2259,31 @@ fn operator_name(before: &str) -> Option<String> {
     let allocation =
         symbol.starts_with(char::is_whitespace) && ALLOCATION_OPERATORS.contains(&word.as_str());
     allocation.then(|| format!("operator {word}"))
+}
+
+/// The name of a C++ call operator overload ([`call_operator`]).
+const CALL_OPERATOR_NAME: &str = "operator()";
+
+/// Whether `line` declares a C++ call operator overload (`bool operator()(int x) const {`,
+/// `auto operator ( ) (int x) {`): the word `operator` (no identifier character before it), then
+/// after optional blanks an empty `()`, then after optional blanks the `(` of the parameter list.
+/// Its symbol is the line's first `()`, so the general rule ([`parameter_list_head`]) takes it
+/// for the parameter list and names the function `operator`. O(n × k) in the line, for k
+/// occurrences of the word.
+fn call_operator(line: &str) -> bool {
+    line.match_indices("operator").any(|(at, word)| {
+        let word_starts = line
+            .get(..at)
+            .and_then(|before| before.chars().next_back())
+            .is_none_or(|c| !is_identifier_char(c));
+        let after = line.get(at + word.len()..).unwrap_or("").trim_start();
+        let parameters = after
+            .strip_prefix('(')
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix(')'))
+            .map(str::trim_start);
+        word_starts && parameters.is_some_and(|rest| rest.starts_with('('))
+    })
 }
 
 /// The C++ allocation operators, whose symbol is a word with an optional `[]`
