@@ -1292,8 +1292,9 @@ impl BraceFamilyExtractor {
                     "trait" | "interface" => UnitKind::Trait,
                     "impl" => UnitKind::Impl,
                     // MAGI FIX (S6 loop 6): a module was function-like, so it never split.
-                    "mod" => UnitKind::Module,
-                    _ => UnitKind::Class, // class, namespace, record, @interface
+                    // MAGI FIX (B2a 1): a C++ namespace holds free functions, as a module does.
+                    "mod" | "namespace" => UnitKind::Module,
+                    _ => UnitKind::Class, // class, record, @interface
                 };
                 // MAGI FIX (S6 loop 7): C++'s `enum class Color` was named `class`.
                 let rest = if kind == UnitKind::Enum {

@@ -50,7 +50,8 @@ pub enum UnitKind {
     Trait,
     /// An impl block (Rust-specific).
     Impl,
-    /// A module block (Rust `mod name { ... }`); split into its items like an impl block.
+    /// A module block (Rust `mod name { ... }`, a C++ `namespace`); split into its items like an
+    /// impl block, its functions staying [`UnitKind::Function`].
     Module,
     /// A group of related top-level declarations: constants, statics,
     /// type aliases, imports, macros, global variables.
@@ -58,6 +59,15 @@ pub enum UnitKind {
     /// Fallback: changed lines not inside any recognized construct.
     /// Context is lines around the change.
     TopLevel,
+}
+
+impl UnitKind {
+    /// Whether a function directly inside a block of this kind is a method: an impl, a class or
+    /// a trait (an interface) holds methods; a module, a namespace or a declaration group holds
+    /// free functions. O(1).
+    pub fn holds_methods(self) -> bool {
+        matches!(self, Self::Impl | Self::Class | Self::Trait)
+    }
 }
 
 /// A semantic unit of code extracted from a source file.
@@ -128,8 +138,9 @@ pub trait LanguageExtractor {
         changed_lines: impl Into<ChangedLines<'a>>,
     ) -> Vec<SemanticUnit>;
 
-    /// Splits a block unit (an `impl`, a class, a trait or a namespace) one level down: its
-    /// methods become [`UnitKind::Method`] units, other nested constructs keep their kind, and
+    /// Splits a block unit (an `impl`, a class, a trait, a module or a namespace) one level down:
+    /// the functions of a type's block become [`UnitKind::Method`] units (a module's stay
+    /// functions, [`UnitKind::holds_methods`]), other nested constructs keep their kind, and
     /// the lines between them (the block's header, the blank lines and its closing line) become
     /// pieces with the block's kind and name, so the block's header is never lost.
     ///
@@ -149,7 +160,8 @@ pub trait LanguageExtractor {
 pub(crate) type Member = (UnitKind, String, u32, u32);
 
 /// The pieces of `block` given its `members`: each member as a unit ([`UnitKind::Function`]
-/// becomes [`UnitKind::Method`]), and each stretch between members (the header, blank lines,
+/// becomes [`UnitKind::Method`] when the block's kind holds methods, [`UnitKind::holds_methods`]),
+/// and each stretch between members (the header, blank lines,
 /// the closing line) as a piece with the block's kind and name. Shared by the extractors'
 /// [`LanguageExtractor::split_block`].
 ///
@@ -218,7 +230,9 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
     let mut parts: Vec<SemanticUnit> = members
         .into_iter()
         .map(|(kind, name, first, last)| {
-            let kind = if kind == UnitKind::Function {
+            // MAGI FIX (B2a 1): a module's or a namespace's functions are free functions; only a
+            // type's block (an impl, a class, a trait) holds methods.
+            let kind = if kind == UnitKind::Function && block.kind.holds_methods() {
                 UnitKind::Method
             } else {
                 kind

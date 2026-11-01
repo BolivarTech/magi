@@ -12,6 +12,7 @@ drift. Each pattern must match: a pattern that matched nothing would let the
 comparison below it pass by never running.
 """
 
+import os
 import pathlib
 import re
 import unittest
@@ -316,6 +317,78 @@ class SecretPrefixDocTests(unittest.TestCase):
         for array in re.findall(r"prefixes: &\[([^\]]*)\]", _source("src/review/secrets.rs")):
             prefixes.update(re.findall(r'"([^"]+)"', array))
         self.assertEqual(set(), named - prefixes)
+
+
+def _locked_version(crate: str) -> str:
+    """The version of *crate* that ``Cargo.lock`` resolves.
+
+    Args:
+        crate: The package name.
+
+    Returns:
+        str: Its locked version.
+
+    Raises:
+        AssertionError: When the lockfile has no such package.
+    """
+    match = re.search(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"' % re.escape(crate),
+                      _source("Cargo.lock"))
+    if match is None:
+        raise AssertionError("%s not found in Cargo.lock" % crate)
+    return match.group(1)
+
+
+def _registry_source(crate: str, relative: str) -> str:
+    """Read *relative* from the locked version of *crate* in cargo's registry.
+
+    Args:
+        crate: The package name.
+        relative: The path inside the package, with forward slashes.
+
+    Returns:
+        str: The file's text, ``\\r`` stripped.
+
+    Raises:
+        AssertionError: When no registry checkout of that version holds the file.
+    """
+    home = pathlib.Path(os.environ.get("CARGO_HOME") or pathlib.Path.home() / ".cargo")
+    package = "%s-%s" % (crate, _locked_version(crate))
+    for index in sorted((home / "registry" / "src").glob("*")):
+        candidate = index / package / relative
+        if candidate.is_file():
+            return candidate.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
+    raise AssertionError("%s/%s not found under %s/registry/src; build the product first"
+                         % (package, relative, home))
+
+
+#: How magi-core's ``OllamaProvider`` names a request's path: the segments after the
+#: method, joined under the daemon root (``/v1`` is normalised away before this).
+_REQUEST_SEGMENTS = re.compile(
+    r"\.request\(\s*&self\.client,\s*reqwest::Method::\w+,\s*&\[([^\]]*)\]")
+
+
+class ProbePathTests(unittest.TestCase):
+    """The paths the model counter lets through as the capability probe (``runs.PROBE_PATHS``)."""
+
+    # MAGI FIX (smoke review, Caspar+Melchior): PROBE_PATHS was a hand copy of the probe's
+    # requests. The product's probe (src/magi/probe.rs) builds magi-core's OllamaProvider and
+    # calls only window() and digest(), whose paths live in magi-core, pinned at Cargo.lock's version.
+
+    def test_the_product_probes_through_the_ollama_provider_of_magi_core(self) -> None:
+        probe = _source("src/magi/probe.rs")
+        self.assertIn("impl ProbeFactory for OllamaProbeFactory", probe)
+        self.assertIn("OllamaProvider::new(base_url.as_str(), model)", probe)
+
+    def test_the_probe_paths_match_what_magi_core_requests(self) -> None:
+        source = _registry_source("magi-core", "src/providers/ollama.rs")
+        start = source.find("impl ProviderProbe for OllamaProvider")
+        self.assertNotEqual(-1, start, "the ProviderProbe impl was not found")
+        end = source.find("\nimpl ", start + 1)
+        block = source[start:] if end == -1 else source[start:end]
+        groups = _REQUEST_SEGMENTS.findall(block)
+        self.assertEqual(2, len(groups), "expected the window and digest requests")
+        paths = {"/" + "/".join(s.strip().strip('"') for s in group.split(",")) for group in groups}
+        self.assertEqual(set(runs.PROBE_PATHS), paths)
 
 
 if __name__ == "__main__":
