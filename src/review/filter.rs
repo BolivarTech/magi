@@ -291,12 +291,11 @@ fn classify(
         Side::Content(bytes) => bytes,
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
+    // MAGI FIX (S6 loop 14, A2-5): the old side's read failure is logged under the path it was
+    // read under (a rename's old path), not the new one, which reads fine.
+    let old_side = old_path.as_deref().unwrap_or(path);
     let old = match &file.diff {
-        Some(_) => match read_side(
-            source.read_old(old_path.as_deref().unwrap_or(path)),
-            path,
-            explicit,
-        )? {
+        Some(_) => match read_side(source.read_old(old_side), old_side, explicit)? {
             Side::Content(bytes) => bytes,
             Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
         },
@@ -409,7 +408,8 @@ fn suppressed_diff(
         Side::Content(bytes) => bytes,
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
-    let old = match read_side(source.read_old(old_path.unwrap_or(path)), path, explicit)? {
+    let old_side = old_path.unwrap_or(path);
+    let old = match read_side(source.read_old(old_side), old_side, explicit)? {
         Side::Content(bytes) => bytes,
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
@@ -460,7 +460,8 @@ enum Side {
 /// # Arguments
 ///
 /// * `read` - The source's answer.
-/// * `path` - The file's path, for the log entry.
+/// * `path` - The path the side was read under (a rename's old path for its old side), for the
+///   log entry.
 /// * `explicit` - Whether the file was requested by name.
 ///
 /// # Errors
