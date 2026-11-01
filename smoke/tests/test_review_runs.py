@@ -826,5 +826,78 @@ class ReviewChainLinkTests(unittest.TestCase):
             self.assertTrue(keep.is_file())
 
 
+class ReviewLogChainTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 17, F1a1-caspar/melchior] the log capture re-tests the chain the product ran in."""
+
+    def _outside_log(self, root: pathlib.Path) -> pathlib.Path:
+        """A tree outside the scratch area shaped like a workspace, with a log that is not this run's."""
+        outside = root / "outside"
+        logs = outside / ".magi" / "logs"
+        logs.mkdir(parents=True)
+        (logs / "elsewhere.log").write_bytes(b"not this run's log")
+        return outside
+
+    def _capture(self, root: pathlib.Path) -> tuple:
+        """Capture R15's log with the repository root at *root*; return the capture and what was refused."""
+        executor = _executor(root)
+        unreadable = []
+        with mock.patch.object(runs, "REPOSITORY_ROOT", root):
+            captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+        return captured, unreadable
+
+    def _assert_workspace_link_not_read(self, make_link) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            outside = self._outside_log(root)
+            (root / "scratch").mkdir()
+            make_link(outside, root / "scratch" / runs.REVIEW_WORKSPACE_DIR)
+            captured, unreadable = self._capture(root)
+            self.assertEqual((), captured)
+            self.assertEqual(1, len(unreadable))
+            self.assertIn(runs.REVIEW_WORKSPACE_DIR, unreadable[0])
+            self.assertIn(runs.LINK_NOT_FOLLOWED, unreadable[0])
+
+    def test_a_workspace_swapped_for_a_junction_is_never_read_through(self) -> None:
+        self._assert_workspace_link_not_read(_make_junction)
+
+    def test_a_workspace_swapped_for_a_symlink_is_never_read_through(self) -> None:
+        self._assert_workspace_link_not_read(_make_symlink)
+
+    def test_a_scratch_area_swapped_for_a_junction_is_never_read_through(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            holder = root / "holder"
+            holder.mkdir()
+            shutil.move(str(self._outside_log(root)), str(holder / runs.REVIEW_WORKSPACE_DIR))
+            _make_junction(holder, root / "scratch")
+            captured, unreadable = self._capture(root)
+            self.assertEqual((), captured)
+            self.assertEqual(1, len(unreadable))
+            self.assertIn("scratch", unreadable[0])
+            self.assertIn(runs.LINK_NOT_FOLLOWED, unreadable[0])
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_product_that_swaps_its_workspace_for_a_link_has_nothing_read_through_it(self) -> None:
+        # The chain was tested before the product ran; the product runs with the workspace as its cwd and
+        # can replace it before it exits.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = self._outside_log(root)
+            workspace = root / "scratch" / runs.REVIEW_WORKSPACE_DIR
+
+            def swap(_definition, _stdin):
+                shutil.rmtree(workspace)
+                _make_junction(outside, workspace)
+                return runs.ProductOutput(stdout=b"", stderr=b"", exit_code=2, command=["magi-rs"])
+
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root), \
+                    mock.patch.object(executor, "_invoke", side_effect=swap):
+                result = executor.execute(runs.DEFINITIONS["R15"])
+            self.assertEqual((), result.review_log)
+            self.assertTrue(any(runs.LINK_NOT_FOLLOWED in entry
+                                for entry in result.review_log_unreadable))
+
+
 if __name__ == "__main__":
     unittest.main()
