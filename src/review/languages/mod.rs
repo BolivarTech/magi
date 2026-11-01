@@ -28,6 +28,7 @@ pub mod brace_family;
 pub mod python;
 pub mod scanner;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::review::context::FileContext;
@@ -154,7 +155,8 @@ pub(crate) type Member = (UnitKind, String, u32, u32);
 ///
 /// # Arguments
 ///
-/// * `block` - The block unit.
+/// * `block` - The block unit. Its changed lines may come in any order: a sorted copy is used
+///   when they are not sorted.
 /// * `members` - Its members in block lines, sorted by start and disjoint.
 ///
 /// # Returns
@@ -179,6 +181,17 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
     let lines: Vec<&str> = block.content.lines().collect();
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
     let base = block.start_line.saturating_sub(1);
+    // MAGI FIX (S6 loop 19, B2a-6): the shares are taken by binary search, which needs the
+    // changed lines sorted; a unit built by a caller with them unsorted gave pieces the wrong
+    // lines. The extractors' units are sorted, so the copy is made only when they are not.
+    let changed: Cow<'_, [u32]> = if block.changed_lines.is_sorted_by(|a, b| a < b) {
+        Cow::Borrowed(&block.changed_lines)
+    } else {
+        let mut sorted = block.changed_lines.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        Cow::Owned(sorted)
+    };
     let piece = |kind: UnitKind, name: String, first: u32, last: u32| SemanticUnit {
         kind,
         name,
@@ -190,7 +203,7 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
             .unwrap_or(&[])
             .join("\n"),
         changed_lines: lines_in_range(
-            &block.changed_lines,
+            &changed,
             first.saturating_add(base),
             last.saturating_add(base),
         )
