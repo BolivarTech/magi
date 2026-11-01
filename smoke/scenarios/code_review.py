@@ -104,7 +104,13 @@ S49_EXPECTED_OMISSIONS = tuple(
     (path, cause) for (path, _), cause
     in zip(runs.review_skipped_files(), ("binary", "secret")))
 
-#: The product's wording that S48 and S49 look for in stderr.
+#: The product's wording that S48 and S49 look for in stderr. Every stderr
+#: text S48-S51 parse (these two phrases, ``; left out: ``, ``, and N more``,
+#: :data:`OMISSION_CAUSES` and :data:`BUDGET_PATTERN`) is pinned against
+#: ``src/review/error.rs`` and ``src/review/filter.rs`` by ``StderrWordingTests``
+#: in ``smoke/tests/test_rust_sync.py``.
+# MAGI FIX (S6 loop 15): F1a2-m3 asked whether these pins exist; they do, and
+# the comment now says where.
 OUTSIDE_WORKSPACE_TEXT = "outside the workspace"
 NOTHING_TO_REVIEW_TEXT = "nothing to review"
 

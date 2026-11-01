@@ -163,11 +163,17 @@ pub trait ContentSource: Send + Sync {
         let _ = (face, path);
     }
 
-    /// Checks that what the source holds fits its total cap.
+    /// Checks that what the source holds, once the caller released what it left out, fits the
+    /// review's total cap. A caller that reads a file to judge it calls this after the verdict
+    /// and its releases, so a file it left out is never charged against the total.
+    ///
+    /// The default holds nothing and never fails.
     ///
     /// # Errors
     ///
-    /// Implementation specific; the default holds nothing and never fails.
+    /// Implementation specific; see [`CachedSource`]'s [`ReviewError::InputTooLarge`].
+    // MAGI FIX (S6 loop 15, A2-3): the total was checked at the read, before the filter judged the
+    // file, so a secret or binary file near the cap failed a review it would have left out.
     fn settle(&self) -> Result<(), ReviewError> {
         Ok(())
     }
@@ -602,12 +608,17 @@ impl ContentSource for RevisionSource<'_> {
 /// every side of a file it leaves out that no kept file was scanned with
 /// ([`ContentSource::release`]), so the cap and the memory count only
 /// what is reviewed and no skipped secret stays held. The bytes held are
-/// bounded by [`MAX_REVIEW_TOTAL_BYTES`]: a read that would pass it is refused and not kept,
-/// while a read of what is already held costs nothing. Memory is O(bytes reviewed); a lookup is
+/// bounded by [`MAX_REVIEW_TOTAL_BYTES`], checked by [`ContentSource::settle`] once the caller
+/// released what it left out; until then a read may pass it by both sides of one file at the
+/// per-file cap ([`MAX_REVIEW_FILE_BYTES`]),
+/// and one that would go further is refused and not kept. A read of what is already held costs
+/// nothing. Memory is O(bytes reviewed); a lookup is
 /// O(1) expected plus the copy it returns.
 pub struct CachedSource<'a> {
     inner: &'a dyn ContentSource,
     cap: u64,
+    /// How far past `cap` a read may go until [`ContentSource::settle`].
+    headroom: u64,
     held: Mutex<Held>,
 }
 
@@ -620,7 +631,14 @@ struct Held {
     old: HashMap<String, Option<Vec<u8>>>,
     /// Bytes held across both sides.
     bytes: u64,
+    /// The bytes held before, and the path of, the first read that passed the cap since the
+    /// total last fit it: what [`ContentSource::settle`] reports.
+    over: Option<(u64, String)>,
 }
+
+/// How far past the total cap a [`CachedSource`] read may go until the caller settles: both sides
+/// of one file at the per-file cap, so the filter can read a file before it judges it.
+const PROVISIONAL_HEADROOM_BYTES: u64 = 2 * MAX_REVIEW_FILE_BYTES;
 
 /// Which side of a file a read is for, or a release is of ([`ContentSource::release`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -654,14 +672,17 @@ impl<'a> CachedSource<'a> {
     /// A cache over `inner` with an explicit total cap and provisional headroom.
     #[cfg(test)]
     pub(crate) fn with_caps(inner: &'a dyn ContentSource, cap: u64, headroom: u64) -> Self {
-        let _ = headroom;
-        Self::capped(inner, cap)
+        Self {
+            headroom,
+            ..Self::capped(inner, cap)
+        }
     }
 
     fn capped(inner: &'a dyn ContentSource, cap: u64) -> Self {
         Self {
             inner,
             cap,
+            headroom: PROVISIONAL_HEADROOM_BYTES,
             held: Mutex::new(Held::default()),
         }
     }
@@ -684,7 +705,9 @@ impl<'a> CachedSource<'a> {
             .as_ref()
             .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX));
         let total = held.bytes.saturating_add(len);
-        if total > self.cap {
+        // MAGI FIX (S6 loop 15, A2-3): past the cap a read is held provisionally, within the
+        // headroom; `settle` decides once the caller released what it left out.
+        if total > self.cap.saturating_add(self.headroom) {
             // MAGI FIX (S6 loop 5): the error named no path and no total, so an operator could
             // not tell a higher cap from fewer files.
             return Err(ReviewError::InputTooLarge {
@@ -692,6 +715,9 @@ impl<'a> CachedSource<'a> {
                 held: held.bytes,
                 path: path.to_string(),
             });
+        }
+        if total > self.cap && held.over.is_none() {
+            held.over = Some((held.bytes, path.to_string()));
         }
         held.bytes = total;
         let side = match face {
@@ -707,7 +733,7 @@ impl ContentSource for CachedSource<'_> {
     /// # Errors
     ///
     /// The inner source's error (never kept), and [`ReviewError::InputTooLarge`] when keeping
-    /// the read would pass the total cap.
+    /// the read would pass the total cap by more than the provisional headroom.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
         self.get(Face::New, path)
     }
@@ -727,6 +753,27 @@ impl ContentSource for CachedSource<'_> {
             .flatten()
             .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         held.bytes = held.bytes.saturating_sub(freed);
+        if held.bytes <= self.cap {
+            held.over = None;
+        }
+    }
+
+    /// # Errors
+    ///
+    /// [`ReviewError::InputTooLarge`] when what is held passes the total cap, naming the first
+    /// read that passed it and what was held before that read. O(1).
+    fn settle(&self) -> Result<(), ReviewError> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.bytes <= self.cap {
+            held.over = None;
+            return Ok(());
+        }
+        let (before, path) = held.over.clone().unwrap_or_default();
+        Err(ReviewError::InputTooLarge {
+            limit: self.cap,
+            held: before,
+            path,
+        })
     }
 }
 

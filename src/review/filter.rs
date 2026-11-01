@@ -183,7 +183,9 @@ enum Verdict {
 ///
 /// [`ReviewError::NotReviewable`] when `explicit` and the file is skipped or missing,
 /// [`ReviewError::Io`] when a file named explicitly cannot be read, [`ReviewError::NothingToReview`]
-/// when no file is kept, and any other error of `source`.
+/// when no file is kept, [`ReviewError::InputTooLarge`] when the kept files pass the review's
+/// total cap ([`ContentSource::settle`], checked after each file), and any other error of
+/// `source`.
 ///
 /// O(total bytes read) time.
 pub fn filter_files(
@@ -241,6 +243,9 @@ pub fn filter_files(
                 });
             }
         }
+        // MAGI FIX (S6 loop 15, A2-3): the total is checked after the verdict and its releases,
+        // so a file left out near the cap no longer fails the review.
+        source.settle()?;
     }
     if filtered.kept.is_empty() {
         // MAGI FIX (S6 loop 3): the omissions and their causes travel with the error (RV20/RV22).
