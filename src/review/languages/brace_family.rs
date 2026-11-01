@@ -6195,4 +6195,25 @@ int g(void) {
         let want: Vec<_> = cases.iter().map(|(_, w)| w.clone()).collect();
         assert_eq!(got, want);
     }
+
+    #[test]
+    fn a_closing_parenthesis_line_never_opens_a_declaration_of_its_own() {
+        // The `);` that closes a wrapped prototype ends in `;`, so it read as a declaration of
+        // its own and split the prototype; it now stays with the lines it closes, whether the
+        // opener is recognised (`int foo(`) or not (a comment before it).
+        let cases = [
+            "int foo(\n    int a\n);\nint g(void) {\n}\n",
+            "/* note */ int foo(\n    int a\n);\nint g(void) {\n}\n",
+        ];
+        let got: Vec<Vec<u32>> = cases
+            .iter()
+            .map(|code| {
+                sorted_spans(&c_extractor(), code)
+                    .iter()
+                    .map(|u| u.2)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(got, vec![vec![1, 4]; cases.len()]);
+    }
 }
