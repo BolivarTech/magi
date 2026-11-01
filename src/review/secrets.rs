@@ -135,8 +135,13 @@ const MAX_URL_USERINFO: usize = 256;
 /// after a long userinfo is still seen and the read stays bounded.
 const MAX_URL_HOST_PEEK: usize = 256;
 /// The bytes that end a URL's userinfo without an `@`: blanks, the authority's other
-/// delimiters, quotes and the brackets of prose or markup.
-const URL_USERINFO_STOP: &[u8] = b" \t\r\n/?#\"'`<>()";
+/// delimiters, and the quotes and brackets RFC 3986 does not allow unencoded in a userinfo
+/// (`"`, `` ` ``, `<`, `>`). The sub-delimiters `'`, `(` and `)` are allowed there, so they stay
+/// inside the run: a URL in prose that a `)` or `'` closes is still ended by the blank or `/`
+/// that follows it.
+// MAGI FIX (S6 loop 14, A2-1, security): `'`, `(` and `)` ended the userinfo, so a password
+// holding one (`pa(ss`) found no `@` and its file was sent.
+const URL_USERINFO_STOP: &[u8] = b" \t\r\n/?#\"`<>";
 /// The bytes a placeholder's name may hold (besides ASCII letters and digits): `db_password`,
 /// `.Values.password`, `db-pass`.
 const URL_PLACEHOLDER_NAME_BYTES: &[u8] = b"_.-";
