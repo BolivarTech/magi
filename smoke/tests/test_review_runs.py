@@ -126,12 +126,23 @@ class WriteFilesTests(unittest.TestCase):
     def test_a_path_leaving_the_root_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hostile = runs.RunDefinition(
-                run_id="RX", argv=("x",), stdin=b"", needs_trio=False,
-                payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
+                run_id="RX", argv=("x", runs.REVIEW_WORKSPACE_TOKEN), stdin=b"",
+                needs_trio=False, payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
                 files=(("../escape.txt", b"x"),))
             root = pathlib.Path(tmp)
             with self.assertRaises(HarnessError):
                 _executor(root)._write_files(hostile, root)
+
+    def test_files_without_the_review_workspace_token_are_refused_at_definition(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a1-m1] only a run that names the review workspace writes its files, so
+        # files on any other run were silently never written and surfaced as a confusing scenario FAIL.
+        with self.assertRaises(HarnessError) as caught:
+            runs.RunDefinition(
+                run_id="RX", argv=("consult",), stdin=b"", needs_trio=False,
+                payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
+                files=(("a.rs", b"x"),))
+        self.assertIn("RX", str(caught.exception))
+        self.assertIn(runs.REVIEW_WORKSPACE_TOKEN, str(caught.exception))
 
     def test_a_definition_without_files_writes_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
