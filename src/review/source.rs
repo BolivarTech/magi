@@ -327,10 +327,19 @@ impl WorktreeSource<'_> {
         if is_never_reviewed(&relative.to_string_lossy()) {
             return Err(ReviewError::Protected(path.to_string()));
         }
-        if !std::fs::metadata(&canonical).map_err(io)?.is_file() {
+        // MAGI FIX (S6 loop 14, A2-6): a file removed between the canonicalization and the open
+        // reads as absent, as one removed a moment earlier does, not as an I/O failure.
+        let meta = match std::fs::metadata(&canonical) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            other => other.map_err(io)?,
+        };
+        if !meta.is_file() {
             return Err(ReviewError::NotRegularFile(path.to_string()));
         }
-        let file = open(&canonical).map_err(io)?;
+        let file = match open(&canonical) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            other => other.map_err(io)?,
+        };
         // Checked again on the handle: the path may have been swapped between the check above
         // and the open (a FIFO, a device file).
         let opened_meta = file.metadata().map_err(io)?;
