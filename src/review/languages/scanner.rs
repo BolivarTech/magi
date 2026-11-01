@@ -1867,6 +1867,9 @@ void h() {
             let results = CodeScanner::new(rules).scan_all(code);
             assert_eq!(find_closing_brace(&results, 1), 6, "first header");
             assert_eq!(find_closing_brace(&results, 3), 6, "second header");
+            // The second header opens its block from the top level, as the first does.
+            let depths: Vec<u32> = results.iter().take(5).map(|l| l.depth_after).collect();
+            assert_eq!(depths, vec![0, 1, 0, 1, 1], "depth through the conditional");
             assert_eq!(results[6].depth_after, 0, "back at the top level");
             assert_eq!(results[7].depth_after, 0, "g opens and closes on its line");
         }
