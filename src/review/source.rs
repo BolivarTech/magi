@@ -1009,6 +1009,28 @@ mod tests {
     }
 
     #[test]
+    fn a_file_gone_between_the_check_and_the_open_reads_as_absent() {
+        // [MAGI S6 loop 14, A2-6] a file removed between the canonicalization and the open was
+        // an I/O error (`unreadable`), while one removed a moment earlier read as absent
+        // (`disappeared`): the same event got two causes.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("a.rs"), "fn f() {}\n").expect("write");
+        let src = WorktreeSource::new(root.path().to_path_buf());
+        let gone = |_: &std::path::Path| -> std::io::Result<std::fs::File> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        };
+        assert_eq!(src.read_with("a.rs", &gone).expect("absent"), None);
+        // Any other failure of the open stays an error.
+        let denied = |_: &std::path::Path| -> std::io::Result<std::fs::File> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        };
+        assert!(matches!(
+            src.read_with("a.rs", &denied),
+            Err(ReviewError::Io(_))
+        ));
+    }
+
+    #[test]
     fn a_file_swapped_between_the_check_and_the_open_is_refused() {
         // [MAGI §6 MS2 D loop 2, security] the opener stands in for a component swapped for an
         // escaping link after the containment check: what was opened is not what the path names.
