@@ -1521,11 +1521,19 @@ const BRACE_SEARCH_VISITS_PER_LINE: usize = 32;
 /// `the_brace_searches_of_a_whole_file_spend_a_budget_linear_in_its_lines`.
 ///
 /// The worst case is accepted, declared: a file crafted to keep a parameter list open on every
-/// line spends the whole budget, about 2.7 × 10⁸ line visits for an 8 MiB file (each a check of
-/// one line's scanner record). It is linear in the file, runs while the review is prepared,
-/// before the review clock starts (RV06), and in the TUI it cannot be cancelled (REQ-TUI-1);
-/// ordinary code spends a small fraction of it. The value is not changed without a measurement.
+/// line spends the whole budget, about 2.7 × 10⁸ line visits for an 8 MiB file. The budget counts
+/// visits, not the work inside one: a visit reads the line's scanner record and also walks its
+/// text a few times ([`paren_delta`], the trims, the stop rule's keyword and signature checks,
+/// the C attribute scan), so it costs O(m) for a line of m characters, and a pass costs at most
+/// its visits times the longest line's length. A crafted file whose few lines are megabytes long
+/// spends few visits, since they are counted in lines, but each is that long: about a thousand
+/// visits of a multi-megabyte line, seconds of work. Either way the pass stays linear in the
+/// file's size, with a constant of up to about a thousand character reads per byte; it runs
+/// while the review is prepared, before the review clock starts (RV06), and in the TUI it cannot
+/// be cancelled (REQ-TUI-1); ordinary code spends a small fraction of it. The value is not
+/// changed without a measurement.
 // MAGI FIX (S6 loop 15): the accepted worst case, written where the budget is defined.
+// MAGI FIX (S6 loop 18, B2b-10): the cost of one visit, O(line length), is declared.
 struct SearchBudget {
     /// The visits the pass may spend in all.
     cap: usize,
