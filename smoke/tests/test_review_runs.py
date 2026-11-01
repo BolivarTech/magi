@@ -422,6 +422,44 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
             self.assertTrue(keep.is_file())
             self.assertFalse((rebuilt / "nested").exists())
 
+    @unittest.skipUnless(os.name == "nt", "a read-only file blocks its own deletion on Windows only")
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_rebuilding_the_workspace_removes_a_read_only_file_left_in_it(self) -> None:
+        # [MAGI §6 MS2 loop 15, F1a1-m3] copytree keeps source modes and rmtree had no error handler, so a
+        # read-only file left in the old workspace aborted every later review run with exit 3 on Windows.
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            workspace = executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            stale = workspace / ".magi" / "stale.lock"
+            stale.write_bytes(b"x")
+            os.chmod(stale, stat.S_IREAD)
+            rebuilt = executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertFalse((rebuilt / ".magi" / "stale.lock").exists())
+            self.assertTrue((rebuilt / ".magi" / "magi.toml").is_file())
+
+    def test_a_failed_deletion_of_a_link_is_never_retried_through_a_mode_change(self) -> None:
+        # [MAGI §6 MS2 loop 15, F1a1-m3] the retry clears the read-only bit; on a link that would change the
+        # target's mode, so the original error stands instead.
+        error = PermissionError(13, "access denied")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "x"
+            with mock.patch.object(runs, "_is_link", return_value=True), \
+                    mock.patch.object(runs.os, "chmod") as chmod:
+                with self.assertRaises(PermissionError):
+                    runs._retry_writable(os.unlink, str(path), error)
+            chmod.assert_not_called()
+
+    def test_a_failed_deletion_of_a_file_is_retried_once_writable(self) -> None:
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "x"
+            path.write_bytes(b"x")
+            os.chmod(path, stat.S_IREAD)
+            runs._retry_writable(os.unlink, str(path), PermissionError(13, "access denied"))
+            self.assertFalse(path.exists())
+
     def test_an_unreadable_directory_under_magi_is_a_harness_error(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-c1] os.walk skips a directory it cannot list unless told otherwise, so a
         # link inside it went unchecked; the walk must fail as a harness error (exit 3), never pass.
