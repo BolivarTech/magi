@@ -1311,6 +1311,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_identifier_ending_in_r_before_a_string_opens_no_raw_string() {
+        // [MAGI B2a A1] the raw-string prefix was matched inside a longer identifier, so in a
+        // macro's tokens (`iter"a\"{"`, an identifier then a string before edition 2021) the
+        // string read as raw, closed on its escaped quote, and its brace counted.
+        let mut scanner = CodeScanner::new(LexicalRules::rust());
+        let results = scanner.scan_all("m!(iter\"a\\\"{\");\nfn g() {\n}\n");
+        assert_eq!(results[0].brace_delta, 0, "the brace is string text");
+        assert!(!results[1].starts_in_literal, "the string closed on line 1");
+        assert_eq!(results[1].brace_delta, 1);
+        assert_eq!(find_closing_brace(&results, 1), 2, "g keeps its bounds");
+        // `abr"` is the identifier `abr` too; the real prefixes still open raw strings.
+        let mut s = CodeScanner::new(LexicalRules::rust());
+        assert_eq!(s.scan_line(1, r#"m!(abr"a\"{");"#).brace_delta, 0);
+        for line in [
+            r#"let s = r"{\";"#,
+            r#"let s = br"{\";"#,
+            r#"let s = cr"{\";"#,
+            r##"let s = (r#"{"#);"##,
+        ] {
+            let mut s = CodeScanner::new(LexicalRules::rust());
+            assert_eq!(s.scan_line(1, line).brace_delta, 0, "{line}");
+            assert_eq!(s.current_depth(), 0, "{line}");
+        }
+    }
+
     // --- Test 7: scanner_handles_nested_block_comments_rust ---
     #[test]
     fn scanner_handles_nested_block_comments_rust() {
