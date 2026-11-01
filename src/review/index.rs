@@ -46,7 +46,9 @@ fn extension_of(path: &str) -> Option<String> {
     // MAGI FIX (S6 loop 5): `FOO.ZZZ` and `notes.zzz` share an extension; both sides compare
     // lowercased, as `detect_language` does.
     // MAGI FIX (S6 loop 18, B1-5): the file name is isolated first, as in
-    // `context::file_extension`.
+    // `context::file_extension`. Unlike that function, a dot-led name keeps its extension
+    // (`.toml` gives `toml`) on purpose: a citation that starts with a dot is never a symbol,
+    // so reading it as a file name skips a check that could only discard the finding.
     base_name(path)
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
