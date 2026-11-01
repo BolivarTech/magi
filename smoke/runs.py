@@ -1645,6 +1645,27 @@ MODEL_COUNTER_STATUS = 503
 #: Bytes of a request body the counter drains at a time.
 MODEL_COUNTER_CHUNK_BYTES = 64 * 1024
 
+#: Requests the counter keeps by method and path.
+MODEL_COUNTER_MAX_RECORDED = 64
+
+
+class RequestLog:
+    """Red stub: no logic yet."""
+
+    def __init__(self, cap=None) -> None:
+        """Stub."""
+        self.recorded = ()
+        self.total = 0
+        self.past_the_probe_total = 0
+        self.overflowed = False
+
+    def record(self, method: str, path: str) -> None:
+        """Stub."""
+
+    def __iter__(self):
+        """Stub."""
+        return iter(self.recorded)
+
 
 class _CountingHandler(http.server.BaseHTTPRequestHandler):
     """Records every request, then answers it :data:`MODEL_COUNTER_STATUS`.

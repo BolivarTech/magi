@@ -1152,10 +1152,77 @@ class RefusalRunModelCallTests(unittest.TestCase):
         self.assertTrue(tomllib.loads(config)["base_url"].startswith("http://127.0.0.1:"))
 
     @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_flooding_the_counter_still_names_the_request_past_the_cap(self) -> None:
+        with mock.patch.object(runs, "MODEL_COUNTER_MAX_RECORDED", 2):
+            result, _, _ = self._execute("R15", ("/api/show",) * 3 + ("/api/chat",))
+        self.assertEqual(1, len(result.model_requests))
+        self.assertIn("1 request past the probe", result.model_requests[0])
+        self.assertIn("overflowed", result.model_requests[0])
+
+    @unittest.skipUnless(_git_available(), "git is required")
     def test_a_run_allowed_to_reach_models_keeps_its_config(self) -> None:
         result, config, _ = self._execute("R12", ())
         self.assertEqual(self._CONFIG, config)
         self.assertEqual((), result.model_requests)
+
+
+class RequestLogTests(unittest.TestCase):
+    """The model counter keeps a bounded record, yet counts every request it saw."""
+
+    def test_a_flood_past_the_cap_keeps_only_the_first_requests_but_counts_them_all(self) -> None:
+        log = runs.RequestLog(cap=3)
+        for index in range(5):
+            log.record("POST", "/api/chat/%d" % index)
+        self.assertEqual((("POST", "/api/chat/0"), ("POST", "/api/chat/1"), ("POST", "/api/chat/2")),
+                         log.recorded)
+        self.assertEqual(5, log.total)
+        self.assertEqual(5, log.past_the_probe_total)
+        self.assertTrue(log.overflowed)
+
+    def test_the_default_cap_is_the_named_constant(self) -> None:
+        log = runs.RequestLog()
+        for _ in range(runs.MODEL_COUNTER_MAX_RECORDED + 1):
+            log.record("POST", "/api/chat")
+        self.assertEqual(runs.MODEL_COUNTER_MAX_RECORDED, len(log.recorded))
+        self.assertTrue(log.overflowed)
+
+    def test_a_request_past_the_probe_beyond_the_cap_is_still_reported(self) -> None:
+        log = runs.RequestLog(cap=2)
+        for _ in range(3):
+            log.record("POST", "/api/show")
+        log.record("POST", "/api/chat")
+        self.assertEqual(1, log.past_the_probe_total)
+        reported = runs.requests_past_the_probe(log)
+        self.assertEqual(1, len(reported))
+        self.assertIn("1 request past the probe", reported[0])
+        self.assertIn("overflowed", reported[0])
+
+    def test_a_probe_only_flood_past_the_cap_reports_nothing(self) -> None:
+        log = runs.RequestLog(cap=2)
+        for _ in range(10):
+            log.record("POST", "/api/tags")
+        self.assertEqual(10, log.total)
+        self.assertEqual(0, log.past_the_probe_total)
+        self.assertTrue(log.overflowed)
+        self.assertEqual((), runs.requests_past_the_probe(log))
+
+    def test_recorded_requests_past_the_probe_are_named_with_the_overflow_total(self) -> None:
+        log = runs.RequestLog(cap=2)
+        log.record("POST", "/api/show")
+        log.record("POST", "/api/chat")
+        log.record("POST", "/v1/embeddings")
+        log.record("POST", "/v1/embeddings")
+        self.assertEqual(("POST /api/chat",
+                          "3 requests past the probe in all; the counter overflowed after "
+                          "recording the first 2 requests"),
+                         runs.requests_past_the_probe(log))
+
+    def test_within_the_cap_only_the_requests_past_the_probe_are_named(self) -> None:
+        log = runs.RequestLog(cap=4)
+        log.record("POST", "/api/show")
+        log.record("POST", "/api/chat")
+        self.assertFalse(log.overflowed)
+        self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
 
 
 if __name__ == "__main__":
