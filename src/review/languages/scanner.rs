@@ -468,16 +468,11 @@ impl CodeScanner {
                         continue;
                     }
 
-                    // Check for byte string: b"..."
-                    if char_at(&chars, i) == 'b' && i + 1 < len && char_at(&chars, i + 1) == '"' {
-                        last_code = Some(STRING_MARK);
-                        self.state = LexicalState::StringLiteral {
-                            quote: '"',
-                            escapable: true,
-                        };
-                        i += 2;
-                        continue;
-                    }
+                    // MAGI FIX (S6 loop 19, B2a-3): a `b"` branch here opened a plain string at the
+                    // `b`, before the `"` reached the triple-quote check, so Python's `b"""` read
+                    // as an empty string and a reopened one. A byte string needs no branch: its
+                    // `b` is code like any prefix letter, and its `"` (or `"""`) opens the string
+                    // on the next character.
 
                     let c = char_at(&chars, i);
                     if !c.is_whitespace() {
