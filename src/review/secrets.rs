@@ -1542,4 +1542,33 @@ mod tests {
         let masked = mask_secrets("postgres://u:pw@pw@db");
         assert_eq!(masked, "postgres://<redacted: url-credential>db");
     }
+
+    #[test]
+    fn an_ssh2_private_key_is_masked_to_its_own_end_line() {
+        // [MAGI S6 loop 14, A2-3] the end of a block was searched with five dashes only, so an
+        // SSH2 key (four-dash RFC 4716 armor) was masked to the end of the text and everything
+        // after it was lost from the report, the error or the model text that carried it.
+        for kind in ["", "ENCRYPTED "] {
+            let begin = format!("{}{kind}PRIVATE KEY ----", concat!("---- BEGIN ", "SSH2 "));
+            let end = format!("{}{kind}PRIVATE KEY ----", concat!("---- END ", "SSH2 "));
+            let text = format!(
+                "a {begin}
+AAAAB3NzaC1yc2EAAAADAQAB
+{end} b
+kept"
+            );
+            assert_eq!(
+                mask_secrets(&text),
+                "a <redacted: pem-private-key> b
+kept",
+                "{text}"
+            );
+        }
+        // With no end line, the mask still runs to the end of the text: the safe direction.
+        let open = format!(
+            "a {SSH2_PLAIN_PRIVATE_KEY}
+AAAAB3NzaC1yc2EAAAADAQAB"
+        );
+        assert_eq!(mask_secrets(&open), "a <redacted: pem-private-key>");
+    }
 }
