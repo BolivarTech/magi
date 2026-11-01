@@ -137,10 +137,9 @@ const MAX_URL_HOST_PEEK: usize = 256;
 /// The bytes that end a URL's userinfo without an `@`: blanks, the authority's other
 /// delimiters, quotes and the brackets of prose or markup.
 const URL_USERINFO_STOP: &[u8] = b" \t\r\n/?#\"'`<>()";
-/// What a password that is a placeholder opens with: a template (`{password}`), a variable
-/// (`$PASSWORD`, `%s`), a markup or documentation slot (`<password>`, `[password]`), or a mask
-/// already applied (`***`). None of them is a credential.
-const URL_PLACEHOLDER_OPENERS: &[u8] = b"{$<[%*";
+/// The bytes a placeholder's name may hold (besides ASCII letters and digits): `db_password`,
+/// `.Values.password`, `db-pass`.
+const URL_PLACEHOLDER_NAME_BYTES: &[u8] = b"_.-";
 
 /// The patterns, in the order that decides the name of a match: `anthropic-key` comes before
 /// `openai-key` because an Anthropic key also starts with `sk-`. A Stripe key needs no such
@@ -374,7 +373,7 @@ impl Matcher {
 
 /// Where the userinfo of a URL credential that opens at `from` (just past `://`) ends: past the
 /// authority's last `@` (a password may hold an unencoded one), when the userinfo holds a `:`
-/// followed by a password that is not a placeholder ([`URL_PLACEHOLDER_OPENERS`]) and the `@`
+/// followed by a password that is not a placeholder ([`is_url_placeholder`]) and the `@`
 /// is followed by a host (an ASCII letter or digit, or `[` for an IPv6 literal). The user may be
 /// empty (`redis://:password@host`). The authority ends at a [`URL_USERINFO_STOP`] byte or a
 /// control character; `None` when it holds no such `@` within [`MAX_URL_USERINFO`] bytes.
@@ -397,13 +396,54 @@ fn url_userinfo_end(bytes: &[u8], from: usize) -> Option<usize> {
     let userinfo = run.get(..at_sign)?;
     let colon = userinfo.iter().position(|b| *b == b':')?;
     let password = userinfo.get(colon + 1..)?;
-    let real = password
-        .first()
-        .is_some_and(|b| !URL_PLACEHOLDER_OPENERS.contains(b));
+    // MAGI FIX (S6 loop 14, A2-1, security): the whole password must be a placeholder form;
+    // its first byte alone let `$ecret` or `{actual` through as a placeholder.
+    let real = !password.is_empty() && !is_url_placeholder(password);
     let host = run
         .get(at_sign + 1)
         .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'[');
     (real && host).then_some(from + at_sign + 1)
+}
+
+/// Whether a URL password is, as a whole, a placeholder rather than a credential: a template
+/// slot (`{}`, `{0}`, `{password}`, `{{.Values.password}}`), a variable (`${db.password}`,
+/// `$PASSWORD`, upper case only, as an environment variable is written), a documentation slot
+/// (`[password]`), a format directive (`%s`, one letter) or a mask already applied (`*`, `***`).
+/// A name holds ASCII letters, digits and [`URL_PLACEHOLDER_NAME_BYTES`]. Anything else, even
+/// one that opens like a placeholder (`$ecret`, `{actual`, `*pw`, `%41bc`), is a credential.
+/// `<password>` needs no form: `<` ends the userinfo ([`URL_USERINFO_STOP`]) before its `@`.
+/// Limit: a real password that is itself exactly one of these forms (`{actual}`) reads as a
+/// placeholder; the forms are what templates and documentation write. O(password length).
+fn is_url_placeholder(password: &[u8]) -> bool {
+    let name = |b: &[u8]| {
+        b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || URL_PLACEHOLDER_NAME_BYTES.contains(c))
+    };
+    let inside = |open: &[u8], close: &[u8]| {
+        password
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+    };
+    let env_name = |b: &[u8]| {
+        b.first()
+            .is_some_and(|c| c.is_ascii_uppercase() || *c == b'_')
+            && b.iter()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+    };
+    if let Some(body) = inside(b"${", b"}") {
+        return !body.is_empty() && name(body);
+    }
+    if let Some(body) = inside(b"{{", b"}}").or_else(|| inside(b"{", b"}")) {
+        return name(body);
+    }
+    if let Some(body) = inside(b"[", b"]") {
+        return !body.is_empty() && name(body);
+    }
+    match password {
+        [b'$', rest @ ..] => env_name(rest),
+        [b'%', letter] => letter.is_ascii_alphabetic(),
+        stars => stars.iter().all(|c| *c == b'*'),
+    }
 }
 
 /// The length of the PEM type word that starts at `at` (1 to [`PEM_MAX_TYPE_WORD`] characters of
