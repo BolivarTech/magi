@@ -1021,7 +1021,8 @@ def _regular_files_without_links(directory, refused):
     Args:
         directory: The directory to walk; it is not itself tested (the caller tests it, as
             :meth:`RunExecutor._capture_review_log` does).
-        refused: A list that receives ``"<name> (<why>)"`` for each entry
+        refused: A list that receives ``"<path> (<why>)"``, *path* relative
+            to *directory* (:func:`_name_under`), for each entry
             left out: a link (neither listed nor read), a directory that could
             not be listed, or an entry whose test failed.
 
@@ -1035,26 +1036,48 @@ def _regular_files_without_links(directory, refused):
         ...     [p.name for p in _regular_files_without_links(tmp, [])]
         ['a.log']
     """
-    files, pending = [], [pathlib.Path(directory)]
+    root = pathlib.Path(directory)
+    # MAGI FIX (S6 loop 15): entries were named by ``path.name``, so a nested
+    # link lost the directory that says which one was left out (F1a1-b2).
+    files, pending = [], [root]
     while pending:
         current = pending.pop()
         try:
             entries = list(os.scandir(current))
         except OSError as exc:
-            refused.append("%s (%s)" % (current.name, exc))
+            refused.append("%s (%s)" % (_name_under(root, current), exc))
             continue
         for entry in entries:
             path = pathlib.Path(entry.path)
             try:
                 if _is_link(path):
-                    refused.append("%s (%s)" % (path.name, LINK_NOT_FOLLOWED))
+                    refused.append("%s (%s)" % (_name_under(root, path),
+                                                LINK_NOT_FOLLOWED))
                 elif entry.is_dir(follow_symlinks=False):
                     pending.append(path)
                 elif entry.is_file(follow_symlinks=False):
                     files.append(path)
             except OSError as exc:
-                refused.append("%s (%s)" % (path.name, exc))
+                refused.append("%s (%s)" % (_name_under(root, path), exc))
     return sorted(files)
+
+
+def _name_under(root, path) -> str:
+    """How a log entry is named: its ``/``-separated path below *root*.
+
+    Args:
+        root: The directory the walk started at.
+        path: A path at or below *root*.
+
+    Returns:
+        str: *path* relative to *root*, or *root*'s own name for *root*.
+
+    Example:
+        >>> _name_under(pathlib.Path("logs"), pathlib.Path("logs/sub/a.log"))
+        'sub/a.log'
+    """
+    relative = pathlib.Path(path).relative_to(root).as_posix()
+    return pathlib.Path(root).name if relative == "." else relative
 
 
 def _skip_top_level_logs(magi_dir):
@@ -1502,10 +1525,12 @@ class RunExecutor:
 
         Args:
             definition: The run that just finished.
-            unreadable: A list that receives ``"<name> (<error>)"`` for each
+            unreadable: A list that receives ``"<path> (<error>)"``, *path*
+                relative to ``.magi/logs``, for each
                 file that could not be read, and each link or unlistable
-                directory left out (:func:`_regular_files_without_links`), or
-                ``None`` to discard them.
+                directory left out (:func:`_regular_files_without_links`); a
+                linked ``.magi`` or ``.magi/logs`` is named by its path under
+                the workspace instead. ``None`` discards them.
 
         Returns:
             tuple[bytes, ...] | None: Each readable file's bytes under
@@ -1545,7 +1570,8 @@ class RunExecutor:
                 captured.append(path.read_bytes())
             except OSError as exc:
                 if unreadable is not None:
-                    unreadable.append("%s (%s)" % (path.name, exc))
+                    unreadable.append("%s (%s)" % (
+                        _name_under(directory, path), exc))
         if unreadable is not None:
             unreadable.extend(refused)
         return tuple(captured)
