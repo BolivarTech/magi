@@ -449,6 +449,21 @@ class RunDefinition:
     rotates: bool = False
     files: tuple[tuple[str, bytes], ...] = ()
 
+    def __post_init__(self) -> None:
+        """Refuse files on a run that has no review workspace to write them in.
+
+        Raises:
+            HarnessError: When ``files`` is not empty and ``argv`` does not
+                carry :data:`REVIEW_WORKSPACE_TOKEN`: only the review workspace
+                is written, so the files would silently never exist.
+        """
+        # MAGI FIX (S6 loop 14): such files were ignored, and the run executed
+        # without its declared input (F1a1-m1).
+        if self.files and REVIEW_WORKSPACE_TOKEN not in self.argv:
+            raise HarnessError(
+                "run %s declares files but no %s in its argv, so nothing would "
+                "write them" % (self.run_id, REVIEW_WORKSPACE_TOKEN))
+
 
 @dataclasses.dataclass(frozen=True)
 class RunResult:
