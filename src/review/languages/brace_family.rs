@@ -5711,4 +5711,115 @@ void g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_class_under_a_multi_line_decorator_splits_at_its_own_brace() {
+        // [MAGI S6 loop 19, B2b-3] the block's opening brace was the first code line opening a
+        // brace, the decorator's `@Component({`, so the members were sought inside the
+        // decorator's object and the class did not split.
+        let ts = "@Component({\n  selector: 'app',\n})\nexport class C {\n  run() {\n    x();\n  }\n  stop() {}\n}\n";
+        assert_eq!(
+            spans(&split(
+                &BraceFamilyExtractor::typescript(),
+                ts,
+                4,
+                UnitKind::Class
+            )),
+            vec![
+                ("C", UnitKind::Class, 1, 4),
+                ("run", UnitKind::Method, 5, 7),
+                ("stop", UnitKind::Method, 8, 8),
+                ("C", UnitKind::Class, 9, 9),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_annotation_whose_argument_holds_a_multi_line_literal_stays_with_its_member() {
+        // [MAGI S6 loop 19, B2b-4] the walk up an annotation's lines gave up at a line that lies
+        // wholly inside a string (a text block, a template literal), so the annotation was cut
+        // from its member and reviewed as a gap unit.
+        let java = "public class A {\n    @Query(\"\"\"\n        SELECT *\n        \"\"\")\n    public void f() {\n        a();\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), java, 5, UnitKind::Class);
+        let found_java = spans(&parts);
+        assert!(
+            found_java.contains(&("f", UnitKind::Method, 2, 7)),
+            "f with its annotation in {found_java:?}"
+        );
+        let ts = "@Component({\n  template: `\n    <div></div>\n  `,\n})\nexport class C {\n  run() {}\n}\n";
+        let units = extract(&BraceFamilyExtractor::typescript(), ts, &all_lines(ts));
+        assert!(
+            spans(&units).contains(&("C", UnitKind::Class, 1, 8)),
+            "C with its decorator in {:?}",
+            spans(&units)
+        );
+    }
+
+    #[test]
+    fn a_declaration_wrapped_after_a_bare_equal_sign_keeps_its_value() {
+        // [MAGI S6 loop 19, B2b-5] a declaration whose line ends in `=` ended on that line, so
+        // its value fell into a gap unit, cut from the name it initializes.
+        let rust = "pub static TABLE: &[u8] =\n    &[1, 2, 3];\nfn f() {\n}\n";
+        assert_eq!(
+            spans(&extract(&rust_extractor(), rust, &all_lines(rust))),
+            vec![
+                ("statics", UnitKind::DeclarationGroup, 1, 2),
+                ("f", UnitKind::Function, 3, 4)
+            ]
+        );
+        let c = "static int n =\n    5;\nint g(void) {\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), c, &all_lines(c))),
+            vec![
+                ("statics", UnitKind::DeclarationGroup, 1, 2),
+                ("g", UnitKind::Function, 3, 4)
+            ]
+        );
+        // With no `;`, the value is the next line, never the declaration after it.
+        let js = "const x =\n  5\nconst y = 1\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::javascript(),
+                js,
+                &all_lines(js)
+            )),
+            vec![("constants", UnitKind::DeclarationGroup, 1, 3)]
+        );
+    }
+
+    #[test]
+    fn the_member_searches_of_a_go_type_group_spend_the_pass_budget() {
+        // [MAGI S6 loop 19, B2b-2] a member's closing-brace search ran past the group's `)` to
+        // the end of the file, outside the pass budget, so a file of groups whose members never
+        // close inside them took O(n²) line visits before the review clock.
+        let ext = BraceFamilyExtractor::go();
+        let group = "type (\n\tA struct {\n\t\tX int\n\t}\n)\n";
+        let lines: Vec<&str> = group.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(group);
+        let budget = SearchBudget::for_lines(lines.len());
+        ext.try_detect_constructs(&lines, &scanned, false, &budget)
+            .expect("small line numbers");
+        assert!(budget.spent() > 0, "the member search spent no visit");
+
+        let groups = 2_000;
+        let code = "type (\n\tA struct {\n)\n".repeat(groups);
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(&code);
+        let budget = SearchBudget::for_lines(lines.len());
+        let constructs = ext
+            .try_detect_constructs(&lines, &scanned, false, &budget)
+            .expect("small line numbers");
+        // Each group's member search stays inside its group: a few visits per line at most.
+        let linear_bound_per_line = 4;
+        assert!(
+            budget.spent() <= lines.len() * linear_bound_per_line,
+            "{} visits for {} lines",
+            budget.spent(),
+            lines.len()
+        );
+        assert_eq!(constructs.len(), groups);
+        let total = u32::try_from(lines.len()).expect("small");
+        let units = extract(&ext, &code, &(1..=total).collect::<Vec<_>>());
+        assert_each_line_in_one_unit(&units, total);
+    }
 }
