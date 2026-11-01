@@ -1574,24 +1574,15 @@ mod tests {
         for kind in ["", "ENCRYPTED "] {
             let begin = format!("{}{kind}PRIVATE KEY ----", concat!("---- BEGIN ", "SSH2 "));
             let end = format!("{}{kind}PRIVATE KEY ----", concat!("---- END ", "SSH2 "));
-            let text = format!(
-                "a {begin}
-AAAAB3NzaC1yc2EAAAADAQAB
-{end} b
-kept"
-            );
+            let text = format!("a {begin}\nAAAAB3NzaC1yc2EAAAADAQAB\n{end} b\nkept");
             assert_eq!(
                 mask_secrets(&text),
-                "a <redacted: pem-private-key> b
-kept",
+                "a <redacted: pem-private-key> b\nkept",
                 "{text}"
             );
         }
         // With no end line, the mask still runs to the end of the text: the safe direction.
-        let open = format!(
-            "a {SSH2_PLAIN_PRIVATE_KEY}
-AAAAB3NzaC1yc2EAAAADAQAB"
-        );
+        let open = format!("a {SSH2_PLAIN_PRIVATE_KEY}\nAAAAB3NzaC1yc2EAAAADAQAB");
         assert_eq!(mask_secrets(&open), "a <redacted: pem-private-key>");
     }
 }
