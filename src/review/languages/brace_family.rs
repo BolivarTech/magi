@@ -514,11 +514,15 @@ impl BraceFamilyExtractor {
                 // `brace_block_end`, spending a wrapped header's visits of the budget twice.
                 let open = open_brace_line(lines, scanned, i, &search);
                 let opens = open.is_some();
-                if opens || trimmed.ends_with('}') || prototypes {
+                // MAGI FIX (S6 loop 18, B2b-8): a one-line function was told by its text ending
+                // in `}`, so a comment after the brace (`void f() {} // note`) left it in a gap;
+                // the scanner says whether its code ends in `}`.
+                let one_line = scanned.get(i).is_some_and(|s| s.ends_block);
+                if opens || one_line || prototypes {
                     let start = self.scan_back_for_docs(lines, scanned, i, floor);
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
-                    let end = if opens || trimmed.ends_with('}') {
+                    let end = if opens || one_line {
                         block_end_after(lines, scanned, i, line_num, open, &search)?
                     } else {
                         line_number(statement_end(lines, scanned, i, &search))?
