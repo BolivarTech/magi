@@ -2716,4 +2716,48 @@ mod tests {
         names.sort_unstable();
         assert_eq!(names, vec!["gone.env", "moved.env"]);
     }
+
+    #[test]
+    fn a_file_under_an_ignored_directory_named_explicitly_is_refused_as_ignored() {
+        // [MAGI S6 loop 17, A2-5] the `File` ignore set comes from `ls-files --others --ignored`,
+        // which could collapse an ignored directory to `dir/`; a file under it, named
+        // explicitly, must be refused as `ignored` like a file a rule matches directly, tracked
+        // or not.
+        let d = repo();
+        std::fs::write(d.path().join(".gitignore"), "dir/\n").expect("write");
+        std::fs::create_dir_all(d.path().join("dir/deep")).expect("mkdir");
+        for name in ["dir/tracked.rs", "dir/file.rs", "dir/deep/file.rs"] {
+            std::fs::write(d.path().join(name), "fn f() {}\n").expect("write");
+        }
+        git(d.path(), &["add", "-f", ".gitignore", "dir/tracked.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        for name in ["dir/tracked.rs", "dir/file.rs", "dir/deep/file.rs"] {
+            let input = ReviewInput::File(name.into());
+            let g = ScrubbedGit::new(d.path().to_path_buf());
+            let ignored = magi_rs::review::filter::ignored_paths(&input, name, d.path(), &g)
+                .expect("ignore set");
+            let src = magi_rs::review::source::WorktreeSource::new(d.path().to_path_buf());
+            let one = vec![magi_rs::review::input::ReviewFile {
+                path: name.into(),
+                diff: None,
+            }];
+            let verdict = magi_rs::review::filter::filter_files(
+                one,
+                &src,
+                &magi_rs::review::languages::LanguageRegistry::new(),
+                true,
+                &|p| ignored.contains(p),
+            );
+            assert!(
+                matches!(
+                    verdict,
+                    Err(ReviewError::NotReviewable {
+                        cause: "ignored",
+                        ..
+                    })
+                ),
+                "{name}: {verdict:?} with {ignored:?}"
+            );
+        }
+    }
 }
