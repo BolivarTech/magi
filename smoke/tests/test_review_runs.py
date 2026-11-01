@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 from smoke import runs
-from smoke.errors import HarnessError
+from smoke.errors import HarnessError, TimedOut
 
 
 def _executor(root: pathlib.Path) -> runs.RunExecutor:
@@ -1150,6 +1150,65 @@ class RefusalRunModelCallTests(unittest.TestCase):
         _, config, _ = self._execute("R13", (), config='[magi]\nmelchior_model = "m"\n')
         import tomllib
         self.assertTrue(tomllib.loads(config)["base_url"].startswith("http://127.0.0.1:"))
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_an_endpoint_the_rewrite_cannot_reach_is_a_harness_error(self) -> None:
+        # [smoke review, Melchior] an endpoint the line rewrite misses would reach a real backend, and
+        # the counter, seeing nothing, would let R13-R16 pass vacuously. The rewritten config is
+        # parsed and every endpoint checked before the run; a miss is the harness's setup (exit 3).
+        for config in ('base_url = "http://localhost:11434/v1"\n'
+                       '[embedding]\n"base_url" = "http://elsewhere.invalid/v1"\n',
+                       'base_url = "http://localhost:11434/v1"\n'
+                       'decision = { base_url = "http://elsewhere.invalid/v1" }\n',
+                       'base_url = "http://localhost:11434/v1"\n'
+                       '[[magi.fallback]]\n"base_url" = "http://elsewhere.invalid/v1"\n'):
+            with self.assertRaises(HarnessError, msg=config):
+                self._execute("R13", (), config=config)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_an_anthropic_kind_in_a_refusal_run_is_a_harness_error(self) -> None:
+        # An anthropic seat posts to a fixed URL that no base_url steers, so the counter cannot see it.
+        for config in ('provider = "anthropic"\n', '[magi]\nkind = "anthropic"\n'):
+            with self.assertRaises(HarnessError, msg=config):
+                self._execute("R13", (), config=config)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_blanks_the_provider_override_of_the_harness_environment(self) -> None:
+        # MAGI_PROVIDER=anthropic in the harness's own shell would steer the run past the counter;
+        # the product reads a blank variable as absent.
+        _, _, env = self._execute("R13", ())
+        self.assertEqual("", env.get("MAGI_PROVIDER"))
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_that_times_out_still_records_what_it_sent(self) -> None:
+        # [smoke review, Caspar] pins that the requests seen before a timeout are reported.
+        def invoke(argv, stdin, env, timeout, cwd):
+            import tomllib
+            import urllib.error
+            import urllib.request
+            base = tomllib.loads((pathlib.Path(cwd) / ".magi" / "magi.toml")
+                                 .read_text(encoding="utf-8"))["base_url"]
+            request = urllib.request.Request(base[:-len("/v1")] + "/api/chat", data=b"{}",
+                                             method="POST")
+            try:
+                urllib.request.urlopen(request, timeout=5).close()
+            except urllib.error.HTTPError as exc:
+                exc.close()
+            raise TimedOut("expired", output=None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / ".magi").mkdir()
+            (root / ".magi" / "magi.toml").write_text(self._CONFIG, encoding="utf-8")
+            binary = mock.Mock()
+            binary.invoke.side_effect = invoke
+            env = types.SimpleNamespace(root=root, magi_dir=root / ".magi",
+                                        scratch_dir=root / "scratch")
+            result = runs.RunExecutor(binary=binary, env=env,
+                                      config=types.SimpleNamespace(passphrase="toy")
+                                      ).execute(runs.DEFINITIONS["R15"])
+        self.assertTrue(result.timed_out)
+        self.assertEqual(("POST /api/chat",), result.model_requests)
 
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_flooding_the_counter_still_names_the_request_past_the_cap(self) -> None:
