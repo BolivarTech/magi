@@ -349,10 +349,12 @@ patterns tied to the product's wording, and R12's input is sized with copies of 
 `smoke/tests/test_rust_sync.py` reads the Rust source (the batch constants in `src/review/window.rs`,
 the refusal texts and causes in `src/review/error.rs` and `src/review/filter.rs`, the floor and the
 attempt arithmetic in `src/magi/mod.rs`, the integer split and the raw refusal ceiling S50 checks in
-`src/review/clock.rs`, and the JSON keys S47 reads in `src/review/report.rs`, `src/tools/code_review.rs`
-and `src/tools/consult.rs`, among others) and fails when a copy or a pattern no longer matches, so a
-wording or constant change in the product shows up in the harness's own tests, not as an unexplained
-`FAIL` at SMOKE time.
+`src/review/clock.rs`, the JSON keys S47 reads in `src/review/report.rs`, `src/tools/code_review.rs`
+and `src/tools/consult.rs`, and the git view the executor checks visibility with: `GIT_VISIBLE_QUERY`
+against the product's `LS_FILES_ALL` in `src/review/input.rs` and `HARNESS_GIT_CONFIG` against
+`NEUTRAL_GIT_CONFIG` in `src/system/review_git.rs`, among others) and fails when a copy or a pattern no
+longer matches, so a wording or constant change in the product shows up in the harness's own tests, not
+as an unexplained `FAIL` at SMOKE time.
 
 **How the input exists.** A review reads files from disk, and the product leaves out whatever
 `.gitignore` excludes when it reviews a directory inside a git repository. The environment's own
