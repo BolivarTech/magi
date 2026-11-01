@@ -1759,14 +1759,16 @@ class RunExecutor:
                 (:func:`_read_bounded`), and each link or unlistable
                 directory left out (:func:`_regular_files_without_links`); a
                 linked ``.magi`` or ``.magi/logs`` is named by its path under
-                the workspace instead. ``None`` discards them.
+                the workspace instead, and a linked workspace or component
+                above it by its full path. ``None`` discards them.
 
         Returns:
             tuple[bytes, ...] | None: Each readable file's bytes under
             ``.magi/logs`` within the caps, in sorted path order; ``None`` for a run without a
             review workspace or when the directory does not exist; ``()`` when
-            ``.magi`` or ``.magi/logs`` is itself a link (or cannot be tested),
-            which is named in *unreadable* and never followed.
+            any component from the repository root down to ``.magi/logs`` is
+            a link (or cannot be tested), which is named in *unreadable* and
+            never followed.
         """
         if REVIEW_WORKSPACE_TOKEN not in definition.argv:
             return None
@@ -1775,17 +1777,23 @@ class RunExecutor:
         # MAGI FIX (S6 loop 15): the walk tests every entry but not its top, and
         # os.scandir follows a linked .magi or .magi/logs, so the harness read
         # what the link points at (F1a1-m1). Each component is tested first.
+        # MAGI FIX (S6 loop 17): only .magi and .magi/logs were tested, while
+        # the product runs with the workspace as its cwd and may swap the
+        # workspace (or a component above it) for a link before it exits
+        # (F1a1-caspar, F1a1-melchior). The whole chain from the repository
+        # root is tested again here, after the run.
         relative = "/".join(LOG_DIR_PARTS)
         try:
-            linked = _linked_component(workspace, relative)
+            linked = self._first_link_down_to(*LOG_DIR_PARTS)
         except OSError as exc:
             if unreadable is not None:
                 unreadable.append("%s (%s)" % (relative, exc))
             return ()
         if linked is not None:
             if unreadable is not None:
-                unreadable.append("%s (%s)" % (
-                    linked.relative_to(workspace).as_posix(), LINK_NOT_FOLLOWED))
+                named = (linked.relative_to(workspace).as_posix()
+                         if workspace in linked.parents else str(linked))
+                unreadable.append("%s (%s)" % (named, LINK_NOT_FOLLOWED))
             return ()
         if not directory.is_dir():
             return None
