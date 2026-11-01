@@ -64,8 +64,9 @@ pub fn detect_language(file_path: &str) -> String {
         .to_ascii_lowercase();
     match ext.as_str() {
         "rs" => "rust",
-        "c" | "h" => "c",
-        "cpp" | "cxx" | "cc" | "hpp" | "hxx" => "cpp",
+        "c" => "c",
+        // MAGI FIX (S6 loop 15): `.h` is read with the C++ rules, so its label says `cpp` too.
+        "cpp" | "cxx" | "cc" | "h" | "hpp" | "hxx" => "cpp",
         "py" | "pyi" => "python",
         "js" | "jsx" | "mjs" => "javascript",
         "ts" | "tsx" | "mts" => "typescript",

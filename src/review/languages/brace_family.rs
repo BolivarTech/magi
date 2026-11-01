@@ -2315,7 +2315,7 @@ impl BraceFamilyExtractor {
     /// whose line becomes a one-line unit of kind class instead of a declaration, and a C string
     /// glued to an `R` macro (`R"(`), read as a raw string that may run to the end of the file.
     /// Either way every line stays in exactly one unit, so no line is lost. The prompt's code
-    /// fence still says `c` for a `.h` file (`review::context::detect_language`).
+    /// fence says `cpp` for a `.h` file too (`review::context::detect_language`).
     ///
     /// A `template <...>` header belongs to the class or function it declares, on the line
     /// right above it or on the construct's own line (`template<typename T> class Box {`).
