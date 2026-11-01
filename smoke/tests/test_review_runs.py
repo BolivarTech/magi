@@ -381,7 +381,7 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
             target.mkdir()
             junction = root / "junction"
             _winapi.CreateJunction(str(target), str(junction))
-            with mock.patch.object(os.path, "isjunction", None):
+            with mock.patch.object(os.path, "isjunction", None, create=True):
                 self.assertTrue(runs._is_link(junction))
                 self.assertFalse(runs._is_link(target))
                 self.assertFalse(runs._is_link(root / "absent"))
