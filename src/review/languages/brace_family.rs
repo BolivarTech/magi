@@ -53,6 +53,11 @@ pub struct BraceFamilyExtractor {
     /// ([`strip_template_header`]) or stand on its own line above it (then it is one of the
     /// `attribute_prefixes`): C++ only.
     template_headers: bool,
+    /// Whether a method directly in a class body may be named by a word of
+    /// [`NOT_FUNCTION_NAMES`] (`delete() {`, `catch(e) {`): JavaScript and TypeScript allow any
+    /// reserved word as a method name, and a class body holds no statement
+    /// ([`BraceFamilyExtractor::try_detect_constructs`]).
+    reserved_word_methods: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -333,6 +338,16 @@ impl BraceFamilyExtractor {
         let mut constructs = Vec::new();
         let mut i = 0;
         let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
+        // The depth of a block body's own lines is the depth before its first line: a line at
+        // that depth is a direct member, one deeper sits inside a member (a static block).
+        let depth_before = |j: usize| {
+            scanned
+                .get(j)
+                .map(|s| i64::from(s.depth_after) - i64::from(s.brace_delta))
+        };
+        let member_depth = depth_before(0);
+        let reserved_names_methods =
+            |j: usize| members && self.reserved_word_methods && depth_before(j) == member_depth;
         let search = BraceSearch {
             stops: &stops,
             budget,
@@ -374,7 +389,14 @@ impl BraceFamilyExtractor {
                 continue;
             }
             let prototypes = members && self.member_prototypes();
-            if let Some(name) = self.signature_name(line, scanned.get(i), prototypes) {
+            // MAGI FIX (S6 loop 14): `delete() {` in a JavaScript class was no member; directly
+            // in a class body a reserved word names a method.
+            let signature = if reserved_names_methods(i) {
+                self.signature_candidate(line, scanned.get(i), prototypes)
+            } else {
+                self.signature_name(line, scanned.get(i), prototypes)
+            };
+            if let Some(name) = signature {
                 let opens = open_brace_line(lines, scanned, i, &search).is_some();
                 if opens || trimmed.ends_with('}') || prototypes {
                     let start = self.scan_back_for_docs(lines, scanned, i, floor);
@@ -903,6 +925,31 @@ impl BraceFamilyExtractor {
         scanned: Option<&ScannedLine>,
         prototypes: bool,
     ) -> Option<String> {
+        // MAGI FIX (S6 loop 4): `catch (e) {` read as a function named `catch`.
+        self.signature_candidate(line, scanned, prototypes)
+            .filter(|name| !NOT_FUNCTION_NAMES.contains(&name.as_str()))
+    }
+
+    /// The name [`Self::signature_name`] reads on a signature line before it rules out the words
+    /// of [`NOT_FUNCTION_NAMES`]: the same rules and arguments, with a reserved word kept as a
+    /// name. Only a direct member of a JavaScript or TypeScript class body is read with it
+    /// (`reserved_word_methods`), where `delete() {` declares a method. O(n) in the line.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The line, untrimmed.
+    /// * `scanned` - The scanner's record of the line; `None` falls back to the trimmed text.
+    /// * `prototypes` - Whether a line whose code ends in `;` is a signature too.
+    ///
+    /// # Returns
+    ///
+    /// The identifier before the line's `(`, or `None` when the line is no signature.
+    fn signature_candidate(
+        &self,
+        line: &str,
+        scanned: Option<&ScannedLine>,
+        prototypes: bool,
+    ) -> Option<String> {
         // MAGI FIX (S6 loop 3): indentation no longer disqualifies a signature.
         if !self.signature_functions {
             return None;
@@ -935,12 +982,7 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 13): `__attribute__((noreturn)) void die(void) {` was a function
         // named `__attribute__`; the C attributes are read past first.
         let attributes = self.without_c_attributes(trimmed);
-        let name = identifier_before_paren(self.without_template_header(&attributes))?;
-        // MAGI FIX (S6 loop 4): `catch (e) {` read as a function named `catch`.
-        if NOT_FUNCTION_NAMES.contains(&name.as_str()) {
-            return None;
-        }
-        Some(name)
+        identifier_before_paren(self.without_template_header(&attributes))
     }
 
     /// The kind of the block `trimmed` opens and the text after its keyword
@@ -2164,6 +2206,7 @@ impl BraceFamilyExtractor {
             signature_functions: false,
             semicolon_declarations: false,
             template_headers: false,
+            reserved_word_methods: false,
         }
     }
 
@@ -2191,6 +2234,7 @@ impl BraceFamilyExtractor {
             signature_functions: true,
             semicolon_declarations: true,
             template_headers: false,
+            reserved_word_methods: false,
         }
     }
 
@@ -2238,6 +2282,7 @@ impl BraceFamilyExtractor {
             signature_functions: false,
             semicolon_declarations: false,
             template_headers: false,
+            reserved_word_methods: false,
         }
     }
 
@@ -2269,6 +2314,7 @@ impl BraceFamilyExtractor {
             signature_functions: true,
             semicolon_declarations: false,
             template_headers: false,
+            reserved_word_methods: false,
         }
     }
 
@@ -2307,6 +2353,8 @@ impl BraceFamilyExtractor {
             signature_functions: true,
             semicolon_declarations: false,
             template_headers: false,
+            // MAGI FIX (S6 loop 14): a method named `delete`, `new` or `catch` was no member.
+            reserved_word_methods: true,
         }
     }
 
