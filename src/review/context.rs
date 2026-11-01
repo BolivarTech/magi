@@ -68,8 +68,9 @@ pub fn detect_language(file_path: &str) -> String {
         // MAGI FIX (S6 loop 15): `.h` is read with the C++ rules, so its label says `cpp` too.
         "cpp" | "cxx" | "cc" | "h" | "hpp" | "hxx" => "cpp",
         "py" | "pyi" => "python",
-        "js" | "jsx" | "mjs" => "javascript",
-        "ts" | "tsx" | "mts" => "typescript",
+        // MAGI FIX (S6 loop 16): `.cjs` and `.cts` have an extractor, so they have a label too.
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
         "go" => "go",
         "java" => "java",
         "cs" => "csharp",
