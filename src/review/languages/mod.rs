@@ -524,6 +524,7 @@ const FALLBACK_CONTEXT_LINES: u32 = 20;
 /// # Returns
 ///
 /// The units in line order, each with its changed lines sorted; empty when nothing changed.
+/// A changed line past the file's last line is left out: the file has no such line to show.
 /// O(c log c + n) for c changed lines and n lines of the file.
 pub fn fallback_extract(
     content: &str,
@@ -533,7 +534,13 @@ pub fn fallback_extract(
 ) -> Vec<SemanticUnit> {
     let lines: Vec<&str> = content.lines().collect();
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-    let mut sorted: Vec<u32> = changed_lines.iter().copied().collect();
+    // MAGI FIX (S6 loop 18, B2a-4): a changed line past the last line opened a window whose
+    // start fell after its end; a line the file does not have has nothing to show.
+    let mut sorted: Vec<u32> = changed_lines
+        .iter()
+        .copied()
+        .filter(|&line| line <= total)
+        .collect();
     sorted.sort_unstable();
 
     // MAGI FIX (S6 loop 3): one window per change, merged when they overlap or touch, instead of
