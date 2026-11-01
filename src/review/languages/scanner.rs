@@ -41,7 +41,59 @@ const MAX_CPP_RAW_DELIMITER_CHARS: usize = 16;
 const CPP_RAW_PREFIXES: [&str; 5] = ["u8R", "uR", "UR", "LR", "R"];
 
 /// How many nested preprocessor conditionals (`#if` ... `#endif`) the scanner tracks.
+///
+/// A conditional nested deeper is not tracked: its branches' braces all count, as before the
+/// scanner tracked any. It bounds the scanner's memory by a constant, whatever the input; real
+/// code nests a handful of levels.
 pub const MAX_CONDITIONAL_NESTING: usize = 64;
+
+/// A preprocessor directive that opens, branches or closes a conditional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConditionalDirective {
+    /// `#if`, `#ifdef`, `#ifndef`.
+    Open,
+    /// `#elif`, `#elifdef`, `#elifndef` (C23), `#else`.
+    Branch,
+    /// `#endif`.
+    Close,
+}
+
+impl ConditionalDirective {
+    /// The conditional directive `line` holds, or `None` for any other line.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - A line whose first non-blank character is `#`; blanks may follow the `#`
+    ///   (`#  ifdef X`, `# else`).
+    ///
+    /// # Returns
+    ///
+    /// The directive named by the word after `#`, or `None` when it is no conditional
+    /// (`#define`, `#include`) or the line holds no `#`. O(n) in the line's length.
+    fn parse(line: &str) -> Option<Self> {
+        let rest = line.trim_start().strip_prefix('#')?.trim_start();
+        let word = rest
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or("");
+        match word {
+            "if" | "ifdef" | "ifndef" => Some(Self::Open),
+            "elif" | "elifdef" | "elifndef" | "else" => Some(Self::Branch),
+            "endif" => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
+/// A preprocessor conditional open at the scanner's position.
+#[derive(Debug, Clone, Copy)]
+struct ConditionalFrame {
+    /// The brace depth at its `#if`, where each later branch restarts.
+    base: u32,
+    /// The brace depth its first branch reached, recorded at its first `#elif` or `#else`;
+    /// `None` while it has only one branch.
+    first_branch_end: Option<u32>,
+}
 
 /// What [`ScannedLine::ends_statement`] records for a literal read in code context: any
 /// character but `;` would do, since a literal is an operand.
@@ -338,6 +390,12 @@ pub struct CodeScanner {
     /// Whether the previous line was a preprocessor directive ending in `\`, so this line
     /// continues it ([`LexicalRules::preprocessor_directives`]).
     in_directive: bool,
+    /// The preprocessor conditionals open at this point, innermost last, at most
+    /// [`MAX_CONDITIONAL_NESTING`] ([`CodeScanner::apply_conditional`]).
+    conditionals: Vec<ConditionalFrame>,
+    /// How many conditionals are open past [`MAX_CONDITIONAL_NESTING`]: not tracked, only
+    /// counted, so their `#elif`, `#else` and `#endif` leave the tracked ones alone.
+    untracked_conditionals: u32,
     /// The rules' line comment token as characters, collected once ([`LexicalRules::line_comment`]).
     line_comment: Vec<char>,
     /// The characters of the line being scanned, a buffer kept between lines so that a scan of
@@ -360,6 +418,44 @@ impl CodeScanner {
             parens: Vec::new(),
             templates: Vec::new(),
             in_directive: false,
+            conditionals: Vec::new(),
+            untracked_conditionals: 0,
+        }
+    }
+
+    /// Apply a preprocessor conditional directive to the brace depth.
+    ///
+    /// `#if` records the depth; `#elif` and `#else` keep the depth the first branch reached and
+    /// restart from the recorded one; `#endif` returns to the first branch's depth when the
+    /// conditional had a later branch. A directive with no open conditional (a stray `#endif` or
+    /// `#else`) changes nothing, and an `#if` past [`MAX_CONDITIONAL_NESTING`] is counted but not
+    /// tracked, so its own `#endif` cannot pop a tracked one. O(1).
+    fn apply_conditional(&mut self, kind: ConditionalDirective) {
+        match kind {
+            ConditionalDirective::Open if self.conditionals.len() < MAX_CONDITIONAL_NESTING => {
+                self.conditionals.push(ConditionalFrame {
+                    base: self.depth,
+                    first_branch_end: None,
+                });
+            }
+            ConditionalDirective::Open => {
+                self.untracked_conditionals = self.untracked_conditionals.saturating_add(1);
+            }
+            ConditionalDirective::Branch if self.untracked_conditionals == 0 => {
+                if let Some(frame) = self.conditionals.last_mut() {
+                    frame.first_branch_end.get_or_insert(self.depth);
+                    self.depth = frame.base;
+                }
+            }
+            ConditionalDirective::Close if self.untracked_conditionals == 0 => {
+                if let Some(end) = self.conditionals.pop().and_then(|f| f.first_branch_end) {
+                    self.depth = end;
+                }
+            }
+            ConditionalDirective::Branch => {}
+            ConditionalDirective::Close => {
+                self.untracked_conditionals = self.untracked_conditionals.saturating_sub(1);
+            }
         }
     }
 
@@ -388,9 +484,18 @@ impl CodeScanner {
         let mut entered_code = false;
         // A directive's strings and comments are lexed as in code, so a `/*` it opens still
         // spans lines, but nothing else in it is structure.
-        let directive = self.rules.preprocessor_directives
-            && (self.in_directive || (was_code_at_start && line.trim_start().starts_with('#')));
+        let starts_directive = self.rules.preprocessor_directives
+            && !self.in_directive
+            && was_code_at_start
+            && line.trim_start().starts_with('#');
+        let directive =
+            starts_directive || (self.rules.preprocessor_directives && self.in_directive);
         self.in_directive = directive && line.trim_end().ends_with('\\');
+        if starts_directive {
+            if let Some(kind) = ConditionalDirective::parse(line) {
+                self.apply_conditional(kind);
+            }
+        }
 
         while i < len {
             match &self.state {
