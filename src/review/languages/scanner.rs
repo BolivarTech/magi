@@ -418,6 +418,11 @@ pub struct CodeScanner {
     /// The characters of the line being scanned, a buffer kept between lines so that a scan of
     /// n lines allocates as for its longest line, not once per line.
     chars: Vec<char>,
+    /// Whether a `/` before any code on the next line opens a regex literal: what the last code
+    /// line ended with decides ([`regex_may_start`], read on that line's own characters, so no
+    /// index crosses lines), as JavaScript reads a line that opens with `/` as the continuation
+    /// of the line above (`a\n  / b` divides). `true` before the first code line.
+    regex_at_line_start: bool,
 }
 
 impl CodeScanner {
@@ -437,6 +442,7 @@ impl CodeScanner {
             in_directive: false,
             conditionals: Vec::new(),
             untracked_conditionals: 0,
+            regex_at_line_start: true,
         }
     }
 
@@ -549,7 +555,12 @@ impl CodeScanner {
                     // MAGI FIX (S6 loop 4): a regex literal's braces (`/}/`) are not structure.
                     if self.rules.regex_literals
                         && char_at(&chars, i) == '/'
-                        && regex_may_start(&chars, last_code_end, last_code)
+                        && regex_may_start(
+                            &chars,
+                            last_code_end,
+                            last_code,
+                            self.regex_at_line_start,
+                        )
                     {
                         last_code = Some(STRING_MARK);
                         self.state = LexicalState::RegexLiteral { in_class: false };
@@ -904,6 +915,13 @@ impl CodeScanner {
             self.state = LexicalState::Code;
         }
 
+        // MAGI FIX (B2a 2, 4): each line started as if nothing preceded it, so a `/` opening a
+        // line after an operand (`a\n  / b`) opened a regex and hid the rest of the line. A line
+        // with no code (blank, a comment) leaves the answer of the code line above it.
+        if self.rules.regex_literals && last_code.is_some() {
+            self.regex_at_line_start =
+                regex_may_start(&chars, last_code_end, last_code, self.regex_at_line_start);
+        }
         let is_non_code = !was_code_at_start && !entered_code;
         self.chars = chars;
 
@@ -1046,7 +1064,9 @@ const REGEX_PRECEDING_KEYWORDS: [&str; 14] = [
 
 /// Whether a `/` (not `//` nor `/*`) starts a JS regular expression literal, by what precedes
 /// it on the line in code (`last_code`, the last non-blank code character, which ends at
-/// `code_end`; comments between it and the `/` are passed over): nothing, an
+/// `code_end`; comments between it and the `/` are passed over): nothing on the line, when
+/// `at_line_start` says the last code line above allows one (it was asked the same question at
+/// its end, [`CodeScanner::scan_line`]), an
 /// operator or an opening bracket (`= /x/`, `(/x/`, `, /x/`), or a keyword of
 /// [`REGEX_PRECEDING_KEYWORDS`], or the `)` closing an `if`/`while`/`for`/`with` condition
 /// ([`CONDITION_END_MARK`]), or a `}`. After an operand (an identifier, a number, a literal,
@@ -1058,10 +1078,15 @@ const REGEX_PRECEDING_KEYWORDS: [&str; 14] = [
 /// an operand's end. A condition keyword is recognized only on the line of its `(`. An unclosed
 /// `/` misread as a regex ends with its line, so a misreading never spreads past it.
 /// O(k) for the k characters before `code_end`.
-fn regex_may_start(chars: &[char], code_end: usize, last_code: Option<char>) -> bool {
+fn regex_may_start(
+    chars: &[char],
+    code_end: usize,
+    last_code: Option<char>,
+    at_line_start: bool,
+) -> bool {
     let before = chars.get(..code_end).unwrap_or(&[]);
     match last_code {
-        None => true,
+        None => at_line_start,
         Some(c) if c == STRING_MARK || matches!(c, ')' | ']') => false,
         Some(c) if is_js_word_char(c) => {
             let word = word_before(chars, code_end);
