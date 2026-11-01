@@ -371,7 +371,9 @@ impl BraceFamilyExtractor {
     /// misread what an earlier one claims (Java's `public class` as a function): a new rule or
     /// language goes into a helper placed in that order, and the test
     /// `construct_ranges_are_sorted_and_disjoint` with the per-language tests pins the result.
-    /// A known maintenance hotspot, declared.
+    /// A known maintenance hotspot, declared. Splitting it into a table of rule strategies is
+    /// deferred until the heuristic set settles after MS3: the rules' order is the contract,
+    /// and a large refactor at the end of the review gate risks moving it.
     /// O(n) in the lines, plus the helpers' forward searches, which share `budget`
     /// ([`SearchBudget`]) and so add O(n) line visits in all.
     ///
