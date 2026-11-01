@@ -377,12 +377,13 @@ impl Matcher {
 }
 
 /// Where the userinfo of a URL credential that opens at `from` (just past `://`) ends: past the
-/// authority's last `@` (a password may hold an unencoded one), when the userinfo holds a `:`
-/// followed by a password that is not a placeholder ([`is_url_placeholder`]) and the `@`
-/// is followed by a host (an ASCII letter or digit, or `[` for an IPv6 literal). The user may be
-/// empty (`redis://:password@host`). The authority ends at a [`URL_USERINFO_STOP`] byte or a
-/// control character; `None` when it holds no such `@` within [`MAX_URL_USERINFO`] bytes.
-/// O([`MAX_URL_USERINFO`] + [`MAX_URL_HOST_PEEK`]).
+/// last `@` within [`MAX_URL_USERINFO`] bytes that ends a credential (a password may hold an
+/// unencoded `@`): one with a `:` before it, a password between them that is not a placeholder
+/// ([`is_url_placeholder`]), and a host after it (an ASCII letter or digit, or `[` for an IPv6
+/// literal). Every such `@` is tried, so a later `@` that ends nothing never hides an earlier
+/// credential. The user may be empty (`redis://:password@host`). The authority ends at a
+/// [`URL_USERINFO_STOP`] byte or a control character; `None` when no `@` ends a credential.
+/// O([`MAX_URL_USERINFO`]²), a constant, per `://`: one placeholder check per `@`.
 fn url_userinfo_end(bytes: &[u8], from: usize) -> Option<usize> {
     let rest = bytes.get(from..).unwrap_or_default();
     let window = rest
@@ -392,22 +393,27 @@ fn url_userinfo_end(bytes: &[u8], from: usize) -> Option<usize> {
         .iter()
         .position(|b| URL_USERINFO_STOP.contains(b) || b.is_ascii_control())
         .unwrap_or(window.len());
-    // The authority's last `@`, as `redact_url` reads it: a password may hold an unencoded `@`.
     let run = window.get(..stop)?;
-    let at_sign = run.iter().rposition(|b| *b == b'@')?;
-    if at_sign > MAX_URL_USERINFO {
-        return None;
-    }
-    let userinfo = run.get(..at_sign)?;
-    let colon = userinfo.iter().position(|b| *b == b':')?;
-    let password = userinfo.get(colon + 1..)?;
-    // MAGI FIX (S6 loop 14, A2-1, security): the whole password must be a placeholder form;
-    // its first byte alone let `$ecret` or `{actual` through as a placeholder.
-    let real = !password.is_empty() && !is_url_placeholder(password);
-    let host = run
-        .get(at_sign + 1)
-        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'[');
-    (real && host).then_some(from + at_sign + 1)
+    let colon = run.iter().position(|b| *b == b':')?;
+    let last = run.len().saturating_sub(1).min(MAX_URL_USERINFO);
+    // The last `@` that ends a credential, as `redact_url` reads the authority's last `@`: a
+    // password may hold an unencoded `@`, so the mask runs to the furthest one that qualifies.
+    // MAGI FIX (S6 loop 14, A2-1, security review): every `@` within the cap is tried, not the
+    // run's last one alone: a later `@` with no host after it (`f('…u:pw@db','@')`) or past the
+    // cap (a minified line) hid the credential before it.
+    (colon + 1..=last).rev().find_map(|at_sign| {
+        if run.get(at_sign) != Some(&b'@') {
+            return None;
+        }
+        let password = run.get(colon + 1..at_sign)?;
+        // MAGI FIX (S6 loop 14, A2-1, security): the whole password must be a placeholder
+        // form; its first byte alone let `$ecret` or `{actual` through as a placeholder.
+        let real = !password.is_empty() && !is_url_placeholder(password);
+        let host = run
+            .get(at_sign + 1)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'[');
+        (real && host).then_some(from + at_sign + 1)
+    })
 }
 
 /// Whether a URL password is, as a whole, a placeholder rather than a credential: a template
