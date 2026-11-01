@@ -211,7 +211,9 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
         context: block.context.clone(),
     };
     let ranges: Vec<(u32, u32)> = members.iter().map(|m| (m.2, m.3)).collect();
-    let (_, orphans) = ChangedLines::All.assign(&ranges, total);
+    // MAGI FIX (B2a A4): every line is changed here, so only the orphans are needed; taking
+    // them from `ChangedLines::All.assign` built and dropped a copy of every member's lines.
+    let orphans = uncovered_lines(&ranges, total);
     let gaps = gap_units(&lines, &block.file, &ranges, orphans);
     let mut parts: Vec<SemanticUnit> = members
         .into_iter()
@@ -306,17 +308,32 @@ impl ChangedLines<'_> {
                     .iter()
                     .map(|&(start, end)| (start..=end.min(total)).collect())
                     .collect();
-                let mut orphans = Vec::new();
-                let mut next = 1u32;
-                for &(start, end) in ranges {
-                    orphans.extend(next..start.min(total.saturating_add(1)));
-                    next = next.max(end.saturating_add(1));
-                }
-                orphans.extend(next..=total);
-                (shares, orphans)
+                (shares, uncovered_lines(ranges, total))
             }
         }
     }
+}
+
+/// The lines of `1..=total` outside every range, sorted: the orphans of
+/// [`ChangedLines::All`].
+///
+/// # Arguments
+///
+/// * `ranges` - `(start, end)` line ranges (1-based, inclusive), sorted by start and disjoint.
+/// * `total` - Line count of the file.
+///
+/// # Returns
+///
+/// The uncovered lines, in order. O(total + r) for r ranges.
+fn uncovered_lines(ranges: &[(u32, u32)], total: u32) -> Vec<u32> {
+    let mut orphans = Vec::new();
+    let mut next = 1u32;
+    for &(start, end) in ranges {
+        orphans.extend(next..start.min(total.saturating_add(1)));
+        next = next.max(end.saturating_add(1));
+    }
+    orphans.extend(next..=total);
+    orphans
 }
 
 /// Enum dispatch for language extractors.
