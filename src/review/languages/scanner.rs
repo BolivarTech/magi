@@ -1353,6 +1353,13 @@ mod tests {
             assert_eq!(s.scan_line(1, line).brace_delta, 0, "{line}");
             assert_eq!(s.current_depth(), 0, "{line}");
         }
+        // A raw string ends on its first quote, so the brace after it is code: read as a plain
+        // string, the escaped quote would keep the string open and hide that brace.
+        for prefix in ["r", "br", "cr"] {
+            let line = format!(r#"let s = {prefix}"\"; {{"#);
+            let mut s = CodeScanner::new(LexicalRules::rust());
+            assert_eq!(s.scan_line(1, &line).brace_delta, 1, "{line}");
+        }
     }
 
     // --- Test 7: scanner_handles_nested_block_comments_rust ---
