@@ -1139,6 +1139,27 @@ mod tests {
         }
     }
     #[test]
+    fn a_directory_named_like_the_memory_database_is_never_reviewed() {
+        // [MAGI S6 loop 14, A2-2, security] the database prefix was checked on the last component
+        // only, so a directory named like the database or a companion hid what it holds.
+        for p in [
+            ".magi-rs-memory.db-wal/notes.txt",
+            "a/.Magi-rs-memory.db.bak/x/y.rs",
+            ".magi-rs-memory.db/x",
+            "a\\.magi-rs-memory.db-shm\\b.rs",
+        ] {
+            assert!(is_never_reviewed(p), "{p}");
+        }
+        for p in [
+            "magi-rs-memory.db/x",
+            "a/x.magi-rs-memory.db.rs/y",
+            "src/memory.rs",
+        ] {
+            assert!(!is_never_reviewed(p), "{p}");
+        }
+    }
+
+    #[test]
     fn a_listed_name_that_is_not_utf8_never_stands_for_a_requested_path() {
         // [MAGI S6 MS2 loop 4, A2 Caspar] the listing was decoded lossily, so `a\xff.rs` read as
         // `a\u{FFFD}.rs`: a requested path that is valid UTF-8 matched a name it is not.
