@@ -3974,4 +3974,20 @@ void g(void) {
         let units = extract(&BraceFamilyExtractor::java(), escaped, &every_line(escaped));
         assert_eq!(spans(&units), vec![("E", UnitKind::Class, 1, 2)]);
     }
+
+    #[test]
+    fn extra_blanks_after_a_keyword_do_not_change_the_construct_or_its_name() {
+        // [MAGI S6 loop 14, B2b1] `blank_keyword_rest` returned the rest untrimmed when the
+        // keyword matched as written, so `const  f = () => {` named an empty function and was
+        // no function expression, and `enum  class Color` was named `class`.
+        let js = "const  f = () => {\n  x();\n};\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &every_line(js));
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 1, 3)]);
+        let cpp = "enum  class Color {\n    Red,\n};\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), cpp, &every_line(cpp));
+        assert_eq!(spans(&units), vec![("Color", UnitKind::Enum, 1, 3)]);
+        assert_eq!(blank_keyword_rest("fn  foo()", "fn "), Some("foo()"));
+        assert_eq!(blank_keyword_rest("fn\t foo()", "fn "), Some("foo()"));
+        assert_eq!(blank_keyword_rest("fnord()", "fn "), None);
+    }
 }
