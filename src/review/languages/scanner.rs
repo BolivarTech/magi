@@ -1065,9 +1065,34 @@ fn word_is(word: &[char], keyword: &str) -> bool {
 /// closes below that depth, or the last line; never a panic. It is not asserted: a
 /// `debug_assert!` would hold the precondition only in debug builds.
 pub fn find_closing_brace(scanned: &[ScannedLine], open_idx: usize) -> usize {
-    let Some(open_line) = scanned.get(open_idx) else {
-        return scanned.len().saturating_sub(1);
-    };
+    find_closing_brace_within(scanned, open_idx, scanned.len(), || true)
+        .unwrap_or_else(|| scanned.len().saturating_sub(1))
+}
+
+/// The line closing the construct that opens at `open_idx`, as [`find_closing_brace`] finds it,
+/// searched only before index `end` and while `visit` allows each line looked at.
+///
+/// # Arguments
+///
+/// * `scanned` - Pre-scanned line results from [`CodeScanner::scan_all`].
+/// * `open_idx` - Index into `scanned` of the line containing the opening brace.
+/// * `end` - Index of the first line not searched (exclusive); past `scanned`, its end.
+/// * `visit` - Called once before each line looked at; `false` stops the search there.
+///
+/// # Returns
+///
+/// Index into `scanned` of the closing line, or `None` when `open_idx` is outside `scanned`, no
+/// line before `end` closes the construct, or `visit` stopped the search first. O(k) for the k
+/// lines searched.
+// MAGI FIX (S6 loop 19, B2b-2): a Go type group's member searched to the end of the file,
+// outside the pass budget; the bound and the budget are now the caller's.
+pub(crate) fn find_closing_brace_within(
+    scanned: &[ScannedLine],
+    open_idx: usize,
+    end: usize,
+    mut visit: impl FnMut() -> bool,
+) -> Option<usize> {
+    let open_line = scanned.get(open_idx)?;
 
     // The depth before the line: a line that opens several blocks (`fn f() { if x {`) closes
     // when the depth falls back to it, not after its innermost block.
@@ -1076,15 +1101,18 @@ pub fn find_closing_brace(scanned: &[ScannedLine], open_idx: usize) -> usize {
     // MAGI FIX (S6 loop 4): a line that closes and reopens (`} else {`) nets zero; the lowest
     // depth within the line, not the depth after it, says whether it closed the block.
     let mut start_depth = open_line.depth_after;
-    for (i, line) in scanned.iter().enumerate().skip(open_idx + 1) {
+    for (i, line) in scanned.iter().enumerate().take(end).skip(open_idx + 1) {
+        if !visit() {
+            return None;
+        }
         let lowest = i64::from(start_depth) + i64::from(line.min_delta);
         if line.min_delta < 0 && lowest <= i64::from(target_depth) {
-            return i;
+            return Some(i);
         }
         start_depth = line.depth_after;
     }
-    // Unclosed brace — return last line (graceful degradation)
-    scanned.len().saturating_sub(1)
+    // Unclosed brace: the caller degrades (`find_closing_brace` returns the last line).
+    None
 }
 
 #[cfg(test)]

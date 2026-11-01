@@ -11,7 +11,9 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 
-use super::scanner::{find_closing_brace, CodeScanner, LexicalRules, ScannedLine};
+use super::scanner::{
+    find_closing_brace, find_closing_brace_within, CodeScanner, LexicalRules, ScannedLine,
+};
 use super::{
     gap_units, split_into_members, ChangedLines, LanguageExtractor, Member, SemanticUnit, UnitKind,
 };
@@ -477,7 +479,7 @@ impl BraceFamilyExtractor {
 
             // MAGI FIX (S6 loop 7): Go's `type (` opened one nameless struct and its later
             // members fell into gaps; each member is a construct of its own.
-            if let Some((last, group)) = self.grouped_types(lines, scanned, i) {
+            if let Some((last, group)) = self.grouped_types(lines, scanned, i, &search) {
                 constructs.extend(group?);
                 i = last + 1;
                 continue;
@@ -685,13 +687,17 @@ impl BraceFamilyExtractor {
     ///
     /// The group's end is found by counting parentheses on the line text ([`paren_delta`]); a
     /// group that never closes runs to the end of the file, its members still found one by one,
-    /// so every line stays in exactly one unit either way. The members are `None` when a line
+    /// so every line stays in exactly one unit either way. A member's closing-brace search stays
+    /// inside the group and spends the pass's `search` budget ([`SearchBudget`]); a member it
+    /// does not close runs to the group's end. The groups of a file are disjoint, so their walks
+    /// add O(n) in all. The members are `None` when a line
     /// number does not fit `u32`, which aborts detection ([`Self::try_detect_constructs`]).
     fn grouped_types(
         &self,
         lines: &[&str],
         scanned: &[ScannedLine],
         i: usize,
+        search: &BraceSearch<'_>,
     ) -> Option<(usize, Option<Vec<Construct>>)> {
         if !self.block_keywords.iter().any(|k| k == "type ") {
             return None;
@@ -721,9 +727,14 @@ impl BraceFamilyExtractor {
                 continue;
             }
             let kind = go_type_kind(trimmed);
+            // MAGI FIX (S6 loop 19, B2b-2): the search ran past the group's `)` to the end of
+            // the file, outside the pass budget, so a file of groups whose members never close
+            // inside them took O(n²) visits; it stays inside the group and spends the budget. A
+            // member not closed there, or whose search the budget cut, runs to the group's end,
+            // so no line of the group is lost.
             let end = if scanned.get(j).is_some_and(|s| s.brace_delta > 0) {
-                find_closing_brace(scanned, j)
-                    .min(body_end.saturating_sub(1))
+                find_closing_brace_within(scanned, j, body_end, || search.spend())
+                    .unwrap_or(body_end.saturating_sub(1))
                     .max(j)
             } else {
                 j
