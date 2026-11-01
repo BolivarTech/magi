@@ -632,6 +632,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
         del doc["consult"]["consensus"]
         self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[3]])
 
+    def test_s47_fails_on_a_json_document_that_is_not_an_object(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a2-m1] read as an AttributeError inside the scenario (a harness defect,
+        # exit 3); ProductOutput.json() refuses a non-object with ProductOutputError, which S47 turns into a
+        # FAIL of every assertion after the exit, so the scenario never reaches document.get.
+        for document in ([1, 2], "text", 7):
+            outcomes = _outcomes("S47", _result("R12", 0, document))
+            for index in range(1, len(code_review.S47_ASSERTIONS)):
+                self.assertEqual(Outcome.FAIL, outcomes[code_review.S47_ASSERTIONS[index]], document)
+
     def test_s47_fails_on_a_consensus_that_is_not_one_report_object(self) -> None:
         # [MAGI §6 MS2 loop 6, F1a-c3] a truthy value is not a consensus: a list of two reports, a bare
         # string, or an object without magi-core's label and verdict all FAIL.
