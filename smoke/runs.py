@@ -1019,7 +1019,8 @@ def _regular_files_without_links(directory, refused):
     with :func:`_is_link` first.
 
     Args:
-        directory: The directory to walk; it is not itself tested.
+        directory: The directory to walk; it is not itself tested (the caller tests it, as
+            :meth:`RunExecutor._capture_review_log` does).
         refused: A list that receives ``"<name> (<why>)"`` for each entry
             left out: a link (neither listed nor read), a directory that could
             not be listed, or an entry whose test failed.
@@ -1509,11 +1510,29 @@ class RunExecutor:
         Returns:
             tuple[bytes, ...] | None: Each readable file's bytes under
             ``.magi/logs``, in sorted path order; ``None`` for a run without a
-            review workspace or when the directory does not exist.
+            review workspace or when the directory does not exist; ``()`` when
+            ``.magi`` or ``.magi/logs`` is itself a link (or cannot be tested),
+            which is named in *unreadable* and never followed.
         """
         if REVIEW_WORKSPACE_TOKEN not in definition.argv:
             return None
-        directory = self._review_workspace().joinpath(*LOG_DIR_PARTS)
+        workspace = self._review_workspace()
+        directory = workspace.joinpath(*LOG_DIR_PARTS)
+        # MAGI FIX (S6 loop 15): the walk tests every entry but not its top, and
+        # os.scandir follows a linked .magi or .magi/logs, so the harness read
+        # what the link points at (F1a1-m1). Each component is tested first.
+        relative = "/".join(LOG_DIR_PARTS)
+        try:
+            linked = _linked_component(workspace, relative)
+        except OSError as exc:
+            if unreadable is not None:
+                unreadable.append("%s (%s)" % (relative, exc))
+            return ()
+        if linked is not None:
+            if unreadable is not None:
+                unreadable.append("%s (%s)" % (
+                    linked.relative_to(workspace).as_posix(), LINK_NOT_FOLLOWED))
+            return ()
         if not directory.is_dir():
             return None
         captured = []
