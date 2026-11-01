@@ -452,6 +452,18 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
                     runs._retry_writable(os.unlink, str(path), error)
             chmod.assert_not_called()
 
+    def test_a_failed_deletion_of_a_directory_keeps_its_search_bit(self) -> None:
+        # [smoke review, Melchior] 0o600 on a directory drops its search bit on POSIX, so the retry
+        # could not even list it; a directory is made 0o700, a file stays 0o600.
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = pathlib.Path(tmp) / "d"
+            directory.mkdir()
+            with mock.patch.object(runs.os, "chmod") as chmod:
+                runs._retry_writable(os.rmdir, str(directory), PermissionError(13, "access denied"))
+            self.assertFalse(directory.exists())
+        chmod.assert_called_once_with(str(directory), stat.S_IRWXU)
+
     def test_a_failed_deletion_of_a_file_is_retried_once_writable(self) -> None:
         import stat
         with tempfile.TemporaryDirectory() as tmp:
