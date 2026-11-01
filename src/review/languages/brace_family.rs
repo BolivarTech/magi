@@ -1692,7 +1692,10 @@ fn identifier_before_paren(line: &str) -> Option<String> {
 const OPERATOR_SYMBOL_CHARS: &str = "=!<>+-*/%&|^~[],";
 
 /// The name of the C++ operator overload `before` declares, when it ends in the word `operator`
-/// and a symbol (`Foo& operator=` gives `operator=`, `bool operator==` gives `operator==`).
+/// and a symbol (`Foo& operator=` gives `operator=`, `bool operator==` gives `operator==`), or
+/// in the word `operator`, a blank and an allocation operator of [`ALLOCATION_OPERATORS`]
+/// (`void* operator new` gives `operator new`, `void operator delete [ ]` gives
+/// `operator delete[]`).
 ///
 /// # Arguments
 ///
@@ -1700,9 +1703,10 @@ const OPERATOR_SYMBOL_CHARS: &str = "=!<>+-*/%&|^~[],";
 ///
 /// # Returns
 ///
-/// `operator` followed by the symbol, or `None` when `before` names no symbol operator (a
-/// call operator, `operator()`, has its symbol after the first `(` and is named by
-/// [`identifier_before_paren`]'s general rule). O(n) in the text.
+/// The operator's name, or `None` when `before` names no such operator (a call operator,
+/// `operator()`, has its symbol after the first `(` and is named by
+/// [`identifier_before_paren`]'s general rule; a conversion operator, `operator bool`, is named
+/// by that rule too, after its type). O(n) in the text.
 fn operator_name(before: &str) -> Option<String> {
     let (head, symbol) = before.trim_end().rsplit_once("operator")?;
     // The symbol touches the word, so a JavaScript `const operator = (x) => {` is no overload.
@@ -1712,8 +1716,24 @@ fn operator_name(before: &str) -> Option<String> {
         .next_back()
         .is_none_or(|c| !is_identifier_char(c));
     let is_symbol = !symbol.is_empty() && symbol.chars().all(|c| OPERATOR_SYMBOL_CHARS.contains(c));
-    (word_starts && is_symbol).then(|| format!("operator{symbol}"))
+    if !word_starts {
+        return None;
+    }
+    if is_symbol {
+        return Some(format!("operator{symbol}"));
+    }
+    // MAGI FIX (S6 loop 14): `void* operator new(size_t n) {` reached `NOT_FUNCTION_NAMES` with
+    // the word `new`, so the allocator was no function and its body fell into a gap unit.
+    let word: String = symbol.chars().filter(|c| !c.is_whitespace()).collect();
+    let allocation =
+        symbol.starts_with(char::is_whitespace) && ALLOCATION_OPERATORS.contains(&word.as_str());
+    allocation.then(|| format!("operator {word}"))
 }
+
+/// The C++ allocation operators, whose symbol is a word with an optional `[]`
+/// (`operator new`, `operator delete[]`), named with one space after `operator` and the
+/// brackets glued to the word, however they were spaced on the line.
+const ALLOCATION_OPERATORS: [&str; 4] = ["new", "new[]", "delete", "delete[]"];
 
 /// `text` without the modifier `word` it opens with, and what belongs to the word: a `(...)`
 /// right after it (`pub(crate)`) or, after blanks, a quoted string (`extern "C"`); the rest is
