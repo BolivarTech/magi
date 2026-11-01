@@ -572,15 +572,30 @@ impl<'g> RevisionSource<'g> {
     /// relying on its callers (git-derived paths never hold one; explicit ones pass the guard).
     /// The rule is the input's own `is_confined` (`src/review/input.rs`), restated here because
     /// that one is private to the listing.
+    ///
+    /// A `.` component (`./a.rs`, `src/./b.rs`) is dropped before any git call: `ls-tree` names
+    /// a path without one, so the check that `rev` holds the path ([`Self::holds`]) compares
+    /// the path as git names it. A path of `.` components alone names no file and is refused
+    /// like an empty one.
     // MAGI FIX (S6 loop 13, A2-c4): the revision side enforced no containment of its own.
     fn read_at(&self, rev: &str, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
-        let confined = !path.is_empty()
-            && Path::new(path)
-                .components()
-                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-        if !confined {
+        let confined = Path::new(path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+        // MAGI FIX (S6 loop 17, A2-3): `./a.rs` never matched `ls-tree`'s `a.rs`, so a path named
+        // with a leading `./` read as absent from the revision.
+        let parts: Option<Vec<&str>> = Path::new(path)
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(part) => Some(part.to_str()),
+                _ => None,
+            })
+            .collect();
+        let named = parts.map(|p| p.join("/")).unwrap_or_default();
+        if !confined || named.is_empty() {
             return Err(ReviewError::OutsideWorkspace(path.to_string()));
         }
+        let path = named.as_str();
         if !self.holds(rev, path)? {
             return Ok(None);
         }
