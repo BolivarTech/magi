@@ -977,12 +977,14 @@ impl BraceFamilyExtractor {
         None
     }
 
-    /// Whether the line opens with a declaration keyword followed by any blank
-    /// ([`blank_keyword_rest`]).
+    /// Whether the line opens with a declaration keyword followed by any blank or by the list,
+    /// path or string it declares ([`declaration_keyword_rest`]).
     fn match_declaration_keyword(&self, trimmed: &str) -> bool {
+        // MAGI FIX (S6 loop 14): `use::{a, b};`, `import{foo} from "x";` and
+        // `#include<stdio.h>` fell into gap units.
         self.declaration_keywords
             .iter()
-            .any(|kw| blank_keyword_rest(trimmed, kw).is_some())
+            .any(|kw| declaration_keyword_rest(trimmed, kw).is_some())
     }
 
     /// The 0-based first line of the construct whose declaration is at `idx`: `idx` moved up
@@ -1161,7 +1163,7 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 12): the `pub ...` and `export ` arms could never match, since the
         // caller strips the visibility words first.
         let trimmed = first_line.trim();
-        let opens = |kw: &str| blank_keyword_rest(trimmed, kw).is_some();
+        let opens = |kw: &str| declaration_keyword_rest(trimmed, kw).is_some();
         if opens("use ") || opens("import ") || opens("from ") {
             "imports".to_string()
         } else if opens("const ") {
@@ -1797,6 +1799,36 @@ fn blank_keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
     let rest = text.strip_prefix(kw.strip_suffix(' ')?)?;
     rest.starts_with(char::is_whitespace)
         .then(|| rest.trim_start())
+}
+
+/// What may follow a declaration keyword's bare word with no blank between and still open the
+/// declaration: a list (`use::{a}`, `import{foo}`, `export{foo}`), a path (`use::a`), an included
+/// file (`#include<stdio.h>`, `#include"a.h"`), a quoted module or linkage (`import'./m'`,
+/// `extern"C"`) or a namespace import (`import*as m`). An identifier character never does, so a
+/// longer word (`usefoo`, `importer`) is no keyword.
+const GLUED_DECLARATION_OPENERS: [&str; 6] = ["{", "::", "<", "\"", "'", "*"];
+
+/// The text after declaration keyword `kw` at the start of `text`: as [`blank_keyword_rest`],
+/// or, when the keyword's bare word is followed directly by one of
+/// [`GLUED_DECLARATION_OPENERS`], the text from that opener on. O(n) in the text.
+///
+/// # Arguments
+///
+/// * `text` - A trimmed line, or its rest after the modifiers.
+/// * `kw` - A declaration keyword of a table, ending in a blank.
+///
+/// # Returns
+///
+/// The text after the keyword, or `None` when `text` does not open with it.
+fn declaration_keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
+    if let Some(rest) = blank_keyword_rest(text, kw) {
+        return Some(rest);
+    }
+    let rest = text.strip_prefix(kw.strip_suffix(' ')?)?;
+    GLUED_DECLARATION_OPENERS
+        .iter()
+        .any(|opener| rest.starts_with(opener))
+        .then_some(rest)
 }
 
 /// `text` after the balanced `<...>` it opens with, trimmed at its start; empty when the list
