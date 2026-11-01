@@ -694,6 +694,14 @@ impl<'a> CachedSource<'a> {
     }
 
     /// Reads one side of `path`, from the cache or from the inner source.
+    ///
+    /// The lock is held across the inner read, so a check and its insert never race and a side
+    /// is read at most once. That serializes concurrent readers behind one slow read (a `git
+    /// show` can take up to `GIT_CALL_TIMEOUT_SECS`); a review reads in series (RV05) and no
+    /// source calls back into the cache, so there is no contention and no reentrant deadlock
+    /// today. A stage that reads in parallel would need a read outside the lock and a re-check
+    /// before the insert.
+    // MAGI FIX (S6 loop 15, A2-5): the lock's scope was undocumented.
     fn get(&self, face: Face, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         let side = match face {
