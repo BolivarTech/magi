@@ -3826,4 +3826,40 @@ void g(void) {
         let units = extract(&ext, &code, &(1..=total).collect::<Vec<_>>());
         assert_each_line_in_one_unit(&units, total);
     }
+
+    /// Every line number of `code`, 1-based.
+    fn every_line(code: &str) -> Vec<u32> {
+        (1..=u32::try_from(code.lines().count()).expect("small")).collect()
+    }
+
+    #[test]
+    fn a_rust_item_after_an_attribute_on_its_own_line_is_a_unit_with_its_body() {
+        // [MAGI S6 loop 14, B2b1] `construct_keyword` never read past a leading `#[...]`, so
+        // `#[inline] fn f() {` and `#[derive(Debug)] struct S {` were no constructs and their
+        // bodies fell into gap units (RV03).
+        let code = "#[inline] fn f() {
+    x();
+}
+#[derive(Debug)] pub struct S {
+    n: u8,
+}
+#[cfg(test)] #[allow(dead_code)] mod tests {
+    fn g() {
+    }
+}
+#[doc = \"]\"] fn h() {
+}
+";
+        let units = extract(&rust_extractor(), code, &every_line(code));
+        assert_each_line_in_one_unit(&units, 12);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("f", UnitKind::Function, 1, 3),
+                ("S", UnitKind::Struct, 4, 6),
+                ("tests", UnitKind::Module, 7, 10),
+                ("h", UnitKind::Function, 11, 12),
+            ]
+        );
+    }
 }
