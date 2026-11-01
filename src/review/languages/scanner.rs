@@ -260,6 +260,11 @@ impl LexicalRules {
 }
 
 /// Result of scanning a single source line.
+///
+/// [`CodeScanner::scan_all`] keeps one per line, so its size bounds the scan's memory: 24 bytes,
+/// about 200 MiB for a capped file of 8 MiB of newlines, as much as the line slices every
+/// extractor already holds. Pinned by `a_scanned_line_takes_at_most_twenty_four_bytes`; packing
+/// it further would narrow the per-line counts, which a line of the capped size can overflow.
 #[derive(Debug, Clone)]
 pub struct ScannedLine {
     /// 1-indexed line number.
@@ -330,12 +335,22 @@ pub struct CodeScanner {
     /// Whether the previous line was a preprocessor directive ending in `\`, so this line
     /// continues it ([`LexicalRules::preprocessor_directives`]).
     in_directive: bool,
+    /// The rules' line comment token as characters, collected once ([`LexicalRules::line_comment`]).
+    line_comment: Vec<char>,
+    /// The characters of the line being scanned, a buffer kept between lines so that a scan of
+    /// n lines allocates as for its longest line, not once per line.
+    chars: Vec<char>,
 }
 
 impl CodeScanner {
     /// Create a new scanner with language-specific lexical rules.
     pub fn new(rules: LexicalRules) -> Self {
+        // MAGI FIX (S6 loop 19, B2a-5): the comment token and the line's characters were
+        // collected into a new `Vec` on every line, millions of allocations for a capped file of
+        // short lines; the token is collected once and the line buffer is reused.
         Self {
+            line_comment: rules.line_comment.chars().collect(),
+            chars: Vec::new(),
             rules,
             state: LexicalState::Code,
             depth: 0,
@@ -351,8 +366,9 @@ impl CodeScanner {
     /// scanner carries context across lines (e.g., multi-line strings,
     /// block comments).
     pub fn scan_line(&mut self, line_number: u32, line: &str) -> ScannedLine {
-        let chars: Vec<char> = line.chars().collect();
-        let line_comment: Vec<char> = self.rules.line_comment.chars().collect();
+        let mut chars = std::mem::take(&mut self.chars);
+        chars.clear();
+        chars.extend(line.chars());
         let len = chars.len();
         let mut i = 0;
         let mut delta: i32 = 0;
@@ -380,10 +396,10 @@ impl CodeScanner {
 
                     // MAGI FIX (S6 loop 6): only `//` and `#` were matched, so any other
                     // configured token was ignored and the braces after it counted.
-                    if !line_comment.is_empty()
+                    if !self.line_comment.is_empty()
                         && chars
                             .get(i..)
-                            .is_some_and(|rest| rest.starts_with(&line_comment))
+                            .is_some_and(|rest| rest.starts_with(&self.line_comment))
                     {
                         self.state = LexicalState::LineComment;
                         break; // rest of line is comment
@@ -540,7 +556,7 @@ impl CodeScanner {
                         if c == '(' {
                             let word = word_before(&chars, word_end);
                             self.parens
-                                .push(CONDITION_KEYWORDS.contains(&word.as_str()));
+                                .push(CONDITION_KEYWORDS.iter().any(|k| word_is(word, k)));
                         } else if c == ')' && self.parens.pop() == Some(true) {
                             last_code = Some(CONDITION_END_MARK);
                         }
@@ -751,6 +767,7 @@ impl CodeScanner {
         }
 
         let is_non_code = !was_code_at_start && !entered_code;
+        self.chars = chars;
 
         ScannedLine {
             line_number,
@@ -893,7 +910,8 @@ fn regex_may_start(chars: &[char], code_end: usize, last_code: Option<char>) -> 
         None => true,
         Some(c) if c == STRING_MARK || matches!(c, ')' | ']') => false,
         Some(c) if is_js_word_char(c) => {
-            REGEX_PRECEDING_KEYWORDS.contains(&word_before(chars, code_end).as_str())
+            let word = word_before(chars, code_end);
+            REGEX_PRECEDING_KEYWORDS.iter().any(|k| word_is(word, k))
         }
         // `a++ / 2` divides; a single `+` or `-` is an operator, so a regex may follow it.
         Some(c @ ('+' | '-')) => !before
@@ -992,18 +1010,29 @@ fn is_js_word_char(c: char) -> bool {
 }
 
 /// The identifier or keyword that ends right before `i`, blanks skipped (`if (` gives `if`);
-/// empty when a non-word character precedes. O(k) for the k characters before `i`.
-fn word_before(chars: &[char], i: usize) -> String {
+/// empty when a non-word character precedes. A sub-slice of `chars`, so nothing is allocated.
+/// O(k) for the k characters before `i`.
+fn word_before(chars: &[char], i: usize) -> &[char] {
     let before = chars.get(..i).unwrap_or(&[]);
-    let mut word: Vec<char> = before
+    let blanks = before
         .iter()
         .rev()
-        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_whitespace())
+        .count();
+    let end = before.len() - blanks;
+    let word = before
+        .get(..end)
+        .unwrap_or(&[])
+        .iter()
+        .rev()
         .take_while(|&&c| is_js_word_char(c))
-        .copied()
-        .collect();
-    word.reverse();
-    word.into_iter().collect()
+        .count();
+    before.get(end - word..end).unwrap_or(&[])
+}
+
+/// Whether the characters `word` spell `keyword`. O(k) for a keyword of k characters.
+fn word_is(word: &[char], keyword: &str) -> bool {
+    word.iter().copied().eq(keyword.chars())
 }
 
 /// Find the closing brace for a construct that opens at `open_idx`.
