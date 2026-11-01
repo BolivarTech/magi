@@ -4404,4 +4404,39 @@ void g(void) {
         );
         assert_eq!(units[1].kind, UnitKind::Class, "{:?}", spans(&units));
     }
+
+    #[test]
+    fn the_quote_aware_delimiter_match_skips_quoted_runs_and_keeps_an_unclosed_text() {
+        // [MAGI S6 loop 14, B2b1] the bounds of `balanced_end_outside_quotes`, which the Rust
+        // attribute and annotation rules share.
+        let quotes = ['"', '\'', '`'];
+        assert_eq!(
+            balanced_end_outside_quotes("(\")\")x", '(', ')', &quotes),
+            Some(5)
+        );
+        assert_eq!(
+            balanced_end_outside_quotes("('(', `)`)", '(', ')', &quotes),
+            Some(10)
+        );
+        assert_eq!(
+            balanced_end_outside_quotes("(\"\\\")\")", '(', ')', &quotes),
+            Some(7)
+        );
+        assert_eq!(balanced_end_outside_quotes("(\")", '(', ')', &quotes), None);
+        assert_eq!(balanced_end_outside_quotes("((a)", '(', ')', &quotes), None);
+        assert_eq!(
+            balanced_end_outside_quotes("(\")\")", '(', ')', &[]),
+            Some(3)
+        );
+        // An attribute or annotation that never closes keeps its line as it was, so the item
+        // after it is no construct, as before the rule: its lines still land in one unit each.
+        let rust = "#[doc = \"] fn h() {\n}\n";
+        let units = extract(&rust_extractor(), rust, &every_line(rust));
+        assert_each_line_in_one_unit(&units, 2);
+        assert!(!units.iter().any(|u| u.name == "h"), "{:?}", spans(&units));
+        let java = "@A(\") class F {\n}\n";
+        let units = extract(&BraceFamilyExtractor::java(), java, &every_line(java));
+        assert_each_line_in_one_unit(&units, 2);
+        assert!(!units.iter().any(|u| u.name == "F"), "{:?}", spans(&units));
+    }
 }
