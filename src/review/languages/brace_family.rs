@@ -1357,8 +1357,11 @@ impl BraceFamilyExtractor {
     /// (Rust's `#[serde(` ... `)]`): the lines above `last` are walked up while its square
     /// brackets stay unbalanced, up to the line that balances them, which must open with an
     /// attribute prefix ending in `[` (`#[`). `None` when `last` does not end in `]`, the
-    /// extractor has no such prefix, a line on the way is not code, or the line that balances
+    /// extractor has no such prefix, `last` is not code, or the line that balances
     /// the brackets opens no attribute (a macro call `list! [` ... `]`).
+    ///
+    /// A line on the way that lies wholly inside a string or a comment (a text block, a template
+    /// literal in the arguments) is passed over: it holds no bracket of the attribute.
     ///
     /// Brackets are counted on the line text, as [`paren_delta`] counts parentheses: a bracket
     /// inside a string may miscount, and the attribute then falls into a gap unit as before, so
@@ -1391,8 +1394,17 @@ impl BraceFamilyExtractor {
         let mut unclosed = 0i64;
         let mut j = last;
         loop {
-            if scanned.get(j).is_none_or(|s| s.is_non_code) {
-                return None;
+            let record = scanned.get(j)?;
+            // MAGI FIX (S6 loop 19, B2b-4): a line wholly inside a string of the arguments (a
+            // Java text block, a template literal) ended the walk, so the annotation was cut from
+            // its member; such a line (or one wholly inside a comment) holds no bracket and is
+            // passed over. The line the walk starts on must still be code.
+            if record.is_non_code {
+                if j == last {
+                    return None;
+                }
+                j = j.checked_sub(1)?;
+                continue;
             }
             let line = lines.get(j)?;
             unclosed += line.chars().fold(0, |n, c| {
