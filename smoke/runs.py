@@ -594,11 +594,12 @@ TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
 #: :data:`TRIO_RUNS_MEASURED_S`: at least this many times it, equality
 #: included (R12's provisional 1500 s against 3000 s sits exactly on it; when
 #: its real figure replaces it, keep it at or under half the timeout). Only
-#: ``smoke/tests/test_runs.py`` reads it; the executor compares nothing. The cloud endpoint's pace varies by time
-#: slot (PM-S-8) and the measurement above is a single run in one slot -- a
-#: US-morning slot measured slower elsewhere in this project's history --
-#: so the harness timeout carries double that single sample rather than
-#: trusting it at face value.
+#: ``smoke/tests/test_runs.py`` reads it; the executor compares nothing.
+#: The cloud endpoint's pace varies by time slot (PM-S-8) and the
+#: measurement above is a single run in one slot -- a US-morning slot
+#: measured slower elsewhere in this project's history -- so the harness
+#: timeout carries double that single sample rather than trusting it at
+#: face value.
 MEASURED_WALL_CLOCK_MARGIN = 2
 
 #: The default of ``[headless] max_system_bytes``. R11 sends one byte more, so
