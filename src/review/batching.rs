@@ -1107,6 +1107,27 @@ mod tests {
     }
 
     #[test]
+    fn a_pure_deletion_too_large_for_a_batch_is_named_by_its_old_side_lines() {
+        // [MAGI S6 loop 17, B1-3] a deletion's new side is empty (`+4,0` is lines 4 to 3), so the
+        // error named an inverted range that points at no line; its old side names the hunk.
+        let diff = format!(
+            "@@ -5,4 +4,0 @@\n{}",
+            format!("-{}\n", "x".repeat(200)).repeat(4)
+        );
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff),
+        }];
+        let src = MapSource::new(&[("a.rs", "y\n")], &[("a.rs", "y\n")]);
+        match plan_batches(&files, &src, &LanguageRegistry::new(), 100) {
+            Err(ReviewError::TooLargeForBatch { what, .. }) => {
+                assert_eq!(what, "a.rs:5-8 (removed lines)")
+            }
+            other => panic!("expected TooLargeForBatch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_whole_file_without_an_extractor_that_does_not_fit_is_a_typed_error() {
         let text = "plain line of prose\n".repeat(40); // ~200 tokens, no extractor for .txt
         let files = vec![ReviewFile {
