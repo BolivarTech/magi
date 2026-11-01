@@ -360,6 +360,10 @@ impl CodeScanner {
         let mut group_delta: i32 = 0;
         // The last non-blank character read in code context (a string counts as its quote).
         let mut last_code: Option<char> = None;
+        // Where the code character `last_code` records ends (0 when none): the word a regex or a
+        // condition follows is read there, so a comment after it (`return /* c */ /x/`) does
+        // not hide it.
+        let mut last_code_end: usize = 0;
         // A line that starts inside a template expression starts inside the template literal.
         let was_code_at_start = self.state == LexicalState::Code && self.templates.is_empty();
         let mut entered_code = false;
@@ -399,7 +403,7 @@ impl CodeScanner {
                     // MAGI FIX (S6 loop 4): a regex literal's braces (`/}/`) are not structure.
                     if self.rules.regex_literals
                         && char_at(&chars, i) == '/'
-                        && regex_may_start(&chars, i, last_code)
+                        && regex_may_start(&chars, last_code_end, last_code)
                     {
                         last_code = Some(STRING_MARK);
                         self.state = LexicalState::RegexLiteral { in_class: false };
@@ -519,14 +523,22 @@ impl CodeScanner {
                     }
 
                     let c = char_at(&chars, i);
+                    // MAGI FIX (S6 loop 19, B2a-4): the condition's keyword was read right before
+                    // the `(`, so a comment between them (`if /* c */ (ok)`) hid it.
+                    let word_end = if last_code.is_some_and(is_js_word_char) {
+                        last_code_end
+                    } else {
+                        0
+                    };
                     if !c.is_whitespace() {
                         last_code = Some(c);
+                        last_code_end = i + 1;
                     }
                     // MAGI FIX (S6 loop 6): `if (ok) /}/.test(s)` read the `/` as a division,
                     // so the regex's brace closed the enclosing block.
                     if self.rules.regex_literals {
                         if c == '(' {
-                            let word = word_before(&chars, i);
+                            let word = word_before(&chars, word_end);
                             self.parens
                                 .push(CONDITION_KEYWORDS.contains(&word.as_str()));
                         } else if c == ')' && self.parens.pop() == Some(true) {
@@ -843,8 +855,10 @@ impl CodeScanner {
 }
 
 /// Keywords after which a `/` starts a regular expression, not a division (`return /x/`).
-const REGEX_PRECEDING_KEYWORDS: [&str; 13] = [
+// MAGI FIX (S6 loop 19, B2a-4): `await /x/.test(s)` read as a division.
+const REGEX_PRECEDING_KEYWORDS: [&str; 14] = [
     "return",
+    "await",
     "typeof",
     "instanceof",
     "in",
@@ -859,8 +873,9 @@ const REGEX_PRECEDING_KEYWORDS: [&str; 13] = [
     "yield",
 ];
 
-/// Whether the `/` at `i` (not `//` nor `/*`) starts a JS regular expression literal, by what
-/// precedes it on the line (`last_code`, the last non-blank code character): nothing, an
+/// Whether a `/` (not `//` nor `/*`) starts a JS regular expression literal, by what precedes
+/// it on the line in code (`last_code`, the last non-blank code character, which ends at
+/// `code_end`; comments between it and the `/` are passed over): nothing, an
 /// operator or an opening bracket (`= /x/`, `(/x/`, `, /x/`), or a keyword of
 /// [`REGEX_PRECEDING_KEYWORDS`], or the `)` closing an `if`/`while`/`for`/`with` condition
 /// ([`CONDITION_END_MARK`]), or a `}`. After an operand (an identifier, a number, a literal,
@@ -871,14 +886,14 @@ const REGEX_PRECEDING_KEYWORDS: [&str; 13] = [
 /// yields `NaN`, never meaningful code. A `)` that closes a call or a group, and `]`, read as
 /// an operand's end. A condition keyword is recognized only on the line of its `(`. An unclosed
 /// `/` misread as a regex ends with its line, so a misreading never spreads past it.
-/// O(k) for the k characters before `i`.
-fn regex_may_start(chars: &[char], i: usize, last_code: Option<char>) -> bool {
-    let before = chars.get(..i).unwrap_or(&[]);
+/// O(k) for the k characters before `code_end`.
+fn regex_may_start(chars: &[char], code_end: usize, last_code: Option<char>) -> bool {
+    let before = chars.get(..code_end).unwrap_or(&[]);
     match last_code {
         None => true,
         Some(c) if c == STRING_MARK || matches!(c, ')' | ']') => false,
         Some(c) if is_js_word_char(c) => {
-            REGEX_PRECEDING_KEYWORDS.contains(&word_before(chars, i).as_str())
+            REGEX_PRECEDING_KEYWORDS.contains(&word_before(chars, code_end).as_str())
         }
         // `a++ / 2` divides; a single `+` or `-` is an operator, so a regex may follow it.
         Some(c @ ('+' | '-')) => !before
