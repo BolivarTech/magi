@@ -4882,4 +4882,67 @@ void g(void) {
         assert_each_line_in_one_unit(&units, 2);
         assert!(!units.iter().any(|u| u.name == "F"), "{:?}", spans(&units));
     }
+
+    #[test]
+    fn a_grouped_or_bracketed_declaration_runs_to_its_matching_closing_delimiter() {
+        // [MAGI S6 loop 17, B2-1] a declaration ending in `(` or `[` sought only a `{`, so a Go
+        // `var (` group, an array literal over lines or a wrapped call kept only its first line
+        // and its members fell into gap units, a changed member sent without its header. The
+        // delimiter in a string or a comment does not close the group.
+        let go = "var (\n\ta = 1\n\n\tb = \")\"\n)\nfunc f() {\n}\n";
+        let units = extract(&BraceFamilyExtractor::go(), go, &[4]);
+        assert_eq!(
+            spans(&units),
+            vec![("variables", UnitKind::DeclarationGroup, 1, 5)]
+        );
+        let go = "var (\n\tcfg = Config{\n\t\tName: \"x\",\n\t}\n\tn = 2\n)\nfunc f() {\n}\n";
+        let units = extract(&BraceFamilyExtractor::go(), go, &[5]);
+        assert_eq!(
+            spans(&units),
+            vec![("variables", UnitKind::DeclarationGroup, 1, 6)]
+        );
+        let js = "const items = [\n  { a: 1 },\n  { b: \"]\" },\n];\nfunction g() {\n}\n";
+        for ext in [
+            BraceFamilyExtractor::javascript(),
+            BraceFamilyExtractor::typescript(),
+        ] {
+            let units = extract(&ext, js, &[3]);
+            assert_eq!(
+                spans(&units),
+                vec![("constants", UnitKind::DeclarationGroup, 1, 4)]
+            );
+        }
+        let rust = "const NAMES: &[&str] = &[\n    \"a\",\n    // ] not the end\n    \"b\",\n];\nfn h() {}\n";
+        let units = extract(&rust_extractor(), rust, &[4]);
+        assert_eq!(
+            spans(&units),
+            vec![("constants", UnitKind::DeclarationGroup, 1, 5)]
+        );
+        let call = "const x = make(a,\n  b,\n  c);\nfunction g() {\n}\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), call, &[2]);
+        assert_eq!(
+            spans(&units),
+            vec![("constants", UnitKind::DeclarationGroup, 1, 3)]
+        );
+    }
+
+    #[test]
+    fn a_bracketed_declaration_that_never_closes_loses_no_line_and_spends_a_linear_budget() {
+        // [MAGI S6 loop 17, B2-1] the walk to the closing delimiter shares the pass's budget, so
+        // a file of unclosed `[` lines stays linear; every line still lands in exactly one unit.
+        let open = "const t = [\n  1,\n\nfunction g() {\n}\n";
+        let ext = BraceFamilyExtractor::javascript();
+        let units = extract(&ext, open, &every_line(open));
+        assert_each_line_in_one_unit(&units, 5);
+        let code = format!("{}function g() {{\n}}\n", "const a = [\n".repeat(5_000));
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(&code);
+        let budget = SearchBudget::for_lines(lines.len());
+        ext.try_detect_constructs(&lines, &scanned, false, &budget)
+            .expect("small line numbers");
+        let cap = lines.len() * 64 + MAX_BRACE_SEARCH_LINES;
+        assert!(budget.spent() <= cap, "{} visits", budget.spent());
+        let total = u32::try_from(lines.len()).expect("small");
+        assert_each_line_in_one_unit(&extract(&ext, &code, &every_line(&code)), total);
+    }
 }
