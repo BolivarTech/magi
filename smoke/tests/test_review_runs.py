@@ -639,5 +639,29 @@ class ReviewLineCountTests(unittest.TestCase):
             self.assertEqual(len(body.decode("utf-8").splitlines()), counts[path])
 
 
+class ProductSpellingTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 16, F1a1-caspar] the product folds ASCII case and trims trailing dots and spaces."""
+
+    def test_protected_candidates_match_the_magi_directory_whatever_its_spelling(self) -> None:
+        listed = frozenset({".MAGI/a.toml", ".magi./b", ".Magi /c", ".magi/d",
+                            ".magic/e", "src/.magi/f", "src/a.rs"})
+        with mock.patch.object(runs, "visible_paths", return_value=listed):
+            self.assertEqual((".MAGI/a.toml", ".Magi /c", ".magi./b", ".magi/d"),
+                             runs.protected_candidates(pathlib.Path(".")))
+
+    def test_protected_candidates_never_fold_a_non_ascii_letter(self) -> None:
+        # The product folds ASCII only: a dotted or dotless I is not the "i" of ".magi".
+        listed = frozenset({".magİ/a", ".MAGı/b"})
+        with mock.patch.object(runs, "visible_paths", return_value=listed):
+            self.assertEqual((), runs.protected_candidates(pathlib.Path(".")))
+
+    def test_the_copy_leaves_out_the_log_directory_whatever_its_spelling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ignore = runs._skip_top_level_logs(tmp)
+            names = ["Logs", "logs.", "LOGS ", "magi.toml", "logsx", "logs"]
+            self.assertEqual({"Logs", "logs.", "LOGS ", "logs"}, ignore(tmp, names))
+            self.assertEqual(set(), ignore(os.path.join(tmp, "sub"), names))
+
+
 if __name__ == "__main__":
     unittest.main()
