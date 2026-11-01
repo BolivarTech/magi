@@ -1282,13 +1282,15 @@ mod tests {
             path: "a.dat".into(),
             cause: SkipCause::Binary,
         }];
-        // When the sides cannot be read, the marker still decides: `binary`, not `unreadable`
-        // or `too large`.
+        // [MAGI S6 loop 14, A2-4] When a side cannot be read, its own cause is named, as for any
+        // file (`unreadable`, `too large`), and the review's total cap still fails the review: a
+        // read failure became `binary`, and an `InputTooLarge` an omission.
         struct Unreadable(SkipOrFail);
         #[derive(Clone, Copy)]
         enum SkipOrFail {
             Fail,
             TooLarge,
+            Total,
         }
         impl ContentSource for Unreadable {
             fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
@@ -1298,6 +1300,11 @@ mod tests {
                         path: path.into(),
                         limit: 1,
                     }),
+                    ("a.dat", SkipOrFail::Total) => Err(ReviewError::InputTooLarge {
+                        limit: 1,
+                        held: 1,
+                        path: path.into(),
+                    }),
                     _ => Ok(Some(b"fn f() {}\n".to_vec())),
                 }
             }
@@ -1306,11 +1313,27 @@ mod tests {
             }
         }
         let reg = LanguageRegistry::new();
-        for mode in [SkipOrFail::Fail, SkipOrFail::TooLarge] {
+        for (mode, cause) in [
+            (SkipOrFail::Fail, SkipCause::Unreadable),
+            (SkipOrFail::TooLarge, SkipCause::TooLarge),
+        ] {
             let f = filter_files(both(), &Unreadable(mode), &reg, false, &|_| false)
                 .expect("a.rs kept");
-            assert_eq!(f.skipped, binary);
+            assert_eq!(
+                f.skipped,
+                vec![Skipped {
+                    path: "a.dat".into(),
+                    cause
+                }]
+            );
         }
+        let total = filter_files(both(), &Unreadable(SkipOrFail::Total), &reg, false, &|_| {
+            false
+        });
+        assert!(
+            matches!(total, Err(ReviewError::InputTooLarge { .. })),
+            "{total:?}"
+        );
         // Real binary bytes: still `binary`.
         let nul = MapSource::new(
             &[("a.dat", "wor\0ld\n"), ("a.rs", "fn f() {}\n")],
