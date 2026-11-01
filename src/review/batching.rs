@@ -401,12 +401,18 @@ fn hunk_ranges(line: &str) -> Option<((u32, u32), (u32, u32))> {
     Some((old, new))
 }
 
-/// The `(first, last)` range of one side, `start[,count]`, of a hunk header.
+/// The `(first, last)` range of one side, `start[,count]`, of a hunk header; `None` when the
+/// side holds lines but starts at line 0 (line numbers start at 1; only an empty side, such as a
+/// new file's `-0,0`, names line 0).
 fn side_range(side: &str) -> Option<(u32, u32)> {
     let (start, count) = match side.split_once(',') {
         Some((s, n)) => (s.parse::<u32>().ok()?, n.parse::<u32>().ok()?),
         None => (side.parse::<u32>().ok()?, 1),
     };
+    // MAGI FIX (S6 loop 16): `@@ -0,1 +0,1 @@` recorded line 0 as reviewed.
+    if start == 0 && count > 0 {
+        return None;
+    }
     if count == 0 {
         Some((start.checked_add(1)?, start))
     } else {
