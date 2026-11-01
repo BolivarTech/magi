@@ -125,6 +125,14 @@ pub struct LexicalRules {
     pub template_literals: bool,
     /// Whether `/.../` regular expression literals exist (JS/TS only).
     pub regex_literals: bool,
+    /// Whether a line whose first non-blank character is `#` is a preprocessor directive
+    /// (C, C++), continued while a line ends in `\`: its strings and comments are read as in
+    /// code, but its braces, parentheses and brackets are no structure (`#define BEGIN {`).
+    pub preprocessor_directives: bool,
+    /// Whether a `'` may open a character constant of several characters (`'ab'`, C and C++),
+    /// besides the one-character literal every `char_literals` language has; a C++14 digit
+    /// separator (`1'000`) opens none.
+    pub multichar_literals: bool,
 }
 
 impl LexicalRules {
@@ -139,11 +147,13 @@ impl LexicalRules {
             raw_strings: RawStringSyntax::RustHashes,
             template_literals: false,
             regex_literals: false,
+            preprocessor_directives: false,
+            multichar_literals: false,
         }
     }
 
     /// C: `//` line comments, `/* */` non-nested block comments,
-    /// `'` char literals.
+    /// `'` char literals of one or several characters, `#` preprocessor directives.
     pub fn c() -> Self {
         Self {
             line_comment: "//",
@@ -153,6 +163,11 @@ impl LexicalRules {
             raw_strings: RawStringSyntax::None,
             template_literals: false,
             regex_literals: false,
+            // MAGI FIX (S6 loop 19, B2a-2): a directive's braces moved the depth, so
+            // `#define BEGIN {` shifted every later block by one level.
+            preprocessor_directives: true,
+            // MAGI FIX (S6 loop 19, B2a-8): `'{}'` read as code, so its braces moved the depth.
+            multichar_literals: true,
         }
     }
 
@@ -176,6 +191,8 @@ impl LexicalRules {
             raw_strings: RawStringSyntax::GoBacktick,
             template_literals: false,
             regex_literals: false,
+            preprocessor_directives: false,
+            multichar_literals: false,
         }
     }
 
@@ -191,6 +208,8 @@ impl LexicalRules {
             raw_strings: RawStringSyntax::TripleQuote,
             template_literals: false,
             regex_literals: false,
+            preprocessor_directives: false,
+            multichar_literals: false,
         }
     }
 
@@ -205,6 +224,8 @@ impl LexicalRules {
             raw_strings: RawStringSyntax::None,
             template_literals: true,
             regex_literals: true,
+            preprocessor_directives: false,
+            multichar_literals: false,
         }
     }
 
@@ -232,6 +253,8 @@ impl LexicalRules {
             raw_strings: RawStringSyntax::TripleQuote,
             template_literals: false,
             regex_literals: false,
+            preprocessor_directives: false,
+            multichar_literals: false,
         }
     }
 }
@@ -304,6 +327,9 @@ pub struct CodeScanner {
     /// For each open `${...}` template expression, innermost last, how many `{` it holds still
     /// open: its `}` with none open returns to the template text.
     templates: Vec<u32>,
+    /// Whether the previous line was a preprocessor directive ending in `\`, so this line
+    /// continues it ([`LexicalRules::preprocessor_directives`]).
+    in_directive: bool,
 }
 
 impl CodeScanner {
@@ -315,6 +341,7 @@ impl CodeScanner {
             depth: 0,
             parens: Vec::new(),
             templates: Vec::new(),
+            in_directive: false,
         }
     }
 
@@ -336,6 +363,11 @@ impl CodeScanner {
         // A line that starts inside a template expression starts inside the template literal.
         let was_code_at_start = self.state == LexicalState::Code && self.templates.is_empty();
         let mut entered_code = false;
+        // A directive's strings and comments are lexed as in code, so a `/*` it opens still
+        // spans lines, but nothing else in it is structure.
+        let directive = self.rules.preprocessor_directives
+            && (self.in_directive || (was_code_at_start && line.trim_start().starts_with('#')));
+        self.in_directive = directive && line.trim_end().ends_with('\\');
 
         while i < len {
             match &self.state {
@@ -435,7 +467,14 @@ impl CodeScanner {
 
                     // Check for character literal (Rust/C/Java)
                     if self.rules.char_literals && char_at(&chars, i) == '\'' {
-                        if self.is_char_literal(&chars, i) {
+                        // C and C++ have no lifetime: a `'` opens a constant of any width that
+                        // closes on the line, unless it separates the digits of a number.
+                        let literal = if self.rules.multichar_literals {
+                            !is_digit_separator(&chars, i) && multichar_literal_closes(&chars, i)
+                        } else {
+                            self.is_char_literal(&chars, i)
+                        };
+                        if literal {
                             last_code = Some(STRING_MARK);
                             self.state = LexicalState::CharLiteral;
                             i += 1; // skip opening quote, content handled in CharLiteral state
@@ -473,6 +512,11 @@ impl CodeScanner {
                     // as an empty string and a reopened one. A byte string needs no branch: its
                     // `b` is code like any prefix letter, and its `"` (or `"""`) opens the string
                     // on the next character.
+
+                    if directive {
+                        i += 1;
+                        continue;
+                    }
 
                     let c = char_at(&chars, i);
                     if !c.is_whitespace() {
@@ -887,6 +931,44 @@ fn cpp_raw_string_start(chars: &[char], i: usize) -> Option<(Vec<char>, usize)> 
         let skip = open + delimiter.len() + 1;
         (delimiter, skip)
     })
+}
+
+/// The most characters between the quotes of a C or C++ multicharacter constant that
+/// [`multichar_literal_closes`] looks at: four characters each written as a four-character
+/// escape (`'\x41\x42\x43\x44'`), the widest an `int` holds. A starting point, not a
+/// measurement; a longer one reads as code, as before this rule.
+const MAX_MULTICHAR_LITERAL_CHARS: usize = 16;
+
+/// Whether the `'` at `i` opens a C or C++ character constant closed on the line within
+/// [`MAX_MULTICHAR_LITERAL_CHARS`] characters (`'{}'`, `'ab'`), a backslash escaping the next
+/// character. O(1): the look-ahead is bounded.
+fn multichar_literal_closes(chars: &[char], i: usize) -> bool {
+    let mut k = i + 1;
+    let end = i
+        .saturating_add(2)
+        .saturating_add(MAX_MULTICHAR_LITERAL_CHARS);
+    while k < chars.len().min(end) {
+        match char_at(chars, k) {
+            '\\' => k += 2,
+            '\'' => return k > i + 1,
+            _ => k += 1,
+        }
+    }
+    false
+}
+
+/// Whether the `'` at `i` is a C++14 digit separator (`1'000`, `0x1'F`): the word right before
+/// it is a number, whose first character is a digit. A prefix (`u8'a'`, `L'a'`) starts with a
+/// letter, so its quote opens a literal. O(k) for the k characters before `i`.
+fn is_digit_separator(chars: &[char], i: usize) -> bool {
+    chars
+        .get(..i)
+        .unwrap_or(&[])
+        .iter()
+        .rev()
+        .take_while(|&&c| c.is_alphanumeric() || c == '_' || c == '.')
+        .last()
+        .is_some_and(char::is_ascii_digit)
 }
 
 /// Whether `c` can be part of a JS identifier or keyword (`$` included).
