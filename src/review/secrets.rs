@@ -913,6 +913,20 @@ pub fn display_path(path: &str) -> String {
 
 /// `text` with every secret [`find_secret`] would name replaced by `<redacted: <pattern name>>`.
 ///
+/// # Invariant (read before editing)
+///
+/// The output must equal what masking the earliest secret and rescanning the rest from scratch
+/// would give. This function does not rescan: it keeps one cached span per search and trusts it
+/// until a mask passes its start, which holds only while every match a search over the whole
+/// text can miss after a mask is the one `token_after_mask` recovers (a token whose left
+/// boundary is the mask's end) and every span a mask cuts is absorbed by `merged_end`. Adding
+/// a `Matcher`, changing a left-boundary rule or a lookbehind (the XML start tag of
+/// `aws_element_end`), or touching either helper can break that silently; the property test
+/// against the rescanning loop (`one_pass_masking_equals_the_rescanning_loop_…`) and the
+/// `mask_secrets_by_rescanning` checks in the pattern tests are what catch it, so extend them
+/// with the change.
+// MAGI FIX (S6 loop 17, A2-6): the invariant sat at the end of the doc, after the cost bound.
+///
 /// Each turn masks the earliest secret of what follows the last mask (ties go to table order),
 /// grown over every secret that overlaps it (`merged_end`), and the end of a mask counts as a
 /// left boundary.
