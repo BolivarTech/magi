@@ -156,9 +156,11 @@ impl LanguageExtractor for BraceFamilyExtractor {
     ///
     /// A declaration group splits at its declarations instead
     /// (`split_declaration_group`). Only those kinds split, declared: an enum or a
-    /// struct is reviewed whole, and a construct no keyword table names (TypeScript's `enum` or
-    /// `namespace`, Rust's `macro_rules!`, a JavaScript IIFE) is no construct at all, so its
-    /// lines fall into gap units. A single such unit, or one declaration, too large for one
+    /// struct is reviewed whole, as is a Rust `macro_rules!` (a function-like unit whose token
+    /// tree is opaque: no item is read inside it, [`MACRO_RULES_KEYWORD`]), and a construct no
+    /// keyword table names (TypeScript's `enum` or `namespace`, a JavaScript IIFE) is no
+    /// construct at all, so its lines fall into gap units. A single such unit, or one
+    /// declaration, too large for one
     /// batch therefore ends the review with the typed `ReviewError::TooLargeForBatch` (RV03),
     /// never a silent cut.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
@@ -451,7 +453,12 @@ impl BraceFamilyExtractor {
             }
             if let Some((kind, name)) = self.construct_keyword(trimmed) {
                 let start = self.scan_back_for_docs(lines, scanned, i, floor);
-                let end = brace_block_end(lines, scanned, i, line_num, &search)?;
+                let mut end = brace_block_end(lines, scanned, i, line_num, &search)?;
+                // MAGI FIX (S6 loop 17, B2-2): a `macro_rules! m (` ... `);` ended at the first
+                // brace of its arms; it runs to its own closing delimiter.
+                if self.opens_macro_rules(trimmed) {
+                    end = end.max(line_number(group_end(lines, scanned, i, &search))?);
+                }
                 constructs.push(Construct {
                     kind,
                     name,
@@ -976,6 +983,16 @@ impl BraceFamilyExtractor {
         } else {
             Cow::Borrowed(trimmed)
         }
+    }
+
+    /// Whether a trimmed line opens a Rust `macro_rules!` definition ([`MACRO_RULES_KEYWORD`]),
+    /// its outer attributes read past (`#[macro_export] macro_rules! m {`). Only the Rust
+    /// extractor holds the keyword in its function table, so no other language matches. O(n).
+    fn opens_macro_rules(&self, trimmed: &str) -> bool {
+        self.function_keywords
+            .iter()
+            .any(|k| k == MACRO_RULES_KEYWORD)
+            && keyword_rest(self.without_rust_attributes(trimmed), MACRO_RULES_KEYWORD).is_some()
     }
 
     /// The text after the function keyword `trimmed` opens with ([`keyword_rest`]), if any.
@@ -2436,6 +2453,15 @@ fn balanced_end(text: &str, open: char, close: char) -> Option<usize> {
 /// A backtick is no Java token, so reading it as a quote there changes no valid line.
 const ANNOTATION_QUOTES: [char; 3] = ['"', '\'', '`'];
 
+/// The keyword that opens a Rust macro-by-example definition (`macro_rules! name {`). It is in
+/// the Rust function table: a macro is reviewed as one function-like unit, its token tree opaque,
+/// so an item written inside it (`fn generated() {}`) is never a construct of its own, and it is
+/// never split (`split_block` splits only blocks of items). Its end is the later of its brace
+/// block and its own closing delimiter ([`group_end`]), so the `(` ... `);` and `[` ... `];`
+/// forms end on their last line too. A macro invoked at the top level (`thread_local! {`) is no
+/// definition and is read as before.
+const MACRO_RULES_KEYWORD: &str = "macro_rules! ";
+
 /// The opening of a Rust outer attribute (`#[inline]`).
 const RUST_ATTRIBUTE_PREFIX: &str = "#[";
 
@@ -2535,7 +2561,9 @@ impl BraceFamilyExtractor {
         Self {
             language: "rust".to_string(),
             exts: &["rs"],
-            function_keywords: vec!["fn ".to_string()],
+            // MAGI FIX (S6 loop 17, B2-2): an item inside a `macro_rules!` token tree was read
+            // as a function of its own; the macro is one function-like unit.
+            function_keywords: vec!["fn ".to_string(), MACRO_RULES_KEYWORD.to_string()],
             block_keywords: vec![
                 "struct ".to_string(),
                 // MAGI FIX (S6 loop 9): a `union` fell into a gap unit; it is a struct-like type.
