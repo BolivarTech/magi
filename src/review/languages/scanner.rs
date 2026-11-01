@@ -931,9 +931,25 @@ impl CodeScanner {
         self.depth
     }
 
-    /// Check if `char_at(chars, i)` starts a Rust raw string (`r"`, `r#"`, `br"`, `br#"`).
-    /// Returns the hash count if it does.
+    /// Check if `char_at(chars, i)` starts a Rust raw string (`r"`, `r#"`, `br"`, `br#"`, and
+    /// the `r` of `cr"`). Returns the hash count if it does.
+    ///
+    /// The prefix counts only at the start of a token, as [`cpp_raw_string_start`]'s does: an
+    /// `r` or `b` preceded by an identifier character is the tail of a longer identifier
+    /// (`iter"a\"{"`, an identifier then a plain string), except the `r` of a `cr` that itself
+    /// starts a token. O(h) for the h hashes.
     fn try_rust_raw_string(&self, chars: &[char], i: usize) -> Option<u32> {
+        // MAGI FIX (B2a A1): the prefix was matched inside a longer identifier, so the plain
+        // string after `iter` read as raw, closed on its escaped quote, and its brace counted.
+        let word_char = |k: usize| is_js_word_char(char_at(chars, k));
+        if i > 0
+            && word_char(i - 1)
+            && !(char_at(chars, i) == 'r'
+                && char_at(chars, i - 1) == 'c'
+                && (i < 2 || !word_char(i - 2)))
+        {
+            return None;
+        }
         let len = chars.len();
         let mut pos = i;
 
