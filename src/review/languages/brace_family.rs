@@ -1619,7 +1619,7 @@ impl SearchBudget {
 /// number of lines (rustfmt's `fn f(\n    a: u8,\n) -> u8 {`) finds its brace.
 ///
 /// The search ends without a brace when line `i` already ends the declaration (its code ends in
-/// `;`), and before the first later line that is blank, is code ending in `;` (a statement: the
+/// `;`) or is a one-line construct (its code ends in `}`), and before the first later line that is blank, is code ending in `;` (a statement: the
 /// declaration had no block; a comment ending in `;` does not count), opens a statement with a
 /// keyword of [`STATEMENT_KEYWORDS`] (`if (x) {`: a signature's brace is never there), or where
 /// `stops` holds (the next construct's start) while no parenthesis opened since line `i` is
@@ -1669,7 +1669,10 @@ fn open_brace_line(
     if opens(i) {
         return Some(i);
     }
-    if ends_statement(i) {
+    // A line whose code ends in `}` after opening nothing net (`fn f() -> u8 { 1 }`) is a
+    // one-line construct: searching on took the brace of the block after it.
+    let ends_block = |idx: usize| is_code(idx) && scanned.get(idx).is_some_and(|s| s.ends_block);
+    if ends_statement(i) || ends_block(i) {
         return None;
     }
     // MAGI FIX (S6 loop 3): no fixed two-line cap; the declaration's own end bounds the search.
