@@ -678,6 +678,26 @@ mod tests {
     }
 
     #[test]
+    fn the_combined_diff_error_reads_as_one_sentence_without_a_run_of_spaces() {
+        // [MAGI S6 loop 16, B1-3] the message held a run of spaces in mid-sentence.
+        let files = vec![ReviewFile {
+            path: "m.rs".into(),
+            diff: Some("@@@ -1,2 -1,2 +1,3 @@@\n  a\n +b\n- c\n".into()),
+        }];
+        let src = MapSource::new(&[("m.rs", "a\nb\n")], &[]);
+        match plan_batches(&files, &src, &LanguageRegistry::new(), 1_000) {
+            Err(ReviewError::Git(msg)) => {
+                assert!(
+                    msg.ends_with(": review the merge against one parent"),
+                    "{msg}"
+                );
+                assert!(!msg.contains("  "), "{msg}");
+            }
+            other => panic!("expected a Git error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_hunk_side_starting_at_line_zero_with_lines_is_a_malformed_header() {
         // [MAGI S6 loop 16, B1-2] `@@ -0,1 +0,1 @@` gave the range (0, 0), so line 0 was recorded
         // as reviewed and a finding on it could pass RV09. Line numbers start at 1; only an
