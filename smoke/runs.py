@@ -34,6 +34,7 @@ import os
 import pathlib
 import shutil
 import stat
+import string
 import subprocess
 import sys
 import threading
@@ -875,6 +876,35 @@ def verify_visible(workspace, paths) -> None:
             "it from the product too" % (", ".join(hidden), workspace))
 
 
+#: Upper-case ASCII letters to their lower-case forms, and nothing else.
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+#: What the product trims off the end of a path component before comparing.
+TRIMMED_TRAILING = ". "
+
+
+def same_product_name(component: str, name: str) -> bool:
+    """Whether *component* names *name* under the product's spelling rule.
+
+    The product (``is_never_reviewed`` in ``src/review/source.rs``) trims
+    trailing ``.`` and `` `` and compares ASCII-case-insensitively, as Windows
+    resolves ``.MAGI`` and ``.magi.`` to ``.magi``. Only ASCII letters fold:
+    ``str.lower`` would also fold letters such as the Kelvin sign.
+
+    Args:
+        component: One path component, as listed.
+        name: The lower-case name it is compared with.
+
+    Returns:
+        bool: ``True`` when the two name the same entry for the product.
+
+    Example:
+        >>> same_product_name(".MAGI.", ".magi"), same_product_name(".magic", ".magi")
+        (True, False)
+    """
+    return component.rstrip(TRIMMED_TRAILING).translate(_ASCII_LOWER) == name
+
+
 def protected_candidates(workspace) -> tuple[str, ...]:
     """The ``.magi/`` paths git lists in *workspace*, as the product would see them.
 
@@ -882,16 +912,19 @@ def protected_candidates(workspace) -> tuple[str, ...]:
         workspace: The review workspace (a git repository of its own).
 
     Returns:
-        tuple[str, ...]: The listed paths under ``.magi/``, sorted.
+        tuple[str, ...]: The listed paths whose first component is ``.magi``
+        as the product spells it (:func:`same_product_name`), sorted.
 
     Raises:
         HarnessError: If git fails.
     """
     # MAGI FIX (S6 loop 9): S51 passed vacuously when an ignore rule hid
     # .magi/ from git and so from the product (F1a-c1, F1a-m2).
-    prefix = LOG_DIR_PARTS[0] + "/"
+    # MAGI FIX (S6 loop 16): only an exact lowercase ".magi/" counted, while the
+    # product folds ASCII case and trims trailing dots and spaces (F1a1-caspar).
     return tuple(sorted(path for path in visible_paths(workspace)
-                        if path.startswith(prefix)))
+                        if same_product_name(path.split("/", 1)[0],
+                                             LOG_DIR_PARTS[0])))
 
 
 #: The reparse tag of a Windows junction (``IO_REPARSE_TAG_MOUNT_POINT``).
@@ -1129,6 +1162,9 @@ def _name_under(root, path) -> str:
 def _skip_top_level_logs(magi_dir):
     """A ``copytree`` filter that leaves out the ``logs`` directory of *magi_dir*.
 
+    The name is matched as the product spells it (:func:`same_product_name`),
+    so ``Logs`` or ``logs.`` is left out too.
+
     The review workspace is built from the environment's ``.magi``, whose
     ``logs/`` holds what earlier runs wrote. Leaving it out makes the log a
     review run captures exactly what that run wrote.
@@ -1144,7 +1180,11 @@ def _skip_top_level_logs(magi_dir):
     def ignore(directory, names):
         if os.path.normcase(os.path.abspath(directory)) != top:
             return set()
-        return {name for name in names if name == LOG_DIR_PARTS[1]}
+        # MAGI FIX (S6 loop 16): an existing "Logs" is the product's log
+        # directory on a case-insensitive file system, yet was copied as stale
+        # history (F1a1-caspar).
+        return {name for name in names
+                if same_product_name(name, LOG_DIR_PARTS[1])}
 
     return ignore
 
