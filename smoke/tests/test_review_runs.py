@@ -3,6 +3,7 @@
 # Date: 2026-10-25
 """Unit tests for the code-review runs R12-R16 and the files they write."""
 
+import io
 import os
 import pathlib
 import shutil
@@ -261,7 +262,7 @@ class ReviewWorkspaceTests(unittest.TestCase):
             logs_dir.mkdir(parents=True)
             (logs_dir / "magi-locked.log").write_bytes(b"x")
             unreadable = []
-            with mock.patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError("locked")):
+            with mock.patch.object(pathlib.Path, "open", side_effect=PermissionError("locked")):
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((), captured)
             self.assertEqual(1, len(unreadable))
@@ -573,7 +574,7 @@ class ReviewLogCaptureTests(unittest.TestCase):
             self.assertEqual(["sub/linked (%s)" % runs.LINK_NOT_FOLLOWED], unreadable)
             (nested / "magi-locked.log").write_bytes(b"x")
             unreadable = []
-            with mock.patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError("locked")):
+            with mock.patch.object(pathlib.Path, "open", side_effect=PermissionError("locked")):
                 executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertIn("sub/magi-locked.log (locked)", unreadable)
 
@@ -680,8 +681,8 @@ class ReviewLogBoundTests(unittest.TestCase):
             (logs_dir / "b.log").write_bytes(b"12345")
             unreadable = []
             with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
-                    mock.patch.object(pathlib.Path, "read_bytes", autospec=True,
-                                      side_effect=pathlib.Path.read_bytes) as read:
+                    mock.patch.object(pathlib.Path, "open", autospec=True,
+                                      side_effect=pathlib.Path.open) as read:
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((b"1234",), captured)
             self.assertEqual(["a.log"], [call.args[0].name for call in read.call_args_list])
@@ -711,11 +712,70 @@ class ReviewLogBoundTests(unittest.TestCase):
             (logs_dir / "a.log").write_bytes(b"12")
             unreadable = []
             with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
-                    mock.patch.object(pathlib.Path, "read_bytes", return_value=b"123456"):
+                    mock.patch.object(pathlib.Path, "open", return_value=io.BytesIO(b"123456")):
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((), captured)
             self.assertEqual(1, len(unreadable))
             self.assertTrue(unreadable[0].startswith("a.log ("))
+
+    def _read_growing(self, spent_before: int) -> tuple:
+        """Read one file whose size reads as 1 byte but which keeps growing, with a 4-byte file cap.
+
+        A file that grew after its size was read, or one a detached writer keeps extending, must be
+        read no further than the cap allows: the bytes the double hands out are counted.
+
+        Returns:
+            tuple: What was kept, what was refused, and how many bytes the double handed out.
+        """
+        class GrowingFile:
+            """A file that has more bytes than any read asks for."""
+
+            def __init__(self) -> None:
+                self.handed_out = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, size: int = -1) -> bytes:
+                size = 1 << 20 if size is None or size < 0 else size
+                self.handed_out += size
+                return b"x" * size
+
+        growing = GrowingFile()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "a.log"
+            path.write_bytes(b"x")
+            refused = []
+            filler = [pathlib.Path(tmp) / "filler.log"] if spent_before else []
+            for item in filler:
+                item.write_bytes(b"y" * spent_before)
+            real_open = pathlib.Path.open
+
+            def open_(self, *args, **kwargs):
+                return growing if self == path else real_open(self, *args, **kwargs)
+
+            with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
+                    mock.patch.object(runs, "MAX_REVIEW_LOG_TOTAL_BYTES", 6), \
+                    mock.patch.object(pathlib.Path, "open", open_):
+                kept = runs._read_bounded(tmp, filler + [path], refused)
+        return kept, refused, growing.handed_out
+
+    def test_a_file_that_keeps_growing_is_read_no_further_than_the_file_cap(self) -> None:
+        # [MAGI §6 MS2 loop 17, F1a1-caspar/melchior/balthasar] the cap was checked against stat() and the
+        # file then read whole, so a file that grew in between was held in memory unbounded.
+        kept, refused, handed_out = self._read_growing(spent_before=0)
+        self.assertEqual([], kept)
+        self.assertEqual(["a.log (%s)" % (runs.OVER_FILE_CAP % 4)], refused)
+        self.assertLessEqual(handed_out, 4 + 1)
+
+    def test_a_file_that_keeps_growing_is_read_no_further_than_the_total_left(self) -> None:
+        kept, refused, handed_out = self._read_growing(spent_before=4)
+        self.assertEqual([b"yyyy"], kept)
+        self.assertEqual(["a.log (%s)" % (runs.OVER_TOTAL_CAP % 6)], refused)
+        self.assertLessEqual(handed_out, 2 + 1)
 
     def test_the_caps_are_positive_and_the_total_holds_one_whole_file(self) -> None:
         self.assertGreater(runs.MAX_REVIEW_LOG_FILE_BYTES, 0)
