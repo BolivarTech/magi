@@ -149,8 +149,10 @@ impl LexicalIndex {
 
     /// Whether a citation names a file (`consts.rs`, `conf.toml`, `src/a.rs`) rather than a symbol.
     ///
-    /// A citation joined by `::` is a symbol path, never a file name. Otherwise it names a file
-    /// when its extension (the text after the last `.`) is the extension of a file given to
+    /// A citation joined by `::` is a symbol path, never a file name. A citation whose last path
+    /// component is the name of a file given to `build` is a file name, with or without an
+    /// extension (`Makefile`, `docker/Dockerfile` when that file was reviewed). Otherwise it names
+    /// a file when its extension (the text after the last `.`) is the extension of a file given to
     /// `build`, of the registry or of `KNOWN_FILE_EXTENSIONS`, and it is plausibly a file:
     ///
     /// * it has the form of a path (holds `/` or `\`), or
@@ -171,10 +173,16 @@ impl LexicalIndex {
     ///
     /// `true` when the citation is read as a file name. O(len of `citation`).
     pub fn is_file_name(&self, citation: &str) -> bool {
+        if citation.contains(PATH_SEPARATOR) {
+            return false;
+        }
+        // MAGI FIX (S6 loop 16): a reviewed name without an extension (`Makefile`,
+        // `docker/Dockerfile`) is a file; the extension guard below rejected it first.
+        if self.file_names.contains(base_name(citation)) {
+            return true;
+        }
         // MAGI FIX (S6 loop 3): a field access on a receiver (`self.c`) is a symbol, not a file.
-        if citation.contains(PATH_SEPARATOR)
-            || !extension_of(citation).is_some_and(|ext| self.file_extensions.contains(&ext))
-        {
+        if !extension_of(citation).is_some_and(|ext| self.file_extensions.contains(&ext)) {
             return false;
         }
         let is_path = citation.contains(['/', '\\']);
