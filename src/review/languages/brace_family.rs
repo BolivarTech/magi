@@ -4113,4 +4113,23 @@ void g(void) {
         let ranges: Vec<(u32, u32)> = units.iter().map(|u| (u.start_line, u.end_line)).collect();
         assert_eq!(ranges, vec![(1, 3)], "{:?}", spans(&units));
     }
+
+    #[test]
+    fn a_keyword_alone_on_its_line_with_no_brace_after_it_takes_no_later_construct() {
+        // [MAGI S6 loop 14, B2b1] the bound of the bare-keyword rule: with no brace before a
+        // blank line or the next construct, the keyword's line is a unit of its own.
+        let c = "struct\n\nint f(void) {\n}\nunion\nint g(void) {\n}\n";
+        let units = extract(&c_extractor(), c, &every_line(c));
+        assert_each_line_in_one_unit(&units, 7);
+        let ranges: Vec<(u32, u32)> = units.iter().map(|u| (u.start_line, u.end_line)).collect();
+        assert_eq!(
+            ranges,
+            vec![(1, 1), (3, 4), (5, 5), (6, 7), (2, 2)],
+            "{:?}",
+            spans(&units)
+        );
+        let rust = "impl";
+        let units = extract(&rust_extractor(), rust, &[1]);
+        assert_eq!(spans(&units), vec![("unnamed", UnitKind::Impl, 1, 1)]);
+    }
 }
