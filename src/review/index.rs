@@ -328,6 +328,33 @@ mod tests {
     }
 
     #[test]
+    fn an_extensionless_reviewed_file_name_is_a_file_name_bare_or_with_a_directory() {
+        // [MAGI S6 loop 16, B1-1] the extension guard ran before the reviewed names, so a
+        // reviewed `Makefile` or `docker/Dockerfile`, cited in a finding, was checked as a
+        // symbol and RV09 could discard the finding as naming an unknown one.
+        let i = LexicalIndex::build(
+            &[
+                ("Makefile".to_string(), "all:\n\tcc a.c\n".to_string()),
+                ("docker/Dockerfile".to_string(), "FROM x\n".to_string()),
+            ],
+            &LanguageRegistry::new(),
+        );
+        for file in [
+            "Makefile",
+            "Dockerfile",
+            "dir/Makefile",
+            "docker/Dockerfile",
+            "docker\\Dockerfile",
+        ] {
+            assert!(i.is_file_name(file), "{file}");
+        }
+        assert!(
+            !i.is_file_name("Rakefile") && !i.is_file_name("Makefile::build"),
+            "an unreviewed extensionless name and a symbol path stay symbols"
+        );
+    }
+
+    #[test]
     fn file_extensions_are_matched_without_regard_to_ascii_case() {
         // [MAGI S6 loop 5, B1-c4] a reviewed file's extension was kept as written and a
         // citation's compared as written, so `notes.zzz` was no file name after `FOO.ZZZ` was
