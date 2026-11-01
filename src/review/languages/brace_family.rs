@@ -718,8 +718,10 @@ impl BraceFamilyExtractor {
     /// The members of a grouped type declaration at line `i` (Go's `type (` ... `)`) and the
     /// group's last line (0-based, its `)`), or `None` when line `i` opens none. Each member is a
     /// construct with its doc comments: a struct, an interface (as a trait) or a defined type or
-    /// alias (as a struct, as a lone `type ID int` is), named by its first word and ending at
-    /// its closing brace, or on its own line when it opens none. The `type (` and `)` lines
+    /// alias (as a struct, as a lone `type ID int` is), named by its first word and ending on the
+    /// line that closes the parentheses and brackets it opens (a wrapped `func(` type), then at
+    /// the closing brace of a block that line opens, or on its own line when it opens neither,
+    /// never past the group's last member line. The `type (` and `)` lines
     /// belong to no member, so they fall into gap units. O(k) for the k lines of the group.
     ///
     /// The group's end is found by counting parentheses in code context ([`code_group_delta`]),
@@ -772,12 +774,20 @@ impl BraceFamilyExtractor {
             // inside them took O(n²) visits; it stays inside the group and spends the budget. A
             // member not closed there, or whose search the budget cut, runs to the group's end,
             // so no line of the group is lost.
-            let end = if scanned.get(j).is_some_and(|s| s.brace_delta > 0) {
-                find_closing_brace_within(scanned, j, body_end, || search.spend())
+            // MAGI FIX (B2b1 7): a member ended on its first line unless that line opened a
+            // brace, so a wrapped `func(` type or type parameter list (`List[`) gave each later
+            // line a member of its own. The member first runs to the line closing the
+            // parentheses and brackets it opens ([`group_end`]), kept inside the group, then to
+            // the closing brace of a block that line opens.
+            let open = group_end(lines, scanned, j, search)
+                .min(body_end.saturating_sub(1))
+                .max(j);
+            let end = if scanned.get(open).is_some_and(|s| s.brace_delta > 0) {
+                find_closing_brace_within(scanned, open, body_end, || search.spend())
                     .unwrap_or(body_end.saturating_sub(1))
-                    .max(j)
+                    .max(open)
             } else {
-                j
+                open
             };
             let start = self.scan_back_for_docs(lines, scanned, j, floor);
             let member = line_number(start)
