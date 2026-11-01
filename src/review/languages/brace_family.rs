@@ -1814,8 +1814,9 @@ fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 
-/// The identifier just before the first `(` of `line` (`int *parse(` gives `parse`,
-/// `public static <T> List<T> wrap(` gives `wrap`).
+/// The identifier just before the `(` that opens the parameter list of `line`
+/// ([`parameter_list_prefix`]; `int *parse(` gives `parse`, `public static <T> List<T> wrap(`
+/// gives `wrap`, `decltype(auto) f(` gives `f`).
 ///
 /// # Arguments
 ///
@@ -1827,7 +1828,9 @@ fn is_identifier_char(c: char) -> bool {
 /// `None` when the line has no `(`, holds `=` before it (an assignment or initializer), or no
 /// identifier ends right before it. O(n) in the line.
 fn identifier_before_paren(line: &str) -> Option<String> {
-    let (before, _) = line.split_once('(')?;
+    // MAGI FIX (S6 loop 15): `decltype(auto) f() {` was named `decltype`, its operand's `(`
+    // being taken for the parameter list; the list's own `(` is looked for instead.
+    let before = parameter_list_prefix(line)?;
     // MAGI FIX (S6 loop 9): `Foo& operator=(` held an `=` before its `(` and named nothing.
     if let Some(name) = operator_name(before) {
         return Some(name);
@@ -1836,16 +1839,55 @@ fn identifier_before_paren(line: &str) -> Option<String> {
         return None;
     }
     // MAGI FIX (S6 loop 6): `$get() {` named no member, so a class could not split there.
-    let name: String = before
-        .trim_end()
-        .chars()
+    Some(trailing_identifier(before))
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
+/// The words of a C++ return type whose operand is parenthesized (`decltype(auto)`,
+/// `decltype(a + b)`): the `(` right after one opens no parameter list.
+const TYPE_OPERATORS: [&str; 1] = ["decltype"];
+
+/// The text of `line` before the `(` that opens its parameter list: its first `(`, except that
+/// a `(` right after a word of [`TYPE_OPERATORS`] is that word's operand and is read past up to
+/// its matching `)` (`decltype(auto) f(` gives `decltype(auto) f`). An operand that never closes
+/// on the line leaves its `(` as the list's, so the line is named by the type word, which
+/// [`NOT_FUNCTION_NAMES`] rules out. O(n) in the line.
+///
+/// # Arguments
+///
+/// * `line` - A signature line.
+///
+/// # Returns
+///
+/// The text before the parameter list's `(`, or `None` when the line holds no such `(`.
+fn parameter_list_prefix(line: &str) -> Option<&str> {
+    let mut from = 0;
+    loop {
+        let at = from + line.get(from..)?.find('(')?;
+        let before = line.get(..at)?;
+        if !TYPE_OPERATORS.contains(&trailing_identifier(before)) {
+            return Some(before);
+        }
+        let Some(end) = line.get(at..).and_then(|t| balanced_end(t, '(', ')')) else {
+            return Some(before);
+        };
+        from = at + end;
+    }
+}
+
+/// The identifier `text` ends with, blanks at its end passed over (`int *parse ` gives
+/// `parse`); empty when it ends in no identifier character ([`is_identifier_char`]). O(n) in the
+/// text.
+fn trailing_identifier(text: &str) -> &str {
+    let text = text.trim_end();
+    let start = text
+        .char_indices()
         .rev()
-        .take_while(|&c| is_identifier_char(c))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    Some(name).filter(|n| !n.is_empty())
+        .take_while(|&(_, c)| is_identifier_char(c))
+        .last()
+        .map_or(text.len(), |(at, _)| at);
+    text.get(start..).unwrap_or("")
 }
 
 /// The characters a C++ overloaded operator's symbol is made of (`=`, `==`, `<<=`, `[]`).
