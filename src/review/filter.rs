@@ -368,18 +368,19 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2], diff: Option<&str>) ->
     if sides.iter().flatten().any(|side| side.contains(&0)) {
         return Some(Verdict::Skip(SkipCause::Binary));
     }
-    if sides
-        .iter()
-        .flatten()
-        .any(|side| std::str::from_utf8(side).is_err())
-    {
-        return Some(Verdict::Skip(SkipCause::NotUtf8));
+    // MAGI FIX (S6 loop 16, A2-5): each side is decoded once and scanned as the `&str` it is;
+    // a lossy decode of text already validated was a second UTF-8 pass per side.
+    let mut faces: Vec<&str> = Vec::with_capacity(sides.len() + 1);
+    for side in sides.into_iter().flatten() {
+        match std::str::from_utf8(side) {
+            Ok(text) => faces.push(text),
+            Err(_) => return Some(Verdict::Skip(SkipCause::NotUtf8)),
+        }
     }
-    let [new, old] = sides;
-    [new, old, diff.map(str::as_bytes)]
+    faces.extend(diff);
+    faces
         .into_iter()
-        .flatten()
-        .find_map(|face| find_secret(&String::from_utf8_lossy(face)))
+        .find_map(find_secret)
         .map(|name| secret(path, name))
 }
 
