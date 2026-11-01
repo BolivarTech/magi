@@ -4386,4 +4386,22 @@ void g(void) {
         assert_eq!(spans(&cpp), spans(&c));
         assert_each_line_in_one_unit(&cpp, 25);
     }
+
+    #[test]
+    fn a_c_identifier_spelled_like_a_cpp_keyword_loses_no_line_in_a_header() {
+        // [MAGI S6 loop 14, B2b1] the declared cost of reading `.h` with the C++ rules: a C
+        // identifier that opens a line as a C++ keyword does reads as a one-line construct, and
+        // every line still lands in exactly one unit.
+        let code = "int f(void) {\n    return 0;\n}\nclass = 1;\nnamespace = 2;\nint g(void) {\n    return 1;\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &every_line(code));
+        assert_each_line_in_one_unit(&units, 8);
+        let ranges: Vec<(u32, u32)> = units.iter().map(|u| (u.start_line, u.end_line)).collect();
+        assert_eq!(
+            ranges,
+            vec![(1, 3), (4, 4), (5, 5), (6, 8)],
+            "{:?}",
+            spans(&units)
+        );
+        assert_eq!(units[1].kind, UnitKind::Class, "{:?}", spans(&units));
+    }
 }
