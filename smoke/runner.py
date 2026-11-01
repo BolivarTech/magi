@@ -35,7 +35,7 @@ _GIT_TIMEOUT_S = 60
 _TRANSLATED_FAILURE = "the product's output could not be interpreted"
 _BACKEND_UNREACHABLE = "the backend was not reachable"
 _RUN_TIMED_OUT = "the shared run did not finish inside its timeout"
-_RUN_REACHED_A_MODEL = "the shared run reached no model endpoint"
+_RUN_REACHED_A_MODEL = "the shared run reached a model endpoint"
 
 
 @dataclasses.dataclass(frozen=True)
