@@ -4288,6 +4288,36 @@ void g(void) {
         assert_each_line_in_one_unit(&units, total);
     }
 
+    #[test]
+    fn a_wrapped_signature_spends_its_brace_search_once() {
+        // [MAGI S6 loop 15, B2b1] The signature path searched for the brace to know whether one
+        // opened, then searched again to find the block's end, so every wrapped signature spent
+        // its header's visits twice and a file reached the budget's degradation sooner.
+        let code = "int f(\n    int a,\n    int b)\n{\n    x();\n}\n";
+        let ext = c_extractor();
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(code);
+        let one_search = SearchBudget::for_lines(lines.len());
+        let stops = |j: usize| ext.starts_construct(&lines, &scanned, j, false);
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &one_search,
+        };
+        assert_eq!(open_brace_line(&lines, &scanned, 0, &search), Some(3));
+        let pass = SearchBudget::for_lines(lines.len());
+        let constructs = ext
+            .try_detect_constructs(&lines, &scanned, false, &pass)
+            .expect("small line numbers");
+        assert_eq!(
+            constructs
+                .iter()
+                .map(|c| (c.name.as_str(), c.start_line, c.end_line))
+                .collect::<Vec<_>>(),
+            vec![("f", 1, 6)]
+        );
+        assert_eq!(pass.spent(), one_search.spent());
+    }
+
     /// Every line number of `code`, 1-based.
     fn every_line(code: &str) -> Vec<u32> {
         (1..=u32::try_from(code.lines().count()).expect("small")).collect()
