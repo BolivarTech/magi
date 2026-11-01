@@ -89,8 +89,8 @@ const PEM_MAX_TYPE_WORD: usize = 16;
 /// ENCRYPTED`, `RSA ENCRYPTED`), so a header is checked in constant time.
 const PEM_MAX_TYPE_WORDS: usize = 4;
 /// The header of an encrypted SSH2 private key (RFC 4716 armor: four dashes and spaces; split
-/// so the source holds no such header). Its `END` line has the same armor, so its mask runs to
-/// the end of the text: the safe direction.
+/// so the source holds no such header). Its `END` line has the same armor ([`SSH2_ARMOR_END`]);
+/// with none, its mask runs to the end of the text: the safe direction.
 const SSH2_PRIVATE_KEY: &str = concat!("---- BEGIN SSH2 ", "ENCRYPTED PRIVATE KEY ----");
 /// The header of an unencrypted SSH2 private key (the ssh.com/Tectia armor of
 /// [`SSH2_PRIVATE_KEY`] without `ENCRYPTED`), masked the same way.
@@ -104,6 +104,10 @@ const PGP_PRIVATE_KEY: &str = concat!("-----", "BEGIN PGP PRIVATE KEY BLOCK-----
 const ARMOR_END: &str = concat!("-----", "END ");
 /// The dashes that close an armor line.
 const ARMOR_DASHES: &str = "-----";
+/// The opening of the `END` line of an SSH2 (RFC 4716) block: four dashes and a space.
+const SSH2_ARMOR_END: &str = "---- END ";
+/// The dashes that close an SSH2 armor line.
+const SSH2_ARMOR_DASHES: &str = "----";
 /// What opens the mark that replaces a masked secret: `<redacted: <pattern name>>`.
 const REDACTED_OPEN: &str = "<redacted: ";
 /// The words of the AWS secret access key's name, in order, each with whether it may be left
@@ -364,7 +368,7 @@ impl Matcher {
             }),
             Self::Header(header) => text
                 .find(header)
-                .map(|at| at..armor_end(text, at + header.len())),
+                .map(|at| at..header_block_end(text, at + header.len(), header)),
             Self::AwsSecretKey => {
                 (0..bytes.len()).find_map(|at| aws_secret_end(bytes, at).map(|end| at..end))
             }
@@ -549,11 +553,30 @@ fn tail_end(bytes: &[u8], at: usize, tail: Tail) -> usize {
 /// The end of an armored block whose header ends at `from`: past the `-----` that closes its
 /// `END` line, or the end of the text when the block has no `END` line.
 fn armor_end(text: &str, from: usize) -> usize {
+    armor_end_with(text, from, ARMOR_END, ARMOR_DASHES)
+}
+
+/// The end of the block a [`Matcher::Header`] opens, its header ending at `from`: an OpenPGP
+/// block (five dashes) ends as [`armor_end`] reads it, an SSH2 block (four dashes and a space,
+/// RFC 4716) at its own `---- END … ----` line. O(n).
+// MAGI FIX (S6 loop 14, A2-3): an SSH2 block was searched for a five-dash end it never has, so
+// its mask ran to the end of the text and the content after the key was lost.
+fn header_block_end(text: &str, from: usize, header: &str) -> usize {
+    if header.starts_with(ARMOR_DASHES) {
+        armor_end(text, from)
+    } else {
+        armor_end_with(text, from, SSH2_ARMOR_END, SSH2_ARMOR_DASHES)
+    }
+}
+
+/// The end of an armored block whose header ends at `from`: past the `close` dashes that end
+/// its line opening with `end`, or the end of the text when there is no such line. O(n).
+fn armor_end_with(text: &str, from: usize, end: &str, close: &str) -> usize {
     text.get(from..)
         .and_then(|rest| {
-            let end = rest.find(ARMOR_END)? + ARMOR_END.len();
-            let close = rest.get(end..)?.find(ARMOR_DASHES)? + ARMOR_DASHES.len();
-            Some(from + end + close)
+            let end_at = rest.find(end)? + end.len();
+            let close_at = rest.get(end_at..)?.find(close)? + close.len();
+            Some(from + end_at + close_at)
         })
         .unwrap_or(text.len())
 }
