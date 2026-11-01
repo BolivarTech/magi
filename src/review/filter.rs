@@ -286,7 +286,13 @@ fn classify(
     {
         return Ok(Verdict::Skip(SkipCause::Ignored));
     }
-    if let Some(name) = find_secret(path) {
+    // MAGI FIX (S6 loop 15, A2-4): the old path too, as for the name rule above: a rename's
+    // key-shaped old path was read and cached under that name before the diff scan left it out.
+    if let Some(name) = [Some(path), old_path.as_deref()]
+        .into_iter()
+        .flatten()
+        .find_map(find_secret)
+    {
         return Ok(secret(path, name));
     }
     if file.diff.as_deref().is_some_and(is_binary_section) {
