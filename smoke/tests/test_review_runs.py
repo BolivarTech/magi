@@ -721,6 +721,32 @@ class ReviewLogBoundTests(unittest.TestCase):
         self.assertGreater(runs.MAX_REVIEW_LOG_FILE_BYTES, 0)
         self.assertGreaterEqual(runs.MAX_REVIEW_LOG_TOTAL_BYTES, runs.MAX_REVIEW_LOG_FILE_BYTES)
 
+    def test_a_non_regular_entry_under_the_log_directory_is_named_not_read(self) -> None:
+        # A fifo, socket or device file is neither a directory nor a regular file. Windows makes none
+        # without a privilege, so the entry is a double; the real file next to it is captured as usual.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = self._logs_dir(root)
+            (logs_dir / "magi-run.log").write_bytes(b"this run's log")
+            fifo = types.SimpleNamespace(
+                path=str(logs_dir / "pipe"), name="pipe",
+                is_dir=lambda follow_symlinks=True: False,
+                is_file=lambda follow_symlinks=True: False)
+            real_scandir = os.scandir
+
+            def scandir(path):
+                entries = list(real_scandir(path))
+                if pathlib.Path(path) == logs_dir:
+                    entries.append(fifo)
+                return iter(entries)
+
+            unreadable = []
+            with mock.patch.object(runs.os, "scandir", side_effect=scandir):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((b"this run's log",), captured)
+            self.assertEqual(["pipe (%s)" % runs.NOT_A_REGULAR_FILE], unreadable)
+
 
 if __name__ == "__main__":
     unittest.main()
