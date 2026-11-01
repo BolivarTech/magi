@@ -519,6 +519,25 @@ class ReviewLogCaptureTests(unittest.TestCase):
             self.assertEqual(1, len(unreadable))
             self.assertIn("linked", unreadable[0])
 
+    def test_a_log_directory_that_is_itself_a_link_is_never_read_through(self) -> None:
+        # [MAGI §6 MS2 loop 15, F1a1-m1] the walk tests every entry under .magi/logs but not the top: os.scandir
+        # follows a symlinked or junction .magi/logs, so the harness read what it points at into the result.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "elsewhere.log").write_bytes(b"not this run's log")
+            magi = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi"
+            magi.mkdir(parents=True)
+            _make_directory_link(outside, magi / "logs")
+            unreadable = []
+            captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((), captured)
+            self.assertEqual(1, len(unreadable))
+            self.assertIn("logs", unreadable[0])
+            self.assertIn(runs.LINK_NOT_FOLLOWED, unreadable[0])
+
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_review_run_without_a_log_directory_carries_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
