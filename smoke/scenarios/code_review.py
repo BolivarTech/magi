@@ -111,6 +111,15 @@ NOTHING_TO_REVIEW_TEXT = "nothing to review"
 #: The directories a review never takes, whatever input names them (RV22).
 PROTECTED_DIRS = (".magi", ".git")
 
+#: The name prefix of the encrypted store and its ``-wal``/``-shm`` files,
+#: which a review never takes either (``NEVER_REVIEWED`` in
+#: ``src/review/source.rs``, pinned by ``smoke/tests/test_rust_sync.py``).
+MEMORY_DB_PREFIX = ".magi-rs-memory.db"
+
+#: What Windows drops from the end of a path component, so ``.git.`` and
+#: ``.git `` name ``.git``; the product trims them before it compares.
+TRAILING_COMPONENT_CHARS = ". "
+
 #: The cause the product gives a protected path it leaves out without reading
 #: it. Any other cause (``binary``, ``secret``, ``not utf-8``) means the file
 #: was opened and classified by its content.
@@ -911,22 +920,34 @@ def _run_log_finding(run, match):
 
 
 def _is_protected(path):
-    """Whether *path* has a ``.magi`` or ``.git`` component.
+    """Whether *path* is one the product never reviews (``is_never_reviewed``).
+
+    Components split on ``/`` and ``\\``, lose trailing dots and spaces, and
+    compare ASCII-case-insensitively, as the product's do.
 
     Args:
         path: A path as the product printed it.
 
     Returns:
-        bool: ``True`` when a ``/``- or ``\\``-separated component is one of
-        :data:`PROTECTED_DIRS`.
+        bool: ``True`` when a component is one of :data:`PROTECTED_DIRS` or
+        starts with :data:`MEMORY_DB_PREFIX`.
 
     Example:
         >>> _is_protected(".magi/magi.toml"), _is_protected("sub/.git/config")
         (True, True)
+        >>> _is_protected(".magi-rs-memory.db-wal"), _is_protected(".GIT./x")
+        (True, True)
         >>> _is_protected("my.magi/x")
         False
     """
-    return any(part in PROTECTED_DIRS for part in re.split(r"[/\\]", path))
+    # MAGI FIX (S6 loop 14): the memory database prefix, and the case and
+    # trailing dots the product folds, were missing, so such a path read for
+    # its content passed (F1a2-m2).
+    for part in re.split(r"[/\\]", path):
+        name = part.rstrip(TRAILING_COMPONENT_CHARS).lower()
+        if name in PROTECTED_DIRS or name.startswith(MEMORY_DB_PREFIX):
+            return True
+    return False
 
 
 def _omissions(stderr):
