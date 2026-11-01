@@ -1515,4 +1515,25 @@ mod tests {
             assert_eq!(find_secret(plain), None, "{plain}");
         }
     }
+
+    #[test]
+    fn a_url_credential_is_found_whatever_follows_its_at_sign() {
+        // [MAGI S6 loop 14, A2-1, security review] only the run's last `@` was tried, so a later
+        // `@` with no host after it (`'@'`) or past the userinfo cap (a minified line) hid a real
+        // credential before it, and its file was sent.
+        let far = "x".repeat(MAX_URL_USERINFO + MAX_URL_HOST_PEEK);
+        for secret in [
+            "f('postgres://u:pw@db','@')".to_string(),
+            "f('postgres://u:pw@db','a@')".to_string(),
+            format!("var a='postgres://u:pw@db',b='{far}@x';"),
+            format!("postgres://u:pw@db,{far}"),
+        ] {
+            assert_eq!(find_secret(&secret), Some("url-credential"), "{secret}");
+            let masked = mask_secrets(&secret);
+            assert!(!masked.contains("u:pw@"), "{masked}");
+        }
+        // An unencoded `@` in the password still masks the whole userinfo.
+        let masked = mask_secrets("postgres://u:pw@pw@db");
+        assert_eq!(masked, "postgres://<redacted: url-credential>db");
+    }
 }
