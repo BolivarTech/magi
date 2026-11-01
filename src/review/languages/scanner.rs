@@ -249,6 +249,10 @@ pub struct ScannedLine {
     /// The lowest running net brace count reached within the line, from 0 at its start (so
     /// never positive): `} else {` gives -1 although its `brace_delta` is 0.
     pub min_delta: i32,
+    /// Net change of the parentheses and square brackets open on this line, code context only
+    /// (`(` and `[` count +1, `)` and `]` count -1), so a delimiter inside a string, a character
+    /// literal, a regex literal or a comment does not count: `var (` gives 1, `b = ")"` gives 0.
+    pub group_delta: i32,
     /// Whether the last non-blank character the line has in code context is `;`: a comment or
     /// string after it does not count, so `int f(void) // note;` does not end a statement.
     pub ends_statement: bool,
@@ -315,6 +319,7 @@ impl CodeScanner {
         let mut i = 0;
         let mut delta: i32 = 0;
         let mut min_delta: i32 = 0;
+        let mut group_delta: i32 = 0;
         // The last non-blank character read in code context (a string counts as its quote).
         let mut last_code: Option<char> = None;
         // A line that starts inside a template expression starts inside the template literal.
@@ -477,6 +482,14 @@ impl CodeScanner {
                         } else if c == ')' && self.parens.pop() == Some(true) {
                             last_code = Some(CONDITION_END_MARK);
                         }
+                    }
+
+                    // MAGI FIX (S6 loop 17, B2-1): the extractors counted parentheses on the
+                    // line text, strings and comments included; the code ones are counted here.
+                    match c {
+                        '(' | '[' => group_delta = group_delta.saturating_add(1),
+                        ')' | ']' => group_delta = group_delta.saturating_sub(1),
+                        _ => {}
                     }
 
                     // Count braces; those of a template expression are not structure.
@@ -682,6 +695,7 @@ impl CodeScanner {
             brace_delta: delta,
             depth_after: self.depth,
             min_delta,
+            group_delta,
             ends_statement: last_code == Some(';'),
             is_non_code,
             starts_in_literal: !was_code_at_start,

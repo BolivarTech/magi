@@ -562,9 +562,15 @@ impl BraceFamilyExtractor {
 
     /// The 0-based last line of the declaration at line `j`: the end of the block its value
     /// opens ([`declaration_block`]), of a `#define` continued by `\` ([`preprocessor_end`]), of
-    /// a declaration list wrapped after a comma ([`Self::declaration_list_end`]) or of a call
-    /// its initializer opens ([`call_initializer_end`]), whichever is last; `j` itself
-    /// otherwise. O(k) for the k lines of the declaration.
+    /// a declaration list wrapped after a comma ([`Self::declaration_list_end`]), of a call
+    /// its initializer opens ([`call_initializer_end`]) or of the parentheses or brackets its line
+    /// leaves open ([`group_end`]), whichever is last; `j` itself otherwise. O(k) for the k lines
+    /// of the declaration.
+    ///
+    /// A declaration that runs to its closing delimiter is one declaration however many members
+    /// it holds (a Go `var (` group, a long array literal), so a declaration group too large for
+    /// one batch does not split inside it ([`Self::split_declaration_group`]) and ends the review
+    /// with the typed `ReviewError::TooLargeForBatch` (RV03), declared: never a silent cut.
     ///
     /// # Arguments
     ///
@@ -583,11 +589,15 @@ impl BraceFamilyExtractor {
         j: usize,
         search: &BraceSearch<'_>,
     ) -> usize {
+        // MAGI FIX (S6 loop 17, B2-1): a declaration that leaves a `(` or `[` open (Go's
+        // `var (`, an array literal over lines, a wrapped call) ended at its first line or at a
+        // brace inside it; it now runs to its matching closing delimiter.
         declaration_block(lines, scanned, j, search)
             .map_or(j, |b| b.1)
             .max(preprocessor_end(lines, j))
             .max(self.declaration_list_end(lines, scanned, j))
             .max(call_initializer_end(lines, scanned, j, search))
+            .max(group_end(lines, scanned, j, search))
     }
 
     /// The pieces of a declaration group too large for one batch: each declaration with its doc
@@ -1756,6 +1766,63 @@ fn call_initializer_end(
         }
         depth += paren_delta(lines, scanned, j);
         if depth <= 0 {
+            return j;
+        }
+    }
+    i
+}
+
+/// The 0-based line that closes the parentheses and square brackets line `i` leaves open
+/// (Go's `var (` ... `)`, `const t = [` ... `];`, `const x = make(a,` ... `c);`): the first later
+/// line where the delimiters opened since line `i` all close, counted by the scanner in code
+/// context only ([`ScannedLine::group_delta`]), so a `)` in a string or a comment closes
+/// nothing. Blank lines and comment lines inside are passed over.
+///
+/// `i` when line `i` leaves none open or is a preprocessor directive (`#define LP (` opens a
+/// parenthesis its expansion closes elsewhere), and when the walk ends without a match: at a line
+/// that closes a brace opened before line `i` (the delimiter was left open in its own scope),
+/// after [`MAX_BRACE_SEARCH_LINES`] lines, or when the pass's budget is spent ([`SearchBudget`]).
+/// The declaration then ends as it did before this rule and the lines after it fall into later
+/// units, none lost. O(k) for the k lines walked.
+///
+/// # Arguments
+///
+/// * `lines` - The text's lines.
+/// * `scanned` - The scanner's record of each line.
+/// * `i` - The 0-based line the declaration starts on.
+/// * `search` - The bounds of the forward searches ([`BraceSearch`]).
+///
+/// # Returns
+///
+/// The 0-based closing line, never before `i`.
+fn group_end(lines: &[&str], scanned: &[ScannedLine], i: usize, search: &BraceSearch<'_>) -> usize {
+    let Some(first) = scanned.get(i).filter(|s| !s.is_non_code) else {
+        return i;
+    };
+    let directive = lines
+        .get(i)
+        .is_some_and(|l| l.trim_start().starts_with('#'));
+    if first.group_delta <= 0 || directive {
+        return i;
+    }
+    let mut open = i64::from(first.group_delta);
+    // The braces opened since the start of line `i`: a line that falls below zero closes a
+    // brace of the enclosing scope.
+    let mut braces = i64::from(first.brace_delta);
+    let walk_end = i
+        .saturating_add(1)
+        .saturating_add(MAX_BRACE_SEARCH_LINES)
+        .min(scanned.len());
+    for j in (i + 1)..walk_end {
+        let Some(record) = scanned.get(j) else {
+            return i;
+        };
+        if !search.spend() || braces + i64::from(record.min_delta) < 0 {
+            return i;
+        }
+        braces += i64::from(record.brace_delta);
+        open += i64::from(record.group_delta);
+        if open <= 0 {
             return j;
         }
     }
