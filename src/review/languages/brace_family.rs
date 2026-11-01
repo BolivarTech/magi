@@ -528,7 +528,8 @@ impl BraceFamilyExtractor {
                 // the scanner says whether its code ends in `}`.
                 let one_line = scanned.get(i).is_some_and(|s| s.ends_block);
                 if opens || one_line || prototypes {
-                    let start = self.scan_back_for_docs(lines, scanned, i, floor);
+                    let head = self.return_type_start(lines, scanned, i, floor, members);
+                    let start = self.scan_back_for_docs(lines, scanned, head, floor);
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
                     let end = if opens || one_line {
@@ -549,7 +550,9 @@ impl BraceFamilyExtractor {
             // Check declaration keywords
             // MAGI FIX (S6 loop 8): `int x,` opened no declaration, so a declaration list
             // wrapped after a comma lost its first line to a gap unit.
-            if self.is_declaration(trimmed, scanned.get(i)) || self.opens_declaration_list(trimmed)
+            if self.is_declaration(trimmed, scanned.get(i))
+                || self.opens_declaration_list(trimmed)
+                || self.opens_wrapped_prototype(lines, scanned, i, &search)
             {
                 // MAGI FIX (S6 loop 5): `const f = () => {` ended on its first line and its body
                 // fell into a gap; a function expression is a function, with its whole body.
@@ -572,10 +575,10 @@ impl BraceFamilyExtractor {
                 // does, as in the main scan.
                 let joins = |j: usize| {
                     scanned.get(j).is_some_and(|s| !s.is_non_code)
-                        && lines.get(j).is_some_and(|l| {
+                        && (lines.get(j).is_some_and(|l| {
                             self.is_declaration(l.trim(), scanned.get(j))
                                 || self.opens_declaration_list(l.trim())
-                        })
+                        }) || self.opens_wrapped_prototype(lines, scanned, j, &search))
                         && self
                             .function_expression(lines, scanned, j, &search)
                             .is_none()
@@ -594,7 +597,8 @@ impl BraceFamilyExtractor {
                         break;
                     }
                 }
-                let doc_start = self.scan_back_for_docs(lines, scanned, group_start, floor);
+                let head = self.return_type_start(lines, scanned, group_start, floor, members);
+                let doc_start = self.scan_back_for_docs(lines, scanned, head, floor);
                 let name = self.declaration_group_name(self.strip_modifiers(trimmed, false));
                 constructs.push(Construct {
                     kind: UnitKind::DeclarationGroup,
@@ -1462,6 +1466,98 @@ impl BraceFamilyExtractor {
         self.signature_functions && !self.semicolon_declarations
     }
 
+    /// Whether line `j` opens a C or C++ prototype wrapped over lines (`int foo(` ...
+    /// `int b);`), for extractors with `semicolon_declarations`: a code line that names a
+    /// function ([`Self::signature_name`]), leaves a parenthesis open in code context
+    /// ([`ScannedLine::group_delta`]) and whose list closes on a line whose code ends in `;`
+    /// ([`group_end`]). Such a line opens no declaration by [`Self::is_declaration`] (its code
+    /// ends in `(` or in a parameter), so without this rule its first lines fell into a gap and
+    /// the closing `);` read as a declaration of its own. O(k) for the k lines of the list, from
+    /// the pass's [`SearchBudget`].
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `j` - The 0-based line asked about.
+    /// * `search` - The bounds of the forward searches ([`BraceSearch`]).
+    ///
+    /// # Returns
+    ///
+    /// `true` when line `j` opens a wrapped prototype.
+    fn opens_wrapped_prototype(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        j: usize,
+        search: &BraceSearch<'_>,
+    ) -> bool {
+        let Some(record) = scanned.get(j).filter(|s| !s.is_non_code) else {
+            return false;
+        };
+        if !self.semicolon_declarations
+            || record.group_delta <= 0
+            || !lines
+                .get(j)
+                .is_some_and(|l| self.signature_name(l, Some(record), false).is_some())
+        {
+            return false;
+        }
+        let close = group_end(lines, scanned, j, search);
+        close > j && scanned.get(close).is_some_and(|s| s.ends_statement)
+    }
+
+    /// The 0-based first line of the construct whose signature is on line `i`: the line above
+    /// it when that line holds only its return type, written GNU style on a line of its own
+    /// (`static int` over `foo (int a)`), else `i`. Only for extractors with
+    /// `semicolon_declarations` and outside a block body (`members`), where a line of type words
+    /// alone (identifier characters, blanks, `*`, `&`, `<`, `>` and `::`, not ending in `:`) is
+    /// no construct of its own: it fell into a gap unit, split from its function or prototype.
+    /// Never above `floor`, the line after the previous construct. O(n) in the two lines.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `i` - The 0-based line of the signature.
+    /// * `floor` - The lowest 0-based line the construct may start on.
+    /// * `members` - Whether the lines are a block's body.
+    ///
+    /// # Returns
+    ///
+    /// `i - 1` when that line is the signature's return type, `i` otherwise.
+    fn return_type_start(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        i: usize,
+        floor: usize,
+        members: bool,
+    ) -> usize {
+        let Some(above) = i.checked_sub(1).filter(|&a| a >= floor) else {
+            return i;
+        };
+        let code = |k: usize| {
+            scanned
+                .get(k)
+                .is_some_and(|s| !s.is_non_code && !s.starts_in_literal)
+        };
+        let type_words = lines.get(above).map(|l| l.trim()).is_some_and(|t| {
+            !t.is_empty()
+                && !t.ends_with(':')
+                && t.chars()
+                    .all(|c| is_identifier_char(c) || RETURN_TYPE_CHARS.contains(c))
+        });
+        let signature = lines
+            .get(i)
+            .is_some_and(|l| self.signature_name(l, scanned.get(i), true).is_some());
+        if self.semicolon_declarations && !members && code(above) && type_words && signature {
+            above
+        } else {
+            i
+        }
+    }
+
     /// Generate a descriptive name for a declaration group from its first line, with the
     /// visibility words already stripped ([`Self::strip_modifiers`]): only bare keywords can
     /// match here, so `pub use` reads as `use` and a JavaScript `export { a };` has no name of
@@ -1498,6 +1594,11 @@ impl BraceFamilyExtractor {
 /// The openers of a comment that make a line before a construct no wrapped continuation of
 /// the signature above it, though it ends in `,` ([`open_brace_line`]).
 const LINE_OPENING_COMMENTS: [&str; 2] = ["//", "/*"];
+
+/// The characters besides identifier ones that a GNU-style return type line may hold
+/// (`static const char *`, `std::vector<int> &`), read by
+/// [`BraceFamilyExtractor::return_type_start`].
+const RETURN_TYPE_CHARS: &str = " 	*&<>:";
 
 /// The most lines past a construct's first line that [`open_brace_line`] looks at for its
 /// opening brace. A starting point, not a measurement: a signature wrapped over more lines
