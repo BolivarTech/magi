@@ -5196,4 +5196,20 @@ void g(void) {
             assert_each_line_in_one_unit(&parts, 14);
         }
     }
+
+    #[test]
+    fn a_comment_before_a_blank_line_inside_an_open_parameter_list_keeps_the_body() {
+        // [MAGI S6 loop 17, B2-4] the blank line was passed over only after a code line ending in
+        // `,` or `(`, so a parameter with a trailing comment, or a comment line, before it ended
+        // the brace search: the function ended on its first line and its body became gap units.
+        let trailing = "fn f(\n    a: u8, // first\n\n    b: u8,\n) -> u8 {\n    a\n}\n";
+        let units = extract(&rust_extractor(), trailing, &[6]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 1, 7)]);
+        let own_line = "fn g(\n    a: u8,\n    // the second one\n\n    b: u8,\n) {\n}\n";
+        let units = extract(&rust_extractor(), own_line, &[6]);
+        assert_eq!(spans(&units), vec![("g", UnitKind::Function, 1, 7)]);
+        let c = "int h(int a, /* (first */\n\n      int b)\n{\n    return a;\n}\n";
+        let units = extract(&c_extractor(), c, &[5]);
+        assert_eq!(spans(&units), vec![("h", UnitKind::Function, 1, 6)]);
+    }
 }
