@@ -101,7 +101,13 @@ pub trait GitCommand: Send + Sync {
     ///
     /// The default reads that answer from [`GitCommand::run`] as a [`ReviewError::Git`] with an
     /// empty message, which is how an implementation that reports git's stderr verbatim sees it;
-    /// an implementation that words its failures overrides this with the exit status.
+    /// an implementation that words its failures overrides this with the exit status. The
+    /// production runner (`ScrubbedGit`, `src/system/review_git.rs`) does: it decides by exit 1
+    /// with an empty stderr, so wording its errors never turns a no-match into a failure. The
+    /// default serves test doubles; pinned by
+    /// `the_default_query_reads_only_an_empty_git_error_as_no_match`.
+    // MAGI FIX (S6 loop 15, A2-6): the contract was implicit, and read as load-bearing for the
+    // production runner, which overrides it.
     ///
     /// # Returns
     ///
