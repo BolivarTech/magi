@@ -696,6 +696,50 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_read_of_a_renamed_file_names_the_path_of_the_side_read() {
+        // [MAGI S6 loop 14, A2-5] the old side's read failure was logged under the new path,
+        // which reads fine, so the entry pointed at the wrong file.
+        struct OldFails;
+        impl ContentSource for OldFails {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(b"fn f() {}\n".to_vec()))
+            }
+            fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Err(ReviewError::Io(format!("{path}: sharing violation")))
+            }
+        }
+        let moved = "diff --git a/was_here.rs b/now_here.rs\nsimilarity index 90%\n\
+                     rename from was_here.rs\nrename to now_here.rs\n--- a/was_here.rs\n\
+                     +++ b/now_here.rs\n@@ -1,1 +1,1 @@\n-fn f() {}\n+fn f() {}\n";
+        let files = || {
+            vec![
+                ReviewFile {
+                    path: "now_here.rs".into(),
+                    diff: Some(moved.into()),
+                },
+                ReviewFile {
+                    path: "a.rs".into(),
+                    diff: None,
+                },
+            ]
+        };
+        let log = crate::logging::testutil::capture(|| {
+            let f = filter_files(files(), &OldFails, &LanguageRegistry::new(), false, &|_| {
+                false
+            })
+            .expect("a.rs kept");
+            assert_eq!(
+                f.skipped,
+                vec![Skipped {
+                    path: "now_here.rs".into(),
+                    cause: SkipCause::Unreadable
+                }]
+            );
+        });
+        assert!(log.contains("path=was_here.rs"), "{log}");
+    }
+
+    #[test]
     fn a_secret_on_the_old_side_of_a_renamed_file_skips_it() {
         // [MAGI §6 MS2 A loop 1] a rename's old side lives under its old path: read by the new path it was empty,
         // and a key on a removed line or outside the hunk reached a model.
