@@ -3992,4 +3992,25 @@ void g(void) {
         assert_eq!(blank_keyword_rest("fn\t foo()", "fn "), Some("foo()"));
         assert_eq!(blank_keyword_rest("fnord()", "fn "), None);
     }
+
+    #[test]
+    fn a_cpp_allocation_operator_overload_is_a_function_with_its_body() {
+        // [MAGI S6 loop 14, B2b1] `operator_name` knew only symbol operators, so the word `new`
+        // or `delete` after `operator` reached `NOT_FUNCTION_NAMES` and the allocator's body fell
+        // into a gap unit.
+        let code = "void* operator new(size_t size) {\n    return malloc(size);\n}\nvoid operator delete[](void* p) noexcept {\n    free(p);\n}\nvoid operator delete (void* p) {\n    free(p);\n}\nvoid* operator new [] (size_t n) {\n    return malloc(n);\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &every_line(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("operator new", UnitKind::Function, 1, 3),
+                ("operator delete[]", UnitKind::Function, 4, 6),
+                ("operator delete", UnitKind::Function, 7, 9),
+                ("operator new[]", UnitKind::Function, 10, 12),
+            ]
+        );
+        // A word glued to `operator` is an identifier, not an overload.
+        assert_eq!(operator_name("void operatornew"), None);
+        assert_eq!(operator_name("int my_operator new"), None);
+    }
 }
