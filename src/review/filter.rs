@@ -157,8 +157,9 @@ enum Verdict {
 /// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker
 /// ([`is_binary_section`]) is judged by its bytes the same way, and when both sides are text it
-/// is kept with no diff, reviewed whole from its new side; it stays `binary` only when a side
-/// cannot be read or the file has no new side (`suppressed_diff`).
+/// is kept with no diff, reviewed whole from its new side; a side that cannot be read is left
+/// out under its own cause, as for any file, and it stays `binary` only when the file has no new
+/// side (`suppressed_diff`).
 /// The binary and UTF-8 checks run on both sides that exist (binary first). The
 /// secret scan covers both whole sides, not only what is sent: the safe direction. A renamed
 /// file's old side is read under its old path (`rename from`).
@@ -284,7 +285,7 @@ fn classify(
         return Ok(secret(path, name));
     }
     if file.diff.as_deref().is_some_and(is_binary_section) {
-        return Ok(suppressed_diff(file, source, old_path.as_deref()));
+        return suppressed_diff(file, source, old_path.as_deref(), explicit);
     }
     let new = match read_side(source.read(path), path, explicit)? {
         Side::Content(bytes) => bytes,
@@ -373,36 +374,51 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2], diff: Option<&str>) ->
 /// turns off (`-diff`, `binary`), and the reviewed tree writes its own `.gitattributes`, so a
 /// change could mark itself out of the review. Both sides are read and judged by their bytes
 /// ([`content_verdict`]); a text file passes and is reviewed whole, from its new side, since
-/// git printed no hunks for it (one INFO entry says so). The marker decides only when the bytes
-/// cannot: a side that fails to read (an I/O error, over a cap, outside the workspace) or a
-/// file with no new side (a deletion) stays `binary`, the label the section carries.
+/// git printed no hunks for it (one INFO entry says so). A side that fails to read is mapped
+/// as for any file ([`read_side`]): it is left out under its own cause (`unreadable`, `too
+/// large`, `outside workspace`, …), and an error that is not a skip (the review's total cap)
+/// fails the review. Only a file with no new side (a deletion) stays `binary`, the label the
+/// section carries.
 ///
 /// # Arguments
 ///
 /// * `file` - The file.
 /// * `source` - The review's content source.
 /// * `old_path` - Its `rename from` path, if any.
+/// * `explicit` - Whether the file was requested by name.
 ///
 /// # Returns
 ///
 /// [`Verdict::KeepWhole`] or the skip.
+///
+/// # Errors
+///
+/// Every read error that [`read_side`] does not map to a skip.
 // MAGI FIX (S6 loop 13, A2-m3 / A2-c1, security): `evil.rs -diff` in the reviewed commit left
 // `evil.rs` out as `binary` without a byte of it read.
+// MAGI FIX (S6 loop 14, A2-4): a failed read was `binary`, and the total cap's `InputTooLarge`
+// an omission that could end as `NothingToReview`; each now goes through `read_side`.
 fn suppressed_diff(
     file: &ReviewFile,
     source: &dyn ContentSource,
     old_path: Option<&str>,
-) -> Verdict {
+    explicit: bool,
+) -> Result<Verdict, ReviewError> {
     let path = file.path.as_str();
-    let (Ok(new), Ok(old)) = (source.read(path), source.read_old(old_path.unwrap_or(path))) else {
-        return Verdict::Skip(SkipCause::Binary);
+    let new = match read_side(source.read(path), path, explicit)? {
+        Side::Content(bytes) => bytes,
+        Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
+    };
+    let old = match read_side(source.read_old(old_path.unwrap_or(path)), path, explicit)? {
+        Side::Content(bytes) => bytes,
+        Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
     let sides = [new.as_deref(), old.as_deref()];
     if let Some(skip) = content_verdict(path, sides, file.diff.as_deref()) {
-        return skip;
+        return Ok(skip);
     }
     if new.is_none() {
-        return Verdict::Skip(SkipCause::Binary);
+        return Ok(Verdict::Skip(SkipCause::Binary));
     }
     let shown = display_path(path);
     tracing::event!(
@@ -411,7 +427,7 @@ fn suppressed_diff(
         path = shown.as_str(),
         "git printed a text file's diff as binary; it is reviewed whole"
     );
-    Verdict::KeepWhole
+    Ok(Verdict::KeepWhole)
 }
 
 /// A `secret` skip, logged with the shown path and the pattern's name (never the value).
