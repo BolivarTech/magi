@@ -138,9 +138,24 @@ impl BatchItem {
     }
 
     /// How a [`ReviewError::TooLargeForBatch`] names the item: the path for a whole file,
-    /// `<path>:<first>-<last>` for a hunk (new side), and the same plus the name for a unit.
+    /// `<path>:<first>-<last>` for a hunk (new side; for a pure deletion, whose new side is
+    /// empty, its old side followed by [`REMOVED_LINES_LABEL`]), and the same plus the name for
+    /// a unit.
     fn describe(&self) -> String {
         match self {
+            // MAGI FIX (S6 loop 17, B1-3): a deletion was named by its empty new side, an
+            // inverted range (`f.c:5-4`) that points at no line.
+            Self::Hunk {
+                file,
+                first_line,
+                last_line,
+                old_first_line,
+                old_last_line,
+                ..
+            } if last_line < first_line && old_last_line >= old_first_line => format!(
+                "{}:{old_first_line}-{old_last_line} {REMOVED_LINES_LABEL}",
+                display_path(file)
+            ),
             Self::Hunk {
                 file,
                 first_line,
@@ -158,6 +173,10 @@ impl BatchItem {
         }
     }
 }
+
+/// What [`BatchItem::describe`] appends to a pure deletion's old-side range, so the range is
+/// not read as lines of the new file.
+const REMOVED_LINES_LABEL: &str = "(removed lines)";
 
 /// What an item drags into its batch, as `(key, tokens)`: charged once per batch per key.
 pub type Companion = (String, usize);
