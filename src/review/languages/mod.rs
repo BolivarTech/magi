@@ -28,7 +28,7 @@ pub mod brace_family;
 pub mod python;
 pub mod scanner;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::review::context::FileContext;
 
@@ -365,14 +365,16 @@ impl LanguageExtractor for ExtractorKind {
 /// assert!(registry.get("unknown.xyz").is_none());
 /// ```
 pub struct LanguageRegistry {
-    extractors: HashMap<String, ExtractorKind>,
+    // MAGI FIX (S6 loop 18, B2a-5): a `HashMap` listed the extensions in an order that changed
+    // from one process to the next; a `BTreeMap` lists them sorted, at O(log k) per lookup.
+    extractors: BTreeMap<String, ExtractorKind>,
 }
 
 impl LanguageRegistry {
     /// Create a registry with all built-in extractors.
     pub fn new() -> Self {
         let mut registry = Self {
-            extractors: HashMap::new(),
+            extractors: BTreeMap::new(),
         };
 
         // Register brace-family extractors
@@ -396,7 +398,7 @@ impl LanguageRegistry {
         registry
     }
 
-    /// File extensions (without the dot) that have a registered extractor.
+    /// File extensions (without the dot) that have a registered extractor, in sorted order.
     pub fn extensions(&self) -> impl Iterator<Item = &str> {
         self.extractors.keys().map(String::as_str)
     }
