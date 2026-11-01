@@ -999,7 +999,9 @@ def _omissions(stderr):
     rest stays in the path. The one rendering the product's text cannot tell
     apart is a path holding `` (<cause>), ``: it splits early. S51 does not
     judge a list over such a name (``CANNOT_TEST``, see
-    :func:`_exclusion_finding`); S49's names are the harness's own.
+    :func:`_exclusion_finding`), unless the early split already names a
+    protected path with a cause other than ``ignored``, which is a ``FAIL``
+    and never a ``PASS``; S49's names are the harness's own.
 
     Args:
         stderr: The decoded stderr.
@@ -1146,7 +1148,8 @@ def _exclusion_finding(run, stderr):
         when git listed no ``.magi/`` file, so none was an enumeration
         candidate, or when one of their names holds `` (<cause>), `` or ends
         in `` (<cause>)`` (:data:`AMBIGUOUS_PATH_PATTERN`), so the list
-        cannot be split around it; ``CANNOT_TEST`` too when the list names
+        cannot be split around it (a split that already reads as a protected
+        path with another cause is the ``FAIL`` above); ``CANNOT_TEST`` too when the list names
         none of them but was cut at the product's display cap
         (:data:`OMISSION_CUT_PATTERN`), so they may be in the unnamed rest;
         ``FAIL`` when git listed some and the uncut list names none of
@@ -1167,6 +1170,11 @@ def _exclusion_finding(run, stderr):
     # MAGI FIX (S6 loop 13): a .magi name holding " (<cause>), " split in two,
     # so the product reading it for its content passed as a protected path
     # left out plus another file (F1a-c3).
+    # MAGI FIX (S6 loop 15): F1a2-m1 noted that such a name embedding
+    # " (<cause>), " can reach the read FAIL above before this CANNOT_TEST,
+    # even when the product left it out as ignored. That order is kept on
+    # purpose: the outcome is a loud FAIL, never a PASS (pinned by
+    # test_s51_fails_never_passes_over_an_ambiguous_name_the_product_left_out_as_ignored).
     ambiguous = [path for path in run.protected_visible
                  if AMBIGUOUS_PATH_PATTERN.search(path)]
     if ambiguous:
