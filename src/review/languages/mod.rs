@@ -841,4 +841,70 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn fallback_extract_ignores_changed_lines_past_the_end_of_the_file() {
+        // [MAGI S6 loop 18, B2a-4] a changed line past the last line opened a window whose
+        // start fell after its end, with no content and a changed line outside its range.
+        let ctx = FileContext::default();
+        let spans = |content: &str, changed: &[u32]| -> Vec<(u32, u32, Vec<u32>)> {
+            let set: HashSet<u32> = changed.iter().copied().collect();
+            fallback_extract(content, "a.txt", &set, &ctx)
+                .into_iter()
+                .map(|u| (u.start_line, u.end_line, u.changed_lines))
+                .collect()
+        };
+        assert_eq!(spans("a\nb\n", &[2, 40]), vec![(1, 2, vec![2])]);
+        assert!(spans("a\nb\n", &[40]).is_empty());
+        assert!(spans("", &[1]).is_empty());
+    }
+
+    #[test]
+    fn the_registry_lists_its_extensions_in_sorted_order() {
+        // [MAGI S6 loop 18, B2a-5] the extensions came in a hash map's order, which changes from
+        // one process to the next.
+        let registry = LanguageRegistry::new();
+        let listed: Vec<&str> = registry.extensions().collect();
+        let mut sorted = listed.clone();
+        sorted.sort_unstable();
+        assert_eq!(listed, sorted);
+    }
+
+    #[test]
+    fn a_block_whose_content_ends_in_a_newline_splits_into_pieces_inside_the_block() {
+        // [MAGI S6 loop 18, B2a-7] the content was split on '\n', so a trailing newline gave a
+        // phantom last line and the closing piece ran one line past the block. A piece between
+        // members holds only the block's changed lines inside it, none here.
+        let block = SemanticUnit {
+            kind: UnitKind::Impl,
+            name: "X".to_string(),
+            file: "a.rs".to_string(),
+            start_line: 10,
+            end_line: 12,
+            content: "impl X {\n    fn a() {}\n}\n".to_string(),
+            changed_lines: vec![11],
+            context: FileContext::default(),
+        };
+        let pieces = split_into_members(&block, vec![(UnitKind::Function, "a".to_string(), 2, 2)]);
+        let spans: Vec<(&str, UnitKind, u32, u32, Vec<u32>)> = pieces
+            .iter()
+            .map(|u| {
+                (
+                    u.name.as_str(),
+                    u.kind,
+                    u.start_line,
+                    u.end_line,
+                    u.changed_lines.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("X", UnitKind::Impl, 10, 10, vec![]),
+                ("a", UnitKind::Method, 11, 11, vec![11]),
+                ("X", UnitKind::Impl, 12, 12, vec![]),
+            ]
+        );
+    }
 }
