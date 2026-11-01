@@ -197,6 +197,11 @@ pub trait ContentSource: Send + Sync {
 /// `Some(bytes)` when the content fits in `cap`, `None` when it is larger (what was read is
 /// dropped). O(min(n, cap)) time and memory.
 ///
+/// Limit: `cap` must be below `u64::MAX`. At `u64::MAX` the extra byte that tells "over" from
+/// "exactly at" saturates away, so a longer content reads as `Some`; no reader can hold that
+/// many bytes, and every caller passes a per-file or per-output cap (8 MiB, 64 MiB).
+// MAGI FIX (S6 loop 15, A2-7): the saturating bound was undocumented.
+///
 /// # Errors
 ///
 /// The reader's I/O error.
