@@ -4349,4 +4349,33 @@ void g(void) {
             "{found:?}"
         );
     }
+
+    #[test]
+    fn a_dot_h_header_is_read_with_the_cpp_rules_so_its_classes_are_units() {
+        // [MAGI S6 loop 14, B2b1] the C extractor owned `.h`, so a C++ header named `.h` had no
+        // class or namespace units and a class too large for a batch could not split.
+        let registry = crate::review::languages::LanguageRegistry::new();
+        let header = registry
+            .get("include/widget.h")
+            .expect("an extractor for .h");
+        assert_eq!(header.language_id(), "cpp");
+        let code = "namespace ui {\nclass Widget {\n  public:\n    void draw() {\n    }\n};\n}\n";
+        let units = header.extract_units(code, "widget.h", ChangedLines::All);
+        let found: Vec<(&str, UnitKind)> =
+            units.iter().map(|u| (u.name.as_str(), u.kind)).collect();
+        assert_eq!(found, vec![("ui", UnitKind::Class)], "{:?}", spans(&units));
+    }
+
+    #[test]
+    fn a_c_header_reads_the_same_with_the_cpp_rules() {
+        // [MAGI S6 loop 14, B2b1] the cost side of giving `.h` to C++: the C++ extractor is the
+        // C one plus classes, namespaces, templates and raw strings, so a C header's units do not
+        // change.
+        let code = "#ifndef A_H\n#define A_H\n#include <stddef.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\ntypedef struct node {\n    int value;\n    struct node *next;\n} node_t;\n\nextern int count;\nint parse(const char *s,\n          size_t n);\nstatic inline int twice(int x) {\n    return 2 * x;\n}\nenum color { RED, GREEN };\n\n#ifdef __cplusplus\n}\n#endif\n#endif\n";
+        let every = every_line(code);
+        let c = extract(&c_extractor(), code, &every);
+        let cpp = extract(&BraceFamilyExtractor::cpp(), code, &every);
+        assert_eq!(spans(&cpp), spans(&c));
+        assert_each_line_in_one_unit(&cpp, 25);
+    }
 }
