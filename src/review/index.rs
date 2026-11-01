@@ -156,7 +156,6 @@ impl LexicalIndex {
     /// `build`, of the registry or of `KNOWN_FILE_EXTENSIONS`, and it is plausibly a file:
     ///
     /// * it has the form of a path (holds `/` or `\`), or
-    /// * it is the name of a file given to `build` (`this.ts` when `lib/this.ts` was reviewed), or
     /// * its first `.`-segment is not a receiver of `FIELD_ACCESS_RECEIVERS` (`self`, `Self`,
     ///   `this`, `super`, `cls`).
     ///
@@ -187,7 +186,9 @@ impl LexicalIndex {
         }
         let is_path = citation.contains(['/', '\\']);
         let receiver = citation.split('.').next().unwrap_or(citation);
-        is_path || self.file_names.contains(citation) || !FIELD_ACCESS_RECEIVERS.contains(&receiver)
+        // MAGI FIX (S6 loop 17, B1-2): the name of a file given to `build` already returned
+        // above, so a second lookup of it here could never be the deciding clause.
+        is_path || !FIELD_ACCESS_RECEIVERS.contains(&receiver)
     }
 
     /// False when `build` stopped at the identifier cap: the symbol check is off for the review.
