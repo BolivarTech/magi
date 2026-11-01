@@ -156,6 +156,12 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         r = _result("R16", 2, None, _with_id(stderr), protected_visible=(".magi/magi.toml",))
         self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
 
+    def test_s51_reads_a_backslash_in_what_git_lists_as_a_slash_too(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a2-c2] the omission list was read with "\\" as "/" but the listed .magi/
+        # paths were compared raw, so a backslash-separated listing never intersected and S51 false-FAILed.
+        r = _result("R16", 2, None, _with_id(_ROOT_STDERR), protected_visible=(".magi\\magi.toml",))
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
+
     def test_s51_never_passes_over_a_protected_name_the_omission_list_cannot_split(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-c3] a .magi name holding " (ignored), " reads as two entries, so the
         # product classifying it as a secret looked like a protected path left out unread plus another file.
