@@ -112,6 +112,13 @@ impl LanguageExtractor for BraceFamilyExtractor {
             if !changed_in_unit.is_empty() {
                 let start_idx = construct.start_line.saturating_sub(1) as usize;
                 let end_idx = construct.end_line as usize;
+                // MAGI FIX (S6 loop 16): declared, not changed. The unit's lines are joined by
+                // '\n', so a CRLF file's unit carries LF line ends: `split_into_members`,
+                // `gap_units` and the Python extractor build and expect content that way, and
+                // preserving '\r' here alone would break that shared contract. Line numbers and
+                // every line's text are unchanged; only the terminators differ from the file's
+                // bytes (a file sent whole, unsplit, keeps its own). Pinned by
+                // `a_crlf_file_gives_the_units_of_its_lf_twin_with_lf_line_ends`.
                 let unit_content = lines
                     .get(start_idx..end_idx.min(lines.len()))
                     .unwrap_or(&[])
@@ -3656,6 +3663,26 @@ int bar(void) {
                 "{code}"
             );
         }
+    }
+
+    #[test]
+    fn a_crlf_file_gives_the_units_of_its_lf_twin_with_lf_line_ends() {
+        // [MAGI S6 loop 16, B2-2] pins the declared normalization: unit content is the unit's
+        // lines joined by '\n' (`str::lines` drops the '\r' of "\r\n"), as every extractor,
+        // `gap_units` and `split_into_members` build and expect it. So a CRLF file's units hold
+        // the same lines, numbers and text as its LF twin, with no '\r' and no line lost.
+        let lf = "use a::b;\n\nfn f() {\n    let x = 1;\n}\n\nconst N: u8 = 2;\n";
+        let crlf = lf.replace('\n', "\r\n");
+        let ext = rust_extractor();
+        let changed = all_lines(lf);
+        let from_lf = extract(&ext, lf, &changed);
+        let from_crlf = extract(&ext, &crlf, &changed);
+        assert_eq!(spans(&from_crlf), spans(&from_lf));
+        for (c, l) in from_crlf.iter().zip(&from_lf) {
+            assert_eq!(c.content, l.content, "{}", c.name);
+            assert!(!c.content.contains('\r'), "{}", c.name);
+        }
+        assert_each_line_in_one_unit(&from_crlf, 7);
     }
 
     #[test]
