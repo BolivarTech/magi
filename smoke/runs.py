@@ -44,6 +44,7 @@ import tomllib
 import urllib.parse
 
 from smoke.config import PLACEHOLDER_ENTRIES, ROTATION_MARKER
+from smoke.env import MAGI_DIR_NAME, MAGI_TOML_NAME
 from smoke.errors import (HarnessError, PayloadTooSmall,
                           ProductOutputError, TimedOut)
 from smoke.payload import PayloadBuilder
@@ -551,7 +552,10 @@ class RunResult:
 #: Where the product writes its logs, relative to a workspace root. The one
 #: definition: :mod:`smoke.logs` re-exports it, because it imports this module
 #: and this module cannot import it back.
-LOG_DIR_PARTS = (".magi", "logs")
+LOG_DIR_PARTS = (MAGI_DIR_NAME, "logs")
+
+#: Where a workspace's configuration lives, relative to its root.
+CONFIG_PATH_PARTS = (MAGI_DIR_NAME, MAGI_TOML_NAME)
 
 #: The token that stands for the environment's path inside a definition's argv.
 WORKSPACE_TOKEN = "<workspace>"
@@ -2269,7 +2273,7 @@ class RunExecutor:
         if workspace is None:
             raise HarnessError("run %s forbids model calls but has no review "
                                "workspace to point at a counter" % definition.run_id)
-        config = workspace / ".magi" / "magi.toml"
+        config = workspace.joinpath(*CONFIG_PATH_PARTS)
         with model_counter() as (url, log):
             point_config_at(config, url)
             off = endpoints_off_the_counter(config, url)
@@ -2475,7 +2479,7 @@ class RunExecutor:
             workspace.mkdir(parents=True)
             # MAGI FIX (S6 loop 6): the environment's logs/ came along, so the
             # captured review log carried earlier runs' lines too (F1a-m4).
-            shutil.copytree(self._env.magi_dir, workspace / ".magi",
+            shutil.copytree(self._env.magi_dir, workspace / MAGI_DIR_NAME,
                             ignore=_skip_top_level_logs(self._env.magi_dir))
             subprocess.run(git_command(workspace, "init", "-q"), check=True,
                            env=git_env(), capture_output=True,
