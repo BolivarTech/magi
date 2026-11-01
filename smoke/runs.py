@@ -918,8 +918,10 @@ def protected_candidates(workspace) -> tuple[str, ...]:
         workspace: The review workspace (a git repository of its own).
 
     Returns:
-        tuple[str, ...]: The listed paths whose first component is ``.magi``
-        as the product spells it (:func:`same_product_name`), sorted.
+        tuple[str, ...]: The listed paths with any component that is
+        ``.magi`` as the product spells it (:func:`same_product_name`), with
+        ``/`` and ``\\`` both read as separators, as the product splits them;
+        sorted.
 
     Raises:
         HarnessError: If git fails.
@@ -928,9 +930,12 @@ def protected_candidates(workspace) -> tuple[str, ...]:
     # .magi/ from git and so from the product (F1a-c1, F1a-m2).
     # MAGI FIX (S6 loop 16): only an exact lowercase ".magi/" counted, while the
     # product folds ASCII case and trims trailing dots and spaces (F1a1-caspar).
-    return tuple(sorted(path for path in visible_paths(workspace)
-                        if same_product_name(path.split("/", 1)[0],
-                                             LOG_DIR_PARTS[0])))
+    # MAGI FIX (S6 loop 18): only the first component was tested, while the
+    # product's is_never_reviewed tests every one (F1a1-caspar).
+    return tuple(sorted(
+        path for path in visible_paths(workspace)
+        if any(same_product_name(component, LOG_DIR_PARTS[0])
+               for component in path.replace("\\", "/").split("/"))))
 
 
 #: The repository the harness lives in, two levels above this file, resolved
