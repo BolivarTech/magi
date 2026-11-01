@@ -890,6 +890,22 @@ mod tests {
     }
 
     #[test]
+    fn gap_units_ignore_orphans_past_the_end_of_the_file() {
+        // [MAGI B2a A3] `fallback_extract` left out a changed line past the last line, but
+        // `gap_units` gave it a unit: inverted (start after end) when a construct ends the file,
+        // or holding a changed line outside its own range.
+        let lines = ["a", "b", "c"];
+        assert!(gap_units(&lines, "a.rs", &[(1, 3)], vec![10]).is_empty());
+        let units = gap_units(&lines, "a.rs", &[(1, 2)], vec![3, 10]);
+        let spans: Vec<(u32, u32, Vec<u32>)> = units
+            .into_iter()
+            .map(|u| (u.start_line, u.end_line, u.changed_lines))
+            .collect();
+        assert_eq!(spans, vec![(3, 3, vec![3])]);
+        assert!(gap_units(&[], "a.rs", &[], vec![1]).is_empty());
+    }
+
+    #[test]
     fn the_registry_lists_its_extensions_in_sorted_order() {
         // [MAGI S6 loop 18, B2a-5] the extensions came in a hash map's order, which changes from
         // one process to the next.
