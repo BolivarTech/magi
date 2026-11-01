@@ -4252,4 +4252,53 @@ void g(void) {
         assert!(ranges.contains(&(3, 3)), "{ranges:?}");
         assert!(ranges.contains(&(4, 5)), "{ranges:?}");
     }
+
+    /// `(name, start, end)` of each piece.
+    fn piece_spans(parts: &[SemanticUnit]) -> Vec<(&str, u32, u32)> {
+        parts
+            .iter()
+            .map(|p| (p.name.as_str(), p.start_line, p.end_line))
+            .collect()
+    }
+
+    #[test]
+    fn a_javascript_method_named_by_a_reserved_word_is_a_member() {
+        // [MAGI S6 loop 14, B2b1] `NOT_FUNCTION_NAMES` applied to every line, so a class
+        // method JavaScript allows to be named `delete`, `new` or `catch` was no member and a
+        // large class could not split there.
+        let js =
+            "class C {\n  delete(key) {\n    x();\n  }\n  new() {\n  }\n  catch(e) {\n  }\n}\n";
+        let parts = split(&BraceFamilyExtractor::javascript(), js, 2, UnitKind::Class);
+        let found = piece_spans(&parts);
+        for member in [("delete", 2, 4), ("new", 5, 6), ("catch", 7, 8)] {
+            assert!(found.contains(&member), "{member:?} in {found:?}");
+        }
+        let ts = "export class D {\n  delete(): void {\n  }\n}\n";
+        let parts = split(&BraceFamilyExtractor::typescript(), ts, 2, UnitKind::Class);
+        let found = piece_spans(&parts);
+        assert!(found.contains(&("delete", 2, 3)), "{found:?}");
+    }
+
+    #[test]
+    fn a_reserved_word_is_a_method_name_only_directly_in_a_class_body() {
+        // [MAGI S6 loop 14, B2b1] the bound of the rule above: a statement inside a static
+        // block is deeper than the class body, and a top-level `if (x) {` is no method either.
+        let js =
+            "class C {\n  static {\n    if (ready) {\n      go();\n    }\n  }\n  run() {\n  }\n}\n";
+        let parts = split(&BraceFamilyExtractor::javascript(), js, 3, UnitKind::Class);
+        let found = piece_spans(&parts);
+        assert!(!found.iter().any(|(name, ..)| *name == "if"), "{found:?}");
+        assert!(found.contains(&("run", 7, 8)), "{found:?}");
+        let top = "if (ready) {\n  go();\n}\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), top, &every_line(top));
+        assert_eq!(spans(&units), vec![("lines 1-3", UnitKind::TopLevel, 1, 3)]);
+        // Java has no such methods: `catch (e) {` stays a clause in a class body.
+        let java = "class K {\n  void a() {\n  }\n  catch (e) {\n  }\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), java, 2, UnitKind::Class);
+        let found = piece_spans(&parts);
+        assert!(
+            !found.iter().any(|(name, ..)| *name == "catch"),
+            "{found:?}"
+        );
+    }
 }
