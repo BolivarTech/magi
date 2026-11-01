@@ -181,7 +181,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// (`split_declaration_group`). Only those kinds split, declared: an enum or a
     /// struct is reviewed whole, as is a Rust `macro_rules!` (a function-like unit whose token
     /// tree is opaque: no item is read inside it, `MACRO_RULES_KEYWORD`), and a construct no
-    /// keyword table names (TypeScript's `enum` or `namespace`, a JavaScript IIFE) is no
+    /// keyword table names (a JavaScript IIFE, a TypeScript `declare module "x" {`) is no
     /// construct at all, so its lines fall into gap units. A single such unit, or one
     /// declaration, too large for one
     /// batch therefore ends the review with the typed `ReviewError::TooLargeForBatch` (RV03),
