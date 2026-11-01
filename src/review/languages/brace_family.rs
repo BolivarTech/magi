@@ -168,8 +168,10 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// constructs between the block's opening brace and its matching closing brace, found as at
     /// the top level (indented functions included). O(n) in the block's lines.
     ///
-    /// A heuristic, declared: the opening brace is the first code line of the unit whose braces
-    /// open more than they close. A header line before it that leaves a brace open (a const
+    /// A heuristic, declared: the opening brace is the first code line of the unit, from the
+    /// block's header on (the first code line a block keyword opens, so a decorator or annotation
+    /// wrapped over lines above it is passed over), whose braces open more than they close. A
+    /// header line before it that leaves a brace open (a const
     /// generic argument wrapped over lines, `impl Foo<{` then `N` then `}> {`) is taken for the
     /// block, so the members are searched in the wrong span and the block may not split, or split
     /// at fewer members. Nothing is lost either way: `split_into_members` covers every line of
@@ -197,9 +199,22 @@ impl LanguageExtractor for BraceFamilyExtractor {
         }
         let lines: Vec<&str> = unit.content.lines().collect();
         let scanned = CodeScanner::new(self.lexical_rules.clone()).scan_all(&unit.content);
+        // MAGI FIX (S6 loop 19, B2b-3): a multi-line decorator above a class
+        // (`@Component({` ... `})`) held the unit's first opening brace, so the members were
+        // sought inside the decorator's object and the class did not split. The search starts
+        // at the block's own header, the first code line its keyword opens.
+        let is_code = |j: usize| scanned.get(j).is_some_and(|s| !s.is_non_code);
+        let header = lines
+            .iter()
+            .enumerate()
+            .position(|(j, l)| is_code(j) && self.construct_keyword(l.trim()).is_some())
+            .unwrap_or(0);
         let Some(open) = scanned
             .iter()
-            .position(|s| !s.is_non_code && s.brace_delta > 0)
+            .enumerate()
+            .skip(header)
+            .position(|(_, s)| !s.is_non_code && s.brace_delta > 0)
+            .map(|p| p + header)
         else {
             return Vec::new();
         };
