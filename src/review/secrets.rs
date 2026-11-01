@@ -1843,4 +1843,44 @@ mod tests {
         let open = format!("a {SSH2_PLAIN_PRIVATE_KEY}\nAAAAB3NzaC1yc2EAAAADAQAB");
         assert_eq!(mask_secrets(&open), "a <redacted: pem-private-key>");
     }
+
+    #[test]
+    fn an_aws_secret_key_in_an_xml_element_or_value_attribute_is_a_secret_and_masked_whole() {
+        // [MAGI S6 loop 17, A2-1, security] `<` and `>` are no separators of an assignment or an
+        // argument, so a key held as an XML element's text (`<SecretAccessKey>…</…>`, with or
+        // without a namespace, on its own line) or as the `value` attribute of a tag that names
+        // it (`<SecretAccessKey value="…"/>`, .NET's `<add key="AWSSecretKey" value="…"/>`) was
+        // sent.
+        let tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let sts = concat!("Secret", "AccessKey");
+        let snake = concat!("aws_secret", "_access_key");
+        let net = concat!("AWS", "SecretKey");
+        let texts = [
+            format!("<{sts}>{tail}</{sts}>"),
+            format!("<{snake}>{tail}</{snake}>"),
+            format!("<Credentials>\n  <{sts}>\n    {tail}\n  </{sts}>\n</Credentials>"),
+            format!("<aws:{sts}>{tail}</aws:{sts}>"),
+            format!("<{sts} type=\"string\">{tail}</{sts}>"),
+            format!("<{sts} value=\"{tail}\"/>"),
+            format!("<{sts}\n    value='{tail}' />"),
+            format!("<add key=\"{net}\" value=\"{tail}\" />"),
+            format!("<Credentials {sts}=\"{tail}\"/>"),
+        ];
+        for text in &texts {
+            assert_eq!(find_secret(text), Some("aws-secret-key"), "{text:?}");
+            let masked = mask_secrets(text);
+            assert!(!masked.contains(tail), "{masked:?}");
+            assert_eq!(masked, mask_secrets_by_rescanning(text), "{text:?}");
+        }
+        // A placeholder as the element's text, an empty element, a tag with no key-shaped value
+        // and a `>` comparison with no start tag name no key.
+        for plain in [
+            format!("<{sts}>${{AWS_SECRET}}</{sts}>"),
+            format!("<{sts}/>"),
+            format!("<{sts} value=\"${{AWS_SECRET}}\"/>"),
+            format!("if {snake} > {tail}"),
+        ] {
+            assert_eq!(find_secret(&plain), None, "{plain:?}");
+        }
+    }
 }
