@@ -2129,8 +2129,9 @@ fn ends_in_bare_equal(trimmed: &str) -> bool {
 /// next lines (`pub static T: &[u8] =` then `&[1, 2, 3];`): the end of that statement, the first
 /// later line whose code ends in `;` ([`statement_end`], which stops at a blank line, at the next
 /// construct and when the pass's budget is spent); with none, as in JavaScript or Go without
-/// semicolons, the next line when it is code that starts no construct, so the value is kept and
-/// the declaration after it is never taken. `i` when line `i` is no code ending in a bare `=`
+/// semicolons, the next line when it is code that starts no construct, through the parentheses
+/// or brackets it leaves open ([`group_end`], `g(` ... `)`), so the value is kept and the
+/// declaration after it is never taken. `i` when line `i` is no code ending in a bare `=`
 /// ([`ends_in_bare_equal`]), or no line qualifies. O(k) for the k lines searched.
 fn bare_initializer_end(
     lines: &[&str],
@@ -2150,8 +2151,10 @@ fn bare_initializer_end(
     let value = is_code(next)
         && lines.get(next).is_some_and(|l| !l.trim().is_empty())
         && !search.stops(next);
+    // MAGI FIX (B2b1 6): a value wrapped over lines without a `;` (`g(` ... `)`, `[` ... `]`)
+    // ended on its first line; it runs to the delimiter that line leaves open.
     if value {
-        next
+        group_end(lines, scanned, next, search)
     } else {
         i
     }
