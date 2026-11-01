@@ -114,6 +114,15 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_h_header_is_labelled_cpp_like_the_extractor_that_reads_it() {
+        // [MAGI S6 loop 15, B1] `.h` was labelled `c` while the C++ extractor read it, so the
+        // prompt's code fence and the extractor disagreed on the header's language.
+        assert_eq!(detect_language("include/a.h"), "cpp");
+        assert_eq!(detect_language("A.H"), "cpp");
+        assert_eq!(detect_language("a.c"), "c");
+    }
+
+    #[test]
     fn detect_language_unknown() {
         assert_eq!(detect_language("Makefile"), "unknown");
     }
