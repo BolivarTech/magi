@@ -3346,6 +3346,27 @@ mod tests {
     }
 
     #[test]
+    fn an_ifdef_else_pair_of_headers_leaves_the_next_function_its_own_unit() {
+        // [B2a] both branches of `#ifdef`/`#else` opened the block of `f`, so `f` ran to the end
+        // of the file, absorbed `g`, and a large file failed as too large for a batch.
+        let code = "#ifdef X\nint f(int a) {\n#else\nint f(void) {\n#endif\n    return 0;\n}\nint g(void) { return 1; }\n";
+        for ext in [c_extractor(), BraceFamilyExtractor::cpp()] {
+            let units = extract(&ext, code, &[6, 8]);
+            let found = spans(&units);
+            assert!(
+                found
+                    .iter()
+                    .any(|&(n, k, _, end)| n == "f" && k == UnitKind::Function && end == 7),
+                "{found:?}"
+            );
+            assert!(
+                found.contains(&("g", UnitKind::Function, 8, 8)),
+                "{found:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_comment_ending_in_a_semicolon_does_not_end_a_signature() {
         // [MAGI S6 loop 4, B2] a line comment ending in `;` read as a statement: the search for
         // the brace stopped there (or the signature read as a prototype) and the body became a

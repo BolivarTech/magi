@@ -40,6 +40,9 @@ const MAX_CPP_RAW_DELIMITER_CHARS: usize = 16;
 /// The encoding prefixes a C++ raw string may carry before its `R`, longest first.
 const CPP_RAW_PREFIXES: [&str; 5] = ["u8R", "uR", "UR", "LR", "R"];
 
+/// How many nested preprocessor conditionals (`#if` ... `#endif`) the scanner tracks.
+pub const MAX_CONDITIONAL_NESTING: usize = 64;
+
 /// What [`ScannedLine::ends_statement`] records for a literal read in code context: any
 /// character but `;` would do, since a literal is an operand.
 const STRING_MARK: char = '"';
@@ -1731,5 +1734,129 @@ void h() {
         // Rust and Java keep their one-character rule: a lifetime opens no literal.
         let mut rust = CodeScanner::new(LexicalRules::rust());
         assert_eq!(rust.scan_line(1, "fn f<'a>(x: &'a str) {").brace_delta, 1);
+    }
+
+    #[test]
+    fn an_ifdef_else_pair_of_function_headers_closes_at_its_own_brace() {
+        // [B2a] each branch of `#ifdef`/`#else` opened the block of `f`, so the depth stayed one
+        // level up after its `}`: `f` ran to the end of the file and absorbed `g`.
+        let code = "#ifdef X\nint f(int a) {\n#else\nint f(void) {\n#endif\n    return 0;\n}\nint g(void) { return 1; }\n";
+        for rules in [LexicalRules::c(), LexicalRules::cpp()] {
+            let results = CodeScanner::new(rules).scan_all(code);
+            assert_eq!(find_closing_brace(&results, 1), 6, "first header");
+            assert_eq!(find_closing_brace(&results, 3), 6, "second header");
+            assert_eq!(results[6].depth_after, 0, "back at the top level");
+            assert_eq!(results[7].depth_after, 0, "g opens and closes on its line");
+        }
+    }
+
+    #[test]
+    fn nested_conditionals_count_only_each_first_branch() {
+        // [B2a] an inner conditional inside the first branch of an outer one: one `{` survives.
+        let code = "#ifdef A\n#ifdef B\nvoid f(int a, int b) {\n#else\nvoid f(int a) {\n#endif\n#else\nvoid f(void) {\n#endif\n    return;\n}\nvoid g(void) {}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        for open in [2, 4, 7] {
+            assert_eq!(find_closing_brace(&results, open), 10, "header {open}");
+        }
+        assert_eq!(results[10].depth_after, 0);
+        assert_eq!(results[11].depth_after, 0);
+    }
+
+    #[test]
+    fn an_elif_chain_counts_only_its_first_branch() {
+        // [B2a] `#if`/`#elif`/`#elif`/`#else`: four headers, one block.
+        let code = "#if A\nint f(int a) {\n#elif B\nint f(long b) {\n#elif defined(C)\nint f(char c) {\n#else\nint f(void) {\n#endif\n    return 0;\n}\nint g(void) {\n}\n";
+        let results = CodeScanner::new(LexicalRules::cpp()).scan_all(code);
+        for open in [1, 3, 5, 7] {
+            assert_eq!(find_closing_brace(&results, open), 10, "header {open}");
+        }
+        assert_eq!(results[10].depth_after, 0);
+        assert_eq!(find_closing_brace(&results, 11), 12, "g is its own block");
+    }
+
+    #[test]
+    fn a_conditional_with_blanks_after_the_hash_is_still_a_conditional() {
+        // [B2a] `#  ifdef` and `# else` are the same directives as `#ifdef` and `#else`.
+        let code = "#  ifdef X\nint f(int a) {\n  # else\nint f(void) {\n#\tendif\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(find_closing_brace(&results, 1), 5);
+        assert_eq!(results[5].depth_after, 0);
+    }
+
+    #[test]
+    fn a_stray_endif_or_else_leaves_the_depth_as_counted() {
+        // [B2a] an unbalanced directive degrades to plain brace counting, never a panic.
+        // Passes before the fix by design: it pins the degraded behaviour.
+        let code = "#endif\n#else\nint f(void) {\n#endif\n    return 0;\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(find_closing_brace(&results, 2), 5);
+        assert_eq!(results[5].depth_after, 0);
+    }
+
+    #[test]
+    fn a_missing_endif_still_restores_the_depth_at_its_else() {
+        // [B2a] a conditional the file never closes still restores at `#else`; its frame only
+        // stays on the stack.
+        let code = "#ifdef X\nint f(int a) {\n#else\nint f(void) {\n    return 0;\n}\nint g(void) { return 1; }\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(find_closing_brace(&results, 1), 5);
+        assert_eq!(results[5].depth_after, 0);
+        assert_eq!(results[6].depth_after, 0);
+    }
+
+    #[test]
+    fn a_brace_inside_an_if_zero_block_without_else_still_counts() {
+        // [B2a] a conditional without `#else` has one branch, which counts as code: a balanced
+        // block inside `#if 0` is still a block. Passes before the fix by design.
+        let code = "#if 0\nint old(void) {\n}\n#endif\nint g(void) {\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(find_closing_brace(&results, 1), 2);
+        assert_eq!(find_closing_brace(&results, 4), 5);
+        assert_eq!(results[5].depth_after, 0);
+    }
+
+    #[test]
+    fn a_conditional_inside_a_comment_or_a_continued_directive_is_no_conditional() {
+        // [B2a] `#else` inside a block comment or a `\`-continued `#define` is text: it restores
+        // nothing, so the `{` of `h` still counts on top of the one of `f`. Passes before the
+        // fix by design.
+        let code = "#ifdef X\nint f(int a) {\n/*\n#else\n*/\n#define M \\\n#else\nint h(void) {\n}\n#endif\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(find_closing_brace(&results, 7), 8, "h is nested in f");
+        assert_eq!(
+            find_closing_brace(&results, 1),
+            10,
+            "f closes at the last brace"
+        );
+        assert_eq!(results[10].depth_after, 0);
+    }
+
+    #[test]
+    fn conditionals_nested_past_the_cap_degrade_to_plain_counting() {
+        // [B2a] past `MAX_CONDITIONAL_NESTING` a conditional is not tracked, and its `#endif`
+        // must not pop a tracked one: the outer `#ifdef`/`#else` still restores.
+        let deep = MAX_CONDITIONAL_NESTING + 3;
+        let mut code = String::from("#ifdef X\nint f(int a) {\n");
+        for _ in 0..deep {
+            code.push_str("#if 1\n");
+        }
+        for _ in 0..deep {
+            code.push_str("#endif\n");
+        }
+        code.push_str("#else\nint f(void) {\n#endif\n}\nint g(void) {\n}\n");
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(&code);
+        let close = results.len() - 3;
+        assert_eq!(find_closing_brace(&results, 1), close);
+        assert_eq!(results[close].depth_after, 0);
+        assert_eq!(find_closing_brace(&results, close + 1), close + 2);
+    }
+
+    #[test]
+    fn a_hash_else_line_is_no_conditional_without_preprocessor_rules() {
+        // [B2a] only languages with preprocessor directives track conditionals. Passes before
+        // the fix by design.
+        let results = CodeScanner::new(LexicalRules::rust()).scan_all("fn f() {\n#else\n}\n");
+        assert_eq!(results[1].depth_after, 1);
+        assert_eq!(results[2].depth_after, 0);
     }
 }
