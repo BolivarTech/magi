@@ -1645,26 +1645,79 @@ MODEL_COUNTER_STATUS = 503
 #: Bytes of a request body the counter drains at a time.
 MODEL_COUNTER_CHUNK_BYTES = 64 * 1024
 
-#: Requests the counter keeps by method and path.
+#: Requests the counter keeps by method and path. A product that floods the
+#: loopback counter during a run would otherwise grow the record without
+#: limit; past this many only the totals grow. 64 is far above the three
+#: probes a refusal run sends, so a run inside the contract is kept whole.
 MODEL_COUNTER_MAX_RECORDED = 64
 
 
 class RequestLog:
-    """Red stub: no logic yet."""
+    """A bounded, thread-safe record of the requests :func:`model_counter` saw.
 
-    def __init__(self, cap=None) -> None:
-        """Stub."""
-        self.recorded = ()
-        self.total = 0
-        self.past_the_probe_total = 0
-        self.overflowed = False
+    Every request is counted, and classified against :data:`PROBE_PATHS` as it
+    arrives, but only the first *cap* are kept by method and path. A request
+    past the probe therefore always counts, even one past the cap whose path
+    was not kept, so a dropped record can never let a run pass.
+
+    Example:
+        >>> log = RequestLog(cap=1)
+        >>> log.record("POST", "/api/show")
+        >>> log.record("POST", "/api/chat")
+        >>> log.recorded, log.total, log.past_the_probe_total, log.overflowed
+        ((('POST', '/api/show'),), 2, 1, True)
+    """
+
+    def __init__(self, cap: int | None = None) -> None:
+        """Start an empty log.
+
+        Args:
+            cap: Requests kept by method and path; ``None`` reads
+                :data:`MODEL_COUNTER_MAX_RECORDED` at construction.
+        """
+        self._cap = MODEL_COUNTER_MAX_RECORDED if cap is None else cap
+        self._lock = threading.Lock()
+        self._recorded: list[tuple[str, str]] = []
+        self._total = 0
+        self._past_the_probe_total = 0
 
     def record(self, method: str, path: str) -> None:
-        """Stub."""
+        """Count one request and keep it while the log is under its cap.
 
-    def __iter__(self):
-        """Stub."""
-        return iter(self.recorded)
+        Args:
+            method: The request's method.
+            path: Its path, without the query.
+        """
+        with self._lock:
+            self._total += 1
+            if path not in PROBE_PATHS:
+                self._past_the_probe_total += 1
+            if len(self._recorded) < self._cap:
+                self._recorded.append((method, path))
+
+    @property
+    def recorded(self) -> tuple[tuple[str, str], ...]:
+        """tuple: The kept ``(method, path)`` pairs, in arrival order."""
+        with self._lock:
+            return tuple(self._recorded)
+
+    @property
+    def total(self) -> int:
+        """int: Every request seen, kept or not."""
+        with self._lock:
+            return self._total
+
+    @property
+    def past_the_probe_total(self) -> int:
+        """int: Every request seen whose path is not in :data:`PROBE_PATHS`."""
+        with self._lock:
+            return self._past_the_probe_total
+
+    @property
+    def overflowed(self) -> bool:
+        """bool: Whether any request was counted but not kept."""
+        with self._lock:
+            return self._total > len(self._recorded)
 
 
 class _CountingHandler(http.server.BaseHTTPRequestHandler):
@@ -1682,9 +1735,7 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
 
     def _answer(self) -> None:
         """Record this request, drain its body and answer it unavailable."""
-        path = urllib.parse.urlsplit(self.path).path
-        with self.server.lock:
-            self.server.received.append((self.command, path))
+        self.server.log.record(self.command, urllib.parse.urlsplit(self.path).path)
         try:
             left = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -1716,41 +1767,58 @@ def model_counter():
 
     Yields:
         tuple: The base URL to point the product at, ending in ``/v1``, and
-        the list that receives ``(method, path)`` per request. Read it after
-        the block: leaving it joins every request's thread.
+        the :class:`RequestLog` that counts every request and keeps the first
+        :data:`MODEL_COUNTER_MAX_RECORDED` by ``(method, path)``. Read it
+        after the block: leaving it joins every request's thread.
     """
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
-    # Joined on close, unlike ThreadingHTTPServer's default, so the list is
+    # Joined on close, unlike ThreadingHTTPServer's default, so the log is
     # complete when the block ends; the handler's timeout bounds the join.
     server.daemon_threads = False
-    server.received = []
-    server.lock = threading.Lock()
+    server.log = RequestLog()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield "http://127.0.0.1:%d/v1" % server.server_address[1], server.received
+        yield "http://127.0.0.1:%d/v1" % server.server_address[1], server.log
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=ERROR_BACKEND_TIMEOUT_S)
 
 
-def requests_past_the_probe(received) -> tuple[str, ...]:
-    """The requests of *received* that are not the capability probe.
+def requests_past_the_probe(log: RequestLog) -> tuple[str, ...]:
+    """The requests *log* saw that are not the capability probe.
+
+    Empty exactly when no request past the probe arrived, whether or not it
+    was kept: a request the log counted but did not keep is still reported,
+    by a trailing entry with the total and the fact that the log overflowed.
 
     Args:
-        received: ``(method, path)`` pairs, as :func:`model_counter` records them.
+        log: The :class:`RequestLog` :func:`model_counter` yields.
 
     Returns:
-        tuple[str, ...]: ``"<METHOD> <path>"`` of each one whose path is not
-        in :data:`PROBE_PATHS`, in order.
+        tuple[str, ...]: ``"<METHOD> <path>"`` of each kept request whose path
+        is not in :data:`PROBE_PATHS`, in order, then, when some were not
+        kept, one entry naming how many there were in all.
 
     Example:
-        >>> requests_past_the_probe([("POST", "/api/show"), ("POST", "/api/chat")])
-        ('POST /api/chat',)
+        >>> log = RequestLog(cap=2)
+        >>> for path in ("/api/show", "/api/chat", "/api/chat"):
+        ...     log.record("POST", path)
+        >>> for entry in requests_past_the_probe(log):
+        ...     print(entry)
+        POST /api/chat
+        2 requests past the probe in all; the counter overflowed after recording the first 2 requests
     """
-    return tuple("%s %s" % (method, path) for method, path in received
-                 if path not in PROBE_PATHS)
+    recorded = log.recorded
+    named = tuple("%s %s" % (method, path) for method, path in recorded
+                  if path not in PROBE_PATHS)
+    seen = log.past_the_probe_total
+    if seen == len(named):
+        return named
+    return named + ("%d %s past the probe in all; the counter overflowed after "
+                    "recording the first %d requests"
+                    % (seen, "request" if seen == 1 else "requests", len(recorded)),)
 
 
 def point_config_at(config_path, url: str) -> None:
@@ -2113,11 +2181,11 @@ class RunExecutor:
         if workspace is None:
             raise HarnessError("run %s forbids model calls but has no review "
                                "workspace to point at a counter" % definition.run_id)
-        with model_counter() as (url, received):
+        with model_counter() as (url, log):
             point_config_at(workspace / ".magi" / "magi.toml", url)
             yield dataclasses.replace(
                 definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),))
-        contacted.extend(requests_past_the_probe(received))
+        contacted.extend(requests_past_the_probe(log))
 
     def _review_workspace(self) -> pathlib.Path:
         """The directory :data:`REVIEW_WORKSPACE_TOKEN` stands for.
