@@ -590,8 +590,11 @@ LARGE_CONSULT_CEILING_S = 20184
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
                                         "R10": 67, "R12": 1500}
 
-#: The factor a trio run's ``timeout_s`` must clear over its measurement in
-#: :data:`TRIO_RUNS_MEASURED_S`. The cloud endpoint's pace varies by time
+#: The factor a trio run's ``timeout_s`` must reach over its measurement in
+#: :data:`TRIO_RUNS_MEASURED_S`: at least this many times it, equality
+#: included (R12's provisional 1500 s against 3000 s sits exactly on it; when
+#: its real figure replaces it, keep it at or under half the timeout). Only
+#: ``smoke/tests/test_runs.py`` reads it; the executor compares nothing. The cloud endpoint's pace varies by time
 #: slot (PM-S-8) and the measurement above is a single run in one slot -- a
 #: US-morning slot measured slower elsewhere in this project's history --
 #: so the harness timeout carries double that single sample rather than
