@@ -31,6 +31,19 @@ _DEFAULT_MAX_ROTATIONS = 2
 _PRODUCT_DEFAULT_CLIENT_TIMEOUT_S = 700
 
 
+def _leaves_room(timeout_s: int, measured_s: int) -> bool:
+    """Whether *timeout_s* is at least the margin times *measured_s*; equality counts.
+
+    Args:
+        timeout_s: A run's harness timeout.
+        measured_s: The run's measured wall clock.
+
+    Returns:
+        bool: ``True`` when the timeout leaves the margin's room.
+    """
+    return timeout_s >= math.ceil(measured_s * runs.MEASURED_WALL_CLOCK_MARGIN)
+
+
 def _http_post(url: str, credential: bytes) -> tuple[int, bytes]:
     """Post to *url* carrying *credential* as a bearer token.
 
@@ -412,10 +425,20 @@ class DefinitionTableTests(unittest.TestCase):
                      if item.needs_trio}
         self.assertEqual(trio_runs, set(runs.TRIO_RUNS_MEASURED_S))
         for run_id, measured in runs.TRIO_RUNS_MEASURED_S.items():
-            self.assertGreaterEqual(
-                runs.DEFINITIONS[run_id].timeout_s,
-                math.ceil(measured * runs.MEASURED_WALL_CLOCK_MARGIN),
+            self.assertTrue(
+                _leaves_room(runs.DEFINITIONS[run_id].timeout_s, measured),
                 run_id)
+
+    def test_a_timeout_exactly_at_the_margin_leaves_room(self) -> None:
+        """MAGI §6 MS2 loop 17 (F1a1-melchior): R12's provisional 1500 s with
+        a 3000 s timeout sits exactly on the factor-2 boundary, so the guard
+        is non-strict on purpose; one second less does not leave room. The
+        guard above is the only reader of the margin: the executor compares
+        nothing against it.
+        """
+        margin = runs.MEASURED_WALL_CLOCK_MARGIN
+        self.assertTrue(_leaves_room(1500 * margin, 1500))
+        self.assertFalse(_leaves_room(1500 * margin - 1, 1500))
 
 
 class CarriedPayloadTests(unittest.TestCase):
