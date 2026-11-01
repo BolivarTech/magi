@@ -3642,6 +3642,25 @@ int bar(void) {
     }
 
     #[test]
+    fn a_c_declaration_with_a_trailing_comment_joins_the_declaration_group() {
+        // [MAGI S6 loop 16, B2-1] `is_declaration` asked whether the trimmed text ended in `;`,
+        // so `static int counter = 0; // note` fell into a gap unit; the scanner's end of
+        // statement, as in `signature_candidate`, ignores a comment after the code.
+        let c = c_extractor();
+        let code = "static int counter = 0; // note\nstatic int limit = 9; /* cap */\nint g(void) {\n    return 0;\n}\n";
+        let units = extract(&c, code, &[1]);
+        assert_eq!(
+            spans(&units),
+            vec![("declarations", UnitKind::DeclarationGroup, 1, 2)]
+        );
+        // A comment that merely ends in `;` after code that does not end a statement is no
+        // declaration: `int f(void) // note;` is a signature line.
+        let signature = "int f(void) // note;\n{\n    return 1;\n}\n";
+        let units = extract(&c, signature, &[1]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 1, 4)]);
+    }
+
+    #[test]
     fn a_braced_initializer_of_a_struct_variable_is_a_declaration() {
         // [MAGI S6 loop 7, B2b-c3] `struct Foo x{1};` read its initializer's `{` as the struct
         // body, so a variable was named as the struct `Foo`.
