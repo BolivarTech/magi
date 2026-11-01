@@ -285,6 +285,11 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
             "{unshown} findings could not be listed under Key Findings; they are listed below"
         )?;
     }
+    // `## Findings` is written even when the main list is empty, on purpose: it is the stable
+    // anchor of the main list, the one the `unshown` line above points at ("listed below"),
+    // found whatever the gate decided; the gate-states line already says the list is empty.
+    // Every other section is written only when it has entries. Pinned by
+    // `the_findings_heading_is_written_even_when_the_main_list_is_empty`.
     writeln!(out, "\n## Findings")?;
     for (f, v) in &s.findings {
         write_finding(out, f, v)?;
@@ -366,6 +371,11 @@ fn write_finding(out: &mut String, f: &ConsolidatedFinding, v: &GateVerdict) -> 
     // MAGI FIX (S6 loop 3): the text says of each verdict what its JSON says: every cause, the
     // answer that set it (model, lean, confidence) and the models skipped after an HTTP 400.
     // MAGI FIX (S6 loop 5): a 413/422 that ended the chain names its HTTP status after the causes.
+    // The causes are written without `escape_controls`, unlike model text: each is a
+    // `&'static str` of the gate's closed vocabulary (`CAUSE_*` in `gate.rs`), one line of
+    // printable ASCII, so none can carry provider or transport text. Pinned by
+    // `every_gate_cause_is_a_one_line_literal_written_as_is`: a cause that ever carries foreign
+    // text has to change the field's type, which turns that test red.
     let mut causes: Vec<String> = v.causes.iter().map(|c| (*c).to_string()).collect();
     causes.extend(v.status.map(|status| format!("HTTP {status}")));
     if !causes.is_empty() {
@@ -1169,6 +1179,78 @@ mod tests {
         let mut text = String::new();
         write_review_section(&mut text, &s, 0).expect("writes");
         assert!(text.contains("chain exhausted; HTTP 413"), "{text}");
+    }
+
+    #[test]
+    fn every_gate_cause_is_a_one_line_literal_written_as_is() {
+        // [MAGI S6 loop 14, C2-1] the causes are the one gate field written without
+        // `escape_controls`; that is safe only while each is a printable literal of the gate's
+        // closed vocabulary. This pins the field's type and every literal.
+        // Static (`GateVerdict::causes` holds `&'static str`); no needle holds a line break and
+        // `lines()` drops a `\r`, so the check reads LF and CRLF trees alike.
+        let gate: &'static str = include_str!("gate.rs");
+        assert!(
+            gate.contains("pub causes: Vec<&'static str>,"),
+            "the causes are no longer static literals"
+        );
+        let declared = gate.matches("\nconst CAUSE_").count();
+        let causes: Vec<&str> = gate
+            .lines()
+            .filter_map(|l| l.strip_prefix("const CAUSE_"))
+            .filter_map(|rest| rest.split_once(": &str = \""))
+            .filter_map(|(_, value)| value.strip_suffix("\";"))
+            .collect();
+        assert_eq!(causes.len(), declared, "a cause is not a one-line literal");
+        assert!(causes.len() >= 10, "{causes:?}");
+        for cause in causes {
+            assert!(
+                !cause.is_empty() && cause.bytes().all(|b| b.is_ascii_graphic() || b == b' '),
+                "{cause:?}"
+            );
+            assert_eq!(escape_controls(cause), cause);
+            let finding = ConsolidatedFinding {
+                file: Some("a.rs".into()),
+                line: Some(1),
+                severity: Severity::Warning,
+                reported_severity: Severity::Warning,
+                titles: vec!["t".into()],
+                details: vec![],
+                categories: vec![Category::Other],
+                sources: vec![AgentName::Melchior, AgentName::Caspar],
+                marks: vec![],
+                batches: vec![0],
+            };
+            let verdict = GateVerdict {
+                state: GateState::Unfiltered,
+                cause: Some(cause),
+                causes: vec![cause],
+                model: None,
+                lean: None,
+                confidence: None,
+                skipped: vec![],
+                status: None,
+            };
+            let mut out = String::new();
+            write_finding(&mut out, &finding, &verdict).expect("writes");
+            assert_eq!(out.lines().count(), 1, "{out}");
+            assert!(out.contains(&format!("({cause})")), "{out}");
+        }
+    }
+
+    #[test]
+    fn the_findings_heading_is_written_even_when_the_main_list_is_empty() {
+        // [MAGI S6 loop 14, C2-2] the heading of the main list is a stable anchor, written with
+        // no finding under it; the optional sections are not.
+        let mut out = String::new();
+        write_review_section(&mut out, &ReviewSummary::default(), 0).expect("writes");
+        assert!(out.ends_with("\n## Findings\n"), "{out}");
+        for optional in [
+            "## Filtered by the gate",
+            "## Skipped",
+            "## Reviewed without language context",
+        ] {
+            assert!(!out.contains(optional), "{out}");
+        }
     }
 
     #[test]
