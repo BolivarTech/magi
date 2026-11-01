@@ -1244,6 +1244,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_token_prefix_in_any_case_is_a_secret_and_keeps_its_boundaries() {
+        // [MAGI S6 loop 15, A2-2, security] prefixes were compared case-sensitively while the
+        // `ant-` exclusion was not, so `sk-ANT-…` was neither an OpenAI nor an Anthropic key and
+        // its file was sent. Prefixes and exclusions now ignore ASCII case alike.
+        let cases = [
+            (
+                concat!("sk-", "ANT-", "api03-AAAAAAAAAAAAAAAAAAAA"),
+                "anthropic-key",
+            ),
+            (
+                concat!("SK-", "ANT-", "api03-AAAAAAAAAAAAAAAAAAAA"),
+                "anthropic-key",
+            ),
+            (
+                concat!("Sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA"),
+                "openai-key",
+            ),
+            (
+                concat!("GH", "P_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                "github-token",
+            ),
+            (
+                concat!("GITHUB_", "PAT_", "AAAAAAAAAAAAAAAAAAAAAA"),
+                "github-token",
+            ),
+            (
+                concat!("Gl", "PAT-", "AAAAAAAAAAAAAAAAAAAA"),
+                "gitlab-token",
+            ),
+        ];
+        for (text, name) in cases {
+            assert_eq!(find_secret(text), Some(name), "{text}");
+            assert!(
+                !mask_secrets(text).contains("AAAAAAAAAAAAAAAAAAAA"),
+                "{text}"
+            );
+            assert_eq!(
+                mask_secrets(text),
+                mask_secrets_by_rescanning(text),
+                "{text}"
+            );
+        }
+        // The left boundary still applies whatever the case.
+        let glued = concat!("task", "-SK-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        assert_eq!(find_secret(glued), None);
+    }
+
     /// A failure deadline far above a linear pass (milliseconds) and below the quadratic one.
     const MASK_DEADLINE_SECS: u64 = 10;
 
