@@ -360,6 +360,13 @@ fn scan(path: &str, text: &str) -> Result<(), ReviewError> {
 
 /// One item per hunk of `diff`; a diff without hunks gives none. The new side is not read: a
 /// deletion has an empty new side and its hunks are built all the same.
+///
+/// A section with body lines but no line opening with `@@` gives no item either, exactly like a
+/// mode change or an empty new file: the two cannot be told apart here. That is safe only
+/// because the diff comes from git, which prefixes every content line of a unified diff with
+/// ' ', '+', '-' or '\', so only a real hunk header opens with `@@`; a hand-built diff that
+/// breaks this would have its body skipped. Pinned by
+/// `a_diff_body_without_a_hunk_header_gives_no_item_like_a_mode_change`.
 fn hunk_items(path: &str, diff: &str) -> Result<Vec<BatchItem>, ReviewError> {
     let mut items = Vec::new();
     for hunk in parse_hunks(path, diff) {
@@ -677,6 +684,30 @@ mod tests {
             }
             other => panic!("expected a Git error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_diff_body_without_a_hunk_header_gives_no_item_like_a_mode_change() {
+        // [MAGI S6 loop 16, B1-5] pins current behavior: a section with body lines but no line
+        // opening with `@@` yields no item. git never writes one (every content line of a unified
+        // diff starts with ' ', '+', '-' or '\'), so it reads as a mode change or an empty file.
+        let files = vec![
+            ReviewFile {
+                path: "mode.rs".into(),
+                diff: Some("old mode 100644\nnew mode 100755\n+not a hunk\n".into()),
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: Some("@@ -1 +1 @@\n-x\n+y\n".into()),
+            },
+        ];
+        let src = MapSource::new(&[("mode.rs", "x\n"), ("a.rs", "y\n")], &[]);
+        let batches = plan_batches(&files, &src, &LanguageRegistry::new(), 1_000).expect("plan");
+        let files_in: Vec<&str> = batches
+            .iter()
+            .flat_map(|b| b.items.iter().map(BatchItem::file))
+            .collect();
+        assert_eq!(files_in, vec!["a.rs"]);
     }
 
     #[test]
