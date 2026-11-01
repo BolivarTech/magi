@@ -283,6 +283,22 @@ class GitConfigTests(unittest.TestCase):
         self.assertEqual(product[0], runs.GIT_VISIBLE_QUERY[0])
         self.assertEqual(set(), set(runs.GIT_VISIBLE_QUERY) - set(product))
 
+    # MAGI FIX (S6 loop 18, F1a1-melchior): git_env() drops every GIT_* variable
+    # on the grounds that none changes what the product's git sees, with
+    # nothing checking the product's environment against that claim.
+    def test_every_git_variable_the_product_passes_is_one_the_harness_assessed(self) -> None:
+        allowlist = re.search(r"const TOOL_ENV_ALLOWLIST: &\[&str\] = &\[(.*?)\];",
+                              _source("src/tools/proc_group.rs"), re.S)
+        self.assertIsNotNone(allowlist, "TOOL_ENV_ALLOWLIST was not found in src/tools/proc_group.rs")
+        spawn = re.search(r"\.env_clear\(\)\s*\.envs\(tool_child_env\(\)\)((?:\s*\.env\([^)]*\))*);",
+                          _source("src/system/review_git.rs"))
+        self.assertIsNotNone(spawn, "the scrubbed git spawn was not found in src/system/review_git.rs")
+        inherited = {name for name in re.findall(r'"([^"]*)"', allowlist.group(1))
+                     if name.upper().startswith(runs.GIT_ENV_PREFIX)}
+        fixed = set(re.findall(r'\.env\("([^"]*)"', spawn.group(1)))
+        self.assertTrue(fixed, "the git spawn sets no variable of its own: the pattern lost its subject")
+        self.assertEqual(set(runs.PRODUCT_GIT_VARIABLES), inherited | fixed)
+
 
 class SecretPrefixDocTests(unittest.TestCase):
     """The README never names a secret prefix the detector does not check."""
