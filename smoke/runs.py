@@ -1480,6 +1480,13 @@ class RunExecutor:
         # area is checked, the leaf included.
         # MAGI FIX (S6 loop 13): an OSError raised by the link checks escaped the
         # executor as a traceback instead of exit 3 (F1a-c1).
+        # MAGI FIX (S6 loop 14): F1a1-c1 read rmtree as following a junction
+        # inside the old workspace on 3.11. It does not: since Python 3.8
+        # shutil's own Windows walk (``_rmtree_isdir``) treats a directory with
+        # the mount-point reparse tag as a link and unlinks it without listing
+        # it, whatever ``os.path.isjunction`` says; only the TOP path being a
+        # link is unsafe, and that is refused above. Pinned on 3.11 and later by
+        # test_rebuilding_the_workspace_never_deletes_through_a_junction_inside_it.
         try:
             linked = _linked_component(pathlib.Path(self._env.scratch_dir),
                                        REVIEW_WORKSPACE_DIR)
