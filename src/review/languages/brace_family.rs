@@ -68,6 +68,12 @@ pub struct BraceFamilyExtractor {
     /// name (`#secret() {`), named as written ([`private_or_computed_name`]): JavaScript and
     /// TypeScript, where a line opening with `#` is no preprocessor directive.
     computed_member_names: bool,
+    /// Whether a function keyword glued to its parameter list declares a function with no name
+    /// (`export default function() {`): JavaScript and TypeScript, where an anonymous function
+    /// declaration is the default export. In Rust or Go a line opening with `fn(` or `func(` is
+    /// a type or a function literal, never a declaration.
+    // MAGI FIX (S6 loop 18, B2b-1): `export default function() {` was a declaration group.
+    anonymous_functions: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -1031,11 +1037,18 @@ impl BraceFamilyExtractor {
             && keyword_rest(self.without_rust_attributes(trimmed), MACRO_RULES_KEYWORD).is_some()
     }
 
-    /// The text after the function keyword `trimmed` opens with ([`keyword_rest`]), if any.
+    /// The text after the function keyword `trimmed` opens with ([`keyword_rest`]), if any, or,
+    /// with `anonymous_functions`, after the keyword's bare word glued to a `(`
+    /// (`function() {` gives `() {`).
     fn match_function_keyword<'t>(&self, trimmed: &'t str) -> Option<&'t str> {
-        self.function_keywords
-            .iter()
-            .find_map(|kw| keyword_rest(trimmed, kw))
+        self.function_keywords.iter().find_map(|kw| {
+            keyword_rest(trimmed, kw).or_else(|| {
+                let word = kw.strip_suffix(' ')?;
+                trimmed
+                    .strip_prefix(word)
+                    .filter(|rest| self.anonymous_functions && rest.starts_with('('))
+            })
+        })
     }
 
     /// Whether line `j` (0-based) is code that opens a construct: a function, block or
@@ -2661,6 +2674,9 @@ fn balanced_end_outside_quotes(
     None
 }
 
+/// The name of a construct that has none (`export default function() {`, `class {`).
+const UNNAMED_CONSTRUCT: &str = "unnamed";
+
 /// The prefix of a Rust raw identifier (`r#match`), which [`construct_name`] keeps in the name.
 const RAW_IDENTIFIER_PREFIX: &str = "r#";
 
@@ -2670,7 +2686,8 @@ const GENERATOR_MARKER: char = '*';
 
 /// The name of a construct: the identifier that opens `rest`, the text after its keyword (after
 /// a parenthesized receiver it opens with, as in Go's `func (r *T) Name(`), or, when none
-/// does, the identifier of the second word of `text`, the matched line. A generator's `*` before
+/// does, the identifier of the second word of `text`, the matched line, or [`UNNAMED_CONSTRUCT`]
+/// when that is no identifier either (`function() {`). A generator's `*` before
 /// the name is passed over (`function *gen()` gives `gen`), and a Rust raw identifier keeps its
 /// prefix (`fn r#match()` gives `r#match`). O(n) in the line.
 fn construct_name(rest: &str, text: &str) -> String {
@@ -2707,7 +2724,12 @@ fn construct_name(rest: &str, text: &str) -> String {
     if !name.is_empty() {
         return name;
     }
-    ident(text.split_whitespace().nth(1).unwrap_or("unnamed"))
+    let second = ident(text.split_whitespace().nth(1).unwrap_or(""));
+    if second.is_empty() {
+        UNNAMED_CONSTRUCT.to_string()
+    } else {
+        second
+    }
 }
 
 /// Return all pre-configured brace-family extractors.
@@ -2763,6 +2785,7 @@ impl BraceFamilyExtractor {
             not_function_names: &NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
+            anonymous_functions: false,
         }
     }
 
@@ -2795,6 +2818,7 @@ impl BraceFamilyExtractor {
             not_function_names: &NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
+            anonymous_functions: false,
         }
     }
 
@@ -2851,6 +2875,7 @@ impl BraceFamilyExtractor {
             not_function_names: &NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
+            anonymous_functions: false,
         }
     }
 
@@ -2885,6 +2910,7 @@ impl BraceFamilyExtractor {
             not_function_names: &JAVA_NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
+            anonymous_functions: false,
         }
     }
 
@@ -2928,6 +2954,7 @@ impl BraceFamilyExtractor {
             reserved_word_methods: true,
             // MAGI FIX (S6 loop 17, B2-3): `[key]() {` and `#m() {` were no members.
             computed_member_names: true,
+            anonymous_functions: true,
         }
     }
 
