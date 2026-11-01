@@ -1153,9 +1153,10 @@ def _retry_writable(func, path, error: BaseException) -> None:
 
     The recovery is Windows-only in effect. On POSIX a deletion fails with
     :class:`PermissionError` because the PARENT directory is not writable,
-    which a mode change of the entry does not fix (and ``0o600`` on a
-    directory drops its search bit), so the retry fails again and that
-    error propagates; the executor reports it as a harness failure (exit 3).
+    which a mode change of the entry does not fix, so the retry fails again
+    and that error propagates; the executor reports it as a harness failure
+    (exit 3). A directory is made ``0o700`` and a file ``0o600``: ``0o600``
+    on a directory would drop its search bit.
     The harness writes every file of the workspace itself, so this is not
     expected to happen.
 
@@ -1170,7 +1171,8 @@ def _retry_writable(func, path, error: BaseException) -> None:
     """
     if not isinstance(error, PermissionError) or _is_link(path):
         raise error
-    os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    is_directory = stat.S_ISDIR(os.lstat(path).st_mode)
+    os.chmod(path, stat.S_IRWXU if is_directory else stat.S_IREAD | stat.S_IWRITE)
     func(path)
 
 
