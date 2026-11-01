@@ -1576,6 +1576,39 @@ mod tests {
     }
 
     #[test]
+    fn an_aws_secret_key_continued_on_the_next_line_is_a_secret_and_masked_whole() {
+        // [MAGI S6 loop 16, A2-3, security] only blanks were skipped after the operator, so a
+        // YAML block scalar (`|`, `>`, with chomping and indentation indicators), a YAML value on
+        // the next indented line, and a shell line continued with `\` sent the key.
+        let tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let name = concat!("aws_secret", "_access_key");
+        let upper = concat!("AWS_SECRET", "_ACCESS_KEY");
+        let texts = [
+            format!("{name}: |\n  {tail}\n"),
+            format!("{name}: >-\n    {tail}\n"),
+            format!("{name}: |2+ \r\n  {tail}\r\n"),
+            format!("{name}:\n  {tail}\n"),
+            format!("export {upper}=\\\n  {tail}\n"),
+            format!("{upper}= \\\n\t\"{tail}\"\n"),
+        ];
+        for text in &texts {
+            assert_eq!(find_secret(text), Some("aws-secret-key"), "{text:?}");
+            let masked = mask_secrets(text);
+            assert!(!masked.contains(tail), "{masked:?}");
+            assert_eq!(masked, mask_secrets_by_rescanning(text), "{text:?}");
+        }
+        // An indicator or a `\` with no line break after it, and a bare line break after `=`,
+        // continue nothing.
+        for plain in [
+            format!("{name}: | {tail}"),
+            format!("{upper}=\\ {tail}"),
+            format!("{upper}=\n  {tail}"),
+        ] {
+            assert_eq!(find_secret(&plain), None, "{plain:?}");
+        }
+    }
+
+    #[test]
     fn a_token_that_runs_into_a_pem_header_masks_the_whole_pem_block() {
         // [MAGI S6 loop 9, A2-b1, security] an OpenAI-shaped token glued to a PEM header ate
         // its `-----BEGIN`, so the PEM search over what followed the mask found no header and
