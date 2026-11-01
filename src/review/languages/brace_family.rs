@@ -74,6 +74,9 @@ pub struct BraceFamilyExtractor {
     /// a type or a function literal, never a declaration.
     // MAGI FIX (S6 loop 18, B2b-1): `export default function() {` was a declaration group.
     anonymous_functions: bool,
+    /// Whether the language overloads operators, so `operator` is a keyword that names one
+    /// (`bool operator <(`, `operator()`) on a signature line ([`operator_overload_name`]): C++.
+    operator_overloads: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -1168,9 +1171,14 @@ impl BraceFamilyExtractor {
         // named `__attribute__`; the C attributes are read past first.
         let attributes = self.without_c_attributes(trimmed);
         let text = self.without_template_header(&attributes);
-        self.computed_member_names
-            .then(|| private_or_computed_name(text))
+        self.operator_overloads
+            .then(|| operator_overload_name(text))
             .flatten()
+            .or_else(|| {
+                self.computed_member_names
+                    .then(|| private_or_computed_name(text))
+                    .flatten()
+            })
             .or_else(|| identifier_before_paren(text))
     }
 
@@ -2058,28 +2066,20 @@ fn is_identifier_char(c: char) -> bool {
 /// function returning a function pointer (`void (*get_handler(int sig))(int)` gives
 /// `get_handler`).
 ///
+/// A C++ operator overload is named before this rule applies ([`operator_overload_name`]).
+///
 /// # Arguments
 ///
 /// * `line` - A signature line.
 ///
 /// # Returns
 ///
-/// A C++ operator overload is named by [`operator_name`] (`operator=`) before the `=` rule applies.
 /// `None` when the line has no `(`, holds `=` before it (an assignment or initializer), or no
 /// identifier ends right before it. O(n) in the line.
 fn identifier_before_paren(line: &str) -> Option<String> {
     // MAGI FIX (S6 loop 15): `decltype(auto) f() {` was named `decltype`, its operand's `(`
     // being taken for the parameter list; the list's own `(` is looked for instead.
-    // MAGI FIX (S6 loop 17, B2-5): `bool operator()(int x) {` was named `operator`: its symbol is
-    // the line's first `()`, taken for the parameter list.
-    if call_operator(line) {
-        return Some(CALL_OPERATOR_NAME.to_string());
-    }
     let head = parameter_list_head(line)?;
-    // MAGI FIX (S6 loop 9): `Foo& operator=(` held an `=` before its `(` and named nothing.
-    if let Some(name) = operator_name(head.name_text) {
-        return Some(name);
-    }
     if head.before.contains('=') {
         return None;
     }
@@ -2303,7 +2303,8 @@ fn trailing_identifier(text: &str) -> &str {
 const OPERATOR_SYMBOL_CHARS: &str = "=!<>+-*/%&|^~[],";
 
 /// The name of the C++ operator overload `before` declares, when it ends in the word `operator`
-/// and a symbol (`Foo& operator=` gives `operator=`, `bool operator==` gives `operator==`), or
+/// and a symbol, blanks between them or inside it passed over (`Foo& operator=` gives
+/// `operator=`, `bool operator ==` gives `operator==`, `int operator [ ]` gives `operator[]`), or
 /// in the word `operator`, a blank and an allocation operator of [`ALLOCATION_OPERATORS`]
 /// (`void* operator new` gives `operator new`, `void operator delete [ ]` gives
 /// `operator delete[]`).
@@ -2320,25 +2321,50 @@ const OPERATOR_SYMBOL_CHARS: &str = "=!<>+-*/%&|^~[],";
 /// [`identifier_before_paren`]'s general rule, after its type). O(n) in the text.
 fn operator_name(before: &str) -> Option<String> {
     let (head, symbol) = before.trim_end().rsplit_once("operator")?;
-    // The symbol touches the word, so a JavaScript `const operator = (x) => {` is no overload.
-    let symbol = symbol.trim_end();
     let word_starts = head
         .chars()
         .next_back()
         .is_none_or(|c| !is_identifier_char(c));
-    let is_symbol = !symbol.is_empty() && symbol.chars().all(|c| OPERATOR_SYMBOL_CHARS.contains(c));
     if !word_starts {
         return None;
     }
-    if is_symbol {
-        return Some(format!("operator{symbol}"));
+    // MAGI FIX (S6 loop 18, B2b-7): the symbol had to touch the word, so `bool operator <(` was
+    // no function; only C++ asks ([`operator_overload_name`]), where the blanks mean nothing.
+    let word: String = symbol.chars().filter(|c| !c.is_whitespace()).collect();
+    if !word.is_empty() && word.chars().all(|c| OPERATOR_SYMBOL_CHARS.contains(c)) {
+        return Some(format!("operator{word}"));
     }
     // MAGI FIX (S6 loop 14): `void* operator new(size_t n) {` reached `NOT_FUNCTION_NAMES` with
     // the word `new`, so the allocator was no function and its body fell into a gap unit.
-    let word: String = symbol.chars().filter(|c| !c.is_whitespace()).collect();
     let allocation =
         symbol.starts_with(char::is_whitespace) && ALLOCATION_OPERATORS.contains(&word.as_str());
     allocation.then(|| format!("operator {word}"))
+}
+
+/// The name of the C++ operator overload `line` declares: a call operator ([`call_operator`],
+/// `operator()`) or an operator named before the `(` of its parameter list ([`operator_name`],
+/// `operator=`, `operator <`, `operator new`). Asked only for an extractor with
+/// `operator_overloads` (C++), where `operator` is a keyword: elsewhere it is an identifier
+/// like any other, so a JavaScript `const operator = (x) => {` names no overload. O(n × k) in
+/// the line, for k occurrences of the word.
+///
+/// # Arguments
+///
+/// * `line` - A signature line.
+///
+/// # Returns
+///
+/// The operator's name, or `None` when the line declares no operator overload.
+// MAGI FIX (S6 loop 18, B2b-7): moved out of `identifier_before_paren`, so the spaced forms
+// are read in C++ only.
+fn operator_overload_name(line: &str) -> Option<String> {
+    // MAGI FIX (S6 loop 17, B2-5): `bool operator()(int x) {` was named `operator`: its symbol is
+    // the line's first `()`, taken for the parameter list.
+    if call_operator(line) {
+        return Some(CALL_OPERATOR_NAME.to_string());
+    }
+    // MAGI FIX (S6 loop 9): `Foo& operator=(` held an `=` before its `(` and named nothing.
+    operator_name(parameter_list_head(line)?.name_text)
 }
 
 /// The name of a C++ call operator overload ([`call_operator`]).
@@ -2811,6 +2837,7 @@ impl BraceFamilyExtractor {
             reserved_word_methods: false,
             computed_member_names: false,
             anonymous_functions: false,
+            operator_overloads: false,
         }
     }
 
@@ -2844,6 +2871,7 @@ impl BraceFamilyExtractor {
             reserved_word_methods: false,
             computed_member_names: false,
             anonymous_functions: false,
+            operator_overloads: false,
         }
     }
 
@@ -2873,6 +2901,7 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 8): a `template <...>` header above a class or a function was left
         // out of the unit it declares.
         ext.template_headers = true;
+        ext.operator_overloads = true;
         ext.attribute_prefixes
             .extend(["template<".to_string(), "template <".to_string()]);
         ext
@@ -2901,6 +2930,7 @@ impl BraceFamilyExtractor {
             reserved_word_methods: false,
             computed_member_names: false,
             anonymous_functions: false,
+            operator_overloads: false,
         }
     }
 
@@ -2936,6 +2966,7 @@ impl BraceFamilyExtractor {
             reserved_word_methods: false,
             computed_member_names: false,
             anonymous_functions: false,
+            operator_overloads: false,
         }
     }
 
@@ -2980,6 +3011,7 @@ impl BraceFamilyExtractor {
             // MAGI FIX (S6 loop 17, B2-3): `[key]() {` and `#m() {` were no members.
             computed_member_names: true,
             anonymous_functions: true,
+            operator_overloads: false,
         }
     }
 
