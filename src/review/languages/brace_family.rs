@@ -490,7 +490,8 @@ impl BraceFamilyExtractor {
             // Check declaration keywords
             // MAGI FIX (S6 loop 8): `int x,` opened no declaration, so a declaration list
             // wrapped after a comma lost its first line to a gap unit.
-            if self.is_declaration(trimmed) || self.opens_declaration_list(trimmed) {
+            if self.is_declaration(trimmed, scanned.get(i)) || self.opens_declaration_list(trimmed)
+            {
                 // MAGI FIX (S6 loop 5): `const f = () => {` ended on its first line and its body
                 // fell into a gap; a function expression is a function, with its whole body.
                 if let Some((name, end)) = self.function_expression(lines, scanned, i, &search) {
@@ -513,7 +514,8 @@ impl BraceFamilyExtractor {
                 let joins = |j: usize| {
                     scanned.get(j).is_some_and(|s| !s.is_non_code)
                         && lines.get(j).is_some_and(|l| {
-                            self.is_declaration(l.trim()) || self.opens_declaration_list(l.trim())
+                            self.is_declaration(l.trim(), scanned.get(j))
+                                || self.opens_declaration_list(l.trim())
                         })
                         && self
                             .function_expression(lines, scanned, j, &search)
@@ -604,7 +606,8 @@ impl BraceFamilyExtractor {
         while let Some(line) = lines.get(j) {
             let trimmed = line.trim();
             let declares = scanned.get(j).is_some_and(|s| !s.is_non_code)
-                && (self.is_declaration(trimmed) || self.opens_declaration_list(trimmed));
+                && (self.is_declaration(trimmed, scanned.get(j))
+                    || self.opens_declaration_list(trimmed));
             if !declares {
                 j += 1;
                 continue;
@@ -735,16 +738,30 @@ impl BraceFamilyExtractor {
     /// Whether a trimmed line opens a declaration: a declaration keyword starts the line as
     /// written or with its visibility stripped (`pub(crate) use`), or, with
     /// `semicolon_declarations`, it is code ending in `;` that does not open with `}`, `#` or a
-    /// comment. Only lines outside every construct are asked, so a statement inside a function
-    /// body is never taken for one. O(k + n).
-    fn is_declaration(&self, trimmed: &str) -> bool {
+    /// comment. With `scanned`, "ending in `;`" is the scanner's end of statement, so a comment
+    /// after the code (`static int n = 0; // note`) does not hide it, as in
+    /// [`Self::signature_candidate`]; without it, the trimmed text must end in `;`. Only lines
+    /// outside every construct are asked, so a statement inside a function body is never taken
+    /// for one. O(k + n).
+    ///
+    /// # Arguments
+    ///
+    /// * `trimmed` - The line, trimmed.
+    /// * `scanned` - The scanner's record of the line; `None` falls back to the trimmed text.
+    ///
+    /// # Returns
+    ///
+    /// Whether the line opens a declaration.
+    fn is_declaration(&self, trimmed: &str, scanned: Option<&ScannedLine>) -> bool {
         // MAGI FIX (S6 loop 14): `#[allow(x)] const X: u8 = 1;` fell into a gap unit.
         let trimmed = self.without_rust_attributes(trimmed);
         // MAGI FIX (S6 loop 4): a C global with no declaration keyword fell into a gap.
         // MAGI FIX (S6 loop 6): so did one whose initializer opens on a later line
         // (`int a[] = {`, `int n =`); its value is the declaration's block or next statement.
         let semicolon = self.semicolon_declarations
-            && (trimmed.ends_with(';') || opens_initializer(trimmed))
+            // MAGI FIX (S6 loop 16): `static int n = 0; // note` fell into a gap unit.
+            && (scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement)
+                || opens_initializer(trimmed))
             && !["}", "#", "//", "/*", "*"]
                 .iter()
                 .any(|p| trimmed.starts_with(p));
@@ -969,7 +986,7 @@ impl BraceFamilyExtractor {
         };
         let trimmed = line.trim();
         self.construct_keyword(trimmed).is_some()
-            || self.is_declaration(trimmed)
+            || self.is_declaration(trimmed, scanned.get(j))
             || self
                 .signature_name(line, scanned.get(j), members && self.member_prototypes())
                 .is_some()
@@ -3651,7 +3668,7 @@ int bar(void) {
         let units = extract(&c, code, &[1]);
         assert_eq!(
             spans(&units),
-            vec![("declarations", UnitKind::DeclarationGroup, 1, 2)]
+            vec![("statics", UnitKind::DeclarationGroup, 1, 2)]
         );
         // A comment that merely ends in `;` after code that does not end a statement is no
         // declaration: `int f(void) // note;` is a signature line.
