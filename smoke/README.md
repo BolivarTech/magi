@@ -354,6 +354,11 @@ which sizes the batches before the budget refusal and costs no completion) lands
 `FAIL` naming them, before the scenario sees the capture. Measured against the release binary:
 R13 sends nothing, R14 to R16 send three `/api/show` probes each. With the probe unanswered the
 pool's window counts as unmeasured, so S50 sees the batch count of the default window.
+Since a silent counter proves nothing if the product never reached it, and R13 sends nothing at
+all, the rewritten `magi.toml` is parsed back before the run: a `base_url` anywhere that is not the
+counter (a quoted key, an inline table), or a `provider`/`kind` of `anthropic` (whose seats post to
+a fixed URL), stops the harness with exit 3, and `MAGI_PROVIDER` is blanked for the run. The probe
+paths are pinned to magi-core's `OllamaProvider` requests by `tests/test_rust_sync.py`.
 
 **What they copy from the product.** S50 and S51 read refusals, and a refusal writes no JSON, so
 `stderr` is the only place their numbers and omission lists appear. The scenarios parse it with
