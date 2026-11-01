@@ -1674,6 +1674,24 @@ mod tests {
     }
 
     #[test]
+    fn a_pem_header_is_a_secret_only_in_upper_case() {
+        // [MAGI S6 loop 16, A2-6, false positive] the review read the case-insensitive probe that
+        // ends the type words as the closing check: `BEGIN`, every type word and `PRIVATE KEY-----`
+        // must all be upper case, as the module doc says.
+        let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+        for header in [
+            concat!("-----", "BEGIN private key-----"),
+            concat!("-----", "BEGIN rsa PRIVATE KEY-----"),
+            concat!("-----", "begin PRIVATE KEY-----"),
+            concat!("-----", "BEGIN RSA Private Key-----"),
+        ] {
+            assert_eq!(find_secret(&format!("{header}\n{body}\n")), None, "{header}");
+        }
+        let upper = format!("{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\n{body}\n");
+        assert_eq!(find_secret(&upper), Some("pem-private-key"));
+    }
+
+    #[test]
     fn a_token_that_runs_into_a_pem_header_masks_the_whole_pem_block() {
         // [MAGI S6 loop 9, A2-b1, security] an OpenAI-shaped token glued to a PEM header ate
         // its `-----BEGIN`, so the PEM search over what followed the mask found no header and
