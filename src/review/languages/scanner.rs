@@ -2053,4 +2053,24 @@ void h() {
         assert_eq!(results[1].depth_after, 1);
         assert_eq!(results[2].depth_after, 0);
     }
+
+    #[test]
+    fn a_c_line_comment_ending_in_a_backslash_continues_onto_the_next_line() {
+        // [MAGI B2a 4] a `//` comment ended with its line, but in C and C++ a backslash before
+        // the newline splices the next line into it (translation phase 2), so the brace there is
+        // comment text, not a block.
+        for rules in [LexicalRules::c(), LexicalRules::cpp()] {
+            let results = CodeScanner::new(rules).scan_all("// note \\\nint f() {\nint g() {\n}\n");
+            assert_eq!(results[1].brace_delta, 0, "the spliced line is comment");
+            assert!(results[1].is_non_code, "the spliced line holds no code");
+            assert_eq!(results[2].brace_delta, 1, "the splice ends with its line");
+            assert_eq!(
+                results[3].depth_after, 0,
+                "the depth closes on the last line"
+            );
+        }
+        // Rust has no line splicing: the next line is code.
+        let results = CodeScanner::new(LexicalRules::rust()).scan_all("// note \\\nfn f() {\n}\n");
+        assert_eq!(results[1].brace_delta, 1);
+    }
 }
