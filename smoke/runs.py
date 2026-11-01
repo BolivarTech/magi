@@ -2138,8 +2138,8 @@ class RunExecutor:
             ``.magi/logs`` within the caps, in sorted path order; ``None`` for a run without a
             review workspace or when the directory does not exist; ``()`` when
             any component from the repository root down to ``.magi/logs`` is
-            a link (or cannot be tested), which is named in *unreadable* and
-            never followed.
+            a link (or cannot be tested), before the walk or after the read,
+            which is named in *unreadable* and never followed.
         """
         if REVIEW_WORKSPACE_TOKEN not in definition.argv:
             return None
@@ -2153,18 +2153,10 @@ class RunExecutor:
         # workspace (or a component above it) for a link before it exits
         # (F1a1-caspar, F1a1-melchior). The whole chain from the repository
         # root is tested again here, after the run.
-        relative = "/".join(LOG_DIR_PARTS)
-        try:
-            linked = self._first_link_down_to(*LOG_DIR_PARTS)
-        except OSError as exc:
+        refusal = self._log_chain_refusal(workspace)
+        if refusal is not None:
             if unreadable is not None:
-                unreadable.append("%s (%s)" % (relative, exc))
-            return ()
-        if linked is not None:
-            if unreadable is not None:
-                named = (linked.relative_to(workspace).as_posix()
-                         if workspace in linked.parents else str(linked))
-                unreadable.append("%s (%s)" % (named, LINK_NOT_FOLLOWED))
+                unreadable.append(refusal)
             return ()
         if not directory.is_dir():
             return None
@@ -2174,9 +2166,40 @@ class RunExecutor:
         refused, identities = [], {}
         files = _regular_files_without_links(directory, refused, identities)
         captured = _read_bounded(directory, files, refused, identities)
+        # MAGI FIX (S6 loop 19): a link swapped onto the chain between the test
+        # above and the walk had the walk list, and the read open, what it
+        # points at (F1a1-balthasar). The chain is tested once more after the
+        # read, and a capture taken through a link is dropped whole.
+        refusal = self._log_chain_refusal(workspace)
+        if refusal is not None:
+            if unreadable is not None:
+                unreadable.append(refusal)
+            return ()
         if unreadable is not None:
             unreadable.extend(refused)
         return tuple(captured)
+
+    def _log_chain_refusal(self, workspace: pathlib.Path):
+        """Why the log capture must not go through the chain down to ``.magi/logs``.
+
+        Args:
+            workspace: The review workspace.
+
+        Returns:
+            str | None: ``"<component> (<why>)"`` for the first link from the
+            repository root down to ``.magi/logs`` (named under *workspace*
+            when it lies there, by its full path otherwise), or for a test that
+            failed; ``None`` when no component is a link.
+        """
+        try:
+            linked = self._first_link_down_to(*LOG_DIR_PARTS)
+        except OSError as exc:
+            return "%s (%s)" % ("/".join(LOG_DIR_PARTS), exc)
+        if linked is None:
+            return None
+        named = (linked.relative_to(workspace).as_posix()
+                 if workspace in linked.parents else str(linked))
+        return "%s (%s)" % (named, LINK_NOT_FOLLOWED)
 
     def _prepare_review_workspace(self, definition: RunDefinition):
         """Build the nested-repository workspace a review run executes in.
