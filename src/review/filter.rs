@@ -220,7 +220,15 @@ pub fn filter_files(
                 if registry.get(&file.path).is_none() {
                     filtered.no_extractor.push(display_path(&file.path));
                 }
-                kept_sides.extend(sides_of(&file));
+                // MAGI FIX (S6 loop 17, A2-2): only the new side is reviewed; the old side read
+                // to judge the file stayed cached and was charged against the review total.
+                let mut sides = sides_of(&file).into_iter();
+                kept_sides.extend(sides.next());
+                for (face, path) in sides {
+                    if !kept_sides.contains(&(face, path.clone())) {
+                        source.release(face, &path);
+                    }
+                }
                 filtered.kept.push(ReviewFile {
                     path: file.path,
                     diff: None,
