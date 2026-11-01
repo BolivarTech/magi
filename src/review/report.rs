@@ -1204,7 +1204,11 @@ mod tests {
         assert!(causes.len() >= 10, "{causes:?}");
         for cause in causes {
             assert!(
-                !cause.is_empty() && cause.bytes().all(|b| b.is_ascii_graphic() || b == b' '),
+                // No escape either: the source text of `"a\nb"` is printable, its value is not.
+                !cause.is_empty()
+                    && cause
+                        .bytes()
+                        .all(|b| (b.is_ascii_graphic() && b != b'\\') || b == b' '),
                 "{cause:?}"
             );
             assert_eq!(escape_controls(cause), cause);
