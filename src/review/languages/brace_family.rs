@@ -6045,4 +6045,53 @@ int g(void) {
             assert_each_line_in_one_unit(&extract(ext, code, &[1, 2, 3, 4]), 4);
         }
     }
+
+    /// The spans of the units of `code` under `ext`, every line changed, sorted by first line.
+    fn sorted_spans(ext: &BraceFamilyExtractor, code: &str) -> Vec<(String, UnitKind, u32, u32)> {
+        let total = u32::try_from(code.lines().count()).expect("small");
+        let units = extract(ext, code, &(1..=total).collect::<Vec<_>>());
+        assert_each_line_in_one_unit(&units, total);
+        let mut all: Vec<(String, UnitKind, u32, u32)> = spans(&units)
+            .into_iter()
+            .map(|(n, k, a, b)| (n.to_string(), k, a, b))
+            .collect();
+        all.sort_by_key(|u| u.2);
+        all
+    }
+
+    #[test]
+    fn a_wrapped_c_prototype_is_one_declaration_with_its_return_type_line() {
+        // A prototype wrapped over lines (`int foo(` ... `int b);`) or written GNU style, with
+        // its return type on a line of its own, split into a gap and a declaration.
+        let decl = |a, b| ("declarations".to_string(), UnitKind::DeclarationGroup, a, b);
+        let func = |n: &str, a, b| (n.to_string(), UnitKind::Function, a, b);
+        let cases = [
+            (
+                "int foo(\n    int a,\n    int b);\nint g(void) {\n}\n",
+                vec![decl(1, 3), func("g", 4, 5)],
+            ),
+            (
+                "int foo(\n    int a,\n    int b\n);\nint g(void) {\n}\n",
+                vec![decl(1, 4), func("g", 5, 6)],
+            ),
+            (
+                "int\nfoo (int a);\nint g(void) {\n}\n",
+                vec![decl(1, 2), func("g", 3, 4)],
+            ),
+            (
+                "int\nfoo (int a,\n     int b);\nint g(void) {\n}\n",
+                vec![decl(1, 3), func("g", 4, 5)],
+            ),
+            (
+                "static int\nfoo (int a,\n     int b)\n{\n  return a;\n}\n",
+                vec![func("foo", 1, 6)],
+            ),
+        ];
+        let got: Vec<_> = cases
+            .iter()
+            .map(|(code, _)| sorted_spans(&c_extractor(), code))
+            .collect();
+        let want: Vec<_> = cases.iter().map(|(_, w)| w.clone()).collect();
+        assert_eq!(got, want);
+    }
 }
