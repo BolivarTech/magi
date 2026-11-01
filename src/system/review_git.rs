@@ -2688,4 +2688,32 @@ mod tests {
             "an ignored old side reached a kept diff"
         );
     }
+
+    #[test]
+    fn the_uncommitted_ignore_set_names_heads_ignored_paths_gone_from_the_index() {
+        // [MAGI S6 loop 17, A2-4] the uncommitted ignore set relies on `ls-files --with-tree`
+        // listing HEAD's tree paths, which git-ls-files(1) documents only for
+        // `--error-unmatch`; a git that stopped listing them would widen what is sent. The set
+        // is pinned exactly: HEAD's ignored files staged for deletion or renamed away, nothing
+        // else.
+        let d = repo();
+        std::fs::write(d.path().join(".gitignore"), "*.env\n").expect("write");
+        std::fs::write(d.path().join("gone.env"), "HOST=a\n").expect("write");
+        std::fs::write(d.path().join("moved.env"), "HOST=b\n").expect("write");
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").expect("write");
+        git(
+            d.path(),
+            &["add", "-f", ".gitignore", "gone.env", "moved.env", "a.rs"],
+        );
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        git(d.path(), &["rm", "-q", "gone.env"]);
+        git(d.path(), &["mv", "moved.env", "moved.rs"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let ignored =
+            magi_rs::review::filter::ignored_paths(&ReviewInput::Uncommitted, ".", d.path(), &g)
+                .expect("ignore set");
+        let mut names: Vec<&str> = ignored.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["gone.env", "moved.env"]);
+    }
 }
