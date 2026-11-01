@@ -5609,6 +5609,30 @@ void g(void) {
     }
 
     #[test]
+    fn a_go_type_group_member_spanning_lines_ends_where_its_declaration_ends() {
+        // [MAGI B2b1 7] a member ended on its first line unless that line opened a brace, so the
+        // parameters of a wrapped `func` type and the fields of a struct whose type parameters
+        // wrap became members of their own (`w`, `r`, `X`).
+        let code = "type (\n\tF func(\n\t\tw io.Writer,\n\t\tr io.Reader,\n\t) error\n\tList[\n\t\tT any,\n\t] struct {\n\t\tX T\n\t}\n\tB int\n)\n\nfunc f() {\n}\n";
+        let total = u32::try_from(code.lines().count()).expect("small");
+        let units = extract(&BraceFamilyExtractor::go(), code, &all_lines(code));
+        assert_each_line_in_one_unit(&units, total);
+        let named: Vec<_> = spans(&units)
+            .into_iter()
+            .filter(|s| s.1 != UnitKind::TopLevel)
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("F", UnitKind::Struct, 2, 5),
+                ("List", UnitKind::Struct, 6, 10),
+                ("B", UnitKind::Struct, 11, 11),
+                ("f", UnitKind::Function, 14, 15)
+            ]
+        );
+    }
+
+    #[test]
     fn a_parenthesis_in_a_comment_does_not_move_a_call_initializer_end() {
         // [MAGI B2b1 B1] the call's end was found by counting parentheses on the line text, so a
         // `(` and a `)` in two comments ran the declaration over the next one.
