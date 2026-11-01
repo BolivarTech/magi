@@ -5206,4 +5206,31 @@ void g(void) {
         let units = extract(&c_extractor(), c, &[5]);
         assert_eq!(spans(&units), vec![("h", UnitKind::Function, 1, 6)]);
     }
+
+    #[test]
+    fn a_cpp_comparison_call_or_subscript_operator_is_named_in_full() {
+        // [MAGI S6 loop 17, B2-5] `operator<` left a `<` open and `operator()` put its symbol
+        // after the first `(`, so both were named `operator`, as was any overload whose symbol
+        // the head rule misread.
+        let cases = [
+            ("bool operator<(const Foo& other) const {", "operator<"),
+            ("bool operator<(const Foo<T>& other) const {", "operator<"),
+            ("bool operator()(int x) const {", "operator()"),
+            ("auto operator<=>(const Foo& o) const {", "operator<=>"),
+            ("T& operator[](size_t i) {", "operator[]"),
+            ("bool operator>(const Foo& o) const {", "operator>"),
+            ("Foo& operator<<(int n) {", "operator<<"),
+            ("Foo& operator>>=(int n) {", "operator>>="),
+            ("bool operator==(const Foo& o) const {", "operator=="),
+        ];
+        for (signature, name) in cases {
+            let code = format!("{signature}\n    return x;\n}}\n");
+            let units = extract(&BraceFamilyExtractor::cpp(), &code, &[2]);
+            assert_eq!(
+                spans(&units),
+                vec![(name, UnitKind::Function, 1, 3)],
+                "{signature}"
+            );
+        }
+    }
 }
