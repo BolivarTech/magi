@@ -1085,6 +1085,23 @@ def _remove_tree(path) -> None:
                       _retry_writable(func, failed, info[1]))
 
 
+#: The largest run-log file :meth:`RunExecutor._capture_review_log` reads.
+#: The review runs that scenarios inspect stop before any model call, so their
+#: log is a few lines; a file this large means a faulty or hostile product,
+#: and reading it whole could exhaust the harness before the scenario reports.
+MAX_REVIEW_LOG_FILE_BYTES = 16 * 1024 * 1024
+
+#: The most run-log bytes one capture keeps, over all files. Holds at least
+#: one file of :data:`MAX_REVIEW_LOG_FILE_BYTES`.
+MAX_REVIEW_LOG_TOTAL_BYTES = 64 * 1024 * 1024
+
+#: Why a capture leaves out a file over :data:`MAX_REVIEW_LOG_FILE_BYTES`.
+OVER_FILE_CAP = "larger than %d bytes, not read"
+
+#: Why a capture leaves out a file once :data:`MAX_REVIEW_LOG_TOTAL_BYTES` is spent.
+OVER_TOTAL_CAP = "past the %d byte capture total, not read"
+
+
 #: Why :func:`_regular_files_without_links` leaves a link out.
 LINK_NOT_FOLLOWED = "a link, not followed"
 
@@ -1139,6 +1156,63 @@ def _regular_files_without_links(directory, refused):
             except OSError as exc:
                 refused.append("%s (%s)" % (_name_under(root, path), exc))
     return sorted(files)
+
+
+def _read_bounded(root, paths, refused) -> list:
+    """Read *paths* in order, within the per-file and total capture caps.
+
+    MAGI FIX (S6 loop 16): every log file was read whole with no bound, so a
+    huge or numerous log from a faulty product could exhaust the harness before
+    the scenario reported ``CANNOT_TEST`` (F1a1-caspar).
+
+    A file's size is read before the file is; one over
+    :data:`MAX_REVIEW_LOG_FILE_BYTES`, or one that would take the capture past
+    :data:`MAX_REVIEW_LOG_TOTAL_BYTES`, is named and not read. The size is
+    checked again after the read, because the file may have grown in between.
+
+    Complexity: ``O(bytes kept)``, at most :data:`MAX_REVIEW_LOG_TOTAL_BYTES`
+    held at once (a file that grew is read before it is dropped).
+
+    Args:
+        root: The directory the files are named under (:func:`_name_under`).
+        paths: The files to read, in the order they are kept.
+        refused: A list that receives ``"<path> (<why>)"`` for each file that
+            could not be read or was over a cap.
+
+    Returns:
+        list[bytes]: The bytes of every file kept, in *paths* order.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     path = pathlib.Path(tmp) / "a.log"
+        ...     _ = path.write_bytes(b"x")
+        ...     _read_bounded(tmp, [path], [])
+        [b'x']
+    """
+    kept, spent = [], 0
+    for path in paths:
+        name = _name_under(root, path)
+        data = None
+        try:
+            size = path.stat().st_size
+            if (size <= MAX_REVIEW_LOG_FILE_BYTES
+                    and spent + size <= MAX_REVIEW_LOG_TOTAL_BYTES):
+                data = path.read_bytes()
+                size = len(data)
+        except OSError as exc:
+            refused.append("%s (%s)" % (name, exc))
+            continue
+        if size > MAX_REVIEW_LOG_FILE_BYTES:
+            why = OVER_FILE_CAP % MAX_REVIEW_LOG_FILE_BYTES
+        elif spent + size > MAX_REVIEW_LOG_TOTAL_BYTES:
+            why = OVER_TOTAL_CAP % MAX_REVIEW_LOG_TOTAL_BYTES
+        else:
+            kept.append(data)
+            spent += size
+            continue
+        refused.append("%s (%s)" % (name, why))
+    return kept
 
 
 def _name_under(root, path) -> str:
@@ -1613,14 +1687,15 @@ class RunExecutor:
             definition: The run that just finished.
             unreadable: A list that receives ``"<path> (<error>)"``, *path*
                 relative to ``.magi/logs``, for each
-                file that could not be read, and each link or unlistable
+                file that could not be read or was over a cap
+                (:func:`_read_bounded`), and each link or unlistable
                 directory left out (:func:`_regular_files_without_links`); a
                 linked ``.magi`` or ``.magi/logs`` is named by its path under
                 the workspace instead. ``None`` discards them.
 
         Returns:
             tuple[bytes, ...] | None: Each readable file's bytes under
-            ``.magi/logs``, in sorted path order; ``None`` for a run without a
+            ``.magi/logs`` within the caps, in sorted path order; ``None`` for a run without a
             review workspace or when the directory does not exist; ``()`` when
             ``.magi`` or ``.magi/logs`` is itself a link (or cannot be tested),
             which is named in *unreadable* and never followed.
@@ -1646,18 +1721,12 @@ class RunExecutor:
             return ()
         if not directory.is_dir():
             return None
-        captured = []
         # MAGI FIX (S6 loop 14): rglob descended into a junction and read_bytes
         # followed a link, so a link under .magi/logs had the harness read what
         # it points at (F1a1-m3). Links are named in *unreadable*, never read.
         refused = []
-        for path in _regular_files_without_links(directory, refused):
-            try:
-                captured.append(path.read_bytes())
-            except OSError as exc:
-                if unreadable is not None:
-                    unreadable.append("%s (%s)" % (
-                        _name_under(directory, path), exc))
+        files = _regular_files_without_links(directory, refused)
+        captured = _read_bounded(directory, files, refused)
         if unreadable is not None:
             unreadable.extend(refused)
         return tuple(captured)
