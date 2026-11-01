@@ -257,11 +257,17 @@ pub struct ScannedLine {
     /// string after it does not count, so `int f(void) // note;` does not end a statement.
     pub ends_statement: bool,
     /// `true` when the line starts inside a multi-line comment or string and never returns to
-    /// code. A line that starts in code is `false` even when it is all comment (`// note`):
-    /// keyword detection does not need to skip it, since no keyword opens with a comment.
+    /// structural code. A line that starts in code is `false` even when it is all comment
+    /// (`// note`): keyword detection does not need to skip it, since no keyword opens with a
+    /// comment. A line that starts inside a `${...}` expression of a template literal counts as
+    /// starting inside the template, so it is `true` while it stays in the expression: the
+    /// expression is code, but its braces are not structure and no unit starts inside it, so
+    /// keyword detection skips it on purpose.
+    // MAGI FIX (S6 loop 18, B2a-2): the template expression case is stated.
     pub is_non_code: bool,
     /// `true` when the line starts inside a multi-line comment or string, whether or not it
-    /// returns to code: its leading whitespace is literal text, not indentation.
+    /// returns to code: its leading whitespace is literal text, not indentation. A line that
+    /// starts inside a `${...}` template expression is `true` too, as for [`Self::is_non_code`].
     pub starts_in_literal: bool,
 }
 
@@ -708,6 +714,11 @@ impl CodeScanner {
     /// [`scan_line`](Self::scan_line) for each line: a trailing `\r` is dropped from each line
     /// and content ending in a newline has no empty last line, the same splitting every
     /// extractor applies before it maps scanned indices onto its own lines.
+    ///
+    /// It continues from the scanner's current state, as [`scan_line`](Self::scan_line) does:
+    /// it resets neither the depth nor the lexical context, so a scanner scans one text. Each
+    /// text gets a new scanner ([`CodeScanner::new`]), as every extractor does.
+    // MAGI FIX (S6 loop 18, B2a-3): the one-text contract is stated.
     pub fn scan_all(&mut self, content: &str) -> Vec<ScannedLine> {
         content
             .lines()
@@ -907,7 +918,11 @@ fn word_before(chars: &[char], i: usize) -> String {
 /// # Returns
 ///
 /// Index into `scanned` of the line containing the matching closing brace.
-/// If no closing brace is found, returns the last line index (graceful degradation).
+/// If no closing brace is found, returns the last line index (graceful degradation). When
+/// `open_idx` is outside `scanned`, it returns the last line index too, which for an empty
+/// `scanned` is 0, an index that does not exist: callers pass the index of a line they read
+/// from `scanned`, and read the result with `get`, never by indexing.
+// MAGI FIX (S6 loop 18, B2a-6): the result for an empty scan is stated.
 ///
 /// # Precondition
 ///
@@ -1422,5 +1437,14 @@ void h() {
         let results = CodeScanner::new(LexicalRules::rust()).scan_all(code);
         let nets: Vec<i32> = results.iter().map(|r| r.group_delta).collect();
         assert_eq!(nets, vec![1, 0, -1, 1, 0]);
+    }
+
+    #[test]
+    fn a_closing_brace_search_outside_the_scan_returns_its_last_index() {
+        // [MAGI S6 loop 18, B2a-6] the documented result for an index outside the scan: the last
+        // line, which an empty scan does not have.
+        let results = CodeScanner::new(LexicalRules::rust()).scan_all("fn f() {\n}\n");
+        assert_eq!(find_closing_brace(&results, 5), 1);
+        assert_eq!(find_closing_brace(&[], 0), 0);
     }
 }
