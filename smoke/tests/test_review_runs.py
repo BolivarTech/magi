@@ -486,6 +486,25 @@ class ReviewLogCaptureTests(unittest.TestCase):
             self.assertIsNotNone(result.review_log)
             self.assertTrue(any(b"run=1-ab refusal" in data for data in result.review_log))
 
+    def test_a_link_under_the_log_directory_is_never_read_through(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a1-m3] rglob descends into a junction and read_bytes follows a link, so a
+        # link planted under .magi/logs had the harness read what it points at into the result.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "elsewhere.log").write_bytes(b"not this run's log")
+            logs_dir = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            logs_dir.mkdir(parents=True)
+            (logs_dir / "magi-run.log").write_bytes(b"this run's log")
+            _make_directory_link(outside, logs_dir / "linked")
+            unreadable = []
+            captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((b"this run's log",), captured)
+            self.assertEqual(1, len(unreadable))
+            self.assertIn("linked", unreadable[0])
+
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_review_run_without_a_log_directory_carries_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
