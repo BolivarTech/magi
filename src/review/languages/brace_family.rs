@@ -4611,6 +4611,47 @@ void g(void) {
     }
 
     #[test]
+    fn a_lambda_default_argument_over_lines_keeps_the_function_whole() {
+        // [MAGI B2b1 7] a brace opened inside the parameter list (a lambda default argument)
+        // was taken for the function's, so the function ended at the lambda's `}` and its body
+        // fell into a gap unit.
+        let cpp = "void f(int cb = []() {\n           return 0;\n       }) {\n    if (x) {\n        run();\n    }\n}\nvoid g(void) {\n}\n";
+        assert_eq!(
+            spans(&extract(&BraceFamilyExtractor::cpp(), cpp, &all_lines(cpp))),
+            vec![
+                ("f", UnitKind::Function, 1, 7),
+                ("g", UnitKind::Function, 8, 9)
+            ]
+        );
+        let js = "function f(cb = () => {\n  x();\n}) {\n  y();\n}\nfunction g() {\n}\n";
+        for ext in [
+            BraceFamilyExtractor::javascript(),
+            BraceFamilyExtractor::typescript(),
+        ] {
+            assert_eq!(
+                spans(&extract(&ext, js, &all_lines(js))),
+                vec![
+                    ("f", UnitKind::Function, 1, 5),
+                    ("g", UnitKind::Function, 6, 7)
+                ]
+            );
+        }
+        // A default argument whose braces close on the signature's line was already whole.
+        let one_line = "function f(cb = () => { x(); }) {\n  y();\n}\nfunction g() {\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::javascript(),
+                one_line,
+                &all_lines(one_line)
+            )),
+            vec![
+                ("f", UnitKind::Function, 1, 3),
+                ("g", UnitKind::Function, 4, 5)
+            ]
+        );
+    }
+
+    #[test]
     fn a_grouped_go_type_declaration_yields_each_member() {
         // [MAGI S6 loop 7, B2b-m1] `type (` opened one nameless struct that ended at the first
         // member's brace, so the later members fell into gap units.
