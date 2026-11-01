@@ -5925,4 +5925,64 @@ void g(void) {
         let units = extract(&ext, &code, &(1..=total).collect::<Vec<_>>());
         assert_each_line_in_one_unit(&units, total);
     }
+    /// The `(start, end)` of the unit named `name` in `units`.
+    fn span_of(units: &[SemanticUnit], name: &str) -> (u32, u32) {
+        let unit = units
+            .iter()
+            .find(|u| u.name == name)
+            .unwrap_or_else(|| panic!("no unit {name} in {:?}", spans(units)));
+        (unit.start_line, unit.end_line)
+    }
+
+    #[test]
+    fn a_one_line_construct_never_takes_the_brace_of_the_block_after_it() {
+        // A one-line construct whose code does not end in `;` searched on for its brace and took
+        // the `{` of the block after it, so the two became one unit.
+        let cases: [(BraceFamilyExtractor, &str, &str); 4] = [
+            (
+                rust_extractor(),
+                "fn f() -> u8 { 1 }
+extern \"C\" {
+    fn g();
+}
+",
+                "f",
+            ),
+            (
+                BraceFamilyExtractor::java(),
+                "void f() { x(); }
+static {
+    y();
+}
+",
+                "f",
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "function a() { x(); }
+{
+  b();
+}
+",
+                "a",
+            ),
+            (
+                BraceFamilyExtractor::java(),
+                "void f() { x(); }
+synchronized (lock) {
+    y();
+}
+",
+                "f",
+            ),
+        ];
+        let got: Vec<(u32, u32)> = cases
+            .iter()
+            .map(|(ext, code, name)| span_of(&extract(ext, code, &[1, 2, 3, 4]), name))
+            .collect();
+        assert_eq!(got, vec![(1, 1); cases.len()]);
+        for (ext, code, _) in &cases {
+            assert_each_line_in_one_unit(&extract(ext, code, &[1, 2, 3, 4]), 4);
+        }
+    }
 }
