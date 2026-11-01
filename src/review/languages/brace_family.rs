@@ -1375,6 +1375,13 @@ const BRACE_SEARCH_VISITS_PER_LINE: usize = 32;
 /// ends on its own line, and the lines after it fall into later units. No line is lost: every
 /// line stays in exactly one unit. Pinned by
 /// `the_brace_searches_of_a_whole_file_spend_a_budget_linear_in_its_lines`.
+///
+/// The worst case is accepted, declared: a file crafted to keep a parameter list open on every
+/// line spends the whole budget, about 2.7 × 10⁸ line visits for an 8 MiB file (each a check of
+/// one line's scanner record). It is linear in the file, runs while the review is prepared,
+/// before the review clock starts (RV06), and in the TUI it cannot be cancelled (REQ-TUI-1);
+/// ordinary code spends a small fraction of it. The value is not changed without a measurement.
+// MAGI FIX (S6 loop 15): the accepted worst case, written where the budget is defined.
 struct SearchBudget {
     /// The visits the pass may spend in all.
     cap: usize,
