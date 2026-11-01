@@ -301,6 +301,10 @@ impl SystemOneClient {
 /// A bare `model` (no `:`) also matches its canonical form with [`OLLAMA_DEFAULT_TAG`], and a
 /// `model` with that tag also matches its bare name; any other spelling (an abbreviated tag,
 /// other quoting) is a generic 404, which still rotates.
+///
+/// The markers follow Ollama's wording, which changed at 0.40: a future wording reads as a
+/// generic 404, so the chain still rotates (the safe direction) and only the "model not
+/// available" detail is lost until the markers are updated here.
 /// O(bytes of `body`).
 // MAGI FIX (S6 loop 3): the legacy marker is name-checked like the 0.40 form.
 // MAGI FIX (S6 loop 12, C2-m3 / C2-b6 / C2-c3): Ollama echoes a bare name with `:latest`, which

@@ -560,7 +560,9 @@ pub fn render_batch_reports(reports: &[(usize, MagiReport)]) -> String {
 ///
 /// # Returns
 ///
-/// The line-safe copies. O(bytes of the text fields).
+/// The line-safe copies. O(bytes of the text fields). The copies are deliberate: the egress
+/// boundary never edits the consolidated review in place, so a large review holds its text
+/// twice while the report is rendered (bounded by the batches' replies, never by the input).
 // MAGI FIX (S6 loop 9, C2 commit review): every model string the formatter may render.
 fn line_safe(
     agents: &[AgentOutput],
