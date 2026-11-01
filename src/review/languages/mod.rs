@@ -476,7 +476,8 @@ pub(crate) fn lines_in_range(sorted: &[u32], start: u32, end: u32) -> &[u32] {
 /// * `file_path` - Path to the file.
 /// * `constructs` - `(start, end)` line ranges (1-based, inclusive) of the file's constructs,
 ///   sorted by start and disjoint.
-/// * `orphans` - Changed lines outside every construct; a 0, which names no line, is ignored.
+/// * `orphans` - Changed lines outside every construct; a 0, or a line past the last one, names
+///   no line of the file and is ignored, as [`fallback_extract`] ignores it.
 ///
 /// # Returns
 ///
@@ -493,7 +494,12 @@ pub(crate) fn gap_units(
     let mut units: Vec<SemanticUnit> = Vec::new();
     // MAGI FIX (S6 loop 19, B2a-1): an orphan 0 gave a unit ending before its start; lines are
     // 1-based, so a 0 names no line to show.
-    for orphan in orphans.into_iter().filter(|&line| line >= 1) {
+    // MAGI FIX (B2a A3): a line past the last one gave a unit ending before its start, or one
+    // holding a changed line outside its range; the file has no such line to show.
+    for orphan in orphans
+        .into_iter()
+        .filter(|line| (1..=total).contains(line))
+    {
         let next = constructs.partition_point(|&(start, _)| start <= orphan);
         let first = next
             .checked_sub(1)
