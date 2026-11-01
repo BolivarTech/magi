@@ -310,11 +310,14 @@ impl ChangedLines<'_> {
 ///
 /// Each variant wraps a concrete extractor. The enum delegates
 /// [`LanguageExtractor`] methods to the inner type via match arms.
-/// This avoids `Box<dyn>` and is trivially [`Clone`]-able.
+/// This avoids `Box<dyn>` and is trivially [`Clone`]-able. The brace-family extractor is
+/// boxed: its keyword tables make it some 200 bytes, against none for Python, and each
+/// registered extension holds one.
+// MAGI FIX (S6 loop 18, B2b-5): boxed when the per-language word list grew the extractor.
 #[derive(Clone)]
 pub enum ExtractorKind {
     /// Brace-delimited languages (Rust, C, C++, Go, Java, JS, TS).
-    BraceFamily(brace_family::BraceFamilyExtractor),
+    BraceFamily(Box<brace_family::BraceFamilyExtractor>),
     /// Indentation-delimited (Python).
     Python(python::PythonExtractor),
 }
@@ -384,7 +387,7 @@ impl LanguageRegistry {
             for ext in extractor.extensions() {
                 registry.extractors.insert(
                     ext.to_string(),
-                    ExtractorKind::BraceFamily(extractor.clone()),
+                    ExtractorKind::BraceFamily(Box::new(extractor.clone())),
                 );
             }
         }

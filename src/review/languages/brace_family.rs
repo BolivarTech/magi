@@ -53,8 +53,14 @@ pub struct BraceFamilyExtractor {
     /// ([`strip_template_header`]) or stand on its own line above it (then it is one of the
     /// `attribute_prefixes`): C++ only.
     template_headers: bool,
+    /// The words that may stand right before a `(` without naming a function in this language
+    /// ([`Self::signature_name`]): [`NOT_FUNCTION_NAMES`], or for Java
+    /// [`JAVA_NOT_FUNCTION_NAMES`], since a word reserved only in another language (`delete`,
+    /// `typeof`) is a legal Java method name.
+    // MAGI FIX (S6 loop 18, B2b-5): one list served every language.
+    not_function_names: &'static [&'static str],
     /// Whether a method directly in a class body may be named by a word of
-    /// [`NOT_FUNCTION_NAMES`] (`delete() {`, `catch(e) {`): JavaScript and TypeScript allow any
+    /// `not_function_names` (`delete() {`, `catch(e) {`): JavaScript and TypeScript allow any
     /// reserved word as a method name, and a class body holds no statement
     /// ([`BraceFamilyExtractor::try_detect_constructs`]).
     reserved_word_methods: bool,
@@ -324,6 +330,28 @@ const NOT_FUNCTION_NAMES: [&str; 23] = [
     "requires",
     "noexcept",
     "decltype",
+];
+
+/// The words of [`NOT_FUNCTION_NAMES`] that Java reserves: its control flow and statements
+/// (`catch (e) {`, `synchronized (lock) {`, `try (var r = open()) {`) and `yield`, which a
+/// switch expression's statement opens with. The others (`delete`, `typeof`, `await`,
+/// `function`, `sizeof`, the C++ trailing clauses) are legal Java method names.
+const JAVA_NOT_FUNCTION_NAMES: [&str; 15] = [
+    "if",
+    "for",
+    "while",
+    "switch",
+    "return",
+    "else",
+    "do",
+    "catch",
+    "try",
+    "finally",
+    "new",
+    "throw",
+    "synchronized",
+    "yield",
+    "case",
 ];
 
 /// The words a JavaScript or TypeScript declaration may open with (`export default`,
@@ -1035,7 +1063,7 @@ impl BraceFamilyExtractor {
     /// with `scanned`, a comment after the code does not count), does not
     /// open with `#` (but for `computed_member_names`, where it opens a private name), a comment, `}`, `@`, `,` or a single `:` (a C++ constructor's initializer line,
     /// `: value_(v) {`, continues the signature above it), has no `=` before its `(`, and names an identifier,
-    /// not a keyword of [`NOT_FUNCTION_NAMES`], just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
+    /// not a word of its `not_function_names`, just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
     /// `bar`). The line may be indented: a function inside a namespace, a class or an
     /// `extern "C"` block is a function too. Only lines outside every construct are asked, so a
     /// call inside a recognised function body is never taken for one. O(n) in the line.
@@ -1063,11 +1091,11 @@ impl BraceFamilyExtractor {
     ) -> Option<String> {
         // MAGI FIX (S6 loop 4): `catch (e) {` read as a function named `catch`.
         self.signature_candidate(line, scanned, prototypes)
-            .filter(|name| !NOT_FUNCTION_NAMES.contains(&name.as_str()))
+            .filter(|name| !self.not_function_names.contains(&name.as_str()))
     }
 
     /// The name [`Self::signature_name`] reads on a signature line before it rules out the words
-    /// of [`NOT_FUNCTION_NAMES`]: the same rules and arguments, with a reserved word kept as a
+    /// of `not_function_names`: the same rules and arguments, with a reserved word kept as a
     /// name. Only a direct member of a JavaScript or TypeScript class body is read with it
     /// (`reserved_word_methods`), where `delete() {` declares a method. O(n) in the line.
     ///
@@ -2688,6 +2716,7 @@ impl BraceFamilyExtractor {
             signature_functions: false,
             semicolon_declarations: false,
             template_headers: false,
+            not_function_names: &NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
         }
@@ -2719,6 +2748,7 @@ impl BraceFamilyExtractor {
             signature_functions: true,
             semicolon_declarations: true,
             template_headers: false,
+            not_function_names: &NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
         }
@@ -2774,6 +2804,7 @@ impl BraceFamilyExtractor {
             signature_functions: false,
             semicolon_declarations: false,
             template_headers: false,
+            not_function_names: &NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
         }
@@ -2807,6 +2838,7 @@ impl BraceFamilyExtractor {
             signature_functions: true,
             semicolon_declarations: false,
             template_headers: false,
+            not_function_names: &JAVA_NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
         }
@@ -2848,6 +2880,7 @@ impl BraceFamilyExtractor {
             semicolon_declarations: false,
             template_headers: false,
             // MAGI FIX (S6 loop 14): a method named `delete`, `new` or `catch` was no member.
+            not_function_names: &NOT_FUNCTION_NAMES,
             reserved_word_methods: true,
             // MAGI FIX (S6 loop 17, B2-3): `[key]() {` and `#m() {` were no members.
             computed_member_names: true,
