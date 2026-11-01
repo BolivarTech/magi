@@ -31,6 +31,7 @@ class _TimedOut:
 
     run_id: str
     timed_out: bool = True
+    model_requests: tuple[str, ...] = ()
 
 
 class StampingTests(unittest.TestCase):
@@ -175,6 +176,26 @@ class ProductOutputBoundaryTests(unittest.TestCase):
         stops being able to detect failure #4 at all.
         """
         findings = self._run_with(_TimedOut("R4"), inspects=True)
+        self.assertEqual(["S7"], self.invoked)
+        self.assertEqual([Outcome.PASS], [f.outcome for f in findings])
+
+    def test_a_run_that_reached_a_model_fails_its_scenario_without_running_it(self) -> None:
+        """[MAGI §6 MS2 loop 19, F1a1-balthasar] a refusal run must reach no model.
+
+        Its exit code and stderr cannot show that: a regression that called a
+        model and then refused would still read as the expected refusal. The
+        executor records every request past the capability probe, and the
+        runner fails the scenario on any, even one that inspects timeouts.
+        """
+        contacted = _TimedOut("R13", timed_out=False,
+                              model_requests=("POST /api/chat",))
+        findings = self._run_with(contacted, inspects=True)
+        self.assertEqual([], self.invoked)
+        self.assertEqual([Outcome.FAIL], [f.outcome for f in findings])
+        self.assertIn("POST /api/chat", findings[0].detail)
+
+    def test_a_run_that_reached_no_model_runs_its_scenario(self) -> None:
+        findings = self._run_with(_TimedOut("R13", timed_out=False), inspects=False)
         self.assertEqual(["S7"], self.invoked)
         self.assertEqual([Outcome.PASS], [f.outcome for f in findings])
 

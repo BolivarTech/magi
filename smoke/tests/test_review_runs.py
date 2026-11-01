@@ -1028,5 +1028,106 @@ class ReviewLogChainTests(unittest.TestCase):
                                 for entry in result.review_log_unreadable))
 
 
+class RefusalRunModelCallTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 19, F1a1-balthasar] R13-R16 prove that no model was contacted.
+
+    Their exit code and stderr are what a refusal looks like whether or not a model was paid for first,
+    so every endpoint their workspace declares is pointed at a local counter that answers nothing, and
+    the run records each request past the capability probe.
+    """
+
+    _CONFIG = ('provider = "ollama"\n'
+               'base_url = "http://localhost:11434/v1"\n'
+               "[magi]\n"
+               '# base_url = "http://commented.invalid/v1"\n'
+               'melchior_model = "m"\n'
+               "[embedding]\n"
+               '  base_url = "http://elsewhere.invalid:11434/v1"\n')
+
+    def _execute(self, run_id: str, paths: tuple, config: str = _CONFIG) -> tuple:
+        """Execute *run_id* with a stand-in product that POSTs to *paths* under its configured daemon.
+
+        Returns:
+            tuple: The result, the workspace config the product saw, and its environment.
+        """
+        import tomllib
+        import urllib.error
+        import urllib.request
+        seen = {}
+
+        def invoke(argv, stdin, env, timeout, cwd):
+            text = (pathlib.Path(cwd) / ".magi" / "magi.toml").read_text(encoding="utf-8")
+            seen["config"], seen["env"] = text, env
+            base = tomllib.loads(text)["base_url"]
+            daemon = base[:-len("/v1")] if base.endswith("/v1") else base
+            for path in paths:
+                request = urllib.request.Request(daemon + path, data=b"{}", method="POST")
+                try:
+                    urllib.request.urlopen(request, timeout=5).close()
+                except urllib.error.HTTPError as exc:
+                    exc.close()
+            return runs.ProductOutput(stdout=b"", stderr=b"", exit_code=2, command=list(argv))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            magi = root / ".magi"
+            magi.mkdir()
+            (magi / "magi.toml").write_text(config, encoding="utf-8")
+            binary = mock.Mock()
+            binary.invoke.side_effect = invoke
+            env = types.SimpleNamespace(root=root, magi_dir=magi, scratch_dir=root / "scratch")
+            executor = runs.RunExecutor(binary=binary, env=env,
+                                        config=types.SimpleNamespace(passphrase="toy"))
+            result = executor.execute(runs.DEFINITIONS[run_id])
+        return result, seen["config"], seen["env"]
+
+    def test_the_refusal_runs_and_only_they_forbid_model_calls(self) -> None:
+        forbidding = {run_id for run_id, definition in runs.DEFINITIONS.items()
+                      if definition.forbids_model_calls}
+        self.assertEqual({"R13", "R14", "R15", "R16"}, forbidding)
+
+    def test_forbidding_model_calls_without_a_review_workspace_is_refused(self) -> None:
+        with self.assertRaises(HarnessError):
+            runs.RunDefinition(run_id="Rx", argv=("query",), stdin=b"", needs_trio=False,
+                               payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
+                               forbids_model_calls=True)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_that_reaches_a_model_records_the_request(self) -> None:
+        for run_id in ("R13", "R14", "R15", "R16"):
+            result, _, _ = self._execute(run_id, ("/api/show", "/api/chat?stream=1"))
+            self.assertEqual(("POST /api/chat",), result.model_requests, run_id)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_that_only_probes_records_nothing(self) -> None:
+        result, _, _ = self._execute("R15", ("/api/show", "/api/tags"))
+        self.assertEqual((), result.model_requests)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_every_endpoint_a_refusal_run_declares_points_at_the_counter(self) -> None:
+        _, config, env = self._execute("R13", ())
+        active = [line.split("=", 1)[1].strip() for line in config.splitlines()
+                  if line.strip().startswith("base_url")]
+        self.assertEqual(2, len(active))
+        self.assertEqual(1, len(set(active)))
+        url = active[0].strip('"')
+        self.assertTrue(url.startswith("http://127.0.0.1:"), url)
+        self.assertEqual(url, env[runs._BACKEND_URL_VARIABLE])
+        self.assertIn('# base_url = "http://commented.invalid/v1"', config)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_config_without_a_root_endpoint_gets_one_pointing_at_the_counter(self) -> None:
+        # Without a root base_url the product's built-in default, a real local daemon, would apply.
+        _, config, _ = self._execute("R13", (), config='[magi]\nmelchior_model = "m"\n')
+        import tomllib
+        self.assertTrue(tomllib.loads(config)["base_url"].startswith("http://127.0.0.1:"))
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_run_allowed_to_reach_models_keeps_its_config(self) -> None:
+        result, config, _ = self._execute("R12", ())
+        self.assertEqual(self._CONFIG, config)
+        self.assertEqual((), result.model_requests)
+
+
 if __name__ == "__main__":
     unittest.main()
