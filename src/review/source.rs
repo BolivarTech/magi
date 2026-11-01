@@ -647,6 +647,8 @@ pub struct CachedSource<'a> {
     cap: u64,
     /// How far past `cap` a read may go until [`ContentSource::settle`].
     headroom: u64,
+    /// What is held. A `Mutex` because [`ContentSource`] reads through `&self` and must be
+    /// `Send + Sync`; its scope, and why it is never contended, is documented at `get`.
     held: Mutex<Held>,
 }
 
