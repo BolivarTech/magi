@@ -1271,6 +1271,51 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_source_rooted_in_a_protected_directory_reads_nothing() {
+        // [S6 loop 16, A2-1, security] stripping the root drops its own `.git` / `.magi` component,
+        // so the per-path check alone saw `config` as an ordinary file.
+        let d = tempfile::tempdir().expect("tempdir");
+        for (dir, file) in [
+            (".git", "config"),
+            (".magi", "magi.toml"),
+            (".git", "hooks/x"),
+        ] {
+            let root = d.path().join(dir);
+            let target = root.join(file);
+            std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&target, "[core]\n").expect("write");
+            let nested = if file.contains('/') {
+                root.join("hooks")
+            } else {
+                root.clone()
+            };
+            let name = target
+                .file_name()
+                .expect("name")
+                .to_string_lossy()
+                .to_string();
+            let src = WorktreeSource::new(nested);
+            assert!(
+                matches!(src.read(&name), Err(ReviewError::Protected(_))),
+                "{dir}/{file}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    // as above: creating a symlink needs Developer Mode on Windows.
+    #[test]
+    fn a_worktree_source_rooted_at_an_alias_of_a_protected_directory_reads_nothing() {
+        // [S6 loop 16, A2-1, security] the alias canonicalizes to the protected directory.
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(d.path().join(".git")).expect("mkdir");
+        std::fs::write(d.path().join(".git").join("config"), "[core]\n").expect("write");
+        std::os::unix::fs::symlink(d.path().join(".git"), d.path().join("ws")).expect("symlink");
+        let src = WorktreeSource::new(d.path().join("ws"));
+        assert!(matches!(src.read("config"), Err(ReviewError::Protected(_))));
+    }
+
+    #[test]
     fn protected_names_match_whatever_their_case_or_trailing_dots() {
         // [CP2 MS2 S1b1 loop 16] Windows resolves `.GIT`, `.git.` and `.git ` to `.git`; the rule is the same everywhere.
         for p in [
