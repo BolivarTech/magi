@@ -4242,6 +4242,24 @@ void g(void) {
     }
 
     #[test]
+    fn a_cpp_function_returning_decltype_auto_is_a_function_with_its_body() {
+        // [MAGI S6 loop 15, B2b1] The first `(` was `decltype`'s, so the name read was
+        // `decltype`, a word of `NOT_FUNCTION_NAMES`, and the body fell into a gap unit.
+        let code = "decltype(auto) f() {\n    return x;\n}\nstatic decltype(a + b) g(int a, int b) {\n    return a + b;\n}\nauto add(int a, int b)\n    -> decltype(a + b)\n{\n    return a + b;\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &every_line(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("f", UnitKind::Function, 1, 3),
+                ("g", UnitKind::Function, 4, 6),
+                ("add", UnitKind::Function, 7, 11),
+            ]
+        );
+        // A `decltype` alone, with no function after it, names nothing.
+        assert_eq!(identifier_before_paren("decltype(x)"), None);
+    }
+
+    #[test]
     fn a_declaration_keyword_glued_to_its_list_opens_a_declaration_group() {
         // [MAGI S6 loop 14, B2b1] `match_declaration_keyword` required a blank after the
         // keyword, so `use::{a, b};`, `import{foo} from "x";` and `#include<stdio.h>` were no
