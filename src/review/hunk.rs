@@ -20,7 +20,8 @@ pub struct Hunk {
 
 /// Parse a unified diff into atomic hunks.
 ///
-/// Splits on `@@` markers and prepends the file header to each hunk.
+/// Splits on `@@` markers and prepends the file header to each hunk; a diff that opens with a
+/// `@@` marker has no header, and each of its hunks starts at its marker.
 /// If no `@@` markers are found, returns the entire diff as a single hunk.
 ///
 /// # Arguments
@@ -57,7 +58,13 @@ pub fn parse_hunks(file: &str, diff: &str) -> Vec<Hunk> {
     bodies
         .into_iter()
         .map(|body| {
-            let content = format!("{}\n{}", header, body);
+            // MAGI FIX (S6 loop 18, B1-6): an empty header is not joined, so a headerless hunk
+            // starts at its `@@` marker instead of a blank line.
+            let content = if header.is_empty() {
+                body
+            } else {
+                format!("{}\n{}", header, body)
+            };
             let lines = content.lines().count();
             Hunk {
                 file: file.to_string(),
