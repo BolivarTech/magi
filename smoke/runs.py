@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.parse
 
 from smoke.config import PLACEHOLDER_ENTRIES, ROTATION_MARKER
@@ -1631,11 +1632,26 @@ def error_backend():
 _BACKEND_URL_VARIABLE = "OPENAI_BASE_URL"
 _BACKEND_KEY_VARIABLE = "OPENAI_API_KEY"
 
+#: The variable that overrides the root ``provider``. A refusal run blanks it,
+#: which the product reads as absent, so the harness's own shell cannot steer
+#: the run to a provider the counter does not stand in for.
+_PROVIDER_VARIABLE = "MAGI_PROVIDER"
+
+#: The provider kind whose seats post to a fixed URL that no ``base_url``
+#: steers (magi-core's ``ClaudeProvider``), so the counter could never see them.
+_UNCOUNTABLE_KIND = "anthropic"
+
+#: The configuration keys that name a provider kind.
+_KIND_KEYS = frozenset({"provider", "kind"})
+
 #: The paths a run that forbids model calls may still request: the capability
 #: probe (``src/magi/probe.rs``), which sizes the batches from the root of an
 #: Ollama daemon before the budget refusal and costs no completion. Anything
 #: else -- a trio completion, a gate decision, an embedding, a path nobody
-#: listed -- is counted.
+#: listed -- is counted. They are magi-core's ``OllamaProvider`` ``window()``
+#: and ``digest()`` requests, under the daemon root (``/v1`` is normalised
+#: away), and ``smoke/tests/test_rust_sync.py`` pins them to the version
+#: ``Cargo.lock`` resolves.
 PROBE_PATHS = frozenset({"/api/show", "/api/tags"})
 
 #: What the counter answers: unavailable, so a probe fails open (the window
@@ -1870,6 +1886,67 @@ def point_config_at(config_path, url: str) -> None:
     except OSError as exc:
         raise HarnessError("could not point %s at the request counter: %s"
                            % (config_path, exc)) from exc
+
+
+def endpoints_off_the_counter(config_path, url: str) -> tuple[str, ...]:
+    """What in the ``magi.toml`` at *config_path* could reach past *url*.
+
+    MAGI FIX (smoke review, Melchior): the counter proves only that it saw no
+    request past the probe, so an endpoint :func:`point_config_at` missed (a
+    quoted key, an inline table) would let a model call go elsewhere and the
+    refusal run pass vacuously. Counting at least one request instead is not
+    a proof: R13 is refused before the probe, and only ``kind = "ollama"``
+    probes at all. So the file is parsed as the product parses it and every
+    endpoint it declares is checked.
+
+    Complexity: ``O(file bytes)``.
+
+    Args:
+        config_path: The rewritten configuration.
+        url: The counter's URL, which every endpoint must be.
+
+    Returns:
+        tuple[str, ...]: One entry per problem, table by table: the root
+        ``base_url`` missing or not *url*, any other ``base_url`` that is not
+        *url* (by dotted key), and any ``provider``/``kind`` naming
+        :data:`_UNCOUNTABLE_KIND`. Empty when every endpoint is the counter.
+
+    Raises:
+        HarnessError: When the file cannot be read or is not valid TOML.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     path = pathlib.Path(tmp) / "magi.toml"
+        ...     _ = path.write_text('base_url = "u"\\n[magi]\\nkind = "anthropic"\\n')
+        ...     endpoints_off_the_counter(path, "u")
+        ('magi.kind = "anthropic", whose seats no base_url steers',)
+    """
+    try:
+        document = tomllib.loads(pathlib.Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise HarnessError("could not read %s back to check its endpoints: %s"
+                           % (config_path, exc)) from exc
+    problems = []
+    if document.get("base_url") != url:
+        problems.append("the root base_url is %r, not the counter"
+                        % document.get("base_url"))
+    pending = [((), document)]
+    while pending:
+        prefix, node = pending.pop(0)
+        items = (node.items() if isinstance(node, dict)
+                 else ((str(i), v) for i, v in enumerate(node)))
+        for key, value in items:
+            name = ".".join(prefix + (key,))
+            if isinstance(value, (dict, list)):
+                pending.append((prefix + (key,), value))
+            elif key == "base_url" and prefix and value != url:
+                problems.append("%s is %r, not the counter" % (name, value))
+            elif (key in _KIND_KEYS and isinstance(value, str)
+                  and value.strip().lower() == _UNCOUNTABLE_KIND):
+                problems.append('%s = "%s", whose seats no base_url steers'
+                                % (name, value))
+    return tuple(problems)
 
 #: The eight shared runs, complete. They land in ONE place rather than a row at
 #: a time as later tasks need them, because a run whose only owner is a task
@@ -2160,6 +2237,13 @@ class RunExecutor:
         Every endpoint of the review workspace's ``magi.toml``
         (:func:`point_config_at`) and ``OPENAI_BASE_URL``, which overrides the
         root one, reach :func:`model_counter`; nothing reaches a real backend.
+        The rewritten file is checked before the run
+        (:func:`endpoints_off_the_counter`) and ``MAGI_PROVIDER`` is blanked,
+        so the harness's own shell cannot steer the run elsewhere. An endpoint
+        off the counter is the harness's setup, not the product's verdict, so
+        it is a :class:`HarnessError` (exit 3), never a scenario ``FAIL``. The
+        requests the counter saw are recorded even when the run times out:
+        the timeout is caught inside this block.
 
         Args:
             definition: The run about to execute.
@@ -2169,11 +2253,13 @@ class RunExecutor:
 
         Yields:
             RunDefinition: *definition* itself for any other run; otherwise a
-            copy whose ``env`` also points ``OPENAI_BASE_URL`` at the counter.
+            copy whose ``env`` also points ``OPENAI_BASE_URL`` at the counter
+            and blanks ``MAGI_PROVIDER``.
 
         Raises:
-            HarnessError: When there is no workspace, or its configuration
-                cannot be rewritten.
+            HarnessError: When there is no workspace, its configuration is
+                missing or cannot be rewritten, or the rewritten configuration
+                still declares an endpoint off the counter.
         """
         if not definition.forbids_model_calls:
             yield definition
@@ -2181,10 +2267,18 @@ class RunExecutor:
         if workspace is None:
             raise HarnessError("run %s forbids model calls but has no review "
                                "workspace to point at a counter" % definition.run_id)
+        config = workspace / ".magi" / "magi.toml"
         with model_counter() as (url, log):
-            point_config_at(workspace / ".magi" / "magi.toml", url)
+            point_config_at(config, url)
+            off = endpoints_off_the_counter(config, url)
+            if off:
+                raise HarnessError(
+                    "run %s forbids model calls, but its configuration could "
+                    "still reach past the request counter: %s"
+                    % (definition.run_id, "; ".join(off)))
             yield dataclasses.replace(
-                definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),))
+                definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),
+                                                  (_PROVIDER_VARIABLE, "")))
         contacted.extend(requests_past_the_probe(log))
 
     def _review_workspace(self) -> pathlib.Path:
