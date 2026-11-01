@@ -1281,6 +1281,11 @@ impl BraceFamilyExtractor {
     fn match_block_keyword<'t>(&self, trimmed: &'t str) -> Option<(UnitKind, &'t str)> {
         for kw in &self.block_keywords {
             if let Some(rest) = keyword_rest(trimmed, kw) {
+                // MAGI FIX (B2b1 9): `namespace` is no reserved word in TypeScript or C, so
+                // `namespace = 2;` assigns a variable; a namespace is named, never assigned.
+                if kw.trim() == "namespace" && rest.starts_with('=') {
+                    continue;
+                }
                 // MAGI FIX (S6 loop 5): the tables hold bare keywords and the modifiers are
                 // stripped before they are matched, so the `pub struct` and `export class` arms
                 // could never match; a bare keyword names the kind.
@@ -1288,7 +1293,7 @@ impl BraceFamilyExtractor {
                     // MAGI FIX (S6 loop 13): `type Reader interface {` was a struct.
                     "type" => go_type_kind(rest),
                     "struct" | "union" => UnitKind::Struct,
-                    "enum" => UnitKind::Enum,
+                    "enum" | "const enum" => UnitKind::Enum,
                     "trait" | "interface" => UnitKind::Trait,
                     "impl" => UnitKind::Impl,
                     // MAGI FIX (S6 loop 6): a module was function-like, so it never split.
@@ -3337,7 +3342,9 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 7): `.tsx` is not claimed, as `.jsx` is not ([`Self::javascript`]).
         // MAGI FIX (S6 loop 9): a CommonJS `.cts` file had no extractor.
         ext.exts = &["ts", "mts", "cts"];
-        ext.block_keywords.push("interface ".to_string());
+        // MAGI FIX (B2b1 9): an enum or a namespace fell into gap units.
+        ext.block_keywords
+            .extend(["interface ", "enum ", "const enum ", "namespace "].map(str::to_string));
         ext.declaration_keywords.push("type ".to_string());
         ext.declaration_keywords.push("export type ".to_string());
         ext.lexical_rules = LexicalRules::typescript();
@@ -6563,7 +6570,10 @@ int g(void) {
         let named = "const namespace = 1;\nnamespace = 2;\n";
         assert_eq!(
             spans(&extract(&ext, named, &all_lines(named))),
-            vec![("constants", UnitKind::DeclarationGroup, 1, 1)]
+            vec![
+                ("constants", UnitKind::DeclarationGroup, 1, 1),
+                ("lines 2-2", UnitKind::TopLevel, 2, 2)
+            ]
         );
     }
 
