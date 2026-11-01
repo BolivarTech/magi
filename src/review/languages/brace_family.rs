@@ -4240,4 +4240,16 @@ void g(void) {
             "{found:?}"
         );
     }
+
+    #[test]
+    fn a_one_line_member_with_balanced_braces_does_not_take_the_statement_after_it() {
+        // [MAGI S6 loop 14, B2b1] the bound of the bodiless-signature rule: a line whose braces
+        // balance (`run() {}`) ends on its own line, so a class field after it stays apart.
+        let js = "class C {\n  run() {}\n  x = 1;\n  go() {\n  }\n}\n";
+        let parts = split(&BraceFamilyExtractor::javascript(), js, 2, UnitKind::Class);
+        let ranges: Vec<(u32, u32)> = parts.iter().map(|p| (p.start_line, p.end_line)).collect();
+        assert!(ranges.contains(&(2, 2)), "{ranges:?}");
+        assert!(ranges.contains(&(3, 3)), "{ranges:?}");
+        assert!(ranges.contains(&(4, 5)), "{ranges:?}");
+    }
 }
