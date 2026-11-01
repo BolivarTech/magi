@@ -326,4 +326,15 @@ mod tests {
             let _ = parse_hunks("a.rs", &hostile[..end]);
         }
     }
+
+    #[test]
+    fn a_headerless_diff_gives_hunks_that_start_at_their_marker() {
+        // [MAGI S6 loop 18, B1-6] an empty header was still joined with a newline, so the
+        // hunk opened with a blank line and counted it.
+        let hunks = parse_hunks("a.rs", "@@ -1 +1 @@\n-a\n+b\n@@ -9 +9 @@\n-c\n+d\n");
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].content, "@@ -1 +1 @@\n-a\n+b");
+        assert_eq!(hunks[0].lines, 3);
+        assert_eq!(hunks[1].content, "@@ -9 +9 @@\n-c\n+d");
+    }
 }
