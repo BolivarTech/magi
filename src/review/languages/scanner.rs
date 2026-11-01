@@ -1919,6 +1919,24 @@ void h() {
     }
 
     #[test]
+    fn the_first_branch_decides_the_depth_after_an_unequal_conditional() {
+        // [B2a] branches that leave different depths: the first one's survives `#endif`, and a
+        // brace opened only in a later branch is dropped there (the declared limit).
+        let first_opens = "#if A\nint f(void) {\n#else\n#endif\n    return 0;\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(first_opens);
+        assert_eq!(results[3].depth_after, 1, "after #endif");
+        assert_eq!(find_closing_brace(&results, 1), 5);
+        assert_eq!(results[5].depth_after, 0);
+        let later_opens = "#if A\n#else\nint f(void) {\n#endif\nint g(void) {\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(later_opens);
+        assert_eq!(
+            results[3].depth_after, 0,
+            "the later branch's brace is dropped"
+        );
+        assert_eq!(find_closing_brace(&results, 4), 5, "g is its own block");
+    }
+
+    #[test]
     fn a_missing_endif_still_restores_the_depth_at_its_else() {
         // [B2a] a conditional the file never closes still restores at `#else`; its frame only
         // stays on the stack.
