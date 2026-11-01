@@ -929,6 +929,13 @@ def protected_candidates(workspace) -> tuple[str, ...]:
                                              LOG_DIR_PARTS[0])))
 
 
+#: The repository the harness lives in, two levels above this file, resolved
+#: the way ``smoke/__main__.py`` resolves it, so the scratch area it derives
+#: lies lexically under this path. No component from here down to the review
+#: workspace may be a link.
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
 #: The reparse tag of a Windows junction (``IO_REPARSE_TAG_MOUNT_POINT``).
 #: Off Windows ``os.lstat`` reports no ``st_reparse_tag``, read as 0, so
 #: nothing matches it.

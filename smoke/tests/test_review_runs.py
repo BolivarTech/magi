@@ -748,5 +748,83 @@ class ReviewLogBoundTests(unittest.TestCase):
             self.assertEqual(["pipe (%s)" % runs.NOT_A_REGULAR_FILE], unreadable)
 
 
+def _make_symlink(target: pathlib.Path, link: pathlib.Path) -> None:
+    """Make *link* a real directory symlink to *target*.
+
+    Raises:
+        unittest.SkipTest: When the platform or the account cannot make one (Windows without the
+            symlink privilege).
+    """
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        raise unittest.SkipTest("cannot create a symlink here: %s" % exc) from exc
+
+
+def _make_junction(target: pathlib.Path, link: pathlib.Path) -> None:
+    """Make *link* a real Windows junction to *target*.
+
+    Raises:
+        unittest.SkipTest: Off Windows, where junctions do not exist.
+    """
+    try:
+        import _winapi  # Windows only; a junction needs no privilege
+    except ImportError as exc:
+        raise unittest.SkipTest("junctions exist on Windows only") from exc
+    _winapi.CreateJunction(str(target), str(link))
+
+
+class ReviewChainLinkTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 17, F1a1-caspar] no link from the repository root down to the workspace."""
+
+    def _linked_scratch(self, root: pathlib.Path, make_link) -> tuple:
+        """A scratch area that is itself a link to *root*/outside, holding a workspace to keep."""
+        outside = root / "outside"
+        keep = outside / runs.REVIEW_WORKSPACE_DIR / "keep.txt"
+        keep.parent.mkdir(parents=True)
+        keep.write_text("not the harness's", encoding="utf-8")
+        make_link(outside, root / "scratch")
+        return outside, keep
+
+    def _assert_scratch_link_refused(self, make_link) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside, keep = self._linked_scratch(root, make_link)
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root):
+                with self.assertRaises(HarnessError) as caught:
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("scratch", str(caught.exception))
+            self.assertTrue(keep.is_file())
+            self.assertFalse((outside / runs.REVIEW_WORKSPACE_DIR / ".magi").exists())
+
+    def test_a_scratch_area_that_is_a_symlink_is_never_deleted_or_copied_through(self) -> None:
+        # The containment check resolves the scratch area on both sides, so a linked scratch area passed it,
+        # and the link walk started below it: rmtree emptied <outside>/review-ws and copytree wrote into it.
+        self._assert_scratch_link_refused(_make_symlink)
+
+    def test_a_scratch_area_that_is_a_junction_is_never_deleted_or_copied_through(self) -> None:
+        self._assert_scratch_link_refused(_make_junction)
+
+    def test_a_link_between_the_repository_root_and_the_scratch_area_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            real = root / "real-smoke"
+            keep = real / "scratch" / runs.REVIEW_WORKSPACE_DIR / "keep.txt"
+            keep.parent.mkdir(parents=True)
+            keep.write_text("x", encoding="utf-8")
+            _make_junction(real, root / "smoke")
+            magi = root / ".magi"
+            magi.mkdir()
+            env = types.SimpleNamespace(root=root / "smoke" / "env", magi_dir=magi,
+                                        scratch_dir=root / "smoke" / "scratch")
+            executor = runs.RunExecutor(binary=None, env=env, config=None)
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root):
+                with self.assertRaises(HarnessError) as caught:
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("smoke", str(caught.exception))
+            self.assertTrue(keep.is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
