@@ -463,7 +463,7 @@ pub(crate) fn lines_in_range(sorted: &[u32], start: u32, end: u32) -> &[u32] {
 /// * `file_path` - Path to the file.
 /// * `constructs` - `(start, end)` line ranges (1-based, inclusive) of the file's constructs,
 ///   sorted by start and disjoint.
-/// * `orphans` - Changed lines outside every construct.
+/// * `orphans` - Changed lines outside every construct; a 0, which names no line, is ignored.
 ///
 /// # Returns
 ///
@@ -478,7 +478,9 @@ pub(crate) fn gap_units(
     orphans.dedup();
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
     let mut units: Vec<SemanticUnit> = Vec::new();
-    for orphan in orphans {
+    // MAGI FIX (S6 loop 19, B2a-1): an orphan 0 gave a unit ending before its start; lines are
+    // 1-based, so a 0 names no line to show.
+    for orphan in orphans.into_iter().filter(|&line| line >= 1) {
         let next = constructs.partition_point(|&(start, _)| start <= orphan);
         let first = next
             .checked_sub(1)
@@ -531,7 +533,7 @@ const FALLBACK_CONTEXT_LINES: u32 = 20;
 /// # Returns
 ///
 /// The units in line order, each with its changed lines sorted; empty when nothing changed.
-/// A changed line past the file's last line is left out: the file has no such line to show.
+/// A changed line past the file's last line, or 0, is left out: the file has no such line to show.
 /// O(c log c + n) for c changed lines and n lines of the file.
 pub fn fallback_extract(
     content: &str,
@@ -543,10 +545,11 @@ pub fn fallback_extract(
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
     // MAGI FIX (S6 loop 18, B2a-4): a changed line past the last line opened a window whose
     // start fell after its end; a line the file does not have has nothing to show.
+    // MAGI FIX (S6 loop 19, B2a-1): so did line 0, which lines (1-based) never are.
     let mut sorted: Vec<u32> = changed_lines
         .iter()
         .copied()
-        .filter(|&line| line <= total)
+        .filter(|line| (1..=total).contains(line))
         .collect();
     sorted.sort_unstable();
 
