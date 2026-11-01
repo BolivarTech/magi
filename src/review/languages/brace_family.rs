@@ -161,7 +161,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// A declaration group splits at its declarations instead
     /// (`split_declaration_group`). Only those kinds split, declared: an enum or a
     /// struct is reviewed whole, as is a Rust `macro_rules!` (a function-like unit whose token
-    /// tree is opaque: no item is read inside it, [`MACRO_RULES_KEYWORD`]), and a construct no
+    /// tree is opaque: no item is read inside it, `MACRO_RULES_KEYWORD`), and a construct no
     /// keyword table names (TypeScript's `enum` or `namespace`, a JavaScript IIFE) is no
     /// construct at all, so its lines fall into gap units. A single such unit, or one
     /// declaration, too large for one
