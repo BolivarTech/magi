@@ -91,6 +91,11 @@ impl LanguageExtractor for BraceFamilyExtractor {
             .map(|c| (c.start_line, c.end_line))
             .collect();
         // MAGI FIX (S6 loop 3): a whole file hands out its lines by range, without a set of all.
+        // The `u32::MAX` fallback is out of reach: a reviewed file is at most
+        // `MAX_REVIEW_FILE_BYTES` (8 MiB), so at most 8 388 608 lines, far below `u32::MAX`; it
+        // only keeps the conversion total, without a panic. Detection itself does not rely on
+        // it: it aborts on a line number that does not fit (`try_detect_constructs`).
+        // MAGI FIX (S6 loop 14): why the fallback is safe, written where it is used.
         let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
         let (shares, orphans) = changed_lines.assign(&ranges, total);
 
@@ -302,6 +307,21 @@ impl BraceFamilyExtractor {
     /// No constructs when a line number does not fit `u32` ([`Self::try_detect_constructs`]):
     /// the file's changed lines then fall into gap units and a block is reviewed whole, as
     /// [`shift_members`] leaves it, never split at fabricated coordinates.
+    ///
+    /// Invariant: the constructs come sorted by their first line and their ranges are disjoint,
+    /// which `ChangedLines::assign` and `split_into_members` rely on; lines no construct holds
+    /// are the gaps. O(n) in the lines ([`Self::try_detect_constructs`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines: a whole file, or the lines of a block's body.
+    /// * `scanned` - The scanner's record of each of those lines, in the same order.
+    /// * `members` - Whether the lines are a block's body (a class, an `impl`, a module).
+    ///
+    /// # Returns
+    ///
+    /// The constructs, 1-based line numbers counted from the first of `lines`.
+    // MAGI FIX (S6 loop 14): the arguments, the result and the invariant are documented.
     fn detect_constructs(
         &self,
         lines: &[&str],
@@ -326,6 +346,23 @@ impl BraceFamilyExtractor {
     /// A known maintenance hotspot, declared.
     /// O(n) in the lines, plus the helpers' forward searches, which share `budget`
     /// ([`SearchBudget`]) and so add O(n) line visits in all.
+    ///
+    /// Each construct found moves the scan past its last line, so no two ranges overlap; the
+    /// scan back for its doc comments never goes above the line after the previous construct
+    /// ([`Self::scan_back_for_docs`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `members` - Whether the lines are a block's body: a signature ending in `;` is then a
+    ///   member ([`Self::member_prototypes`]), and a JavaScript or TypeScript method directly in
+    ///   it may be named by a reserved word (`reserved_word_methods`).
+    /// * `budget` - The line visits the forward searches of this pass may spend.
+    ///
+    /// # Returns
+    ///
+    /// The constructs, sorted and disjoint, or `None` when a line number does not fit `u32`.
     fn try_detect_constructs(
         &self,
         lines: &[&str],
@@ -486,6 +523,17 @@ impl BraceFamilyExtractor {
     /// a declaration list wrapped after a comma ([`Self::declaration_list_end`]) or of a call
     /// its initializer opens ([`call_initializer_end`]), whichever is last; `j` itself
     /// otherwise. O(k) for the k lines of the declaration.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `j` - The 0-based line the declaration starts on.
+    /// * `search` - The bounds of the forward searches ([`BraceSearch`]).
+    ///
+    /// # Returns
+    ///
+    /// The declaration's last line, 0-based, never before `j`.
     fn declaration_end(
         &self,
         lines: &[&str],
@@ -1239,6 +1287,14 @@ const LINE_OPENING_COMMENTS: [&str; 2] = ["//", "/*"];
 /// than this (a generated parameter list) is read as having no brace, so its lines fall into
 /// later units, reviewed but split from their signature. It bounds one search; the searches of a
 /// whole detection pass share [`SearchBudget`], O(n) line visits for a text of n lines.
+///
+/// Why this value: rustfmt and clang-format put one parameter per line, so a hand-written
+/// signature spans tens of lines at most; 1 024 is two orders of magnitude above that, so only
+/// generated code reaches it, and it keeps one search over a pathological text short (a few
+/// thousand line visits). It is a fixed constant, not a setting: no operator knob changes how
+/// a file is cut into units, so the same file always gives the same units. Raising it only
+/// moves where a generated list is split from its body; lowering it splits real signatures.
+// MAGI FIX (S6 loop 14): why the value, and why it is no setting.
 const MAX_BRACE_SEARCH_LINES: usize = 1_024;
 
 /// What a forward brace search of one detection pass is bounded by: where the next construct
@@ -1267,6 +1323,13 @@ impl BraceSearch<'_> {
 /// spend in all ([`SearchBudget`]). A starting point, not a measurement: a construct's searches
 /// walk its header, a few lines even when wrapped, two or three times, so ordinary code spends a
 /// small fraction of it; only a text built to keep one parameter list open per line reaches it.
+///
+/// Why this value: about ten times what ordinary code spends (two or three walks over a header
+/// of a few lines), so no real file meets the cap, while an 8 MiB file still costs at most
+/// about 2.7 × 10⁸ line visits in the worst case, bounded and linear. It is fixed, not a
+/// setting, for the reason given at [`MAX_BRACE_SEARCH_LINES`]; once it is spent the searches
+/// degrade as [`SearchBudget`] says, with no line lost.
+// MAGI FIX (S6 loop 14): why the value, and why it is no setting.
 const BRACE_SEARCH_VISITS_PER_LINE: usize = 32;
 
 /// The line visits the forward searches of one detection pass may spend:
