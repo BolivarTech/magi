@@ -746,6 +746,46 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_whose_old_path_is_shaped_like_a_key_is_left_out_before_any_read() {
+        // [MAGI S6 loop 15, A2-4] the path check ran on the new path only: a rename's old path
+        // shaped like a key was read (and cached) under that name before the diff scan left the
+        // file out, and a failed read of it was logged as `unreadable`, not `secret`.
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        struct Counting(AtomicUsize);
+        impl ContentSource for Counting {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.0.fetch_add(1, SeqCst);
+                Ok(Some(b"fn f() {}\n".to_vec()))
+            }
+            fn read_old(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.0.fetch_add(1, SeqCst);
+                Err(ReviewError::Io(format!("{path}: sharing violation")))
+            }
+        }
+        let old = concat!("AK", "IA", "ABCDEFGHIJKLMNOP.rs");
+        let moved = format!(
+            "diff --git a/{old} b/now.rs\nsimilarity index 90%\nrename from {old}\n\
+             rename to now.rs\n--- a/{old}\n+++ b/now.rs\n@@ -1,1 +1,1 @@\n-fn f() {{}}\n+fn f() {{}}\n"
+        );
+        let file = vec![ReviewFile {
+            path: "now.rs".into(),
+            diff: Some(moved),
+        }];
+        let src = Counting(AtomicUsize::new(0));
+        let err = filter_files(file, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect_err("the only file is left out");
+        assert!(
+            matches!(
+                &err,
+                ReviewError::NothingToReview { skipped }
+                    if skipped == &[Skipped { path: "now.rs".into(), cause: SkipCause::Secret }]
+            ),
+            "{err:?}"
+        );
+        assert_eq!(src.0.load(SeqCst), 0, "no side was read");
+    }
+
+    #[test]
     fn a_secret_on_the_old_side_of_a_renamed_file_skips_it() {
         // [MAGI §6 MS2 A loop 1] a rename's old side lives under its old path: read by the new path it was empty,
         // and a key on a removed line or outside the hunk reached a model.
