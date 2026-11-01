@@ -4132,4 +4132,59 @@ void g(void) {
         let units = extract(&rust_extractor(), rust, &[1]);
         assert_eq!(spans(&units), vec![("unnamed", UnitKind::Impl, 1, 1)]);
     }
+
+    #[test]
+    fn a_signature_without_a_body_wrapped_over_lines_ends_at_its_semicolon() {
+        // [MAGI S6 loop 14, B2b1] with no brace found, a construct ended on its keyword's line,
+        // so a wrapped trait method or foreign function lost the rest of its signature to the
+        // next unit (RV03).
+        let top = "fn f(\n    a: u8,\n) -> u8;\nfn g() {\n}\n";
+        let units = extract(&rust_extractor(), top, &every_line(top));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("f", UnitKind::Function, 1, 3),
+                ("g", UnitKind::Function, 4, 5)
+            ]
+        );
+        let tr = "trait T {\n    fn f<U>(\n        a: U,\n    ) -> U\n    where\n        U: Clone;\n    fn g(&self) {\n    }\n}\n";
+        let parts = split(&rust_extractor(), tr, 2, UnitKind::Trait);
+        let ranges: Vec<(&str, u32, u32)> = parts
+            .iter()
+            .map(|p| (p.name.as_str(), p.start_line, p.end_line))
+            .collect();
+        assert!(ranges.contains(&("f", 2, 6)), "{ranges:?}");
+        assert!(ranges.contains(&("g", 7, 8)), "{ranges:?}");
+    }
+
+    #[test]
+    fn a_blank_line_inside_a_wrapped_parameter_list_keeps_the_body_with_its_signature() {
+        // [MAGI S6 loop 14, B2b1] the brace search stopped at any blank line, so a blank line
+        // between two parameters detached the body from its signature.
+        let rust = "fn h(\n    a: u8,\n\n    b: u8,\n) -> u8 {\n    a\n}\n";
+        let units = extract(&rust_extractor(), rust, &every_line(rust));
+        assert_eq!(spans(&units), vec![("h", UnitKind::Function, 1, 7)]);
+        let c = "int k(int a,\n\n      int b)\n{\n    return a;\n}\n";
+        let units = extract(&c_extractor(), c, &every_line(c));
+        assert_eq!(spans(&units), vec![("k", UnitKind::Function, 1, 6)]);
+    }
+
+    #[test]
+    fn a_blank_line_after_a_line_that_closes_its_code_still_ends_the_brace_search() {
+        // [MAGI S6 loop 14, B2b1] the bound of the rule above: a `(` inside a character literal
+        // leaves the parentheses counted open, but the line does not end in `,` or `(`, so the
+        // blank line after it still ends the search and the next function keeps its brace.
+        let code = "fn p() -> char { '(' }\n\nfn q() {\n    x();\n}\n";
+        let units = extract(&rust_extractor(), code, &every_line(code));
+        assert_each_line_in_one_unit(&units, 5);
+        let found = spans(&units);
+        assert!(
+            found.contains(&("p", UnitKind::Function, 1, 1)),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&("q", UnitKind::Function, 3, 5)),
+            "{found:?}"
+        );
+    }
 }
