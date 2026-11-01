@@ -3957,4 +3957,20 @@ void g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_parenthesis_inside_an_annotation_string_does_not_hide_the_declaration() {
+        // [MAGI S6 loop 14, B2b1] `without_annotations` counted the parentheses inside the
+        // annotation's strings, so `@Component(")")` closed early and the class was no unit.
+        let java = "@Component(\")\") public class C {\n    void run() {\n    }\n}\n";
+        let units = extract(&BraceFamilyExtractor::java(), java, &every_line(java));
+        assert_eq!(spans(&units), vec![("C", UnitKind::Class, 1, 4)]);
+        let ts = "@Component(')', `(`) export class D {\n    run() {\n    }\n}\n";
+        let units = extract(&BraceFamilyExtractor::typescript(), ts, &every_line(ts));
+        assert_eq!(spans(&units), vec![("D", UnitKind::Class, 1, 4)]);
+        // An escaped quote stays inside its string.
+        let escaped = "@A(\"\\\")\") class E {\n}\n";
+        let units = extract(&BraceFamilyExtractor::java(), escaped, &every_line(escaped));
+        assert_eq!(spans(&units), vec![("E", UnitKind::Class, 1, 2)]);
+    }
 }
