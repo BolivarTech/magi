@@ -434,13 +434,16 @@ impl BraceFamilyExtractor {
                 self.signature_name(line, scanned.get(i), prototypes)
             };
             if let Some(name) = signature {
-                let opens = open_brace_line(lines, scanned, i, &search).is_some();
+                // MAGI FIX (S6 loop 15): the brace search ran twice, once here and once in
+                // `brace_block_end`, spending a wrapped header's visits of the budget twice.
+                let open = open_brace_line(lines, scanned, i, &search);
+                let opens = open.is_some();
                 if opens || trimmed.ends_with('}') || prototypes {
                     let start = self.scan_back_for_docs(lines, scanned, i, floor);
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
                     let end = if opens || trimmed.ends_with('}') {
-                        brace_block_end(lines, scanned, i, line_num, &search)?
+                        block_end_after(lines, scanned, i, line_num, open, &search)?
                     } else {
                         line_number(statement_end(lines, scanned, i, &search))?
                     };
@@ -1784,7 +1787,35 @@ fn brace_block_end(
     line_num: u32,
     search: &BraceSearch<'_>,
 ) -> Option<u32> {
-    match open_brace_line(lines, scanned, i, search) {
+    let open = open_brace_line(lines, scanned, i, search);
+    block_end_after(lines, scanned, i, line_num, open, search)
+}
+
+/// The 1-indexed last line of the construct starting at line index `i`, as [`brace_block_end`]
+/// finds it, given the result of its brace search (`open`, [`open_brace_line`]) already run, so
+/// a caller that needed the search's answer first does not spend its visits a second time.
+///
+/// # Arguments
+///
+/// * `lines` - The text's lines.
+/// * `scanned` - The scanner's record of each line.
+/// * `i` - The 0-based line the construct starts on.
+/// * `line_num` - The 1-based number of line `i`.
+/// * `open` - The 0-based line of the construct's opening brace, or `None` when it has none.
+/// * `search` - The bounds of the forward searches ([`BraceSearch`]).
+///
+/// # Returns
+///
+/// The construct's last line, 1-based, or `None` when it does not fit `u32`.
+fn block_end_after(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    i: usize,
+    line_num: u32,
+    open: Option<usize>,
+    search: &BraceSearch<'_>,
+) -> Option<u32> {
+    match open {
         Some(open_idx) => line_number(find_closing_brace(scanned, open_idx)),
         // MAGI FIX (S6 loop 14): a wrapped signature without a body ended on its first line
         // and the rest of it fell into the next unit.
