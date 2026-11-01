@@ -1225,7 +1225,8 @@ fn word_is(word: &[char], keyword: &str) -> bool {
 /// The closing brace is the first line after `open_idx` where the
 /// depth, at any point within the line, returns to the level it was
 /// at before the opening brace: `} else {` closes the block it ends
-/// although it opens another one.
+/// although it opens another one. On the opening line, the braces opened after its lowest point
+/// are the construct's, so a line that closes first and then opens (`}) {`) opens one.
 ///
 /// # Arguments
 ///
@@ -1280,7 +1281,15 @@ pub(crate) fn find_closing_brace_within(
 
     // The depth before the line: a line that opens several blocks (`fn f() { if x {`) closes
     // when the depth falls back to it, not after its innermost block.
-    let opened = u32::try_from(open_line.brace_delta.max(0)).unwrap_or(0);
+    // MAGI FIX (B2b1 7): a line that closes before it opens (`}) {`, the end of a default
+    // argument's lambda then the function's brace) opens what it holds after its lowest point.
+    let opened = u32::try_from(
+        open_line
+            .brace_delta
+            .saturating_sub(open_line.min_delta)
+            .max(0),
+    )
+    .unwrap_or(0);
     let target_depth = open_line.depth_after.saturating_sub(opened);
     // MAGI FIX (S6 loop 4): a line that closes and reopens (`} else {`) nets zero; the lowest
     // depth within the line, not the depth after it, says whether it closed the block.

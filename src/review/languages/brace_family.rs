@@ -1782,11 +1782,15 @@ impl SearchBudget {
 /// (`fn p() -> char { '(' }` leaves nothing open), so the blank line after such a line still
 /// ends the search and the next construct keeps its own brace.
 ///
-/// A brace on a parameter line is taken for the construct's brace, declared: a default argument
-/// that opens a lambda body on that line (`void f(int cb = []() {`) or an anonymous struct
-/// parameter makes the function end at that parameter's closing brace, and the rest of its body
-/// falls into later units. No line is lost: every line stays in exactly one unit, so the body is
-/// still reviewed, only split from its signature.
+/// A brace that a default argument opens while the list is still open (`void f(int cb = []() {`,
+/// `function f(cb = () => {`: a line holding a bare `=`, [`holds_bare_assignment`]) is the
+/// argument's: the search passes over the lines to the one that closes the list, whose brace
+/// after its lowest point (`}) {`) is the function's. Any other brace on a parameter line is
+/// taken for the construct's, declared: an anonymous struct parameter, or a lambda passed with no
+/// `=` (a call `describe('x', () => {`, which reads as a signature and keeps its block), makes
+/// the construct end at that brace's match, and the rest of its body falls into later units. No
+/// line is lost: every line stays in exactly one unit, so the body is still reviewed, only split
+/// from its signature.
 ///
 /// The search looks at most [`MAX_BRACE_SEARCH_LINES`] lines past line `i`, and no more than the
 /// detection pass has left ([`SearchBudget`]), and then degrades to "no brace found", which
@@ -1804,15 +1808,32 @@ fn open_brace_line(
     // MAGI FIX (S6 loop 4): a comment ending in `;` (`// keeps state;`) is not a statement.
     let ends_statement =
         |idx: usize| is_code(idx) && scanned.get(idx).is_some_and(|s| s.ends_statement);
-    if opens(i) {
+    let group_open = |idx: usize| scanned.get(idx).map_or(0, |s| i64::from(s.group_delta));
+    // MAGI FIX (B2b1 7): a brace a default argument opens while the parameter list is still open
+    // (a lambda, `f(cb = () => {`) is the argument's, not the function's: the search passes over
+    // the argument to the line that closes the list.
+    let mut in_default_argument = opens(i)
+        && group_open(i) > 0
+        && lines.get(i).is_some_and(|l| {
+            l.split_once('(')
+                .is_some_and(|(_, list)| holds_bare_assignment(list))
+        });
+    if opens(i) && !in_default_argument {
         return Some(i);
     }
     // A line whose code ends in `}` after opening nothing net (`fn f() -> u8 { 1 }`) is a
     // one-line construct: searching on took the brace of the block after it.
     let ends_block = |idx: usize| is_code(idx) && scanned.get(idx).is_some_and(|s| s.ends_block);
-    if ends_statement(i) || ends_block(i) {
+    if !in_default_argument && (ends_statement(i) || ends_block(i)) {
         return None;
     }
+    // The line that closes the list after a default argument's brace (`}) {`) nets no brace,
+    // yet opens the function's after its lowest point.
+    let reopens = |idx: usize| {
+        scanned
+            .get(idx)
+            .is_some_and(|s| s.brace_delta > s.min_delta)
+    };
     // MAGI FIX (S6 loop 3): no fixed two-line cap; the declaration's own end bounds the search.
     // MAGI FIX (S6 loop 6): a top-level `foo()` took the brace of the `if (x) {` after it.
     // MAGI FIX (S6 loop 7): a parameter line inside the open list no longer stops the search.
@@ -1827,7 +1848,6 @@ fn open_brace_line(
     // MAGI FIX (S6 loop 17, B2-4): the list counted as open only after a code line ending in `,`
     // or `(`, so a comment before the blank line ended the search; the scanner's count of the
     // delimiters in code, which no comment or string moves, now decides.
-    let group_open = |idx: usize| scanned.get(idx).map_or(0, |s| i64::from(s.group_delta));
     let mut list_open = group_open(i);
     for j in (i + 1)..budget_end {
         if !search.spend() {
@@ -1843,6 +1863,22 @@ fn open_brace_line(
         // string (`func f(x int) // see (`) held it open and the next function's brace was taken.
         let open_before = list_open;
         list_open += group_open(j);
+        if in_default_argument {
+            if list_open > 0 {
+                continue;
+            }
+            in_default_argument = false;
+            if reopens(j) {
+                return Some(j);
+            }
+        } else if open_before > 0
+            && list_open > 0
+            && opens(j)
+            && lines.get(j).is_some_and(|l| holds_bare_assignment(l))
+        {
+            in_default_argument = true;
+            continue;
+        }
         // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
         // the next construct; a line after one ending in `,` continues the declaration.
         // MAGI FIX (S6 loop 11): a comment line ending in `,` (`// note,`) between two signatures
@@ -2123,6 +2159,30 @@ fn ends_in_bare_equal(trimmed: &str) -> bool {
     trimmed
         .strip_suffix('=')
         .is_some_and(|rest| !rest.ends_with(['=', '!', '<', '>']))
+}
+
+/// Whether `text` holds a bare `=`, an assignment or a default argument (`cb = () => {`), not
+/// part of `==`, `!=`, `<=`, `>=`, `=>` or a compound assignment (`+=`). A heuristic on the
+/// text: a `=` inside a string counts too. O(n) in the text.
+///
+/// # Arguments
+///
+/// * `text` - A line's text, or part of it.
+///
+/// # Returns
+///
+/// Whether a bare `=` is in it.
+fn holds_bare_assignment(text: &str) -> bool {
+    let mut previous = ' ';
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let next = chars.peek().copied().unwrap_or(' ');
+        if c == '=' && !"=!<>+-*/%&|^".contains(previous) && !matches!(next, '=' | '>') {
+            return true;
+        }
+        previous = c;
+    }
+    false
 }
 
 /// The 0-based last line of the value a declaration at line `i` puts after a bare `=` on the
@@ -4595,9 +4655,9 @@ fn g() {
 
     #[test]
     fn a_brace_in_an_open_parameter_list_loses_no_line() {
-        // [MAGI S6 loop 8, B2b-m2] declared on `open_brace_line`: a lambda default argument's
-        // brace is taken for the function's, so the body is split from its signature, but every
-        // line stays in exactly one unit.
+        // [MAGI S6 loop 8, B2b-m2] a lambda default argument's brace was taken for the
+        // function's; every line stays in exactly one unit either way (since B2b1 7 the function
+        // is whole, `a_lambda_default_argument_over_lines_keeps_the_function_whole`).
         let code = "void f(int cb = []() {
            return 0;
        }) {
