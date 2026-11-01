@@ -193,6 +193,9 @@ class ProductOutputBoundaryTests(unittest.TestCase):
         self.assertEqual([], self.invoked)
         self.assertEqual([Outcome.FAIL], [f.outcome for f in findings])
         self.assertIn("POST /api/chat", findings[0].detail)
+        # [smoke review, Melchior] the label names what the run did, as the timeout and backend
+        # labels do; it read "reached no model endpoint" on the finding that reports it reached one.
+        self.assertEqual("the shared run reached a model endpoint", findings[0].assertion)
 
     def test_a_run_that_reached_no_model_runs_its_scenario(self) -> None:
         findings = self._run_with(_TimedOut("R13", timed_out=False), inspects=False)
