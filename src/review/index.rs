@@ -40,11 +40,15 @@ fn base_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-/// Extension of a path: the text after its last `.`, if it has one, in ASCII lowercase.
+/// Extension of a path: the text after the last `.` of its file name, if it has one, in ASCII
+/// lowercase. A dot in a directory (`src.d/foo`) is not an extension.
 fn extension_of(path: &str) -> Option<String> {
     // MAGI FIX (S6 loop 5): `FOO.ZZZ` and `notes.zzz` share an extension; both sides compare
     // lowercased, as `detect_language` does.
-    path.rsplit_once('.')
+    // MAGI FIX (S6 loop 18, B1-5): the file name is isolated first, as in
+    // `context::file_extension`.
+    base_name(path)
+        .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
 }
 
