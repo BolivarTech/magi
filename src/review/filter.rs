@@ -2349,4 +2349,44 @@ mod tests {
             assert_eq!(n, 1, "side new={side} of a.rs was read again: {reads:?}");
         }
     }
+
+    #[test]
+    fn a_file_reviewed_whole_from_its_new_side_is_never_charged_for_its_old_side() {
+        // [MAGI S6 loop 17, A2-2] a text file whose diff git printed as binary is kept with no
+        // diff and reviewed from its new side alone, but the old side read to judge it stayed in
+        // the cache and counted against the review total, so many such files failed a review as
+        // `InputTooLarge` whose reviewed bytes fit the cap.
+        let inner = MapSource::new(
+            &[(
+                "a.txt",
+                "0123456789
+",
+            )],
+            &[(
+                "a.txt",
+                "abcdefghij
+",
+            )],
+        );
+        let cache = crate::review::source::CachedSource::with_total_cap(&inner, 15);
+        let files = vec![ReviewFile {
+            path: "a.txt".into(),
+            diff: Some(
+                "Binary files a/a.txt and b/a.txt differ
+"
+                .into(),
+            ),
+        }];
+        let f = filter_files(files, &cache, &LanguageRegistry::new(), false, &|_| false)
+            .expect("the new side alone fits the cap");
+        assert_eq!(
+            f.kept
+                .iter()
+                .map(|k| (k.path.as_str(), k.diff.is_none()))
+                .collect::<Vec<_>>(),
+            vec![("a.txt", true)]
+        );
+        assert!(f.skipped.is_empty(), "{:?}", f.skipped);
+        assert!(cache.settle().is_ok(), "only the new side is held");
+    }
 }
