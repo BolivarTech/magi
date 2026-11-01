@@ -825,11 +825,11 @@ impl BraceFamilyExtractor {
     /// written or with its visibility stripped (`pub(crate) use`), or, with
     /// `semicolon_declarations`, it is code ending in `;` that does not open with `}`, `)`, `#` or
     /// a comment: a line opening with `)` closes a list wrapped from a line above (`);`,
-    /// `) const;`), so it is never a declaration of its own. With `scanned`, "ending in `;`" is the scanner's end of statement, so a comment
-    /// after the code (`static int n = 0; // note`) does not hide it, as in
-    /// [`Self::signature_candidate`]; without it, the trimmed text must end in `;`. Only lines
-    /// outside every construct are asked, so a statement inside a function body is never taken
-    /// for one. O(k + n).
+    /// `) const;`), so it is never a declaration of its own. With `scanned`, "ending in `;`" is
+    /// the scanner's end of statement, so a comment after the code (`static int n = 0; // note`)
+    /// does not hide it, as in [`Self::signature_candidate`]; without it, the trimmed text must
+    /// end in `;`. Only lines outside every construct are asked, so a statement inside a function
+    /// body is never taken for one. O(k + n).
     ///
     /// # Arguments
     ///
