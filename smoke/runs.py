@@ -703,6 +703,31 @@ def git_env() -> dict[str, str]:
 #: Seconds the harness gives each git command it runs.
 GIT_TIMEOUT_S = 60
 
+
+def _error_detail(exc: BaseException) -> str:
+    """The text of *exc*, with the stderr a subprocess error captured.
+
+    ``CalledProcessError`` and ``TimeoutExpired`` keep the child's stderr on
+    the exception but leave it out of ``str()``, so a harness error built from
+    ``str(exc)`` alone loses the child's own reason.
+
+    Args:
+        exc: The error to describe.
+
+    Returns:
+        str: ``str(exc)``, then ``": <stderr>"`` when the error carries a
+        non-empty captured stderr, decoded as UTF-8 with replacement.
+
+    Example:
+        >>> _error_detail(subprocess.CalledProcessError(1, "git", stderr=b"bad"))
+        "Command 'git' returned non-zero exit status 1.: bad"
+    """
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    stderr = (stderr or "").strip()
+    return "%s: %s" % (exc, stderr) if stderr else str(exc)
+
 #: A path outside the workspace, for the hostile-path run. Its last component
 #: appears in no fixed product text, so S48 can require it in stderr without
 #: the product's own phrase satisfying the check.
@@ -1582,8 +1607,10 @@ class RunExecutor:
                            env=git_env(), capture_output=True,
                            timeout=GIT_TIMEOUT_S)
         except (OSError, subprocess.SubprocessError, shutil.Error) as exc:
+            # MAGI FIX (S6 loop 15): CalledProcessError's str() carries no
+            # captured stderr, so git's own reason was dropped (F1a1-b1).
             raise HarnessError("could not build the review workspace at %s: %s"
-                               % (workspace, exc)) from exc
+                               % (workspace, _error_detail(exc))) from exc
         self._write_files(definition, workspace)
         verify_visible(workspace, [path for path, _ in definition.files])
         return workspace
