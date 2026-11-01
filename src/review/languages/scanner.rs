@@ -1638,6 +1638,53 @@ function h() {
     }
 
     #[test]
+    fn a_slash_opening_a_line_divides_when_the_line_above_ends_in_an_operand() {
+        // [MAGI B2a 2, 4] every line started with nothing before it, so a `/` opening a line
+        // always opened a regex, even when it continued a division from the line above
+        // (`a\n  / b`), as JavaScript reads it: the rest of the line, its braces included, was
+        // hidden. What the line above ends with decides, as within a line.
+        let delta_of_last = |code: &str| {
+            let results = CodeScanner::new(LexicalRules::javascript()).scan_all(code);
+            results.last().map(|s| s.brace_delta)
+        };
+        let cases = [
+            ("x = total\n  / count; }", Some(-1)),
+            ("x = f(a)\n  / 2; }", Some(-1)),
+            ("x = a\n// note\n\n  / b; }", Some(-1)),
+            ("x = a /* c */\n  / b; }", Some(-1)),
+            // A regex still opens after a statement, an operator, an opening bracket or a block.
+            ("g();\n/}/.test(s);", Some(0)),
+            ("x =\n  /}/.test(s);", Some(0)),
+            ("f(\n  /}/);", Some(0)),
+            ("function f() {}\n/{/.test(s);", Some(0)),
+            ("if (ok)\n  /}/.test(s);", Some(0)),
+            ("return\n/}/.test(s);", Some(0)),
+        ];
+        for (code, delta) in cases {
+            assert_eq!(delta_of_last(code), delta, "{code:?}");
+        }
+        let code = "function f() {
+  if (a
+      / b > 1) {
+    g();
+  }
+}
+function h() {
+}
+";
+        let results = CodeScanner::new(LexicalRules::javascript()).scan_all(code);
+        assert_eq!(
+            results[2].brace_delta, 1,
+            "the division's line opens the if block"
+        );
+        assert_eq!(
+            find_closing_brace(&results, 0),
+            5,
+            "f ends on its own brace"
+        );
+    }
+
+    #[test]
     fn a_cpp_raw_string_keeps_its_quotes_and_braces_as_text() {
         // [MAGI S6 loop 6, B2a-b1/c2] C++ had no raw-string state: `R"({"a": 1})"` read as
         // ordinary strings, so its braces and its unbalanced quotes moved the depth.
