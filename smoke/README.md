@@ -352,7 +352,9 @@ attempt arithmetic in `src/magi/mod.rs`, the integer split and the raw refusal c
 `src/review/clock.rs`, the JSON keys S47 reads in `src/review/report.rs`, `src/tools/code_review.rs`
 and `src/tools/consult.rs`, and the git view the executor checks visibility with: `GIT_VISIBLE_QUERY`
 against the product's `LS_FILES_ALL` in `src/review/input.rs` and `HARNESS_GIT_CONFIG` against
-`NEUTRAL_GIT_CONFIG` in `src/system/review_git.rs`, and the never-reviewed names with their spelling rule
+`NEUTRAL_GIT_CONFIG` in `src/system/review_git.rs`, and `PRODUCT_GIT_VARIABLES` against the `GIT_*`
+variables the product's git runs carry (`TOOL_ENV_ALLOWLIST` in `src/tools/proc_group.rs` and the
+scrubbed spawn in `src/system/review_git.rs`), none of which changes what that query lists, and the never-reviewed names with their spelling rule
 (`NEVER_REVIEWED`, `MEMORY_DB_PREFIX` and the trailing-`.`/space trim and ASCII case fold of
 `is_never_reviewed` in `src/review/source.rs`, which `same_product_name` copies), among others) and fails when a copy or a pattern no
 longer matches, so a wording or constant change in the product shows up in the harness's own tests, not
@@ -377,7 +379,7 @@ that: it reviews the workspace root and writes R14's two files so that nothing e
 reviewable. The workspace is a git repository, so the product lists it with `git ls-files`. Git
 names `.magi/`, which the product leaves out and lists among its omissions, but never names its
 own `.git/`: only the `.magi/` half of S51 exercises the product's exclusion, and the `.git/` half
-only checks that nothing the product reports names it. Right before the product starts, the executor lists the workspace again with the same query and records the `.magi/` paths it sees (`RunResult.protected_visible`), which is how S51 tells an exercised exclusion from one that had no candidate. The executor refuses to build the
+only checks that nothing the product reports names it. Right before the product starts, the executor lists the workspace again with the same query and records the paths it sees with a `.magi` component at any depth, as the product reads them (`RunResult.protected_visible`), which is how S51 tells an exercised exclusion from one that had no candidate. The executor refuses to build the
 workspace (exit 3) unless its path resolves strictly under the scratch area, checked before anything
 is created or deleted. It also refuses (exit 3) when any component of the workspace path below the
 repository root is a symlink or a junction, `smoke/`, the scratch area and the workspace itself

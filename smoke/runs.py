@@ -958,9 +958,12 @@ def protected_candidates(workspace) -> tuple[str, ...]:
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-#: The reparse tag of a Windows junction (``IO_REPARSE_TAG_MOUNT_POINT``).
-#: Off Windows ``os.lstat`` reports no ``st_reparse_tag``, read as 0, so
-#: nothing matches it.
+#: The reparse tag of a Windows junction (``IO_REPARSE_TAG_MOUNT_POINT``,
+#: ``0xA0000003``). The ``stat`` module exports it on Windows since Python 3.8,
+#: so it is set on the 3.11 floor (checked against a real junction by
+#: ``test_a_junction_is_a_link_without_os_path_isjunction``); off Windows it is
+#: ``None`` and ``os.lstat`` reports no ``st_reparse_tag``, so nothing is a
+#: junction there.
 JUNCTION_REPARSE_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
 
 
@@ -1032,10 +1035,14 @@ def _chain_from_repository(path) -> tuple[pathlib.Path, pathlib.PurePath]:
 
     A path under :data:`REPOSITORY_ROOT` (the scratch area always is) is
     walked from the repository root, so every component from there down,
-    the scratch area included, is tested. Any other path (a test double's
+    the scratch area included, is tested. The harness's scratch area is
+    always under it, even in a checkout reached through a link: both this
+    root and ``smoke/__main__.py``'s environment root are derived from the
+    RESOLVED location of the package. Any other path (a test double's
     temporary scratch area) is walked from its own parent, so its last
-    component is still tested; callers append what lies below it. The path is made absolute without resolving
-    links: resolving would walk through the very link being looked for.
+    component is still tested; callers append what lies below it. The path
+    is made absolute without resolving links: resolving would walk through
+    the very link being looked for.
 
     Args:
         path: The path the walk ends at.
@@ -1108,6 +1115,14 @@ def _retry_writable(func, path, error: BaseException) -> None:
     entry would stop every later rebuild. The bit is cleared and the deletion
     retried once. A link is never touched: changing its mode would change
     what it points at, so the original error stands.
+
+    The recovery is Windows-only in effect. On POSIX a deletion fails with
+    :class:`PermissionError` because the PARENT directory is not writable,
+    which a mode change of the entry does not fix (and ``0o600`` on a
+    directory drops its search bit), so the retry fails again and that
+    error propagates; the executor reports it as a harness failure (exit 3).
+    The harness writes every file of the workspace itself, so this is not
+    expected to happen.
 
     Args:
         func: The function that failed (``os.unlink``, ``os.rmdir``...).
