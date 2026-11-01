@@ -1769,8 +1769,10 @@ fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
 /// The text after the keyword, or `None`.
 fn blank_keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
     // MAGI FIX (S6 loop 13): a tab after the keyword (`fn\tfoo`) matched no `fn `.
+    // MAGI FIX (S6 loop 14): a keyword matched as written kept the blanks after it, so
+    // `const  f = () => {` named an empty function and `enum  class Color` read as `class`.
     if let Some(rest) = text.strip_prefix(kw) {
-        return Some(rest);
+        return Some(rest.trim_start());
     }
     let rest = text.strip_prefix(kw.strip_suffix(' ')?)?;
     rest.starts_with(char::is_whitespace)
