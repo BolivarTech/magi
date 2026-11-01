@@ -5263,4 +5263,29 @@ void g(void) {
             );
         }
     }
+
+    #[test]
+    fn a_rust_inner_attribute_stays_with_its_container_and_no_line_is_lost() {
+        // [MAGI S6 loop 17, B2-6] an inner attribute (`#![allow(x)]`) applies to the module or
+        // crate that holds it, not to the item below it, so it is never joined to that item: at
+        // the top of a file it is a unit of its own, inside a module it is in the module's header.
+        let top = "#![allow(dead_code)]\nfn f() {\n    x();\n}\n";
+        let units = extract(&rust_extractor(), top, &every_line(top));
+        assert_each_line_in_one_unit(&units, 4);
+        assert!(
+            spans(&units).contains(&("f", UnitKind::Function, 2, 4)),
+            "{:?}",
+            spans(&units)
+        );
+        let module = "mod m {\n    #![allow(unused)]\n    fn a() {}\n}\n";
+        let parts = split(&rust_extractor(), module, 3, UnitKind::Module);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("m", UnitKind::Module, 1, 2),
+                ("a", UnitKind::Method, 3, 3),
+                ("m", UnitKind::Module, 4, 4)
+            ]
+        );
+    }
 }
