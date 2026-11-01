@@ -1027,6 +1027,35 @@ class ReviewLogChainTests(unittest.TestCase):
             self.assertTrue(any(runs.LINK_NOT_FOLLOWED in entry
                                 for entry in result.review_log_unreadable))
 
+    def test_a_log_directory_swapped_for_a_link_after_the_chain_check_is_never_read_through(self) -> None:
+        # [MAGI §6 MS2 loop 19, F1a1-balthasar] a surviving child swaps .magi/logs between the chain check
+        # and the walk: the walk lists, and the read opens, what the link points at.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = self._outside_log(root)
+            logs_dir = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            logs_dir.mkdir(parents=True)
+            (logs_dir / "magi-run.log").write_bytes(b"this run's log")
+            real_check = executor._first_link_down_to
+            checks = []
+
+            def check_then_swap(*below):
+                found = real_check(*below)
+                checks.append(below)
+                if len(checks) == 1:
+                    shutil.rmtree(logs_dir)
+                    _make_junction(outside / ".magi" / "logs", logs_dir)
+                return found
+
+            unreadable = []
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root), \
+                    mock.patch.object(executor, "_first_link_down_to", side_effect=check_then_swap):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertNotIn(b"not this run's log", b"".join(captured or ()))
+            self.assertEqual((), captured)
+            self.assertTrue(any(runs.LINK_NOT_FOLLOWED in entry for entry in unreadable), unreadable)
+
 
 class RefusalRunModelCallTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 19, F1a1-balthasar] R13-R16 prove that no model was contacted.
