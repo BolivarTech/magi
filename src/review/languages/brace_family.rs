@@ -1942,8 +1942,10 @@ fn statement_end(
 /// The opening brace is the one [`open_brace_line`] finds. A construct with no brace ends at
 /// its statement's `;` ([`statement_end`]): a signature without a body wrapped over lines
 /// (`fn f(` ... `) -> u8;`, a trait method with a `where` clause) is one unit. That holds only
-/// when line `i` holds no `{`: a one-line construct whose braces balance (`run() {}`) ends on
-/// `line_num`, so it never takes a later statement (a class field `x = 1;`). A signature with
+/// when the code of line `i` does not end in `}` ([`ScannedLine::ends_block`]): a one-line
+/// construct whose braces balance (`run() {}`) ends on `line_num`, so it never takes a later
+/// statement (a class field `x = 1;`), while a `{` in a comment or a string of line `i` cuts
+/// nothing. A signature with
 /// no body and no `;` (a Go function implemented in assembly) ends on `line_num` too, as does
 /// any construct whose search runs out of budget; the lines after it fall into later units,
 /// none lost.
@@ -1974,6 +1976,11 @@ fn brace_block_end(
 /// finds it, given the result of its brace search (`open`, [`open_brace_line`]) already run, so
 /// a caller that needed the search's answer first does not spend its visits a second time.
 ///
+/// With no opening brace, a line whose code ends in `}` ([`ScannedLine::ends_block`]) is a
+/// one-line construct (`fn a() { x(); } // note`) and ends there; any other line is a
+/// signature without a body, which runs to its statement's end ([`statement_end`]), however
+/// wrapped, so a brace in a comment or a string of its first line does not cut it.
+///
 /// # Arguments
 ///
 /// * `lines` - The text's lines.
@@ -1998,7 +2005,10 @@ fn block_end_after(
         Some(open_idx) => line_number(find_closing_brace(scanned, open_idx)),
         // MAGI FIX (S6 loop 14): a wrapped signature without a body ended on its first line
         // and the rest of it fell into the next unit.
-        None if lines.get(i).is_some_and(|l| !l.contains('{')) => {
+        // MAGI FIX (S6 loop 18, B2b-2): a `{` anywhere in the line's text, a comment's or a
+        // string's included, made it a one-line construct; the scanner says whether its code
+        // ends in `}`.
+        None if scanned.get(i).is_none_or(|s| !s.ends_block) => {
             line_number(statement_end(lines, scanned, i, search))
         }
         None => Some(line_num),
@@ -5479,13 +5489,15 @@ void g(void) {
                 ("T", UnitKind::Trait, 5, 5),
             ]
         );
-        let go = "func f(a int, // {\n\tb int)\nfunc g() {\n}\n";
-        let units = extract(&BraceFamilyExtractor::go(), go, &every_line(go));
+        // A one-line construct whose code ends in `}` still ends on its line.
+        let one_line = "trait T {\n    fn f(&self) { x(); } // c\n    fn g(&self);\n}\n";
         assert_eq!(
-            spans(&units),
+            spans(&split(&rust_extractor(), one_line, 1, UnitKind::Trait)),
             vec![
-                ("f", UnitKind::Function, 1, 2),
-                ("g", UnitKind::Function, 3, 4),
+                ("T", UnitKind::Trait, 1, 1),
+                ("f", UnitKind::Method, 2, 2),
+                ("g", UnitKind::Method, 3, 3),
+                ("T", UnitKind::Trait, 4, 4),
             ]
         );
     }

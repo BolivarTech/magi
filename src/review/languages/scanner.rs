@@ -708,7 +708,7 @@ impl CodeScanner {
             min_delta,
             group_delta,
             ends_statement: last_code == Some(';'),
-            ends_block: false,
+            ends_block: last_code == Some('}'),
             is_non_code,
             starts_in_literal: !was_code_at_start,
         }
