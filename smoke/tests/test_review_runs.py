@@ -663,5 +663,64 @@ class ProductSpellingTests(unittest.TestCase):
             self.assertEqual(set(), ignore(os.path.join(tmp, "sub"), names))
 
 
+class ReviewLogBoundTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 16, F1a1-caspar, F1a1-melchior] a bounded capture, and nothing left out unnamed."""
+
+    def _logs_dir(self, root: pathlib.Path) -> pathlib.Path:
+        logs_dir = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+        logs_dir.mkdir(parents=True)
+        return logs_dir
+
+    def test_a_log_file_over_the_per_file_cap_is_named_not_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = self._logs_dir(root)
+            (logs_dir / "a.log").write_bytes(b"1234")
+            (logs_dir / "b.log").write_bytes(b"12345")
+            unreadable = []
+            with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
+                    mock.patch.object(pathlib.Path, "read_bytes", autospec=True,
+                                      side_effect=pathlib.Path.read_bytes) as read:
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((b"1234",), captured)
+            self.assertEqual(["a.log"], [call.args[0].name for call in read.call_args_list])
+            self.assertEqual(1, len(unreadable))
+            self.assertTrue(unreadable[0].startswith("b.log ("))
+            self.assertIn("4", unreadable[0])
+
+    def test_log_files_past_the_total_cap_are_named_not_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = self._logs_dir(root)
+            for name in ("a.log", "b.log", "c.log"):
+                (logs_dir / name).write_bytes(b"123")
+            unreadable = []
+            with mock.patch.object(runs, "MAX_REVIEW_LOG_TOTAL_BYTES", 6):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((b"123", b"123"), captured)
+            self.assertEqual(1, len(unreadable))
+            self.assertTrue(unreadable[0].startswith("c.log ("))
+
+    def test_a_file_that_grew_past_the_cap_after_its_size_was_read_is_dropped_and_named(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = self._logs_dir(root)
+            (logs_dir / "a.log").write_bytes(b"12")
+            unreadable = []
+            with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
+                    mock.patch.object(pathlib.Path, "read_bytes", return_value=b"123456"):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((), captured)
+            self.assertEqual(1, len(unreadable))
+            self.assertTrue(unreadable[0].startswith("a.log ("))
+
+    def test_the_caps_are_positive_and_the_total_holds_one_whole_file(self) -> None:
+        self.assertGreater(runs.MAX_REVIEW_LOG_FILE_BYTES, 0)
+        self.assertGreaterEqual(runs.MAX_REVIEW_LOG_TOTAL_BYTES, runs.MAX_REVIEW_LOG_FILE_BYTES)
+
+
 if __name__ == "__main__":
     unittest.main()
