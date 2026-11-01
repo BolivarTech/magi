@@ -1408,4 +1408,19 @@ void h() {
             "the class closes on its own brace"
         );
     }
+
+    #[test]
+    fn a_line_closing_more_groups_than_it_opens_reports_a_negative_net() {
+        // [MAGI S6 loop 18, B2a-1] `group_delta` is a signed net per line, as `brace_delta` is:
+        // the closing line of a wrapped parameter list (`) {`) reports -1, which the extractor's
+        // brace search adds up to see the list close (`open_brace_line`).
+        let code = "fn f(
+    a: u8,
+) {
+    g(a)(b
+)(";
+        let results = CodeScanner::new(LexicalRules::rust()).scan_all(code);
+        let nets: Vec<i32> = results.iter().map(|r| r.group_delta).collect();
+        assert_eq!(nets, vec![1, 0, -1, 1, 0]);
+    }
 }
