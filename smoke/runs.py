@@ -1006,6 +1006,52 @@ def _reject_links(top) -> None:
                     "workspace never follows one" % (top, path))
 
 
+def _retry_writable(func, path, error: BaseException) -> None:
+    """The deletion error handler of :func:`_remove_tree`: retry once, writable.
+
+    On Windows a read-only file (or directory) cannot be deleted, and
+    :func:`shutil.copytree` keeps the read-only bit it copies, so one such
+    entry would stop every later rebuild. The bit is cleared and the deletion
+    retried once. A link is never touched: changing its mode would change
+    what it points at, so the original error stands.
+
+    Args:
+        func: The function that failed (``os.unlink``, ``os.rmdir``...).
+        path: The path it failed on.
+        error: The error it raised.
+
+    Raises:
+        BaseException: *error* itself, for a link or anything other than a
+            :class:`PermissionError`; whatever the retry raises otherwise.
+    """
+    if not isinstance(error, PermissionError) or _is_link(path):
+        raise error
+    os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+    func(path)
+
+
+def _remove_tree(path) -> None:
+    """Delete the tree at *path*, clearing a read-only bit that blocks it.
+
+    ``shutil.rmtree`` takes the handler as ``onexc`` from Python 3.12 and as
+    the deprecated ``onerror`` (with an ``exc_info`` triple) before it; both
+    reach :func:`_retry_writable`. Links inside the tree are unlinked, never
+    followed, as ``shutil.rmtree`` does on its own.
+
+    Args:
+        path: The tree to delete; it must not itself be a link (the caller
+            refuses that first).
+
+    Raises:
+        OSError: When an entry cannot be deleted even writable.
+    """
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_retry_writable)
+    else:
+        shutil.rmtree(path, onerror=lambda func, failed, info:
+                      _retry_writable(func, failed, info[1]))
+
+
 #: Why :func:`_regular_files_without_links` leaves a link out.
 LINK_NOT_FOLLOWED = "a link, not followed"
 
@@ -1641,8 +1687,11 @@ class RunExecutor:
                 "refusing to delete the review workspace at %s: %s is a "
                 "link" % (workspace, linked))
         try:
+            # MAGI FIX (S6 loop 15): a read-only file in the old workspace made
+            # rmtree raise on Windows and every later review run end at exit 3
+            # (F1a1-m3); _remove_tree clears the bit and retries once.
             if workspace.exists():
-                shutil.rmtree(workspace)
+                _remove_tree(workspace)
             workspace.mkdir(parents=True)
             # MAGI FIX (S6 loop 6): the environment's logs/ came along, so the
             # captured review log carried earlier runs' lines too (F1a-m4).
