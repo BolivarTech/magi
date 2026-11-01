@@ -150,4 +150,18 @@ mod tests {
     fn detect_language_unknown() {
         assert_eq!(detect_language("Makefile"), "unknown");
     }
+
+    #[test]
+    fn a_name_without_a_dot_or_with_only_a_leading_dot_has_no_language() {
+        // [MAGI S6 loop 17, B1-1] the whole dot-less name was read as its extension, so a file
+        // named `bash` was labelled `shell`, and a hidden `.rs` was labelled `rust`, while the
+        // registry gives neither an extractor.
+        for path in [
+            "bash", "toml", "src/go", ".rs", "dir/.py", "a.d/json", "a.d\\c",
+        ] {
+            assert_eq!(detect_language(path), "unknown", "{path}");
+        }
+        assert_eq!(detect_language("dir.d/main.rs"), "rust");
+        assert_eq!(detect_language(".hidden/x.go"), "go");
+    }
 }
