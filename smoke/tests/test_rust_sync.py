@@ -173,6 +173,22 @@ class StderrWordingTests(unittest.TestCase):
         self.assertIn(code_review.NOTHING_TO_REVIEW_TEXT, "nothing to review: no reviewable file")
 
 
+class NeverReviewedTests(unittest.TestCase):
+    """The protected names S51 checks are the ones the product never reviews."""
+
+    # MAGI FIX (S6 loop 14): S51 left out the memory database prefix (F1a2-m2).
+    def test_the_protected_names_are_the_products_never_reviewed_list(self) -> None:
+        source = _source("src/review/source.rs")
+        prefix = re.search(r'const MEMORY_DB_PREFIX: &str = "([^"]+)";', source)
+        listed = re.search(r"pub const NEVER_REVIEWED: &\[&str\] = &\[([^\]]*)\];", source)
+        self.assertIsNotNone(prefix)
+        self.assertIsNotNone(listed)
+        self.assertEqual(prefix.group(1), code_review.MEMORY_DB_PREFIX)
+        names = tuple(re.findall(r'"([^"]+)"', listed.group(1)))
+        self.assertEqual(set(names), set(code_review.PROTECTED_DIRS))
+        self.assertIn("MEMORY_DB_PREFIX", listed.group(1))
+
+
 class ReportKeyTests(unittest.TestCase):
     """The JSON keys S47 reads exist in the product's report and envelope."""
 

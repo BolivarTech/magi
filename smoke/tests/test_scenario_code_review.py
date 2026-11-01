@@ -185,6 +185,17 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
             r = _result("R16", 2, None, _with_id(stderr))
             self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], path)
 
+    def test_s51_fails_when_a_memory_database_file_was_read_for_its_content(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a2-m2] RV22 never reviews .magi-rs-memory.db* (NEVER_REVIEWED in
+        # src/review/source.rs), but S51's check knew only .magi and .git, so one classified by its content
+        # passed. Parity with the product: any component, case-insensitive, trailing dots and spaces trimmed.
+        for path in (b".magi-rs-memory.db (binary)", b".magi-rs-memory.db-wal (binary)",
+                     b"sub/.MAGI-RS-MEMORY.DB-shm (binary)", b".magi-rs-memory.db-wal/notes.txt (secret)",
+                     b".GIT/config (secret)", b".magi./magi.toml (not utf-8)"):
+            stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)", path)
+            r = _result("R16", 2, None, _with_id(stderr))
+            self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]], path)
+
     def test_s51_fails_when_a_read_protected_path_holds_a_comma_semicolon_or_space(self) -> None:
         # [MAGI §6 MS2 loop 4, F1-1] the old entry pattern stopped a path at ',', ';' or a space, so the
         # protected component fell outside the match and a read .magi file passed unseen.
