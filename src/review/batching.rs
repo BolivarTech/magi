@@ -672,6 +672,27 @@ mod tests {
     }
 
     #[test]
+    fn a_hunk_side_starting_at_line_zero_with_lines_is_a_malformed_header() {
+        // [MAGI S6 loop 16, B1-2] `@@ -0,1 +0,1 @@` gave the range (0, 0), so line 0 was recorded
+        // as reviewed and a finding on it could pass RV09. Line numbers start at 1; only an
+        // empty side (`-0,0`, a new file's old side) may name line 0.
+        for header in ["@@ -0,1 +0,1 @@", "@@ -1 +0,2 @@", "@@ -0 +1 @@"] {
+            let files = vec![ReviewFile {
+                path: "z.rs".into(),
+                diff: Some(format!("{header}\n-a\n+b\n")),
+            }];
+            let src = MapSource::new(&[("z.rs", "b\n")], &[]);
+            match plan_batches(&files, &src, &LanguageRegistry::new(), 1_000) {
+                Err(ReviewError::Git(msg)) => {
+                    assert!(msg.contains("malformed hunk header"), "{msg}")
+                }
+                other => panic!("{header}: expected a Git error, got {other:?}"),
+            }
+        }
+        assert_eq!(hunk_ranges("@@ -0,0 +1,3 @@"), Some(((1, 0), (1, 3))));
+    }
+
+    #[test]
     fn a_hunk_carries_both_sides_and_a_deletion_has_an_empty_new_side() {
         // [CP2 MS2 S1 loop 2] a finding on a removed line uses the old numbering.
         let files = vec![
