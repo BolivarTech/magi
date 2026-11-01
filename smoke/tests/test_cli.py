@@ -204,6 +204,25 @@ class ImportTimeFailureTests(unittest.TestCase):
                          "the product as having failed")
         self.assertIn("deliberately broken", stderr)
 
+    def test_a_review_input_too_small_for_its_batches_exits_three(self) -> None:
+        """[MAGI §6 MS2 loop 18, F1a1-melchior] ``DEFINITIONS`` builds the
+        review input at import, so the batch-size invariant raises while
+        ``smoke.runs`` loads; that is the harness's own defect, never a
+        product verdict."""
+        root = support.scratch_dir(self)
+        shutil.copytree(pathlib.Path(main.__file__).parent, root / "smoke")
+        target = root / "smoke" / "runs.py"
+        source = target.read_text(encoding="utf-8")
+        needle = "\nREVIEW_FILE_BYTES = 96000\n"
+        self.assertIn(needle, source.replace("\r", ""))
+        target.write_text(source.replace("\r", "").replace(
+            needle, "\nREVIEW_FILE_BYTES = 1000\n"), encoding="utf-8")
+        code, stderr = self._exit_code(root)
+        self.assertEqual(EXIT_HARNESS, code,
+                         "a broken harness invariant must not report the "
+                         "product as having failed")
+        self.assertIn("the generated review input is", stderr)
+
     def test_a_scenario_that_cannot_import_exits_three(self) -> None:
         root = support.scratch_dir(self)
         shutil.copytree(pathlib.Path(main.__file__).parent, root / "smoke")
