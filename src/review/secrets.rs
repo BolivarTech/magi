@@ -8,8 +8,9 @@
 //! matched without dependencies (a prefix, a character class and a minimum length), in time
 //! linear in the text. Not covered, by design: JWTs (any base64url JSON looks like one), Azure
 //! keys, high-entropy strings with no prefix, the base64 body of a PEM or armored OpenPGP
-//! private key without its `BEGIN` line, and an AWS secret key passed as an argument
-//! (`f(aws_secret_key, "…")`): only an assignment or a comparison after the key's name is detected.
+//! private key without its `BEGIN` line, and an AWS secret key without its name: the key is found
+//! after its name through an assignment or a comparison, or quoted next to it as an argument or
+//! a collection item (`f(aws_secret_key, "…")`), never as a bare 40-character value.
 //! The minimum lengths can miss a shorter real key; that is the trade-off with false positives on
 //! ordinary code. So are the left boundaries: a short prefix (`sk-`, `ghp_`, `AKIA`, …) glued to a
 //! word character is not a token, because base64 runs and kebab-case names hold them by chance; the distinctive
@@ -66,7 +67,8 @@ enum Matcher {
     PemPrivateKey,
     /// A fixed header, found anywhere in the text (an armored OpenPGP private key).
     Header(&'static str),
-    /// The AWS secret access key, recognized by its name and an assignment.
+    /// The AWS secret access key, recognized by its name and an assignment, a comparison, or a
+    /// quoted key passed next to it.
     AwsSecretKey,
     /// A password in a URL's authority: `scheme://user:password@host`.
     UrlCredential,
@@ -130,6 +132,17 @@ const QUOTES: &[u8] = b"\"'";
 /// and comparisons (`==`, `!=`, JavaScript's `===` and `!==`).
 // MAGI FIX (S6 loop 11): a key compared against its name (`==`, `!=`) was sent.
 const AWS_OPERATORS: &[&[u8]] = &[b"===", b"!==", b"==", b"!=", b"=>", b":=", b"=", b":"];
+/// The bytes that may stand between an AWS secret key's name and a quoted key passed next to it
+/// as an argument or a collection item: blanks and line breaks, quotes, the separators of an
+/// argument list or a collection, and the bytes of [`AWS_OPERATORS`]. `<` is left out, so a
+/// `<=` stays no assignment.
+// MAGI FIX (S6 loop 15, A2-1, security): `configure(aws_secret_access_key, "…")` was sent.
+const AWS_ARGUMENT_SEPARATORS: &[u8] = b" \t\r\n\"'`,()[]{}:=>!";
+/// The quotes that may open a key passed next to its name: a string literal of most languages.
+const AWS_ARGUMENT_QUOTES: &[u8] = b"\"'`";
+/// The most separator bytes read after an AWS secret key's name before a quoted key, so each
+/// name reads a bounded run.
+const AWS_ARGUMENT_WINDOW: usize = 16;
 /// What separates a URL's scheme from its authority.
 const URL_AUTHORITY_START: &str = "://";
 /// The longest userinfo (`user:password`) a URL credential may have, so each `://` reads a
@@ -604,13 +617,21 @@ fn aws_name_end(bytes: &[u8], at: usize) -> Option<usize> {
     kept_optional.then_some(pos)
 }
 
-/// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), an
-/// optional quote that closes it (a JSON property, a quoted hash key), blanks, an operator of
-/// [`AWS_OPERATORS`] (an assignment or a comparison), blanks, an optional quote, and a key of at
-/// least 40 characters. `None` when none opens there.
-// MAGI FIX (S6 loop 7): `"aws_secret_access_key": "…"` and `=>` were not assignments.
+/// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), then
+/// the key after an assignment or a comparison ([`aws_assignment_end`]) or quoted next to it
+/// ([`aws_argument_end`]). `None` when none opens there. O(1) when no name opens at `at`.
 fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
-    let mut pos = aws_name_end(bytes, at)?;
+    let name_end = aws_name_end(bytes, at)?;
+    aws_assignment_end(bytes, name_end).or_else(|| aws_argument_end(bytes, name_end))
+}
+
+/// Where the key ends after an AWS secret key's name that ends at `name_end`: an optional quote
+/// that closes the name (a JSON property, a quoted hash key), blanks, an operator of
+/// [`AWS_OPERATORS`] (an assignment or a comparison), blanks, an optional quote, and a key of at
+/// least 40 characters. `None` when there is none.
+// MAGI FIX (S6 loop 7): `"aws_secret_access_key": "…"` and `=>` were not assignments.
+fn aws_assignment_end(bytes: &[u8], name_end: usize) -> Option<usize> {
+    let mut pos = name_end;
     if bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
         pos += 1;
     }
@@ -626,6 +647,30 @@ fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
         pos += 1;
     }
     tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN)
+        .then(|| tail_end(bytes, pos, Tail::Base64))
+}
+
+/// Where a quoted key passed next to an AWS secret key's name that ends at `name_end` ends: at
+/// most [`AWS_ARGUMENT_WINDOW`] bytes of [`AWS_ARGUMENT_SEPARATORS`], the last of them a quote of
+/// [`AWS_ARGUMENT_QUOTES`], then a key of at least 40 characters. The quote keeps an unquoted
+/// identifier next to the name (`f(aws_secret_key, someLongVariableName)`) from being taken for
+/// the key. `None` when there is none. O([`AWS_ARGUMENT_WINDOW`] + key length).
+// MAGI FIX (S6 loop 15, A2-1, security): a key passed as an argument or a collection item was
+// sent; only an assignment or a comparison after the name was read.
+fn aws_argument_end(bytes: &[u8], name_end: usize) -> Option<usize> {
+    let run = bytes
+        .get(name_end..)
+        .unwrap_or_default()
+        .iter()
+        .take(AWS_ARGUMENT_WINDOW)
+        .take_while(|b| AWS_ARGUMENT_SEPARATORS.contains(b))
+        .count();
+    let pos = name_end + run;
+    let quoted = run
+        .checked_sub(1)
+        .and_then(|last| bytes.get(name_end + last))
+        .is_some_and(|b| AWS_ARGUMENT_QUOTES.contains(b));
+    (quoted && tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN))
         .then(|| tail_end(bytes, pos, Tail::Base64))
 }
 
