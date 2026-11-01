@@ -133,6 +133,11 @@ OMISSION_CAUSES = ("binary", "not utf-8", "secret", "ignored",
 #: The omission list of a ``nothing to review`` refusal, to the end of its line.
 OMISSION_LIST_PATTERN = re.compile(r"; left out: (?P<list>.*)")
 
+#: The ``, and N more`` the product writes after the
+#: ``MAX_OMISSIONS_SHOWN`` entries it names (``omissions`` in
+#: ``src/review/error.rs``): the list was cut and the rest are not named.
+OMISSION_CUT_PATTERN = re.compile(r", and (?P<more>\d+) more")
+
 #: What may follow the last entry on the line: the ``, and N more`` the product
 #: writes past its display cap, then the run log's ``key=value`` fields that the
 #: stderr layer prints after the message (``review.error=nothing_to_review``).
@@ -1083,7 +1088,10 @@ def _exclusion_finding(run, stderr):
         when git listed no ``.magi/`` file, so none was an enumeration
         candidate, or when one of their names holds `` (<cause>), `` or ends
         in `` (<cause>)`` (:data:`AMBIGUOUS_PATH_PATTERN`), so the list
-        cannot be split around it; ``FAIL`` when git listed some and the list names none of
+        cannot be split around it; ``CANNOT_TEST`` too when the list names
+        none of them but was cut at the product's display cap
+        (:data:`OMISSION_CUT_PATTERN`), so they may be in the unnamed rest;
+        ``FAIL`` when git listed some and the uncut list names none of
         them as ``ignored``; else ``PASS``. Names are compared with ``\\``
         read as ``/``.
     """
@@ -1112,7 +1120,18 @@ def _exclusion_finding(run, stderr):
     entries, _ = _omissions(stderr)
     named = {_slashed(path) for path, cause in entries
              if cause == PROTECTED_CAUSE}
-    return _verdict(S51_ASSERTIONS, 2, "R16",
-                    bool(named & set(run.protected_visible)),
+    found = bool(named & set(run.protected_visible))
+    # MAGI FIX (S6 loop 14): the product names at most MAX_OMISSIONS_SHOWN
+    # entries, so with the list cut every listed .magi/ file could sit in the
+    # unnamed rest and S51 read the environment's size as a FAIL (F1a1-m2).
+    cut = OMISSION_CUT_PATTERN.search(
+        OMISSION_LIST_PATTERN.search(stderr).group("list"))
+    if not found and cut is not None:
+        return _finding(
+            S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
+            "git lists %s, the refusal names none of them and cut its list "
+            "at %s more, so they may be among the unnamed"
+            % (", ".join(run.protected_visible), cut.group("more")))
+    return _verdict(S51_ASSERTIONS, 2, "R16", found,
                     "git lists %s, and stderr names none of them as ignored"
                     % ", ".join(run.protected_visible))
