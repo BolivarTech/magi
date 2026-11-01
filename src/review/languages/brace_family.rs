@@ -1814,9 +1814,12 @@ fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 
-/// The identifier just before the `(` that opens the parameter list of `line`
-/// ([`parameter_list_prefix`]; `int *parse(` gives `parse`, `public static <T> List<T> wrap(`
-/// gives `wrap`, `decltype(auto) f(` gives `f`).
+/// The identifier that names the function `line` declares, read just before the `(` that opens
+/// its parameter list ([`parameter_list_head`]; `int *parse(` gives `parse`,
+/// `public static <T> List<T> wrap(` gives `wrap`, `decltype(auto) f(` gives `f`,
+/// `std::function<void(int)> make(` gives `make`), or inside the declarator in parentheses of a
+/// function returning a function pointer (`void (*get_handler(int sig))(int)` gives
+/// `get_handler`).
 ///
 /// # Arguments
 ///
@@ -1830,16 +1833,16 @@ fn is_identifier_char(c: char) -> bool {
 fn identifier_before_paren(line: &str) -> Option<String> {
     // MAGI FIX (S6 loop 15): `decltype(auto) f() {` was named `decltype`, its operand's `(`
     // being taken for the parameter list; the list's own `(` is looked for instead.
-    let before = parameter_list_prefix(line)?;
+    let head = parameter_list_head(line)?;
     // MAGI FIX (S6 loop 9): `Foo& operator=(` held an `=` before its `(` and named nothing.
-    if let Some(name) = operator_name(before) {
+    if let Some(name) = operator_name(head.name_text) {
         return Some(name);
     }
-    if before.contains('=') {
+    if head.before.contains('=') {
         return None;
     }
     // MAGI FIX (S6 loop 6): `$get() {` named no member, so a class could not split there.
-    Some(trailing_identifier(before))
+    Some(trailing_identifier(head.name_text))
         .filter(|n| !n.is_empty())
         .map(str::to_string)
 }
@@ -1848,11 +1851,46 @@ fn identifier_before_paren(line: &str) -> Option<String> {
 /// `decltype(a + b)`): the `(` right after one opens no parameter list.
 const TYPE_OPERATORS: [&str; 1] = ["decltype"];
 
-/// The text of `line` before the `(` that opens its parameter list: its first `(`, except that
-/// a `(` right after a word of [`TYPE_OPERATORS`] is that word's operand and is read past up to
-/// its matching `)` (`decltype(auto) f(` gives `decltype(auto) f`). An operand that never closes
-/// on the line leaves its `(` as the list's, so the line is named by the type word, which
-/// [`NOT_FUNCTION_NAMES`] rules out. O(n) in the line.
+/// The characters a declarator in parentheses opens with (`(*f)`, `(&r)`, a block's `(^b)`).
+const DECLARATOR_OPENERS: [char; 3] = ['*', '&', '^'];
+
+/// Where a signature line's parameter list starts ([`parameter_list_head`]).
+struct ListHead<'t> {
+    /// The line's text before the `(` the head was found at, for the `=` rule.
+    before: &'t str,
+    /// The text whose last identifier names the function: `before` itself, or the inside of a
+    /// declarator in parentheses up to its own `(`.
+    name_text: &'t str,
+}
+
+impl<'t> ListHead<'t> {
+    /// A head named by the identifier just before its `(`. O(1).
+    fn at(before: &'t str) -> Self {
+        Self {
+            before,
+            name_text: before,
+        }
+    }
+}
+
+/// The head of the parameter list `line` opens, read past what a return type may put in
+/// parentheses before it:
+///
+/// * a `(` right after a word of [`TYPE_OPERATORS`] is that word's operand, read past up to its
+///   matching `)` (`decltype(auto) f(`);
+/// * a `(` inside angle brackets is a template argument, read past the same way
+///   (`std::function<void(int)> make(`); a `>` closes a bracket however it is preceded, so `->`
+///   counts as one too;
+/// * a `(` after a return type word, opening with a [`DECLARATOR_OPENERS`] character and followed
+///   by another `(` once it closes, is a declarator in parentheses: the function is named
+///   inside it (`void (*f)()`, `void (*get_handler(int sig))(int)`). A keyword of
+///   [`NOT_FUNCTION_NAMES`] before it (`while (*s)(x)`) is no return type.
+///
+/// When a `<` is left open (a comparison, `a < f(x)`, or an operator, `operator<(`), the line's
+/// first `(` is taken, as before this rule, so nothing it named before is lost; an operand that
+/// never closes on the line leaves its `(` as the list's, so the line is named by the type word,
+/// which [`NOT_FUNCTION_NAMES`] rules out. A heuristic on one line's text: a parenthesis inside a
+/// string of the return type miscounts. O(n) in the line.
 ///
 /// # Arguments
 ///
@@ -1860,20 +1898,76 @@ const TYPE_OPERATORS: [&str; 1] = ["decltype"];
 ///
 /// # Returns
 ///
-/// The text before the parameter list's `(`, or `None` when the line holds no such `(`.
-fn parameter_list_prefix(line: &str) -> Option<&str> {
+/// The head, or `None` when the line holds no `(` that opens a parameter list.
+fn parameter_list_head(line: &str) -> Option<ListHead<'_>> {
+    // MAGI FIX (S6 loop 15): `std::function<void(int)> make() {` and `void (*f)() {` were
+    // named `void`, the first `(` being taken for the parameter list.
+    let first = || line.split_once('(').map(|(before, _)| ListHead::at(before));
     let mut from = 0;
+    let mut angles = 0usize;
     loop {
-        let at = from + line.get(from..)?.find('(')?;
-        let before = line.get(..at)?;
-        if !TYPE_OPERATORS.contains(&trailing_identifier(before)) {
-            return Some(before);
-        }
-        let Some(end) = line.get(at..).and_then(|t| balanced_end(t, '(', ')')) else {
-            return Some(before);
+        let Some((offset, c)) = line
+            .get(from..)?
+            .char_indices()
+            .find(|&(_, c)| matches!(c, '(' | '<' | '>'))
+        else {
+            return if angles > 0 { first() } else { None };
         };
-        from = at + end;
+        let at = from + offset;
+        if c != '(' {
+            angles = if c == '<' {
+                angles + 1
+            } else {
+                angles.saturating_sub(1)
+            };
+            from = at + c.len_utf8();
+            continue;
+        }
+        let before = line.get(..at)?;
+        let group_end = line
+            .get(at..)
+            .and_then(|t| balanced_end(t, '(', ')'))
+            .map(|end| at + end);
+        let word = trailing_identifier(before);
+        let read_past = angles > 0 || TYPE_OPERATORS.contains(&word);
+        match group_end {
+            Some(end) if read_past => from = end,
+            None if angles > 0 => return first(),
+            None => return Some(ListHead::at(before)),
+            Some(end) => {
+                let name_text = declarator_name_text(line, at, end, word).unwrap_or(before);
+                return Some(ListHead { before, name_text });
+            }
+        }
     }
+}
+
+/// The inside of the declarator in parentheses that spans `line[open..end]`, up to its own `(`
+/// (`*get_handler` in `void (*get_handler(int sig))(int)`, `*f` in `void (*f)()`), when it is
+/// one: `word`, the identifier before it, is a return type (not empty, not a keyword of
+/// [`NOT_FUNCTION_NAMES`]), its inside opens with a [`DECLARATOR_OPENERS`] character, and a `(`
+/// follows its `)`. O(n) in the line.
+///
+/// # Arguments
+///
+/// * `line` - A signature line.
+/// * `open` - The byte offset of the group's `(`.
+/// * `end` - The byte offset just past its matching `)`.
+/// * `word` - The identifier just before the `(`.
+///
+/// # Returns
+///
+/// The declarator's text, or `None` when the group is no declarator.
+fn declarator_name_text<'t>(line: &'t str, open: usize, end: usize, word: &str) -> Option<&'t str> {
+    if word.is_empty() || NOT_FUNCTION_NAMES.contains(&word) {
+        return None;
+    }
+    let inner = line.get(open + 1..end.checked_sub(1)?)?.trim_start();
+    let followed = line.get(end..)?.trim_start().starts_with('(');
+    if !(followed && inner.starts_with(DECLARATOR_OPENERS)) {
+        return None;
+    }
+    Some(inner.split_once('(').map_or(inner, |(name, _)| name))
 }
 
 /// The identifier `text` ends with, blanks at its end passed over (`int *parse ` gives
