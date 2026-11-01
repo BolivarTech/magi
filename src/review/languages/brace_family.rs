@@ -2210,11 +2210,13 @@ impl BraceFamilyExtractor {
         }
     }
 
-    /// C extractor.
+    /// C extractor. It claims `.c` only: a `.h` header goes to the C++ extractor
+    /// ([`Self::cpp`]), which reads every C construct this one does.
     pub fn c() -> Self {
         Self {
             language: "c".to_string(),
-            exts: &["c", "h"],
+            // MAGI FIX (S6 loop 14): `.h` is read with the C++ rules ([`Self::cpp`]).
+            exts: &["c"],
             function_keywords: vec![],
             block_keywords: vec![
                 "struct ".to_string(),
@@ -2240,18 +2242,24 @@ impl BraceFamilyExtractor {
 
     /// C++ extractor.
     ///
-    /// A `.h` header is C ([`Self::c`]): the extension does not say which language a header is
-    /// written in, and C is the one both languages parse. A C++ header named `.h` is scanned
-    /// with C rules, so its classes and namespaces are not units of their own (their lines fall
-    /// into gap units, each line in exactly one) and a C++ raw string in it is read as ordinary
-    /// strings; name C++ headers `.hpp` or `.hxx` to get the C++ extractor.
+    /// It also claims `.h`: the extension does not say which language a header is written in,
+    /// and this extractor is the C one ([`Self::c`]) plus classes, namespaces, template headers
+    /// and raw strings, so it is the safer reading of both (RV03). A C++ header named `.h` gets
+    /// its classes and namespaces as units, and a class too large for a batch splits at its
+    /// methods; read with the C rules, they fell into gap units. A C header reads the same
+    /// (pinned by `a_c_header_reads_the_same_with_the_cpp_rules`); the residual cost, declared, is a
+    /// C identifier that opens a line as a C++ keyword would (`class = 1;`, `namespace = 2;`),
+    /// whose line becomes a one-line unit of kind class instead of a declaration, and a C string
+    /// glued to an `R` macro (`R"(`), read as a raw string that may run to the end of the file.
+    /// Either way every line stays in exactly one unit, so no line is lost. The prompt's code
+    /// fence still says `c` for a `.h` file (`review::context::detect_language`).
     ///
     /// A `template <...>` header belongs to the class or function it declares, on the line
     /// right above it or on the construct's own line (`template<typename T> class Box {`).
     pub fn cpp() -> Self {
         let mut ext = Self::c();
         ext.language = "cpp".to_string();
-        ext.exts = &["cpp", "cxx", "cc", "hpp", "hxx"];
+        ext.exts = &["cpp", "cxx", "cc", "hpp", "hxx", "h"];
         ext.block_keywords
             .extend(["class ".to_string(), "namespace ".to_string()]);
         ext.lexical_rules = LexicalRules::cpp();
