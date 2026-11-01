@@ -367,9 +367,11 @@ fn hunk_items(path: &str, diff: &str) -> Result<Vec<BatchItem>, ReviewError> {
             continue;
         };
         // MAGI FIX (S6 loop 5): a combined diff failed as a malformed header, hiding its cause.
+        // MAGI FIX (S6 loop 16): the message held a run of spaces in mid-sentence.
         if marker.starts_with(COMBINED_HUNK_MARKER) {
             return Err(ReviewError::Git(format!(
-                "combined (merge) diff hunks are not supported in {}: review the merge against one                  parent",
+                "combined (merge) diff hunks are not supported in {}: review the merge against \
+                 one parent",
                 display_path(path)
             )));
         }
