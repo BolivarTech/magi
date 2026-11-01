@@ -1760,8 +1760,9 @@ fn strip_modifier<'t>(text: &'t str, word: &str) -> Option<&'t str> {
 /// The text after keyword `kw` at the start of `text`. A table keyword ends in a blank
 /// (`impl `), and the word may also be followed directly by a generic parameter list
 /// (`impl<T: Clone> Foo<T>`), which is passed over, or by the brace of an anonymous construct
-/// (`class{`), which is kept. `None` when `text` does not open with the keyword. O(n) in the
-/// text.
+/// (`class{`), which is kept. The keyword may also be the whole line (`union`, its brace on the
+/// next line, Allman style); the rest is then empty and the construct is named `unnamed`
+/// ([`construct_name`]). `None` when `text` does not open with the keyword. O(n) in the text.
 fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
     if let Some(rest) = blank_keyword_rest(text, kw) {
         return Some(rest);
@@ -1770,7 +1771,9 @@ fn keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'t str> {
     let word = kw.strip_suffix(' ')?;
     let rest = text.strip_prefix(word)?;
     // MAGI FIX (S6 loop 6): `export default class{` matched no `class ` and was no class.
-    if rest.starts_with('{') {
+    // MAGI FIX (S6 loop 14): a keyword alone on its line (`union`, then `{` on the next) was no
+    // construct, so an anonymous type's variable fell into gap units around its declarator.
+    if rest.is_empty() || rest.starts_with('{') {
         return Some(rest);
     }
     rest.starts_with('<').then(|| skip_generics(rest))
