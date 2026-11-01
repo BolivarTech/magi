@@ -124,6 +124,23 @@ mod tests {
     }
 
     #[test]
+    fn every_registry_extension_is_labelled_with_its_extractor_language() {
+        // [MAGI S6 loop 16, B1-6] `detect_language` and the registry are two extension maps;
+        // a registry extension missing here (`.cjs`, `.cts`) gave an `unknown` file header to a
+        // file whose units the extractor still read.
+        use crate::review::languages::{LanguageExtractor, LanguageRegistry};
+        let registry = LanguageRegistry::new();
+        let mut checked = 0;
+        for ext in registry.extensions() {
+            let path = format!("a.{ext}");
+            let extractor = registry.get(&path).map(LanguageExtractor::language_id);
+            assert_eq!(Some(detect_language(&path).as_str()), extractor, "{path}");
+            checked += 1;
+        }
+        assert!(checked > 0, "the registry lists its extensions");
+    }
+
+    #[test]
     fn detect_language_unknown() {
         assert_eq!(detect_language("Makefile"), "unknown");
     }
