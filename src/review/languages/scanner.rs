@@ -1467,4 +1467,117 @@ void h() {
         let ends: Vec<bool> = results.iter().map(|r| r.ends_block).collect();
         assert_eq!(ends, vec![true, false, true, false, true]);
     }
+
+    #[test]
+    fn a_c_preprocessor_directive_moves_no_brace_depth() {
+        // [MAGI S6 loop 19, B2a-2] a directive's braces counted as code, so `#define BEGIN {`
+        // left the depth one level up for the rest of the file and a later `}` closed the
+        // wrong block.
+        let code = "#define BEGIN {\n#define END }\n#define BLOCK(x) \\\n    { x; } \\\n    {\nint f(void) {\n}\n";
+        for rules in [LexicalRules::c(), LexicalRules::cpp()] {
+            let results = CodeScanner::new(rules).scan_all(code);
+            for (idx, line) in results.iter().take(5).enumerate() {
+                assert_eq!(
+                    (line.brace_delta, line.depth_after, line.ends_block),
+                    (0, 0, false),
+                    "directive line {}",
+                    idx + 1
+                );
+            }
+            assert_eq!(results[5].brace_delta, 1, "f opens its block");
+            assert_eq!(
+                find_closing_brace(&results, 5),
+                6,
+                "f ends on its own brace"
+            );
+        }
+        // Not a directive: a `#` past the start of a line, and Rust's attributes.
+        let mut c = CodeScanner::new(LexicalRules::c());
+        assert_eq!(c.scan_line(1, "int a = b # c; {").brace_delta, 1);
+        let mut rust = CodeScanner::new(LexicalRules::rust());
+        assert_eq!(rust.scan_line(1, "#[cfg(x)] fn f() {").brace_delta, 1);
+    }
+
+    #[test]
+    fn a_python_byte_triple_quoted_string_is_one_string() {
+        // [MAGI S6 loop 19, B2a-3] the `b"` byte-string branch fired before the triple quote, so
+        // `b"""` read as an empty string and a reopened one, and its text was scanned as code.
+        for prefix in ["b", "rb", "br", "B", "Rb"] {
+            let code = format!("x = {prefix}\"\"\"a \" {{\n\"\"\"\ny = 1\n");
+            let results = CodeScanner::new(LexicalRules::python()).scan_all(&code);
+            assert_eq!(results[0].brace_delta, 0, "{prefix}: the brace is text");
+            assert!(
+                results[1].starts_in_literal,
+                "{prefix}: line 2 is string text"
+            );
+            assert!(!results[2].starts_in_literal, "{prefix}: the string closed");
+        }
+        let mut rust = CodeScanner::new(LexicalRules::rust());
+        assert_eq!(rust.scan_line(1, r#"let s = b"{"; {"#).brace_delta, 1);
+    }
+
+    #[test]
+    fn a_regex_after_await_or_a_comment_after_a_keyword_is_not_counted() {
+        // [MAGI S6 loop 19, B2a-4] `await` was no keyword a regex may follow, and a comment
+        // between a keyword and the `/` (or the `(` of a condition) hid the keyword, so the
+        // regex read as a division and its braces moved the depth.
+        let code = "async function f(s) {\n  await /{/.test(s);\n  return /* c */ /}/.test(s);\n}\nif /* c */ (ok) /}/.test(s);\nfunction g() {\n}\n";
+        let results = CodeScanner::new(LexicalRules::javascript()).scan_all(code);
+        for idx in [1, 2, 4] {
+            assert_eq!(results[idx].brace_delta, 0, "line {}", idx + 1);
+        }
+        assert_eq!(
+            find_closing_brace(&results, 0),
+            3,
+            "f ends on its own brace"
+        );
+        assert_eq!(find_closing_brace(&results, 5), 6, "g is still found");
+        let mut js = CodeScanner::new(LexicalRules::javascript());
+        assert_eq!(
+            js.scan_line(1, "x = a /* c */ / b; {").brace_delta,
+            1,
+            "an operand before the comment still divides"
+        );
+    }
+
+    #[test]
+    fn a_scanned_line_takes_at_most_twenty_four_bytes() {
+        // [MAGI S6 loop 19, B2a-5] `scan_all` keeps one record per line, so a capped file of
+        // 8 MiB of newlines holds about 8.4 M of them: 24 bytes each is about 200 MiB, and a
+        // field added carelessly grows that by a third. Pinned at the measured size.
+        assert!(
+            std::mem::size_of::<ScannedLine>() <= 24,
+            "{} bytes",
+            std::mem::size_of::<ScannedLine>()
+        );
+    }
+
+    #[test]
+    fn a_cpp_raw_string_delimiter_may_hold_a_quote() {
+        // [MAGI S6 loop 19, B2a-7] a delimiter holding `"` is legal C++ (only blanks, `(`, `)`,
+        // `\` and control characters are excluded), but it was rejected, so the raw string read
+        // as plain strings and code and its braces moved the depth.
+        let code = "auto s = R\"d\"(a { b)d\"\";\nint x;\n";
+        let results = CodeScanner::new(LexicalRules::cpp()).scan_all(code);
+        assert_eq!(results[0].brace_delta, 0);
+        assert!(!results[1].starts_in_literal, "the raw string closed");
+    }
+
+    #[test]
+    fn a_c_multicharacter_constant_is_a_literal() {
+        // [MAGI S6 loop 19, B2a-8] C and C++ allow multicharacter constants (`'{}'`); only a
+        // one-character literal was recognized, so their braces moved the depth.
+        for rules in [LexicalRules::c(), LexicalRules::cpp()] {
+            let mut s = CodeScanner::new(rules);
+            assert_eq!(s.scan_line(1, "int c = '{{'; int d = 'a}';").brace_delta, 0);
+            assert_eq!(s.current_depth(), 0);
+        }
+        // A C++14 digit separator opens no literal.
+        let mut cpp = CodeScanner::new(LexicalRules::cpp());
+        assert_eq!(cpp.scan_line(1, "int n = 1'000'000; {").brace_delta, 1);
+        assert_eq!(cpp.scan_line(2, "int m = 0x1'F; }").brace_delta, -1);
+        // Rust and Java keep their one-character rule: a lifetime opens no literal.
+        let mut rust = CodeScanner::new(LexicalRules::rust());
+        assert_eq!(rust.scan_line(1, "fn f<'a>(x: &'a str) {").brace_delta, 1);
+    }
 }
