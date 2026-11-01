@@ -197,8 +197,8 @@ pub fn read_bounded(reader: impl Read, cap: u64) -> std::io::Result<Option<Vec<u
 
 /// Whether a path is one a review never reads.
 ///
-/// True for a component `.git` or `.magi`, or a last component that starts with
-/// `.magi-rs-memory.db`. Components split on `/` and `\`, compared ASCII-case-insensitively after
+/// True for a component `.git` or `.magi`, or any component that starts with
+/// `.magi-rs-memory.db` (a directory named like the database hides nothing either). Components split on `/` and `\`, compared ASCII-case-insensitively after
 /// trimming trailing `.` and ` ` (Windows resolves `.GIT`, `.git.` and `.git ` to `.git`; the
 /// same rule everywhere over-blocks a `.Git` directory on Linux, the safe direction).
 ///
@@ -218,8 +218,10 @@ pub fn is_never_reviewed(path: &str) -> bool {
     let named = components
         .iter()
         .any(|c| NEVER_REVIEWED.iter().any(|n| c.eq_ignore_ascii_case(n)));
-    let database = components.last().is_some_and(|last| {
-        last.get(..MEMORY_DB_PREFIX.len())
+    // MAGI FIX (S6 loop 14, A2-2, security): every component, not the last one alone:
+    // `.magi-rs-memory.db-wal/notes.txt` was reviewed.
+    let database = components.iter().any(|c| {
+        c.get(..MEMORY_DB_PREFIX.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(MEMORY_DB_PREFIX))
     });
     named || database
