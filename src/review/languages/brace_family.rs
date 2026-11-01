@@ -6578,6 +6578,37 @@ int g(void) {
     }
 
     #[test]
+    fn a_typescript_optional_method_is_a_member() {
+        // [MAGI B2b1 10] `foo?(x: number): void;` ended in `?` before its `(`, so no identifier
+        // named it and an interface or class could not split there.
+        let ext = BraceFamilyExtractor::typescript();
+        let interface =
+            "interface I {\n  foo?(x: number): void;\n  qux?<T>(x: T): T;\n  bar(): void;\n}\n";
+        let parts = split(&ext, interface, 2, UnitKind::Trait);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("I", UnitKind::Trait, 1, 1),
+                ("foo", UnitKind::Method, 2, 2),
+                ("qux", UnitKind::Method, 3, 3),
+                ("bar", UnitKind::Method, 4, 4),
+                ("I", UnitKind::Trait, 5, 5)
+            ]
+        );
+        let class = "class C {\n  baz?(): void {\n    x();\n  }\n  q() {\n  }\n}\n";
+        let parts = split(&ext, class, 3, UnitKind::Class);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("C", UnitKind::Class, 1, 1),
+                ("baz", UnitKind::Method, 2, 4),
+                ("q", UnitKind::Method, 5, 6),
+                ("C", UnitKind::Class, 7, 7)
+            ]
+        );
+    }
+
+    #[test]
     fn a_free_function_in_a_module_or_a_namespace_stays_a_function_when_split() {
         // [MAGI B2a 1] every block promoted its functions to methods, so a free function in a
         // Rust `mod` or a C++ `namespace` was labelled a method; only a type's block has methods.
