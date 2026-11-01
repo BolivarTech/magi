@@ -214,6 +214,17 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         r = _result("R16", 2, None, _with_id(stderr))
         self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
 
+    def test_s51_cannot_test_the_exclusion_when_the_cap_may_have_cut_every_visible_magi_file(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a1-m2] the product names at most MAX_OMISSIONS_SHOWN entries; when it cut
+        # the list and none of the .magi/ files git listed is among those shown, they may be in the cut tail,
+        # so "names none of them" is the environment's size, never a product FAIL.
+        stderr = (b"error: nothing to review: no reviewable file in the input; left out: "
+                  b"skipped/leak.txt (secret), skipped/pixel.png (binary), and 3 more" + _NL)
+        r = _result("R16", 2, None, _with_id(stderr))
+        outcome = [f for f in DEFAULT_REGISTRY.get("S51").func(r)][2]
+        self.assertEqual(Outcome.CANNOT_TEST, outcome.outcome)
+        self.assertIn("3 more", outcome.detail)
+
     def test_s51_fails_on_a_wrong_exit(self) -> None:
         r = _result("R16", 0, None, _with_id(_ROOT_STDERR))
         self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[0]])
