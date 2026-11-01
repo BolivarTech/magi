@@ -163,6 +163,24 @@ const AWS_ARGUMENT_QUOTES: &[u8] = b"\"'`";
 /// The most separator bytes read after an AWS secret key's name before a quoted key, so each
 /// name reads a bounded run.
 const AWS_ARGUMENT_WINDOW: usize = 16;
+/// What opens an XML start tag, and what closes one.
+const XML_TAG_OPEN: u8 = b'<';
+/// What closes an XML start tag.
+const XML_TAG_CLOSE: u8 = b'>';
+/// What marks an XML start tag as self-closing (`<a/>`) when it stands before its `>`.
+const XML_SELF_CLOSE: u8 = b'/';
+/// What separates an XML namespace prefix from a tag name (`<aws:SecretAccessKey>`).
+const XML_NAMESPACE_SEPARATOR: u8 = b':';
+/// The longest XML namespace prefix read before a tag name, so each name reads a bounded run.
+const XML_MAX_PREFIX: usize = 32;
+/// The most bytes read after an AWS secret key's name inside the tag it opens or sits in, so
+/// each name reads a bounded run: room for a few short attributes before the `>` or `value`.
+const XML_TAG_WINDOW: usize = 128;
+/// The attribute that holds a setting's value in a tag that names it (`<add key="…" value="…"/>`).
+const XML_VALUE_ATTRIBUTE: &str = "value";
+/// The blanks and line breaks allowed between the `>` of a start tag and the key it holds, and
+/// before an attribute's name.
+const XML_BLANKS: &[u8] = b" \t\r\n";
 /// What separates a URL's scheme from its authority.
 const URL_AUTHORITY_START: &str = "://";
 /// The longest userinfo (`user:password`) a URL credential may have, so each `://` reads a
@@ -647,11 +665,113 @@ fn aws_name_end(bytes: &[u8], at: usize) -> Option<usize> {
 }
 
 /// Where the AWS secret access key that opens at `at` ends: its name ([`aws_name_end`]), then
-/// the key after an assignment or a comparison ([`aws_assignment_end`]) or quoted next to it
-/// ([`aws_argument_end`]). `None` when none opens there. O(1) when no name opens at `at`.
+/// the key after an assignment or a comparison ([`aws_assignment_end`]), quoted next to it
+/// ([`aws_argument_end`]), as the text of the XML element the name opens
+/// ([`aws_element_end`]), or as the `value` attribute of the tag the name opens or sits in
+/// ([`aws_value_attribute_end`]). `None` when none opens there. O(1) when no name opens at `at`.
 fn aws_secret_end(bytes: &[u8], at: usize) -> Option<usize> {
     let name_end = aws_name_end(bytes, at)?;
-    aws_assignment_end(bytes, name_end).or_else(|| aws_argument_end(bytes, name_end))
+    aws_assignment_end(bytes, name_end)
+        .or_else(|| aws_argument_end(bytes, name_end))
+        .or_else(|| aws_element_end(bytes, at, name_end))
+        .or_else(|| aws_value_attribute_end(bytes, at, name_end))
+}
+
+/// Whether the name that opens at `at` is an XML start tag's name: `<` right before it, or a
+/// namespace prefix of at most [`XML_MAX_PREFIX`] word characters and its `:` between them
+/// (`<aws:SecretAccessKey`). O([`XML_MAX_PREFIX`]).
+fn opens_xml_start_tag(bytes: &[u8], at: usize) -> bool {
+    let Some(before) = at.checked_sub(1) else {
+        return false;
+    };
+    match bytes.get(before) {
+        Some(&XML_TAG_OPEN) => true,
+        Some(&XML_NAMESPACE_SEPARATOR) => {
+            let prefix = bytes
+                .get(..before)
+                .unwrap_or_default()
+                .iter()
+                .rev()
+                .take(XML_MAX_PREFIX + 1)
+                .take_while(|b| is_word(**b))
+                .count();
+            (1..=XML_MAX_PREFIX).contains(&prefix)
+                && before
+                    .checked_sub(prefix + 1)
+                    .and_then(|open| bytes.get(open))
+                    == Some(&XML_TAG_OPEN)
+        }
+        _ => false,
+    }
+}
+
+/// The bytes of the tag a name ending at `name_end` opens or sits in: at most [`XML_TAG_WINDOW`]
+/// of them, up to (not including) the first `<` or `>`. O([`XML_TAG_WINDOW`]).
+fn xml_tag_rest(bytes: &[u8], name_end: usize) -> &[u8] {
+    let window = bytes
+        .get(name_end..)
+        .unwrap_or_default()
+        .iter()
+        .take(XML_TAG_WINDOW)
+        .take_while(|b| **b != XML_TAG_OPEN && **b != XML_TAG_CLOSE)
+        .count();
+    bytes.get(name_end..name_end + window).unwrap_or_default()
+}
+
+/// Where the key held as the text of the XML element whose start tag the name at `at` opens
+/// ends: the tag's other attributes (within [`XML_TAG_WINDOW`]), its `>` (not a self-closing
+/// `/>`), blanks and line breaks, then a key of at least 40 characters. The start tag must be
+/// one ([`opens_xml_start_tag`]), so a `>` comparison after the name is not read as a key.
+/// `None` when there is none. O([`XML_TAG_WINDOW`] + blanks + key length).
+// MAGI FIX (S6 loop 17, A2-1, security): `<SecretAccessKey>…</SecretAccessKey>` was sent.
+fn aws_element_end(bytes: &[u8], at: usize, name_end: usize) -> Option<usize> {
+    if !opens_xml_start_tag(bytes, at) {
+        return None;
+    }
+    let close = name_end + xml_tag_rest(bytes, name_end).len();
+    if bytes.get(close) != Some(&XML_TAG_CLOSE)
+        || close.checked_sub(1).and_then(|before| bytes.get(before)) == Some(&XML_SELF_CLOSE)
+    {
+        return None;
+    }
+    let pos = skip_bytes(bytes, close + 1, XML_BLANKS);
+    tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN)
+        .then(|| tail_end(bytes, pos, Tail::Base64))
+}
+
+/// Where the key held as the `value` attribute ([`XML_VALUE_ATTRIBUTE`]) of the tag that names
+/// the key ends: the name at `at` is the tag's name ([`opens_xml_start_tag`]) or a quoted
+/// attribute value (`key="AWSSecretKey"`), and within the rest of the tag
+/// ([`xml_tag_rest`]) an attribute `value` after a blank, blanks, `=`, blanks, a quote, and a
+/// key of at least 40 characters. `None` when there is none. O([`XML_TAG_WINDOW`] + key length).
+// MAGI FIX (S6 loop 17, A2-1, security): `<add key="AWSSecretKey" value="…"/>` was sent.
+fn aws_value_attribute_end(bytes: &[u8], at: usize, name_end: usize) -> Option<usize> {
+    let quoted_value = at
+        .checked_sub(2)
+        .and_then(|eq| bytes.get(eq..at))
+        .is_some_and(|before| matches!(before, [b'=', q] if QUOTES.contains(q)));
+    if !quoted_value && !opens_xml_start_tag(bytes, at) {
+        return None;
+    }
+    let tag = xml_tag_rest(bytes, name_end);
+    (1..tag.len()).find_map(|offset| {
+        let attr = name_end + offset;
+        let after_blank = tag.get(offset - 1).is_some_and(|b| XML_BLANKS.contains(b));
+        if !after_blank || !word_at(bytes, attr, XML_VALUE_ATTRIBUTE) {
+            return None;
+        }
+        let mut pos = skip_bytes(bytes, attr + XML_VALUE_ATTRIBUTE.len(), XML_BLANKS);
+        if bytes.get(pos) != Some(&b'=') {
+            return None;
+        }
+        pos = skip_bytes(bytes, pos + 1, XML_BLANKS);
+        if !bytes.get(pos).is_some_and(|b| QUOTES.contains(b)) {
+            return None;
+        }
+        pos += 1;
+        tail_at_least(bytes, pos, Tail::Base64, AWS_SECRET_MIN)
+            .then(|| tail_end(bytes, pos, Tail::Base64))
+    })
 }
 
 /// Where the key ends after an AWS secret key's name that ends at `name_end`: an optional quote
