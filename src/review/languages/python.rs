@@ -1270,4 +1270,58 @@ def g():
             ]
         );
     }
+
+    /// Asserts each line `1..=total` lies in exactly one unit.
+    fn assert_each_line_in_one_unit(units: &[SemanticUnit], total: u32) {
+        for line in 1..=total {
+            let holders: Vec<&str> = units
+                .iter()
+                .filter(|u| u.start_line <= line && line <= u.end_line)
+                .map(|u| u.name.as_str())
+                .collect();
+            assert_eq!(holders.len(), 1, "line {line} is in {holders:?}");
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_on_the_first_line_loses_no_line() {
+        // [MAGI S6 loop 14, B2b2] a UTF-8 BOM before `def` hides the keyword (U+FEFF is no
+        // whitespace), a declared limitation: the first construct's unit structure degrades,
+        // but every line still lands in exactly one unit and the next construct is found.
+        let code = "\u{FEFF}def f():\n    return 1\n\ndef g():\n    pass\n";
+        let units = extract(code, &[1, 2, 3, 4, 5]);
+        assert_each_line_in_one_unit(&units, 5);
+        assert!(
+            spans(&units).contains(&("g", UnitKind::Function, 4, 5)),
+            "{:?}",
+            spans(&units)
+        );
+    }
+
+    #[test]
+    fn a_definition_inside_a_module_level_block_falls_into_a_whole_gap_unit() {
+        // [MAGI S6 loop 14, B2b2] definitions are found at indent 0 only, a declared
+        // limitation: one inside `if TYPE_CHECKING:` is no unit of its own, its block is one gap
+        // unit, and that unit is never split, so a block larger than a batch is refused with the
+        // typed `ReviewError::TooLargeForBatch` (RV03) instead of being cut; no line is lost.
+        let code = "import os\n\nif TYPE_CHECKING:\n    def helper():\n        return 1\n\n    class Shim:\n        pass\n\ndef after():\n    return 2\n";
+        let every: Vec<u32> = (1..=11).collect();
+        let units = extract(code, &every);
+        assert_each_line_in_one_unit(&units, 11);
+        let found = spans(&units);
+        assert!(
+            found.contains(&("after", UnitKind::Function, 10, 11)),
+            "{found:?}"
+        );
+        assert!(
+            !units.iter().any(|u| u.name == "helper" || u.name == "Shim"),
+            "{found:?}"
+        );
+        let block = units
+            .iter()
+            .find(|u| u.start_line <= 4 && 4 <= u.end_line)
+            .expect("a unit holds the nested def");
+        assert_eq!(block.kind, UnitKind::TopLevel, "{found:?}");
+        assert!(PythonExtractor.split_block(block).is_empty());
+    }
 }
