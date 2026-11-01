@@ -171,6 +171,16 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         r = _result("R16", 2, None, _with_id(stderr), protected_visible=_R16_PROTECTED + (planted,))
         self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]])
 
+    def test_s51_fails_never_passes_over_an_ambiguous_name_the_product_left_out_as_ignored(self) -> None:
+        # [MAGI §6 MS2 loop 15, F1a2-m1] a .magi name holding " (<cause>), " that the product correctly leaves
+        # out as ignored splits into a protected path "read" plus another file, so the read check fires before
+        # the ambiguity CANNOT_TEST: the outcome is a loud FAIL, and must never be a PASS.
+        planted = ".magi/x (binary), y"
+        stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)",
+                                      planted.encode() + b" (ignored), skipped/pixel.png (binary)")
+        r = _result("R16", 2, None, _with_id(stderr), protected_visible=_R16_PROTECTED + (planted,))
+        self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]])
+
     def test_s51_fails_when_a_protected_file_was_taken_for_review(self) -> None:
         # A .magi/magi.toml taken for review makes the input reviewable: the run reaches the budget
         # refusal (--timeout 20) instead of "nothing to review".
