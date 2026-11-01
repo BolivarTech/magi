@@ -2690,6 +2690,34 @@ mod tests {
     }
 
     #[test]
+    fn a_path_named_with_a_leading_dot_slash_is_read_from_a_revision() {
+        // [MAGI S6 loop 17, A2-3] the object spec `<rev>:./<path>` with a `./` path is
+        // `<rev>:././<path>` (not `<rev>:../<path>`, as the review read it), which git resolves;
+        // the check that the revision holds the path compares `ls-tree`'s names, which never
+        // carry a `./`, so the path must be read as git names it.
+        let d = repo();
+        std::fs::create_dir(d.path().join("src")).expect("mkdir");
+        std::fs::write(d.path().join("a.rs"), "one\n").expect("write");
+        std::fs::write(d.path().join("src/b.rs"), "two\n").expect("write");
+        git(d.path(), &["add", "a.rs", "src/b.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        std::fs::write(d.path().join("a.rs"), "dirty\n").expect("write");
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let src = RevisionSource::new(&g, "HEAD".into(), None);
+        for (path, want) in [
+            ("./a.rs", "one\n"),
+            ("./src/b.rs", "two\n"),
+            ("src/./b.rs", "two\n"),
+        ] {
+            assert_eq!(
+                src.read(path).expect("read"),
+                Some(want.as_bytes().to_vec()),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn the_uncommitted_ignore_set_names_heads_ignored_paths_gone_from_the_index() {
         // [MAGI S6 loop 17, A2-4] the uncommitted ignore set relies on `ls-files --with-tree`
         // listing HEAD's tree paths, which git-ls-files(1) documents only for
