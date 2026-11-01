@@ -455,16 +455,6 @@ impl BraceFamilyExtractor {
         let mut constructs = Vec::new();
         let mut i = 0;
         let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
-        // The depth of a block body's own lines is the depth before its first line: a line at
-        // that depth is a direct member, one deeper sits inside a member (a static block).
-        let depth_before = |j: usize| {
-            scanned
-                .get(j)
-                .map(|s| i64::from(s.depth_after) - i64::from(s.brace_delta))
-        };
-        let member_depth = depth_before(0);
-        let reserved_names_methods =
-            |j: usize| members && self.reserved_word_methods && depth_before(j) == member_depth;
         let search = BraceSearch {
             stops: &stops,
             budget,
@@ -511,14 +501,7 @@ impl BraceFamilyExtractor {
                 continue;
             }
             let prototypes = members && self.member_prototypes();
-            // MAGI FIX (S6 loop 14): `delete() {` in a JavaScript class was no member; directly
-            // in a class body a reserved word names a method.
-            let signature = if reserved_names_methods(i) {
-                self.signature_candidate(line, scanned.get(i), prototypes)
-            } else {
-                self.signature_name(line, scanned.get(i), prototypes)
-            };
-            if let Some(name) = signature {
+            if let Some(name) = self.line_signature(line, scanned, i, members) {
                 // MAGI FIX (S6 loop 15): the brace search ran twice, once here and once in
                 // `brace_block_end`, spending a wrapped header's visits of the budget twice.
                 let open = open_brace_line(lines, scanned, i, &search);
@@ -1055,8 +1038,8 @@ impl BraceFamilyExtractor {
     }
 
     /// Whether line `j` (0-based) is code that opens a construct: a function, block or
-    /// declaration keyword, or a signature where [`Self::signature_name`] applies. O(k) in the
-    /// keywords.
+    /// declaration keyword, or a signature as the main scan reads it
+    /// ([`Self::line_signature`]). O(k) in the keywords.
     fn starts_construct(
         &self,
         lines: &[&str],
@@ -1071,11 +1054,54 @@ impl BraceFamilyExtractor {
             return false;
         };
         let trimmed = line.trim();
+        // MAGI FIX (S6 loop 18, B2b-9): the stop rule ruled out a reserved word unlike the main
+        // scan, so a member with no `;` (`abstract foo(): void`) took the body of the
+        // `delete() {` after it; both read a signature through `line_signature`.
         self.construct_keyword(trimmed).is_some()
             || self.is_declaration(trimmed, scanned.get(j))
-            || self
-                .signature_name(line, scanned.get(j), members && self.member_prototypes())
-                .is_some()
+            || self.line_signature(line, scanned, j, members).is_some()
+    }
+
+    /// The function name of the signature on line `j` (0-based), as the main scan reads it:
+    /// [`Self::signature_name`], or, for a line directly in a class body of a language with
+    /// `reserved_word_methods`, [`Self::signature_candidate`], where a reserved word names a
+    /// method (`delete() {`). Shared by the main scan and the forward searches' stop rule
+    /// ([`Self::starts_construct`]), so the two never disagree on where a construct starts. O(n)
+    /// in the line.
+    ///
+    /// The depth of a block body's own lines is the depth before its first line: a line at that
+    /// depth is a direct member, one deeper sits inside a member (a static block).
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - Line `j`, untrimmed.
+    /// * `scanned` - The scanner's record of each line of the text.
+    /// * `j` - The 0-based line.
+    /// * `members` - Whether the lines are a block's body.
+    ///
+    /// # Returns
+    ///
+    /// The function name, or `None` when the line is no signature.
+    // MAGI FIX (S6 loop 14): `delete() {` in a JavaScript class was no member; directly in a
+    // class body a reserved word names a method.
+    fn line_signature(
+        &self,
+        line: &str,
+        scanned: &[ScannedLine],
+        j: usize,
+        members: bool,
+    ) -> Option<String> {
+        let depth_before = |k: usize| {
+            scanned
+                .get(k)
+                .map(|s| i64::from(s.depth_after) - i64::from(s.brace_delta))
+        };
+        let prototypes = members && self.member_prototypes();
+        if members && self.reserved_word_methods && depth_before(j) == depth_before(0) {
+            self.signature_candidate(line, scanned.get(j), prototypes)
+        } else {
+            self.signature_name(line, scanned.get(j), prototypes)
+        }
     }
 
     /// The function name of a C-family signature line, for extractors with
