@@ -423,6 +423,12 @@ impl LanguageRegistry {
     /// Create a registry with all built-in extractors. Each declared extension is stored in
     /// ASCII lower case, the form [`Self::get`] looks up, so the match ignores case whatever
     /// case an extractor declares.
+    ///
+    /// The built-in extractors declare disjoint extensions (pinned by
+    /// `the_built_in_extractors_declare_disjoint_extensions`). Were two to share one, the
+    /// extractor registered later would take it, deterministically (brace-family ones in
+    /// [`brace_family::all_extractors`] order, then Python); that test fails first, so a new
+    /// extractor cannot displace another in silence.
     pub fn new() -> Self {
         // MAGI FIX (B2a 2): the lookup lowercases the path's extension; the stored keys are
         // lowercased too, so the two sides never depend on how an extractor spells them.
@@ -944,6 +950,27 @@ mod tests {
             .collect();
         assert_eq!(spans, vec![(3, 3, vec![3])]);
         assert!(gap_units(&[], "a.rs", &[], vec![1]).is_empty());
+    }
+
+    #[test]
+    fn the_built_in_extractors_declare_disjoint_extensions() {
+        // [MAGI B2a 5] a later extractor silently displaced an earlier one on a shared
+        // extension. Passes by design: it guards the extractors added later.
+        let mut declared: Vec<String> = brace_family::all_extractors()
+            .iter()
+            .flat_map(|e| e.extensions().iter().map(|x| x.to_ascii_lowercase()))
+            .chain(
+                python::PythonExtractor
+                    .extensions()
+                    .iter()
+                    .map(|x| x.to_ascii_lowercase()),
+            )
+            .collect();
+        let total = declared.len();
+        declared.sort_unstable();
+        declared.dedup();
+        assert_eq!(declared.len(), total, "an extension is declared twice");
+        assert_eq!(LanguageRegistry::new().extensions().count(), total);
     }
 
     #[test]
