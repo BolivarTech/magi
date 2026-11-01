@@ -63,15 +63,20 @@ impl ConditionalDirective {
     ///
     /// # Arguments
     ///
-    /// * `line` - A line whose first non-blank character is `#`; blanks may follow the `#`
-    ///   (`#  ifdef X`, `# else`).
+    /// * `line` - A line whose first non-blank character is `#`; blanks and block comments,
+    ///   which C reads as blanks, may follow the `#` (`#  ifdef X`, `# /* c */ else`).
     ///
     /// # Returns
     ///
     /// The directive named by the word after `#`, or `None` when it is no conditional
-    /// (`#define`, `#include`) or the line holds no `#`. O(n) in the line's length.
+    /// (`#define`, `#include`), a block comment after the `#` does not close on the line, or the
+    /// line holds no `#`. O(n) in the line's length.
     fn parse(line: &str) -> Option<Self> {
-        let rest = line.trim_start().strip_prefix('#')?.trim_start();
+        let mut rest = line.trim_start().strip_prefix('#')?.trim_start();
+        // MAGI FIX (B2a 3): `# /* c */ ifdef X` hid the word behind the comment.
+        while let Some(comment) = rest.strip_prefix("/*") {
+            rest = comment.split_once("*/")?.1.trim_start();
+        }
         let word = rest
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .next()
