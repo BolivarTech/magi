@@ -4302,6 +4302,38 @@ void g(void) {
     }
 
     #[test]
+    fn a_return_type_holding_parentheses_does_not_name_the_function() {
+        // [MAGI S6 loop 15, B2b1] The name was read before the line's first `(`, so a template
+        // argument (`std::function<void(int)>`) or a declarator in parentheses (a function
+        // returning a function pointer) named the function `void`; the symbol check (RV09)
+        // then missed the real name.
+        let code = "std::function<void(int)> make(int n) {\n    return f;\n}\nvoid (*get_handler(int sig))(int) {\n    return h;\n}\nvoid (*f)() {\n    x();\n}\nstd::map<int, std::pair<int, int>> table() {\n    return t;\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &every_line(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("make", UnitKind::Function, 1, 3),
+                ("get_handler", UnitKind::Function, 4, 6),
+                ("f", UnitKind::Function, 7, 9),
+                ("table", UnitKind::Function, 10, 12),
+            ]
+        );
+        // A statement's parenthesized operand is no declarator: it names the keyword, which
+        // `NOT_FUNCTION_NAMES` rules out, and a call is named by its callee.
+        assert_eq!(identifier_before_paren("if (*p) {"), Some("if".to_string()));
+        assert_eq!(
+            identifier_before_paren("while (*s)(x) {"),
+            Some("while".to_string())
+        );
+        assert_eq!(
+            identifier_before_paren("run(*p) {"),
+            Some("run".to_string())
+        );
+        // A `<` with no matching `>` before the `(` (a comparison) keeps the first `(`.
+        assert_eq!(identifier_before_paren("a < f(x) {"), Some("f".to_string()));
+    }
+
+    #[test]
     fn a_declaration_keyword_glued_to_its_list_opens_a_declaration_group() {
         // [MAGI S6 loop 14, B2b1] `match_declaration_keyword` required a blank after the
         // keyword, so `use::{a, b};`, `import{foo} from "x";` and `#include<stdio.h>` were no
