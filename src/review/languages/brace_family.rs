@@ -722,7 +722,8 @@ impl BraceFamilyExtractor {
     /// its closing brace, or on its own line when it opens none. The `type (` and `)` lines
     /// belong to no member, so they fall into gap units. O(k) for the k lines of the group.
     ///
-    /// The group's end is found by counting parentheses on the line text ([`paren_delta`]); a
+    /// The group's end is found by counting parentheses in code context ([`code_group_delta`]),
+    /// so one inside a raw string, a string or a comment moves nothing; a
     /// group that never closes runs to the end of the file, its members still found one by one,
     /// so every line stays in exactly one unit either way. A member's closing-brace search stays
     /// inside the group and spends the pass's `search` budget ([`SearchBudget`]); a member it
@@ -745,7 +746,9 @@ impl BraceFamilyExtractor {
         }
         let mut depth = 0i64;
         let close = (i..lines.len()).find(|&j| {
-            depth += paren_delta(lines, scanned, j);
+            // MAGI FIX (B2b1 B1): the parentheses were counted on the line text, so a `)` in a
+            // raw string cut the group short and a `(` in a comment absorbed the next function.
+            depth += code_group_delta(scanned, j);
             depth <= 0
         });
         let last = close.unwrap_or(lines.len().saturating_sub(1));
@@ -1386,7 +1389,7 @@ impl BraceFamilyExtractor {
     /// A line on the way that lies wholly inside a string or a comment (a text block, a template
     /// literal in the arguments) is passed over: it holds no bracket of the attribute.
     ///
-    /// Brackets are counted on the line text, as [`paren_delta`] counts parentheses: a bracket
+    /// Brackets are counted on the line text: a bracket
     /// inside a string may miscount, and the attribute then falls into a gap unit as before, so
     /// no line is lost. O(k) for the k lines walked.
     ///
@@ -1681,7 +1684,7 @@ const BRACE_SEARCH_VISITS_PER_LINE: usize = 32;
 /// The worst case is accepted, declared: a file crafted to keep a parameter list open on every
 /// line spends the whole budget, about 2.7 × 10⁸ line visits for an 8 MiB file. The budget counts
 /// visits, not the work inside one: a visit reads the line's scanner record and also walks its
-/// text a few times ([`paren_delta`], the trims, the stop rule's keyword and signature checks,
+/// text a few times (the trims, the stop rule's keyword and signature checks,
 /// the C attribute scan), so it costs O(m) for a line of m characters, and a pass costs at most
 /// its visits times the longest line's length. A crafted file whose few lines are megabytes long
 /// spends few visits, since they are counted in lines, but each is that long: about a thousand
@@ -1850,20 +1853,12 @@ fn open_brace_line(
     None
 }
 
-/// The `(` minus the `)` of line `idx` when it is code; 0 for a line that starts inside a comment
-/// or a string and stays there, or that does not exist. The characters are counted on the line
-/// text, strings and trailing comments included. O(n) in the line.
-fn paren_delta(lines: &[&str], scanned: &[ScannedLine], idx: usize) -> i64 {
-    if scanned.get(idx).is_none_or(|s| s.is_non_code) {
-        return 0;
-    }
-    lines.get(idx).map_or(0, |l| {
-        l.chars().fold(0, |n, c| match c {
-            '(' => n + 1,
-            ')' => n - 1,
-            _ => n,
-        })
-    })
+/// The parentheses and square brackets line `idx` opens minus those it closes, counted by the
+/// scanner in code context only ([`ScannedLine::group_delta`]): one inside a string, a raw
+/// string, a character literal or a comment counts nothing. 0 for a line that does not exist.
+/// O(1).
+fn code_group_delta(scanned: &[ScannedLine], idx: usize) -> i64 {
+    scanned.get(idx).map_or(0, |s| i64::from(s.group_delta))
 }
 
 /// Keywords that open a statement, never the rest of a declaration: the brace of a line that
@@ -2013,7 +2008,7 @@ fn opens_call_initializer(trimmed: &str) -> bool {
 
 /// The 0-based line that closes the call an initializer opens at line `i`
 /// ([`opens_call_initializer`]): the first code line after it where the parentheses opened
-/// since line `i` all close, counted on the line text ([`paren_delta`]). The walk ends without
+/// since line `i` all close, counted in code context ([`code_group_delta`]). The walk ends without
 /// one at a blank line or after [`MAX_BRACE_SEARCH_LINES`] lines; `i` then, and when line `i`
 /// opens no such call, so the declaration ends on its own line and the lines after it fall into
 /// later units, none lost. O(k) for the k lines walked.
@@ -2029,7 +2024,9 @@ fn call_initializer_end(
     {
         return i;
     }
-    let mut depth = paren_delta(lines, scanned, i);
+    // MAGI FIX (B2b1 B1): counted on the line text, a `(` and a `)` in two comments ran the
+    // declaration over the next one.
+    let mut depth = code_group_delta(scanned, i);
     let budget_end = i
         .saturating_add(1)
         .saturating_add(MAX_BRACE_SEARCH_LINES)
@@ -2038,7 +2035,7 @@ fn call_initializer_end(
         if !search.spend() || lines.get(j).is_some_and(|l| l.trim().is_empty()) {
             return i;
         }
-        depth += paren_delta(lines, scanned, j);
+        depth += code_group_delta(scanned, j);
         if depth <= 0 {
             return j;
         }
