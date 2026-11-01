@@ -4441,6 +4441,33 @@ int bar(void) {
     }
 
     #[test]
+    fn a_c_declaration_list_with_a_function_declarator_splits_as_one_declaration() {
+        // [MAGI B2b1 8] a list line holding a function declarator (`g(void),`) read as a
+        // signature and ended the list before it, so a split group cut `int a, g(void), b;`
+        // in two pieces.
+        for code in [
+            "int a,\n    g(void),\n    b;\nint c;\nvoid h(void) {\n}\n",
+            "int a,\n    g(int x,\n      int y),\n    b;\nint c;\nvoid h(void) {\n}\n",
+        ] {
+            let parts = split(&c_extractor(), code, 1, UnitKind::DeclarationGroup);
+            let last = u32::try_from(code.lines().count()).expect("small") - 3;
+            assert_eq!(
+                spans(&parts),
+                vec![
+                    ("declarations", UnitKind::DeclarationGroup, 1, last),
+                    (
+                        "declarations",
+                        UnitKind::DeclarationGroup,
+                        last + 1,
+                        last + 1
+                    ),
+                ],
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn a_cpp_constructor_initializer_or_trailing_clause_continues_its_signature() {
         // [MAGI S6 loop 9, B2b-b1] `: value_(value) {` read as a signature named `value_`, so the
         // brace search stopped there and the constructor fell into gap units.
