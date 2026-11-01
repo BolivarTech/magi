@@ -255,6 +255,9 @@ pub fn is_never_reviewed(path: &str) -> bool {
 
 /// Reads the worktree under a root, never outside it.
 ///
+/// A root whose canonical path has a never-reviewed component (a `.git` or `.magi` directory, or
+/// an alias resolving into one) reads nothing: every read is [`ReviewError::Protected`].
+///
 /// Each read canonicalizes `root.join(path)`, checks by path components that it stays under the
 /// canonical root, refuses a resolved target that is a never-reviewed path (a symlink alias of
 /// `.git/config`), and reads that canonical path with the per-file cap. After the open the path
@@ -303,7 +306,7 @@ impl ContentSource for WorktreeSource<'_> {
     /// [`ReviewError::OutsideWorkspace`] when the path resolves outside the root or no longer
     /// names the file opened (see [`WorktreeSource`]), [`ReviewError::NotReviewable`] with
     /// [`HARD_LINK_CAUSE`] for a file with more than one hard link,
-    /// [`ReviewError::Protected`] when it resolves to a never-reviewed path,
+    /// [`ReviewError::Protected`] when it resolves to a never-reviewed path or the root is one,
     /// [`ReviewError::NotRegularFile`] when it resolves to something other than a regular file
     /// (a link to a directory), and [`ReviewError::TooLarge`] over [`MAX_REVIEW_FILE_BYTES`].
     /// A link whose target does not exist is `Ok(None)`, like a file that does not exist.
@@ -336,6 +339,12 @@ impl WorktreeSource<'_> {
             .canonical_root
             .as_ref()
             .map_err(|e| ReviewError::Io(format!("{}: {e}", self.root.display())))?;
+        // MAGI FIX (S6 loop 16, A2-1, security): the containment check below strips the root, and
+        // with it a `.git` / `.magi` component of the root itself (or of the directory an alias
+        // root resolves to): under such a root nothing is read.
+        if is_never_reviewed(&canonical_root.to_string_lossy()) {
+            return Err(ReviewError::Protected(path.to_string()));
+        }
         let joined = self.root.join(path);
         match std::fs::symlink_metadata(&joined) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
