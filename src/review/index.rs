@@ -379,6 +379,18 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_in_a_directory_is_not_read_as_the_file_extension() {
+        // [MAGI S6 loop 18, B1-5] the extension was taken from the whole path, so a dotted
+        // directory over an extensionless file (`src.d/foo`) gave the extension `d/foo`, unlike
+        // `context::file_extension`, which isolates the file name first.
+        for path in ["src.d/foo", "src/v1.2/main", "conf.d\\settings"] {
+            assert_eq!(extension_of(path), None, "{path}");
+        }
+        assert_eq!(extension_of("pkg.d/Lib.RS").as_deref(), Some("rs"));
+        assert_eq!(extension_of("notes.zzz").as_deref(), Some("zzz"));
+    }
+
+    #[test]
     fn overlapping_and_adjacent_ranges_merge_and_gaps_stay() {
         let mut r = Reviewed::default();
         r.add_lines("a.rs", 10, 20);
