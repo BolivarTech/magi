@@ -171,10 +171,12 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
     if members.is_empty() {
         return Vec::new();
     }
-    // `content` is the block's lines joined by '\n': splitting on it gives them back exactly.
+    // `content` is the block's lines joined by '\n': `str::lines` gives them back exactly.
     // Every extractor builds it with `str::lines`, so a CRLF file reaches here without its '\r'
     // and the pieces carry the same text the unpieced unit did.
-    let lines: Vec<&str> = block.content.split('\n').collect();
+    // MAGI FIX (S6 loop 18, B2a-7): splitting on '\n' read a trailing newline as one more line,
+    // so the last piece ran one line past the block; `str::lines` gives no such line.
+    let lines: Vec<&str> = block.content.lines().collect();
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
     let base = block.start_line.saturating_sub(1);
     let piece = |kind: UnitKind, name: String, first: u32, last: u32| SemanticUnit {
