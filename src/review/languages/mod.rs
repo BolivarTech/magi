@@ -406,8 +406,12 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
-    /// Create a registry with all built-in extractors.
+    /// Create a registry with all built-in extractors. Each declared extension is stored in
+    /// ASCII lower case, the form [`Self::get`] looks up, so the match ignores case whatever
+    /// case an extractor declares.
     pub fn new() -> Self {
+        // MAGI FIX (B2a 2): the lookup lowercases the path's extension; the stored keys are
+        // lowercased too, so the two sides never depend on how an extractor spells them.
         let mut registry = Self {
             extractors: BTreeMap::new(),
         };
@@ -416,7 +420,7 @@ impl LanguageRegistry {
         for extractor in brace_family::all_extractors() {
             for ext in extractor.extensions() {
                 registry.extractors.insert(
-                    ext.to_string(),
+                    ext.to_ascii_lowercase(),
                     ExtractorKind::BraceFamily(Box::new(extractor.clone())),
                 );
             }
@@ -427,7 +431,7 @@ impl LanguageRegistry {
         for ext in py.extensions() {
             registry
                 .extractors
-                .insert(ext.to_string(), ExtractorKind::Python(py));
+                .insert(ext.to_ascii_lowercase(), ExtractorKind::Python(py));
         }
 
         registry
