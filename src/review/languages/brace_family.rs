@@ -98,10 +98,17 @@ impl LanguageExtractor for BraceFamilyExtractor {
         // MAGI FIX (S6 loop 14): why the fallback is safe, written where it is used.
         let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
         let (shares, orphans) = changed_lines.assign(&ranges, total);
+        // MAGI FIX (S6 loop 15): a `zip` with fewer shares than constructs dropped the last
+        // constructs' changed lines from every unit; a mismatch, out of reach while `assign`
+        // keeps its contract, now reviews the changed lines as gaps, none lost.
+        let (pairs, ranges, orphans) = match construct_shares(&constructs, shares) {
+            Some(pairs) => (pairs, ranges, orphans),
+            None => (Vec::new(), Vec::new(), changed_lines.assign(&[], total).1),
+        };
 
         // Filter to constructs that overlap with changed lines
         let mut units: Vec<SemanticUnit> = Vec::new();
-        for (construct, changed_in_unit) in constructs.iter().zip(shares) {
+        for (construct, changed_in_unit) in pairs {
             if !changed_in_unit.is_empty() {
                 let start_idx = construct.start_line.saturating_sub(1) as usize;
                 let end_idx = construct.end_line as usize;
@@ -209,6 +216,27 @@ fn shift_members(constructs: Vec<Construct>, open: usize) -> Option<Vec<Member>>
             ))
         })
         .collect()
+}
+
+/// Each construct paired with its share of the changed lines, or `None` when `shares` does not
+/// hold exactly one share per construct, the contract of `ChangedLines::assign`. A `zip` stops
+/// at the shorter side, so a share list one short would drop the last constructs and their
+/// changed lines from every unit; on a mismatch the caller reviews the changed lines as gaps
+/// instead, so none is lost. O(n) in the constructs.
+///
+/// # Arguments
+///
+/// * `constructs` - The file's constructs, sorted and disjoint.
+/// * `shares` - The changed lines of each construct, in the same order.
+///
+/// # Returns
+///
+/// The pairs, or `None` when the two lengths differ.
+fn construct_shares(
+    constructs: &[Construct],
+    shares: Vec<Vec<u32>>,
+) -> Option<Vec<(&Construct, Vec<u32>)>> {
+    (shares.len() == constructs.len()).then(|| constructs.iter().zip(shares).collect())
 }
 
 /// The modifier words of a language, stripped before its keyword tables are matched.
@@ -4347,6 +4375,39 @@ void g(void) {
             vec![("f", 1, 6)]
         );
         assert_eq!(pass.spent(), one_search.spent());
+    }
+
+    #[test]
+    fn constructs_pair_with_their_shares_only_one_to_one() {
+        // [MAGI S6 loop 15, B2b1] `extract_units` paired constructs and shares with `zip`, which
+        // stops at the shorter side: a share list one short would have dropped the last
+        // construct's changed lines from every unit, silently.
+        let construct = |name: &str, start, end| Construct {
+            kind: UnitKind::Function,
+            name: name.to_string(),
+            start_line: start,
+            end_line: end,
+        };
+        let constructs = vec![construct("a", 1, 3), construct("b", 5, 7)];
+        let pairs = construct_shares(&constructs, vec![vec![2], vec![]]).expect("one to one");
+        assert_eq!(
+            pairs
+                .iter()
+                .map(|(c, share)| (c.name.as_str(), share.clone()))
+                .collect::<Vec<_>>(),
+            vec![("a", vec![2]), ("b", vec![])]
+        );
+        assert!(construct_shares(&constructs, vec![vec![2]]).is_none());
+        assert!(construct_shares(&constructs, vec![vec![], vec![], vec![6]]).is_none());
+        assert!(construct_shares(&[], Vec::new()).is_some_and(|p| p.is_empty()));
+        // `assign` keeps the contract for both of its forms, an empty set included.
+        let ranges = [(1, 3), (5, 7)];
+        let only: HashSet<u32> = [2, 4].into_iter().collect();
+        for changed in [ChangedLines::All, ChangedLines::from(&only)] {
+            assert_eq!(changed.assign(&ranges, 8).0.len(), ranges.len());
+        }
+        let none: HashSet<u32> = HashSet::new();
+        assert_eq!(ChangedLines::from(&none).assign(&ranges, 8).0.len(), 2);
     }
 
     /// Every line number of `code`, 1-based.
