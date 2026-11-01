@@ -5564,6 +5564,80 @@ void g(void) {
     }
 
     #[test]
+    fn a_parenthesis_in_a_string_or_comment_does_not_move_a_go_type_group_end() {
+        // [MAGI B2b1 B1] the group's end was found by counting parentheses on the line text, so
+        // a `)` in a raw string cut the group short and a `(` in a comment ran it to the end of
+        // the file, absorbing the function after it as a member.
+        let go = BraceFamilyExtractor::go();
+        let named = |code: &str| -> Vec<(String, UnitKind, u32, u32)> {
+            let total = u32::try_from(code.lines().count()).expect("small");
+            let units = extract(&go, code, &all_lines(code));
+            assert_each_line_in_one_unit(&units, total);
+            spans(&units)
+                .into_iter()
+                .filter(|s| s.1 != UnitKind::TopLevel)
+                .map(|(n, k, a, b)| (n.to_string(), k, a, b))
+                .collect()
+        };
+        let owned = |v: &[(&str, UnitKind, u32, u32)]| -> Vec<(String, UnitKind, u32, u32)> {
+            v.iter()
+                .map(|&(n, k, a, b)| (n.to_string(), k, a, b))
+                .collect()
+        };
+        for tag in ["`json:\")\"`", "`json:\"(\"`"] {
+            let code = format!(
+                "type (\n\tA struct {{\n\t\tTag string {tag}\n\t}}\n\tB int\n)\n\nfunc f() {{\n}}\n"
+            );
+            assert_eq!(
+                named(&code),
+                owned(&[
+                    ("A", UnitKind::Struct, 2, 4),
+                    ("B", UnitKind::Struct, 5, 5),
+                    ("f", UnitKind::Function, 8, 9)
+                ]),
+                "{tag}"
+            );
+        }
+        for comment in ["// A holds :(", "// A holds :)"] {
+            let code = format!("type (\n\t{comment}\n\tA int\n)\n\nfunc f() {{\n}}\n");
+            assert_eq!(
+                named(&code),
+                owned(&[
+                    ("A", UnitKind::Struct, 2, 3),
+                    ("f", UnitKind::Function, 6, 7)
+                ]),
+                "{comment}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_parenthesis_in_a_comment_does_not_move_a_call_initializer_end() {
+        // [MAGI B2b1 B1] the call's end was found by counting parentheses on the line text, so a
+        // `(` and a `)` in two comments ran the declaration over the next one.
+        let ext = BraceFamilyExtractor::java();
+        let code = "int x = make(\n    2); // :(\nint y = 3; // :)\nint z;\n";
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(code);
+        let stops = |_: usize| false;
+        let budget = SearchBudget::for_lines(lines.len());
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &budget,
+        };
+        assert_eq!(call_initializer_end(&lines, &scanned, 0, &search), 1);
+        let string = "int x = make(\n    \"(\",\n    2);\nint y = g(\")\");\n";
+        let lines: Vec<&str> = string.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(string);
+        let budget = SearchBudget::for_lines(lines.len());
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &budget,
+        };
+        assert_eq!(call_initializer_end(&lines, &scanned, 0, &search), 2);
+    }
+
+    #[test]
     fn the_walk_to_a_closing_delimiter_stops_when_the_pass_budget_is_spent() {
         // [MAGI S6 loop 17, B2-1] the walk spends the pass's budget like every forward search;
         // with none left it ends on its own line, as a search past its bound does.
