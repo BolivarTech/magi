@@ -6,6 +6,7 @@
 import hashlib
 import pathlib
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -89,6 +90,22 @@ class ExpiryTests(unittest.TestCase):
     def test_a_timeout_is_still_a_product_output_error(self) -> None:
         """Every caller that already treats an expiry as one keeps working."""
         self.assertTrue(issubclass(TimedOut, ProductOutputError))
+
+
+class WorkingDirectoryTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 18, F1a1-caspar] the review runs pass ``cwd`` as a ``pathlib.Path``."""
+
+    def test_a_path_working_directory_reaches_the_child(self) -> None:
+        """R16's relative input ``.`` names the review workspace only if the
+        child really starts there; a ``Path`` must be accepted, not only a str.
+        The child is the running interpreter, standing in for the product."""
+        workdir = support.scratch_dir(self).resolve()
+        with mock.patch.object(ReleaseBinary, "path", new_callable=mock.PropertyMock,
+                               return_value=pathlib.Path(sys.executable)):
+            output = ReleaseBinary(workdir).invoke(
+                ["-c", "import os; print(os.getcwd())"], timeout=30, cwd=workdir)
+        self.assertEqual(0, output.exit_code)
+        self.assertEqual(workdir, pathlib.Path(output.stdout.decode("utf-8").strip()).resolve())
 
 
 if __name__ == "__main__":
