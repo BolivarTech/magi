@@ -183,6 +183,18 @@ pub struct LexicalRules {
     /// Whether a line whose first non-blank character is `#` is a preprocessor directive
     /// (C, C++), continued while a line ends in `\`: its strings and comments are read as in
     /// code, but its braces, parentheses and brackets are no structure (`#define BEGIN {`).
+    ///
+    /// Conditionals (`#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`) shape the depth:
+    /// only the first branch of a conditional counts after its `#endif`. Each later branch is
+    /// scanned from the depth at the `#if`, so a header it opens (`#else` / `int f(void) {`)
+    /// still opens a block within it, but the depth it leaves is dropped at `#endif`. The limit:
+    /// a block opened or closed only in a later branch is invisible after the conditional, and
+    /// the first branch counts even when it is dead (`#if 0` ... `#else`). An unbalanced
+    /// directive (a stray `#endif`, a missing one) degrades to plain counting, never a panic,
+    /// as does a conditional nested past [`MAX_CONDITIONAL_NESTING`]. A directive inside a
+    /// comment, a string or a `\`-continued directive is no conditional.
+    // MAGI FIX (B2a): `#ifdef` / `#else` around two headers of one function counted both `{`,
+    // so the function ran to the end of the file and a large file failed its batch.
     pub preprocessor_directives: bool,
     /// Whether a `'` may open a character constant of several characters (`'ab'`, C and C++),
     /// besides the one-character literal every `char_literals` language has; a C++14 digit
@@ -463,7 +475,12 @@ impl CodeScanner {
     ///
     /// Must be called in order (line 1, line 2, ...) because the
     /// scanner carries context across lines (e.g., multi-line strings,
-    /// block comments).
+    /// block comments, open preprocessor conditionals).
+    ///
+    /// A conditional directive line moves no brace itself (its `brace_delta` and `min_delta`
+    /// are 0) but may move `depth_after`: `#elif` and `#else` return it to the depth at `#if`,
+    /// `#endif` to the depth the first branch reached
+    /// ([`LexicalRules::preprocessor_directives`]). O(n) in the line's length.
     pub fn scan_line(&mut self, line_number: u32, line: &str) -> ScannedLine {
         let mut chars = std::mem::take(&mut self.chars);
         chars.clear();
