@@ -921,4 +921,66 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn a_changed_line_zero_gives_no_unit() {
+        // [MAGI S6 loop 19, B2a-1] lines are 1-based, but a set holding 0 opened a fallback
+        // window holding a line outside its range, and a gap unit ending before its start.
+        let ctx = FileContext::default();
+        let set: HashSet<u32> = [0].into_iter().collect();
+        assert!(fallback_extract("a\nb\n", "a.txt", &set, &ctx).is_empty());
+        let with_two: HashSet<u32> = [0, 2].into_iter().collect();
+        let units = fallback_extract("a\nb\n", "a.txt", &with_two, &ctx);
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| (u.start_line, u.end_line, u.changed_lines.clone()))
+                .collect::<Vec<_>>(),
+            vec![(1, 2, vec![2])]
+        );
+        let registry = LanguageRegistry::new();
+        let rust = registry.get("a.rs").expect("registered");
+        let units = rust.extract_units("fn f() {\n}\n", "a.rs", &set);
+        assert!(
+            units.is_empty(),
+            "{:?}",
+            units
+                .iter()
+                .map(|u| (u.start_line, u.end_line))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_block_with_unsorted_changed_lines_splits_with_each_line_in_its_piece() {
+        // [MAGI S6 loop 19, B2a-6] the pieces took their share by binary search, which needs the
+        // block's changed lines sorted; a block built with them unsorted gave pieces the wrong
+        // lines. The public `split_block` now sorts a copy.
+        let registry = LanguageRegistry::new();
+        let rust = registry.get("a.rs").expect("registered");
+        let block = SemanticUnit {
+            kind: UnitKind::Impl,
+            name: "X".to_string(),
+            file: "a.rs".to_string(),
+            start_line: 1,
+            end_line: 4,
+            content: "impl X {\n    fn a() {}\n    fn b() {}\n}".to_string(),
+            changed_lines: vec![3, 4, 1, 2],
+            context: FileContext::default(),
+        };
+        let pieces: Vec<(String, Vec<u32>)> = rust
+            .split_block(&block)
+            .into_iter()
+            .map(|u| (u.name, u.changed_lines))
+            .collect();
+        assert_eq!(
+            pieces,
+            vec![
+                ("X".to_string(), vec![1]),
+                ("a".to_string(), vec![2]),
+                ("b".to_string(), vec![3]),
+                ("X".to_string(), vec![4]),
+            ]
+        );
+    }
 }
