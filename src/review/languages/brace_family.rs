@@ -5012,4 +5012,28 @@ void g(void) {
         let total = u32::try_from(lines.len()).expect("small");
         assert_each_line_in_one_unit(&extract(&ext, &code, &every_line(&code)), total);
     }
+
+    #[test]
+    fn the_walk_to_a_closing_delimiter_stops_when_the_pass_budget_is_spent() {
+        // [MAGI S6 loop 17, B2-1] the walk spends the pass's budget like every forward search;
+        // with none left it ends on its own line, as a search past its bound does.
+        let code = "var (\n\ta = 1\n)\n";
+        let ext = BraceFamilyExtractor::go();
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(code);
+        let stops = |_: usize| false;
+        let fresh = SearchBudget::for_lines(lines.len());
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &fresh,
+        };
+        assert_eq!(group_end(&lines, &scanned, 0, &search), 2);
+        let spent = SearchBudget::for_lines(lines.len());
+        while spent.spend() {}
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &spent,
+        };
+        assert_eq!(group_end(&lines, &scanned, 0, &search), 0);
+    }
 }
