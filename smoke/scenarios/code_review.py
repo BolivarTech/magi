@@ -884,6 +884,12 @@ def _budget_fields_ok(match):
     # which the product's raw ceiling never is in a refusal, and each number
     # was checked alone, so a 999 s ceiling beside a 21 s minimum passed
     # (F1a-c3).
+    # MAGI FIX (S6 loop 15): F1a2-c2 noted that the need is checked only from
+    # below. That is declared, not fixed: the exact need depends on the
+    # environment's [magi] rotation and retry settings, which the harness does
+    # not read; the formula is pinned in Rust (headless_consult_timeout_secs in
+    # src/magi/mod.rs and pre_budget in src/review/clock.rs), and minimum ==
+    # batches x need ties the advice to whatever need the product printed.
     if match is None:
         return False
     batches, wall, need, floor, ceiling, minimum = (
