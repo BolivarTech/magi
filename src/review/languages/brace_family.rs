@@ -601,6 +601,9 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 10): `@Deprecated public class A {` was no construct at all.
         // MAGI FIX (S6 loop 13): `struct __attribute__((packed)) Hdr {` was named after the
         // attribute; the C attributes are read past first.
+        // MAGI FIX (S6 loop 14): `#[inline] fn f() {` was no construct and its body fell into a
+        // gap unit; the Rust attributes on the line are read past first.
+        let trimmed = self.without_rust_attributes(trimmed);
         let attributes = self.without_c_attributes(trimmed);
         let trimmed = self.without_template_header(self.without_annotations(&attributes));
         let candidates = [self.strip_modifiers(trimmed, true), trimmed];
@@ -632,6 +635,8 @@ impl BraceFamilyExtractor {
     /// comment. Only lines outside every construct are asked, so a statement inside a function
     /// body is never taken for one. O(k + n).
     fn is_declaration(&self, trimmed: &str) -> bool {
+        // MAGI FIX (S6 loop 14): `#[allow(x)] const X: u8 = 1;` fell into a gap unit.
+        let trimmed = self.without_rust_attributes(trimmed);
         // MAGI FIX (S6 loop 4): a C global with no declaration keyword fell into a gap.
         // MAGI FIX (S6 loop 6): so did one whose initializer opens on a later line
         // (`int a[] = {`, `int n =`); its value is the declaration's block or next statement.
@@ -786,6 +791,46 @@ impl BraceFamilyExtractor {
                 tail = tail.get(close..).unwrap_or("");
             }
             rest = tail.trim_start();
+        }
+        rest
+    }
+
+    /// `trimmed` without the complete Rust outer attributes it opens with (`#[inline]`,
+    /// `#[derive(Debug)] #[cfg(test)]`), for extractors whose `attribute_prefixes` hold
+    /// [`RUST_ATTRIBUTE_PREFIX`] (Rust); `trimmed` otherwise.
+    ///
+    /// An attribute is `#[` up to its matching `]`, read past its double-quoted strings
+    /// ([`balanced_end_outside_quotes`] with [`RUST_ATTRIBUTE_QUOTES`]), so `#[doc = "]"]` closes
+    /// at its last `]`. An attribute that does not close on the line is kept with everything
+    /// after it, so the line still opens with `#[` and reads as before: an attribute line,
+    /// joined to the item below it ([`Self::scan_back_for_docs`]). A raw string holding a `"`
+    /// (`#[doc = r#"a"b"#]`) may miscount; the line then opens with no keyword and its item falls
+    /// into a gap unit, as before this rule, so no line is lost. O(n) in the line.
+    ///
+    /// # Arguments
+    ///
+    /// * `trimmed` - A trimmed line.
+    ///
+    /// # Returns
+    ///
+    /// The rest of the line after its leading attributes, trimmed at its start.
+    fn without_rust_attributes<'t>(&self, trimmed: &'t str) -> &'t str {
+        if !self
+            .attribute_prefixes
+            .iter()
+            .any(|p| p == RUST_ATTRIBUTE_PREFIX)
+        {
+            return trimmed;
+        }
+        let mut rest = trimmed;
+        while rest.starts_with(RUST_ATTRIBUTE_PREFIX) {
+            let attribute = rest.get(1..).unwrap_or("");
+            let Some(end) =
+                balanced_end_outside_quotes(attribute, '[', ']', &RUST_ATTRIBUTE_QUOTES)
+            else {
+                return rest;
+            };
+            rest = attribute.get(end..).unwrap_or("").trim_start();
         }
         rest
     }
@@ -1875,11 +1920,61 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
 }
 
 /// The byte offset just past the `close` that matches the `open` `text` starts with, or `None`
-/// when it never closes. O(n) in the text.
+/// when it never closes. Every character counts, strings included. O(n) in the text.
 fn balanced_end(text: &str, open: char, close: char) -> Option<usize> {
+    balanced_end_outside_quotes(text, open, close, &[])
+}
+
+/// The opening of a Rust outer attribute (`#[inline]`).
+const RUST_ATTRIBUTE_PREFIX: &str = "#[";
+
+/// The quotes a Rust attribute's arguments are read past: only `"`, since a `'` may open a
+/// lifetime (`T: 'a`), which has no closing quote.
+const RUST_ATTRIBUTE_QUOTES: [char; 1] = ['"'];
+
+/// The byte offset just past the `close` that matches the `open` `text` starts with, counting
+/// only the delimiters outside quoted text, or `None` when it never closes.
+///
+/// A character of `quotes` opens a quoted run that the same character ends; inside it a `\`
+/// escapes the next character (`"a\"b"`). The scanner ([`CodeScanner`]) reports braces per
+/// line, not where a string ends on it, so this reads one line's text on its own, with the
+/// quotes of the language it reads. A quote that never closes leaves the delimiters after it
+/// uncounted, so the result is `None` and the caller keeps its text as it was. O(n) in the
+/// text.
+///
+/// # Arguments
+///
+/// * `text` - The text, starting with `open`.
+/// * `open` - The opening delimiter.
+/// * `close` - The closing delimiter.
+/// * `quotes` - The characters that open and close quoted text; empty to count every character.
+///
+/// # Returns
+///
+/// The offset just past the matching `close`, or `None`.
+fn balanced_end_outside_quotes(
+    text: &str,
+    open: char,
+    close: char,
+    quotes: &[char],
+) -> Option<usize> {
     let mut depth = 0u32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
     for (at, c) in text.char_indices() {
-        if c == open {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if quotes.contains(&c) {
+            quote = Some(c);
+        } else if c == open {
             depth = depth.saturating_add(1);
         } else if c == close {
             depth = depth.saturating_sub(1);
