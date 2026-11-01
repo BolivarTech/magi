@@ -1507,13 +1507,13 @@ impl SearchBudget {
 /// line text ([`paren_delta`]), so a `(` or `)` inside a string or a comment of the parameter
 /// list miscounts them; the search then still ends at a blank line, a statement or a brace.
 ///
-/// A blank line does not end the search inside an open parameter list: while a parenthesis
-/// opened since line `i` is still open and the last non-blank line before it is code ending in
-/// a [`PARAMETER_LIST_CONTINUATIONS`] character (`a: u8,` or `fn f(`), it is passed over, so a
-/// blank line between two parameters keeps the body with its signature. Both conditions are
-/// required because the parentheses are counted on the text: a `(` inside a character literal
-/// (`fn p() -> char { '(' }`) leaves the count open, but that line ends in `}`, so the blank line
-/// after it still ends the search and the next construct keeps its own brace.
+/// A blank line does not end the search inside an open parameter list: while a parenthesis or
+/// bracket opened since line `i` is still open, counted by the scanner in code context only
+/// ([`ScannedLine::group_delta`]), it is passed over, so a blank line between two parameters
+/// keeps the body with its signature, whatever comment comes before it (`a: u8, // first`, a
+/// comment line). A delimiter inside a string, a character literal or a comment does not count
+/// (`fn p() -> char { '(' }` leaves nothing open), so the blank line after such a line still
+/// ends the search and the next construct keeps its own brace.
 ///
 /// A brace on a parameter line is taken for the construct's brace, declared: a default argument
 /// that opens a lambda body on that line (`void f(int cb = []() {`) or an anonymous struct
@@ -1555,24 +1555,22 @@ fn open_brace_line(
         .min(lines.len());
     // MAGI FIX (S6 loop 14): a blank line between two parameters ended the search, so the body
     // was cut from its signature; inside an open list it is passed over.
-    let leaves_list_open = |idx: usize| {
-        is_code(idx)
-            && lines
-                .get(idx)
-                .is_some_and(|l| l.trim_end().ends_with(PARAMETER_LIST_CONTINUATIONS))
-    };
-    let mut last_filled = i;
+    // MAGI FIX (S6 loop 17, B2-4): the list counted as open only after a code line ending in `,`
+    // or `(`, so a comment before the blank line ended the search; the scanner's count of the
+    // delimiters in code, which no comment or string moves, now decides.
+    let group_open = |idx: usize| scanned.get(idx).map_or(0, |s| i64::from(s.group_delta));
+    let mut list_open = group_open(i);
     for j in (i + 1)..budget_end {
         if !search.spend() {
             return None;
         }
         if lines.get(j).is_some_and(|l| l.trim().is_empty()) {
-            if parens > 0 && leaves_list_open(last_filled) {
+            if list_open > 0 {
                 continue;
             }
             return None;
         }
-        last_filled = j;
+        list_open += group_open(j);
         // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
         // the next construct; a line after one ending in `,` continues the declaration.
         // MAGI FIX (S6 loop 11): a comment line ending in `,` (`// note,`) between two signatures
@@ -1600,10 +1598,6 @@ fn open_brace_line(
     }
     None
 }
-
-/// What a line inside a wrapped parameter list ends with when the list goes on after it: a
-/// parameter's `,` or the list's opening `(` ([`open_brace_line`]).
-const PARAMETER_LIST_CONTINUATIONS: [char; 2] = [',', '('];
 
 /// The `(` minus the `)` of line `idx` when it is code; 0 for a line that starts inside a comment
 /// or a string and stays there, or that does not exist. The characters are counted on the line
