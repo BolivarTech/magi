@@ -2043,6 +2043,22 @@ void h() {
     }
 
     #[test]
+    fn a_conditional_with_a_comment_after_the_hash_is_still_a_conditional() {
+        // [MAGI B2a 3] a block comment between `#` and the directive's word (`# /* c */ ifdef X`,
+        // valid C: a comment is a blank) hid the word, so both branches' braces counted.
+        let code = "# /* c */ ifdef X\nint f(int a) {\n#/**/else\nint f(void) {\n# /* a */ /* b */ endif\n}\nint g(void) { return 1; }\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(find_closing_brace(&results, 1), 5);
+        assert_eq!(results[5].depth_after, 0);
+        assert_eq!(results[6].depth_after, 0);
+        assert_eq!(
+            ConditionalDirective::parse("# /* never closed ifdef X"),
+            None,
+            "an unclosed comment hides the rest of the line"
+        );
+    }
+
+    #[test]
     fn a_stray_endif_or_else_leaves_the_depth_as_counted() {
         // [B2a] an unbalanced directive degrades to plain brace counting, never a panic.
         // Passes before the fix by design: it pins the degraded behaviour.
