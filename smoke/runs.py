@@ -508,8 +508,10 @@ class RunResult:
     #: time because the next review run rebuilds the workspace from nothing, so
     #: a scenario reading the live directory would depend on run order.
     review_log: tuple[bytes, ...] | None = None
-    #: The log files under ``.magi/logs`` that could not be read, each as
-    #: ``"<name> (<error>)"`` like :func:`smoke.logs.scan`'s list. A scenario
+    #: The entries under ``.magi/logs`` left out of :attr:`review_log`, each as
+    #: ``"<name> (<why>)"`` like :func:`smoke.logs.scan`'s list: a file that
+    #: could not be read or was over a capture cap, a link, or an entry that is
+    #: not a regular file. A scenario
     #: that finds nothing in :attr:`review_log` while this is not empty cannot
     #: tell a product that never logged from a file it was refused.
     review_log_unreadable: tuple[str, ...] = ()
