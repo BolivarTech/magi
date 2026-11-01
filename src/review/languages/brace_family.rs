@@ -5989,4 +5989,58 @@ synchronized (lock) {
             assert_each_line_in_one_unit(&extract(ext, code, &[1, 2, 3, 4]), 4);
         }
     }
+
+    #[test]
+    fn a_parenthesis_in_a_comment_or_a_string_does_not_hold_a_signature_open() {
+        // The stop rule counted the parentheses on the line text, so a `(` inside a comment or a
+        // string kept the parameter list "open" and the function without a body took the next
+        // function's brace.
+        let cases: [(BraceFamilyExtractor, &str); 4] = [
+            (
+                BraceFamilyExtractor::go(),
+                "func f(x int) // see (
+func g() {
+	x()
+}
+",
+            ),
+            (
+                BraceFamilyExtractor::go(),
+                "func f(x int) /* ( */
+func g() {
+	x()
+}
+",
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "function f(a: \"(\"): void
+function g() {
+  x()
+}
+",
+            ),
+            (
+                c_extractor(),
+                "int f(char c) // see (
+int g(void) {
+    return 0;
+}
+",
+            ),
+        ];
+        let got: Vec<Option<(u32, u32)>> = cases
+            .iter()
+            .map(|(ext, code)| {
+                extract(ext, code, &[1, 2, 3, 4])
+                    .iter()
+                    .find(|u| u.name == "g")
+                    .map(|u| (u.start_line, u.end_line))
+            })
+            .collect();
+        assert_eq!(got, vec![Some((2, 4)); cases.len()]);
+        for (ext, code) in &cases {
+            assert_each_line_in_one_unit(&extract(ext, code, &[1, 2, 3, 4]), 4);
+        }
+    }
 }
