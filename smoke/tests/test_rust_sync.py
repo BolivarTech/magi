@@ -188,6 +188,22 @@ class NeverReviewedTests(unittest.TestCase):
         self.assertEqual(set(names), set(code_review.PROTECTED_DIRS))
         self.assertIn("MEMORY_DB_PREFIX", listed.group(1))
 
+    # MAGI FIX (S6 loop 17): same_product_name copies is_never_reviewed's folding rule with no pin, so
+    # a wider product rule would have left S51's candidates behind in silence (F1a1-melchior).
+    def test_the_name_folding_is_the_one_is_never_reviewed_applies(self) -> None:
+        body = re.search(r"pub fn is_never_reviewed\(path: &str\) -> bool \{(.*?)\n\}",
+                         _source("src/review/source.rs"), re.S)
+        self.assertIsNotNone(body, "is_never_reviewed not found in src/review/source.rs")
+        trimmed = re.search(r"\.trim_end_matches\(\[([^\]]*)\]\)", body.group(1))
+        self.assertIsNotNone(trimmed, "is_never_reviewed no longer trims with trim_end_matches([...])")
+        chars = re.findall(r"'(.)'", trimmed.group(1))
+        self.assertEqual(sorted(chars), sorted(runs.TRIMMED_TRAILING))
+        self.assertIn(".split(['/', '\\\\'])", body.group(1))
+        # Every comparison folds ASCII case and nothing else, as same_product_name does.
+        self.assertGreater(body.group(1).count("eq_ignore_ascii_case"), 0)
+        self.assertNotIn("to_lowercase", body.group(1))
+        self.assertNotIn("==", body.group(1))
+
 
 class ReportKeyTests(unittest.TestCase):
     """The JSON keys S47 reads exist in the product's report and envelope."""

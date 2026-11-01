@@ -352,7 +352,9 @@ attempt arithmetic in `src/magi/mod.rs`, the integer split and the raw refusal c
 `src/review/clock.rs`, the JSON keys S47 reads in `src/review/report.rs`, `src/tools/code_review.rs`
 and `src/tools/consult.rs`, and the git view the executor checks visibility with: `GIT_VISIBLE_QUERY`
 against the product's `LS_FILES_ALL` in `src/review/input.rs` and `HARNESS_GIT_CONFIG` against
-`NEUTRAL_GIT_CONFIG` in `src/system/review_git.rs`, among others) and fails when a copy or a pattern no
+`NEUTRAL_GIT_CONFIG` in `src/system/review_git.rs`, and the never-reviewed names with their spelling rule
+(`NEVER_REVIEWED`, `MEMORY_DB_PREFIX` and the trailing-`.`/space trim and ASCII case fold of
+`is_never_reviewed` in `src/review/source.rs`, which `same_product_name` copies), among others) and fails when a copy or a pattern no
 longer matches, so a wording or constant change in the product shows up in the harness's own tests, not
 as an unexplained `FAIL` at SMOKE time.
 
