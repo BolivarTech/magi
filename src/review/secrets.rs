@@ -1419,4 +1419,37 @@ mod tests {
             assert_eq!(find_secret(&plain), None, "{plain}");
         }
     }
+
+    #[test]
+    fn a_url_password_is_a_placeholder_only_in_an_exact_placeholder_form() {
+        // [MAGI S6 loop 14, A2-1, security] only the password's first byte was checked, so a
+        // real password that opens with `$`, `{`, `[`, `%` or `*` (`$ecret`, `{actual`, `*pw`)
+        // read as a placeholder and its file was sent.
+        let user = "svc";
+        let url = |pass: &str| format!("postgres://{user}:{pass}@db.internal/app");
+        for real in [
+            "$ecret", "$3cr3t", "{actual", "{a}b", "[pw]x", "%41bc", "*pw", "**x**", "$", "${}",
+            "${PASS",
+        ] {
+            let secret = url(real);
+            assert_eq!(find_secret(&secret), Some("url-credential"), "{secret}");
+        }
+        for placeholder in [
+            "{password}",
+            "{}",
+            "{0}",
+            "{{ db_password }}",
+            "{{.Values.password}}",
+            "${DB_PASSWORD}",
+            "${db.password}",
+            "$PASSWORD",
+            "$DB_PASS_2",
+            "[password]",
+            "%s",
+            "***",
+        ] {
+            let plain = url(placeholder);
+            assert_eq!(find_secret(&plain), None, "{plain}");
+        }
+    }
 }
