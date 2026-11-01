@@ -1858,7 +1858,10 @@ def point_config_at(config_path, url: str) -> None:
         url: The endpoint every section must reach.
 
     Raises:
-        HarnessError: When the file cannot be read or written.
+        HarnessError: When the file is missing or cannot be read or written.
+            The workspace is the harness's own copy of the environment, so a
+            missing file is a harness setup failure: :mod:`smoke.__main__`
+            maps it to exit 3, never to a scenario ``FAIL``.
 
     Example:
         >>> import tempfile
