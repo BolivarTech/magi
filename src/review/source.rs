@@ -1046,6 +1046,29 @@ mod tests {
     }
 
     #[test]
+    fn the_default_query_reads_only_an_empty_git_error_as_no_match() {
+        // [MAGI S6 loop 15, A2-6] the default `query` decides "no match" by an empty message:
+        // that is the contract of a double that reports git's stderr verbatim. Any other failure
+        // stays an error, so a worded failure never reads as an absent path.
+        struct Answers;
+        impl GitCommand for Answers {
+            fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                match args.first().copied() {
+                    Some("found") => Ok(b"abc\n".to_vec()),
+                    Some("none") => Err(ReviewError::Git(String::new())),
+                    _ => Err(ReviewError::Git("git rev-parse failed: exit 128".into())),
+                }
+            }
+        }
+        assert_eq!(Answers.query(&["found"]).expect("ok"), Some("abc\n".into()));
+        assert_eq!(Answers.query(&["none"]).expect("no match"), None);
+        assert!(matches!(
+            Answers.query(&["broken"]),
+            Err(ReviewError::Git(msg)) if !msg.is_empty()
+        ));
+    }
+
+    #[test]
     fn a_worktree_file_over_the_cap_is_too_large_and_never_returned() {
         let d = tempfile::tempdir().expect("tempdir");
         let cap = usize::try_from(MAX_REVIEW_FILE_BYTES).expect("fits");
