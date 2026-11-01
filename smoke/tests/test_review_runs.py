@@ -262,7 +262,7 @@ class ReviewWorkspaceTests(unittest.TestCase):
             logs_dir.mkdir(parents=True)
             (logs_dir / "magi-locked.log").write_bytes(b"x")
             unreadable = []
-            with mock.patch.object(pathlib.Path, "open", side_effect=PermissionError("locked")):
+            with mock.patch.object(runs, "_open_listed", side_effect=PermissionError("locked")):
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((), captured)
             self.assertEqual(1, len(unreadable))
@@ -574,7 +574,7 @@ class ReviewLogCaptureTests(unittest.TestCase):
             self.assertEqual(["sub/linked (%s)" % runs.LINK_NOT_FOLLOWED], unreadable)
             (nested / "magi-locked.log").write_bytes(b"x")
             unreadable = []
-            with mock.patch.object(pathlib.Path, "open", side_effect=PermissionError("locked")):
+            with mock.patch.object(runs, "_open_listed", side_effect=PermissionError("locked")):
                 executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertIn("sub/magi-locked.log (locked)", unreadable)
 
@@ -689,11 +689,11 @@ class ReviewLogBoundTests(unittest.TestCase):
             (logs_dir / "b.log").write_bytes(b"12345")
             unreadable = []
             with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
-                    mock.patch.object(pathlib.Path, "open", autospec=True,
-                                      side_effect=pathlib.Path.open) as read:
+                    mock.patch.object(runs, "_open_listed",
+                                      side_effect=runs._open_listed) as read:
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((b"1234",), captured)
-            self.assertEqual(["a.log"], [call.args[0].name for call in read.call_args_list])
+            self.assertEqual(["a.log"], [pathlib.Path(call.args[0]).name for call in read.call_args_list])
             self.assertEqual(1, len(unreadable))
             self.assertTrue(unreadable[0].startswith("b.log ("))
             self.assertIn("4", unreadable[0])
@@ -720,7 +720,7 @@ class ReviewLogBoundTests(unittest.TestCase):
             (logs_dir / "a.log").write_bytes(b"12")
             unreadable = []
             with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
-                    mock.patch.object(pathlib.Path, "open", return_value=io.BytesIO(b"123456")):
+                    mock.patch.object(runs, "_open_listed", return_value=io.BytesIO(b"123456")):
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((), captured)
             self.assertEqual(1, len(unreadable))
@@ -760,14 +760,14 @@ class ReviewLogBoundTests(unittest.TestCase):
             filler = [pathlib.Path(tmp) / "filler.log"] if spent_before else []
             for item in filler:
                 item.write_bytes(b"y" * spent_before)
-            real_open = pathlib.Path.open
+            real_open = runs._open_listed
 
-            def open_(self, *args, **kwargs):
-                return growing if self == path else real_open(self, *args, **kwargs)
+            def open_(listed, expected):
+                return growing if pathlib.Path(listed) == path else real_open(listed, expected)
 
             with mock.patch.object(runs, "MAX_REVIEW_LOG_FILE_BYTES", 4), \
                     mock.patch.object(runs, "MAX_REVIEW_LOG_TOTAL_BYTES", 6), \
-                    mock.patch.object(pathlib.Path, "open", open_):
+                    mock.patch.object(runs, "_open_listed", open_):
                 kept = runs._read_bounded(tmp, filler + [path], refused)
         return kept, refused, growing.handed_out
 
@@ -814,6 +814,67 @@ class ReviewLogBoundTests(unittest.TestCase):
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((b"this run's log",), captured)
             self.assertEqual(["pipe (%s)" % runs.NOT_A_REGULAR_FILE], unreadable)
+
+
+class ReviewLogSwapTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 19, F1a1-balthasar] a log file swapped after the walk listed it is never read.
+
+    The walk tests each entry, but the read used to open the file again by path and follow whatever
+    stood there by then, so a surviving child process could swap a listed file for a link (or a hard
+    link) to bytes outside the workspace between the two.
+    """
+
+    _OUTSIDE = b"bytes outside the workspace"
+
+    def _capture_with_swap(self, swap) -> tuple:
+        """Capture R15's log while *swap* replaces ``a.log`` right after the walk listed it.
+
+        Args:
+            swap: Called with ``(a.log, outside file)`` once the walk has returned.
+
+        Returns:
+            tuple: What was captured, and the entries named as left out.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            logs_dir.mkdir(parents=True)
+            listed = logs_dir / "a.log"
+            listed.write_bytes(b"this run's log")
+            outside = root / "outside.txt"
+            outside.write_bytes(self._OUTSIDE)
+            real_walk = runs._regular_files_without_links
+
+            def walk_then_swap(*args, **kwargs):
+                files = real_walk(*args, **kwargs)
+                listed.unlink()
+                swap(listed, outside)
+                return files
+
+            unreadable = []
+            with mock.patch.object(runs, "_regular_files_without_links", side_effect=walk_then_swap):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+        return captured, unreadable
+
+    def test_a_log_file_replaced_by_a_hard_link_after_listing_is_named_not_read(self) -> None:
+        # A hard link is a regular file to every path test, so only the identity recorded when the walk
+        # listed the file tells it from the one that was listed. Needs no privilege on any platform.
+        captured, unreadable = self._capture_with_swap(lambda link, target: os.link(target, link))
+        self.assertNotIn(self._OUTSIDE, b"".join(captured))
+        self.assertEqual(["a.log (%s)" % runs.CHANGED_AFTER_LISTING], unreadable)
+
+    def test_a_log_file_swapped_for_a_symlink_after_listing_is_never_read_through(self) -> None:
+        def symlink(link, target):
+            try:
+                os.symlink(target, link)
+            except (OSError, NotImplementedError) as exc:
+                raise unittest.SkipTest("cannot create a symlink here: %s" % exc) from exc
+
+        captured, unreadable = self._capture_with_swap(symlink)
+        self.assertNotIn(self._OUTSIDE, b"".join(captured))
+        self.assertEqual(1, len(unreadable))
+        self.assertTrue(unreadable[0].startswith("a.log ("), unreadable)
 
 
 def _make_symlink(target: pathlib.Path, link: pathlib.Path) -> None:
