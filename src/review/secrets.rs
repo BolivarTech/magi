@@ -1685,7 +1685,11 @@ mod tests {
             concat!("-----", "begin PRIVATE KEY-----"),
             concat!("-----", "BEGIN RSA Private Key-----"),
         ] {
-            assert_eq!(find_secret(&format!("{header}\n{body}\n")), None, "{header}");
+            assert_eq!(
+                find_secret(&format!("{header}\n{body}\n")),
+                None,
+                "{header}"
+            );
         }
         let upper = format!("{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\n{body}\n");
         assert_eq!(find_secret(&upper), Some("pem-private-key"));
