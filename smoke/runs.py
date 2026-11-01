@@ -677,6 +677,13 @@ REVIEW_SKIPPED_DIR = "skipped"
 #: environment: its ``.gitignore`` is ``*``, and the product leaves out what
 #: ``.gitignore`` excludes. The workspace is therefore a nested git repository
 #: of its own, so git's top level is the workspace and no outer rule applies.
+#:
+#: It is ONE fixed path, rebuilt from nothing before each review run and read
+#: right after it, so the review runs must execute one at a time: two at once
+#: would delete each other's workspace mid-run. They do, because the executor
+#: runs every definition in turn (``smoke/__main__.py``) under the
+#: environment's lock; anything that runs definitions in parallel has to give
+#: each review run a workspace of its own first.
 REVIEW_WORKSPACE_TOKEN = "<review-workspace>"
 REVIEW_WORKSPACE_DIR = "review-ws"
 
@@ -987,7 +994,10 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parent.parent
 #: so it is set on the 3.11 floor (checked against a real junction by
 #: ``test_a_junction_is_a_link_without_os_path_isjunction``); off Windows it is
 #: ``None`` and ``os.lstat`` reports no ``st_reparse_tag``, so nothing is a
-#: junction there.
+#: junction there. The constant comes from the C module ``_stat``, which
+#: defines the ``IO_REPARSE_TAG_*`` names only on Windows; ``Lib/stat.py``
+#: defines just the ``FILE_ATTRIBUTE_*`` ones on every platform (checked on
+#: Linux with 3.13 and on Windows with 3.11 and 3.15, MAGI S6 loop 19).
 JUNCTION_REPARSE_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
 
 
@@ -1874,7 +1884,10 @@ DEFINITIONS: dict[str, RunDefinition] = {
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60),
     # R12-R16 feed ``code-review`` (S47-S51). R12 reviews the generated tree in
     # at least three batches against the real trio; R13-R16 are refused before
-    # any model is reached.
+    # any model is reached. Their input is the files written into the review
+    # workspace, not stdin, which is empty: ``payload_size`` only selects the
+    # stdin payload (:meth:`RunExecutor._stdin_for`), so ``PAYLOAD_SMALL``
+    # here means "no generated stdin payload", not the size of what they read.
     "R12": RunDefinition(
         run_id="R12",
         argv=("code-review",) + REVIEW_FLAGS + ("--structured-verdicts",

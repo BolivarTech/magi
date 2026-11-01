@@ -343,6 +343,18 @@ filtering, or a model call that should never have happened. S48 to S51 therefore
 `inspects_timeouts` and report every assertion of a timed-out run as `FAIL`, without judging the
 exit code 0 the executor gives a run it had to kill.
 
+**That no model was reached is measured.** A refusal's exit code and `stderr` read the same whether
+or not the product paid for a model first, so R13 to R16 declare `forbids_model_calls`. The
+executor serves a loopback counter that answers every request with 503, points every active
+`base_url` of the review workspace's `magi.toml` at it (adding a root one when there is none,
+since the built-in default is a real local daemon) and `OPENAI_BASE_URL` too, and records each
+request's method and path. Every request except the capability probe (`/api/show`, `/api/tags`,
+which sizes the batches before the budget refusal and costs no completion) lands in
+`RunResult.model_requests`, and the runner answers every scenario reading such a run with one
+`FAIL` naming them, before the scenario sees the capture. Measured against the release binary:
+R13 sends nothing, R14 to R16 send three `/api/show` probes each. With the probe unanswered the
+pool's window counts as unmeasured, so S50 sees the batch count of the default window.
+
 **What they copy from the product.** S50 and S51 read refusals, and a refusal writes no JSON, so
 `stderr` is the only place their numbers and omission lists appear. The scenarios parse it with
 patterns tied to the product's wording, and R12's input is sized with copies of the batch constants.
@@ -391,7 +403,15 @@ detected with `os.path.isjunction` from Python 3.12 and, on the 3.11 floor, from
 `.magi` that cannot be listed, or a link check that fails, stops the run with exit 3: a link inside
 it could not be ruled out. A component swapped for a link between that check and the deletion is not
 guarded: the scratch area is inside the repository, under the environment's lock,
-and whoever can swap a directory there already controls the harness's own code. A link INSIDE the old workspace is not refused: `shutil.rmtree` unlinks a symlink or a junction it meets without descending into it (on Windows since Python 3.8, so on the 3.11 floor too), and `test_rebuilding_the_workspace_never_deletes_through_a_junction_inside_it` pins that with a real junction. The run log is captured without following links: the chain from the repository root down to `.magi/logs` is tested again after the product exits (the product runs in the workspace and could swap it, or a component above it, for a link), a link anywhere on it leaves the capture empty and is named, and a link under the workspace's `.magi/logs` is never read and is named in `RunResult.review_log_unreadable`, and so is an entry that is not a regular file (a fifo, socket or device) and a file over the capture caps (`MAX_REVIEW_LOG_FILE_BYTES`, 16 MiB per file, and `MAX_REVIEW_LOG_TOTAL_BYTES`, 64 MiB per run; each file is read in chunks and no further than one byte past what the caps still allow, so a file that grew after its size was read is dropped without being held whole), so a faulty product's huge log is named instead of exhausting the harness, and a scenario that finds nothing in what was read reports `CANNOT_TEST`. The `.magi` and `logs` names are compared as the product compares them: ASCII case folded, trailing dots and spaces trimmed. A run definition that declares files without the review workspace in its argv is a harness error, because nothing would write them. Every review run starts the product with the workspace as its working directory, so a relative input (`gen`, `.`, `../smoke-hostile-target`) names the same path whether the product joins it to `-w` or to its working directory.
+and whoever can swap a directory there already controls the harness's own code. A link INSIDE the old workspace is not refused: `shutil.rmtree` unlinks a symlink or a junction it meets without descending into it (on Windows since Python 3.8, so on the 3.11 floor too), and `test_rebuilding_the_workspace_never_deletes_through_a_junction_inside_it` pins that with a real junction. The run log is captured without following links: the chain from the repository root down to `.magi/logs` is tested again after the product exits (the product runs in the workspace and could swap it, or a component above it, for a link), a link anywhere on it leaves the capture empty and is named, and a link under the workspace's `.magi/logs` is never read and is named in `RunResult.review_log_unreadable`, and so is an entry that is not a regular file (a fifo, socket or device) and a file over the capture caps (`MAX_REVIEW_LOG_FILE_BYTES`, 16 MiB per file, and `MAX_REVIEW_LOG_TOTAL_BYTES`, 64 MiB per run; each file is read in chunks and no further than one byte past what the caps still allow, so a file that grew after its size was read is dropped without being held whole), so a faulty product's huge log is named instead of exhausting the harness, and a scenario that finds nothing in what was read reports `CANNOT_TEST`. A listed file is opened
+only if it is still the file the walk listed: its device and file number are recorded when it is
+listed and compared with the opened handle's (`os.fstat`; on Windows the volume serial and file
+index), and POSIX opens it with `O_NOFOLLOW` and `O_NONBLOCK`, so a file swapped afterwards for a
+link, a hard link or a fifo is named `changed after it was listed, not read` (or by the open's
+error) instead of being read through. The chain is tested again after the read, so a directory on
+it swapped for a link during the capture drops the whole capture and is named. What is left is a
+directory swapped for a link and back again between those two tests: the product would have to
+race the harness twice inside one capture. The `.magi` and `logs` names are compared as the product compares them: ASCII case folded, trailing dots and spaces trimmed. A run definition that declares files without the review workspace in its argv is a harness error, because nothing would write them. Every review run starts the product with the workspace as its working directory, so a relative input (`gen`, `.`, `../smoke-hostile-target`) names the same path whether the product joins it to `-w` or to its working directory.
 
 **Cost.** R13, R14, R15 and R16 never reach a model. R12 is a review of at least three batches by the
 real trio plus the gate. The tree is about 72 000 tokens and the product fills a batch to 50 % of

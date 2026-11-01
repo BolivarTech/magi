@@ -29,9 +29,10 @@ and refusing the inputs it must refuse before a model is paid for.
 
 S48-S51 need no backend, so they declare ``inspects_timeouts`` and report a
 timed-out run as ``FAIL`` themselves: a refusal reached before any model call
-has no slow provider to blame for a hang. That no model was contacted is not observable from
-outside the process; the Rust integration tests pin it with a stand-in that
-records every body.
+has no slow provider to blame for a hang. That no model was contacted is checked by the
+executor, not here: R13-R16 run against a local request counter, and any request past the
+capability probe fails the scenario before it is read (``runs.RunDefinition.forbids_model_calls``).
+The Rust integration tests pin the same with a stand-in that records every body.
 """
 
 import json
