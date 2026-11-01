@@ -79,6 +79,9 @@ pub struct BraceFamilyExtractor {
     /// Whether the language overloads operators, so `operator` is a keyword that names one
     /// (`bool operator <(`, `operator()`) on a signature line ([`operator_overload_name`]): C++.
     operator_overloads: bool,
+    /// Whether a member may be optional, a `?` glued between its name and its parameter list
+    /// (`foo?(x: number): void;`), named without the `?` ([`optional_member_name`]): TypeScript.
+    optional_members: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -1274,6 +1277,12 @@ impl BraceFamilyExtractor {
                     .flatten()
             })
             .or_else(|| identifier_before_paren(text))
+            // MAGI FIX (B2b1 10): `foo?(x: number): void;` named no member.
+            .or_else(|| {
+                self.optional_members
+                    .then(|| optional_member_name(text))
+                    .flatten()
+            })
     }
 
     /// The kind of the block `trimmed` opens and the text after its keyword
@@ -2411,6 +2420,28 @@ fn identifier_before_paren(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The name of a TypeScript optional member, its `?` glued between the name and the parameter
+/// list ([`parameter_list_head`]; `foo?(x: number): void;` and `qux?<T>(x: T): T;` give `foo`
+/// and `qux`), without the `?`. A blank before the `?` (`a ?(b)`, a conditional) names nothing,
+/// nor does an `=` before the `(` (an assignment). O(n) in the line.
+///
+/// # Arguments
+///
+/// * `line` - A signature line, trimmed.
+///
+/// # Returns
+///
+/// The member's name, or `None`.
+fn optional_member_name(line: &str) -> Option<String> {
+    let head = parameter_list_head(line)?;
+    if head.before.contains('=') {
+        return None;
+    }
+    let name = without_type_parameters(head.name_text).strip_suffix('?')?;
+    let ident = trailing_identifier(name);
+    (!ident.is_empty() && name.ends_with(is_identifier_char)).then(|| ident.to_string())
+}
+
 /// The name of a JavaScript or TypeScript member whose key is computed or private, as written
 /// before the `(` of its parameter list ([`parameter_list_head`]): a computed key in balanced
 /// square brackets (`*[Symbol.iterator]() {` gives `[Symbol.iterator]`) or an identifier right
@@ -3158,6 +3189,7 @@ impl BraceFamilyExtractor {
             computed_member_names: false,
             anonymous_functions: false,
             operator_overloads: false,
+            optional_members: false,
         }
     }
 
@@ -3192,6 +3224,7 @@ impl BraceFamilyExtractor {
             computed_member_names: false,
             anonymous_functions: false,
             operator_overloads: false,
+            optional_members: false,
         }
     }
 
@@ -3251,6 +3284,7 @@ impl BraceFamilyExtractor {
             computed_member_names: false,
             anonymous_functions: false,
             operator_overloads: false,
+            optional_members: false,
         }
     }
 
@@ -3287,6 +3321,7 @@ impl BraceFamilyExtractor {
             computed_member_names: false,
             anonymous_functions: false,
             operator_overloads: false,
+            optional_members: false,
         }
     }
 
@@ -3332,6 +3367,7 @@ impl BraceFamilyExtractor {
             computed_member_names: true,
             anonymous_functions: true,
             operator_overloads: false,
+            optional_members: false,
         }
     }
 
@@ -3348,6 +3384,7 @@ impl BraceFamilyExtractor {
         ext.declaration_keywords.push("type ".to_string());
         ext.declaration_keywords.push("export type ".to_string());
         ext.lexical_rules = LexicalRules::typescript();
+        ext.optional_members = true;
         ext
     }
 }
