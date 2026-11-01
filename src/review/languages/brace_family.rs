@@ -4094,4 +4094,20 @@ void g(void) {
         let units = extract(&BraceFamilyExtractor::javascript(), js, &every_line(js));
         assert_eq!(spans(&units), vec![("lines 1-2", UnitKind::TopLevel, 1, 2)]);
     }
+
+    #[test]
+    fn a_variable_of_an_anonymous_type_is_one_unit_with_its_declarator() {
+        // [MAGI S6 loop 14, B2b1] reported: `struct { int a; } x;` reads as a type, so its
+        // trailing `x;` falls into a gap unit. The closing line holds the declarator, and the
+        // block ends on that line, so the declaration stays whole.
+        let c = "struct { int a; } x;\nstruct {\n    int b;\n} y, *z;\nunion\n{\n    int c;\n} w = {0};\n";
+        let units = extract(&c_extractor(), c, &every_line(c));
+        assert_each_line_in_one_unit(&units, 8);
+        let ranges: Vec<(u32, u32)> = units.iter().map(|u| (u.start_line, u.end_line)).collect();
+        assert_eq!(ranges, vec![(1, 1), (2, 4), (5, 8)], "{:?}", spans(&units));
+        let cpp = "class {\n    int d;\n} v;\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), cpp, &every_line(cpp));
+        let ranges: Vec<(u32, u32)> = units.iter().map(|u| (u.start_line, u.end_line)).collect();
+        assert_eq!(ranges, vec![(1, 3)], "{:?}", spans(&units));
+    }
 }
