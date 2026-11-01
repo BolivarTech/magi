@@ -396,8 +396,12 @@ impl WorktreeSource<'_> {
         let opened = same_file::Handle::from_file(file).map_err(io)?;
         // Re-resolved after the open: a component swapped for an escaping link before the open
         // either still escapes, or names another file than the one opened.
-        let now = std::fs::canonicalize(&joined)
-            .map_err(|_| ReviewError::OutsideWorkspace(path.to_string()))?;
+        // MAGI FIX (S6 loop 16, A2-4): a file unlinked right after the open reads as absent here
+        // too, as it does at every earlier step; nothing of it is read either way.
+        let now = match std::fs::canonicalize(&joined) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            other => other.map_err(|_| ReviewError::OutsideWorkspace(path.to_string()))?,
+        };
         let still_inside = now
             .strip_prefix(canonical_root)
             .is_ok_and(|r| !is_never_reviewed(&r.to_string_lossy()));
@@ -407,7 +411,11 @@ impl WorktreeSource<'_> {
         // MAGI FIX (S6 loop 7): the path is opened again through `open_for_review`, never a
         // plain open: a FIFO swapped in after the first open opens at once and fails the
         // identity comparison instead of blocking the preparation.
-        let named = same_file::Handle::from_file(open_for_review(&now).map_err(io)?).map_err(io)?;
+        let reopened = match open_for_review(&now) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            other => other.map_err(io)?,
+        };
+        let named = same_file::Handle::from_file(reopened).map_err(io)?;
         if named != opened {
             return Err(ReviewError::OutsideWorkspace(path.to_string()));
         }
