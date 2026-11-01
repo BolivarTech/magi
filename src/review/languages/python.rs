@@ -343,6 +343,21 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
 /// `u32`. The 8 MiB file cap keeps that out of reach (8 388 608 lines at most); the check makes
 /// the failure mode explicit, as the brace family's detection and [`member_span`] do. O(n) in
 /// the lines.
+///
+/// Two limitations, declared, both in the safe direction (every line stays in exactly one unit):
+///
+/// - Definitions, classes, imports and assignments are found at indent 0 only. One inside a
+///   module-level compound statement (`if TYPE_CHECKING:`, a `try:` around a compatibility
+///   import, a `with` block) is no unit of its own: the whole block is one gap unit, never
+///   split, so a block larger than a batch ends the review with the typed
+///   `ReviewError::TooLargeForBatch` (RV03) instead of being cut. Pinned by
+///   `a_definition_inside_a_module_level_block_falls_into_a_whole_gap_unit`.
+/// - A UTF-8 byte order mark before the first line's keyword (`\u{FEFF}def f():`) is kept by
+///   `str::trim`, since U+FEFF is no whitespace, so that first construct is not recognised
+///   (its header may read as a one-line assignment and its body falls into a gap unit). Only
+///   the unit structure of that construct degrades; every line is still reviewed. Pinned by
+///   `a_byte_order_mark_on_the_first_line_loses_no_line`.
+// MAGI FIX (S6 loop 14): the indent-0 and byte-order-mark limitations are declared and pinned.
 fn try_detect_python_constructs(lines: &[&str]) -> Option<Vec<PythonConstruct>> {
     // MAGI FIX (S6 loop 12): the conversions fell back to `u32::MAX`, `1` or the line number,
     // unlike the brace family since loop 10; an unrepresentable line now aborts detection.
@@ -462,6 +477,13 @@ fn is_module_assignment(trimmed: &str) -> bool {
 /// inside a bracket or a string and do not count. O(n) in the line.
 fn has_top_level_assignment(line: &str) -> bool {
     // MAGI FIX (S6 loop 5): any `=` or `:` made a call (`setup(level=1)`) an assignment.
+    // MAGI FIX (S6 loop 14): a triple-quoted string is read here as three one-quote strings,
+    // unlike `LogicalLines`, which tracks it as one. That is deliberate and gives the same
+    // answer for valid Python: the stretches read as outside the string, between the 2nd and
+    // 3rd quotes and between the 4th and 5th, are empty, so an `=` or `:` inside the string
+    // always stays inside a quote, and a real assignment's operator comes before the string
+    // opens. Keep the simplification; tracking triple quotes here would only add a second copy
+    // of the string reader to keep in step.
     let chars: Vec<char> = line.chars().collect();
     let at = |k: usize| chars.get(k).copied();
     let mut depth = 0u32;
