@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 from smoke.config import PLACEHOLDER_ENTRIES, ROTATION_MARKER
 from smoke.errors import (HarnessError, PayloadTooSmall,
@@ -438,6 +439,15 @@ class RunDefinition:
             ``(path, content)`` pairs. A review run reads its input from disk,
             so the input has to exist first. The workspace is rebuilt from
             nothing on every run, so the pairs are always written fresh.
+        forbids_model_calls: Whether the run must end before any model is
+            contacted. Its exit code and stderr cannot show that -- a product
+            that paid for a model and then refused would read the same -- so
+            the executor points every endpoint the review workspace declares
+            at a local counter (:func:`model_counter`) and records each
+            request past the capability probe on the result, and the runner
+            fails every scenario that reads the run when there is one. It
+            needs the review workspace, whose configuration is the one
+            rewritten.
     """
 
     run_id: str
@@ -450,14 +460,17 @@ class RunDefinition:
     env: tuple[tuple[str, str], ...] = ()
     rotates: bool = False
     files: tuple[tuple[str, bytes], ...] = ()
+    forbids_model_calls: bool = False
 
     def __post_init__(self) -> None:
-        """Refuse files on a run that has no review workspace to write them in.
+        """Refuse files, or a model-call ban, on a run without a review workspace.
 
         Raises:
-            HarnessError: When ``files`` is not empty and ``argv`` does not
-                carry :data:`REVIEW_WORKSPACE_TOKEN`: only the review workspace
-                is written, so the files would silently never exist.
+            HarnessError: When ``files`` is not empty, or
+                ``forbids_model_calls`` is set, and ``argv`` does not carry
+                :data:`REVIEW_WORKSPACE_TOKEN`: only the review workspace is
+                written, so the files would silently never exist and the ban
+                would guard nothing.
         """
         # MAGI FIX (S6 loop 14): such files were ignored, and the run executed
         # without its declared input (F1a1-m1).
@@ -465,6 +478,11 @@ class RunDefinition:
             raise HarnessError(
                 "run %s declares files but no %s in its argv, so nothing would "
                 "write them" % (self.run_id, REVIEW_WORKSPACE_TOKEN))
+        # MAGI FIX (S6 loop 19): see forbids_model_calls (F1a1-balthasar).
+        if self.forbids_model_calls and REVIEW_WORKSPACE_TOKEN not in self.argv:
+            raise HarnessError(
+                "run %s forbids model calls but has no %s whose endpoints "
+                "could be counted" % (self.run_id, REVIEW_WORKSPACE_TOKEN))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -522,6 +540,11 @@ class RunResult:
     #: (a global ``core.excludesFile``, say) hides ``.magi/`` from git and so
     #: from the product: then no protected path was an enumeration candidate.
     protected_visible: tuple[str, ...] = ()
+    #: ``"<METHOD> <path>"`` of every request a run that forbids model calls
+    #: sent past the capability probe (:data:`PROBE_PATHS`), in arrival order.
+    #: Empty for every other run. Any entry is a product defect, which the
+    #: runner reports as ``FAIL`` for every scenario reading the run.
+    model_requests: tuple[str, ...] = ()
 
 
 #: Where the product writes its logs, relative to a workspace root. The one
@@ -1598,6 +1621,157 @@ def error_backend():
 _BACKEND_URL_VARIABLE = "OPENAI_BASE_URL"
 _BACKEND_KEY_VARIABLE = "OPENAI_API_KEY"
 
+#: The paths a run that forbids model calls may still request: the capability
+#: probe (``src/magi/probe.rs``), which sizes the batches from the root of an
+#: Ollama daemon before the budget refusal and costs no completion. Anything
+#: else -- a trio completion, a gate decision, an embedding, a path nobody
+#: listed -- is counted.
+PROBE_PATHS = frozenset({"/api/show", "/api/tags"})
+
+#: What the counter answers: unavailable, so a probe fails open (the window
+#: counts as unmeasured) and a completion fails at once instead of waiting.
+MODEL_COUNTER_STATUS = 503
+
+#: Bytes of a request body the counter drains at a time.
+MODEL_COUNTER_CHUNK_BYTES = 64 * 1024
+
+
+class _CountingHandler(http.server.BaseHTTPRequestHandler):
+    """Records every request, then answers it :data:`MODEL_COUNTER_STATUS`.
+
+    The request is recorded as soon as its line and headers are read, before
+    its body, so one the product abandons half-sent still counts. Only the
+    method and the path are kept: no header, query or body, which is where a
+    credential would travel.
+    """
+
+    #: Bounds a request that stops mid-body, so a stuck client cannot hold the
+    #: run (or the server's shutdown, which joins its threads) open.
+    timeout = ERROR_BACKEND_TIMEOUT_S
+
+    def _answer(self) -> None:
+        """Record this request, drain its body and answer it unavailable."""
+        path = urllib.parse.urlsplit(self.path).path
+        with self.server.lock:
+            self.server.received.append((self.command, path))
+        try:
+            left = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            left = 0
+        while left > 0:
+            chunk = self.rfile.read(min(MODEL_COUNTER_CHUNK_BYTES, left))
+            if not chunk:
+                break
+            left -= len(chunk)
+        self.send_response(MODEL_COUNTER_STATUS)
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = _answer
+
+    def log_message(self, fmt: str, *args) -> None:
+        """Swallow the access log, as :class:`_EchoingHandler` does.
+
+        Args:
+            fmt: The format string the base class passes.
+            *args: Its arguments.
+        """
+
+
+@contextlib.contextmanager
+def model_counter():
+    """Serve a loopback endpoint that records every request, for the block.
+
+    Yields:
+        tuple: The base URL to point the product at, ending in ``/v1``, and
+        the list that receives ``(method, path)`` per request. Read it after
+        the block: leaving it joins every request's thread.
+    """
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
+    # Joined on close, unlike ThreadingHTTPServer's default, so the list is
+    # complete when the block ends; the handler's timeout bounds the join.
+    server.daemon_threads = False
+    server.received = []
+    server.lock = threading.Lock()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield "http://127.0.0.1:%d/v1" % server.server_address[1], server.received
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=ERROR_BACKEND_TIMEOUT_S)
+
+
+def requests_past_the_probe(received) -> tuple[str, ...]:
+    """The requests of *received* that are not the capability probe.
+
+    Args:
+        received: ``(method, path)`` pairs, as :func:`model_counter` records them.
+
+    Returns:
+        tuple[str, ...]: ``"<METHOD> <path>"`` of each one whose path is not
+        in :data:`PROBE_PATHS`, in order.
+
+    Example:
+        >>> requests_past_the_probe([("POST", "/api/show"), ("POST", "/api/chat")])
+        ('POST /api/chat',)
+    """
+    return tuple("%s %s" % (method, path) for method, path in received
+                 if path not in PROBE_PATHS)
+
+
+def point_config_at(config_path, url: str) -> None:
+    """Rewrite the ``magi.toml`` at *config_path* so every endpoint is *url*.
+
+    Every active ``base_url`` line, in any table, becomes ``base_url = "<url>"``
+    (a commented one is left alone, and its table inherits the root). With no
+    root ``base_url`` one is added first: the product's built-in default is a
+    real local daemon.
+
+    Complexity: ``O(file bytes)``.
+
+    Args:
+        config_path: The configuration to rewrite in place.
+        url: The endpoint every section must reach.
+
+    Raises:
+        HarnessError: When the file cannot be read or written.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     path = pathlib.Path(tmp) / "magi.toml"
+        ...     _ = path.write_text('[magi]\\n  base_url = "http://x/v1"\\n')
+        ...     point_config_at(path, "http://127.0.0.1:9/v1")
+        ...     path.read_text().splitlines()
+        ['base_url = "http://127.0.0.1:9/v1"', '[magi]', 'base_url = "http://127.0.0.1:9/v1"']
+    """
+    line = 'base_url = "%s"' % url
+    try:
+        text = pathlib.Path(config_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise HarnessError("could not read %s to count its endpoints: %s"
+                           % (config_path, exc)) from exc
+    lines, in_root, root_declared = [], True, False
+    for original in text.splitlines():
+        stripped = original.strip()
+        if stripped.startswith("["):
+            in_root = False
+        if stripped.startswith("base_url") and stripped[len("base_url"):].lstrip().startswith("="):
+            root_declared = root_declared or in_root
+            original = line
+        lines.append(original)
+    if not root_declared:
+        lines.insert(0, line)
+    try:
+        pathlib.Path(config_path).write_text("\n".join(lines) + "\n",
+                                             encoding="utf-8")
+    except OSError as exc:
+        raise HarnessError("could not point %s at the request counter: %s"
+                           % (config_path, exc)) from exc
+
 #: The eight shared runs, complete. They land in ONE place rather than a row at
 #: a time as later tasks need them, because a run whose only owner is a task
 #: nobody wrote never gets written at all -- which is exactly how R8 came to be
@@ -1712,11 +1886,13 @@ DEFINITIONS: dict[str, RunDefinition] = {
         run_id="R13",
         argv=("code-review",) + REVIEW_FLAGS + (REVIEW_OUTSIDE_PATH,),
         stdin=b"",
+        forbids_model_calls=True,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60),
     "R14": RunDefinition(
         run_id="R14",
         argv=("code-review",) + REVIEW_FLAGS + (REVIEW_SKIPPED_DIR,),
         stdin=b"",
+        forbids_model_calls=True,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         files=review_skipped_files()),
     "R15": RunDefinition(
@@ -1725,6 +1901,7 @@ DEFINITIONS: dict[str, RunDefinition] = {
         + ("--timeout", str(REVIEW_TOO_SHORT_TIMEOUT_S), "--log-level",
            "error", REVIEW_GEN_DIR),
         stdin=b"",
+        forbids_model_calls=True,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         files=review_input_files()),
     # MAGI FIX (S6 loop 3): the workspace ROOT, so ``.magi`` and ``.git`` are
@@ -1734,6 +1911,7 @@ DEFINITIONS: dict[str, RunDefinition] = {
         argv=("code-review",) + REVIEW_FLAGS
         + ("--timeout", str(REVIEW_TOO_SHORT_TIMEOUT_S), REVIEW_ROOT_PATH),
         stdin=b"",
+        forbids_model_calls=True,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         files=review_skipped_files()),
 }
@@ -1834,23 +2012,25 @@ class RunExecutor:
         protected = () if workspace is None else protected_candidates(workspace)
         stdin = self._stdin_for(definition)
         baseline = None
-        try:
-            if definition.rotates:
-                # The baseline is taken INSIDE, after the guard that refuses to
-                # rotate a credential there is nothing to put back. Reading the
-                # environment before that guard runs touches it on the one path
-                # that is supposed to have changed nothing.
-                with self._rotated_credential() as counts:
-                    baseline = counts
-                    output = self._invoke(definition, stdin)
-            else:
-                output = self._invoke(definition, stdin)
-            timed_out = False
-        except TimedOut as expired:
-            output = expired.output or ProductOutput(
-                stdout=b"", stderr=b"", exit_code=0,
-                command=self._command(definition))
-            timed_out = True
+        contacted: list[str] = []
+        with self._counted_endpoints(definition, workspace, contacted) as runnable:
+            try:
+                if runnable.rotates:
+                    # The baseline is taken INSIDE, after the guard that refuses
+                    # to rotate a credential there is nothing to put back.
+                    # Reading the environment before that guard runs touches it
+                    # on the one path that is supposed to have changed nothing.
+                    with self._rotated_credential() as counts:
+                        baseline = counts
+                        output = self._invoke(runnable, stdin)
+                else:
+                    output = self._invoke(runnable, stdin)
+                timed_out = False
+            except TimedOut as expired:
+                output = expired.output or ProductOutput(
+                    stdout=b"", stderr=b"", exit_code=0,
+                    command=self._command(runnable))
+                timed_out = True
         unreadable = []
         review_log = self._capture_review_log(definition, unreadable)
         return RunResult(
@@ -1864,7 +2044,46 @@ class RunExecutor:
             review_log=review_log,
             review_log_unreadable=tuple(unreadable),
             protected_visible=protected,
+            model_requests=tuple(contacted),
         )
+
+    @contextlib.contextmanager
+    def _counted_endpoints(self, definition: RunDefinition, workspace, contacted):
+        """Point a run that forbids model calls at a request counter.
+
+        MAGI FIX (S6 loop 19): R13-R16 never showed that no model was
+        contacted, so a product that paid for one and then refused passed
+        S48-S51 (F1a1-balthasar).
+
+        Every endpoint of the review workspace's ``magi.toml``
+        (:func:`point_config_at`) and ``OPENAI_BASE_URL``, which overrides the
+        root one, reach :func:`model_counter`; nothing reaches a real backend.
+
+        Args:
+            definition: The run about to execute.
+            workspace: Its review workspace, or ``None``.
+            contacted: A list that receives, once the run is over, each request
+                past the probe (:func:`requests_past_the_probe`).
+
+        Yields:
+            RunDefinition: *definition* itself for any other run; otherwise a
+            copy whose ``env`` also points ``OPENAI_BASE_URL`` at the counter.
+
+        Raises:
+            HarnessError: When there is no workspace, or its configuration
+                cannot be rewritten.
+        """
+        if not definition.forbids_model_calls:
+            yield definition
+            return
+        if workspace is None:
+            raise HarnessError("run %s forbids model calls but has no review "
+                               "workspace to point at a counter" % definition.run_id)
+        with model_counter() as (url, received):
+            point_config_at(workspace / ".magi" / "magi.toml", url)
+            yield dataclasses.replace(
+                definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),))
+        contacted.extend(requests_past_the_probe(received))
 
     def _review_workspace(self) -> pathlib.Path:
         """The directory :data:`REVIEW_WORKSPACE_TOKEN` stands for.

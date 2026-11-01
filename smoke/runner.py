@@ -20,19 +20,22 @@ class _TimedOutRun(typing.Protocol):
 
     ``RunResult`` is produced by Task 21 and this module is written in Task 3,
     so the real type cannot be imported here. A Protocol names the contract
-    anyway: the runner reads ``timed_out`` and nothing else, and a type checker
-    can verify Task 21's ``RunResult`` satisfies it. Without this the agreement
-    between the two tasks lives in a comment, which is exactly the kind of
-    contract that drifts silently.
+    anyway: the runner reads ``timed_out`` and ``model_requests`` and nothing
+    else, and a type checker can verify Task 21's ``RunResult`` satisfies it.
+    Without this the agreement between the two tasks lives in a comment, which
+    is exactly the kind of contract that drifts silently.
     """
 
     timed_out: bool
+    #: Requests a run that must reach no model sent past the capability probe.
+    model_requests: tuple[str, ...]
 
 
 _GIT_TIMEOUT_S = 60
 _TRANSLATED_FAILURE = "the product's output could not be interpreted"
 _BACKEND_UNREACHABLE = "the backend was not reachable"
 _RUN_TIMED_OUT = "the shared run did not finish inside its timeout"
+_RUN_REACHED_A_MODEL = "the shared run reached no model endpoint"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -282,6 +285,22 @@ class Runner:
                 untouched, so it reaches the exit-3 path.
         """
         for run_id, result in self._runs_for(entry).items():
+            # MAGI FIX (S6 loop 19): a refusal run that paid for a model and
+            # then refused read as the expected refusal (F1a1-balthasar). The
+            # executor records what it sent; any request is a product FAIL,
+            # whatever the scenario would make of the capture, and comes
+            # before the timeout rule because it is evidence, not a hang.
+            if result is not None and result.model_requests:
+                return [
+                    Finding(
+                        assertion=_RUN_REACHED_A_MODEL,
+                        outcome=Outcome.FAIL,
+                        detail="run %s sent %s" % (
+                            run_id, ", ".join(result.model_requests)),
+                        run_id=run_id,
+                    )
+                ], True
+        for run_id, result in self._runs_for(entry).items():
             # Iteration follows the declared tuple order, so a scenario hanging
             # off several runs always reports the FIRST one that timed out and
             # the report never reorders between invocations.
@@ -340,8 +359,9 @@ class Runner:
 
         The annotation is the runner's OWN view, and it is narrower than what
         the scenario receives on purpose: all this class ever reads off a
-        result is ``timed_out``. Saying so in the type is what gives the
-        Protocol a consumer instead of leaving it as a comment with a colon.
+        result is ``timed_out`` and ``model_requests``. Saying so in the type
+        is what gives the Protocol a consumer instead of leaving it as a
+        comment with a colon.
 
         Args:
             entry: The registered scenario.
