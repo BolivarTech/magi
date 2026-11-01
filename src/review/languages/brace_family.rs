@@ -615,8 +615,9 @@ impl BraceFamilyExtractor {
     /// The 0-based last line of the declaration at line `j`: the end of the block its value
     /// opens ([`declaration_block`]), of a `#define` continued by `\` ([`preprocessor_end`]), of
     /// a declaration list wrapped after a comma ([`Self::declaration_list_end`]), of a call
-    /// its initializer opens ([`call_initializer_end`]) or of the parentheses or brackets its line
-    /// leaves open ([`group_end`]), whichever is last; `j` itself otherwise. O(k) for the k lines
+    /// its initializer opens ([`call_initializer_end`]), of the parentheses or brackets its line
+    /// leaves open ([`group_end`]) or of the value after a bare `=` ([`bare_initializer_end`]),
+    /// whichever is last; `j` itself otherwise. O(k) for the k lines
     /// of the declaration.
     ///
     /// A declaration that runs to its closing delimiter is one declaration however many members
@@ -650,6 +651,9 @@ impl BraceFamilyExtractor {
             .max(self.declaration_list_end(lines, scanned, j))
             .max(call_initializer_end(lines, scanned, j, search))
             .max(group_end(lines, scanned, j, search))
+            // MAGI FIX (S6 loop 19, B2b-5): a declaration wrapped after a bare `=` ended on its
+            // first line, and its value fell into a gap unit.
+            .max(bare_initializer_end(lines, scanned, j, search))
     }
 
     /// The pieces of a declaration group too large for one batch: each declaration with its doc
@@ -1975,6 +1979,46 @@ fn group_end(lines: &[&str], scanned: &[ScannedLine], i: usize, search: &BraceSe
         }
     }
     i
+}
+
+/// Whether a trimmed line ends in an assignment's bare `=` (`static int n =`), not in a
+/// comparison (`==`, `!=`, `<=`, `>=`). O(1).
+fn ends_in_bare_equal(trimmed: &str) -> bool {
+    trimmed
+        .strip_suffix('=')
+        .is_some_and(|rest| !rest.ends_with(['=', '!', '<', '>']))
+}
+
+/// The 0-based last line of the value a declaration at line `i` puts after a bare `=` on the
+/// next lines (`pub static T: &[u8] =` then `&[1, 2, 3];`): the end of that statement, the first
+/// later line whose code ends in `;` ([`statement_end`], which stops at a blank line, at the next
+/// construct and when the pass's budget is spent); with none, as in JavaScript or Go without
+/// semicolons, the next line when it is code that starts no construct, so the value is kept and
+/// the declaration after it is never taken. `i` when line `i` is no code ending in a bare `=`
+/// ([`ends_in_bare_equal`]), or no line qualifies. O(k) for the k lines searched.
+fn bare_initializer_end(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    i: usize,
+    search: &BraceSearch<'_>,
+) -> usize {
+    let is_code = |j: usize| scanned.get(j).is_some_and(|s| !s.is_non_code);
+    if !is_code(i) || !lines.get(i).is_some_and(|l| ends_in_bare_equal(l.trim())) {
+        return i;
+    }
+    let end = statement_end(lines, scanned, i, search);
+    if end > i {
+        return end;
+    }
+    let next = i + 1;
+    let value = is_code(next)
+        && lines.get(next).is_some_and(|l| !l.trim().is_empty())
+        && !search.stops(next);
+    if value {
+        next
+    } else {
+        i
+    }
 }
 
 /// Whether a trimmed line opens a C or C++ linkage block (`extern "C" {`, `extern "C++" {`).
