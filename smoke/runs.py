@@ -981,6 +981,56 @@ def _reject_links(top) -> None:
                     "workspace never follows one" % (top, path))
 
 
+#: Why :func:`_regular_files_without_links` leaves a link out.
+LINK_NOT_FOLLOWED = "a link, not followed"
+
+
+def _regular_files_without_links(directory, refused):
+    """The files under *directory*, sorted, without descending into or reading a link.
+
+    ``Path.rglob`` descends into a junction on Windows, and a file test follows
+    a symlink, so neither bounds a walk to what is really under *directory*.
+    This one lists each directory with :func:`os.scandir` and tests every entry
+    with :func:`_is_link` first.
+
+    Args:
+        directory: The directory to walk; it is not itself tested.
+        refused: A list that receives ``"<name> (<why>)"`` for each entry
+            left out: a link (neither listed nor read), a directory that could
+            not be listed, or an entry whose test failed.
+
+    Returns:
+        list[pathlib.Path]: The regular files found, in sorted path order.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     _ = (pathlib.Path(tmp) / "a.log").write_bytes(b"x")
+        ...     [p.name for p in _regular_files_without_links(tmp, [])]
+        ['a.log']
+    """
+    files, pending = [], [pathlib.Path(directory)]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError as exc:
+            refused.append("%s (%s)" % (current.name, exc))
+            continue
+        for entry in entries:
+            path = pathlib.Path(entry.path)
+            try:
+                if _is_link(path):
+                    refused.append("%s (%s)" % (path.name, LINK_NOT_FOLLOWED))
+                elif entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(path)
+            except OSError as exc:
+                refused.append("%s (%s)" % (path.name, exc))
+    return sorted(files)
+
+
 def _skip_top_level_logs(magi_dir):
     """A ``copytree`` filter that leaves out the ``logs`` directory of *magi_dir*.
 
@@ -1427,7 +1477,9 @@ class RunExecutor:
         Args:
             definition: The run that just finished.
             unreadable: A list that receives ``"<name> (<error>)"`` for each
-                file that could not be read, or ``None`` to discard them.
+                file that could not be read, and each link or unlistable
+                directory left out (:func:`_regular_files_without_links`), or
+                ``None`` to discard them.
 
         Returns:
             tuple[bytes, ...] | None: Each readable file's bytes under
@@ -1440,14 +1492,18 @@ class RunExecutor:
         if not directory.is_dir():
             return None
         captured = []
-        for path in sorted(directory.rglob("*")):
-            if not path.is_file():
-                continue
+        # MAGI FIX (S6 loop 14): rglob descended into a junction and read_bytes
+        # followed a link, so a link under .magi/logs had the harness read what
+        # it points at (F1a1-m3). Links are named in *unreadable*, never read.
+        refused = []
+        for path in _regular_files_without_links(directory, refused):
             try:
                 captured.append(path.read_bytes())
             except OSError as exc:
                 if unreadable is not None:
                     unreadable.append("%s (%s)" % (path.name, exc))
+        if unreadable is not None:
+            unreadable.extend(refused)
         return tuple(captured)
 
     def _prepare_review_workspace(self, definition: RunDefinition):
