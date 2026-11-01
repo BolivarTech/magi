@@ -1208,6 +1208,43 @@ def _regular_files_without_links(directory, refused):
     return sorted(files)
 
 
+#: How many bytes :func:`_read_at_most` asks for at a time.
+READ_CHUNK_BYTES = 64 * 1024
+
+
+def _read_at_most(path, limit: int) -> bytes:
+    """Read *path* from the start, stopping once it holds more than *limit* bytes.
+
+    Args:
+        path: The file to read.
+        limit: The most bytes the caller can keep, at least 0.
+
+    Returns:
+        bytes: The whole file when it holds at most *limit* bytes; otherwise
+        its first ``limit + 1`` bytes, which tell the caller it is over.
+
+    Raises:
+        OSError: When the file cannot be opened or read.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     path = pathlib.Path(tmp) / "a.log"
+        ...     _ = path.write_bytes(b"12345")
+        ...     _read_at_most(path, 2), _read_at_most(path, 9)
+        (b'123', b'12345')
+    """
+    chunks, held = [], 0
+    with path.open("rb") as handle:
+        while held <= limit:
+            chunk = handle.read(min(READ_CHUNK_BYTES, limit + 1 - held))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            held += len(chunk)
+    return b"".join(chunks)
+
+
 def _read_bounded(root, paths, refused) -> list:
     """Read *paths* in order, within the per-file and total capture caps.
 
@@ -1217,11 +1254,17 @@ def _read_bounded(root, paths, refused) -> list:
 
     A file's size is read before the file is; one over
     :data:`MAX_REVIEW_LOG_FILE_BYTES`, or one that would take the capture past
-    :data:`MAX_REVIEW_LOG_TOTAL_BYTES`, is named and not read. The size is
-    checked again after the read, because the file may have grown in between.
+    :data:`MAX_REVIEW_LOG_TOTAL_BYTES`, is named and not read. The read itself
+    stops one byte past what is still allowed (:func:`_read_at_most`), because
+    the file may have grown since its size was read, or still be growing: a
+    file that turns out larger is named and dropped.
+
+    MAGI FIX (S6 loop 17): the file was read whole after the size check, so a
+    file that grew in between was held in memory unbounded (F1a1-caspar,
+    F1a1-melchior, F1a1-balthasar).
 
     Complexity: ``O(bytes kept)``, at most :data:`MAX_REVIEW_LOG_TOTAL_BYTES`
-    held at once (a file that grew is read before it is dropped).
+    plus one chunk held at once.
 
     Args:
         root: The directory the files are named under (:func:`_name_under`).
@@ -1248,7 +1291,8 @@ def _read_bounded(root, paths, refused) -> list:
             size = path.stat().st_size
             if (size <= MAX_REVIEW_LOG_FILE_BYTES
                     and spent + size <= MAX_REVIEW_LOG_TOTAL_BYTES):
-                data = path.read_bytes()
+                data = _read_at_most(path, min(MAX_REVIEW_LOG_FILE_BYTES,
+                                               MAX_REVIEW_LOG_TOTAL_BYTES - spent))
                 size = len(data)
         except OSError as exc:
             refused.append("%s (%s)" % (name, exc))
