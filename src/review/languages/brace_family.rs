@@ -4033,4 +4033,33 @@ void g(void) {
         assert_eq!(operator_name("void operatornew"), None);
         assert_eq!(operator_name("int my_operator new"), None);
     }
+
+    #[test]
+    fn a_declaration_keyword_glued_to_its_list_opens_a_declaration_group() {
+        // [MAGI S6 loop 14, B2b1] `match_declaration_keyword` required a blank after the
+        // keyword, so `use::{a, b};`, `import{foo} from "x";` and `#include<stdio.h>` were no
+        // declarations and fell into gap units.
+        let rust = "use::{a, b};\nfn f() {\n}\n";
+        let units = extract(&rust_extractor(), rust, &[1]);
+        assert_eq!(
+            spans(&units),
+            vec![("imports", UnitKind::DeclarationGroup, 1, 1)]
+        );
+        let js = "import{foo} from \"x\";\nexport{foo};\nimport*as m from 'm';\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &every_line(js));
+        assert_eq!(
+            spans(&units),
+            vec![("imports", UnitKind::DeclarationGroup, 1, 3)]
+        );
+        let c = "#include<stdio.h>\n#include\"a.h\"\n";
+        let units = extract(&c_extractor(), c, &every_line(c));
+        assert_eq!(
+            spans(&units),
+            vec![("declarations", UnitKind::DeclarationGroup, 1, 2)]
+        );
+        // A longer word that starts like a keyword is no keyword.
+        let js = "usefoo();\nimporter();\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &every_line(js));
+        assert_eq!(spans(&units), vec![("lines 1-2", UnitKind::TopLevel, 1, 2)]);
+    }
 }
