@@ -751,7 +751,9 @@ impl BraceFamilyExtractor {
     /// arguments in balanced parentheses on the same line. `@interface` declares an annotation
     /// type and is kept. An annotation whose arguments do not close on the line is kept with
     /// everything after it, so the line still opens with `@` and is no signature, as before.
-    /// Parentheses are counted on the line text, as [`paren_delta`] does. O(n) in the line.
+    /// Parentheses inside the arguments' strings do not count ([`balanced_end_outside_quotes`]
+    /// with [`ANNOTATION_QUOTES`]), so `@Component(")")` closes at its last `)`; a string that
+    /// never closes on the line keeps the annotation, as above. O(n) in the line.
     ///
     /// # Arguments
     ///
@@ -776,16 +778,10 @@ impl BraceFamilyExtractor {
                 return rest;
             }
             if tail.starts_with('(') {
-                let mut depth = 0i64;
-                let close = tail.char_indices().find_map(|(at, c)| {
-                    depth += match c {
-                        '(' => 1,
-                        ')' => -1,
-                        _ => 0,
-                    };
-                    (depth == 0).then_some(at + c.len_utf8())
-                });
-                let Some(close) = close else {
+                // MAGI FIX (S6 loop 14): `@Component(")")` closed at the quoted `)` and the
+                // class after it was no unit; the quoted parentheses no longer count.
+                let Some(close) = balanced_end_outside_quotes(tail, '(', ')', &ANNOTATION_QUOTES)
+                else {
                     return rest;
                 };
                 tail = tail.get(close..).unwrap_or("");
@@ -1924,6 +1920,11 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
 fn balanced_end(text: &str, open: char, close: char) -> Option<usize> {
     balanced_end_outside_quotes(text, open, close, &[])
 }
+
+/// The quotes an annotation's arguments are read past ([`BraceFamilyExtractor::without_annotations`]):
+/// Java's strings and character literals, and JavaScript's and TypeScript's three string forms.
+/// A backtick is no Java token, so reading it as a quote there changes no valid line.
+const ANNOTATION_QUOTES: [char; 3] = ['"', '\'', '`'];
 
 /// The opening of a Rust outer attribute (`#[inline]`).
 const RUST_ATTRIBUTE_PREFIX: &str = "#[";
