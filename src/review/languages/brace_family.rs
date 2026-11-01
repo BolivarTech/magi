@@ -6217,4 +6217,23 @@ int g(void) {
             .collect();
         assert_eq!(got, vec![vec![1, 4]; cases.len()]);
     }
+
+    #[test]
+    fn a_method_inside_a_field_initializer_is_no_member_of_the_class() {
+        // The member pass promoted a signature at any depth, so the method of an anonymous class
+        // in a field's initializer became a member and cut the field's header from its body.
+        let code = "class C {\n    Runnable r = new Runnable() {\n        public void run() {\n            go();\n        }\n    };\n\n    void b() {\n        x();\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), code, 9, UnitKind::Class);
+        assert!(
+            parts.iter().any(|p| p.start_line <= 2 && 6 <= p.end_line),
+            "the field is split: {:?}",
+            spans(&parts)
+        );
+        assert!(parts.iter().all(|p| p.name != "run"), "{:?}", spans(&parts));
+        assert!(
+            spans(&parts).contains(&("b", UnitKind::Method, 8, 10)),
+            "{:?}",
+            spans(&parts)
+        );
+    }
 }
