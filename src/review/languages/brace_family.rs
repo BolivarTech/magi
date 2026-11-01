@@ -454,7 +454,9 @@ impl BraceFamilyExtractor {
     /// * `scanned` - The scanner's record of each line.
     /// * `members` - Whether the lines are a block's body: a signature ending in `;` is then a
     ///   member ([`Self::member_prototypes`]), and a JavaScript or TypeScript method directly in
-    ///   it may be named by a reserved word (`reserved_word_methods`).
+    ///   it may be named by a reserved word (`reserved_word_methods`). A signature deeper than
+    ///   the body's first line is then no member: it sits inside a member no rule read (a
+    ///   method of an anonymous class in a field's initializer), which stays one piece.
     /// * `budget` - The line visits the forward searches of this pass may spend.
     ///
     /// # Returns
@@ -471,6 +473,11 @@ impl BraceFamilyExtractor {
         // number, unlike `shift_members`; an unrepresentable line now aborts detection.
         let mut constructs = Vec::new();
         let mut i = 0;
+        let depth_before = |k: usize| {
+            scanned
+                .get(k)
+                .map(|s| i64::from(s.depth_after) - i64::from(s.brace_delta))
+        };
         let stops = |j: usize| self.starts_construct(lines, scanned, j, members);
         let search = BraceSearch {
             stops: &stops,
@@ -518,7 +525,14 @@ impl BraceFamilyExtractor {
                 continue;
             }
             let prototypes = members && self.member_prototypes();
-            if let Some(name) = self.line_signature(line, scanned, i, members) {
+            // A signature deeper than the body's own lines sits inside a member no rule read
+            // (an anonymous class in a field's initializer, `r = new Runnable() {`): taking it
+            // for a member cut the field's header from its body.
+            let nested = members && depth_before(i) != depth_before(0);
+            if let Some(name) = (!nested)
+                .then(|| self.line_signature(line, scanned, i, members))
+                .flatten()
+            {
                 // MAGI FIX (S6 loop 15): the brace search ran twice, once here and once in
                 // `brace_block_end`, spending a wrapped header's visits of the budget twice.
                 let open = open_brace_line(lines, scanned, i, &search);
