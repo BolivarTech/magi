@@ -1492,4 +1492,22 @@ mod tests {
             assert_eq!(find_secret(&plain), None, "{plain}");
         }
     }
+
+    #[test]
+    fn a_url_password_may_hold_the_sub_delimiters_a_userinfo_allows() {
+        // [MAGI S6 loop 14, A2-1, security] `'`, `(` and `)` ended the userinfo, although RFC
+        // 3986 allows them unencoded in it: `svc:pa(ss@db` found no `@` and its file was sent.
+        for pass in ["pa(ss", "pa)ss", "pa'ss", "(pass)"] {
+            let secret = format!("postgres://svc:{pass}@db.internal/app");
+            assert_eq!(find_secret(&secret), Some("url-credential"), "{secret}");
+            let masked = mask_secrets(&secret);
+            assert!(!masked.contains("ss@"), "{masked}");
+        }
+        for plain in [
+            "(see https://example.com/a) and (b:c@d)",
+            "'https://example.com' 'a:b@c'",
+        ] {
+            assert_eq!(find_secret(plain), None, "{plain}");
+        }
+    }
 }
