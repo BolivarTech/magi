@@ -377,6 +377,26 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
                 with self.assertRaises(HarnessError):
                     runs._reject_links(root)
 
+    @unittest.skipUnless(os.name == "nt", "junctions exist on Windows only")
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_rebuilding_the_workspace_never_deletes_through_a_junction_inside_it(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a1-c1] the existing workspace is removed with shutil.rmtree before it is
+        # rebuilt; a junction left inside it must be unlinked, never descended into, on the 3.11 floor too.
+        import _winapi
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = root / "outside"
+            outside.mkdir()
+            keep = outside / "keep.txt"
+            keep.write_text("not the workspace's", encoding="utf-8")
+            workspace = root / "scratch" / runs.REVIEW_WORKSPACE_DIR
+            (workspace / "nested").mkdir(parents=True)
+            _winapi.CreateJunction(str(outside), str(workspace / "nested" / "junction"))
+            rebuilt = executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertTrue(keep.is_file())
+            self.assertFalse((rebuilt / "nested").exists())
+
     def test_an_unreadable_directory_under_magi_is_a_harness_error(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-c1] os.walk skips a directory it cannot list unless told otherwise, so a
         # link inside it went unchecked; the walk must fail as a harness error (exit 3), never pass.
