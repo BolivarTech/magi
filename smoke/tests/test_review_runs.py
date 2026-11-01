@@ -519,6 +519,26 @@ class ReviewLogCaptureTests(unittest.TestCase):
             self.assertEqual(1, len(unreadable))
             self.assertIn("linked", unreadable[0])
 
+    def test_a_refused_or_unreadable_nested_log_entry_is_named_by_its_path_under_the_log_root(self) -> None:
+        # [MAGI §6 MS2 loop 15, F1a1-b2] entries were named by path.name alone, so a nested link or locked
+        # file lost the directory that tells which one was left out.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = root / "outside"
+            outside.mkdir()
+            nested = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs" / "sub"
+            nested.mkdir(parents=True)
+            _make_directory_link(outside, nested / "linked")
+            unreadable = []
+            executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual(["sub/linked (%s)" % runs.LINK_NOT_FOLLOWED], unreadable)
+            (nested / "magi-locked.log").write_bytes(b"x")
+            unreadable = []
+            with mock.patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError("locked")):
+                executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertIn("sub/magi-locked.log (locked)", unreadable)
+
     def test_a_log_directory_that_is_itself_a_link_is_never_read_through(self) -> None:
         # [MAGI §6 MS2 loop 15, F1a1-m1] the walk tests every entry under .magi/logs but not the top: os.scandir
         # follows a symlinked or junction .magi/logs, so the harness read what it points at into the result.
