@@ -2547,6 +2547,18 @@ const ANNOTATION_QUOTES: [char; 3] = ['"', '\'', '`'];
 const MACRO_RULES_KEYWORD: &str = "macro_rules! ";
 
 /// The opening of a Rust outer attribute (`#[inline]`).
+///
+/// An inner attribute (`#![allow(dead_code)]`) does not open with it, on purpose: the Rust
+/// reference applies an inner attribute to the item that contains it (the crate, a module, a
+/// function), never to the item written after it, so joining it to that item
+/// ([`BraceFamilyExtractor::scan_back_for_docs`]) would review it as part of code it does not
+/// govern. It stays with its container instead: inside a module or `impl` body it falls into the
+/// block's header piece when the block splits ([`BraceFamilyExtractor::split_block`]), and at the
+/// top of a file it is a gap unit of its own. Either way its line lands in exactly one unit, so
+/// none is lost. Pinned by `a_rust_inner_attribute_stays_with_its_container_and_no_line_is_lost`.
+/// An inner doc comment (`//!`, `/*!`) is still joined to the item below it (it is one of the
+/// Rust `doc_comment_prefixes`), a known difference, declared.
+// MAGI FIX (S6 loop 17, B2-6): the inner-attribute policy, written where the prefix is defined.
 const RUST_ATTRIBUTE_PREFIX: &str = "#[";
 
 /// The quotes a Rust attribute's arguments are read past: only `"`, since a `'` may open a
