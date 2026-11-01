@@ -6152,6 +6152,45 @@ void g(void) {
     }
 
     #[test]
+    fn a_value_wrapped_after_a_bare_equal_sign_runs_to_its_closing_delimiter_without_a_semicolon() {
+        // [MAGI B2b1 6] in Go or JavaScript without semicolons, the value after a bare `=` was
+        // only the next line, so a call or a literal wrapped over lines (`g(` ... `)`, `[` ...
+        // `]`) lost its other lines to a gap unit.
+        let go = "var x =\n\tg(\n\t\t1,\n\t)\nfunc f() {\n}\n";
+        assert_eq!(
+            spans(&extract(&BraceFamilyExtractor::go(), go, &all_lines(go))),
+            vec![
+                ("variables", UnitKind::DeclarationGroup, 1, 4),
+                ("f", UnitKind::Function, 5, 6)
+            ]
+        );
+        let js = "const x =\n  [\n    1,\n    2\n  ]\nfunction f() {\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::javascript(),
+                js,
+                &all_lines(js)
+            )),
+            vec![
+                ("constants", UnitKind::DeclarationGroup, 1, 5),
+                ("f", UnitKind::Function, 6, 7)
+            ]
+        );
+        let braced = "var m =\n\tmap[string]int{\n\t\t\"a\": 1,\n\t}\nfunc f() {\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::go(),
+                braced,
+                &all_lines(braced)
+            )),
+            vec![
+                ("variables", UnitKind::DeclarationGroup, 1, 4),
+                ("f", UnitKind::Function, 5, 6)
+            ]
+        );
+    }
+
+    #[test]
     fn the_member_searches_of_a_go_type_group_spend_the_pass_budget() {
         // [MAGI S6 loop 19, B2b-2] a member's closing-brace search ran past the group's `)` to
         // the end of the file, outside the pass budget, so a file of groups whose members never
