@@ -1831,6 +1831,73 @@ mod tests {
     }
 
     #[test]
+    fn a_file_left_out_near_the_total_cap_does_not_fail_the_review() {
+        // [MAGI S6 loop 15, A2-3] the cache checked the total before the filter judged the file:
+        // with the kept files near the cap, reading a file that was then left out (a secret, a
+        // binary) failed the whole review with `InputTooLarge`.
+        let kept = "fn f() {}\n";
+        let other = "fn b() {}\n";
+        let key = "const K: &str = \"AKIAABCDEFGHIJKLMNOP\";\n"; // allow-secret-scan
+        let inner = MapSource::new(
+            &[
+                ("a.rs", kept),
+                ("key.rs", key),
+                ("big.dat", "\0abcdefghijklmnopqrstuvwxyz"),
+                ("b.rs", other),
+            ],
+            &[],
+        );
+        let cap = u64::try_from(kept.len() + other.len()).expect("fits");
+        let cache = crate::review::source::CachedSource::with_total_cap(&inner, cap);
+        let files = |names: &[&str]| -> Vec<ReviewFile> {
+            names
+                .iter()
+                .map(|n| ReviewFile {
+                    path: (*n).into(),
+                    diff: None,
+                })
+                .collect()
+        };
+        let f = filter_files(
+            files(&["a.rs", "key.rs", "big.dat", "b.rs"]),
+            &cache,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        )
+        .expect("the omitted files are released before the total is checked");
+        let kept_paths: Vec<&str> = f.kept.iter().map(|k| k.path.as_str()).collect();
+        assert_eq!(kept_paths, ["a.rs", "b.rs"]);
+        assert_eq!(
+            f.skipped,
+            vec![
+                Skipped {
+                    path: "key.rs".into(),
+                    cause: SkipCause::Secret
+                },
+                Skipped {
+                    path: "big.dat".into(),
+                    cause: SkipCause::Binary
+                },
+            ]
+        );
+        // What is kept still may not pass the cap: one byte less fails on the file that passes it.
+        let tight = crate::review::source::CachedSource::with_total_cap(&inner, cap - 1);
+        let err = filter_files(
+            files(&["a.rs", "key.rs", "b.rs"]),
+            &tight,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        )
+        .expect_err("a.rs and b.rs pass the cap");
+        assert!(
+            matches!(&err, ReviewError::InputTooLarge { path, .. } if path == "b.rs"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn an_empty_directory_is_nothing_to_review() {
         let src = MapSource::new(&[], &[]);
         assert!(matches!(

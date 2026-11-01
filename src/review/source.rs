@@ -162,6 +162,15 @@ pub trait ContentSource: Send + Sync {
     fn release(&self, face: Face, path: &str) {
         let _ = (face, path);
     }
+
+    /// Checks that what the source holds fits its total cap.
+    ///
+    /// # Errors
+    ///
+    /// Implementation specific; the default holds nothing and never fails.
+    fn settle(&self) -> Result<(), ReviewError> {
+        Ok(())
+    }
 }
 
 /// Reads all of `reader`, but never more than `cap + 1` bytes.
@@ -642,6 +651,13 @@ impl<'a> CachedSource<'a> {
         Self::capped(inner, cap)
     }
 
+    /// A cache over `inner` with an explicit total cap and provisional headroom.
+    #[cfg(test)]
+    pub(crate) fn with_caps(inner: &'a dyn ContentSource, cap: u64, headroom: u64) -> Self {
+        let _ = headroom;
+        Self::capped(inner, cap)
+    }
+
     fn capped(inner: &'a dyn ContentSource, cap: u64) -> Self {
         Self {
             inner,
@@ -837,20 +853,40 @@ mod tests {
                 Ok(Some(b"abc".to_vec()))
             }
         }
-        let cached = CachedSource::with_total_cap(&Three, 5);
+        // [MAGI S6 loop 15, A2-3] a read may pass the cap by the provisional headroom (3 here)
+        // until the caller settles, so a file the filter then leaves out costs nothing.
+        let cached = CachedSource::with_caps(&Three, 5, 3);
         assert_eq!(cached.read("a.rs").expect("fits"), Some(b"abc".to_vec()));
+        assert!(cached.settle().is_ok());
         // [CP2 MS2 cierre (sin MAGI)] the old side is held too, so it counts toward the same cap.
+        assert_eq!(
+            cached.read_old("a.rs").expect("provisional"),
+            Some(b"abc".to_vec())
+        );
         assert!(matches!(
-            cached.read_old("a.rs"),
-            Err(ReviewError::InputTooLarge { limit: 5, .. })
+            cached.settle(),
+            Err(ReviewError::InputTooLarge {
+                limit: 5,
+                held: 3,
+                ..
+            })
         ));
+        cached.release(Face::Old, "a.rs");
+        assert!(cached.settle().is_ok(), "released, the total fits again");
         // [MAGI S6 loop 5, A2-b1] the error says what was held and which read passed the cap.
-        let err = cached.read("b.rs").expect_err("over the cap");
+        assert!(cached.read("b.rs").is_ok(), "within the headroom");
+        let err = cached.settle().expect_err("over the cap");
         assert!(
             matches!(&err, ReviewError::InputTooLarge { limit: 5, held: 3, path } if path == "b.rs"),
             "{err:?}"
         );
         assert!(err.to_string().contains("b.rs"), "{err}");
+        // Past the headroom a read is refused outright and not kept.
+        let err = cached.read_old("b.rs").expect_err("past the headroom");
+        assert!(
+            matches!(&err, ReviewError::InputTooLarge { limit: 5, held: 6, path } if path == "b.rs"),
+            "{err:?}"
+        );
         assert_eq!(
             cached.read("a.rs").expect("already held: adds nothing"),
             Some(b"abc".to_vec())
