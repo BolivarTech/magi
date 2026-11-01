@@ -5114,7 +5114,7 @@ void g(void) {
             let parts = split(&ext, code, 3, UnitKind::Class);
             let members: Vec<(&str, u32, u32)> = parts
                 .iter()
-                .filter(|u| u.kind == UnitKind::Function)
+                .filter(|u| u.kind == UnitKind::Method)
                 .map(|u| (u.name.as_str(), u.start_line, u.end_line))
                 .collect();
             assert_eq!(
