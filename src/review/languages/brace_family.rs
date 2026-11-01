@@ -5091,4 +5091,13 @@ void g(void) {
         assert!(names.contains(&"inner"), "{names:?}");
         assert!(!names.contains(&"hidden"), "{names:?}");
     }
+
+    #[test]
+    fn a_parenthesized_macro_rules_with_a_braced_arm_ends_at_its_own_closing_delimiter() {
+        // [MAGI S6 loop 17, B2-2] the brace search of `macro_rules! p (` found its first arm's
+        // `{`, so the macro ended at that arm and its `);` fell into a gap unit.
+        let code = "macro_rules! p (\n    () => {\n        fn q() {}\n    };\n);\nfn after() {}\n";
+        let units = extract(&rust_extractor(), code, &[3]);
+        assert_eq!(spans(&units), vec![("p", UnitKind::Function, 1, 5)]);
+    }
 }
