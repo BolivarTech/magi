@@ -2084,7 +2084,9 @@ fn identifier_before_paren(line: &str) -> Option<String> {
         return None;
     }
     // MAGI FIX (S6 loop 6): `$get() {` named no member, so a class could not split there.
-    Some(trailing_identifier(head.name_text))
+    // MAGI FIX (S6 loop 18, B2b-4): `foo<T>(x: T) {` ended in `>`, so no identifier named it
+    // and a generic TypeScript method was no member; its type parameters are read past.
+    Some(trailing_identifier(without_type_parameters(head.name_text)))
         .filter(|n| !n.is_empty())
         .map(str::to_string)
 }
@@ -2108,9 +2110,9 @@ fn private_or_computed_name(line: &str) -> Option<String> {
     if head.before.contains('=') {
         return None;
     }
-    let text = head.name_text.trim_end();
+    let text = without_type_parameters(head.name_text);
     if text.ends_with(']') {
-        let open = matching_open_bracket(text)?;
+        let open = matching_open(text, '[', ']')?;
         return text.get(open..).map(str::to_string);
     }
     let ident = trailing_identifier(text);
@@ -2118,14 +2120,37 @@ fn private_or_computed_name(line: &str) -> Option<String> {
     (!ident.is_empty() && before.ends_with('#')).then(|| format!("#{ident}"))
 }
 
-/// The byte offset of the `[` that matches the `]` `text` ends with, counting the brackets
-/// between, or `None` when it never opens. O(n) in the text.
-fn matching_open_bracket(text: &str) -> Option<usize> {
+/// `text` without the type parameter list it ends with (`foo<T>` gives `foo`,
+/// `[key]<K, V>` gives `[key]`), blanks at its end passed over; `text` trimmed at its end when it
+/// ends in no `>` or the list never opens. A generic method (`foo<T>(x: T) {`) and a C++
+/// explicit specialization (`void f<int>(int x) {`) are named so before their `(`. O(n) in the
+/// text.
+///
+/// # Arguments
+///
+/// * `text` - The text of a signature line before its parameter list.
+///
+/// # Returns
+///
+/// The text before the type parameter list.
+fn without_type_parameters(text: &str) -> &str {
+    let text = text.trim_end();
+    if !text.ends_with('>') {
+        return text;
+    }
+    matching_open(text, '<', '>')
+        .and_then(|at| text.get(..at))
+        .map_or(text, str::trim_end)
+}
+
+/// The byte offset of the `open` that matches the `close` `text` ends with (`[` for `]`, `<` for
+/// `>`), counting the pairs between, or `None` when it never opens. O(n) in the text.
+fn matching_open(text: &str, open: char, close: char) -> Option<usize> {
     let mut depth = 0u32;
     for (at, c) in text.char_indices().rev() {
         match c {
-            ']' => depth = depth.saturating_add(1),
-            '[' => {
+            c if c == close => depth = depth.saturating_add(1),
+            c if c == open => {
                 depth = depth.checked_sub(1)?;
                 if depth == 0 {
                     return Some(at);
@@ -5512,6 +5537,11 @@ void g(void) {
                 ("bar", UnitKind::Method, 3, 3),
                 ("I", UnitKind::Trait, 4, 4),
             ]
+        );
+        // A C++ explicit specialization is named the same way.
+        assert_eq!(
+            identifier_before_paren("void f<int>(int x) {"),
+            Some("f".to_string())
         );
     }
 
