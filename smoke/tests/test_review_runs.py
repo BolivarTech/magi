@@ -647,7 +647,15 @@ class ProductSpellingTests(unittest.TestCase):
         listed = frozenset({".MAGI/a.toml", ".magi./b", ".Magi /c", ".magi/d",
                             ".magic/e", "src/.magi/f", "src/a.rs"})
         with mock.patch.object(runs, "visible_paths", return_value=listed):
-            self.assertEqual((".MAGI/a.toml", ".Magi /c", ".magi./b", ".magi/d"),
+            self.assertEqual((".MAGI/a.toml", ".Magi /c", ".magi./b", ".magi/d", "src/.magi/f"),
+                             runs.protected_candidates(pathlib.Path(".")))
+
+    def test_protected_candidates_match_a_magi_directory_at_any_depth(self) -> None:
+        # [MAGI §6 MS2 loop 18, F1a1-caspar] the product's is_never_reviewed tests every component, so a
+        # nested .magi is left out too; counting only the first component left it unexercised by S51.
+        listed = frozenset({"a/b/.MAGI./x.toml", "a\\.magi\\y", "a/.magic/z", "a/magi/w", "a/b.magi/v"})
+        with mock.patch.object(runs, "visible_paths", return_value=listed):
+            self.assertEqual(("a/b/.MAGI./x.toml", "a\\.magi\\y"),
                              runs.protected_candidates(pathlib.Path(".")))
 
     def test_protected_candidates_never_fold_a_non_ascii_letter(self) -> None:
