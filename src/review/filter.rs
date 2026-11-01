@@ -51,6 +51,11 @@ const LS_FILES_IGNORED_TRACKED: &[&str] = &[
     "-z",
 ];
 
+/// `rev-parse` for the commit `HEAD` names: no output and exit 1 in a repository without commits.
+const HEAD_COMMIT_QUERY: &[&str] = &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"];
+/// The `ls-files` option that also lists the paths of a tree, as if still in the index.
+const WITH_TREE_OPTION: &str = "--with-tree=";
+
 /// A file left out of a review, with why.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Skipped {
@@ -526,7 +531,12 @@ fn read_side(
 /// rule. Otherwise one `rev-parse --is-inside-work-tree`, then one `ls-files` call: for `File`,
 /// tracked and untracked files a rule excludes (a file that does not exist is not listed, so it
 /// stays `missing`); for `Directory` and `Uncommitted` (`pathspec` `.`), the tracked ones a rule
-/// excludes, which the enumeration lists (untracked ignored files are never enumerated).
+/// excludes, which the enumeration lists (untracked ignored files are never enumerated). For
+/// `Uncommitted` the set also covers the paths of `HEAD`'s tree (`--with-tree`, after one more
+/// `rev-parse`; none in a repository without commits), where its diff reads the old side: a
+/// tracked ignored file staged for deletion or renamed away is no longer in the index. `HEAD` is
+/// read again here, not the SHA the input pinned: a commit the operator makes during the
+/// preparation makes the set follow the newer tree (declared, not closed).
 /// Outside any repository the set is empty.
 ///
 /// `pathspec` follows a `--`, so a name that begins with `-` (`-x.rs`, `--stdin`) is a path and
@@ -572,6 +582,18 @@ pub fn ignored_paths(
         return Ok(HashSet::new());
     }
     let mut args = query.to_vec();
+    // MAGI FIX (S6 loop 16, A2-2, security): the diff's old side comes from HEAD, the index
+    // alone forgot a tracked ignored file staged for deletion or renamed away, and its HEAD
+    // content was kept. `--with-tree` lists HEAD's paths as well (measured with git 2.56).
+    let with_tree = match input {
+        ReviewInput::Uncommitted => git
+            .query(HEAD_COMMIT_QUERY)?
+            .map(|sha| format!("{WITH_TREE_OPTION}{}", sha.trim())),
+        _ => None,
+    };
+    if let Some(option) = &with_tree {
+        args.push(option);
+    }
     // MAGI FIX (S6 loop 10): D2-m2 refuted; the `--` keeps a leading-dash name a path.
     args.extend_from_slice(&["--", pathspec]);
     // A name that is not UTF-8 is never enumerated as a file to review (the input sets it
