@@ -256,6 +256,11 @@ pub struct ScannedLine {
     /// Whether the last non-blank character the line has in code context is `;`: a comment or
     /// string after it does not count, so `int f(void) // note;` does not end a statement.
     pub ends_statement: bool,
+    /// Whether the last non-blank character the line has in code context is `}`: a comment or
+    /// string after it does not count, so `void f() {} // note` ends a block and
+    /// `void g(const char* s = "}",` does not. A `}` that closes a template expression counts
+    /// as the template text it returns to, not as a brace.
+    pub ends_block: bool,
     /// `true` when the line starts inside a multi-line comment or string and never returns to
     /// structural code. A line that starts in code is `false` even when it is all comment
     /// (`// note`): keyword detection does not need to skip it, since no keyword opens with a
@@ -703,6 +708,7 @@ impl CodeScanner {
             min_delta,
             group_delta,
             ends_statement: last_code == Some(';'),
+            ends_block: false,
             is_non_code,
             starts_in_literal: !was_code_at_start,
         }
@@ -1449,5 +1455,16 @@ void h() {
         let results = CodeScanner::new(LexicalRules::rust()).scan_all("fn f() {\n}\n");
         assert_eq!(find_closing_brace(&results, 5), 1);
         assert_eq!(find_closing_brace(&[], 0), 0);
+    }
+
+    #[test]
+    fn a_line_whose_code_ends_in_a_closing_brace_ends_a_block() {
+        // [MAGI S6 loop 18, B2b-2/B2b-8] the extractors told a one-line construct by its text
+        // ending in `}` or holding a `{`; the scanner records whether the line's code ends in `}`,
+        // which no comment or string after it, or brace inside it, moves.
+        let code = "void f() {} // note\nvoid g(const char* s = \"}\",\nint h() { return 0; }\nint k() {\n}";
+        let results = CodeScanner::new(LexicalRules::cpp()).scan_all(code);
+        let ends: Vec<bool> = results.iter().map(|r| r.ends_block).collect();
+        assert_eq!(ends, vec![true, false, true, false, true]);
     }
 }

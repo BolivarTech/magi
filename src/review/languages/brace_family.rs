@@ -5300,4 +5300,213 @@ void g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_java_method_named_by_a_word_reserved_only_elsewhere_is_a_method() {
+        // [MAGI S6 loop 18, B2b-5] one list of non-function words served every language, so a
+        // Java method named `delete` was no unit and a call in its body was read as a member.
+        let java = "class A {\n    public void delete(Long id) {\n        repo.remove(id);\n    }\n    void await(int n) {\n        x(n);\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), java, 1, UnitKind::Class);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("A", UnitKind::Class, 1, 1),
+                ("delete", UnitKind::Method, 2, 4),
+                ("await", UnitKind::Method, 5, 7),
+                ("A", UnitKind::Class, 8, 8),
+            ]
+        );
+        // A Java keyword is still no method name.
+        let ext = BraceFamilyExtractor::java();
+        for line in ["    catch (Exception e) {", "    synchronized (lock) {"] {
+            assert_eq!(ext.signature_name(line, None, false), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn an_anonymous_default_exported_function_is_a_function() {
+        // [MAGI S6 loop 18, B2b-1] `function(` matched no `function ` keyword, so the export
+        // was a declaration group named `declarations`.
+        for head in [
+            "export default function() {",
+            "export default async function() {",
+        ] {
+            let code = format!("{head}\n    x();\n}}\n");
+            for ext in [
+                BraceFamilyExtractor::javascript(),
+                BraceFamilyExtractor::typescript(),
+            ] {
+                let units = extract(&ext, &code, &every_line(&code));
+                assert_eq!(
+                    spans(&units),
+                    vec![("unnamed", UnitKind::Function, 1, 3)],
+                    "{head}"
+                );
+            }
+        }
+        // A Rust function pointer type opening a line is no function.
+        let rust = "type F =\n    fn(u8) -> u8;\n";
+        let units = extract(&rust_extractor(), rust, &every_line(rust));
+        assert!(
+            units.iter().all(|u| u.kind != UnitKind::Function),
+            "{:?}",
+            spans(&units)
+        );
+    }
+
+    #[test]
+    fn a_generator_or_a_raw_identifier_names_its_function() {
+        // [MAGI S6 loop 18, B2b-6] `function *generate()` was named `` and `fn r#match()` was
+        // named `r`.
+        let js = "function *generate() {\n    yield 1;\n}\nfunction* other() {\n    yield 2;\n}\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &every_line(js));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("generate", UnitKind::Function, 1, 3),
+                ("other", UnitKind::Function, 4, 6),
+            ]
+        );
+        let rust = "fn r#match() {\n    x();\n}\nimpl S {\n    pub fn r#type(&self) {}\n}\n";
+        let units = extract(&rust_extractor(), rust, &every_line(rust));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("r#match", UnitKind::Function, 1, 3),
+                ("S", UnitKind::Impl, 4, 6),
+            ]
+        );
+        let parts = split(&rust_extractor(), rust, 4, UnitKind::Impl);
+        assert!(
+            parts.iter().any(|p| p.name == "r#type"),
+            "{:?}",
+            spans(&parts)
+        );
+    }
+
+    #[test]
+    fn a_generic_typescript_method_is_a_method() {
+        // [MAGI S6 loop 18, B2b-4] the text before `(` ended in `>`, so no identifier named the
+        // method and a generic method of a class or an interface was no member.
+        let ts = BraceFamilyExtractor::typescript();
+        let class = "class A {\n    foo<T>(x: T) {\n        return x;\n    }\n    static #bar<K>(k: K) {\n        return k;\n    }\n}\n";
+        assert_eq!(
+            spans(&split(&ts, class, 1, UnitKind::Class)),
+            vec![
+                ("A", UnitKind::Class, 1, 1),
+                ("foo", UnitKind::Method, 2, 4),
+                ("#bar", UnitKind::Method, 5, 7),
+                ("A", UnitKind::Class, 8, 8),
+            ]
+        );
+        let interface = "interface I {\n    foo<T>(x: T): T;\n    bar(): void;\n}\n";
+        assert_eq!(
+            spans(&split(&ts, interface, 1, UnitKind::Trait)),
+            vec![
+                ("I", UnitKind::Trait, 1, 1),
+                ("foo", UnitKind::Method, 2, 2),
+                ("bar", UnitKind::Method, 3, 3),
+                ("I", UnitKind::Trait, 4, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cpp_operator_spaced_from_its_symbol_is_a_function() {
+        // [MAGI S6 loop 18, B2b-7] the symbol had to touch the word `operator`, so a spaced
+        // overload was no function and its body fell into gap units.
+        let cpp = "bool operator <(int a, int b) {\n    return a;\n}\nT& operator = (const T& o) {\n    return *this;\n}\nbool operator [ ] (int i) const {\n    return v[i];\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), cpp, &every_line(cpp));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("operator<", UnitKind::Function, 1, 3),
+                ("operator=", UnitKind::Function, 4, 6),
+                ("operator[]", UnitKind::Function, 7, 9),
+            ]
+        );
+        // Outside C++ the word `operator` is an identifier like any other.
+        let js = "const operator = (x) => {\n    return x;\n};\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &every_line(js));
+        assert_eq!(spans(&units), vec![("operator", UnitKind::Function, 1, 3)]);
+    }
+
+    #[test]
+    fn a_brace_in_a_comment_does_not_end_a_wrapped_signature_on_its_first_line() {
+        // [MAGI S6 loop 18, B2b-2] a body-less signature was told from a one-line construct by a
+        // `{` anywhere in its first line, so one in a comment ended it there and the rest of the
+        // signature fell into a gap unit.
+        let rust = "trait T {\n    fn f(a: u8, // {\n        b: u8);\n    fn g(&self);\n}\n";
+        assert_eq!(
+            spans(&split(&rust_extractor(), rust, 1, UnitKind::Trait)),
+            vec![
+                ("T", UnitKind::Trait, 1, 1),
+                ("f", UnitKind::Method, 2, 3),
+                ("g", UnitKind::Method, 4, 4),
+                ("T", UnitKind::Trait, 5, 5),
+            ]
+        );
+        let go = "func f(a int, // {\n\tb int)\nfunc g() {\n}\n";
+        let units = extract(&BraceFamilyExtractor::go(), go, &every_line(go));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("f", UnitKind::Function, 1, 2),
+                ("g", UnitKind::Function, 3, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_one_line_function_with_a_trailing_comment_is_a_unit() {
+        // [MAGI S6 loop 18, B2b-8] a one-line function was told by its text ending in `}`, so a
+        // comment after the brace left it in a gap unit.
+        let c = "void f() {} // note\nint g(void) {\n    return 0;\n}\n";
+        let units = extract(&c_extractor(), c, &every_line(c));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("f", UnitKind::Function, 1, 1),
+                ("g", UnitKind::Function, 2, 4),
+            ]
+        );
+        let cpp =
+            "class A {\n    void f() {} // note\n    int g() {\n        return 0;\n    }\n};\n";
+        assert_eq!(
+            spans(&split(
+                &BraceFamilyExtractor::cpp(),
+                cpp,
+                1,
+                UnitKind::Class
+            )),
+            vec![
+                ("A", UnitKind::Class, 1, 1),
+                ("f", UnitKind::Method, 2, 2),
+                ("g", UnitKind::Method, 3, 5),
+                ("A", UnitKind::Class, 6, 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_method_after_an_unterminated_member_keeps_its_own_body() {
+        // [MAGI S6 loop 18, B2b-9] the forward search's stop rule read a method named by a
+        // reserved word (`delete() {`) as no construct, unlike the main scan, so a member with
+        // no `;` before it took that method's body.
+        let ts = "abstract class A {\n    abstract foo(): void\n    delete() {\n        x();\n    }\n}\n";
+        assert_eq!(
+            spans(&split(
+                &BraceFamilyExtractor::typescript(),
+                ts,
+                1,
+                UnitKind::Class
+            )),
+            vec![
+                ("A", UnitKind::Class, 1, 1),
+                ("foo", UnitKind::Method, 2, 2),
+                ("delete", UnitKind::Method, 3, 5),
+                ("A", UnitKind::Class, 6, 6),
+            ]
+        );
+    }
 }
