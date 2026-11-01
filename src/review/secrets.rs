@@ -1439,6 +1439,39 @@ mod tests {
     }
 
     #[test]
+    fn an_aws_secret_key_passed_with_its_name_as_an_argument_or_a_collection_item_is_a_secret() {
+        // [MAGI S6 loop 15, A2-1, security] only an assignment or a comparison after the name
+        // was read, so a quoted key passed next to it (`configure(name, "…")`, a tuple, a list,
+        // a dict value in a tuple, a call wrapped over two lines) was sent.
+        let tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let name = concat!("aws_secret", "_access_key");
+        let texts = [
+            format!("configure({name}, \"{tail}\")"),
+            format!("(\"{name}\", \"{tail}\")"),
+            format!("[\"{name}\", '{tail}']"),
+            format!("set({name},\n    \"{tail}\")"),
+            format!("{{'{name}': (\"{tail}\",)}}"),
+            format!("f({name}, `{tail}`)"),
+        ];
+        for text in &texts {
+            assert_eq!(find_secret(text), Some("aws-secret-key"), "{text}");
+            let masked = mask_secrets(text);
+            assert!(!masked.contains(tail), "{masked}");
+            assert_eq!(masked, mask_secrets_by_rescanning(text), "{text}");
+        }
+        // An unquoted identifier next to the name is code, not a key; a value past the short
+        // window, or after a byte that is no separator, is not taken for the key either.
+        let ident = "AbcdefghijAbcdefghijAbcdefghijAbcdefghij";
+        for plain in [
+            format!("f({name}, {ident})"),
+            format!("f({name},{}\"{tail}\")", " ".repeat(32)),
+            format!("f({name}; \"{tail}\")"),
+        ] {
+            assert_eq!(find_secret(&plain), None, "{plain}");
+        }
+    }
+
+    #[test]
     fn a_token_that_runs_into_a_pem_header_masks_the_whole_pem_block() {
         // [MAGI S6 loop 9, A2-b1, security] an OpenAI-shaped token glued to a PEM header ate
         // its `-----BEGIN`, so the PEM search over what followed the mask found no header and
