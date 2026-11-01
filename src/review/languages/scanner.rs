@@ -875,11 +875,14 @@ fn cpp_raw_string_start(chars: &[char], i: usize) -> Option<(Vec<char>, usize)> 
         .take_while(|&&c| c != '(')
         .copied()
         .collect();
+    // MAGI FIX (S6 loop 19, B2a-7): a `"` was rejected too, though C++ allows it in a delimiter
+    // ([lex.string] excludes only blanks, `(`, `)`, `\` and control characters), so such a raw
+    // string read as plain strings and its braces moved the depth.
     let valid = delimiter.len() <= MAX_CPP_RAW_DELIMITER_CHARS
         && rest.get(open + delimiter.len()) == Some(&'(')
         && !delimiter
             .iter()
-            .any(|&c| c.is_whitespace() || matches!(c, ')' | '\\' | '"'));
+            .any(|&c| c.is_whitespace() || c.is_control() || matches!(c, ')' | '\\'));
     valid.then(|| {
         let skip = open + delimiter.len() + 1;
         (delimiter, skip)
