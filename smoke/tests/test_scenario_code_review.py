@@ -289,6 +289,17 @@ class CodeReviewScenarioTests(unittest.TestCase):
             self.assertEqual(Outcome.CANNOT_TEST,
                              _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]], why)
 
+    def test_s47_fails_an_under_planned_run_even_when_the_backend_lost_a_batch(self) -> None:
+        # [MAGI §6 MS2 loop 14, F1a2-m3] batches_planned is published and judgeable whether or not every batch
+        # completed: two batches over an unmeasured window is a sizing defect, and a quota error on the second
+        # batch read CANNOT_TEST before the count was checked.
+        doc = _review(2)
+        doc["code_review"].update(batches_completed=1, failed_batches=[[2, "http error 429: quota"]])
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+        doc["code_review"]["unmeasured_models"] = []
+        self.assertEqual(Outcome.CANNOT_TEST,
+                         _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
     def test_s47_fails_a_shortfall_that_is_not_all_provider_class(self) -> None:
         # [MAGI §6 MS2 loop 12, F1a-m1/b1] any other shortfall stays FAIL: a cause that is not the backend's,
         # one provider failure beside it, or a shortfall the failed list does not account for.
