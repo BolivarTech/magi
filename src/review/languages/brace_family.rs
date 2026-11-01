@@ -903,7 +903,9 @@ impl BraceFamilyExtractor {
     /// ([`Self::opens_declaration_list`]): the first later code line that ends in `;`. The walk
     /// ends earlier, on the line before, at a blank line, a line whose braces do not balance (an
     /// initializer block, which joins the group as a declaration of its own) or a line that opens
-    /// a block or function construct, so the list never takes a later construct. `i` when line `i`
+    /// a block or function construct, so the list never takes a later construct; a line ending
+    /// in `,` is a declarator of the list (`g(void),`, `(*fp)(int),`), never a function header.
+    /// `i` when line `i`
     /// opens no list. O(k) for the k lines walked.
     fn declaration_list_end(&self, lines: &[&str], scanned: &[ScannedLine], i: usize) -> usize {
         if !lines
@@ -927,9 +929,13 @@ impl BraceFamilyExtractor {
             if record.ends_statement {
                 return k;
             }
+            // MAGI FIX (B2b1 8): a list line holding a function declarator (`g(void),`) read as a
+            // signature and ended the list before it; a line that ends in `,` continues the list,
+            // as no function header does (its parameters would close first).
             if record.brace_delta != 0
                 || self.construct_keyword(trimmed).is_some()
-                || self.signature_name(line, Some(record), false).is_some()
+                || (!trimmed.ends_with(',')
+                    && self.signature_name(line, Some(record), false).is_some())
             {
                 break;
             }
