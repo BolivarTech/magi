@@ -6534,6 +6534,40 @@ int g(void) {
     }
 
     #[test]
+    fn a_typescript_enum_or_namespace_is_a_unit_and_a_namespace_splits_into_its_items() {
+        // [MAGI B2b1 9] TypeScript's `enum` and `namespace` were in no keyword table, so their
+        // lines fell into gap units (or a declaration group, after `export` or `const`).
+        let code = "enum E {\n  A,\n  B,\n}\nexport enum F {\n  X,\n}\nconst enum G {\n  Y,\n}\nnamespace N {\n  function f() {\n  }\n}\ndeclare namespace D {\n  function g(): void;\n}\n";
+        let ext = BraceFamilyExtractor::typescript();
+        let units = extract(&ext, code, &all_lines(code));
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("E", UnitKind::Enum, 1, 4),
+                ("F", UnitKind::Enum, 5, 7),
+                ("G", UnitKind::Enum, 8, 10),
+                ("N", UnitKind::Module, 11, 14),
+                ("D", UnitKind::Module, 15, 17)
+            ]
+        );
+        let parts = split(&ext, code, 12, UnitKind::Module);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("N", UnitKind::Module, 11, 11),
+                ("f", UnitKind::Function, 12, 13),
+                ("N", UnitKind::Module, 14, 14)
+            ]
+        );
+        // `namespace` is no reserved word: a variable or an assignment by that name stays one.
+        let named = "const namespace = 1;\nnamespace = 2;\n";
+        assert_eq!(
+            spans(&extract(&ext, named, &all_lines(named))),
+            vec![("constants", UnitKind::DeclarationGroup, 1, 1)]
+        );
+    }
+
+    #[test]
     fn a_free_function_in_a_module_or_a_namespace_stays_a_function_when_split() {
         // [MAGI B2a 1] every block promoted its functions to methods, so a free function in a
         // Rust `mod` or a C++ `namespace` was labelled a method; only a type's block has methods.
