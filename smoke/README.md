@@ -378,9 +378,10 @@ own `.git/`: only the `.magi/` half of S51 exercises the product's exclusion, an
 only checks that nothing the product reports names it. Right before the product starts, the executor lists the workspace again with the same query and records the `.magi/` paths it sees (`RunResult.protected_visible`), which is how S51 tells an exercised exclusion from one that had no candidate. The executor refuses to build the
 workspace (exit 3) unless its path resolves strictly under the scratch area, checked before anything
 is created or deleted. It also refuses (exit 3) when any component of the workspace path below the
-scratch area is a symlink or a junction, the workspace itself included, and when the environment's
-`.magi` holds one: a linked parent resolves under the scratch area too, so deleting through it would
-empty the tree it names, and copying would follow a link the environment never needs. Junctions are
+repository root is a symlink or a junction, `smoke/`, the scratch area and the workspace itself
+included, and when the environment's `.magi` holds one: a linked parent resolves on both sides of the
+containment check, so deleting through it would empty the tree it names, and copying would follow a
+link the environment never needs. Junctions are
 detected with `os.path.isjunction` from Python 3.12 and, on the 3.11 floor, from the reparse tag
 `os.lstat` reports on Windows, so a junction is refused on every supported version. A directory under
 `.magi` that cannot be listed, or a link check that fails, stops the run with exit 3: a link inside

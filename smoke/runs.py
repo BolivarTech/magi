@@ -979,8 +979,9 @@ def _is_link(path) -> bool:
 def _linked_component(base, relative):
     """The first link on the way from *base* down to ``base / relative``.
 
-    *base* itself is not tested: it is the area the path is contained in, and
-    the containment check resolves it on both sides.
+    *base* itself is not tested; callers pick it with
+    :func:`_chain_from_repository`, so every component below the repository
+    root is.
 
     Args:
         base: The directory the walk starts under.
@@ -1002,6 +1003,35 @@ def _linked_component(base, relative):
         if _is_link(path):
             return path
     return None
+
+
+def _chain_from_repository(path) -> tuple[pathlib.Path, pathlib.PurePath]:
+    """Where a link walk down to *path* starts, and the components it tests.
+
+    A path under :data:`REPOSITORY_ROOT` (the scratch area always is) is
+    walked from the repository root, so every component from there down,
+    the scratch area included, is tested. Any other path (a test double's
+    temporary scratch area) is walked from its own parent, so its last
+    component is still tested; callers append what lies below it. The path is made absolute without resolving
+    links: resolving would walk through the very link being looked for.
+
+    Args:
+        path: The path the walk ends at.
+
+    Returns:
+        tuple[pathlib.Path, pathlib.PurePath]: The untested base, and the path
+        below it whose every component :func:`_linked_component` tests.
+
+    Example:
+        >>> base, below = _chain_from_repository(REPOSITORY_ROOT / "smoke" / "scratch")
+        >>> base == REPOSITORY_ROOT, below.as_posix()
+        (True, 'smoke/scratch')
+    """
+    absolute = pathlib.Path(os.path.abspath(path))
+    try:
+        return REPOSITORY_ROOT, absolute.relative_to(REPOSITORY_ROOT)
+    except ValueError:
+        return absolute.parent, pathlib.PurePath(absolute.name)
 
 
 def _walk_failed(error: OSError) -> None:
@@ -1692,6 +1722,24 @@ class RunExecutor:
         """
         return pathlib.Path(self._env.scratch_dir) / REVIEW_WORKSPACE_DIR
 
+    def _first_link_down_to(self, *below: str):
+        """The first link from the repository root down to the workspace path *below*.
+
+        Args:
+            *below: Components under the review workspace; none means the
+                workspace itself.
+
+        Returns:
+            pathlib.Path | None: The first component that is a symlink or a
+            junction, the scratch area and the workspace included, or ``None``.
+
+        Raises:
+            OSError: When a component cannot be inspected.
+        """
+        base, scratch = _chain_from_repository(self._env.scratch_dir)
+        return _linked_component(
+            base, scratch.joinpath(REVIEW_WORKSPACE_DIR, *below))
+
     def _capture_review_log(self, definition: RunDefinition, unreadable=None):
         """Read the review workspace's run log right after a run.
 
@@ -1803,9 +1851,12 @@ class RunExecutor:
         # it, whatever ``os.path.isjunction`` says; only the TOP path being a
         # link is unsafe, and that is refused above. Pinned on 3.11 and later by
         # test_rebuilding_the_workspace_never_deletes_through_a_junction_inside_it.
+        # MAGI FIX (S6 loop 17): the walk started below the scratch area, so a
+        # scratch area that is itself a link (or a linked component above it)
+        # passed both checks, and rmtree and copytree went through it
+        # (F1a1-caspar). The walk starts at the repository root.
         try:
-            linked = _linked_component(pathlib.Path(self._env.scratch_dir),
-                                       REVIEW_WORKSPACE_DIR)
+            linked = self._first_link_down_to()
             if linked is None:
                 _reject_links(self._env.magi_dir)
         except OSError as exc:
