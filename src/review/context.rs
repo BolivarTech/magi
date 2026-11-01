@@ -10,7 +10,12 @@
 
 use serde::Serialize;
 
-/// Structured metadata about a source file, kept by each semantic unit.
+/// Structured metadata about a source file, carried by each semantic unit.
+///
+/// No stage fills or reads it in v0.25.0: every extractor sets it to [`FileContext::default`]
+/// (all fields empty, `language` included), and a batch names its file's language in its file
+/// header from the path ([`detect_language`]). It is kept as the slot for the retrieval stage
+/// that will fill it; until then none of its fields says anything about the file.
 ///
 /// # Examples
 ///
