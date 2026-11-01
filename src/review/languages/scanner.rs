@@ -859,11 +859,14 @@ fn cpp_raw_string_start(chars: &[char], i: usize) -> Option<(Vec<char>, usize)> 
         return None;
     }
     let rest = chars.get(i..)?;
-    let prefix = CPP_RAW_PREFIXES.iter().find(|p| {
-        let p: Vec<char> = p.chars().collect();
-        rest.starts_with(&p) && rest.get(p.len()) == Some(&'"')
+    // MAGI FIX (S6 loop 18, B2a-8): each prefix was collected into a `Vec` at every position of
+    // a C++ line; it is compared in place, so a position that opens no raw string allocates
+    // nothing.
+    let prefix_chars = CPP_RAW_PREFIXES.iter().find_map(|p| {
+        let n = p.chars().count();
+        (rest.iter().take(n).copied().eq(p.chars()) && rest.get(n) == Some(&'"')).then_some(n)
     })?;
-    let open = prefix.chars().count() + 1;
+    let open = prefix_chars + 1;
     let delimiter: Vec<char> = rest
         .get(open..)?
         .iter()
