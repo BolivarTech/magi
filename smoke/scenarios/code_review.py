@@ -1120,7 +1120,9 @@ def _exclusion_finding(run, stderr):
     entries, _ = _omissions(stderr)
     named = {_slashed(path) for path, cause in entries
              if cause == PROTECTED_CAUSE}
-    found = bool(named & set(run.protected_visible))
+    # MAGI FIX (S6 loop 14): only the omission list was read with "\\" as "/",
+    # so a backslash-separated listing never matched (F1a2-c2).
+    found = bool(named & {_slashed(path) for path in run.protected_visible})
     # MAGI FIX (S6 loop 14): the product names at most MAX_OMISSIONS_SHOWN
     # entries, so with the list cut every listed .magi/ file could sit in the
     # unnamed rest and S51 read the environment's size as a FAIL (F1a1-m2).
