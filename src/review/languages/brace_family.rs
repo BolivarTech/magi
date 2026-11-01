@@ -1633,9 +1633,10 @@ impl SearchBudget {
 ///
 /// Inside an open parameter list `stops` is not asked: a parameter line holding a `(` after a
 /// word (`int (*callback)(int),`, `std::function<void(int)> cb,`) reads like a signature of its
-/// own, and stopping there cut the function at that line. The parentheses are counted on the
-/// line text ([`paren_delta`]), so a `(` or `)` inside a string or a comment of the parameter
-/// list miscounts them; the search then still ends at a blank line, a statement or a brace.
+/// own, and stopping there cut the function at that line. The list counts as open while a
+/// parenthesis or bracket opened since line `i` is still open, counted by the scanner in code
+/// context only ([`ScannedLine::group_delta`]), so a `(` inside a string or a comment
+/// (`func f(x int) // see (`) holds nothing open and the next construct keeps its own brace.
 ///
 /// A blank line does not end the search inside an open parameter list: while a parenthesis or
 /// bracket opened since line `i` is still open, counted by the scanner in code context only
@@ -1679,7 +1680,6 @@ fn open_brace_line(
     // MAGI FIX (S6 loop 3): no fixed two-line cap; the declaration's own end bounds the search.
     // MAGI FIX (S6 loop 6): a top-level `foo()` took the brace of the `if (x) {` after it.
     // MAGI FIX (S6 loop 7): a parameter line inside the open list no longer stops the search.
-    let mut parens = paren_delta(lines, scanned, i);
     // MAGI FIX (S6 loop 12): inside an open parameter list the search ran to the end of the
     // file, quadratic over a file of `f(a` lines and outside any clock; it is now bounded.
     let budget_end = i
@@ -1703,6 +1703,9 @@ fn open_brace_line(
             }
             return None;
         }
+        // The list still open before line `j`, in code context: a `(` inside a comment or a
+        // string (`func f(x int) // see (`) held it open and the next function's brace was taken.
+        let open_before = list_open;
         list_open += group_open(j);
         // MAGI FIX (S6 loop 9): a constructor initializer after a `,` (`count_(0) {`) read as
         // the next construct; a line after one ending in `,` continues the declaration.
@@ -1716,7 +1719,7 @@ fn open_brace_line(
                     t.ends_with(',') && !LINE_OPENING_COMMENTS.iter().any(|c| t.starts_with(c))
                 })
         });
-        let ends_search = (parens <= 0 && !continues && search.stops(j))
+        let ends_search = (open_before <= 0 && !continues && search.stops(j))
             || lines.get(j).is_some_and(|l| opens_statement(l.trim()));
         if ends_search {
             return None;
@@ -1727,7 +1730,6 @@ fn open_brace_line(
         if ends_statement(j) {
             return None;
         }
-        parens += paren_delta(lines, scanned, j);
     }
     None
 }
