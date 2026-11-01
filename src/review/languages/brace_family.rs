@@ -2661,11 +2661,41 @@ fn balanced_end_outside_quotes(
     None
 }
 
+/// The prefix of a Rust raw identifier (`r#match`), which [`construct_name`] keeps in the name.
+const RAW_IDENTIFIER_PREFIX: &str = "r#";
+
+/// The marker of a JavaScript generator declaration (`function *gen()`), which
+/// [`construct_name`] passes over before the name.
+const GENERATOR_MARKER: char = '*';
+
 /// The name of a construct: the identifier that opens `rest`, the text after its keyword (after
 /// a parenthesized receiver it opens with, as in Go's `func (r *T) Name(`), or, when none
-/// does, the identifier of the second word of `text`, the matched line.
+/// does, the identifier of the second word of `text`, the matched line. A generator's `*` before
+/// the name is passed over (`function *gen()` gives `gen`), and a Rust raw identifier keeps its
+/// prefix (`fn r#match()` gives `r#match`). O(n) in the line.
 fn construct_name(rest: &str, text: &str) -> String {
-    let ident = |t: &str| -> String { t.chars().take_while(|&c| is_identifier_char(c)).collect() };
+    // MAGI FIX (S6 loop 18, B2b-6): `fn r#match()` was named `r` and `function *gen()` was
+    // unnamed; a raw identifier keeps its prefix, as written, and a generator's `*` is passed
+    // over.
+    let ident = |t: &str| -> String {
+        let (prefix, body) = t
+            .strip_prefix(RAW_IDENTIFIER_PREFIX)
+            .filter(|body| body.starts_with(is_identifier_char))
+            .map_or(("", t), |body| (RAW_IDENTIFIER_PREFIX, body));
+        let name: String = body
+            .chars()
+            .take_while(|&c| is_identifier_char(c))
+            .collect();
+        if name.is_empty() {
+            name
+        } else {
+            format!("{prefix}{name}")
+        }
+    };
+    let rest = rest
+        .trim_start()
+        .strip_prefix(GENERATOR_MARKER)
+        .map_or(rest, str::trim_start);
     // MAGI FIX (S6 loop 6): a Go method's receiver left it unnamed.
     let rest = match rest.trim_start().strip_prefix('(') {
         Some(inner) => inner
