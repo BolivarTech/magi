@@ -193,6 +193,9 @@ pub struct LexicalRules {
     /// directive (a stray `#endif`, a missing one) degrades to plain counting, never a panic,
     /// as does a conditional nested past [`MAX_CONDITIONAL_NESTING`]. A directive inside a
     /// comment, a string or a `\`-continued directive is no conditional.
+    ///
+    /// The same languages splice a line ending in `\` onto the next one, so a `//` comment
+    /// ending in `\` continues on the next line, which is then comment text too.
     // MAGI FIX (B2a): `#ifdef` / `#else` around two headers of one function counted both `{`,
     // so the function ran to the end of the file and a large file failed its batch.
     pub preprocessor_directives: bool,
@@ -886,10 +889,18 @@ impl CodeScanner {
 
         // Reset line comment at end of line; a regex literal cannot span lines either, so an
         // unclosed one (a `/` misread as one) ends with its line.
-        if matches!(
-            self.state,
-            LexicalState::LineComment | LexicalState::RegexLiteral { .. }
-        ) {
+        // MAGI FIX (B2a 4): in C and C++ a backslash before the newline splices the next line
+        // into the comment (translation phase 2), so `// note \` hides the next line's braces.
+        // Trailing blanks after the backslash are tolerated, as for a continued directive.
+        let spliced_comment = self.rules.preprocessor_directives
+            && self.state == LexicalState::LineComment
+            && line.trim_end().ends_with('\\');
+        if !spliced_comment
+            && matches!(
+                self.state,
+                LexicalState::LineComment | LexicalState::RegexLiteral { .. }
+            )
+        {
             self.state = LexicalState::Code;
         }
 
