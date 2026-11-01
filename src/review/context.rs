@@ -42,6 +42,33 @@ pub struct FileContext {
     pub framework_hints: Vec<String>,
 }
 
+/// The extension of a file path, as written: what follows the last `.` of its file name (the
+/// text after its last `/` or `\`). A name without a dot, or whose only dot leads it, has none
+/// (`Makefile`, `bash`, `.rs`), and neither does a dot in a directory name (`a.d/json`).
+///
+/// # Arguments
+///
+/// * `file_path` - A path, relative or absolute, with `/` or `\` separators.
+///
+/// # Returns
+///
+/// The extension without its dot, or `None`. O(n) in the path.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::context::file_extension;
+///
+/// assert_eq!(file_extension("src/main.RS"), Some("RS"));
+/// assert_eq!(file_extension(".rs"), None);
+/// assert_eq!(file_extension("bash"), None);
+/// ```
+pub fn file_extension(file_path: &str) -> Option<&str> {
+    let name = file_path.rsplit(['/', '\\']).next()?;
+    let (stem, ext) = name.rsplit_once('.')?;
+    (!stem.is_empty()).then_some(ext)
+}
+
 /// Detect programming language from file extension, ignoring its ASCII case.
 ///
 /// # Arguments
@@ -50,7 +77,8 @@ pub struct FileContext {
 ///
 /// # Returns
 ///
-/// Language identifier string. Returns "unknown" for unrecognized extensions.
+/// Language identifier string. Returns "unknown" for unrecognized extensions, and for a file
+/// name with no extension ([`file_extension`]: `bash`, `.rs`).
 ///
 /// # Examples
 ///
@@ -59,14 +87,13 @@ pub struct FileContext {
 ///
 /// assert_eq!(detect_language("app.py"), "python");
 /// assert_eq!(detect_language("Makefile"), "unknown");
+/// assert_eq!(detect_language("bash"), "unknown");
 /// ```
 pub fn detect_language(file_path: &str) -> String {
     // MAGI FIX (S6 loop 4): `MAIN.RS` is Rust too; the extension is matched case-insensitively.
-    let ext = file_path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    // MAGI FIX (S6 loop 17, B1-1): a dot-less name (`bash`) was its own extension, and a hidden
+    // `.rs` was Rust, unlike the registry, which gives neither an extractor.
+    let ext = file_extension(file_path).unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "rs" => "rust",
         "c" => "c",
