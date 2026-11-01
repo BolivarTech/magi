@@ -402,19 +402,17 @@ impl LanguageRegistry {
     }
 
     /// Get the extractor for a file path, or `None` for unknown extensions. The extension is
-    /// matched ignoring its ASCII case (`A.RS` is Rust), as [`detect_language`] does. The
-    /// extension is what follows the last dot of the file name (the last `/` or `\` segment);
-    /// a name without a dot, or whose only dot leads it (`rs`, `.rs`), has none.
+    /// matched ignoring its ASCII case (`A.RS` is Rust), as [`detect_language`] does, and read
+    /// the same way ([`file_extension`]): a name without a dot, or whose only dot leads it
+    /// (`rs`, `.rs`), has none.
     ///
     /// [`detect_language`]: crate::review::context::detect_language
+    /// [`file_extension`]: crate::review::context::file_extension
     pub fn get(&self, file_path: &str) -> Option<&ExtractorKind> {
         // MAGI FIX (S6 loop 4): an upper-case extension lost its extractor.
         // MAGI FIX (S6 loop 6): a name without a dot was taken whole as its extension.
-        let name = file_path.rsplit(['/', '\\']).next()?;
-        let (stem, ext) = name.rsplit_once('.')?;
-        if stem.is_empty() {
-            return None;
-        }
+        // MAGI FIX (S6 loop 17, B1-1): one reading of the extension, shared with the label.
+        let ext = crate::review::context::file_extension(file_path)?;
         self.extractors.get(&ext.to_ascii_lowercase())
     }
 }
