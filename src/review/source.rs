@@ -1174,6 +1174,24 @@ mod tests {
     }
 
     #[test]
+    fn a_file_gone_right_after_the_open_reads_as_absent() {
+        // [MAGI S6 loop 16, A2-4] the same unlink a moment later, between the open and the
+        // re-verification, read as outside the workspace.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("a.rs"), "fn f() {}\n").expect("write");
+        let src = WorktreeSource::new(root.path().to_path_buf());
+        let open_then_unlink = |p: &std::path::Path| -> std::io::Result<std::fs::File> {
+            let file = open_for_review(p)?;
+            std::fs::remove_file(p)?;
+            Ok(file)
+        };
+        assert_eq!(
+            src.read_with("a.rs", &open_then_unlink).expect("absent"),
+            None
+        );
+    }
+
+    #[test]
     fn a_file_swapped_between_the_check_and_the_open_is_refused() {
         // [MAGI §6 MS2 D loop 2, security] the opener stands in for a component swapped for an
         // escaping link after the containment check: what was opened is not what the path names.
