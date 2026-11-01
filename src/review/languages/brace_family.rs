@@ -58,6 +58,10 @@ pub struct BraceFamilyExtractor {
     /// reserved word as a method name, and a class body holds no statement
     /// ([`BraceFamilyExtractor::try_detect_constructs`]).
     reserved_word_methods: bool,
+    /// Whether a member may be named by a computed key (`[Symbol.iterator]() {`) or a private
+    /// name (`#secret() {`), named as written ([`private_or_computed_name`]): JavaScript and
+    /// TypeScript, where a line opening with `#` is no preprocessor directive.
+    computed_member_names: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -1029,7 +1033,7 @@ impl BraceFamilyExtractor {
     /// The function name of a C-family signature line, for extractors with
     /// `signature_functions`: a line that holds `(`, whose code does not end in `;` (a prototype;
     /// with `scanned`, a comment after the code does not count), does not
-    /// open with `#`, a comment, `}`, `@`, `,` or a single `:` (a C++ constructor's initializer line,
+    /// open with `#` (but for `computed_member_names`, where it opens a private name), a comment, `}`, `@`, `,` or a single `:` (a C++ constructor's initializer line,
     /// `: value_(v) {`, continues the signature above it), has no `=` before its `(`, and names an identifier,
     /// not a keyword of [`NOT_FUNCTION_NAMES`], just before the `(` (`int *parse(` gives `parse`, `void Foo::bar(` gives
     /// `bar`). The line may be indented: a function inside a namespace, a class or an
@@ -1100,10 +1104,14 @@ impl BraceFamilyExtractor {
         // search stopped there; it continues the signature above it.
         let initializer =
             trimmed.starts_with(',') || (trimmed.starts_with(':') && !trimmed.starts_with("::"));
+        // MAGI FIX (S6 loop 17, B2-3): a private method (`#m() {`) opened with `#` and was read
+        // as a preprocessor line; in JavaScript and TypeScript `#` opens a private name.
+        let directive = trimmed.starts_with('#') && !self.computed_member_names;
         if (prototype && !prototypes)
             || comment_star
             || initializer
-            || ["#", "//", "/*", "}", "@"]
+            || directive
+            || ["//", "/*", "}", "@"]
                 .iter()
                 .any(|p| trimmed.starts_with(p))
         {
@@ -1114,7 +1122,11 @@ impl BraceFamilyExtractor {
         // MAGI FIX (S6 loop 13): `__attribute__((noreturn)) void die(void) {` was a function
         // named `__attribute__`; the C attributes are read past first.
         let attributes = self.without_c_attributes(trimmed);
-        identifier_before_paren(self.without_template_header(&attributes))
+        let text = self.without_template_header(&attributes);
+        self.computed_member_names
+            .then(|| private_or_computed_name(text))
+            .flatten()
+            .or_else(|| identifier_before_paren(text))
     }
 
     /// The kind of the block `trimmed` opens and the text after its keyword
@@ -2023,6 +2035,54 @@ fn identifier_before_paren(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The name of a JavaScript or TypeScript member whose key is computed or private, as written
+/// before the `(` of its parameter list ([`parameter_list_head`]): a computed key in balanced
+/// square brackets (`*[Symbol.iterator]() {` gives `[Symbol.iterator]`) or an identifier right
+/// after a `#` (`static #s() {` gives `#s`). `None` for any other line, which
+/// [`identifier_before_paren`] then names, and when an `=` comes before the `(` (an assignment).
+/// O(n) in the line.
+///
+/// # Arguments
+///
+/// * `line` - A signature line, trimmed.
+///
+/// # Returns
+///
+/// The member's name, or `None`.
+fn private_or_computed_name(line: &str) -> Option<String> {
+    let head = parameter_list_head(line)?;
+    if head.before.contains('=') {
+        return None;
+    }
+    let text = head.name_text.trim_end();
+    if text.ends_with(']') {
+        let open = matching_open_bracket(text)?;
+        return text.get(open..).map(str::to_string);
+    }
+    let ident = trailing_identifier(text);
+    let before = text.get(..text.len().checked_sub(ident.len())?)?;
+    (!ident.is_empty() && before.ends_with('#')).then(|| format!("#{ident}"))
+}
+
+/// The byte offset of the `[` that matches the `]` `text` ends with, counting the brackets
+/// between, or `None` when it never opens. O(n) in the text.
+fn matching_open_bracket(text: &str) -> Option<usize> {
+    let mut depth = 0u32;
+    for (at, c) in text.char_indices().rev() {
+        match c {
+            ']' => depth = depth.saturating_add(1),
+            '[' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The words of a C++ return type whose operand is parenthesized (`decltype(auto)`,
 /// `decltype(a + b)`): the `(` right after one opens no parameter list.
 const TYPE_OPERATORS: [&str; 1] = ["decltype"];
@@ -2593,6 +2653,7 @@ impl BraceFamilyExtractor {
             semicolon_declarations: false,
             template_headers: false,
             reserved_word_methods: false,
+            computed_member_names: false,
         }
     }
 
@@ -2623,6 +2684,7 @@ impl BraceFamilyExtractor {
             semicolon_declarations: true,
             template_headers: false,
             reserved_word_methods: false,
+            computed_member_names: false,
         }
     }
 
@@ -2677,6 +2739,7 @@ impl BraceFamilyExtractor {
             semicolon_declarations: false,
             template_headers: false,
             reserved_word_methods: false,
+            computed_member_names: false,
         }
     }
 
@@ -2709,6 +2772,7 @@ impl BraceFamilyExtractor {
             semicolon_declarations: false,
             template_headers: false,
             reserved_word_methods: false,
+            computed_member_names: false,
         }
     }
 
@@ -2749,6 +2813,8 @@ impl BraceFamilyExtractor {
             template_headers: false,
             // MAGI FIX (S6 loop 14): a method named `delete`, `new` or `catch` was no member.
             reserved_word_methods: true,
+            // MAGI FIX (S6 loop 17, B2-3): `[key]() {` and `#m() {` were no members.
+            computed_member_names: true,
         }
     }
 
