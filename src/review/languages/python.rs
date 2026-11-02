@@ -451,35 +451,31 @@ fn is_module_assignment(trimmed: &str) -> bool {
 /// augmented: `+=`, `<<=`; not the comparisons `==`, `!=`, `<=`, `>=`) or an annotation `:`
 /// (not `:=`). A call's keyword argument (`f(level=1)`) and a string's `:` (`print("a:b")`) are
 /// inside a bracket or a string and do not count. O(n) in the line.
+///
+/// Strings are read with [`PythonStrings`], the reader `LogicalLines` uses, so triple quotes,
+/// prefixes and f-string fields follow one grammar: an `=` inside a triple-quoted string holding
+/// an apostrophe (`'''It's a = b'''`) stays string text. A string still open at the line's end
+/// (a triple-quoted string that continues) holds the rest of the line, so no operator follows.
 fn has_top_level_assignment(line: &str) -> bool {
     // MAGI FIX (S6 loop 5): any `=` or `:` made a call (`setup(level=1)`) an assignment.
-    // MAGI FIX (S6 loop 14): a triple-quoted string is read here as three one-quote strings,
-    // unlike `LogicalLines`, which tracks it as one. That is deliberate and gives the same
-    // answer for valid Python: the stretches read as outside the string, between the 2nd and
-    // 3rd quotes and between the 4th and 5th, are empty, so an `=` or `:` inside the string
-    // always stays inside a quote, and a real assignment's operator comes before the string
-    // opens. Keep the simplification; tracking triple quotes here would only add a second copy
-    // of the string reader to keep in step.
+    // MAGI FIX (loop 26, 9): a triple-quoted string was read as three one-quote strings, so an
+    // apostrophe inside it (`'''It's a = b'''`) left `a = b` outside every quote and the
+    // docstring read as an assignment; the shared string reader tracks triple quotes.
     let chars: Vec<char> = line.chars().collect();
     let at = |k: usize| chars.get(k).copied();
     let mut depth = 0u32;
-    let mut quote: Option<char> = None;
+    let mut strings = PythonStrings::default();
     let mut k = 0;
     while let Some(c) = at(k) {
-        if let Some(q) = quote {
-            if c == '\\' {
-                k += 2;
-                continue;
-            }
-            if c == q {
-                quote = None;
-            }
-            k += 1;
-            continue;
-        }
         match c {
             '#' => return false,
-            '"' | '\'' => quote = Some(c),
+            '"' | '\'' => {
+                k = strings.open(&chars, k).unwrap_or(k + 1);
+                if strings.is_open() {
+                    return false;
+                }
+                continue;
+            }
             '(' | '[' | '{' => depth = depth.saturating_add(1),
             ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ':' if depth == 0 => return at(k + 1) != Some('='),
