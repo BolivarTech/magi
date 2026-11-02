@@ -6,6 +6,7 @@
 import contextlib
 import io
 import math
+import os
 import pathlib
 import unittest
 import urllib.error
@@ -1293,6 +1294,58 @@ class LargePayloadWiringTests(unittest.TestCase):
         runs.configure(binary, env, config)
         runs.RunExecutor(binary, env, config).execute(runs.DEFINITIONS["R1"])
         self.assertLess(len(sent["stdin"] or b""), 4096)
+
+
+class LogScanLinkTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 28, sweep of F1a1-melchior] ``logs.scan`` reads only the product's own log files.
+
+    It walked the environment's ``.magi/logs`` with ``rglob`` and ``read_bytes``, which follow a link (and
+    descend into a junction), so a link or a hard link planted there had a scenario match bytes from outside
+    the environment -- the defect the review-log capture had already been fixed for.
+    """
+
+    _OUTSIDE = b"run=4242 bytes outside the environment"
+
+    def _scan(self, plant) -> tuple:
+        """Scan a log directory holding one real file after *plant(logs_dir, outside)* ran."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            logs_dir = root / ".magi" / "logs"
+            logs_dir.mkdir(parents=True)
+            (logs_dir / "magi-run.log").write_bytes(b"this run's own line\n")
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "elsewhere.log").write_bytes(self._OUTSIDE)
+            plant(logs_dir, outside)
+            with mock.patch.object(logs, "log_directory", return_value=logs_dir):
+                found, existed, unreadable = logs.contains("run=4242")
+                own, _, _ = logs.contains("this run's own line")
+        return found, existed, unreadable, own
+
+    def test_a_link_under_the_log_directory_is_never_read_through(self) -> None:
+        def plant(logs_dir, outside):
+            try:
+                os.symlink(outside, logs_dir / "linked", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                try:
+                    import _winapi
+                    _winapi.CreateJunction(str(outside), str(logs_dir / "linked"))
+                except (ImportError, OSError) as exc:
+                    raise unittest.SkipTest("cannot create a directory link here: %s" % exc) from exc
+
+        found, existed, unreadable, own = self._scan(plant)
+        self.assertTrue(existed)
+        self.assertTrue(own)
+        self.assertFalse(found)
+        self.assertEqual(["linked (%s)" % runs.LINK_NOT_FOLLOWED], unreadable)
+
+    def test_a_hard_link_under_the_log_directory_is_never_read(self) -> None:
+        found, _, unreadable, own = self._scan(
+            lambda logs_dir, outside: os.link(outside / "elsewhere.log", logs_dir / "planted.log"))
+        self.assertTrue(own)
+        self.assertFalse(found)
+        self.assertEqual(["planted.log (%s)" % runs.HARD_LINKED], unreadable)
 
 
 if __name__ == "__main__":
