@@ -80,6 +80,20 @@ class ExitCodeTests(unittest.TestCase):
         self.assertIn("harness failure: the stand-in failed", stderr.getvalue())
         self.assertIn("requests the counter saw: POST /api/chat", stderr.getvalue())
 
+    def test_a_preflight_failure_prints_the_notes_it_carries(self) -> None:
+        """[MAGI §6 MS2 loop 28, F1a1-caspar] notes were printed for a
+        harness failure only; any other exception that reaches the outer
+        guard prints them with its traceback, but a preflight failure is
+        reported by its message alone and lost them."""
+        error = PreflightError("the backend is down")
+        error.add_note("requests the counter saw: POST /api/chat")
+        stderr = io.StringIO()
+        with mock.patch.object(main.SmokeConfig, "load", side_effect=error), \
+                contextlib.redirect_stderr(stderr):
+            code = main.main(["--smoke-1"])
+        self.assertEqual(EXIT_PREFLIGHT, code)
+        self.assertIn("requests the counter saw: POST /api/chat", stderr.getvalue())
+
 
 class ArgumentTests(unittest.TestCase):
     """No --defaults flag exists; absent --profile is the certifying mode."""
