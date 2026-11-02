@@ -1501,4 +1501,22 @@ def g():
         let def = extract("def f():\n    def g():\n        pass\n", &[2]);
         assert!(PythonExtractor.split_block(&def[0]).is_empty());
     }
+
+    #[test]
+    fn an_equals_sign_inside_a_triple_quoted_docstring_is_no_assignment() {
+        // [MAGI loop 26, 9] the assignment check read a triple-quoted string as one-quote
+        // strings, so an apostrophe inside it (`It's`) left `a = b` outside every quote and the
+        // docstring merged with the assignment below it under a junk name.
+        assert!(!has_top_level_assignment("'''It's a = b, see below.'''"));
+        assert!(!has_top_level_assignment("\"\"\"Say \"x\" = 1.\"\"\""));
+        assert!(has_top_level_assignment("X = '''It's a = b'''"));
+        let code = "'''It's a = b, see below.'''\nX = 1\n";
+        assert_eq!(
+            spans(&extract(code, &[1, 2])),
+            vec![
+                ("X", UnitKind::DeclarationGroup, 2, 2),
+                ("lines 1-1", UnitKind::TopLevel, 1, 1),
+            ]
+        );
+    }
 }
