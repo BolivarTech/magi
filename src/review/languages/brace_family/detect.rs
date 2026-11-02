@@ -999,7 +999,7 @@ impl BraceFamilyExtractor {
                 start -= 1;
             } else if let Some(open) = self
                 .block_doc_start(lines, scanned, start - 1)
-                .or_else(|| self.multi_line_attribute_start(lines, scanned, start - 1))
+                .or_else(|| self.multi_line_attribute_start(lines, scanned, start - 1, floor))
             {
                 start = open;
             } else if let Some(above) = self.attribute_above_blanks(lines, scanned, start, floor) {
@@ -1055,7 +1055,7 @@ impl BraceFamilyExtractor {
             .any(|p| text.starts_with(p.as_str()));
         (opens_attribute
             || self
-                .multi_line_attribute_start(lines, scanned, above)
+                .multi_line_attribute_start(lines, scanned, above, floor)
                 .is_some())
         .then_some(above)
     }
@@ -1107,11 +1107,29 @@ impl BraceFamilyExtractor {
     /// (`@SuppressWarnings(` ... `)`, `@Component({` ... `})`) is recovered the same way on its
     /// parentheses: `last` ends in `)` and the line that balances them opens with an attribute
     /// prefix that does not end in `[` (`@`).
+    ///
+    /// The walk never goes above `floor`, the line after the previous construct: an attribute
+    /// opening above it would overlap that construct, and an unbounded walk made a file of
+    /// closing lines between constructs (`)` then `fn f() {}`, repeated) cost O(n²) line visits.
+    /// Each walk stays inside the gap above its own construct, and the gaps of a pass are
+    /// disjoint, so the walks add O(n) in all.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `last` - The 0-based line the attribute would end on.
+    /// * `floor` - The 0-based line the walk never goes above.
+    ///
+    /// # Returns
+    ///
+    /// The attribute's 0-based opening line, or `None`.
     fn multi_line_attribute_start(
         &self,
         lines: &[&str],
         scanned: &[ScannedLine],
         last: usize,
+        floor: usize,
     ) -> Option<usize> {
         // MAGI FIX (S6 loop 10): the line above an item under a multi-line attribute is `)]`,
         // so the attribute was cut from the item it controls and reviewed as a gap unit.
@@ -1139,7 +1157,7 @@ impl BraceFamilyExtractor {
                 if j == last {
                     return None;
                 }
-                j = j.checked_sub(1)?;
+                j = j.checked_sub(1).filter(|&k| k >= floor)?;
                 continue;
             }
             let line = lines.get(j)?;
@@ -1155,7 +1173,9 @@ impl BraceFamilyExtractor {
             if unclosed <= 0 {
                 return (unclosed == 0 && j < last && opens_attribute(line.trim())).then_some(j);
             }
-            j = j.checked_sub(1)?;
+            // MAGI FIX (loop 26, 1): the walk had no floor and climbed to the top of the file
+            // while the brackets stayed unbalanced, so `)` lines between functions cost O(n²).
+            j = j.checked_sub(1).filter(|&k| k >= floor)?;
         }
     }
 
