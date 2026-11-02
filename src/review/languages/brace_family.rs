@@ -401,6 +401,15 @@ const CPP_NOT_FUNCTION_NAMES: [&str; 18] = [
     "try", "throw", "new", "delete", "requires", "noexcept", "decltype",
 ];
 
+/// The C++ words a namespace or a class may open with: `inline namespace v1 {` (C++11) and the
+/// C++20 module export `export namespace m {`. Qualifiers only, so they are stripped before the
+/// block and function tables and never before the declaration table.
+// MAGI FIX (B2b1 10): both namespaces matched no keyword and their functions became top-level.
+const CPP_MODIFIERS: Modifiers = Modifiers {
+    visibility: &[],
+    qualifiers: &["inline", "export"],
+};
+
 /// The words a JavaScript or TypeScript declaration may open with (`export default`,
 /// `export abstract class`, `async function`).
 const JS_MODIFIERS: Modifiers = Modifiers {
@@ -859,7 +868,16 @@ impl BraceFamilyExtractor {
                         !(self.semicolon_declarations
                             && (declares_variable(rest) || returns_from_function(rest)))
                     })
-                    .map(|(kind, rest)| (kind, construct_name(rest, text)))
+                    .map(|(kind, rest)| {
+                        let name = construct_name(rest, text);
+                        // MAGI FIX (B2b1 10): `namespace a::b {` was named `a`.
+                        let name = if kind == UnitKind::Module {
+                            nested_namespace_name(rest, name)
+                        } else {
+                            name
+                        };
+                        (kind, name)
+                    })
             })
             .or_else(|| {
                 candidates.iter().find_map(|&text| {
@@ -3152,6 +3170,40 @@ fn construct_name(rest: &str, text: &str) -> String {
     }
 }
 
+/// The name of a C++17 nested namespace (`namespace a::b {` gives `a::b`): `name`, the first
+/// identifier of `rest`, followed by each `::identifier` that comes right after it. `name` alone
+/// when `rest` does not open with it (an unnamed namespace) or no `::` follows. O(n) in `rest`.
+///
+/// # Arguments
+///
+/// * `rest` - The text after the `namespace` keyword.
+/// * `name` - The name [`construct_name`] read on it.
+///
+/// # Returns
+///
+/// The qualified name.
+fn nested_namespace_name(rest: &str, name: String) -> String {
+    let Some(mut tail) = rest.trim_start().strip_prefix(name.as_str()) else {
+        return name;
+    };
+    let mut qualified = name;
+    while let Some(after) = tail.strip_prefix("::") {
+        let len: usize = after
+            .chars()
+            .take_while(|&c| is_identifier_char(c))
+            .map(char::len_utf8)
+            .sum();
+        let (part, next) = after.split_at(len);
+        if part.is_empty() {
+            break;
+        }
+        qualified.push_str("::");
+        qualified.push_str(part);
+        tail = next;
+    }
+    qualified
+}
+
 /// Return all pre-configured brace-family extractors.
 pub fn all_extractors() -> Vec<BraceFamilyExtractor> {
     vec![
@@ -3274,6 +3326,7 @@ impl BraceFamilyExtractor {
         ext.template_headers = true;
         ext.operator_overloads = true;
         ext.not_function_names = &CPP_NOT_FUNCTION_NAMES;
+        ext.modifiers = &CPP_MODIFIERS;
         ext.attribute_prefixes
             .extend(["template<".to_string(), "template <".to_string()]);
         ext
