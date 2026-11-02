@@ -30,6 +30,7 @@ import dataclasses
 import datetime
 import http.server
 import io
+import itertools
 import json
 import os
 import pathlib
@@ -1320,6 +1321,23 @@ NOT_A_REGULAR_FILE = "not a regular file, not read"
 #: listed (:func:`_open_listed`).
 CHANGED_AFTER_LISTING = "changed after it was listed, not read"
 
+#: Why a capture leaves out a file with more than one link. A hard link is a
+#: regular file to every test and its identity is the one the walk lists, so
+#: nothing else tells a link to a file outside the workspace from the run's
+#: own log; the product never writes one.
+HARD_LINKED = "a file with more than one link, not read"
+
+#: The most entries one capture lists under ``.magi/logs``, files,
+#: directories and links alike. The byte caps bound what is read, not what is
+#: listed: a faulty product could write a vast number of empty files, each one
+#: materialised as an entry at no captured byte. The runs scenarios inspect
+#: write a few files, so this leaves them whole.
+MAX_REVIEW_LOG_ENTRIES = 4096
+
+#: Why a capture stops listing: the directory named holds entries past
+#: :data:`MAX_REVIEW_LOG_ENTRIES`, which are neither listed nor read.
+OVER_ENTRY_CAP = "more than %d entries under the log directory, the rest not listed"
+
 #: The flags :func:`_open_listed` opens a log file with. ``O_NOFOLLOW`` and
 #: ``O_NONBLOCK`` exist on POSIX only: there a link is refused by the open
 #: itself and a fifo cannot block it. Windows has neither, so there the
@@ -1358,16 +1376,27 @@ def _open_listed(path, expected):
     Returns:
         io.BufferedReader: The open file, binary; the caller closes it.
 
+    MAGI FIX (S6 loop 28): ``O_NOFOLLOW`` guards only the last component, so
+    a directory above the file swapped for a link had the open follow it
+    (F1a1-melchior); where descriptor-relative opens exist the file is
+    opened through :func:`_open_anchored`, which refuses a link anywhere
+    from the repository root down. A file with more than one link is refused
+    too (:data:`HARD_LINKED`).
+
     Raises:
         OSError: When it cannot be opened (a link, on POSIX), or when the
             object opened is not a regular file or not *expected*, with
-            :data:`CHANGED_AFTER_LISTING` as its text.
+            :data:`CHANGED_AFTER_LISTING` as its text, or has more than one
+            link, with :data:`HARD_LINKED`.
     """
-    descriptor = os.open(path, _LOG_OPEN_FLAGS)
+    descriptor = (_open_anchored(path, _LOG_OPEN_FLAGS) if _ANCHORED_OPENS
+                  else os.open(path, _LOG_OPEN_FLAGS))
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _identity(opened) != expected:
             raise OSError(CHANGED_AFTER_LISTING)
+        if opened.st_nlink != 1:
+            raise OSError(HARD_LINKED)
         return os.fdopen(descriptor, "rb")
     except BaseException:
         os.close(descriptor)
@@ -1384,65 +1413,159 @@ _DIRECTORY_OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
 #: ``os.scandir`` takes a descriptor and ``O_NOFOLLOW`` exists (POSIX only).
 _LISTS_BY_DESCRIPTOR = os.scandir in os.supports_fd and hasattr(os, "O_NOFOLLOW")
 
+#: Whether the capture opens every component relative to its parent's
+#: descriptor (:func:`_open_anchored`): POSIX, where ``os.open`` takes
+#: ``dir_fd``. Windows has no such open; there the capture tests the chain by
+#: path before and after each listing, and a link swapped onto a component
+#: above ``.magi/logs`` between those tests can have the walk list, or a read
+#: open, what it points at. The read then fails the identity the file was
+#: listed with, and :meth:`RunExecutor._capture_review_log` tests the whole
+#: chain once more after the read and drops the capture, so no byte from
+#: behind such a link reaches a result; it may reach the harness's memory.
+_ANCHORED_OPENS = _LISTS_BY_DESCRIPTOR and os.open in os.supports_dir_fd
+
+
+def _open_anchored(path, flags: int) -> int:
+    """Open *path* one component at a time, each relative to its parent's descriptor.
+
+    MAGI FIX (S6 loop 28): ``O_NOFOLLOW`` guards only the last component of a
+    path, so a directory above it swapped for a link had the open follow that
+    link (F1a1-melchior). Here every component below the walk's untested base
+    (:func:`_chain_from_repository`) is opened with ``O_NOFOLLOW``, relative to
+    the directory opened before it, so a link anywhere on the way fails the
+    open (``ELOOP``) and no later swap of a component already opened can
+    redirect the rest. POSIX only (:data:`_ANCHORED_OPENS`).
+
+    Args:
+        path: The entry to open.
+        flags: The flags for the last component; ``O_NOFOLLOW`` belongs in
+            them when that component must not be a link.
+
+    Returns:
+        int: The open descriptor; the caller closes it.
+
+    Raises:
+        OSError: When a component cannot be opened, a link included.
+    """
+    base, below = _chain_from_repository(path)
+    parts = below.parts
+    if not parts:
+        return os.open(base, flags)
+    descriptor = os.open(base, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, _DIRECTORY_OPEN_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return os.open(parts[-1], flags, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+
 
 def _unchanged_directory(path, expected) -> None:
     """Refuse *path* unless it is still the directory *expected* names, not a link.
+
+    The chain above it is tested too (:func:`_linked_ancestor`): Windows lists
+    by path, so a linked component above *path* would redirect the listing.
 
     Args:
         path: The directory to test.
         expected: Its :func:`_identity` when the walk listed it.
 
     Raises:
-        OSError: When it is a link, not a directory, or another directory now,
-            with :data:`CHANGED_AFTER_LISTING` as its text; or when it cannot
+        OSError: When it, or a component above it, is a link
+            (:data:`LINK_NOT_FOLLOWED`), when it is not a directory or another
+            directory now (:data:`CHANGED_AFTER_LISTING`), or when it cannot
             be inspected.
     """
+    if _linked_ancestor(path) is not None:
+        raise OSError(LINK_NOT_FOLLOWED)
     status = os.lstat(path)
     if (_is_link(path) or not stat.S_ISDIR(status.st_mode)
             or _identity(status) != expected):
         raise OSError(CHANGED_AFTER_LISTING)
 
 
-def _listed_directory(path, expected) -> list:
-    """List the nested log directory *path*, only if it is still the one listed.
+def _first_entries(listing, limit: int) -> list:
+    """At most ``limit + 1`` ``(name, entry)`` pairs of the listing *listing*, which is closed.
+
+    Args:
+        listing: An ``os.scandir`` iterator.
+        limit: The most entries the caller keeps; one more tells it there are more.
+
+    Returns:
+        list[tuple[str, os.DirEntry]]: The entries taken, in listing order.
+    """
+    try:
+        return [(entry.name, entry) for entry in itertools.islice(listing, limit + 1)]
+    finally:
+        close = getattr(listing, "close", None)
+        if close is not None:
+            close()
+
+
+def _listed_directory(path, expected, limit: int | None = None) -> list:
+    """List the log directory *path*, only if it is still the one listed.
 
     MAGI FIX (S6 loop 25): an approved directory was listed later by path, and
     ``os.scandir`` follows a link, so one swapped in after its link test had
     the walk list, and the read open, what it points at (F1a1-caspar).
 
-    On POSIX the directory is opened with :data:`_DIRECTORY_OPEN_FLAGS`, its
-    identity read from the open descriptor, and the listing taken from that
-    descriptor, so no later swap can redirect it. Windows can list only by
-    path, so the directory is tested before and after the listing; a swap that
-    sneaks in and out between the two still fails the identity each listed
-    file is opened against (:func:`_open_listed`), which then names a file
-    under the real directory, never one behind the link.
+    On POSIX the directory is opened through :func:`_open_anchored`, so a link
+    anywhere from the repository root down refuses the open; its identity is
+    read from the open descriptor and the listing taken from it, so no later
+    swap can redirect it. Each entry's identity is read relative to that
+    descriptor while it is open. Windows can list only by path, so the
+    directory and the chain above it are tested before and after the listing
+    (:func:`_unchanged_directory`); see :data:`_ANCHORED_OPENS` for what is
+    left.
+
+    MAGI FIX (S6 loop 28): the listing was taken whole, so a directory with a
+    vast number of entries was materialised at no captured byte
+    (F1a1-melchior). At most ``limit + 1`` entries are taken.
 
     Args:
         path: The directory to list.
-        expected: Its :func:`_identity` when its parent was listed.
+        expected: Its :func:`_identity` when its parent was listed, or
+            ``None`` for the walk's root on POSIX, which the anchored open
+            itself vouches for.
+        limit: The most entries the caller keeps; ``None`` reads
+            :data:`MAX_REVIEW_LOG_ENTRIES`.
 
     Returns:
-        list[tuple[str, os.DirEntry]]: Each entry's name and the entry, whose
-        ``is_dir``/``is_file`` with ``follow_symlinks=False`` describe it as
-        listed.
+        list[tuple[str, os.DirEntry, tuple | None]]: Each entry's name, the
+        entry (whose ``is_dir``/``is_file`` with ``follow_symlinks=False``
+        describe it as listed), and on POSIX its :func:`_identity`, read
+        without following a link (``None`` when that failed, and always on
+        Windows, where the caller reads it). One entry past *limit* means the
+        directory holds more.
 
     Raises:
         OSError: When the directory cannot be opened or listed, or is not the
             one *expected* names (:data:`CHANGED_AFTER_LISTING`).
     """
-    if not _LISTS_BY_DESCRIPTOR:
+    limit = MAX_REVIEW_LOG_ENTRIES if limit is None else limit
+    if not _ANCHORED_OPENS:
+        if expected is None:
+            expected = _identity(os.lstat(path))
         _unchanged_directory(path, expected)
-        entries = [(entry.name, entry) for entry in os.scandir(path)]
+        entries = _first_entries(os.scandir(path), limit)
         _unchanged_directory(path, expected)
-        return entries
-    descriptor = os.open(path, _DIRECTORY_OPEN_FLAGS)
+        return [(name, entry, None) for name, entry in entries]
+    descriptor = _open_anchored(path, _DIRECTORY_OPEN_FLAGS)
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISDIR(opened.st_mode) or _identity(opened) != expected:
+        if not stat.S_ISDIR(opened.st_mode) or (
+                expected is not None and _identity(opened) != expected):
             raise OSError(CHANGED_AFTER_LISTING)
-        with os.scandir(descriptor) as listing:
-            return [(entry.name, entry) for entry in listing]
+        listed = []
+        for name, entry in _first_entries(os.scandir(descriptor), limit):
+            try:
+                identity = _identity(entry.stat(follow_symlinks=False))
+            except OSError:
+                identity = None
+            listed.append((name, entry, identity))
+        return listed
     finally:
         os.close(descriptor)
 
@@ -1452,8 +1575,11 @@ def _regular_files_without_links(directory, refused, identities=None):
 
     ``Path.rglob`` descends into a junction on Windows, and a file test follows
     a symlink, so neither bounds a walk to what is really under *directory*.
-    This one lists each directory with :func:`os.scandir` and tests every entry
-    with :func:`_is_link` first.
+    This one lists each directory with :func:`_listed_directory` and tests
+    every entry with :func:`_is_link` first.
+
+    Complexity: ``O(entries)``, at most :data:`MAX_REVIEW_LOG_ENTRIES` listed
+    in all; past that the walk stops and names the directory it stopped in.
 
     Args:
         directory: The directory to walk. It is listed like every nested
@@ -1465,7 +1591,8 @@ def _regular_files_without_links(directory, refused, identities=None):
             left out: a link (neither listed nor read), an entry that is
             neither a directory nor a regular file (a fifo, socket or device,
             never opened: reading a fifo can block), a directory that could
-            not be listed, or an entry whose test failed.
+            not be listed, an entry whose test failed, or the directory where
+            the entry cap (:data:`OVER_ENTRY_CAP`) stopped the walk.
         identities: A dict that receives, for each file returned, its
             :func:`_identity` as listed, so the read can refuse a file
             swapped in afterwards (:func:`_open_listed`). ``None`` records
@@ -1490,30 +1617,38 @@ def _regular_files_without_links(directory, refused, identities=None):
     # MAGI FIX (S6 loop 27): the root was listed by path, so a link swapped
     # onto it after the caller's test was listed, and its files read, once
     # before the caller's second test dropped the capture (F1a1-melchior). The
-    # root is listed the same way, from its identity now, which refuses a link.
-    files, pending = [], []
-    try:
-        pending.append((root, _identity(os.lstat(root))))
-    except OSError as exc:
-        refused.append("%s (%s)" % (_name_under(root, root), exc))
+    # root is listed the same way, which refuses a link.
+    # MAGI FIX (S6 loop 28): the walk listed every entry whatever their number
+    # (F1a1-melchior); it now stops at MAX_REVIEW_LOG_ENTRIES and names the
+    # directory it stopped in, once.
+    files, pending, budget = [], [(root, None)], MAX_REVIEW_LOG_ENTRIES
+    stopped = False
     while pending:
         current, expected = pending.pop()
         try:
-            entries = _listed_directory(current, expected)
+            entries = _listed_directory(current, expected, budget)
         except OSError as exc:
             refused.append("%s (%s)" % (_name_under(root, current), exc))
             continue
-        for name, entry in entries:
+        if len(entries) > budget:
+            refused.append("%s (%s)" % (_name_under(root, current),
+                                        OVER_ENTRY_CAP % MAX_REVIEW_LOG_ENTRIES))
+            entries, pending, stopped = entries[:budget], [], True
+        budget -= len(entries)
+        for name, entry, listed_identity in entries:
             path = current / name
             try:
                 if _is_link(path):
                     refused.append("%s (%s)" % (_name_under(root, path),
                                                 LINK_NOT_FOLLOWED))
                 elif entry.is_dir(follow_symlinks=False):
-                    pending.append((path, _identity(os.lstat(path))))
+                    if not stopped:
+                        pending.append((path, listed_identity
+                                        or _identity(os.lstat(path))))
                 elif entry.is_file(follow_symlinks=False):
                     if identities is not None:
-                        identities[path] = _identity(os.lstat(path))
+                        identities[path] = (listed_identity
+                                            or _identity(os.lstat(path)))
                     files.append(path)
                 else:
                     # MAGI FIX (S6 loop 16): a fifo, socket or device file was
