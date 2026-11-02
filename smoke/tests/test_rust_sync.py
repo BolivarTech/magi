@@ -44,6 +44,56 @@ def _source(relative: str) -> str:
     return read_source(relative, _ROOT)
 
 
+#: The only parameter name a ``section.get`` may take instead of a literal key:
+#: ``_list_under``'s own, whose keys are read at its call sites.
+_LIST_UNDER_PARAMETER = "key"
+
+
+def _summary_keys_read(scenario: str) -> set[str]:
+    """The ``code_review`` summary keys a scenario module reads, from every shape it reads them in.
+
+    MAGI FIX (S6 loop 29): the keys were collected from two access shapes, so a
+    key read in a third one (brackets, another accessor, a key held in a
+    variable) was left out and the fixed-set comparison still passed
+    (F1b2a-melchior). Every use of ``section`` must now be one of the shapes
+    parsed here, or the read fails and the access is reviewed on purpose.
+
+    Args:
+        scenario: The scenario module's source.
+
+    Returns:
+        set[str]: The keys read with ``section.get("<key>")`` or
+        ``_list_under(section, "<key>")``.
+
+    Raises:
+        AssertionError: Naming an access shape the read does not parse:
+            ``section[...]``, any accessor but ``.get``, a ``.get`` whose
+            argument is neither a literal key nor ``_list_under``'s own
+            parameter, a ``_list_under`` call without a literal key, or
+            ``section`` unpacked or iterated.
+    """
+    for pattern in (r"\bsection\s*\[", r"\*\*\s*section\b", r"\bin\s+section\b", r"getattr\(\s*section\b"):
+        found = re.search(pattern, scenario)
+        if found is not None:
+            raise AssertionError("an access to section the key guard does not parse: %r" % found.group(0))
+    accessors = set(re.findall(r"\bsection\s*\.\s*(\w+)", scenario))
+    if accessors - {"get"}:
+        raise AssertionError("section accessors the key guard does not parse: %s" % sorted(accessors - {"get"}))
+    keys = set()
+    for argument in re.findall(r"\bsection\.get\(([^)]*)\)", scenario):
+        literal = re.fullmatch(r'\s*"(\w+)"\s*', argument)
+        if literal is not None:
+            keys.add(literal.group(1))
+        elif argument.strip() != _LIST_UNDER_PARAMETER:
+            raise AssertionError("section.get(%s) does not name its key literally" % argument)
+    for argument in re.findall(r"(?<!def )\b_list_under\(section,([^)]*)\)", scenario):
+        literal = re.fullmatch(r'\s*"(\w+)"\s*', argument)
+        if literal is None:
+            raise AssertionError("_list_under(section,%s) does not name its key literally" % argument)
+        keys.add(literal.group(1))
+    return keys
+
+
 def _usize_const(text: str, name: str) -> int:
     """The value of ``pub const <name>: usize = <n>;`` in *text*.
 
