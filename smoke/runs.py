@@ -1149,14 +1149,47 @@ def _reject_links(top) -> None:
                     "workspace never follows one" % (top, path))
 
 
+#: Whether this platform's ``chmod`` can change a link itself rather than what
+#: it points at (``follow_symlinks=False``): Windows from Python 3.13, macOS,
+#: the BSDs. Read once, at import: the platform does not change mid-run.
+_CHMOD_SKIPS_LINKS = os.chmod in os.supports_follow_symlinks
+
+#: Whether :func:`_set_mode` can set a mode on a descriptor opened with
+#: ``O_NOFOLLOW`` instead (Linux, where ``chmod`` follows every link).
+_CHMOD_BY_DESCRIPTOR = hasattr(os, "O_NOFOLLOW") and os.chmod in os.supports_fd
+
+
 def _set_mode(path, mode: int) -> None:
-    """Set the mode of *path*.
+    """Set the mode of *path* without following a link that stands there now.
+
+    MAGI FIX (S6 loop 27): :func:`_retry_writable` tested for a link and then
+    changed the mode by path, so a link swapped in between had the mode of
+    whatever it points at changed (F1a1-caspar). Where ``chmod`` can leave a
+    link unfollowed (Windows from Python 3.13, macOS and the BSDs) it is told
+    to; where it cannot but ``O_NOFOLLOW`` exists (Linux), the mode is set on
+    a descriptor opened without following, so a link fails the open instead.
+    Anywhere else (Windows before 3.13) ``chmod`` changes the link's own
+    attribute and never what it points at.
 
     Args:
         path: The entry.
         mode: The new mode.
+
+    Raises:
+        OSError: When the mode cannot be set, a link at *path* included on
+            Linux (``ELOOP``), or an entry that cannot be opened for reading.
     """
-    os.chmod(path, mode)
+    if _CHMOD_SKIPS_LINKS:
+        os.chmod(path, mode, follow_symlinks=False)
+    elif _CHMOD_BY_DESCRIPTOR:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW
+                             | getattr(os, "O_NONBLOCK", 0))
+        try:
+            os.chmod(descriptor, mode)
+        finally:
+            os.close(descriptor)
+    else:
+        os.chmod(path, mode)
 
 
 def _retry_writable(func, path, error: BaseException) -> None:
@@ -1166,7 +1199,9 @@ def _retry_writable(func, path, error: BaseException) -> None:
     :func:`shutil.copytree` keeps the read-only bit it copies, so one such
     entry would stop every later rebuild. The bit is cleared and the deletion
     retried once. A link is never touched: changing its mode would change
-    what it points at, so the original error stands.
+    what it points at, so the original error stands; and the mode is set by
+    :func:`_set_mode`, which does not follow a link that replaced the entry
+    after that test.
 
     The recovery is Windows-only in effect. On POSIX a deletion fails with
     :class:`PermissionError` because the PARENT directory is not writable,
@@ -1189,7 +1224,7 @@ def _retry_writable(func, path, error: BaseException) -> None:
     if not isinstance(error, PermissionError) or _is_link(path):
         raise error
     is_directory = stat.S_ISDIR(os.lstat(path).st_mode)
-    os.chmod(path, stat.S_IRWXU if is_directory else stat.S_IREAD | stat.S_IWRITE)
+    _set_mode(path, stat.S_IRWXU if is_directory else stat.S_IREAD | stat.S_IWRITE)
     func(path)
 
 
