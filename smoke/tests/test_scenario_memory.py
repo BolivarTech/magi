@@ -498,6 +498,14 @@ class EmbedderDownTests(unittest.TestCase):
             "%r appears nowhere in src/agent/mod.rs, so no run can ever "
             "produce it" % memory.DEGRADATION_MARKER)
 
+    def test_the_marker_guard_fails_on_a_marker_left_only_in_a_trailing_comment(self) -> None:
+        # [MAGI §6 MS2 loop 29, F1b2a-melchior] code_only kept a line whole when code preceded a trailing
+        # comment, so the marker surviving only there passed the guard above.
+        commented = "let degraded = true; // %s\n" % memory.DEGRADATION_MARKER
+        with mock.patch(__name__ + ".read_source", return_value=commented):
+            with self.assertRaises(AssertionError):
+                self.test_the_marker_is_a_phrase_the_product_actually_emits()
+
     def test_the_probe_plants_a_memory_before_it_breaks_the_embedder(self) -> None:
         """The fixture could not trip the condition either.
 
