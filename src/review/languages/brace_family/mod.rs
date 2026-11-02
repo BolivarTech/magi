@@ -2717,6 +2717,32 @@ void g(void) {
     }
 
     #[test]
+    fn a_rust_attribute_ends_past_its_strings_and_raw_strings_only() {
+        // The bounds of `rust_attribute_end`: strings and raw strings hide their delimiters, an
+        // `r` inside a word opens no raw string, and an unclosed string closes nothing.
+        fn end(t: &str) -> Option<&str> {
+            rust_attribute_end(t).and_then(|e| t.get(..e))
+        }
+        assert_eq!(end("[doc = \"]\"] fn f"), Some("[doc = \"]\"]"));
+        assert_eq!(end("[doc = r\"]\"] x"), Some("[doc = r\"]\"]"));
+        assert_eq!(
+            end("[doc = r##\"a\"#]\"##] x"),
+            Some("[doc = r##\"a\"#]\"##]")
+        );
+        assert_eq!(end("[doc = br#\"]\"#] x"), Some("[doc = br#\"]\"#]"));
+        // A raw string would end at the escaped quote; a plain one runs past it.
+        assert_eq!(end("[cfg(for\"\\\"]\")] x"), Some("[cfg(for\"\\\"]\")]"));
+        assert_eq!(end("[doc = \"a\\\"]\"] x"), Some("[doc = \"a\\\"]\"]"));
+        assert_eq!(
+            end("[cfg(feature = \"x\")][y]"),
+            Some("[cfg(feature = \"x\")]")
+        );
+        assert_eq!(end("[doc = r#\"a]"), None);
+        assert_eq!(end("[doc = \"a]"), None);
+        assert_eq!(end("[inline"), None);
+    }
+
+    #[test]
     fn a_rust_item_after_an_attribute_on_its_own_line_is_a_unit_with_its_body() {
         // [MAGI S6 loop 14, B2b1] `construct_keyword` never read past a leading `#[...]`, so
         // `#[inline] fn f() {` and `#[derive(Debug)] struct S {` were no constructs and their
