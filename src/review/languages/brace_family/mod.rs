@@ -4903,4 +4903,77 @@ int g(void) {
             );
         }
     }
+
+    #[test]
+    fn a_return_type_literal_block_keeps_the_function_body() {
+        // [MAGI loop 28 sweep, B2a/B2b1b] the brace a return type opens (`function f(): {`, a
+        // TypeScript object type, or `func f() struct {`, a Go anonymous struct) was taken for
+        // the body's, so the function ended where the type closed and its body fell into a gap
+        // unit. The body's brace is the one the type's closing line opens after its lowest point
+        // (`} {`, `}> {`, `} => {`) or an Allman `{` on the next line.
+        let ts = BraceFamilyExtractor::typescript();
+        let body = "\n    return { a: 1 };\n}\nfunction g() {\n}\n";
+        for head in [
+            "function f(): {\n    a: number;\n} {",
+            "async function f(): Promise<{\n    a: number;\n}> {",
+        ] {
+            let code = format!("{head}{body}");
+            assert_eq!(
+                sorted_spans(&ts, &code),
+                vec![
+                    unit("f", UnitKind::Function, 1, 5),
+                    unit("g", UnitKind::Function, 6, 7),
+                ],
+                "{code}"
+            );
+        }
+        assert_eq!(
+            sorted_spans(
+                &ts,
+                &format!("function f(): {{\n    a: number;\n}}\n{{{body}")
+            ),
+            vec![
+                unit("f", UnitKind::Function, 1, 6),
+                unit("g", UnitKind::Function, 7, 8),
+            ]
+        );
+        let class = "class C {\n    m(): {\n        a: number;\n    } {\n        return { a: 1 };\n    }\n}\n";
+        assert!(
+            spans(&split(&ts, class, 5, UnitKind::Class)).contains(&("m", UnitKind::Method, 2, 6)),
+            "{:?}",
+            spans(&split(&ts, class, 5, UnitKind::Class))
+        );
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::go(),
+                "func f() struct {\n\tA int\n} {\n\treturn struct{ A int }{1}\n}\nfunc g() {\n}\n"
+            ),
+            vec![
+                unit("f", UnitKind::Function, 1, 5),
+                unit("g", UnitKind::Function, 6, 7),
+            ]
+        );
+        // Unchanged: a method signature with no body ends where its type closes, and a C++
+        // ref-qualifier's `&` before the body's brace is no type.
+        assert_eq!(
+            sorted_spans(
+                &ts,
+                "interface I {\n    m(): {\n        a: number;\n    };\n}\nfunction g() {\n}\n"
+            ),
+            vec![
+                unit("I", UnitKind::Trait, 1, 5),
+                unit("g", UnitKind::Function, 6, 7),
+            ]
+        );
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::cpp(),
+                "void S::f() & {\n    x();\n}\nint g() {\n}\n"
+            ),
+            vec![
+                unit("f", UnitKind::Function, 1, 3),
+                unit("g", UnitKind::Function, 4, 5),
+            ]
+        );
+    }
 }
