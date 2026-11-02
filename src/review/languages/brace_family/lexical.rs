@@ -41,13 +41,14 @@ pub(super) fn is_identifier_char(c: char) -> bool {
 ///
 /// # Returns
 ///
-/// `None` when the line has no `(`, holds `=` before it (an assignment or initializer), or no
-/// identifier ends right before it. O(n) in the line.
+/// `None` when the line has no `(`, holds `=` before it (an assignment or initializer; the `=` of
+/// an arrow in a type bound does not count, `ListHead::assigns`), or no identifier ends right
+/// before it. O(n) in the line.
 pub(super) fn identifier_before_paren(line: &str) -> Option<String> {
     // MAGI FIX (S6 loop 15): `decltype(auto) f() {` was named `decltype`, its operand's `(`
     // being taken for the parameter list; the list's own `(` is looked for instead.
     let head = parameter_list_head(line)?;
-    if head.before.contains('=') {
+    if head.assigns() {
         return None;
     }
     // MAGI FIX (S6 loop 6): `$get() {` named no member, so a class could not split there.
@@ -72,7 +73,7 @@ pub(super) fn identifier_before_paren(line: &str) -> Option<String> {
 /// The member's name, or `None`.
 pub(super) fn optional_member_name(line: &str) -> Option<String> {
     let head = parameter_list_head(line)?;
-    if head.before.contains('=') {
+    if head.assigns() {
         return None;
     }
     let name = without_type_parameters(head.name_text).strip_suffix('?')?;
@@ -96,7 +97,7 @@ pub(super) fn optional_member_name(line: &str) -> Option<String> {
 /// The member's name, or `None`.
 pub(super) fn private_or_computed_name(line: &str) -> Option<String> {
     let head = parameter_list_head(line)?;
-    if head.before.contains('=') {
+    if head.assigns() {
         return None;
     }
     let text = without_type_parameters(head.name_text);
@@ -132,12 +133,29 @@ fn without_type_parameters(text: &str) -> &str {
         .map_or(text, str::trim_end)
 }
 
+/// The characters whose `>` after them is an arrow, never an angle bracket: `->` (a Rust or C++
+/// return type, `Fn() -> U`) and `=>` (a TypeScript function type, `() => void`).
+const ARROW_HEADS: [char; 2] = ['-', '='];
+
+/// Whether the `>` at byte offset `at` of `text` closes an angle bracket, not an arrow
+/// ([`ARROW_HEADS`]). O(1).
+fn closes_angle(text: &str, at: usize) -> bool {
+    !text
+        .get(..at)
+        .and_then(|before| before.chars().next_back())
+        .is_some_and(|p| ARROW_HEADS.contains(&p))
+}
+
 /// The byte offset of the `open` that matches the `close` `text` ends with (`[` for `]`, `<` for
-/// `>`), counting the pairs between, or `None` when it never opens. O(n) in the text.
+/// `>`), counting the pairs between, or `None` when it never opens. For `>`, the head of an arrow
+/// (`() => void`, `Fn() -> U`) is no close ([`closes_angle`]). O(n) in the text.
 fn matching_open(text: &str, open: char, close: char) -> Option<usize> {
     let mut depth = 0u32;
     for (at, c) in text.char_indices().rev() {
         match c {
+            // MAGI FIX (S6 loop 25, B2b1b): the `>` of `=>` in `foo<T extends () => void>`
+            // closed a bracket that never opened, so the generic method named no member.
+            '>' if c == close && !closes_angle(text, at) => {}
             c if c == close => depth = depth.saturating_add(1),
             c if c == open => {
                 depth = depth.checked_sub(1)?;
@@ -175,6 +193,20 @@ impl<'t> ListHead<'t> {
             name_text: before,
         }
     }
+
+    /// Whether the text before the `(` holds an `=`, an assignment or initializer (`x = f(`),
+    /// other than the `=` of an arrow (`foo<T extends () => void>(`), which a type bound holds.
+    /// O(n) in the text.
+    // MAGI FIX (S6 loop 25, B2b1b): the arrow of a bound read as an assignment, so a generic
+    // method bounded by a function type named no member.
+    fn assigns(&self) -> bool {
+        self.before.match_indices('=').any(|(at, _)| {
+            !self
+                .before
+                .get(at + 1..)
+                .is_some_and(|r| r.starts_with('>'))
+        })
+    }
 }
 
 /// The head of the parameter list `line` opens, read past what a return type may put in
@@ -183,8 +215,8 @@ impl<'t> ListHead<'t> {
 /// * a `(` right after a word of [`TYPE_OPERATORS`] is that word's operand, read past up to its
 ///   matching `)` (`decltype(auto) f(`);
 /// * a `(` inside angle brackets is a template argument, read past the same way
-///   (`std::function<void(int)> make(`); a `>` closes a bracket however it is preceded, so `->`
-///   counts as one too;
+///   (`std::function<void(int)> make(`); the `>` of an arrow (`->`, `=>`) closes none
+///   ([`closes_angle`]), so `foo<T extends () => void>(` is read past its bound;
 /// * a `(` after a return type word, opening with a [`DECLARATOR_OPENERS`] character and followed
 ///   by another `(` once it closes, is a declarator in parentheses: the function is named
 ///   inside it (`void (*f)()`, `void (*get_handler(int sig))(int)`). A keyword of
@@ -221,8 +253,10 @@ fn parameter_list_head(line: &str) -> Option<ListHead<'_>> {
         if c != '(' {
             angles = if c == '<' {
                 angles + 1
-            } else {
+            } else if closes_angle(line, at) {
                 angles.saturating_sub(1)
+            } else {
+                angles
             };
             from = at + c.len_utf8();
             continue;
@@ -484,16 +518,16 @@ pub(super) fn declaration_keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'
 }
 
 /// `text` after the balanced `<...>` it opens with, trimmed at its start; empty when the list
-/// never closes. The `>` of a `->` (`impl<T: Fn(u8) -> u8>`) closes nothing. O(n) in the text.
+/// never closes. The `>` of an arrow (`impl<T: Fn(u8) -> u8>`, `<T extends () => void>`) closes
+/// nothing ([`closes_angle`]). O(n) in the text.
 pub(super) fn skip_generics(text: &str) -> &str {
     let mut depth = 0u32;
-    let mut previous = '\0';
     for (i, c) in text.char_indices() {
-        let after_dash = std::mem::replace(&mut previous, c) == '-';
         match c {
             '<' => depth = depth.saturating_add(1),
             // MAGI FIX (S6 loop 6): the `>` of a `->` in a bound closed the list early.
-            '>' if after_dash => {}
+            // MAGI FIX (S6 loop 25, B2b1b): so did the `>` of a TypeScript `=>`.
+            '>' if !closes_angle(text, i) => {}
             '>' => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
