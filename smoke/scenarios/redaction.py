@@ -81,6 +81,20 @@ def no_credential_leaks(run):
                            % run.output.exit_code)
         return
 
+    # MAGI FIX (S6 loop 29): a run whose requests never reached the error
+    # backend (sent to a proxy, say) also exits non-zero, so the exit code
+    # alone let S10 search output from a path the backend never answered
+    # (F1a1b-melchior). The backend counts what it answered; ``None`` is a
+    # run double that does not say.
+    if getattr(run, "backend_requests", None) == 0:
+        for index in range(len(ASSERTIONS)):
+            yield _finding(index, Outcome.CANNOT_TEST,
+                           "the error backend answered no request, so the "
+                           "product never received the 401 that carries the "
+                           "credential onto its error path; finding no leak "
+                           "there proves nothing")
+        return
+
     planted = tuple(run.planted)
     streams = run.output.raw()
     log = _archived_log(run.run_id)

@@ -46,6 +46,7 @@ import time
 import tomllib
 import urllib.parse
 
+from smoke.binary import LOOPBACK_HOSTS, NO_PROXY_VARIABLE
 from smoke.config import PLACEHOLDER_ENTRIES, ROTATION_MARKER
 from smoke.env import MAGI_DIR_NAME, MAGI_TOML_NAME
 from smoke.errors import (HarnessError, PayloadTooSmall,
@@ -551,6 +552,11 @@ class RunResult:
     #: Empty for every other run. Any entry is a product defect, which the
     #: runner reports as ``FAIL`` for every scenario reading the run.
     model_requests: tuple[str, ...] = ()
+    #: How many requests the run's loopback error backend
+    #: (:data:`ERROR_BACKEND_TOKEN`, R6) answered; ``None`` for a run without
+    #: one. Zero means the product never reached it, so nothing it printed
+    #: walked the error path the backend plants a credential on.
+    backend_requests: int | None = None
 
 
 #: Where the product writes its logs, relative to a workspace root. The one
@@ -2098,6 +2104,11 @@ ERROR_BACKEND_STATUS = 401
 ERROR_BACKEND_TIMEOUT_S = 5.0
 
 
+#: The most digits of a Content-Length :func:`_drain_body` converts: every
+#: length a 64-bit size can hold, and far below the integer-conversion limit.
+MAX_CONTENT_LENGTH_DIGITS = 19
+
+
 def _drain_body(rfile, headers) -> None:
     """Read and discard a request body, never holding more than one chunk.
 
@@ -2118,7 +2129,15 @@ def _drain_body(rfile, headers) -> None:
         OSError: When a read fails or times out.
     """
     declared = (headers.get("Content-Length") or "").strip()
-    left = int(declared) if declared.isascii() and declared.isdigit() else 0
+    # MAGI FIX (S6 loop 29): a decimal length past Python's integer-conversion
+    # limit (4300 digits) raised ValueError, which neither handler catches, so
+    # the request got a traceback instead of an answer (F1a1b-melchior,
+    # F1a1b-caspar). A length longer than MAX_CONTENT_LENGTH_DIGITS counts as
+    # no body like any other unusable value; both stand-ins answer HTTP/1.0
+    # and close, so an undrained body never reaches a later request.
+    usable = (declared.isascii() and declared.isdigit()
+              and len(declared) <= MAX_CONTENT_LENGTH_DIGITS)
+    left = int(declared) if usable else 0
     while left > 0:
         chunk = rfile.read(min(MODEL_COUNTER_CHUNK_BYTES, left))
         if not chunk:
@@ -2142,7 +2161,10 @@ class _EchoingHandler(http.server.BaseHTTPRequestHandler):
     timeout = ERROR_BACKEND_TIMEOUT_S
 
     def do_POST(self) -> None:  # noqa: N802 - the base class names it
-        """Answer one POST with :data:`ERROR_BACKEND_STATUS`."""
+        """Answer one POST with :data:`ERROR_BACKEND_STATUS`, recording it first."""
+        log = getattr(self.server, "log", None)
+        if log is not None:
+            log.record(self.command, urllib.parse.urlsplit(self.path).path)
         try:
             _drain_body(self.rfile, self.headers)
         except OSError:
@@ -2180,14 +2202,20 @@ class _EchoingHandler(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def error_backend():
+def error_backend(log=None):
     """Serve an error-answering endpoint on loopback for the block's duration.
+
+    Args:
+        log: A :class:`RequestLog` that records every request the backend
+            answers, so a caller can tell a backend the product reached from
+            one it never did; ``None`` records nothing.
 
     Yields:
         str: The base URL to point the product at, already ending in ``/v1``.
     """
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _EchoingHandler)
     server.daemon_threads = True
+    server.log = log
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -2214,10 +2242,10 @@ _PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
 
 #: The proxy exemption list a refusal run sets, replacing any inherited one, so
 #: loopback is exempt even if a proxy variable reached the child some other way.
-_NO_PROXY_VARIABLE = "NO_PROXY"
+_NO_PROXY_VARIABLE = NO_PROXY_VARIABLE
 
 #: Every spelling of the loopback host the counter may be reached by.
-_LOOPBACK_HOSTS = "127.0.0.1,localhost,::1"
+_LOOPBACK_HOSTS = ",".join(LOOPBACK_HOSTS)
 
 #: The only provider kind a refusal run may name. The harness writes the
 #: product's own scaffold (``provider = "ollama"``, no ``[magi].kind``), and the
@@ -3005,6 +3033,10 @@ class RunExecutor:
         self._env = env
         self._config = config
         self._credential = credential
+        #: How many requests the error backend of the run in progress answered,
+        #: one entry per backend served (:meth:`_invoke`); reset by
+        #: :meth:`execute`, which runs one definition at a time.
+        self._reached: list[int] = []
 
     def execute(self, definition: RunDefinition) -> RunResult:
         """Run one definition and return everything it produced.
@@ -3038,6 +3070,7 @@ class RunExecutor:
         stdin = self._stdin_for(definition)
         baseline = None
         contacted: list[str] = []
+        self._reached = []
         with self._counted_endpoints(definition, workspace, contacted) as runnable:
             try:
                 if runnable.rotates:
@@ -3070,6 +3103,7 @@ class RunExecutor:
             review_log_unreadable=tuple(unreadable),
             protected_visible=protected,
             model_requests=tuple(contacted),
+            backend_requests=sum(self._reached) if self._reached else None,
         )
 
     @contextlib.contextmanager
@@ -3480,6 +3514,10 @@ class RunExecutor:
                 stdin: bytes) -> ProductOutput:
         """Run the product once for *definition*.
 
+        For a run with an error backend (:data:`ERROR_BACKEND_TOKEN`), how
+        many requests the backend answered is appended to the run's
+        ``_reached`` record, even when the run times out or fails.
+
         Args:
             definition: The run.
             stdin: What to hand the child, already built.
@@ -3494,13 +3532,20 @@ class RunExecutor:
         declared = dict(definition.env)
         if ERROR_BACKEND_TOKEN not in declared.values():
             return self._invoke_with(definition, declared, stdin)
-        with self._authenticated_backend(definition) as url:
-            resolved = {name: (url if value == ERROR_BACKEND_TOKEN else value)
-                        for name, value in declared.items()}
-            return self._invoke_with(definition, resolved, stdin)
+        # MAGI FIX (S6 loop 29): nothing recorded whether the product reached
+        # the backend, so a run whose requests went elsewhere (a proxy) let S10
+        # search output that never walked the error path (F1a1b-melchior).
+        log = RequestLog()
+        try:
+            with self._authenticated_backend(definition, log) as url:
+                resolved = {name: (url if value == ERROR_BACKEND_TOKEN else value)
+                            for name, value in declared.items()}
+                return self._invoke_with(definition, resolved, stdin)
+        finally:
+            self._reached.append(log.total)
 
     @contextlib.contextmanager
-    def _authenticated_backend(self, definition: RunDefinition):
+    def _authenticated_backend(self, definition: RunDefinition, log=None):
         """Serve an error backend the product must AUTHENTICATE against.
 
         The credential goes into the URL's authority, not only into a header,
@@ -3518,12 +3563,14 @@ class RunExecutor:
 
         Args:
             definition: The run, for the secret it declares planting.
+            log: A :class:`RequestLog` the backend records every request in
+                (:func:`error_backend`), or ``None``.
 
         Yields:
             str: The authenticated URL to hand the product.
         """
         password = definition.planted[0].value if definition.planted else ""
-        with error_backend() as url:
+        with error_backend(log) as url:
             # The plant sits INSIDE the try, so a `vault set` that fails
             # part-way still reaches the removal for the entries that did land.
             # Outside it, a failure on the third of four left the first two in

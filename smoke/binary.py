@@ -37,6 +37,57 @@ from smoke.product import ProductOutput
 #: the product publishes, and nothing asserts on it.
 KILLED_EXIT_CODE = -1
 
+#: Every spelling of the loopback host a stand-in the harness serves may be
+#: reached by.
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+#: The proxy exemption list the product's HTTP client (reqwest) reads, in
+#: either case.
+NO_PROXY_VARIABLE = "NO_PROXY"
+
+
+def exempt_loopback(environment: Mapping[str, str]) -> dict[str, str]:
+    """A copy of *environment* whose ``NO_PROXY`` also exempts loopback.
+
+    MAGI FIX (S6 loop 29): reqwest honours the system proxy and does not
+    exempt ``127.0.0.1``, and only the refusal runs took the proxy out of the
+    child's way. On a proxied host the product's requests to every other
+    loopback stand-in (R6's error backend, the decide and memory scenarios'
+    backends) went to the proxy instead, and a scenario searched output from
+    a path its backend never answered (F1a1b-melchior). Every child now
+    reaches loopback directly; the proxy itself is kept, because some runs
+    reach a real backend off loopback and an operator behind a proxy needs it
+    there.
+
+    The inherited exemptions (``NO_PROXY`` or ``no_proxy``, merged) are kept
+    in order, :data:`LOOPBACK_HOSTS` appended where missing, under the one
+    upper-case name.
+
+    Complexity: ``O(len(environment) + exemptions)``.
+
+    Args:
+        environment: The child's environment, already built.
+
+    Returns:
+        dict[str, str]: A new mapping; *environment* is never modified.
+
+    Example:
+        >>> exempt_loopback({"no_proxy": "corp.example", "PATH": "p"})
+        {'PATH': 'p', 'NO_PROXY': 'corp.example,127.0.0.1,localhost,::1'}
+    """
+    entries = []
+    for name, value in environment.items():
+        if name.upper() == NO_PROXY_VARIABLE:
+            for entry in value.split(","):
+                entry = entry.strip()
+                if entry and entry not in entries:
+                    entries.append(entry)
+    entries.extend(host for host in LOOPBACK_HOSTS if host not in entries)
+    exempt = {name: value for name, value in environment.items()
+              if name.upper() != NO_PROXY_VARIABLE}
+    exempt[NO_PROXY_VARIABLE] = ",".join(entries)
+    return exempt
+
 
 def child_environment(overlay: Mapping[str, str | None] | None = None,
                       base: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -293,6 +344,8 @@ class ReleaseBinary:
                 loses ``PATH`` -- and, on Windows, ``SystemRoot``, without
                 which sockets do not initialise. A ``None`` value removes the
                 variable in every case spelling (:func:`child_environment`).
+                Loopback is always exempt from the proxy
+                (:func:`exempt_loopback`).
             timeout: Seconds to wait, or ``None`` to wait indefinitely.
             cwd: The directory to run the child in, or ``None`` for the
                 harness's own. It is a parameter and never a ``chdir`` because
@@ -318,7 +371,7 @@ class ReleaseBinary:
                 verdict the scenario can read.
         """
         command = [str(self.path)] + list(args)
-        child_env = child_environment(env)
+        child_env = exempt_loopback(child_environment(env))
         try:
             completed = subprocess.run(
                 command,
