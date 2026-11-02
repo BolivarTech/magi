@@ -667,13 +667,11 @@ impl BraceFamilyExtractor {
     /// `#[derive(Debug)] #[cfg(test)]`), for extractors whose `attribute_prefixes` hold
     /// [`RUST_ATTRIBUTE_PREFIX`] (Rust); `trimmed` otherwise.
     ///
-    /// An attribute is `#[` up to its matching `]`, read past its double-quoted strings
-    /// ([`balanced_end_outside_quotes`] with [`RUST_ATTRIBUTE_QUOTES`]), so `#[doc = "]"]` closes
-    /// at its last `]`. An attribute that does not close on the line is kept with everything
-    /// after it, so the line still opens with `#[` and reads as before: an attribute line,
-    /// joined to the item below it ([`Self::scan_back_for_docs`]). A raw string holding a `"`
-    /// (`#[doc = r#"a"b"#]`) may miscount; the line then opens with no keyword and its item falls
-    /// into a gap unit, as before this rule, so no line is lost. O(n) in the line.
+    /// An attribute is `#[` up to its matching `]`, read past its strings and raw strings
+    /// ([`rust_attribute_end`]), so `#[doc = "]"]` and `#[doc = r#"a"b"#]` close at their last
+    /// `]`. An attribute that does not close on the line is kept with everything after it, so
+    /// the line still opens with `#[` and reads as before: an attribute line, joined to the item
+    /// below it ([`Self::scan_back_for_docs`]). O(n) in the line.
     ///
     /// # Arguments
     ///
@@ -693,9 +691,7 @@ impl BraceFamilyExtractor {
         let mut rest = trimmed;
         while rest.starts_with(RUST_ATTRIBUTE_PREFIX) {
             let attribute = rest.get(1..).unwrap_or("");
-            let Some(end) =
-                balanced_end_outside_quotes(attribute, '[', ']', &RUST_ATTRIBUTE_QUOTES)
-            else {
+            let Some(end) = rust_attribute_end(attribute) else {
                 return rest;
             };
             rest = attribute.get(end..).unwrap_or("").trim_start();

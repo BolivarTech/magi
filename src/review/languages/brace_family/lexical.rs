@@ -690,9 +690,104 @@ pub(super) const MACRO_RULES_KEYWORD: &str = "macro_rules! ";
 // MAGI FIX (S6 loop 17, B2-6): the inner-attribute policy, written where the prefix is defined.
 pub(super) const RUST_ATTRIBUTE_PREFIX: &str = "#[";
 
-/// The quotes a Rust attribute's arguments are read past: only `"`, since a `'` may open a
-/// lifetime (`T: 'a`), which has no closing quote.
-pub(super) const RUST_ATTRIBUTE_QUOTES: [char; 1] = ['"'];
+/// The prefix letter of a Rust raw string (`r"..."`, `r#"..."#`), which a byte string's `b`
+/// may precede (`br#"..."#`).
+const RAW_STRING_PREFIX: char = 'r';
+
+/// The letter that makes a Rust string a byte string (`b"..."`, `br"..."`).
+const BYTE_STRING_PREFIX: char = 'b';
+
+/// The byte offset just past the `]` that matches the `[` a Rust attribute's `text` starts with
+/// (`[doc = "]"]` closes at its last `]`), or `None` when it never closes on the line.
+///
+/// A `"` string is read past, a `\` escaping the next character in it, and so is a raw string
+/// (`r"..."`, `r#"a"b"#`, `br"..."`), which ends only at a `"` followed by as many `#` as it
+/// opened with, so a quote or bracket inside one counts nothing. A `'` is no quote, since it may
+/// open a lifetime (`T: 'a`), which has no closing quote. An `r` inside an identifier
+/// (`for"x"`) opens no raw string. A string that never closes makes the result `None`, and the
+/// caller keeps its text as it was. O(n) in the text: each character is read once.
+///
+/// # Arguments
+///
+/// * `text` - The attribute's text from its `[`.
+///
+/// # Returns
+///
+/// The offset just past the matching `]`, or `None`.
+// MAGI FIX (S6 loop 25, B2b1a): a raw string holding a `"` left the attribute unclosed, so the
+// item after it on the line was no construct.
+pub(super) fn rust_attribute_end(text: &str) -> Option<usize> {
+    let starts_word = |p: Option<char>| p.is_none_or(|p| !is_identifier_char(p));
+    let mut depth = 0u32;
+    let mut at = 0;
+    // The two characters before `at`, nearest first: whether an `r` starts a word.
+    let mut previous: [Option<char>; 2] = [None, None];
+    while let Some(c) = text.get(at..).and_then(|rest| rest.chars().next()) {
+        let after = at + c.len_utf8();
+        let raw_prefix = c == RAW_STRING_PREFIX
+            && (starts_word(previous[0])
+                || (previous[0] == Some(BYTE_STRING_PREFIX) && starts_word(previous[1])));
+        if let Some(end) = raw_prefix.then(|| raw_string_end(text, after)).flatten() {
+            at = end?;
+            previous = [Some('"'), None];
+            continue;
+        }
+        match c {
+            '"' => {
+                at = quoted_end(text, after)?;
+                previous = [Some('"'), None];
+                continue;
+            }
+            '[' => depth = depth.saturating_add(1),
+            ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(after);
+                }
+            }
+            _ => {}
+        }
+        previous = [Some(c), previous[0]];
+        at = after;
+    }
+    None
+}
+
+/// Where the Rust raw string whose `#` run or `"` starts at byte offset `from` of `text` ends:
+/// `None` when no raw string opens there (no `"` after the `#` run: the `r` is a plain letter),
+/// `Some(None)` when one opens but never closes on the line, and `Some(Some(end))` with the
+/// offset just past its closing `"` and `#` run otherwise. O(n) in the text.
+fn raw_string_end(text: &str, from: usize) -> Option<Option<usize>> {
+    let rest = text.get(from..)?;
+    let hashes = rest.len() - rest.trim_start_matches('#').len();
+    if !rest.get(hashes..)?.starts_with('"') {
+        return None;
+    }
+    let body = from + hashes + 1;
+    let closer = format!("\"{}", "#".repeat(hashes));
+    Some(
+        text.get(body..)
+            .and_then(|b| b.find(&closer))
+            .map(|pos| body + pos + closer.len()),
+    )
+}
+
+/// The offset just past the `"` that closes the string whose content starts at byte offset
+/// `from` of `text`, a `\` escaping the next character, or `None` when it never closes. O(n) in
+/// the text.
+fn quoted_end(text: &str, from: usize) -> Option<usize> {
+    let mut escaped = false;
+    for (at, c) in text.get(from..)?.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            return Some(from + at + 1);
+        }
+    }
+    None
+}
 
 /// The byte offset just past the `close` that matches the `open` `text` starts with, counting
 /// only the delimiters outside quoted text, or `None` when it never closes.
