@@ -2543,6 +2543,23 @@ void g(void) {
     }
 
     #[test]
+    fn a_block_comment_line_opening_with_a_statement_keyword_keeps_the_body_with_its_signature() {
+        // [MAGI S6 loop 25, B2b1b] the brace search read a block comment's line as code, so a
+        // comment line opening with `return` or `if` between a signature and its brace ended the
+        // search and the body was cut from its signature.
+        let c = "int f(int a)\n/* note\n   return early */\n{\n    return a;\n}\n";
+        assert_eq!(
+            sorted_spans(&c_extractor(), c),
+            vec![("f".to_string(), UnitKind::Function, 1, 6)]
+        );
+        let rust = "fn g()\n/* see\n   if needed */\n{\n    x();\n}\n";
+        assert_eq!(
+            sorted_spans(&rust_extractor(), rust),
+            vec![("g".to_string(), UnitKind::Function, 1, 6)]
+        );
+    }
+
+    #[test]
     fn a_comment_line_ending_in_a_semicolon_joins_no_declaration_group() {
         // [MAGI S6 loop 13, B2b1-m1] the group's forward scan asked the line text alone, so a
         // block comment's body line ending in `;` (`note;`) was taken for a declaration and
