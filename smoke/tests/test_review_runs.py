@@ -1520,20 +1520,22 @@ class ModelCounterShutdownTests(unittest.TestCase):
     """
 
     def test_a_request_left_in_the_backlog_at_shutdown_is_still_counted(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1b1-balthasar/caspar] synchronised by an event, not by polling a private
+        # flag of BaseServer: the loop accepts nothing and returns once shutdown is asked for, which is what
+        # serve_forever does with a connection still waiting.
         import http.server
         import socket
-        import time
-        real_serve = http.server.ThreadingHTTPServer.serve_forever
+        import threading
+        shutdown_requested = threading.Event()
 
-        def serve_after_shutdown_is_requested(server, poll_interval=0.5):
-            # Hold the loop until shutdown is requested, so the request below is never accepted by it.
-            deadline = time.monotonic() + 30
-            while not server._BaseServer__shutdown_request and time.monotonic() < deadline:
-                time.sleep(0.01)
-            real_serve(server, poll_interval)
+        def serve_accepting_nothing(server, poll_interval=0.5):
+            shutdown_requested.wait(30)
 
-        with mock.patch.object(http.server.ThreadingHTTPServer, "serve_forever",
-                               serve_after_shutdown_is_requested):
+        def request_shutdown(server):
+            shutdown_requested.set()
+
+        with mock.patch.object(http.server.ThreadingHTTPServer, "serve_forever", serve_accepting_nothing), \
+                mock.patch.object(http.server.ThreadingHTTPServer, "shutdown", request_shutdown):
             with runs.model_counter() as (url, log):
                 port = int(url.rsplit(":", 1)[1].split("/", 1)[0])
                 client = socket.create_connection(("127.0.0.1", port))
