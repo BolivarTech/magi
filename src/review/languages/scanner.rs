@@ -719,7 +719,7 @@ impl CodeScanner {
                         // C and C++ have no lifetime: a `'` opens a constant of any width that
                         // closes on the line, unless it separates the digits of a number.
                         let literal = if self.rules.multichar_literals {
-                            !is_digit_separator(&chars, i) && multichar_literal_closes(&chars, i)
+                            c_char_literal_end(&chars, i).is_some()
                         } else {
                             rust_char_literal_len(&chars, i).is_some()
                         };
@@ -1283,15 +1283,15 @@ fn cpp_raw_string_start(chars: &[char], i: usize) -> Option<(Vec<char>, usize)> 
 }
 
 /// The most characters between the quotes of a C or C++ multicharacter constant that
-/// [`multichar_literal_closes`] looks at: four characters each written as a four-character
+/// [`multichar_literal_end`] looks at: four characters each written as a four-character
 /// escape (`'\x41\x42\x43\x44'`), the widest an `int` holds. A starting point, not a
 /// measurement; a longer one reads as code, as before this rule.
 const MAX_MULTICHAR_LITERAL_CHARS: usize = 16;
 
-/// Whether the `'` at `i` opens a C or C++ character constant closed on the line within
-/// [`MAX_MULTICHAR_LITERAL_CHARS`] characters (`'{}'`, `'ab'`), a backslash escaping the next
-/// character. O(1): the look-ahead is bounded.
-fn multichar_literal_closes(chars: &[char], i: usize) -> bool {
+/// The index of the quote closing the C or C++ character constant whose `'` is at `i`, when it
+/// closes on the line within [`MAX_MULTICHAR_LITERAL_CHARS`] characters (`'{}'`, `'ab'`), a
+/// backslash escaping the next character; `None` otherwise. O(1): the look-ahead is bounded.
+fn multichar_literal_end(chars: &[char], i: usize) -> Option<usize> {
     let mut k = i + 1;
     let end = i
         .saturating_add(2)
@@ -1299,11 +1299,32 @@ fn multichar_literal_closes(chars: &[char], i: usize) -> bool {
     while k < chars.len().min(end) {
         match char_at(chars, k) {
             '\\' => k += 2,
-            '\'' => return k > i + 1,
+            '\'' => return (k > i + 1).then_some(k),
             _ => k += 1,
         }
     }
-    false
+    None
+}
+
+/// The index of the quote closing the C or C++ character constant whose `'` is at `i`, or
+/// `None` when that `'` opens none: it separates the digits of a number
+/// ([`is_digit_separator`]) or no constant closes after it ([`multichar_literal_end`]). Shared
+/// by the scanner and the brace family's attribute reader (`brace_family::lexical`), so both
+/// read one rule. O(k) for the k characters of the word before `i`.
+///
+/// # Arguments
+///
+/// * `chars` - The line's characters.
+/// * `i` - The index of a `'` in `chars`.
+///
+/// # Returns
+///
+/// The closing quote's index, or `None`.
+pub(crate) fn c_char_literal_end(chars: &[char], i: usize) -> Option<usize> {
+    if is_digit_separator(chars, i) {
+        return None;
+    }
+    multichar_literal_end(chars, i)
 }
 
 /// Whether the `'` at `i` is a C++14 digit separator (`1'000`, `0x1'F`): the word right before

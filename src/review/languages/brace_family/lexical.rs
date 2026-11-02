@@ -6,7 +6,9 @@
 //! names, keyword and modifier stripping, C and Rust attribute skipping, and construct naming.
 
 use super::*;
-use crate::review::languages::scanner::{rust_char_literal_len, RUST_CHAR_LITERAL_MAX_CHARS};
+use crate::review::languages::scanner::{
+    c_char_literal_end, rust_char_literal_len, RUST_CHAR_LITERAL_MAX_CHARS,
+};
 
 /// The 1-based line number of the 0-based line `idx`.
 ///
@@ -831,7 +833,10 @@ pub(super) fn strip_c_attributes(text: &str) -> Cow<'_, str> {
 /// The byte span (`start`, `end`) of the first complete C or C++ attribute in `text`
 /// ([`strip_c_attributes`]), or `None` when there is none: an attribute word starts only where
 /// no identifier character comes before it, and is followed, after any blanks, by a `(` whose
-/// match closes on the line; a `[[` is matched by its closing `]]`. O(n × k) in the text.
+/// match closes on the line; a `[[` is matched by its closing `]]`. The brackets are balanced
+/// past strings and character constants ([`c_balanced_end`]). O(n × k) in the text.
+// MAGI FIX (loop 29, B2b1b): a `)` or `]` inside a string (`section(")")`, `deprecated("]")`)
+// closed the attribute early, so the construct after it on the line was no construct.
 fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
     let mut previous: Option<char> = None;
     for (at, c) in text.char_indices() {
@@ -839,7 +844,7 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
         previous = Some(c);
         let rest = text.get(at..).unwrap_or("");
         if rest.starts_with(STANDARD_ATTRIBUTE_OPEN) {
-            return balanced_end(rest, '[', ']').map(|end| (at, at + end));
+            return c_balanced_end(rest, '[', ']').map(|end| (at, at + end));
         }
         if !word_starts {
             continue;
@@ -856,7 +861,76 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
             continue;
         }
         let offset = at + word.len() + (after.len() - args.len());
-        return balanced_end(args, '(', ')').map(|end| (at, offset + end));
+        return c_balanced_end(args, '(', ')').map(|end| (at, offset + end));
+    }
+    None
+}
+
+/// The byte offset just past the `close` that matches the `open` `text` starts with, reading C
+/// and C++ strings and character constants past, or `None` when it never closes on the line.
+///
+/// A `"` string ends at its next `"` not escaped by a `\`; a `'` opens a character constant by
+/// the scanner's rule ([`c_char_literal_end`]), so a digit separator (`alignas(1'024)`) is no
+/// quote. A string that never closes makes the result `None`, and the caller keeps its text as it
+/// was. O(n) in the text: each character is read once.
+///
+/// # Arguments
+///
+/// * `text` - The text, starting with `open`.
+/// * `open` - The opening delimiter.
+/// * `close` - The closing delimiter.
+///
+/// # Returns
+///
+/// The offset just past the matching `close`, or `None`.
+fn c_balanced_end(text: &str, open: char, close: char) -> Option<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let width = |from: usize, to: usize| -> usize {
+        chars
+            .get(from..to)
+            .unwrap_or(&[])
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum()
+    };
+    let mut depth = 0u32;
+    let mut byte = 0;
+    let mut k = 0;
+    while let Some(&c) = chars.get(k) {
+        let quoted_last = match c {
+            '"' => Some(c_string_end(&chars, k)?),
+            '\'' => c_char_literal_end(&chars, k),
+            _ => None,
+        };
+        if let Some(last) = quoted_last {
+            byte += width(k, last + 1);
+            k = last + 1;
+            continue;
+        }
+        if c == open {
+            depth = depth.saturating_add(1);
+        } else if c == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(byte + c.len_utf8());
+            }
+        }
+        byte += c.len_utf8();
+        k += 1;
+    }
+    None
+}
+
+/// The index of the `"` that closes the string whose opening `"` is at `open` in `chars`, a `\`
+/// escaping the next character, or `None` when it never closes. O(n) in the characters.
+fn c_string_end(chars: &[char], open: usize) -> Option<usize> {
+    let mut k = open + 1;
+    while let Some(&c) = chars.get(k) {
+        match c {
+            '\\' => k += 2,
+            '"' => return Some(k),
+            _ => k += 1,
+        }
     }
     None
 }
