@@ -661,6 +661,23 @@ const TEMPLATE_KEYWORD: &str = "template";
 /// `alignas(16)` (C++11, C23) and `_Alignas(16)` (C11).
 const C_ATTRIBUTE_WORDS: [&str; 4] = ["__attribute__", "__declspec", "alignas", "_Alignas"];
 
+/// What opens a C or C++ standard attribute (`[[nodiscard]]`, C++11 and C23). No other C or
+/// C++ token opens with it, so a line that does is an attribute line.
+const STANDARD_ATTRIBUTE_OPEN: &str = "[[";
+
+/// The line prefixes of the C and C++ extractors' `attribute_prefixes`: an attribute alone on
+/// the line above a construct (`[[nodiscard]]`, `__attribute__((noreturn))`) or wrapped over
+/// lines (`[[deprecated(` ... `)]]`) qualifies that construct and is reviewed with it, as one on
+/// the construct's own line is read past ([`strip_c_attributes`]). O(1).
+pub(super) fn c_attribute_prefixes() -> Vec<String> {
+    // MAGI FIX (loop 27, B2b1a): an attribute line above a C or C++ function was a gap unit,
+    // reviewed apart from the function it qualifies.
+    std::iter::once(STANDARD_ATTRIBUTE_OPEN)
+        .chain(C_ATTRIBUTE_WORDS)
+        .map(str::to_string)
+        .collect()
+}
+
 /// `text` without its C and C++ attributes, wherever they stand on the line: a standard
 /// attribute (`[[nodiscard]]`, `[[gnu::packed]]`) and a word of [`C_ATTRIBUTE_WORDS`] with its
 /// argument list in balanced parentheses. The blanks are collapsed to one space, so the

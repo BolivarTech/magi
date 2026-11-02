@@ -592,7 +592,7 @@ impl BraceFamilyExtractor {
                 "#include ".to_string(),
             ],
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
-            attribute_prefixes: vec![],
+            attribute_prefixes: c_attribute_prefixes(),
             modifiers: &NO_MODIFIERS,
             lexical_rules: LexicalRules::c(),
             signature_functions: true,
