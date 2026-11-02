@@ -718,6 +718,10 @@ fn opens_linkage_block(trimmed: &str) -> bool {
 /// The 0-based last line of the preprocessor directive at line `i` (`#define MAX(a, b) \`):
 /// the directive goes on while a line ends in `\`. `i` when line `i` is no directive (its text
 /// does not open with `#`) or does not end in `\`. O(k) for the k lines of the directive.
+///
+/// It spends no visit of the pass's [`SearchBudget`], unlike the forward searches: its callers
+/// (a declaration group and its split, `BraceFamilyExtractor::declaration_end`) resume after the
+/// line it returns, so each directive's lines are walked once and a pass's walks add O(n) in all.
 pub(super) fn preprocessor_end(lines: &[&str], i: usize) -> usize {
     if !lines
         .get(i)

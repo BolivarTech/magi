@@ -200,7 +200,9 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
     let base = block.start_line.saturating_sub(1);
     // MAGI FIX (S6 loop 19, B2a-6): the shares are taken by binary search, which needs the
     // changed lines sorted; a unit built by a caller with them unsorted gave pieces the wrong
-    // lines. The extractors' units are sorted, so the copy is made only when they are not.
+    // lines. The extractors' units are strictly increasing (sorted, no duplicates), so the copy is
+    // made only when they are not; a sorted list with duplicates is copied too, and its pieces'
+    // shares come out deduplicated.
     let changed: Cow<'_, [u32]> = if block.changed_lines.is_sorted_by(|a, b| a < b) {
         Cow::Borrowed(&block.changed_lines)
     } else {

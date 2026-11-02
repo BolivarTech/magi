@@ -7,6 +7,29 @@
 //! Uses [`CodeScanner`] for lexical-aware
 //! brace counting and keyword detection to extract complete semantic
 //! units (functions, structs, classes, declaration groups).
+//!
+//! # Declared limits
+//!
+//! Heuristics kept on purpose. Each keeps every line in exactly one unit (RV03): a miss splits
+//! a construct from part of its lines, which are still reviewed, never dropped. Each is pinned
+//! by the test named:
+//!
+//! - The forward searches of a pass share one budget linear in the lines; once it is spent a
+//!   search finds no brace and the construct ends on its own line
+//!   (`the_brace_searches_of_a_whole_file_spend_a_budget_linear_in_its_lines`,
+//!   `the_walk_up_from_a_wrapped_attribute_tail_spends_the_pass_budget`).
+//! - A `.h` file is read with the C++ rules, so a C identifier spelled like a C++ keyword opens
+//!   a one-line construct (`a_c_header_reads_the_same_with_the_cpp_rules`,
+//!   `a_c_identifier_spelled_like_a_cpp_keyword_loses_no_line_in_a_header`).
+//! - A unit's content joins its lines with LF, whatever the file's line ends
+//!   (`a_crlf_file_gives_the_units_of_its_lf_twin_with_lf_line_ends`).
+//! - A C `typedef struct` or `typedef enum` is a declaration group, one unit with its
+//!   `} Name;` line, not a struct (`loop_28_shapes_read_as_one_unit_each`).
+//! - A comment after a return type's brace (`function f(): { // shape`) hides the type, and the
+//!   brace reads as the body's (`a_comment_after_a_return_type_brace_hides_the_type_declared`).
+//! - A C++ braced member initializer wrapped over lines (`Foo::Foo() : arr{`) splits the
+//!   constructor from its body
+//!   (`a_braced_member_initializer_wrapped_over_lines_splits_the_constructor_declared`).
 
 use std::borrow::Cow;
 use std::cell::Cell;

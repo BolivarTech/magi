@@ -16,6 +16,17 @@
 //! as code, so its brackets and quotes shift every later unit boundary. [`PythonStrings`] keeps
 //! a stack of open strings and fields instead. Template strings (PEP 750, `t"..."`, Python
 //! 3.14) share the f-string grammar and are read the same way.
+//!
+//! # Declared limits
+//!
+//! Each is pinned by the test named:
+//!
+//! - Past [`MAX_FSTRING_NESTING`] open frames a `{` is text and a string opened in a field has no
+//!   fields (`nesting_past_the_cap_degrades_without_panicking_or_losing_the_end`); the stack
+//!   never holds more than the cap plus one frame
+//!   (`the_stack_never_holds_more_than_the_cap_plus_one_frame`).
+//! - In a format spec every `{` opens a nested field and no `{{` is a literal brace, as CPython
+//!   reads it (`a_brace_in_a_format_spec_opens_a_nested_field_as_cpython_reads_it`).
 
 /// The most frames (open strings and replacement fields) [`PythonStrings`] tracks at once.
 ///
@@ -108,7 +119,10 @@ enum Frame {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PythonStrings {
-    /// What is open, innermost last; at most [`MAX_FSTRING_NESTING`] + 1 frames.
+    /// What is open, innermost last; at most [`MAX_FSTRING_NESTING`] + 1 frames: a string opens
+    /// only in a replacement field or with nothing open, and a field (or an f-string with fields)
+    /// only while fewer than [`MAX_FSTRING_NESTING`] frames are open, so only a string inside
+    /// the deepest field passes the cap.
     frames: Vec<Frame>,
     /// Whether the last read ended on a backslash that escapes the newline.
     escaped_newline: bool,

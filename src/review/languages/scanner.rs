@@ -20,6 +20,27 @@
 //! assert_eq!(results[1].brace_delta, 0);  // brace in string — not counted
 //! assert_eq!(results[2].brace_delta, -1); // closing }
 //! ```
+//!
+//! # Declared limits
+//!
+//! Heuristics kept on purpose. None loses or duplicates a line in the units built on the scan,
+//! and each is pinned by the test named:
+//!
+//! - Only the first branch of a preprocessor conditional decides the depth after its `#endif`
+//!   (`the_first_branch_decides_the_depth_after_an_unequal_conditional`); a later branch that
+//!   closes the block around it ends that block for the closing-brace search
+//!   (`a_later_branch_that_closes_the_block_it_is_in_is_seen_by_the_closing_search`); past
+//!   [`MAX_CONDITIONAL_NESTING`] braces count plainly
+//!   (`conditionals_nested_past_the_cap_degrade_to_plain_counting`).
+//! - A JavaScript `/` after `}` opens a regex, so dividing an object literal misreads
+//!   (`a_regex_after_a_control_condition_or_a_block_close_is_not_counted`); a character class
+//!   closes at its first `]`, as ECMAScript lexes it
+//!   (`a_regex_character_class_closes_at_its_first_bracket_as_ecmascript_lexes_it`).
+//! - A brace of a type (a TypeScript type literal, an object type in a signature) counts as any
+//!   brace; the extractors decide whose it is (`brace_family`'s
+//!   `loop_28_shapes_read_as_one_unit_each` and `a_return_type_literal_block_keeps_the_function_body`).
+//! - A block that never closes ends on the last line
+//!   (`a_closing_brace_search_on_an_unclosed_block_returns_the_last_line`).
 
 use super::python_strings::PythonStrings;
 
@@ -203,7 +224,11 @@ pub struct LexicalRules {
     /// scanned from the depth at the `#if`, so a header it opens (`#else` / `int f(void) {`)
     /// still opens a block within it, but the depth it leaves is dropped at `#endif`. The limit:
     /// a block opened or closed only in a later branch is invisible after the conditional, and
-    /// the first branch counts even when it is dead (`#if 0` ... `#else`). An unbalanced
+    /// the first branch counts even when it is dead (`#if 0` ... `#else`). Within a later branch
+    /// each line's depth is real, so a branch that closes the block around it on its own (`}`
+    /// then a new header, under `#else`) dips below it, and the closing-brace search, which reads
+    /// each line's lowest point, ends that block there: the structure of the `#else`
+    /// configuration, with the next header a construct of its own, no line lost. An unbalanced
     /// directive (a stray `#endif`, a missing one) degrades to plain counting, never a panic,
     /// as does a conditional nested past [`MAX_CONDITIONAL_NESTING`]. A directive inside a
     /// comment, a string or a `\`-continued directive is no conditional.

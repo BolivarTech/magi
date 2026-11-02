@@ -6,6 +6,24 @@
 //!
 //! Recognizes `def`, `async def`, `class`, `import`/`from`, and module-level
 //! assignments. Block boundaries are determined by indentation level changes.
+//!
+//! # Declared limits
+//!
+//! Heuristics kept on purpose. Each keeps every line in exactly one unit (RV03), and each is
+//! pinned by the test named:
+//!
+//! - Definitions, classes, imports and assignments are found at indent 0 only; one inside a
+//!   module-level compound statement leaves the whole block one gap unit
+//!   (`a_definition_inside_a_module_level_block_falls_into_a_whole_gap_unit`).
+//! - A byte order mark before the first line's keyword hides that construct
+//!   (`a_byte_order_mark_on_the_first_line_loses_no_line`).
+//! - A tab counts as one column of indentation. CPython compares indentation with tabs at 8
+//!   columns and at 1 and rejects (`TabError`) a file where the two orders disagree, so in every
+//!   file it accepts this orders the lines as Python does; checked over 4 880 accepted files
+//!   mixing tabs and spaces, none disagreeing (`tab_indentation_gives_the_same_units_as_space_indentation`).
+//! - Code CPython rejects (two backslashes ending a line outside a string) still loses no line
+//!   (`two_backslashes_ending_a_line_outside_a_string_lose_no_line`).
+//! - String and f-string limits are those of `python_strings`.
 
 use super::python_strings::PythonStrings;
 use super::scanner::{CodeScanner, LexicalRules};
