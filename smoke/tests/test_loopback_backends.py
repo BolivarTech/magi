@@ -164,5 +164,51 @@ class ErrorBackendReachedTests(unittest.TestCase):
         self.assertIn("error backend", findings[0].detail)
 
 
+class HandlerThreadBoundTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 29, F1a1b-caspar] a flood of connections cannot spawn handler threads without bound.
+
+    ThreadingHTTPServer starts one thread per connection; each lives until its deadline, so a product that
+    opened connections faster than they closed grew the harness's thread count with nothing to stop it.
+    Past the cap a connection is served on the accepting thread: accepting slows down, every request is
+    still answered and counted.
+    """
+
+    _REQUEST = b"POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
+
+    def test_both_stand_ins_bound_their_handler_threads(self) -> None:
+        self.assertTrue(issubclass(runs._BoundedThreadingServer, runs.http.server.ThreadingHTTPServer))
+        self.assertGreater(runs.MAX_LOOPBACK_HANDLER_THREADS, 0)
+        with mock.patch.object(runs.http.server, "ThreadingHTTPServer",
+                               side_effect=AssertionError("an unbounded server")):
+            with runs.error_backend():
+                pass
+            with runs.model_counter():
+                pass
+
+    def test_past_the_cap_a_request_is_still_answered_and_counted_without_a_thread(self) -> None:
+        import socketserver
+        with mock.patch.object(runs, "MAX_LOOPBACK_HANDLER_THREADS", 0), \
+                mock.patch.object(socketserver.ThreadingMixIn, "process_request",
+                                  side_effect=AssertionError("a thread was spawned past the cap")):
+            with runs.model_counter() as (url, log):
+                answer = _first_bytes(_port(url), self._REQUEST)
+        self.assertTrue(answer.startswith(b"HTTP/1.0 %d" % runs.MODEL_COUNTER_STATUS), answer[:80])
+        self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
+
+    def test_a_finished_thread_gives_its_slot_back(self) -> None:
+        import socketserver
+        with mock.patch.object(runs, "MAX_LOOPBACK_HANDLER_THREADS", 1):
+            server = runs._BoundedThreadingServer(("127.0.0.1", 0), runs._CountingHandler)
+        try:
+            with mock.patch.object(socketserver.ThreadingMixIn, "process_request"):
+                server.process_request(None, None)
+            self.assertFalse(server._slots.acquire(blocking=False), "the only slot was not taken")
+            with mock.patch.object(socketserver.ThreadingMixIn, "process_request_thread"):
+                server.process_request_thread(None, None)
+            self.assertTrue(server._slots.acquire(blocking=False), "the ended thread kept its slot")
+        finally:
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()
