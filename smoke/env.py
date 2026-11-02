@@ -575,10 +575,18 @@ def _reject_transplanted_path(text: str, scratch: pathlib.Path) -> None:
         scratch: The temporary directory it was generated in.
 
     Raises:
-        HarnessError: If any spelling of the temporary path appears in *text*.
+        HarnessError: If any spelling of the temporary path appears in *text*,
+            or the path cannot be resolved.
     """
+    try:
+        resolved = scratch.resolve()
+    except (OSError, RuntimeError) as exc:
+        # A symlink loop is a RuntimeError before Python 3.13, an OSError after.
+        raise HarnessError("could not resolve the temporary directory %s to "
+                           "check the generated %s: %s"
+                           % (scratch, MAGI_TOML_NAME, exc)) from exc
     spellings = set()
-    for candidate in (scratch, scratch.resolve()):
+    for candidate in (scratch, resolved):
         rendered = str(candidate)
         spellings.add(rendered)
         spellings.add(rendered.replace("\\", "/"))
