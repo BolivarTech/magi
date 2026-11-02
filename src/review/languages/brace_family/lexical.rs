@@ -195,16 +195,32 @@ impl<'t> ListHead<'t> {
     }
 
     /// Whether the text before the `(` holds an `=`, an assignment or initializer (`x = f(`),
-    /// other than the `=` of an arrow (`foo<T extends () => void>(`), which a type bound holds.
-    /// O(n) in the text.
+    /// other than the `=` of an arrow (`foo<T extends () => void>(`), which a type bound holds,
+    /// and an `=` inside angle brackets, a type parameter's default (`get<T = unknown>(`). The
+    /// `>` of an arrow closes no bracket ([`closes_angle`]). O(n) in the text.
     // MAGI FIX (S6 loop 25, B2b1b): the arrow of a bound read as an assignment, so a generic
     // method bounded by a function type named no member.
+    // MAGI FIX (loop 26, 5): the `=` of a generic default read as an assignment, so the method
+    // was no member of its class.
     fn assigns(&self) -> bool {
-        self.before.match_indices('=').any(|(at, _)| {
-            !self
-                .before
-                .get(at + 1..)
-                .is_some_and(|r| r.starts_with('>'))
+        let mut angles = 0usize;
+        self.before.char_indices().any(|(at, c)| match c {
+            '<' => {
+                angles += 1;
+                false
+            }
+            '>' if closes_angle(self.before, at) => {
+                angles = angles.saturating_sub(1);
+                false
+            }
+            '=' => {
+                angles == 0
+                    && !self
+                        .before
+                        .get(at + 1..)
+                        .is_some_and(|r| r.starts_with('>'))
+            }
+            _ => false,
         })
     }
 }
