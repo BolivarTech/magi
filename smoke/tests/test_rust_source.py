@@ -91,6 +91,36 @@ class CodeOnlyTests(unittest.TestCase):
         self.assertEqual(text, _helpers().code_only(text))
 
 
+class ReadSourceTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 27, F1b2a-melchior] ``read_source``, which every guard stands on, does what it says."""
+
+    def _read(self, data: bytes) -> str:
+        """Write *data* under a temporary root and read it back through ``read_source`` with that root."""
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "x.rs").write_bytes(data)
+            return _helpers().read_source("src/x.rs", root)
+
+    def test_crlf_line_endings_are_normalised(self) -> None:
+        self.assertEqual("const A: u8 = 1;\nconst B: u8 = 2;\n",
+                         self._read(b"const A: u8 = 1;\r\nconst B: u8 = 2;\r\n"))
+
+    def test_a_byte_that_is_not_utf8_is_replaced_not_fatal(self) -> None:
+        self.assertEqual("let b = b\"�\";\nconst N: u8 = 3;\n",
+                         self._read(b"let b = b\"\xff\";\nconst N: u8 = 3;\n"))
+
+    def test_the_root_override_is_where_the_file_is_read_from(self) -> None:
+        self.assertEqual("only under the given root\n", self._read(b"only under the given root\n"))
+
+    def test_without_a_root_the_repository_is_read(self) -> None:
+        helpers = _helpers()
+        self.assertTrue((helpers.REPO_ROOT / "Cargo.toml").is_file())
+        self.assertIn("[package]", helpers.read_source("Cargo.toml"))
+
+
 class GuardRoutingTests(unittest.TestCase):
     """The sync guards themselves read through the helpers."""
 
