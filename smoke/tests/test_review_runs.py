@@ -1321,6 +1321,39 @@ class RefusalRunModelCallTests(unittest.TestCase):
         self.assertEqual(("POST /api/chat",), result.model_requests)
 
     @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_ending_in_a_harness_failure_still_names_what_it_sent(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1a1-melchior] only a timeout was caught inside the counted block, so any other
+        # exception skipped the record and the exit-3 report lost the requests that would explain it.
+        def invoke(argv, stdin, env, timeout, cwd):
+            import tomllib
+            import urllib.error
+            import urllib.request
+            base = tomllib.loads((pathlib.Path(cwd) / ".magi" / "magi.toml")
+                                 .read_text(encoding="utf-8"))["base_url"]
+            request = urllib.request.Request(base[:-len("/v1")] + "/api/chat", data=b"{}",
+                                             method="POST")
+            try:
+                urllib.request.urlopen(request, timeout=5).close()
+            except urllib.error.HTTPError as exc:
+                exc.close()
+            raise HarnessError("the stand-in failed after sending")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / ".magi").mkdir()
+            (root / ".magi" / "magi.toml").write_text(self._CONFIG, encoding="utf-8")
+            binary = mock.Mock()
+            binary.invoke.side_effect = invoke
+            env = types.SimpleNamespace(root=root, magi_dir=root / ".magi",
+                                        scratch_dir=root / "scratch")
+            executor = runs.RunExecutor(binary=binary, env=env,
+                                        config=types.SimpleNamespace(passphrase="toy"))
+            with self.assertRaises(HarnessError) as caught:
+                executor.execute(runs.DEFINITIONS["R15"])
+        notes = getattr(caught.exception, "__notes__", [])
+        self.assertTrue(any("POST /api/chat" in note for note in notes), notes)
+
+    @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_flooding_the_counter_still_names_the_request_past_the_cap(self) -> None:
         with mock.patch.object(runs, "MODEL_COUNTER_MAX_RECORDED", 2):
             result, _, _ = self._execute("R15", ("/api/show",) * 3 + ("/api/chat",))

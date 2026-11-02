@@ -66,6 +66,20 @@ class ExitCodeTests(unittest.TestCase):
             4, len({EXIT_OK, EXIT_NOT_PASSED, EXIT_PREFLIGHT, EXIT_HARNESS})
         )
 
+    def test_a_harness_failure_prints_the_notes_it_carries(self) -> None:
+        """[MAGI §6 MS2 loop 27, F1a1-melchior] a refusal run that fails after
+        reaching the counter attaches what it sent as a note; printing only
+        the message dropped it from the exit-3 report."""
+        error = HarnessError("the stand-in failed")
+        error.add_note("requests the counter saw: POST /api/chat")
+        stderr = io.StringIO()
+        with mock.patch.object(main.SmokeConfig, "load", side_effect=error), \
+                contextlib.redirect_stderr(stderr):
+            code = main.main(["--smoke-1"])
+        self.assertEqual(EXIT_HARNESS, code)
+        self.assertIn("harness failure: the stand-in failed", stderr.getvalue())
+        self.assertIn("requests the counter saw: POST /api/chat", stderr.getvalue())
+
 
 class ArgumentTests(unittest.TestCase):
     """No --defaults flag exists; absent --profile is the certifying mode."""
