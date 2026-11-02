@@ -2709,7 +2709,8 @@ void g(void) {
             sorted_spans(&rust_extractor(), code),
             vec![
                 ("f".to_string(), UnitKind::Function, 1, 3),
-                ("constants".to_string(), UnitKind::DeclarationGroup, 4, 4),
+                // A group is named by its first line as written, attribute included.
+                ("declarations".to_string(), UnitKind::DeclarationGroup, 4, 4),
                 ("g".to_string(), UnitKind::Function, 5, 7),
             ]
         );
