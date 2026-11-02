@@ -185,6 +185,22 @@ def repo_root():
 TEST_MODULE_MARKER = "#[cfg(test)]"
 
 
+def _has_test_module(text):
+    """Return True when a line of ``text`` starts with ``#[cfg(test)]``.
+
+    Line-anchored on purpose: a marker quoted in a comment or string (as in
+    ``brace_family/detect.rs``'s rustdoc) is not a test module.
+
+    Args:
+        text: File text, or None when unreadable.
+
+    Returns:
+        bool: Whether the file declares a test module.
+    """
+    return any(line.lstrip().startswith(TEST_MODULE_MARKER)
+               for line in (text or "").splitlines())
+
+
 def _read_from_repo(path):
     """Return the text of ``path`` under the repository root, or None.
 
@@ -309,7 +325,7 @@ def module_filter(path, pkgs=None, single_crate=True, read_source=None):
         if parts[-1] == "mod":
             # A module root: its children may depend on it, so take the subtree.
             parts = parts[:-1]
-        elif TEST_MODULE_MARKER not in (read_source(path) or ""):
+        elif not _has_test_module(read_source(path)):
             # No test module here: its tests are the parent's, so widen.
             parts = parts[:-1]
         if not parts or parts == ["main"] or parts == ["lib"]:
