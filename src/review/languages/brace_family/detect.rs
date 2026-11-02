@@ -210,14 +210,18 @@ impl BraceFamilyExtractor {
                 let group_start = i;
                 // MAGI FIX (S6 loop 7): a `#define` continued by `\` ends on its last line.
                 let end_of = |j: usize| self.declaration_end(lines, scanned, j, &search);
-                // A declaration joins the group unless it is a function expression, its own unit.
+                // A declaration joins the group unless it is a function expression, its own unit,
+                // or opens a construct: the main scan tries constructs first, and so does this.
                 // MAGI FIX (S6 loop 13): a comment line ending in `;` joined the group; only code
                 // does, as in the main scan.
+                // MAGI FIX (loop 27, B2b1a): `export class C {` after an import joined its group
+                // (`export` is a declaration keyword) and the group ran through the class.
                 let joins = |j: usize| {
                     scanned.get(j).is_some_and(|s| !s.is_non_code)
                         && (lines.get(j).is_some_and(|l| {
-                            self.is_declaration(l.trim(), scanned.get(j))
-                                || self.opens_declaration_list(l.trim())
+                            self.construct_keyword(l.trim()).is_none()
+                                && (self.is_declaration(l.trim(), scanned.get(j))
+                                    || self.opens_declaration_list(l.trim()))
                         }) || self.opens_wrapped_prototype(lines, scanned, j, &search))
                         && self
                             .function_expression(lines, scanned, j, &search)
