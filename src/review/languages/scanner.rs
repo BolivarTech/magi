@@ -440,6 +440,11 @@ pub struct CodeScanner {
     /// index crosses lines), as JavaScript reads a line that opens with `/` as the continuation
     /// of the line above (`a\n  / b` divides). `true` before the first code line.
     regex_at_line_start: bool,
+    /// Whether the block comment open at this point opened where only blanks and comments
+    /// stood before it on its line, outside a directive: C reads the comment as one blank, so a
+    /// `#` right after its close on a later line still opens a directive (`/* a` then
+    /// `b */ #ifdef X`).
+    comment_at_line_head: bool,
 }
 
 impl CodeScanner {
@@ -461,6 +466,7 @@ impl CodeScanner {
             conditionals: Vec::new(),
             untracked_conditionals: 0,
             regex_at_line_start: true,
+            comment_at_line_head: false,
         }
     }
 
@@ -544,10 +550,21 @@ impl CodeScanner {
         // spans lines, but nothing else in it is structure.
         // MAGI FIX (B2a 6): a block comment before the `#` (`/* c */ #ifdef X`) hid the
         // directive; C reads a comment as a blank before preprocessing.
-        let directive_text = without_leading_block_comments(line);
+        // MAGI FIX (loop 27, B2a): so did one that spans lines (`/* a` then `b */ #ifdef X`),
+        // when only blanks and comments stand before it on the line it opens on.
+        let comment_at_head = self.rules.preprocessor_directives
+            && !self.rules.nested_comments
+            && matches!(self.state, LexicalState::BlockComment { .. })
+            && self.comment_at_line_head
+            && self.templates.is_empty();
+        let line_head_blank = was_code_at_start || comment_at_head;
+        let after_comment = comment_at_head
+            .then(|| line.find("*/").and_then(|at| line.get(at + 2..)))
+            .flatten();
+        let directive_text = without_leading_block_comments(after_comment.unwrap_or(line));
         let starts_directive = self.rules.preprocessor_directives
             && !self.in_directive
-            && was_code_at_start
+            && (was_code_at_start || after_comment.is_some())
             && directive_text.starts_with('#');
         let directive =
             starts_directive || (self.rules.preprocessor_directives && self.in_directive);
@@ -580,6 +597,8 @@ impl CodeScanner {
                         && char_at(&chars, i) == '/'
                         && char_at(&chars, i + 1) == '*'
                     {
+                        self.comment_at_line_head =
+                            line_head_blank && last_code.is_none() && !directive;
                         self.state = LexicalState::BlockComment { depth: 1 };
                         i += 2;
                         continue;
