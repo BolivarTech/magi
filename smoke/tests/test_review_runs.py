@@ -72,7 +72,12 @@ class ReviewInputTests(unittest.TestCase):
         import re
         lines = [line for _, body in runs.review_input_files()
                  for line in body.decode().splitlines() if line.startswith("pub fn ")]
-        names = [re.match(r"pub fn ([A-Za-z_][A-Za-z0-9_]*)\(", line).group(1) for line in lines]
+        # [MAGI §6 MS2 loop 28, F1b1-melchior] a declaration the pattern missed raised AttributeError on
+        # None; each must parse, generic parameters included, and fail as an assertion naming the line.
+        matches = [(line, re.match(r"pub fn ([A-Za-z_][A-Za-z0-9_]*)\s*[(<]", line)) for line in lines]
+        for line, match in matches:
+            self.assertIsNotNone(match, line)
+        names = [match.group(1) for _, match in matches]
         self.assertTrue(names)
         self.assertEqual(len(names), len(set(names)))
 
@@ -770,6 +775,8 @@ class ProductSpellingTests(unittest.TestCase):
     def test_protected_candidates_match_a_magi_directory_at_any_depth(self) -> None:
         # [MAGI §6 MS2 loop 18, F1a1-caspar] the product's is_never_reviewed tests every component, so a
         # nested .magi is left out too; counting only the first component left it unexercised by S51.
+        # The backslash path holds on POSIX too: is_never_reviewed splits on '/' and '\\' on every platform
+        # (pinned by test_the_name_folding_is_the_one_is_never_reviewed_applies), and so does the harness.
         listed = frozenset({"a/b/.MAGI./x.toml", "a\\.magi\\y", "a/.magic/z", "a/magi/w", "a/b.magi/v"})
         with mock.patch.object(runs, "visible_paths", return_value=listed):
             self.assertEqual(("a/b/.MAGI./x.toml", "a\\.magi\\y"),
