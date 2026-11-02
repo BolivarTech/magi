@@ -4581,7 +4581,9 @@ int g(void) {
                 (3, 6),
             ),
             (
-                "int a;\n\ntemplate <int N,\n          bool B = (N >= 0)>\nvoid f() {\n    g();\n}\n",
+                // After a declaration group a wrapped header has a defect of its own, pinned by
+                // `a_wrapped_template_header_after_a_declaration_group_is_never_part_of_it`.
+                "// a\n\ntemplate <int N,\n          bool B = (N >= 0)>\nvoid f() {\n    g();\n}\n",
                 "f",
                 UnitKind::Function,
                 (3, 7),
