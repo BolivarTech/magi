@@ -6677,4 +6677,37 @@ int g(void) {
             spans(&parts)
         );
     }
+
+    #[test]
+    fn a_c_function_named_by_a_word_reserved_only_elsewhere_is_a_function() {
+        // [MAGI B2b1 9] C shared the word list of JavaScript, Java and C++, so a C function named
+        // `delete`, `new`, `try` or `function` (no C keyword) was no function and its body fell
+        // into gap units.
+        let code = "int delete(int x) {\n    return x;\n}\nint new(int y) {\n    return y;\n}\nint try(void) {\n    return 0;\n}\nint function(void) {\n    return 1;\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), code, &all_lines(code))),
+            vec![
+                ("delete", UnitKind::Function, 1, 3),
+                ("new", UnitKind::Function, 4, 6),
+                ("try", UnitKind::Function, 7, 9),
+                ("function", UnitKind::Function, 10, 12)
+            ]
+        );
+        // C++ reserves `delete`, `new` and `try`, not `function`; C still reserves its own words.
+        let cpp = BraceFamilyExtractor::cpp();
+        for line in ["    delete (p);", "    try (x) {", "    new (p) T {"] {
+            assert_eq!(cpp.signature_name(line, None, false), None, "{line}");
+        }
+        assert_eq!(
+            cpp.signature_name("int function(void) {", None, false),
+            Some("function".to_string())
+        );
+        for line in ["    if (x) {", "    while (x) {", "    sizeof (x) {"] {
+            assert_eq!(
+                c_extractor().signature_name(line, None, false),
+                None,
+                "{line}"
+            );
+        }
+    }
 }
