@@ -1225,7 +1225,9 @@ class ReviewChainLinkTests(unittest.TestCase):
             with mock.patch.object(runs, "REPOSITORY_ROOT", root):
                 with self.assertRaises(HarnessError) as caught:
                     executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
-            self.assertIn("smoke", str(caught.exception))
+            # [MAGI §6 MS2 loop 29, F1b1b-melchior] "smoke" alone is in any error naming a path through the
+            # link; the refusal must name the linked component and say it is a link.
+            self.assertIn("%s is a link" % (root / "smoke"), str(caught.exception))
             self.assertTrue(keep.is_file())
 
 
