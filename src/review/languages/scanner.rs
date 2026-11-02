@@ -180,20 +180,20 @@ pub enum RawStringSyntax {
 #[derive(Debug, Clone)]
 pub struct LexicalRules {
     /// Line comment start token (e.g., `"//"`). Empty string = none.
-    pub line_comment: &'static str,
+    pub(crate) line_comment: &'static str,
     /// Whether `/* */` block comments exist.
-    pub block_comments: bool,
+    pub(crate) block_comments: bool,
     /// Whether block comments can nest (`/* /* */ */` — Rust only).
-    pub nested_comments: bool,
+    pub(crate) nested_comments: bool,
     /// Whether the language has character literals with `'` (C, Rust, Java).
     /// `false` for Python (single-quote strings) and JS (single-quote strings).
-    pub char_literals: bool,
+    pub(crate) char_literals: bool,
     /// Raw string syntax variant.
-    pub raw_strings: RawStringSyntax,
+    pub(crate) raw_strings: RawStringSyntax,
     /// Whether backtick template literals exist (JS/TS only).
-    pub template_literals: bool,
+    pub(crate) template_literals: bool,
     /// Whether `/.../` regular expression literals exist (JS/TS only).
-    pub regex_literals: bool,
+    pub(crate) regex_literals: bool,
     /// Whether a line whose first non-blank character is `#` is a preprocessor directive
     /// (C, C++), continued while a line ends in `\`: its strings and comments are read as in
     /// code, but its braces, parentheses and brackets are no structure (`#define BEGIN {`).
@@ -212,11 +212,11 @@ pub struct LexicalRules {
     /// ending in `\` continues on the next line, which is then comment text too.
     // MAGI FIX (B2a): `#ifdef` / `#else` around two headers of one function counted both `{`,
     // so the function ran to the end of the file and a large file failed its batch.
-    pub preprocessor_directives: bool,
+    pub(crate) preprocessor_directives: bool,
     /// Whether a `'` may open a character constant of several characters (`'ab'`, C and C++),
     /// besides the one-character literal every `char_literals` language has; a C++14 digit
     /// separator (`1'000`) opens none.
-    pub multichar_literals: bool,
+    pub(crate) multichar_literals: bool,
 }
 
 impl LexicalRules {
@@ -509,7 +509,7 @@ impl CodeScanner {
     /// A conditional directive line moves no brace itself (its `brace_delta` and `min_delta`
     /// are 0) but may move `depth_after`: `#elif` and `#else` return it to the depth at `#if`,
     /// `#endif` to the depth the first branch reached
-    /// ([`LexicalRules::preprocessor_directives`]). O(n) in the line's length.
+    /// (the `preprocessor_directives` rule of [`LexicalRules`]). O(n) in the line's length.
     ///
     /// With preprocessor rules, a line that ends in `\` continues its directive or its `//`
     /// comment onto the next line even when blanks follow the backslash: GCC and Clang splice
