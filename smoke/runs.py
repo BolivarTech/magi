@@ -1968,6 +1968,13 @@ def point_config_at(config_path, url: str) -> None:
     root ``base_url`` one is added first: the product's built-in default is a
     real local daemon.
 
+    The rewrite reads lines, not TOML: any line starting with ``[`` ends the
+    root table, so a root multi-line array whose element line starts with
+    ``[`` (``  [1, 2],``) hides a root ``base_url`` after it, and the inserted
+    one duplicates the key. The product's root holds no array, and the result
+    is parsed back before the run (:func:`endpoints_off_the_counter`), so the
+    duplicate is a :class:`HarnessError` (exit 3), never a miscount.
+
     Complexity: ``O(file bytes)``.
 
     Args:
@@ -2067,6 +2074,8 @@ def endpoints_off_the_counter(config_path, url: str) -> tuple[str, ...]:
             problems.append("%s is %r, not the counter" % (".".join(path), value))
     for path in _KIND_PATHS:
         value = _config_value(document, path)
+        # Absent or blank resolves to the product's default kind, which
+        # smoke/tests/test_rust_sync.py (CountedKindTests) pins to _COUNTED_KIND.
         if value is None or (isinstance(value, str) and not value.strip()):
             continue
         if not isinstance(value, str) or value.strip() != _COUNTED_KIND:
@@ -2485,6 +2494,12 @@ class RunExecutor:
         it is a :class:`HarnessError` (exit 3), never a scenario ``FAIL``. The
         requests the counter saw are recorded even when the run times out:
         the timeout is caught inside this block.
+
+        The proof covers exactly what the configuration and these two
+        variables steer. A product defect that reached a model some other way
+        (a hardcoded URL, a subprocess with its own endpoint) would leave the
+        counter empty and the run would pass; that is outside what a stand-in
+        endpoint can observe, and the scenarios do not claim it.
 
         Args:
             definition: The run about to execute.
