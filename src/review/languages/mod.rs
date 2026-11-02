@@ -1106,4 +1106,49 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn every_extracted_unit_and_split_piece_carries_the_default_context() {
+        // [MAGI loop 27, B2a] declared: no stage reads `SemanticUnit::context` in v0.25.0, and
+        // every unit an extractor gives (its constructs, its gap units, the pieces of a split
+        // block) leaves it at `FileContext::default`, so the two paths a file may take carry the
+        // same metadata. Only `fallback_extract`, which no stage calls in v0.25.0, stores the
+        // context its caller passes.
+        let samples = [
+            (
+                "a.rs",
+                "use a;\n\nimpl S {\n    fn a() {}\n\n    fn b() {}\n}\n",
+            ),
+            (
+                "a.py",
+                "import a\n\nclass C:\n    def a(self):\n        pass\n",
+            ),
+        ];
+        let default = format!("{:?}", FileContext::default());
+        let registry = LanguageRegistry::new();
+        for (path, code) in samples {
+            let ext = registry.get(path).expect("a registered extension");
+            let units = ext.extract_units(code, path, ChangedLines::All);
+            assert!(units.len() > 1, "{path}: constructs and a gap");
+            for unit in &units {
+                assert_eq!(format!("{:?}", unit.context), default, "{path}");
+                for piece in ext.split_block(unit) {
+                    assert_eq!(format!("{:?}", piece.context), default, "{path}");
+                }
+            }
+        }
+        let given = FileContext {
+            language: "text".to_string(),
+            ..FileContext::default()
+        };
+        let set: HashSet<u32> = [1].into_iter().collect();
+        let units = fallback_extract("a\n", "a.txt", &set, &given);
+        assert_eq!(
+            units
+                .iter()
+                .map(|u| u.context.language.as_str())
+                .collect::<Vec<_>>(),
+            vec!["text"]
+        );
+    }
 }
