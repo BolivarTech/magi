@@ -155,6 +155,14 @@ class TestlessSubmoduleTests(unittest.TestCase):
         self.assertEqual("test(/review::languages::scanner::/)",
                          scoped_tests.module_filter(path, read_source=read))
 
+    def test_a_marker_quoted_in_a_comment_is_not_a_test_module(self) -> None:
+        """``detect.rs`` cites ``#[cfg(test)]`` in rustdoc and has no tests."""
+        path = "src/review/languages/brace_family/detect.rs"
+        read = self._reader({path: "/// `#[derive(Debug)] #[cfg(test)]`\n"
+                                   "fn strip() {}\n"})
+        self.assertEqual("test(/review::languages::brace_family::/)",
+                         scoped_tests.module_filter(path, read_source=read))
+
     def test_a_deleted_submodule_selects_its_parent_subtree(self) -> None:
         path = "src/review/languages/brace_family/gone.rs"
         self.assertEqual(
