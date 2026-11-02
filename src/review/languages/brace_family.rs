@@ -1374,7 +1374,10 @@ impl BraceFamilyExtractor {
     /// The 0-based first line of the construct whose declaration is at `idx`: `idx` moved up
     /// over the doc comments and attributes right above it. A doc line opens with a doc prefix
     /// (`///`, `/**`); a block comment that spans lines (`/**` ... `*/`) counts whole when its
-    /// opening line does ([`Self::block_doc_start`]). O(k) for the k lines passed over.
+    /// opening line does ([`Self::block_doc_start`]). O(k) for the k lines passed over. Up to
+    /// [`MAX_BLANK_LINES_AFTER_ATTRIBUTE`] blank lines are passed over when an attribute stands
+    /// above them ([`Self::attribute_above_blanks`]); above a doc comment or anything else, a
+    /// blank line ends the walk.
     ///
     /// The walk never goes above `floor`, the 0-based line after the previous construct: a
     /// one-line construct may itself open with an attribute prefix (Java's
@@ -1410,11 +1413,62 @@ impl BraceFamilyExtractor {
                 .or_else(|| self.multi_line_attribute_start(lines, scanned, start - 1))
             {
                 start = open;
+            } else if let Some(above) = self.attribute_above_blanks(lines, scanned, start, floor) {
+                // MAGI FIX (B2b1 12): a blank line between an attribute and its item
+                // (`#[derive(Debug)]`, blank, `struct S {`) cut the attribute from it.
+                start = above + 1;
             } else {
                 break;
             }
         }
         start.max(floor)
+    }
+
+    /// The 0-based line of the attribute right above the blank lines that end at line `start`
+    /// (exclusive), for [`Self::scan_back_for_docs`]: at most [`MAX_BLANK_LINES_AFTER_ATTRIBUTE`]
+    /// blank lines, then a line that opens with an attribute prefix or ends a multi-line
+    /// attribute ([`Self::multi_line_attribute_start`]), never above `floor`. `None` when the
+    /// line above `start` is not blank, more blank lines stand there, or what precedes them is
+    /// no attribute (a plain comment, code): such a line stays apart. O(b + k) for the b blank
+    /// lines and the k lines of a multi-line attribute.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `start` - The 0-based first line reached so far by the walk up.
+    /// * `floor` - The 0-based line the walk never goes above.
+    ///
+    /// # Returns
+    ///
+    /// The attribute's 0-based last line, or `None`.
+    fn attribute_above_blanks(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        start: usize,
+        floor: usize,
+    ) -> Option<usize> {
+        let is_blank = |k: usize| lines.get(k).is_some_and(|l| l.trim().is_empty());
+        let blanks = (floor..start)
+            .rev()
+            .take(MAX_BLANK_LINES_AFTER_ATTRIBUTE + 1)
+            .take_while(|&k| is_blank(k))
+            .count();
+        if blanks == 0 || blanks > MAX_BLANK_LINES_AFTER_ATTRIBUTE {
+            return None;
+        }
+        let above = start.checked_sub(blanks + 1).filter(|&k| k >= floor)?;
+        let text = lines.get(above)?.trim();
+        let opens_attribute = self
+            .attribute_prefixes
+            .iter()
+            .any(|p| text.starts_with(p.as_str()));
+        (opens_attribute
+            || self
+                .multi_line_attribute_start(lines, scanned, above)
+                .is_some())
+        .then_some(above)
     }
 
     /// The 0-based opening line of the doc block comment that ends on line `last` (its `*/`):
@@ -1675,6 +1729,13 @@ impl BraceFamilyExtractor {
         }
     }
 }
+
+/// The most blank lines that may stand between an attribute and the construct it governs
+/// (`@Override`, blank, `public void f() {`) for the attribute to stay in the construct's unit
+/// ([`BraceFamilyExtractor::scan_back_for_docs`]). A starting point, not a measurement: one or
+/// two blank lines are a style slip; more read as a separation, and the attribute then stays a
+/// gap unit, as before, with no line lost.
+const MAX_BLANK_LINES_AFTER_ATTRIBUTE: usize = 2;
 
 /// The openers of a comment that make a line before a construct no wrapped continuation of
 /// the signature above it, though it ends in `,` ([`open_brace_line`]).
