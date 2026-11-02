@@ -2186,4 +2186,27 @@ void h() {
         let results = CodeScanner::new(LexicalRules::rust()).scan_all("// note \\\nfn f() {\n}\n");
         assert_eq!(results[1].brace_delta, 1);
     }
+
+    #[test]
+    fn a_regex_after_a_unary_or_binary_plus_or_minus_is_not_counted() {
+        // [MAGI B2a 3, 5] a `+` or `-` was read as the tail of `++`/`--` whenever it was the
+        // only operator character before the `/` on the line, or when the one before it,
+        // across a blank, was the same sign (`x++ + /}/`): the regex read as a division and
+        // its brace moved the depth.
+        let cases = [
+            ("+/}/.test(s);", 0),
+            ("-/{/.exec(s);", 0),
+            ("y = x++ + /}/.test(s);", 0),
+            ("y = x-- - /{/.test(s);", 0),
+            ("y = a + +/}/.test(s);", 0),
+            // A postfix `++` or `--` still ends an operand: the `/` after it divides.
+            ("y = a++ / b; {", 1),
+            ("y = a-- / b; }", -1),
+            ("y = a+++ /}/.test(s);", 0),
+        ];
+        for (line, delta) in cases {
+            let mut scanner = CodeScanner::new(LexicalRules::javascript());
+            assert_eq!(scanner.scan_line(1, line).brace_delta, delta, "{line}");
+        }
+    }
 }
