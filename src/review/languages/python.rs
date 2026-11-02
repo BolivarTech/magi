@@ -427,24 +427,61 @@ fn try_detect_python_constructs(lines: &[&str]) -> Option<Vec<PythonConstruct>> 
 /// otherwise read as an assignment.
 const NOT_ASSIGNMENT_WORDS: &[&str] = &[
     "def", "async", "class", "import", "from", "if", "elif", "else", "for", "while", "with", "try",
-    "except", "finally", "match", "case", "assert", "raise", "del", "global", "nonlocal", "return",
-    "yield", "await", "pass", "lambda", "not",
+    "except", "finally", "assert", "raise", "del", "global", "nonlocal", "return", "yield",
+    "await", "pass", "lambda", "not",
 ];
+
+/// The soft keywords that open a compound statement (Python 3.10, PEP 634): `match` and `case`
+/// open one only in the statement's own form, whose header ends in `:`; anywhere else they are
+/// plain names (`match = 1`, `case: int = 2`), which CPython accepts.
+const SOFT_STATEMENT_WORDS: &[&str] = &["match", "case"];
 
 /// Whether an unindented, trimmed line is a module-level assignment (`X = 1`, `x: int = 1`,
 /// `y += 1`): it holds an assignment `=` or an annotation `:` outside every bracket and string
-/// ([`has_top_level_assignment`]), is no comment or decorator, and does not open with a word of
-/// [`NOT_ASSIGNMENT_WORDS`]. O(n) in the line.
+/// ([`has_top_level_assignment`]), is no comment or decorator, does not open with a word of
+/// [`NOT_ASSIGNMENT_WORDS`], and is no statement a word of [`SOFT_STATEMENT_WORDS`] opens (one
+/// whose code ends in `:`, [`ends_in_colon`]). O(n) in the line.
 fn is_module_assignment(trimmed: &str) -> bool {
+    // MAGI FIX (loop 27, B2b2): `match = 1` and `case = 2` (legal names since 3.10) fell into
+    // gap units, the soft keywords being read as hard ones.
     let first_word = trimmed
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .next()
         .unwrap_or("");
+    let soft_statement = SOFT_STATEMENT_WORDS.contains(&first_word) && ends_in_colon(trimmed);
     !trimmed.is_empty()
         && !trimmed.starts_with('#')
         && !trimmed.starts_with('@')
         && !NOT_ASSIGNMENT_WORDS.contains(&first_word)
+        && !soft_statement
         && has_top_level_assignment(trimmed)
+}
+
+/// Whether the last character `line` has outside every string and comment is `:`, as the
+/// header of a compound statement ends (`match x:  # note`). Strings are read with
+/// [`PythonStrings`]; a string still open at the line's end ends no header. O(n) in the line.
+fn ends_in_colon(line: &str) -> bool {
+    let chars: Vec<char> = line.chars().collect();
+    let mut strings = PythonStrings::default();
+    let mut last: Option<char> = None;
+    let mut k = 0;
+    while let Some(&c) = chars.get(k) {
+        match c {
+            '#' => break,
+            '"' | '\'' => {
+                last = Some(c);
+                k = strings.open(&chars, k).unwrap_or(k + 1);
+                if strings.is_open() {
+                    return false;
+                }
+                continue;
+            }
+            _ if !c.is_whitespace() => last = Some(c),
+            _ => {}
+        }
+        k += 1;
+    }
+    last == Some(':')
 }
 
 /// Whether `line` holds, outside every bracket, string and comment, an assignment `=` (plain or
