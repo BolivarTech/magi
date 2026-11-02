@@ -913,23 +913,93 @@ class ReviewLogBoundTests(unittest.TestCase):
             executor = _executor(root)
             logs_dir = self._logs_dir(root)
             (logs_dir / "magi-run.log").write_bytes(b"this run's log")
-            fifo = types.SimpleNamespace(
-                path=str(logs_dir / "pipe"), name="pipe",
-                is_dir=lambda follow_symlinks=True: False,
-                is_file=lambda follow_symlinks=True: False)
-            real_scandir = os.scandir
-
-            def scandir(path):
-                entries = list(real_scandir(path))
-                if pathlib.Path(path) == logs_dir:
-                    entries.append(fifo)
-                return iter(entries)
-
             unreadable = []
-            with mock.patch.object(runs.os, "scandir", side_effect=scandir):
+            if hasattr(os, "mkfifo"):
+                # [MAGI §6 MS2 loop 28] the double compared its argument with a path, and POSIX lists the
+                # directory through a descriptor, so the test errored there; a real fifo needs no double.
+                os.mkfifo(logs_dir / "pipe")
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            else:
+                fifo = types.SimpleNamespace(
+                    path=str(logs_dir / "pipe"), name="pipe",
+                    is_dir=lambda follow_symlinks=True: False,
+                    is_file=lambda follow_symlinks=True: False)
+                real_scandir = os.scandir
+
+                def scandir(path):
+                    entries = list(real_scandir(path))
+                    if pathlib.Path(path) == logs_dir:
+                        entries.append(fifo)
+                    return iter(entries)
+
+                with mock.patch.object(runs.os, "scandir", side_effect=scandir):
+                    captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((b"this run's log",), captured)
             self.assertEqual(["pipe (%s)" % runs.NOT_A_REGULAR_FILE], unreadable)
+
+    def test_a_hard_link_already_under_the_log_directory_is_named_not_read(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1a1-melchior] a hard link is a regular file to every test, and its identity
+        # is the one the walk lists, so a link to a file outside the workspace planted before the capture was
+        # read like the run's own log. The product never writes one; a file with more links is refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = self._logs_dir(root)
+            (logs_dir / "magi-run.log").write_bytes(b"this run's log")
+            outside = root / "outside.txt"
+            outside.write_bytes(b"bytes outside the workspace")
+            os.link(outside, logs_dir / "planted.log")
+            unreadable = []
+            captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertEqual((b"this run's log",), captured)
+            self.assertEqual(["planted.log (%s)" % runs.HARD_LINKED], unreadable)
+
+    def test_a_log_directory_with_more_entries_than_the_cap_is_listed_no_further(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1a1-melchior] the byte caps bound what is read, not what is listed: a product
+        # that wrote a vast number of empty files had every entry materialised, at no captured byte.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = self._logs_dir(root)
+            for index in range(6):
+                (logs_dir / ("%d.log" % index)).write_bytes(b"x")
+            real_scandir = os.scandir
+            pulled = []
+
+            class Counting:
+                """Counts every entry the walk takes from a listing."""
+
+                def __init__(self, listing) -> None:
+                    self._listing = listing
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    entry = next(self._listing)
+                    pulled.append(entry.name)
+                    return entry
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    self.close()
+                    return False
+
+                def close(self) -> None:
+                    self._listing.close()
+
+            unreadable = []
+            with mock.patch.object(runs, "MAX_REVIEW_LOG_ENTRIES", 3), \
+                    mock.patch.object(runs.os, "scandir", side_effect=lambda arg: Counting(real_scandir(arg))):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertLessEqual(len(pulled), 3 + 1)
+            self.assertLessEqual(len(captured), 3)
+            self.assertEqual(["logs (%s)" % (runs.OVER_ENTRY_CAP % 3)], unreadable)
+
+    def test_the_entry_cap_is_positive(self) -> None:
+        self.assertGreater(runs.MAX_REVIEW_LOG_ENTRIES, 0)
 
 
 class ReviewLogSwapTests(unittest.TestCase):
@@ -1277,6 +1347,47 @@ class ReviewLogChainTests(unittest.TestCase):
                     mock.patch.object(runs, "_read_bounded", side_effect=recording_read):
                 executor._capture_review_log(runs.DEFINITIONS["R15"], [])
             self.assertNotIn(b"not this run's log", b"".join(read))
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd,
+                         "no descriptor-relative open here (Windows); the limit is declared in runs.py")
+    def test_an_ancestor_swapped_for_a_link_before_the_walk_is_never_read_once(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1a1-melchior] O_NOFOLLOW guarded only the last component: a .magi swapped
+        # for a link after the chain check had the walk list, and the read open, the log behind it, before
+        # the post-read check dropped the capture. Every component is now opened relative to its parent.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = self._outside_log(root)
+            magi = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi"
+            (magi / "logs").mkdir(parents=True)
+            (magi / "logs" / "magi-run.log").write_bytes(b"this run's log")
+            real_check = executor._first_link_down_to
+            checks = []
+
+            def check_then_swap(*below):
+                found = real_check(*below)
+                checks.append(below)
+                if len(checks) == 1:
+                    shutil.rmtree(magi)
+                    _make_symlink(outside / ".magi", magi)
+                return found
+
+            real_read = runs._read_bounded
+            read = []
+
+            def recording_read(*args, **kwargs):
+                captured = real_read(*args, **kwargs)
+                read.extend(captured)
+                return captured
+
+            unreadable = []
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root), \
+                    mock.patch.object(executor, "_first_link_down_to", side_effect=check_then_swap), \
+                    mock.patch.object(runs, "_read_bounded", side_effect=recording_read):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertNotIn(b"not this run's log", b"".join(read))
+            self.assertEqual((), captured)
+            self.assertTrue(any(runs.LINK_NOT_FOLLOWED in entry for entry in unreadable), unreadable)
 
 
 class RefusalRunModelCallTests(unittest.TestCase):
