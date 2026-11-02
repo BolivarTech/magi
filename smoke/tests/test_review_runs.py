@@ -1198,7 +1198,8 @@ class ReviewChainLinkTests(unittest.TestCase):
             keep = real / "scratch" / runs.REVIEW_WORKSPACE_DIR / "keep.txt"
             keep.parent.mkdir(parents=True)
             keep.write_text("x", encoding="utf-8")
-            _make_junction(real, root / "smoke")
+            # [MAGI §6 MS2 loop 28, F1b1-melchior] a symlink where it can be made, so POSIX runs it too.
+            _make_directory_link(real, root / "smoke")
             magi = root / ".magi"
             magi.mkdir()
             env = types.SimpleNamespace(root=root / "smoke" / "env", magi_dir=magi,
@@ -1249,12 +1250,19 @@ class ReviewLogChainTests(unittest.TestCase):
         self._assert_workspace_link_not_read(_make_symlink)
 
     def test_a_scratch_area_swapped_for_a_junction_is_never_read_through(self) -> None:
+        self._assert_scratch_link_not_read(_make_junction)
+
+    def test_a_scratch_area_swapped_for_a_symlink_is_never_read_through(self) -> None:
+        # [MAGI §6 MS2 loop 28, sweep of F1b1-melchior] the junction twin skips off Windows.
+        self._assert_scratch_link_not_read(_make_symlink)
+
+    def _assert_scratch_link_not_read(self, make_link) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             holder = root / "holder"
             holder.mkdir()
             shutil.move(str(self._outside_log(root)), str(holder / runs.REVIEW_WORKSPACE_DIR))
-            _make_junction(holder, root / "scratch")
+            make_link(holder, root / "scratch")
             captured, unreadable = self._capture(root)
             self.assertEqual((), captured)
             self.assertEqual(1, len(unreadable))
@@ -1273,7 +1281,7 @@ class ReviewLogChainTests(unittest.TestCase):
 
             def swap(_definition, _stdin):
                 shutil.rmtree(workspace)
-                _make_junction(outside, workspace)
+                _make_directory_link(outside, workspace)
                 return runs.ProductOutput(stdout=b"", stderr=b"", exit_code=2, command=["magi-rs"])
 
             with mock.patch.object(runs, "REPOSITORY_ROOT", root), \
@@ -1301,7 +1309,7 @@ class ReviewLogChainTests(unittest.TestCase):
                 checks.append(below)
                 if len(checks) == 1:
                     shutil.rmtree(logs_dir)
-                    _make_junction(outside / ".magi" / "logs", logs_dir)
+                    _make_directory_link(outside / ".magi" / "logs", logs_dir)
                 return found
 
             unreadable = []
@@ -1348,8 +1356,6 @@ class ReviewLogChainTests(unittest.TestCase):
                 executor._capture_review_log(runs.DEFINITIONS["R15"], [])
             self.assertNotIn(b"not this run's log", b"".join(read))
 
-    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd,
-                         "no descriptor-relative open here (Windows); the limit is declared in runs.py")
     def test_an_ancestor_swapped_for_a_link_before_the_walk_is_never_read_once(self) -> None:
         # [MAGI §6 MS2 loop 28, F1a1-melchior] O_NOFOLLOW guarded only the last component: a .magi swapped
         # for a link after the chain check had the walk list, and the read open, the log behind it, before
@@ -1369,7 +1375,7 @@ class ReviewLogChainTests(unittest.TestCase):
                 checks.append(below)
                 if len(checks) == 1:
                     shutil.rmtree(magi)
-                    _make_symlink(outside / ".magi", magi)
+                    _make_directory_link(outside / ".magi", magi)
                 return found
 
             real_read = runs._read_bounded
