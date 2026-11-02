@@ -315,9 +315,13 @@ impl BraceFamilyExtractor {
         let mut j = 0;
         while let Some(line) = lines.get(j) {
             let trimmed = line.trim();
+            // MAGI FIX (S6 loop 25, B2b1a): the group joins a wrapped prototype
+            // (`int foo(` ... `);`), so its split must see one too, or the prototype was cut at
+            // its first parameter line.
             let declares = scanned.get(j).is_some_and(|s| !s.is_non_code)
                 && (self.is_declaration(trimmed, scanned.get(j))
-                    || self.opens_declaration_list(trimmed));
+                    || self.opens_declaration_list(trimmed)
+                    || self.opens_wrapped_prototype(&lines, &scanned, j, &search));
             if !declares {
                 j += 1;
                 continue;
