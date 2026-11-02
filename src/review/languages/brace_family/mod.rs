@@ -4648,4 +4648,37 @@ int g(void) {
             vec![(1, 1), (2, 2), (3, 3)]
         );
     }
+
+    #[test]
+    fn a_compound_assignment_opens_no_initializer() {
+        // [MAGI loop 27, B2b1b] the initializer checks excluded only the comparisons (`==`, `!=`,
+        // `<=`, `>=`) from a line ending in `=`, so a compound assignment (`x +=`) read as a
+        // declaration's bare `=`, unlike `holds_bare_assignment`; both now agree.
+        for line in [
+            "static int n =",
+            "int a[] = {",
+            "T c = make(",
+            "x =",
+            "let x: u8=",
+        ] {
+            assert!(opens_initializer(line), "{line}");
+        }
+        for op in [
+            "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "==", "!=", "<=", ">=",
+        ] {
+            let line = format!("x {op}");
+            assert!(!opens_initializer(&line), "{line}");
+        }
+        let ext = BraceFamilyExtractor::c();
+        let code = "x +=\n    1;\nint y;\n";
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(code);
+        let stops = |_: usize| false;
+        let budget = SearchBudget::for_lines(lines.len());
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &budget,
+        };
+        assert_eq!(bare_initializer_end(&lines, &scanned, 0, &search), 0);
+    }
 }
