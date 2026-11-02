@@ -830,14 +830,18 @@ impl BraceFamilyExtractor {
         self.function_keywords
             .iter()
             .any(|k| k == MACRO_RULES_KEYWORD)
-            && keyword_rest(self.without_rust_attributes(trimmed), MACRO_RULES_KEYWORD).is_some()
+            && macro_rules_rest(self.without_rust_attributes(trimmed)).is_some()
     }
 
     /// The text after the function keyword `trimmed` opens with ([`keyword_rest`]), if any, or,
     /// with `anonymous_functions`, after the keyword's bare word glued to a `(`
-    /// (`function() {` gives `() {`).
+    /// (`function() {` gives `() {`). The `macro_rules!` keyword is matched by
+    /// [`macro_rules_rest`], its `!` glued or spaced.
     fn match_function_keyword<'t>(&self, trimmed: &'t str) -> Option<&'t str> {
         self.function_keywords.iter().find_map(|kw| {
+            if kw == MACRO_RULES_KEYWORD {
+                return macro_rules_rest(trimmed);
+            }
             keyword_rest(trimmed, kw).or_else(|| {
                 let word = kw.strip_suffix(' ')?;
                 trimmed

@@ -955,6 +955,21 @@ pub(super) const ANNOTATION_QUOTES: [char; 3] = ['"', '\'', '`'];
 /// definition and is read as before.
 pub(super) const MACRO_RULES_KEYWORD: &str = "macro_rules! ";
 
+/// The text after the `macro_rules!` keyword ([`MACRO_RULES_KEYWORD`]) at the start of `text`,
+/// from the macro's name on: the `!` may be glued to the word and to the name or spaced from
+/// either (`macro_rules!foo`, `macro_rules ! foo`), as Rust's tokens allow. `None` when `text`
+/// does not open with the keyword followed by a name. O(n) in the text.
+// MAGI FIX (loop 29, B2b1a): `macro_rules!foo {` matched no `macro_rules! ` and fell into a gap.
+pub(super) fn macro_rules_rest(text: &str) -> Option<&str> {
+    let word = MACRO_RULES_KEYWORD.strip_suffix("! ")?;
+    let rest = text
+        .strip_prefix(word)?
+        .trim_start()
+        .strip_prefix('!')?
+        .trim_start();
+    rest.starts_with(is_identifier_char).then_some(rest)
+}
+
 /// The opening of a Rust outer attribute (`#[inline]`).
 ///
 /// An inner attribute (`#![allow(dead_code)]`) does not open with it, on purpose: the Rust
