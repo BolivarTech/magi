@@ -440,6 +440,10 @@ const ALLOCATION_OPERATORS: [&str; 4] = ["new", "new[]", "delete", "delete[]"];
 /// right after it (`pub(crate)`) or, after blanks, a quoted string (`extern "C"`); the rest is
 /// trimmed at its start. `None` when `text` does not open with `word` followed by a blank or a
 /// `(`. O(n) in the text.
+///
+/// Blanks may stand before the `(` only when it holds a Rust visibility path
+/// ([`is_visibility_path`]: `pub (crate)`, `pub (in a::b)`), which rustfmt never writes but the
+/// compiler accepts; any other spaced `(` is no part of the word (`async (x) => {`).
 pub(super) fn strip_modifier<'t>(text: &'t str, word: &str) -> Option<&'t str> {
     let rest = text.strip_prefix(word)?;
     if let Some(inner) = rest.strip_prefix('(') {
@@ -450,10 +454,43 @@ pub(super) fn strip_modifier<'t>(text: &'t str, word: &str) -> Option<&'t str> {
         return None;
     }
     let rest = rest.trim_start();
+    // MAGI FIX (loop 26, 6): `pub (crate) fn f() {` kept its `(crate)`, so the item was no
+    // construct and fell into a gap unit.
+    if let Some((path, after)) = rest.strip_prefix('(').and_then(|r| r.split_once(')')) {
+        if is_visibility_path(path) {
+            return Some(after.trim_start());
+        }
+    }
     match rest.strip_prefix('"').and_then(|r| r.split_once('"')) {
         Some((_, after)) => Some(after.trim_start()),
         None => Some(rest),
     }
+}
+
+/// The paths a Rust visibility restricts an item to, inside its parentheses (`pub(crate)`);
+/// `in` opens an explicit path (`pub(in a::b)`).
+const VISIBILITY_PATHS: [&str; 3] = ["crate", "self", "super"];
+
+/// The word that opens an explicit Rust visibility path (`pub(in a::b)`).
+const VISIBILITY_IN_KEYWORD: &str = "in";
+
+/// Whether `path`, the inside of a parenthesized group after a modifier, is a Rust visibility
+/// path: a word of [`VISIBILITY_PATHS`] or [`VISIBILITY_IN_KEYWORD`] followed by a blank and a
+/// path. O(n) in the text.
+///
+/// # Arguments
+///
+/// * `path` - The text between the parentheses.
+///
+/// # Returns
+///
+/// `true` when the group restricts a visibility.
+fn is_visibility_path(path: &str) -> bool {
+    let path = path.trim();
+    VISIBILITY_PATHS.contains(&path)
+        || path
+            .strip_prefix(VISIBILITY_IN_KEYWORD)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace) && !rest.trim().is_empty())
 }
 
 /// The text after keyword `kw` at the start of `text`. A table keyword ends in a blank
