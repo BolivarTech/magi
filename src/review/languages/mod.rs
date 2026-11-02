@@ -226,7 +226,9 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
     // MAGI FIX (B2a A4): every line is changed here, so only the orphans are needed; taking
     // them from `ChangedLines::All.assign` built and dropped a copy of every member's lines.
     let orphans = uncovered_lines(&ranges, total);
-    let gaps = gap_units(&lines, &block.file, &ranges, orphans);
+    // MAGI FIX (B2a 4): the gaps were built as units, their content joined, then joined again
+    // as pieces; only their ranges are taken now.
+    let gaps = gap_ranges(&ranges, orphans, total);
     let mut parts: Vec<SemanticUnit> = members
         .into_iter()
         .map(|(kind, name, first, last)| {
@@ -241,7 +243,7 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
         })
         .chain(
             gaps.into_iter()
-                .map(|g| piece(block.kind, block.name.clone(), g.start_line, g.end_line)),
+                .map(|(first, last, _)| piece(block.kind, block.name.clone(), first, last)),
         )
         .collect();
     parts.sort_by_key(|u| u.start_line);
@@ -527,12 +529,49 @@ pub(crate) fn gap_units(
     lines: &[&str],
     file_path: &str,
     constructs: &[(u32, u32)],
-    mut orphans: Vec<u32>,
+    orphans: Vec<u32>,
 ) -> Vec<SemanticUnit> {
+    let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    gap_ranges(constructs, orphans, total)
+        .into_iter()
+        .map(|(first, last, changed_lines)| SemanticUnit {
+            kind: UnitKind::TopLevel,
+            name: format!("lines {first}-{last}"),
+            file: file_path.to_string(),
+            start_line: first,
+            end_line: last,
+            content: lines
+                .get(first.saturating_sub(1) as usize..(last as usize).min(lines.len()))
+                .unwrap_or(&[])
+                .join("\n"),
+            changed_lines,
+            context: FileContext::default(),
+        })
+        .collect()
+}
+
+/// The gaps between constructs that hold orphans, as [`gap_units`] spans them, without their
+/// content: `(first, last, orphans)`, lines 1-based and inclusive, the orphans sorted. Shared by
+/// [`gap_units`] and [`split_into_members`], which builds each piece's content once.
+///
+/// # Arguments
+///
+/// * `constructs` - `(start, end)` line ranges (1-based, inclusive), sorted by start and
+///   disjoint.
+/// * `orphans` - Changed lines outside every construct; a 0, or a line past `total`, is ignored.
+/// * `total` - Line count of the text.
+///
+/// # Returns
+///
+/// The gaps, in line order. O(o log o + o log c) for o orphans and c constructs.
+fn gap_ranges(
+    constructs: &[(u32, u32)],
+    mut orphans: Vec<u32>,
+    total: u32,
+) -> Vec<(u32, u32, Vec<u32>)> {
     orphans.sort_unstable();
     orphans.dedup();
-    let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-    let mut units: Vec<SemanticUnit> = Vec::new();
+    let mut gaps: Vec<(u32, u32, Vec<u32>)> = Vec::new();
     // MAGI FIX (S6 loop 19, B2a-1): an orphan 0 gave a unit ending before its start; lines are
     // 1-based, so a 0 names no line to show.
     // MAGI FIX (B2a A3): a line past the last one gave a unit ending before its start, or one
@@ -549,29 +588,12 @@ pub(crate) fn gap_units(
         let last = constructs
             .get(next)
             .map_or(total, |&(start, _)| start.saturating_sub(1));
-        if let Some(unit) = units
-            .last_mut()
-            .filter(|u| u.start_line == first && u.end_line == last)
-        {
-            unit.changed_lines.push(orphan);
-            continue;
+        match gaps.last_mut() {
+            Some((f, l, changed)) if *f == first && *l == last => changed.push(orphan),
+            _ => gaps.push((first, last, vec![orphan])),
         }
-        let content = lines
-            .get(first.saturating_sub(1) as usize..(last as usize).min(lines.len()))
-            .unwrap_or(&[])
-            .join("\n");
-        units.push(SemanticUnit {
-            kind: UnitKind::TopLevel,
-            name: format!("lines {first}-{last}"),
-            file: file_path.to_string(),
-            start_line: first,
-            end_line: last,
-            content,
-            changed_lines: vec![orphan],
-            context: FileContext::default(),
-        });
     }
-    units
+    gaps
 }
 
 /// Lines of context [`fallback_extract`] keeps on each side of a changed line.
