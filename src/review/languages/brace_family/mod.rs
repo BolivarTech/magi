@@ -4495,4 +4495,62 @@ int g(void) {
         let parts = ext.split_block(&units[0]);
         assert_eq!(span_of(&parts, "m"), (2, 3), "{:?}", spans(&parts));
     }
+
+    #[test]
+    fn a_construct_after_a_declaration_group_is_never_part_of_it() {
+        // [MAGI loop 27, found verifying B2b1a] `export` is a declaration keyword of JavaScript
+        // and TypeScript, so a line it opens joined the declaration group above it even when it
+        // opens a class or a function (`export class C {`), and the group ran through the whole
+        // block: the main scan tries constructs before declarations, the group's join did not.
+        let cases: [(BraceFamilyExtractor, &str, &str, UnitKind); 4] = [
+            (
+                BraceFamilyExtractor::typescript(),
+                "import a from 'a';\n\nexport class C {\n  m() {\n  }\n}\n",
+                "C",
+                UnitKind::Class,
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "import a from 'a';\nexport function f() {\n  return 1;\n}\n",
+                "f",
+                UnitKind::Function,
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "import a from 'a';\n\nexport @dec class C {\n  m() {\n  }\n}\n",
+                "C",
+                UnitKind::Class,
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "export const x = 1;\nexport default class C {\n  m() {\n  }\n}\n",
+                "C",
+                UnitKind::Class,
+            ),
+        ];
+        for (ext, code, name, kind) in &cases {
+            let found = sorted_spans(ext, code);
+            let construct = found
+                .iter()
+                .find(|u| u.0 == *name)
+                .unwrap_or_else(|| panic!("no {name}: {found:?}"));
+            assert_eq!(construct.1, *kind, "{code}: {found:?}");
+            assert!(
+                found
+                    .iter()
+                    .filter(|u| u.1 == UnitKind::DeclarationGroup)
+                    .all(|u| u.3 < construct.2),
+                "{code}: {found:?}"
+            );
+        }
+        // A declaration still joins: `export const` after an import is one group.
+        let found = sorted_spans(
+            &BraceFamilyExtractor::typescript(),
+            "import a from 'a';\nexport const x = 1;\n",
+        );
+        assert_eq!(
+            found,
+            vec![("imports".to_string(), UnitKind::DeclarationGroup, 1, 2)]
+        );
+    }
 }
