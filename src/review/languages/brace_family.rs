@@ -478,6 +478,12 @@ impl BraceFamilyExtractor {
     /// scan back for its doc comments never goes above the line after the previous construct
     /// ([`Self::scan_back_for_docs`]).
     ///
+    /// Units are line ranges, so two constructs that share a line (`struct S {} impl S {`,
+    /// `fn a() { 1 } fn b() {`) are one unit, named after the first, declared: the second one's
+    /// header is on that line, and keeping its body with it is the only cut that leaves no
+    /// header apart from its body. Its range ends where the last block the line leaves open
+    /// closes, and the constructs after it keep their own units.
+    ///
     /// # Arguments
     ///
     /// * `lines` - The text's lines.
