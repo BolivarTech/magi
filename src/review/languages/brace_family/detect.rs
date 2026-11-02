@@ -454,7 +454,8 @@ impl BraceFamilyExtractor {
         // gap unit; the Rust attributes on the line are read past first.
         let trimmed = self.without_rust_attributes(trimmed);
         let attributes = self.without_c_attributes(trimmed);
-        let trimmed = self.without_template_header(self.without_annotations(&attributes));
+        let annotations = self.without_annotations_among_modifiers(&attributes);
+        let trimmed = self.without_template_header(&annotations);
         let candidates = [self.strip_modifiers(trimmed, true), trimmed];
         candidates
             .iter()
@@ -670,6 +671,45 @@ impl BraceFamilyExtractor {
         rest
     }
 
+    /// `trimmed` without the complete annotations it opens with and those mixed among the
+    /// modifier words that follow ([`Self::without_annotations`], [`Self::strip_modifiers`]):
+    /// Java and TypeScript let annotations and modifiers come in any order
+    /// (`public @Deprecated final class C {` reads `public final class C {`,
+    /// `export @dec class C {` reads `export class C {`). The modifiers are kept, so a word that
+    /// is a modifier only before a blank (`get() {`) still names what it names. `trimmed`'s
+    /// leading annotations only, borrowed, when no annotation follows a modifier. O(n) in the
+    /// line: each round consumes what it strips.
+    ///
+    /// # Arguments
+    ///
+    /// * `trimmed` - A trimmed line.
+    ///
+    /// # Returns
+    ///
+    /// The line without those annotations.
+    fn without_annotations_among_modifiers<'t>(&self, trimmed: &'t str) -> Cow<'t, str> {
+        // MAGI FIX (loop 27, B2b1a): annotations were read past only before the modifiers, so
+        // `public @Deprecated class C {` was no class and `public @A final @B("x") class C {` a
+        // function named `B`.
+        let mut rest = self.without_annotations(trimmed);
+        let mut kept = String::new();
+        loop {
+            let after_modifiers = self.strip_modifiers(rest, true);
+            let after_annotations = self.without_annotations(after_modifiers);
+            if after_annotations.len() == after_modifiers.len() {
+                break;
+            }
+            kept.push_str(rest.get(..rest.len() - after_modifiers.len()).unwrap_or(""));
+            rest = after_annotations;
+        }
+        if kept.is_empty() {
+            Cow::Borrowed(rest)
+        } else {
+            kept.push_str(rest);
+            Cow::Owned(kept)
+        }
+    }
+
     /// `trimmed` without the complete Rust outer attributes it opens with (`#[inline]`,
     /// `#[derive(Debug)] #[cfg(test)]`), for extractors whose `attribute_prefixes` hold
     /// [`RUST_ATTRIBUTE_PREFIX`] (Rust); `trimmed` otherwise.
@@ -869,7 +909,8 @@ impl BraceFamilyExtractor {
         }
         // MAGI FIX (S6 loop 10): `@Override public void run() {` opened with `@` and was no
         // signature; the complete annotations on the line are read past first.
-        let trimmed = self.without_annotations(line.trim());
+        let annotations = self.without_annotations_among_modifiers(line.trim());
+        let trimmed: &str = &annotations;
         // MAGI FIX (S6 loop 4): a trailing comment ending in `;` is not a prototype's `;`.
         let prototype = scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement);
         // An annotation or decorator (`@SuppressWarnings("x")`) is no signature either.
