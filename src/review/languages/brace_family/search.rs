@@ -433,7 +433,8 @@ fn opens_call_initializer(trimmed: &str) -> bool {
 /// since line `i` all close, counted in code context ([`code_group_delta`]). The walk ends without
 /// one at a blank line or after [`MAX_BRACE_SEARCH_LINES`] lines; `i` then, and when line `i`
 /// opens no such call, so the declaration ends on its own line and the lines after it fall into
-/// later units, none lost. O(k) for the k lines walked.
+/// later units, none lost. A line whose text ends in `(` but leaves no parenthesis open in code
+/// (`int x = 1; // note (`) opens none. O(k) for the k lines walked.
 pub(super) fn call_initializer_end(
     lines: &[&str],
     scanned: &[ScannedLine],
@@ -449,6 +450,11 @@ pub(super) fn call_initializer_end(
     // MAGI FIX (B2b1 B1): counted on the line text, a `(` and a `)` in two comments ran the
     // declaration over the next one.
     let mut depth = code_group_delta(scanned, i);
+    // MAGI FIX (loop 27, B2b1b): a `(` ending the line's comment opened a call and ran the
+    // declaration over the next one.
+    if depth <= 0 {
+        return i;
+    }
     let budget_end = i
         .saturating_add(1)
         .saturating_add(MAX_BRACE_SEARCH_LINES)
