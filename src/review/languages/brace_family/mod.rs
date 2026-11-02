@@ -4822,4 +4822,51 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_storage_class_before_an_aggregate_keyword_keeps_the_aggregate_one_unit() {
+        // [MAGI loop 28, B2b1a] the C and C++ extractors stripped no storage class, so
+        // `static struct S {` matched no keyword: its header and its `} s;` line fell into gap
+        // units around its fields. A variable of the type, a function returning it and a
+        // plain static function read as before.
+        for ext in [BraceFamilyExtractor::c(), BraceFamilyExtractor::cpp()] {
+            for (code, kind) in [
+                (
+                    "static struct S {\n    int a;\n} s;\nint g(void) {\n}\n",
+                    UnitKind::Struct,
+                ),
+                (
+                    "const struct S {\n    int a;\n} s = {1};\nint g(void) {\n}\n",
+                    UnitKind::Struct,
+                ),
+                (
+                    "static union S {\n    int a;\n    float b;\n} s;\nint g(void) {\n}\n",
+                    UnitKind::Struct,
+                ),
+            ] {
+                let spans = sorted_spans(&ext, code);
+                let last = u32::try_from(code.lines().count()).expect("small");
+                let close = last - 2;
+                assert_eq!(
+                    spans,
+                    vec![
+                        unit("S", kind, 1, close),
+                        unit("g", UnitKind::Function, close + 1, last),
+                    ],
+                    "{code}"
+                );
+            }
+            assert_eq!(
+                sorted_spans(
+                    &ext,
+                    "static struct S *make(void) {\n    return 0;\n}\nstatic int h(void) {\n}\nstatic struct S s = {\n    1,\n};\n"
+                ),
+                vec![
+                    unit("make", UnitKind::Function, 1, 3),
+                    unit("h", UnitKind::Function, 4, 5),
+                    unit("statics", UnitKind::DeclarationGroup, 6, 8),
+                ]
+            );
+        }
+    }
 }
