@@ -4621,4 +4621,31 @@ int g(void) {
             );
         }
     }
+
+    #[test]
+    fn a_parenthesis_ending_a_comment_opens_no_call_initializer() {
+        // [MAGI loop 27, B2b1b] a call initializer was told by the line's text ending in `(`, so a
+        // complete declaration whose comment ends in one (`int x = 1; // note (`) opened a call
+        // and ran over the declaration below it; only a `(` the line leaves open in code counts.
+        let ext = BraceFamilyExtractor::c();
+        let code = "int x = 1; // note (\nint y = 2;\nint z;\n";
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(code);
+        let stops = |_: usize| false;
+        let budget = SearchBudget::for_lines(lines.len());
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &budget,
+        };
+        assert_eq!(call_initializer_end(&lines, &scanned, 0, &search), 0);
+        let units = extract(&ext, code, &[1, 2, 3]);
+        let parts = ext.split_block(&units[0]);
+        assert_eq!(
+            parts
+                .iter()
+                .map(|u| (u.start_line, u.end_line))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (2, 2), (3, 3)]
+        );
+    }
 }
