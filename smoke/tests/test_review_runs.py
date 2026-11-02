@@ -15,6 +15,7 @@ from unittest import mock
 
 from smoke import runs
 from smoke.errors import HarnessError, TimedOut
+from smoke.tests import support
 
 
 def _executor(root: pathlib.Path) -> runs.RunExecutor:
@@ -1431,7 +1432,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
             for path in paths:
                 request = urllib.request.Request(daemon + path, data=b"{}", method="POST")
                 try:
-                    urllib.request.urlopen(request, timeout=5).close()
+                    support.loopback_open(request).close()
                 except urllib.error.HTTPError as exc:
                     exc.close()
             return runs.ProductOutput(stdout=b"", stderr=b"", exit_code=2, command=list(argv))
@@ -1600,7 +1601,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
             request = urllib.request.Request(base[:-len("/v1")] + "/api/chat", data=b"{}",
                                              method="POST")
             try:
-                urllib.request.urlopen(request, timeout=5).close()
+                support.loopback_open(request).close()
             except urllib.error.HTTPError as exc:
                 exc.close()
             raise TimedOut("expired", output=None)
@@ -1632,7 +1633,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
             request = urllib.request.Request(base[:-len("/v1")] + "/api/chat", data=b"{}",
                                              method="POST")
             try:
-                urllib.request.urlopen(request, timeout=5).close()
+                support.loopback_open(request).close()
             except urllib.error.HTTPError as exc:
                 exc.close()
             raise HarnessError("the stand-in failed after sending")
@@ -1854,7 +1855,6 @@ class LoopbackOpenTests(unittest.TestCase):
     def test_a_loopback_request_never_goes_through_the_hosts_proxy(self) -> None:
         import urllib.error
         import urllib.request
-        from smoke.tests import support
         proxied = {"HTTP_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9",
                    "ALL_PROXY": "http://127.0.0.1:9", "all_proxy": "http://127.0.0.1:9",
                    "NO_PROXY": "", "no_proxy": ""}

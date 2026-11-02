@@ -23,6 +23,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import urllib.request
 from typing import Callable, Optional
 
 from smoke import runs
@@ -32,6 +33,35 @@ from smoke.product import ProductOutput
 #: an exception, because "the binary refused" and "the harness could not start
 #: it" are different states and a scenario handles them differently.
 DEFAULT_EXIT_CODE = 1
+
+#: How long a stand-in waits for its loopback server to answer.
+LOOPBACK_TIMEOUT_S = 5
+
+#: An opener with no proxy handler: a stand-in's request to a loopback server
+#: goes straight to it, whatever ``HTTP_PROXY`` or ``ALL_PROXY`` the host sets.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def loopback_open(request, timeout: float = LOOPBACK_TIMEOUT_S):
+    """Send *request* to a loopback server the test runs, never through a proxy.
+
+    MAGI FIX (S6 loop 28): the stand-in doubles used ``urlopen``, which honours
+    the host's proxy variables when ``no_proxy`` does not cover 127.0.0.1, so on
+    a proxied host their requests never reached the counter and a test that
+    asserts nothing was counted passed vacuously (F1b1-melchior).
+
+    Args:
+        request: A ``urllib.request.Request`` or a URL.
+        timeout: Seconds to wait for the answer.
+
+    Returns:
+        http.client.HTTPResponse: The open response; the caller closes it.
+
+    Raises:
+        urllib.error.HTTPError: For a non-2xx answer (the counter's 503).
+        OSError: When nothing answers.
+    """
+    return _LOOPBACK_OPENER.open(request, timeout=timeout)
 
 
 @dataclasses.dataclass(frozen=True)

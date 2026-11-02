@@ -62,7 +62,7 @@ def _http_post(url: str, credential: bytes) -> tuple[int, bytes]:
         headers={"Authorization": b"Bearer " + credential,
                  "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=5) as answer:
+        with support.loopback_open(request) as answer:
             return answer.status, answer.read()
     except urllib.error.HTTPError as refused:
         return refused.code, refused.read()

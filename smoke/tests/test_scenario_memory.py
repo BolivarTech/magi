@@ -660,7 +660,7 @@ def _status_of(url: str) -> int | None:
         url.rstrip("/") + "/embeddings", data=b"{}",
         headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=5) as answer:
+        with support.loopback_open(request) as answer:
             return answer.status
     except urllib.error.HTTPError as refused:
         return refused.code
