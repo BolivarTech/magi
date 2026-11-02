@@ -602,9 +602,11 @@ pub(super) fn skip_generics(text: &str) -> &str {
 
 /// The angle brackets one line of a C++ template header wrapped over lines opens, less those it
 /// closes, counting neither inside the parentheses of the line, as [`skip_generics`] does: a
-/// comparison in a template argument sits in them (`bool B = (N >= 0)>` closes one). A `)` that
-/// closes a parenthesis of an earlier line is read as closing nothing, declared: the angle
-/// brackets of a comparison wrapped over lines may then count. O(n) in the line.
+/// comparison in a template argument sits in them (`bool B = (N >= 0)>` closes one). The `>` of
+/// an arrow (`auto (*)(int) -> void`, a trailing return type in a default argument) closes
+/// nothing ([`closes_angle`]), as in [`skip_generics`]. A `)` that closes a parenthesis of an
+/// earlier line is read as closing nothing, declared: the angle brackets of a comparison wrapped
+/// over lines may then count. O(n) in the line.
 ///
 /// # Arguments
 ///
@@ -614,8 +616,9 @@ pub(super) fn skip_generics(text: &str) -> &str {
 ///
 /// The number of `<` minus the number of `>` outside its parentheses.
 pub(super) fn template_angle_delta(line: &str) -> i64 {
+    // MAGI FIX (loop 28, B2b1b): the `>` of `-> void` in a default argument closed the header.
     let mut parens = 0u32;
-    line.chars().fold(0, |n, c| match c {
+    line.char_indices().fold(0, |n, (at, c)| match c {
         '(' => {
             parens = parens.saturating_add(1);
             n
@@ -625,7 +628,7 @@ pub(super) fn template_angle_delta(line: &str) -> i64 {
             n
         }
         '<' if parens == 0 => n + 1,
-        '>' if parens == 0 => n - 1,
+        '>' if parens == 0 && closes_angle(line, at) => n - 1,
         _ => n,
     })
 }
