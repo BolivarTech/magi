@@ -1105,6 +1105,49 @@ def _chain_from_repository(path) -> tuple[pathlib.Path, pathlib.PurePath]:
         return absolute.parent, pathlib.PurePath(absolute.name)
 
 
+def _resolved(path, what: str) -> pathlib.Path:
+    """*path* with every link and ``..`` resolved, or a harness error naming *what*.
+
+    MAGI FIX (S6 loop 28): ``Path.resolve`` raises :class:`RuntimeError` on a
+    symlink loop (an :class:`OSError` from Python 3.13) and an
+    :class:`OSError` on a component it cannot inspect, and the executor
+    called it outside every guard, so the run ended in a traceback instead of
+    a named harness failure (F1a1-caspar).
+
+    Args:
+        path: The path to resolve; it need not exist.
+        what: What the path is, for the message.
+
+    Returns:
+        pathlib.Path: The resolved path.
+
+    Raises:
+        HarnessError: When the path cannot be resolved.
+    """
+    try:
+        return pathlib.Path(path).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise HarnessError("could not resolve %s %s: %s" % (what, path, exc)) from exc
+
+
+def _linked_ancestor(path):
+    """The first link from the repository root down to *path*, *path* itself excluded.
+
+    Args:
+        path: A path whose parents must hold no link (:func:`_chain_from_repository`).
+
+    Returns:
+        pathlib.Path | None: The first linked component above *path*, or ``None``.
+
+    Raises:
+        OSError: When a component cannot be inspected.
+    """
+    base, below = _chain_from_repository(path)
+    if len(below.parts) < 2:
+        return None
+    return _linked_component(base, below.parent)
+
+
 def _walk_failed(error: OSError) -> None:
     """The ``onerror`` of :func:`_reject_links`'s walk: refuse what it cannot list.
 
@@ -2889,12 +2932,12 @@ class RunExecutor:
         if REVIEW_WORKSPACE_TOKEN not in definition.argv:
             return None
         workspace = self._review_workspace()
-        scratch = pathlib.Path(self._env.scratch_dir).resolve()
+        scratch = _resolved(self._env.scratch_dir, "the scratch area")
         # MAGI FIX (S6 loop 3): containment is checked before anything is
         # deleted OR created. The tree is deleted wholesale and then rebuilt,
         # so only a path that resolves strictly under the scratch area may be
         # touched at all (F3).
-        if scratch not in workspace.resolve().parents:
+        if scratch not in _resolved(workspace, "the review workspace").parents:
             raise HarnessError(
                 "refusing to build the review workspace at %s: it resolves "
                 "outside the scratch area %s" % (workspace, scratch))
@@ -2923,8 +2966,13 @@ class RunExecutor:
         # scratch area that is itself a link (or a linked component above it)
         # passed both checks, and rmtree and copytree went through it
         # (F1a1-caspar). The walk starts at the repository root.
+        # MAGI FIX (S6 loop 28): the source .magi was tested with everything
+        # under it but not the directories above it, so an environment
+        # directory swapped for a link had copytree copy the tree it points at
+        # (F1b1-balthasar). Its chain from the repository root is tested too.
         try:
-            linked = self._first_link_down_to()
+            linked = (self._first_link_down_to()
+                      or _linked_ancestor(self._env.magi_dir))
             if linked is None:
                 _reject_links(self._env.magi_dir)
         except OSError as exc:
@@ -2971,12 +3019,12 @@ class RunExecutor:
         """
         if not definition.files:
             return
-        root = pathlib.Path(root).resolve()
+        root = _resolved(root, "the workspace of run %s" % definition.run_id)
         for relative, body in definition.files:
             # Containment is checked on the RESOLVED target: resolve() follows
             # every symlink and collapses every "..", so a link under *root*
             # that points outside lands outside and is refused like "../x".
-            target = (root / relative).resolve()
+            target = _resolved(root / relative, "a file of run %s" % definition.run_id)
             if root not in target.parents:
                 raise HarnessError(
                     "run %s declares a file outside its workspace: %s"
@@ -3033,13 +3081,17 @@ class RunExecutor:
 
         Returns:
             list[str]: The arguments, without the program name.
+
+        Raises:
+            HarnessError: If the review workspace cannot be resolved.
         """
         root = str(self._env.root)
         resolved = {WORKSPACE_TOKEN: root}
         if REVIEW_WORKSPACE_TOKEN in definition.argv:
             # MAGI FIX (S6 loop 11, F1a-m1): resolved, because the product starts with
             # cwd = this workspace and a relative -w would be joined to it a second time.
-            resolved[REVIEW_WORKSPACE_TOKEN] = str(self._review_workspace().resolve())
+            resolved[REVIEW_WORKSPACE_TOKEN] = str(
+                _resolved(self._review_workspace(), "the review workspace"))
         return [resolved.get(word, word) for word in definition.argv]
 
     def _invoke(self, definition: RunDefinition,
