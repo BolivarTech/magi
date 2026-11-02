@@ -1917,6 +1917,34 @@ ERROR_BACKEND_STATUS = 401
 ERROR_BACKEND_TIMEOUT_S = 5.0
 
 
+def _drain_body(rfile, headers) -> None:
+    """Read and discard a request body, never holding more than one chunk.
+
+    MAGI FIX (S6 loop 28): the error backend read ``int(Content-Length)``
+    bytes in one call, so a non-numeric value raised in the handler (the
+    product got no answer), a negative one read to the end of the stream,
+    and a huge one asked the reader for that many bytes at once. The length
+    is read as a non-negative integer, anything else counting as no body,
+    and the body is read :data:`MODEL_COUNTER_CHUNK_BYTES` at a time until it
+    is spent or the client stops sending. Both loopback handlers drain
+    through here.
+
+    Args:
+        rfile: The request's input stream.
+        headers: Its headers.
+
+    Raises:
+        OSError: When a read fails or times out.
+    """
+    declared = (headers.get("Content-Length") or "").strip()
+    left = int(declared) if declared.isascii() and declared.isdigit() else 0
+    while left > 0:
+        chunk = rfile.read(min(MODEL_COUNTER_CHUNK_BYTES, left))
+        if not chunk:
+            return
+        left -= len(chunk)
+
+
 class _EchoingHandler(http.server.BaseHTTPRequestHandler):
     """Answers every request with an error that repeats what it was sent.
 
@@ -1934,9 +1962,12 @@ class _EchoingHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - the base class names it
         """Answer one POST with :data:`ERROR_BACKEND_STATUS`."""
-        length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
+        try:
+            _drain_body(self.rfile, self.headers)
+        except OSError:
+            # The client stopped mid-body or hung up: nobody is left to answer.
+            self.close_connection = True
+            return
         body = json.dumps({
             "error": {
                 "message": "unauthorized",
@@ -2239,15 +2270,7 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
     def _answer(self) -> None:
         """Drain this request's body and answer it unavailable."""
         try:
-            left = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            left = 0
-        try:
-            while left > 0:
-                chunk = self.rfile.read(min(MODEL_COUNTER_CHUNK_BYTES, left))
-                if not chunk:
-                    break
-                left -= len(chunk)
+            _drain_body(self.rfile, self.headers)
             self.send_response(MODEL_COUNTER_STATUS)
             self.send_header("Content-Length", "0")
             self.send_header("Connection", "close")
