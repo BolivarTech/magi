@@ -4597,4 +4597,28 @@ int g(void) {
             );
         }
     }
+
+    #[test]
+    fn a_wrapped_template_header_after_a_declaration_group_is_never_part_of_it() {
+        // [MAGI loop 27, found verifying B2b1b] the first line of a template header wrapped over
+        // lines ends in `,`, so it joined the declaration group above it as a declaration list
+        // and its function lost its header; the main scan passes over such a header before it
+        // looks for declarations, and the group's join now does too.
+        let ext = BraceFamilyExtractor::cpp();
+        for code in [
+            "int a;\n\ntemplate <typename T,\n          typename U>\nvoid f() {\n    g();\n}\n",
+            "int a;\n\ntemplate <int N,\n          bool B = (N >= 0)>\nvoid f() {\n    g();\n}\n",
+        ] {
+            let found = sorted_spans(&ext, code);
+            assert_eq!(
+                found,
+                vec![
+                    ("declarations".to_string(), UnitKind::DeclarationGroup, 1, 1),
+                    ("lines 2-2".to_string(), UnitKind::TopLevel, 2, 2),
+                    ("f".to_string(), UnitKind::Function, 3, 7),
+                ],
+                "{code}"
+            );
+        }
+    }
 }
