@@ -95,6 +95,20 @@ class ReviewRunDefinitionTests(unittest.TestCase):
 
     def test_the_hostile_path_run_names_a_path_outside_the_workspace(self) -> None:
         self.assertEqual(runs.REVIEW_OUTSIDE_PATH, runs.DEFINITIONS["R13"].argv[-1])
+        # [MAGI §6 MS2 loop 29, F1b1a-melchior] the name alone was pinned; the path must also leave the
+        # workspace it is joined to, or R13 reviews something inside it and calls models.
+        workspace = os.path.abspath(os.path.join("scratch", runs.REVIEW_WORKSPACE_DIR))
+        joined = os.path.normpath(os.path.join(workspace, runs.REVIEW_OUTSIDE_PATH))
+        self.assertNotEqual(workspace, os.path.commonpath([workspace, joined]))
+
+    def test_the_review_runs_read_the_inputs_they_write(self) -> None:
+        # [MAGI §6 MS2 loop 29, F1b1a-melchior] R12 reviews the generated files and R14 the skipped ones.
+        self.assertEqual(runs.REVIEW_GEN_DIR, runs.DEFINITIONS["R12"].argv[-1])
+        self.assertTrue(all(path.startswith(runs.REVIEW_GEN_DIR + "/")
+                            for path, _ in runs.DEFINITIONS["R12"].files))
+        self.assertEqual(runs.REVIEW_SKIPPED_DIR, runs.DEFINITIONS["R14"].argv[-1])
+        self.assertTrue(all(path.startswith(runs.REVIEW_SKIPPED_DIR + "/")
+                            for path, _ in runs.DEFINITIONS["R14"].files))
 
     def test_the_timeout_run_asks_for_a_total_below_any_floor(self) -> None:
         argv = list(runs.DEFINITIONS["R15"].argv)
