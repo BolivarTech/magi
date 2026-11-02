@@ -1643,12 +1643,23 @@ _BACKEND_KEY_VARIABLE = "OPENAI_API_KEY"
 #: the run to a provider the counter does not stand in for.
 _PROVIDER_VARIABLE = "MAGI_PROVIDER"
 
-#: The provider kind whose seats post to a fixed URL that no ``base_url``
-#: steers (magi-core's ``ClaudeProvider``), so the counter could never see them.
-_UNCOUNTABLE_KIND = "anthropic"
+#: The only provider kind a refusal run may name. The harness writes the
+#: product's own scaffold (``provider = "ollama"``, no ``[magi].kind``), and the
+#: counter is built for it: :data:`PROBE_PATHS` are Ollama's, and an
+#: ``anthropic`` seat posts to a fixed URL that no ``base_url`` steers
+#: (magi-core's ``ClaudeProvider``). Any other kind is a setup the counter was
+#: not measured against, so it is refused rather than assumed countable.
+_COUNTED_KIND = "ollama"
 
-#: The configuration keys that name a provider kind.
-_KIND_KEYS = frozenset({"provider", "kind"})
+#: Where the product reads a provider kind: the root ``provider`` and
+#: ``[magi].kind`` (``src/config.rs``, ``ProviderKind::parse``, trimmed and
+#: case-sensitive, blank meaning absent). ``[embedding].provider`` is not one:
+#: it is a label with its own vocabulary (``"openai"`` by default) that routes
+#: nothing. No other section has a kind (``deny_unknown_fields`` everywhere).
+_KIND_PATHS = (("provider",), ("magi", "kind"))
+
+#: The only key :func:`point_config_at` may change, in any table.
+_ENDPOINT_KEY = "base_url"
 
 #: The paths a run that forbids model calls may still request: the capability
 #: probe (``src/magi/probe.rs``), which sizes the batches from the root of an
@@ -1914,11 +1925,20 @@ def endpoints_off_the_counter(config_path, url: str) -> tuple[str, ...]:
         config_path: The rewritten configuration.
         url: The counter's URL, which every endpoint must be.
 
+    The product's endpoint keys are exactly the ``base_url`` of the root,
+    ``[magi]``, ``[embedding]``, ``[decision]`` and ``[code_review]``; every
+    section is ``deny_unknown_fields``, so no ``endpoint``/``api_base``/``url``
+    key can exist, and a ``[[magi.fallback]]`` or gate fallback names only a
+    model, which is sent to its section's endpoint. The environment variables
+    that steer one, ``OPENAI_BASE_URL`` and ``MAGI_PROVIDER``, are set by
+    :meth:`RunExecutor._counted_endpoints`.
+
     Returns:
         tuple[str, ...]: One entry per problem, table by table: the root
         ``base_url`` missing or not *url*, any other ``base_url`` that is not
-        *url* (by dotted key), and any ``provider``/``kind`` naming
-        :data:`_UNCOUNTABLE_KIND`. Empty when every endpoint is the counter.
+        *url* (by dotted key), and a provider kind (:data:`_KIND_PATHS`) that
+        is neither blank nor :data:`_COUNTED_KIND`. Empty when every endpoint
+        is the counter.
 
     Raises:
         HarnessError: When the file cannot be read or is not valid TOML.
@@ -1929,33 +1949,137 @@ def endpoints_off_the_counter(config_path, url: str) -> tuple[str, ...]:
         ...     path = pathlib.Path(tmp) / "magi.toml"
         ...     _ = path.write_text('base_url = "u"\\n[magi]\\nkind = "anthropic"\\n')
         ...     endpoints_off_the_counter(path, "u")
-        ('magi.kind = "anthropic", whose seats no base_url steers',)
+        ('magi.kind = "anthropic", not "ollama", the only kind the counter stands in for',)
+    """
+    document = _parsed_config(config_path)
+    problems = []
+    if document.get(_ENDPOINT_KEY) != url:
+        problems.append("the root base_url is %r, not the counter"
+                        % document.get(_ENDPOINT_KEY))
+    for path, value in _config_leaves(document):
+        if path[-1] == _ENDPOINT_KEY and len(path) > 1 and value != url:
+            problems.append("%s is %r, not the counter" % (".".join(path), value))
+    for path in _KIND_PATHS:
+        value = _config_value(document, path)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if not isinstance(value, str) or value.strip() != _COUNTED_KIND:
+            problems.append('%s = "%s", not "%s", the only kind the counter '
+                            "stands in for" % (".".join(path), value, _COUNTED_KIND))
+    return tuple(problems)
+
+
+#: Marks a key missing from one side of :func:`changes_besides_endpoints`.
+_ABSENT = object()
+
+
+def changes_besides_endpoints(original: str, config_path) -> tuple[str, ...]:
+    """What :func:`point_config_at` changed in the config besides its endpoints.
+
+    MAGI FIX (smoke review, Caspar): the rewrite is line-based, so a line that
+    only looks like a ``base_url`` -- inside a multi-line string, say -- is
+    rewritten too, and the run would then exercise a configuration nobody
+    wrote. Both texts are parsed and compared with every ``base_url`` masked.
+
+    Complexity: ``O(file bytes)``.
+
+    Args:
+        original: The configuration text before the rewrite.
+        config_path: The rewritten configuration.
+
+    Returns:
+        tuple[str, ...]: One entry per dotted key whose value differs, was
+        added or was removed, in sorted order. Empty when only endpoints moved.
+
+    Raises:
+        HarnessError: When either text cannot be read or is not valid TOML.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     path = pathlib.Path(tmp) / "magi.toml"
+        ...     _ = path.write_text('base_url = "u"\\nprovider = "b"\\n')
+        ...     changes_besides_endpoints('provider = "a"\\n', path)
+        ("provider is 'b', was 'a'",)
     """
     try:
-        document = tomllib.loads(pathlib.Path(config_path).read_text(encoding="utf-8"))
+        before = tomllib.loads(original)
+    except tomllib.TOMLDecodeError as exc:
+        raise HarnessError("could not parse the configuration before pointing "
+                           "it at the counter: %s" % exc) from exc
+    masked = [{path: value for path, value in _config_leaves(document)
+               if path[-1] != _ENDPOINT_KEY}
+              for document in (before, _parsed_config(config_path))]
+    was, now = masked
+    return tuple("%s is %r, was %r" % (".".join(path), now.get(path, "<absent>"),
+                                      was.get(path, "<absent>"))
+                 for path in sorted(was.keys() | now.keys())
+                 if was.get(path, _ABSENT) != now.get(path, _ABSENT))
+
+
+
+def _parsed_config(config_path) -> dict:
+    """Read and parse the ``magi.toml`` at *config_path*.
+
+    Args:
+        config_path: The file.
+
+    Returns:
+        dict: The parsed document.
+
+    Raises:
+        HarnessError: When the file cannot be read or is not valid TOML.
+    """
+    try:
+        return tomllib.loads(pathlib.Path(config_path).read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise HarnessError("could not read %s back to check its endpoints: %s"
                            % (config_path, exc)) from exc
-    problems = []
-    if document.get("base_url") != url:
-        problems.append("the root base_url is %r, not the counter"
-                        % document.get("base_url"))
+
+
+def _config_leaves(document: dict):
+    """Every scalar of a parsed TOML document, with its key path.
+
+    Arrays are indexed by position (``"0"``, ``"1"``, ...); an empty table or
+    array is a leaf of its own, so removing one is visible.
+
+    Complexity: ``O(nodes)``.
+
+    Args:
+        document: A parsed document.
+
+    Yields:
+        tuple[tuple[str, ...], object]: The path and the value, breadth first.
+    """
     pending = [((), document)]
     while pending:
         prefix, node = pending.pop(0)
         items = (node.items() if isinstance(node, dict)
                  else ((str(i), v) for i, v in enumerate(node)))
         for key, value in items:
-            name = ".".join(prefix + (key,))
-            if isinstance(value, (dict, list)):
-                pending.append((prefix + (key,), value))
-            elif key == "base_url" and prefix and value != url:
-                problems.append("%s is %r, not the counter" % (name, value))
-            elif (key in _KIND_KEYS and isinstance(value, str)
-                  and value.strip().lower() == _UNCOUNTABLE_KIND):
-                problems.append('%s = "%s", whose seats no base_url steers'
-                                % (name, value))
-    return tuple(problems)
+            path = prefix + (key,)
+            if isinstance(value, (dict, list)) and value:
+                pending.append((path, value))
+            else:
+                yield path, value
+
+
+def _config_value(document: dict, path: tuple):
+    """The value at *path* in *document*, or ``None`` where any table is missing.
+
+    Args:
+        document: A parsed document.
+        path: The key path.
+
+    Returns:
+        object: The value, or ``None``.
+    """
+    node = document
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
 
 #: The eight shared runs, complete. They land in ONE place rather than a row at
 #: a time as later tasks need them, because a run whose only owner is a task
@@ -2247,7 +2371,9 @@ class RunExecutor:
         (:func:`point_config_at`) and ``OPENAI_BASE_URL``, which overrides the
         root one, reach :func:`model_counter`; nothing reaches a real backend.
         The rewritten file is checked before the run
-        (:func:`endpoints_off_the_counter`) and ``MAGI_PROVIDER`` is blanked,
+        (:func:`endpoints_off_the_counter`), and compared with the original
+        everywhere but its endpoints (:func:`changes_besides_endpoints`), and
+        ``MAGI_PROVIDER`` is blanked,
         so the harness's own shell cannot steer the run elsewhere. An endpoint
         off the counter is the harness's setup, not the product's verdict, so
         it is a :class:`HarnessError` (exit 3), never a scenario ``FAIL``. The
@@ -2268,7 +2394,9 @@ class RunExecutor:
         Raises:
             HarnessError: When there is no workspace, its configuration is
                 missing or cannot be rewritten, or the rewritten configuration
-                still declares an endpoint off the counter.
+                still declares an endpoint off the counter, names a provider
+                kind other than :data:`_COUNTED_KIND`, or differs from the
+                original in anything but an endpoint.
         """
         if not definition.forbids_model_calls:
             yield definition
@@ -2277,9 +2405,15 @@ class RunExecutor:
             raise HarnessError("run %s forbids model calls but has no review "
                                "workspace to point at a counter" % definition.run_id)
         config = workspace.joinpath(*CONFIG_PATH_PARTS)
+        try:
+            original = config.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise HarnessError("could not read %s to count its endpoints: %s"
+                               % (config, exc)) from exc
         with model_counter() as (url, log):
             point_config_at(config, url)
-            off = endpoints_off_the_counter(config, url)
+            off = (endpoints_off_the_counter(config, url)
+                   + changes_besides_endpoints(original, config))
             if off:
                 raise HarnessError(
                     "run %s forbids model calls, but its configuration could "
