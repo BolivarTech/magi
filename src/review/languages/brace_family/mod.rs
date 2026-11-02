@@ -4391,4 +4391,19 @@ int g(void) {
             vec![("K", 1, 1), ("get", 2, 4), ("set", 5, 7), ("K", 8, 8)]
         );
     }
+
+    #[test]
+    fn a_rust_visibility_spaced_before_its_path_still_opens_the_item() {
+        // [MAGI loop 26, 6] `pub (crate)` was no modifier, since the `(` had to touch `pub`, so
+        // the function was no construct and fell into a gap unit.
+        let rust =
+            "pub (crate) fn f() {\n    x();\n}\npub (in crate::a) struct S {\n    n: u8,\n}\n";
+        assert_eq!(
+            spans(&extract(&rust_extractor(), rust, &all_lines(rust))),
+            vec![
+                ("f", UnitKind::Function, 1, 3),
+                ("S", UnitKind::Struct, 4, 6)
+            ]
+        );
+    }
 }
