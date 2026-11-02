@@ -5124,6 +5124,25 @@ int g(void) {
     }
 
     #[test]
+    fn a_comment_after_a_return_type_brace_hides_the_type_declared() {
+        // [MAGI loop 28 sweep] declared: `opens_return_type_literal` reads the line's text, so a
+        // comment after the type's brace (`function f(): { // shape`) hides the rule and the line
+        // reads as opening the body, as before the rule: the function ends where the type closes
+        // and its body falls into a later unit, every line still in exactly one unit.
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::typescript(),
+                "function f(): { // shape\n    a: number;\n} {\n    return x;\n}\nfunction g() {\n}\n"
+            ),
+            vec![
+                unit("f", UnitKind::Function, 1, 3),
+                unit("lines 4-5", UnitKind::TopLevel, 4, 5),
+                unit("g", UnitKind::Function, 6, 7),
+            ]
+        );
+    }
+
+    #[test]
     fn a_braced_member_initializer_wrapped_over_lines_splits_the_constructor_declared() {
         // [MAGI loop 28 sweep] declared: the brace a C++ constructor's member initializer opens
         // (`Foo::Foo() : arr{`) is taken for the body's when the initializer wraps over lines,
