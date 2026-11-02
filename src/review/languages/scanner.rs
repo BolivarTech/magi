@@ -33,7 +33,9 @@ fn char_at(chars: &[char], i: usize) -> char {
 }
 
 /// Characters after the backslash of the longest escaped char literal, Rust's `'\u{10FFFF}'`:
-/// `u`, the two braces and six hex digits, plus the closing quote.
+/// `u`, the two braces and six hex digits, plus the closing quote. Underscores between the
+/// digits (`'\u{1_0}'`) count against it, so an escape with six digits and an underscore reads
+/// as no char literal, declared: a heuristic window, not Rust's grammar.
 const MAX_CHAR_ESCAPE_CHARS: usize = 10;
 
 /// The longest delimiter a C++ raw string allows between `"` and `(` (C++11 [lex.string]).
@@ -1076,10 +1078,14 @@ impl CodeScanner {
         // Escaped char: '\n', '\\', '\'', and the multi-char escapes '\x00', '\012', '\u{1F600}'.
         // MAGI FIX (S6 loop 3): the closing quote may sit up to MAX_CHAR_ESCAPE_CHARS after the
         // backslash, with only escape-body chars between; a lifetime never follows a backslash.
+        // MAGI FIX (loop 26, 2): `_` was no escape-body char, though Rust allows it between the
+        // digits of a unicode escape (`'\u{1_0}'`), so the quote opened no char literal.
         if next == '\\' {
             return ((i + 3)..len.min(i + 3 + MAX_CHAR_ESCAPE_CHARS))
                 .map(|k| char_at(chars, k))
-                .take_while(|&c| c == '\'' || c.is_ascii_alphanumeric() || c == '{' || c == '}')
+                .take_while(|&c| {
+                    c == '\'' || c.is_ascii_alphanumeric() || matches!(c, '{' | '}' | '_')
+                })
                 .any(|c| c == '\'');
         }
         // Simple char: 'a'
