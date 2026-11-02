@@ -4785,4 +4785,24 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_nested_braced_initializer_opening_its_line_is_one_declaration() {
+        // [MAGI loop 28, B2b1b] `opens_initializer` stripped one trailing `{`, so `= {{` (a
+        // nested initializer opening the next lines) opened none and its first lines fell into
+        // a gap unit.
+        for code in [
+            "int grid[2][2] = {{\n    1, 2}, {\n    3, 4}};\nint g(void) {\n}\n",
+            "int grid[2][2] = { {\n    1, 2}, {\n    3, 4} };\nint g(void) {\n}\n",
+        ] {
+            assert_eq!(
+                sorted_spans(&BraceFamilyExtractor::c(), code),
+                vec![
+                    unit("declarations", UnitKind::DeclarationGroup, 1, 3),
+                    unit("g", UnitKind::Function, 4, 5),
+                ],
+                "{code}"
+            );
+        }
+    }
 }
