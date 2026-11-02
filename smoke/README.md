@@ -357,7 +357,12 @@ pool's window counts as unmeasured, so S50 sees the batch count of the default w
 Since a silent counter proves nothing if the product never reached it, and R13 sends nothing at
 all, the rewritten `magi.toml` is parsed back before the run: a `base_url` anywhere that is not the
 counter (a quoted key, an inline table), or a `provider`/`kind` of `anthropic` (whose seats post to
-a fixed URL), stops the harness with exit 3, and `MAGI_PROVIDER` is blanked for the run. The probe
+a fixed URL), stops the harness with exit 3, and `MAGI_PROVIDER` is blanked for the run. The run
+also drops `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` in either case and sets `NO_PROXY` to
+`127.0.0.1,localhost,::1`: the product's HTTP client honours the system proxy and does not exempt
+`127.0.0.1`, so an inherited proxy would carry the requests past the counter and leave it empty.
+Only refusal runs lose the proxy; the others keep the shell's environment, because some reach a
+real backend off loopback that an operator behind a proxy needs it for. The probe
 paths are pinned to magi-core's `OllamaProvider` requests by `tests/test_rust_sync.py`.
 
 **What they copy from the product.** S50 and S51 read refusals, and a refusal writes no JSON, so
