@@ -126,5 +126,46 @@ class HarnessCategoryTests(unittest.TestCase):
         self.assertEqual("full", scoped_tests.module_filter("unmapped/thing.py"))
 
 
+class TestlessSubmoduleTests(unittest.TestCase):
+    """A submodule with no test module of its own widens to its parent."""
+
+    @staticmethod
+    def _reader(sources):
+        """Build a reader over an in-memory tree.
+
+        Args:
+            sources: Mapping of repository path to file text; a missing key
+                behaves like a file deleted in the diff.
+
+        Returns:
+            Callable[[str], Optional[str]]: The reader ``module_filter`` takes.
+        """
+        return lambda path: sources.get(path)
+
+    def test_a_submodule_without_tests_selects_its_parent_subtree(self) -> None:
+        """Its tests live in the parent's ``mod tests``; the narrow filter ran 0."""
+        path = "src/review/languages/brace_family/detect.rs"
+        read = self._reader({path: "pub fn detect() {}\n"})
+        self.assertEqual("test(/review::languages::brace_family::/)",
+                         scoped_tests.module_filter(path, read_source=read))
+
+    def test_a_submodule_with_its_own_tests_keeps_its_narrow_filter(self) -> None:
+        path = "src/review/languages/scanner.rs"
+        read = self._reader({path: "fn a() {}\n#[cfg(test)]\nmod tests {}\n"})
+        self.assertEqual("test(/review::languages::scanner::/)",
+                         scoped_tests.module_filter(path, read_source=read))
+
+    def test_a_deleted_submodule_selects_its_parent_subtree(self) -> None:
+        path = "src/review/languages/brace_family/gone.rs"
+        self.assertEqual(
+            "test(/review::languages::brace_family::/)",
+            scoped_tests.module_filter(path, read_source=self._reader({})))
+
+    def test_a_testless_child_of_the_crate_root_runs_everything(self) -> None:
+        read = self._reader({"src/foo.rs": "pub fn foo() {}\n"})
+        self.assertEqual("full",
+                         scoped_tests.module_filter("src/foo.rs", read_source=read))
+
+
 if __name__ == "__main__":
     unittest.main()

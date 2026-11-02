@@ -228,7 +228,7 @@ def scope(name, inner, single_crate):
     return "package(%s) & %s" % (name, inner)
 
 
-def module_filter(path, pkgs=None, single_crate=True):
+def module_filter(path, pkgs=None, single_crate=True, read_source=None):
     """Map one repository path to a nextest filter fragment.
 
     Returns ``"full"`` when the path forces a full run, ``None`` when it
