@@ -33,6 +33,7 @@ import io
 import json
 import os
 import pathlib
+import selectors
 import shutil
 import stat
 import string
@@ -1894,8 +1895,34 @@ def model_counter():
         yield "http://127.0.0.1:%d/v1" % server.server_address[1], server.log
     finally:
         server.shutdown()
+        _drain_backlog(server)
         server.server_close()
         thread.join(timeout=ERROR_BACKEND_TIMEOUT_S)
+
+
+def _drain_backlog(server: http.server.ThreadingHTTPServer) -> None:
+    """Handle every connection still waiting to be accepted by *server*.
+
+    MAGI FIX (S6 loop 25): ``serve_forever`` stops as soon as shutdown is
+    requested, even with a connection ready to accept, and ``server_close``
+    then drops it, so a request the product sent just before it exited was
+    never counted (F1a1-caspar). Each one is accepted and handled here, on a
+    thread ``server_close`` joins, before the listening socket is closed.
+
+    The drain stops once nothing is waiting, or after
+    :data:`ERROR_BACKEND_TIMEOUT_S`, so a client that keeps connecting cannot
+    hold the run open; the product has exited by then, so whatever arrives
+    later is not this run's.
+
+    Args:
+        server: The counter, already shut down (its loop has returned).
+    """
+    server.timeout = 0
+    deadline = time.monotonic() + ERROR_BACKEND_TIMEOUT_S
+    with selectors.DefaultSelector() as selector:
+        selector.register(server.socket, selectors.EVENT_READ)
+        while selector.select(0) and time.monotonic() < deadline:
+            server.handle_request()
 
 
 def requests_past_the_probe(log: RequestLog) -> tuple[str, ...]:
