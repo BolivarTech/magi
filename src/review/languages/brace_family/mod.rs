@@ -4466,8 +4466,9 @@ int g(void) {
         // [MAGI loop 27, B2b1a] annotations were read past only before the modifiers, so
         // `public @Deprecated class C {` (legal Java, annotations and modifiers mix in any order)
         // was no class, `public @A final @B("x") class C {` a function named `B`, and
-        // TypeScript's `export @dec class C {` (decorators after `export`, TS 5.0) ran into the
-        // import group above it.
+        // TypeScript's `export @dec class C {` (decorators after `export`, TS 5.0) no class.
+        // After an import group it also joined that group, a defect of its own pinned by
+        // `a_construct_after_a_declaration_group_is_never_part_of_it`.
         let class = |n: &str, a, b| (n.to_string(), UnitKind::Class, a, b);
         let cases: [(BraceFamilyExtractor, &str); 3] = [
             (
@@ -4480,7 +4481,7 @@ int g(void) {
             ),
             (
                 BraceFamilyExtractor::typescript(),
-                "import a from 'a';\n\nexport @dec class C {\n  m() {\n  }\n}\n",
+                "foo();\n\nexport @dec class C {\n  m() {\n  }\n}\n",
             ),
         ];
         for (ext, code) in &cases {
