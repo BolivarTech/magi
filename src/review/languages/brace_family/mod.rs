@@ -4379,4 +4379,16 @@ int g(void) {
             Some((1, 3))
         );
     }
+
+    #[test]
+    fn a_generic_default_in_a_method_signature_is_no_assignment() {
+        // [MAGI loop 26, 5] the `=` of a type parameter's default (`get<T = unknown>(`) read as
+        // an assignment, so the method was no member and stayed in the class's header piece.
+        let ts = "class K {\n    get<T = unknown>(key: string): T {\n        return x;\n    }\n    set(k: string) {\n        y();\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::typescript(), ts, 2, UnitKind::Class);
+        assert_eq!(
+            piece_spans(&parts),
+            vec![("K", 1, 1), ("get", 2, 4), ("set", 5, 7), ("K", 8, 8)]
+        );
+    }
 }
