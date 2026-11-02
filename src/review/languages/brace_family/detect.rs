@@ -8,6 +8,15 @@
 
 use super::*;
 
+/// What a C or C++ declaration line never opens with: a closing brace, a `)` (it closes a list
+/// wrapped from a line above: `);`, `) const;`, `),`), a preprocessor `#` or a comment.
+const NOT_DECLARATION_OPENERS: [&str; 6] = ["}", ")", "#", "//", "/*", "*"];
+
+/// What a line opening a declaration list never opens with besides
+/// [`NOT_DECLARATION_OPENERS`]: a constructor's initializer list (`: a_(0),`) or a list
+/// continuation (`, b`).
+const NOT_DECLARATION_LIST_OPENERS: [&str; 2] = [":", ","];
+
 impl BraceFamilyExtractor {
     /// Detect all constructs in the file or, with `members`, in a block's body, where a
     /// signature that ends in `;` is a member too ([`Self::member_prototypes`]).
@@ -525,7 +534,7 @@ impl BraceFamilyExtractor {
             // MAGI FIX (S6 loop 16): `static int n = 0; // note` fell into a gap unit.
             && (scanned.map_or(trimmed.ends_with(';'), |s| s.ends_statement)
                 || opens_initializer(trimmed))
-            && !["}", ")", "#", "//", "/*", "*"]
+            && !NOT_DECLARATION_OPENERS
                 .iter()
                 .any(|p| trimmed.starts_with(p));
         semicolon
@@ -535,7 +544,9 @@ impl BraceFamilyExtractor {
 
     /// Whether a trimmed line opens a C or C++ declaration list wrapped after a comma (`int x,`,
     /// `static const char *a = "x",`), for extractors with `semicolon_declarations`: code ending
-    /// in `,` that does not open with `}`, `#`, a comment, `:` or `,`. Only the main scan and its
+    /// in `,` that does not open with what no declaration opens with ([`NOT_DECLARATION_OPENERS`],
+    /// a `)` included: it closes a list wrapped from a line above) nor with `:` or `,`
+    /// ([`NOT_DECLARATION_LIST_OPENERS`]). Only the main scan and its
     /// declaration groups ask it, never [`Self::starts_construct`]: a constructor's initializer
     /// line (`b_{0},`) ends in `,` too, and stopping a signature's brace search there cut the
     /// function. A comment after the comma (`int x, // note`) hides it, declared: that line falls
@@ -543,8 +554,10 @@ impl BraceFamilyExtractor {
     fn opens_declaration_list(&self, trimmed: &str) -> bool {
         self.semicolon_declarations
             && trimmed.ends_with(',')
-            && !["}", "#", "//", "/*", "*", ":", ","]
+            // MAGI FIX (loop 28, B2b1a): a stray `),` opened a list that ran over a function.
+            && !NOT_DECLARATION_OPENERS
                 .iter()
+                .chain(&NOT_DECLARATION_LIST_OPENERS)
                 .any(|p| trimmed.starts_with(p))
     }
 
