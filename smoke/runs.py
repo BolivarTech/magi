@@ -1769,6 +1769,44 @@ def _read_bounded(root, paths, refused, identities=None) -> list:
     return kept
 
 
+def read_log_files(directory, unreadable):
+    """Yield the bytes of each regular file under *directory*, in sorted path order, never through a link.
+
+    For a log directory that is read whole, such as the persistent
+    environment's ``.magi/logs`` (:func:`smoke.logs.scan`): the walk is
+    :func:`_regular_files_without_links` and each file is opened by
+    :func:`_open_listed`, so a link, a hard link or a file swapped after the
+    listing is named, never read. Unlike the review-log capture, no byte cap
+    applies: that directory is the environment's whole history, and a cap
+    would turn a long-lived environment into a scenario that cannot test.
+    The walk's entry cap (:data:`MAX_REVIEW_LOG_ENTRIES`) does apply, and a
+    directory past it is named in *unreadable*.
+
+    MAGI FIX (S6 loop 28): ``smoke.logs.scan`` walked with ``rglob`` and read
+    with ``read_bytes``, both of which follow a link (F1a1-melchior, the
+    defect the review-log capture was fixed for).
+
+    Args:
+        directory: The directory to read.
+        unreadable: A list that receives ``"<path> (<why>)"``, *path*
+            relative to *directory*, for each entry left out or file that
+            could not be read.
+
+    Yields:
+        bytes: Each file's contents.
+    """
+    identities = {}
+    files = _regular_files_without_links(directory, unreadable, identities)
+    for path in files:
+        try:
+            with _open_listed(path, identities[path]) as handle:
+                data = handle.read()
+        except OSError as exc:
+            unreadable.append("%s (%s)" % (_name_under(directory, path), exc))
+            continue
+        yield data
+
+
 def _name_under(root, path) -> str:
     """How a log entry is named: its ``/``-separated path below *root*.
 

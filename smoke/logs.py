@@ -100,15 +100,13 @@ def scan(matcher):
     directory = log_directory()
     if not directory.is_dir():
         return None, False, []
+    # MAGI FIX (S6 loop 28): rglob and read_bytes followed a link planted
+    # under the directory, so a scenario could match bytes from outside the
+    # environment (F1a1-melchior, swept from the review-log capture). The walk
+    # and the reads never go through a link now (runs.read_log_files); an
+    # entry left out is named by its path under the directory.
     unreadable = []
-    for path in sorted(directory.rglob("*")):
-        if not path.is_file():
-            continue
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            unreadable.append("%s (%s)" % (path.name, exc))
-            continue
+    for data in runs.read_log_files(directory, unreadable):
         result = matcher(data)
         if result is not None:
             return result, True, unreadable
