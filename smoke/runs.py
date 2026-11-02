@@ -1169,19 +1169,21 @@ def _walk_failed(error: OSError) -> None:
 
 
 def _reject_links(top) -> None:
-    """Refuse a tree that holds a symlink or a junction, *top* included.
+    """Refuse a tree that holds a symlink, a junction or a hard-linked file, *top* included.
 
-    The review workspace is copied from the environment's ``.magi`` with
-    :func:`shutil.copytree`, which follows links: an entry pointing outside
-    would copy what it points at into the workspace the product reads. The
-    environment never needs one, so any link is refused rather than copied
-    as a link or followed.
+    The review workspace is copied from the environment's ``.magi``, and an
+    entry pointing outside would put what it points at into the workspace
+    the product reads. The environment never needs one, so any link is
+    refused rather than copied as a link or followed. This is the check made
+    before the old workspace is deleted; the copy itself
+    (:func:`_copy_tree_without_links`) refuses the same entries again, so a
+    link swapped in after this walk is refused there.
 
     Args:
         top: The directory to check.
 
     Raises:
-        HarnessError: Naming the first link found, or a directory the walk
+        HarnessError: Naming the first link or hard-linked file found, or a directory the walk
             could not list (a link inside it could not be ruled out).
         OSError: When a link test itself fails; the executor turns it into a
             :class:`HarnessError`.
@@ -2013,7 +2015,7 @@ def _copy_tree_without_links(source, destination, ignore) -> None:
 
 
 def _skip_top_level_logs(magi_dir):
-    """A ``copytree`` filter that leaves out the ``logs`` directory of *magi_dir*.
+    """A copy filter that leaves out the ``logs`` directory of *magi_dir*.
 
     The name is matched as the product spells it (:func:`same_product_name`),
     so ``Logs`` or ``logs.`` is left out too.
@@ -2026,7 +2028,7 @@ def _skip_top_level_logs(magi_dir):
         magi_dir: The ``.magi`` directory being copied.
 
     Returns:
-        callable: The ``ignore`` argument of :func:`shutil.copytree`.
+        callable: The ``ignore`` argument of :func:`_copy_tree_without_links`.
     """
     top = os.path.normcase(os.path.abspath(magi_dir))
 

@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 0.25.0
+# Version: 0.24.3
 # Date: 2026-11-02
 """Unit tests for every harness read of a log directory the product writes.
 
