@@ -3481,6 +3481,35 @@ void g(void) {
     }
 
     #[test]
+    fn an_arrow_in_a_type_parameter_bound_closes_no_angle_bracket() {
+        // [MAGI S6 loop 25, B2b1b] the `>` of `=>` or `->` in a bound counted as the list's
+        // close, so `foo<T extends () => void>(cb: T) {` named no member and its class did not
+        // split there.
+        let ts = BraceFamilyExtractor::typescript();
+        let class = "class A {\n    foo<T extends () => void>(cb: T) {\n        cb();\n    }\n    bar<U extends (x: number) => void>(u: U): void {\n        u(1);\n    }\n}\n";
+        assert_eq!(
+            spans(&split(&ts, class, 3, UnitKind::Class)),
+            vec![
+                ("A", UnitKind::Class, 1, 1),
+                ("foo", UnitKind::Method, 2, 4),
+                ("bar", UnitKind::Method, 5, 7),
+                ("A", UnitKind::Class, 8, 8),
+            ]
+        );
+        for line in [
+            "foo<T extends () => void>(cb: T) {",
+            "foo<T: Fn() -> U>(x: T) {",
+        ] {
+            assert_eq!(
+                identifier_before_paren(line),
+                Some("foo".to_string()),
+                "{line}"
+            );
+        }
+        assert_eq!(skip_generics("<T extends () => void>(cb: T)"), "(cb: T)");
+    }
+
+    #[test]
     fn a_generic_typescript_method_is_a_method() {
         // [MAGI S6 loop 18, B2b-4] the text before `(` ended in `>`, so no identifier named the
         // method and a generic method of a class or an interface was no member.
