@@ -409,12 +409,14 @@ pub(super) fn returns_from_function(rest: &str) -> bool {
 }
 
 /// Whether a trimmed line opens an initializer it continues on the next lines: it ends in a bare
-/// `=` ([`ends_in_bare_equal`]: `static int n =`), in `= {` (`int a[] = {`) or in a call's `(`
-/// after the `=` ([`opens_call_initializer`]). O(n) in the line.
+/// `=` ([`ends_in_bare_equal`]: `static int n =`), in `=` followed by any run of `{` and blanks
+/// (`int a[] = {`, a nested `int m[2][2] = {{`) or in a call's `(` after the `=`
+/// ([`opens_call_initializer`]). O(n) in the line.
 pub(super) fn opens_initializer(trimmed: &str) -> bool {
     // MAGI FIX (loop 27, B2b1b): any line ending in `=` opened one, a compound assignment
     // (`x +=`) and a comparison (`x ==`) included.
-    ends_in_bare_equal(trimmed.strip_suffix('{').unwrap_or(trimmed).trim_end())
+    // MAGI FIX (loop 28, B2b1b): only one trailing `{` was stripped, so `= {{` opened none.
+    ends_in_bare_equal(trimmed.trim_end_matches(|c: char| c == '{' || c.is_whitespace()))
         || opens_call_initializer(trimmed)
 }
 
