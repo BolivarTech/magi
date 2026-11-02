@@ -1185,6 +1185,44 @@ class RefusalRunModelCallTests(unittest.TestCase):
                 self._execute("R13", (), config=config)
 
     @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_accepts_only_ollama_where_the_product_reads_a_provider_kind(self) -> None:
+        # [smoke review, Caspar] the probe allowlist is Ollama's, and the harness writes the product's
+        # own scaffold (provider = "ollama"), so any other kind is a setup the counter was not built for.
+        for config in ('provider = "openai-compat"\n', '[magi]\nkind = "openai-compat"\n',
+                       'provider = "Ollama"\n'):
+            with self.assertRaises(HarnessError, msg=config):
+                self._execute("R13", (), config=config)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_keeps_the_embedding_provider_label_and_blank_kinds(self) -> None:
+        # [embedding].provider is a label with its own vocabulary ("openai" by default), never a
+        # provider kind, and a blank kind is absent to the product.
+        for config in ('provider = " ollama "\n[magi]\nkind = ""\n[embedding]\nprovider = "openai"\n',
+                       '[magi]\nkind = "ollama"\n'):
+            result, _, _ = self._execute("R13", (), config=config)
+            self.assertEqual((), result.model_requests, config)
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_rewrite_that_changes_anything_but_an_endpoint_is_a_harness_error(self) -> None:
+        # [smoke review, Caspar] the line rewrite can reach inside a multi-line string; the parsed
+        # result must equal the original everywhere but the endpoints.
+        multiline = ('base_url = "http://localhost:11434/v1"\n[magi]\nmelchior_model = """\n'
+                     'base_url = "kept verbatim"\n"""\n')
+        with self.assertRaises(HarnessError):
+            self._execute("R13", (), config=multiline)
+
+        original = runs.point_config_at
+
+        def rewrite_and_drift(path, url):
+            original(path, url)
+            text = pathlib.Path(path).read_text(encoding="utf-8")
+            pathlib.Path(path).write_text(text.replace('"m"', '"drifted"'), encoding="utf-8")
+
+        with mock.patch.object(runs, "point_config_at", rewrite_and_drift):
+            with self.assertRaises(HarnessError):
+                self._execute("R13", ())
+
+    @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_blanks_the_provider_override_of_the_harness_environment(self) -> None:
         # MAGI_PROVIDER=anthropic in the harness's own shell would steer the run past the counter;
         # the product reads a blank variable as absent.
