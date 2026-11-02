@@ -4805,4 +4805,21 @@ int g(void) {
             );
         }
     }
+
+    #[test]
+    fn a_line_closing_a_wrapped_list_opens_no_declaration_list() {
+        // [MAGI loop 28, B2b1a] `opens_declaration_list` lacked `is_declaration`'s `)` rule, so a
+        // stray `),` outside every construct opened a declaration list that ran through the
+        // function after it.
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::c(),
+                "),\nint g(void) {\n    return 1;\n}\n"
+            ),
+            vec![
+                unit("lines 1-1", UnitKind::TopLevel, 1, 1),
+                unit("g", UnitKind::Function, 2, 4),
+            ]
+        );
+    }
 }
