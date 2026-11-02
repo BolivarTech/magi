@@ -517,15 +517,18 @@ impl CodeScanner {
         let mut entered_code = false;
         // A directive's strings and comments are lexed as in code, so a `/*` it opens still
         // spans lines, but nothing else in it is structure.
+        // MAGI FIX (B2a 6): a block comment before the `#` (`/* c */ #ifdef X`) hid the
+        // directive; C reads a comment as a blank before preprocessing.
+        let directive_text = without_leading_block_comments(line);
         let starts_directive = self.rules.preprocessor_directives
             && !self.in_directive
             && was_code_at_start
-            && line.trim_start().starts_with('#');
+            && directive_text.starts_with('#');
         let directive =
             starts_directive || (self.rules.preprocessor_directives && self.in_directive);
         self.in_directive = directive && line.trim_end().ends_with('\\');
         if starts_directive {
-            if let Some(kind) = ConditionalDirective::parse(line) {
+            if let Some(kind) = ConditionalDirective::parse(directive_text) {
                 self.apply_conditional(kind);
             }
         }
@@ -1105,6 +1108,21 @@ fn regex_may_start(
         Some(c @ ('+' | '-')) => before.iter().rev().take_while(|&&p| p == c).count() % 2 == 1,
         Some(_) => true,
     }
+}
+
+/// `line` without its leading blanks and the block comments that open it and close on it
+/// (`/* c */ #ifdef X` gives `#ifdef X`), as C reads a comment before preprocessing: a blank.
+/// A comment that does not close on the line leaves `line` trimmed, so it still opens with
+/// `/*` and no directive is read on it. O(n) in the line's length.
+fn without_leading_block_comments(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    while let Some(comment) = rest.strip_prefix("/*") {
+        match comment.split_once("*/") {
+            Some((_, after)) => rest = after.trim_start(),
+            None => return line.trim_start(),
+        }
+    }
+    rest
 }
 
 /// Whether a C++ raw string (`R"delim(`, with an optional encoding prefix) starts at `i`.
