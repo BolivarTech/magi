@@ -1191,6 +1191,14 @@ def _reject_links(top) -> None:
                 raise HarnessError(
                     "refusing to copy %s: %s is a link, and the review "
                     "workspace never follows one" % (top, path))
+        # MAGI FIX (S6 loop 29): a hard link is a regular file to every link
+        # test, so one to a file outside the environment was copied as that
+        # file's bytes (F1a1b-caspar). The log capture already refused them.
+        for name in files:
+            path = os.path.join(directory, name)
+            if os.lstat(path).st_nlink != 1:
+                raise HarnessError("refusing to copy %s: %s is %s"
+                                   % (top, path, HARD_LINKED))
 
 
 #: Whether this platform's ``chmod`` can change a link itself rather than what
@@ -1823,6 +1831,144 @@ def _name_under(root, path) -> str:
     """
     relative = pathlib.Path(path).relative_to(root).as_posix()
     return pathlib.Path(root).name if relative == "." else relative
+
+
+#: The most entries :func:`_copy_tree_without_links` copies, files and
+#: directories alike. The environment's ``.magi`` holds a handful (the
+#: configuration, the encrypted store and its journal files), so a tree past
+#: this is not the environment the harness built and is refused rather than
+#: copied without bound.
+MAX_COPIED_MAGI_ENTRIES = 4096
+
+#: The flags :func:`_copy_listed_file` creates a workspace file with: a new
+#: file only, never through a link (``O_NOFOLLOW`` on POSIX).
+_COPY_CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                      | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+
+#: The mode a copied file is created with before its own is applied: readable
+#: and writable by the harness only, so its bytes are never exposed wider in
+#: between.
+_COPY_CREATE_MODE = 0o600
+
+#: The mode a copied directory is created with before its own is applied,
+#: once its contents are in.
+_COPY_DIRECTORY_MODE = 0o700
+
+
+def _copy_listed_file(source, target, expected) -> None:
+    """Copy the regular file *source* to the new file *target*, only if it is the one listed.
+
+    *source* is opened by :func:`_open_listed`, so a link, a hard link
+    (:data:`HARD_LINKED`) or a file swapped in after the listing
+    (:data:`CHANGED_AFTER_LISTING`) is refused, and the bytes copied are those
+    of the file that was opened. *target* must not exist. Its mode is the
+    source's, as :func:`shutil.copy2` kept it.
+
+    Complexity: ``O(file size)``, :data:`READ_CHUNK_BYTES` held at once.
+
+    Args:
+        source: The file to copy.
+        target: Where to write it; created, never overwritten.
+        expected: The source's :func:`_identity` as listed.
+
+    Raises:
+        OSError: When either file cannot be opened, read or written, or the
+            source is not the file listed.
+    """
+    with _open_listed(source, expected) as reader:
+        mode = stat.S_IMODE(os.fstat(reader.fileno()).st_mode)
+        with os.fdopen(os.open(target, _COPY_CREATE_FLAGS, _COPY_CREATE_MODE),
+                       "wb") as writer:
+            shutil.copyfileobj(reader, writer, READ_CHUNK_BYTES)
+    os.chmod(target, mode)
+
+
+def _copy_tree_without_links(source, destination, ignore) -> None:
+    """Copy the directory *source* to the new directory *destination*, refusing every link.
+
+    MAGI FIX (S6 loop 29): the workspace was copied with
+    :func:`shutil.copytree` after a separate walk had checked the tree for
+    links. They were two looks at the tree, and copytree follows whatever
+    stands at a path when it copies it, so a link swapped in between (or a
+    hard link, which no link test sees) put bytes from outside the
+    environment in front of the product (F1a1b-melchior, F1a1b-caspar).
+
+    Here the tree is walked and copied in one pass, with the machinery the
+    log capture reads with: each directory is listed only while it is still
+    the one its parent listed, never through a link
+    (:func:`_listed_directory`), and each file is copied from the descriptor
+    :func:`_copy_listed_file` opened, which refuses a link, a hard link and a
+    file that is not the one listed. A link, a fifo, socket or device, an
+    unlistable directory or a tree past :data:`MAX_COPIED_MAGI_ENTRIES` stops
+    the copy. Modes are kept; a directory's own is applied after its
+    contents, so a read-only one can still be filled.
+
+    Complexity: ``O(entries + bytes)``.
+
+    Args:
+        source: The directory to copy; refused when it is itself a link.
+        destination: Where to create the copy; it must not exist, its parent
+            must.
+        ignore: Called with a directory and the names listed in it, like the
+            ``ignore`` argument of :func:`shutil.copytree`; the names it
+            returns are not copied (:func:`_skip_top_level_logs`).
+
+    Raises:
+        HarnessError: Naming the link, hard link, changed or irregular entry,
+            or the directory that could not be listed or was past the cap.
+        OSError: When a directory or file cannot be created or written, which
+            the executor turns into a :class:`HarnessError`.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     source = pathlib.Path(tmp) / "src"
+        ...     source.mkdir()
+        ...     _ = (source / "a.toml").write_bytes(b"x")
+        ...     _copy_tree_without_links(source, pathlib.Path(tmp) / "dst",
+        ...                              lambda directory, names: set())
+        ...     (pathlib.Path(tmp) / "dst" / "a.toml").read_bytes()
+        b'x'
+    """
+    source = pathlib.Path(source)
+    pending = [(source, pathlib.Path(destination), None)]
+    modes, budget = [], MAX_COPIED_MAGI_ENTRIES
+    while pending:
+        current, target, expected = pending.pop()
+        try:
+            entries = _listed_directory(current, expected, budget)
+        except OSError as exc:
+            raise HarnessError("refusing to copy %s: %s could not be listed "
+                               "as the directory checked: %s"
+                               % (source, current, exc)) from exc
+        if len(entries) > budget:
+            raise HarnessError("refusing to copy %s: it holds more than %d "
+                               "entries" % (source, MAX_COPIED_MAGI_ENTRIES))
+        budget -= len(entries)
+        target.mkdir(mode=_COPY_DIRECTORY_MODE)
+        modes.append((target, stat.S_IMODE(os.lstat(current).st_mode)))
+        skipped = ignore(str(current), [name for name, _, _ in entries])
+        for name, entry, identity in entries:
+            if name in skipped:
+                continue
+            path = current / name
+            if _is_link(path):
+                raise HarnessError("refusing to copy %s: %s is %s"
+                                   % (source, path, LINK_NOT_FOLLOWED))
+            listed = identity or _identity(os.lstat(path))
+            if entry.is_dir(follow_symlinks=False):
+                pending.append((path, target / name, listed))
+            elif entry.is_file(follow_symlinks=False):
+                try:
+                    _copy_listed_file(path, target / name, listed)
+                except OSError as exc:
+                    raise HarnessError("refusing to copy %s: %s: %s"
+                                       % (source, path, exc)) from exc
+            else:
+                raise HarnessError("refusing to copy %s: %s is %s"
+                                   % (source, path, NOT_A_REGULAR_FILE))
+    for directory, mode in reversed(modes):
+        os.chmod(directory, mode)
 
 
 def _skip_top_level_logs(magi_dir):
@@ -3187,8 +3333,13 @@ class RunExecutor:
             workspace.mkdir(parents=True)
             # MAGI FIX (S6 loop 6): the environment's logs/ came along, so the
             # captured review log carried earlier runs' lines too (F1a-m4).
-            shutil.copytree(self._env.magi_dir, workspace / MAGI_DIR_NAME,
-                            ignore=_skip_top_level_logs(self._env.magi_dir))
+            # MAGI FIX (S6 loop 29): copytree followed whatever stood at each
+            # path when it copied, so a link (or a hard link) swapped in after
+            # the check above reached the workspace (F1a1b-melchior,
+            # F1a1b-caspar). The copy itself refuses them now.
+            _copy_tree_without_links(
+                self._env.magi_dir, workspace / MAGI_DIR_NAME,
+                _skip_top_level_logs(self._env.magi_dir))
             subprocess.run(git_command(workspace, "init", "-q"), check=True,
                            env=git_env(), capture_output=True,
                            timeout=GIT_TIMEOUT_S)
