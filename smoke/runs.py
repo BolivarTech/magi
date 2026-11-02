@@ -430,7 +430,8 @@ class RunDefinition:
             Anything the scenario reconstructed for itself would be a second
             derivation that can disagree with the first.
         env: Variables overlaid on the child's environment, as ordered pairs so
-            the definition stays immutable. The passphrase is NOT here: every
+            the definition stays immutable. A ``None`` value removes the
+            variable instead (:func:`smoke.binary.child_environment`). The passphrase is NOT here: every
             run gets it, so the executor adds it rather than eight rows
             repeating it.
         rotates: Whether the run rotates the backend credential and puts it
@@ -460,7 +461,7 @@ class RunDefinition:
     payload_size: str
     timeout_s: int
     planted: tuple[PlantedSecret, ...] = ()
-    env: tuple[tuple[str, str], ...] = ()
+    env: tuple[tuple[str, str | None], ...] = ()
     rotates: bool = False
     files: tuple[tuple[str, bytes], ...] = ()
     forbids_model_calls: bool = False
@@ -1723,6 +1724,20 @@ _BACKEND_KEY_VARIABLE = "OPENAI_API_KEY"
 #: the run to a provider the counter does not stand in for.
 _PROVIDER_VARIABLE = "MAGI_PROVIDER"
 
+#: The variables through which the product's HTTP client (reqwest, system proxy
+#: on by default) sends a request to a proxy, matched in either case. A refusal
+#: run removes them: reqwest does not exempt ``127.0.0.1``, so an inherited
+#: ``HTTP_PROXY`` sends the counter's traffic to the proxy, the counter sees
+#: nothing, and the "no model call" proof passes vacuously.
+_PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+
+#: The proxy exemption list a refusal run sets, replacing any inherited one, so
+#: loopback is exempt even if a proxy variable reached the child some other way.
+_NO_PROXY_VARIABLE = "NO_PROXY"
+
+#: Every spelling of the loopback host the counter may be reached by.
+_LOOPBACK_HOSTS = "127.0.0.1,localhost,::1"
+
 #: The only provider kind a refusal run may name. The harness writes the
 #: product's own scaffold (``provider = "ollama"``, no ``[magi].kind``), and the
 #: counter is built for it: :data:`PROBE_PATHS` are Ollama's, and an
@@ -2043,7 +2058,8 @@ def endpoints_off_the_counter(config_path, url: str) -> tuple[str, ...]:
     section is ``deny_unknown_fields``, so no ``endpoint``/``api_base``/``url``
     key can exist, and a ``[[magi.fallback]]`` or gate fallback names only a
     model, which is sent to its section's endpoint. The environment variables
-    that steer one, ``OPENAI_BASE_URL`` and ``MAGI_PROVIDER``, are set by
+    that steer one, ``OPENAI_BASE_URL``, ``MAGI_PROVIDER`` and the proxy
+    variables (:data:`_PROXY_VARIABLES`, ``NO_PROXY``), are set or removed by
     :meth:`RunExecutor._counted_endpoints`.
 
     Returns:
@@ -2487,16 +2503,26 @@ class RunExecutor:
         root one, reach :func:`model_counter`; nothing reaches a real backend.
         The rewritten file is checked before the run
         (:func:`endpoints_off_the_counter`), and compared with the original
-        everywhere but its endpoints (:func:`changes_besides_endpoints`), and
-        ``MAGI_PROVIDER`` is blanked,
-        so the harness's own shell cannot steer the run elsewhere. An endpoint
+        everywhere but its endpoints (:func:`changes_besides_endpoints`),
+        ``MAGI_PROVIDER`` is blanked, the proxy variables
+        (:data:`_PROXY_VARIABLES`, in every case spelling) are removed and
+        ``NO_PROXY`` is set to loopback, so the harness's own shell cannot
+        steer the run elsewhere: reqwest honours the system proxy and does not
+        exempt ``127.0.0.1``, so an inherited ``HTTP_PROXY`` would carry the
+        counter's requests to the proxy and leave the counter empty.
+
+        Only these runs lose the proxy. Every other run keeps the harness's
+        environment as it is, because some of them reach a real backend off
+        loopback (the decide scenarios name ``openrouter.ai``) and an operator
+        behind a proxy needs it there; a refusal run talks to nothing but the
+        local counter, so it can never need one. An endpoint
         off the counter is the harness's setup, not the product's verdict, so
         it is a :class:`HarnessError` (exit 3), never a scenario ``FAIL``. The
         requests the counter saw are recorded even when the run times out:
         the timeout is caught inside this block.
 
-        The proof covers exactly what the configuration and these two
-        variables steer. A product defect that reached a model some other way
+        The proof covers exactly what the configuration and these variables
+        steer. A product defect that reached a model some other way
         (a hardcoded URL, a subprocess with its own endpoint) would leave the
         counter empty and the run would pass; that is outside what a stand-in
         endpoint can observe, and the scenarios do not claim it.
@@ -2509,8 +2535,10 @@ class RunExecutor:
 
         Yields:
             RunDefinition: *definition* itself for any other run; otherwise a
-            copy whose ``env`` also points ``OPENAI_BASE_URL`` at the counter
-            and blanks ``MAGI_PROVIDER``.
+            copy whose ``env`` also points ``OPENAI_BASE_URL`` at the counter,
+            blanks ``MAGI_PROVIDER``, removes the proxy variables (a ``None``
+            value, :func:`smoke.binary.child_environment`) and sets
+            ``NO_PROXY`` to :data:`_LOOPBACK_HOSTS`.
 
         Raises:
             HarnessError: When there is no workspace, its configuration is
@@ -2542,7 +2570,9 @@ class RunExecutor:
                     % (definition.run_id, "; ".join(off)))
             yield dataclasses.replace(
                 definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),
-                                                  (_PROVIDER_VARIABLE, "")))
+                                                  (_PROVIDER_VARIABLE, ""))
+                + tuple((name, None) for name in _PROXY_VARIABLES)
+                + ((_NO_PROXY_VARIABLE, _LOOPBACK_HOSTS),))
         contacted.extend(requests_past_the_probe(log))
 
     def _review_workspace(self) -> pathlib.Path:

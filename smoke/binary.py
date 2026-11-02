@@ -27,6 +27,7 @@ import os
 import pathlib
 import subprocess
 import sys
+from collections.abc import Mapping
 
 from smoke.errors import PreflightError, ProductOutputError, TimedOut
 from smoke.product import ProductOutput
@@ -35,6 +36,44 @@ from smoke.product import ProductOutput
 #: real code applies; the negative value keeps it from colliding with anything
 #: the product publishes, and nothing asserts on it.
 KILLED_EXIT_CODE = -1
+
+
+def child_environment(overlay: Mapping[str, str | None] | None = None,
+                      base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build a child's environment: *base* with *overlay* applied on a copy.
+
+    Every name in *overlay* first takes out each variable of *base* whose
+    name matches it **ignoring case**, and is then set unless its value is
+    ``None``. Matching ignores case because the product reads some variables
+    in either case -- reqwest's system proxy takes ``HTTP_PROXY`` and
+    ``http_proxy`` alike -- so a removal that missed one spelling would leave
+    the variable in force. On Windows the environment is case-insensitive
+    anyway; on POSIX this also drops a lowercase twin of a variable the
+    overlay sets, which nothing in the product reads.
+
+    Complexity: ``O(len(base) + len(overlay))``.
+
+    Args:
+        overlay: Names to set, or to remove when the value is ``None``.
+            ``None`` or empty leaves *base* as it is.
+        base: The environment to start from; ``os.environ`` when ``None``.
+
+    Returns:
+        dict[str, str]: A new mapping. *base* is never modified.
+
+    Example:
+        >>> child_environment({"no_proxy": None, "A": "1"},
+        ...                   base={"NO_PROXY": "x", "a": "0", "B": "2"})
+        {'B': '2', 'A': '1'}
+    """
+    overlay = overlay or {}
+    replaced = {name.upper() for name in overlay}
+    source = os.environ if base is None else base
+    environment = {name: value for name, value in source.items()
+                   if name.upper() not in replaced}
+    environment.update({name: value for name, value in overlay.items()
+                        if value is not None})
+    return environment
 
 
 def _partial_capture(expired: subprocess.TimeoutExpired,
@@ -226,7 +265,7 @@ class ReleaseBinary:
         return completed.stdout.decode("utf-8", errors="replace").strip()
 
     def invoke(self, args: list[str], stdin: bytes | None = None,
-               env: dict[str, str] | None = None,
+               env: Mapping[str, str | None] | None = None,
                timeout: float | None = None,
                cwd: pathlib.Path | str | None = None) -> ProductOutput:
         """Run the binary once and capture everything it emitted.
@@ -252,7 +291,8 @@ class ReleaseBinary:
                 overlay is on a COPY of ``os.environ`` rather than a bare
                 mapping, because a child started with an empty environment
                 loses ``PATH`` -- and, on Windows, ``SystemRoot``, without
-                which sockets do not initialise.
+                which sockets do not initialise. A ``None`` value removes the
+                variable in every case spelling (:func:`child_environment`).
             timeout: Seconds to wait, or ``None`` to wait indefinitely.
             cwd: The directory to run the child in, or ``None`` for the
                 harness's own. It is a parameter and never a ``chdir`` because
@@ -278,9 +318,7 @@ class ReleaseBinary:
                 verdict the scenario can read.
         """
         command = [str(self.path)] + list(args)
-        child_env = dict(os.environ)
-        if env:
-            child_env.update(env)
+        child_env = child_environment(env)
         try:
             completed = subprocess.run(
                 command,
