@@ -1584,4 +1584,54 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn a_form_feed_before_a_definition_resets_its_indentation() {
+        // [MAGI loop 27, B2b2] Python's tokenizer resets the column at a form feed in the
+        // leading whitespace, so `\x0cdef f():` opens a module-level function (CPython parses
+        // it); the form feed counted as indentation and the function fell into a gap unit.
+        let code = "x = 1\n\u{c}def f():\n    pass\n";
+        assert_eq!(
+            spans(&extract(code, &[1, 2, 3])),
+            vec![
+                ("x", UnitKind::DeclarationGroup, 1, 1),
+                ("f", UnitKind::Function, 2, 3),
+            ]
+        );
+        let code = "def f():\n    x = 1\n\u{c}    y = 2\n";
+        assert_eq!(
+            spans(&extract(code, &[3])),
+            vec![("f", UnitKind::Function, 1, 3)]
+        );
+    }
+
+    #[test]
+    fn tab_indentation_gives_the_same_units_as_space_indentation() {
+        // [MAGI loop 27, B2b2] declared green, a false positive for valid code: CPython compares
+        // indentation with tabs at 8 columns and at 1, and rejects (`TabError`) a file where the
+        // two orders disagree, so in any file it accepts, counting a tab as one character orders
+        // the lines as Python does. A tab-indented file, and one mixing a tab-indented class
+        // body with a method body indented by a tab and spaces, split as with spaces.
+        for code in [
+            "class C:\n\tdef a(self):\n\t\treturn 1\n\n\tdef b(self):\n\t\treturn 2\n",
+            "class C:\n\tdef a(self):\n\t        return 1\n\n\tdef b(self):\n\t        return 2\n",
+        ] {
+            let units = extract(code, &[1]);
+            assert_eq!(
+                spans(&units),
+                vec![("C", UnitKind::Class, 1, 6)],
+                "{code:?}"
+            );
+            assert_eq!(
+                spans(&PythonExtractor.split_block(&units[0])),
+                vec![
+                    ("C", UnitKind::Class, 1, 1),
+                    ("a", UnitKind::Method, 2, 3),
+                    ("C", UnitKind::Class, 4, 4),
+                    ("b", UnitKind::Method, 5, 6),
+                ],
+                "{code:?}"
+            );
+        }
+    }
 }
