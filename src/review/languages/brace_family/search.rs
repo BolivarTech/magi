@@ -404,17 +404,21 @@ pub(super) fn returns_from_function(rest: &str) -> bool {
         >= 2
 }
 
-/// Whether a trimmed line opens an initializer it continues on the next lines: it ends in `=`
-/// (`static int n =`), in `= {` (`int a[] = {`) or in a call's `(` after the `=`
-/// ([`opens_call_initializer`]). O(n) in the line.
+/// Whether a trimmed line opens an initializer it continues on the next lines: it ends in a bare
+/// `=` ([`ends_in_bare_equal`]: `static int n =`), in `= {` (`int a[] = {`) or in a call's `(`
+/// after the `=` ([`opens_call_initializer`]). O(n) in the line.
 pub(super) fn opens_initializer(trimmed: &str) -> bool {
-    trimmed
-        .strip_suffix('{')
-        .unwrap_or(trimmed)
-        .trim_end()
-        .ends_with('=')
+    // MAGI FIX (loop 27, B2b1b): any line ending in `=` opened one, a compound assignment
+    // (`x +=`) and a comparison (`x ==`) included.
+    ends_in_bare_equal(trimmed.strip_suffix('{').unwrap_or(trimmed).trim_end())
         || opens_call_initializer(trimmed)
 }
+
+/// The characters that, right before a `=`, make it part of another operator: a comparison
+/// (`==`, `!=`, `<=`, `>=`) or a compound assignment (`+=`, `<<=`, `^=`, ...). Shared by
+/// [`ends_in_bare_equal`] and [`holds_bare_assignment`], so the two never disagree on which `=`
+/// is bare.
+const OPERATOR_BEFORE_EQUAL: &str = "=!<>+-*/%&|^";
 
 /// Whether a trimmed line opens an initializer whose call wraps onto the next lines
 /// (`static const struct config c = make_config(`): it ends in `(` and holds a `=` before its
@@ -534,11 +538,16 @@ pub(super) fn group_end(
 }
 
 /// Whether a trimmed line ends in an assignment's bare `=` (`static int n =`), not in a
-/// comparison (`==`, `!=`, `<=`, `>=`). O(1).
+/// comparison (`==`, `!=`, `<=`, `>=`) nor a compound assignment (`+=`, `<<=`), as
+/// [`holds_bare_assignment`] reads them ([`OPERATOR_BEFORE_EQUAL`]). O(1).
 fn ends_in_bare_equal(trimmed: &str) -> bool {
-    trimmed
-        .strip_suffix('=')
-        .is_some_and(|rest| !rest.ends_with(['=', '!', '<', '>']))
+    // MAGI FIX (loop 27, B2b1b): `x +=` read as a bare `=`, unlike `holds_bare_assignment`.
+    trimmed.strip_suffix('=').is_some_and(|rest| {
+        !rest
+            .chars()
+            .next_back()
+            .is_some_and(|c| OPERATOR_BEFORE_EQUAL.contains(c))
+    })
 }
 
 /// Whether `text` holds a bare `=`, an assignment or a default argument (`cb = () => {`), not
@@ -557,7 +566,7 @@ fn holds_bare_assignment(text: &str) -> bool {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         let next = chars.peek().copied().unwrap_or(' ');
-        if c == '=' && !"=!<>+-*/%&|^".contains(previous) && !matches!(next, '=' | '>') {
+        if c == '=' && !OPERATOR_BEFORE_EQUAL.contains(previous) && !matches!(next, '=' | '>') {
             return true;
         }
         previous = c;
