@@ -362,7 +362,11 @@ also drops `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` in either case and sets `
 `127.0.0.1,localhost,::1`: the product's HTTP client honours the system proxy and does not exempt
 `127.0.0.1`, so an inherited proxy would carry the requests past the counter and leave it empty.
 Only refusal runs lose the proxy; the others keep the shell's environment, because some reach a
-real backend off loopback that an operator behind a proxy needs it for. The probe
+real backend off loopback that an operator behind a proxy needs it for. Every product invocation,
+refusal or not, gets loopback added to whatever `NO_PROXY` it inherits, so R6's error backend and
+the decide and memory scenarios' loopback stand-ins are reached directly on a proxied host too; R6
+also records how many requests its backend answered, and S10 reports `CANNOT_TEST` when it saw
+none (the product's error path the scenario searches was never walked). The probe
 paths are pinned to magi-core's `OllamaProvider` requests by `tests/test_rust_sync.py`.
 
 **What they copy from the product.** S50 and S51 read refusals, and a refusal writes no JSON, so
@@ -410,13 +414,18 @@ is created or deleted. It also refuses (exit 3) when any component of the worksp
 repository root is a symlink or a junction, `smoke/`, the scratch area and the workspace itself
 included, and when the environment's `.magi` holds one: a linked parent resolves on both sides of the
 containment check, so deleting through it would empty the tree it names, and copying would follow a
-link the environment never needs. Junctions are
+link the environment never needs. A hard-linked file in `.magi` is refused too: it is a regular file
+to every link test, yet may be a file outside the environment. The copy itself is not
+`shutil.copytree`: it walks and copies in one pass with the log capture's machinery, listing each
+directory only while it is still the one checked and copying each file from the descriptor it
+opened, so a link or hard link swapped in after the check is refused by the copy, never followed.
+Junctions are
 detected with `os.path.isjunction` from Python 3.12 and, on the 3.11 floor, from the reparse tag
 `os.lstat` reports on Windows, so a junction is refused on every supported version. A directory under
 `.magi` that cannot be listed, or a link check that fails, stops the run with exit 3: a link inside
 it could not be ruled out. A component swapped for a link between that check and the deletion is not
 guarded: the scratch area is inside the repository, under the environment's lock,
-and whoever can swap a directory there already controls the harness's own code. A link INSIDE the old workspace is not refused: `shutil.rmtree` unlinks a symlink or a junction it meets without descending into it (on Windows since Python 3.8, so on the 3.11 floor too), and `test_rebuilding_the_workspace_never_deletes_through_a_junction_inside_it` pins that with a real junction. The run log is captured without following links: the chain from the repository root down to `.magi/logs` is tested again after the product exits (the product runs in the workspace and could swap it, or a component above it, for a link), a link anywhere on it leaves the capture empty and is named, and a link under the workspace's `.magi/logs` is never read and is named in `RunResult.review_log_unreadable`, and so is an entry that is not a regular file (a fifo, socket or device) and a file over the capture caps (`MAX_REVIEW_LOG_FILE_BYTES`, 16 MiB per file, and `MAX_REVIEW_LOG_TOTAL_BYTES`, 64 MiB per run; each file is read in chunks and no further than one byte past what the caps still allow, so a file that grew after its size was read is dropped without being held whole), so a faulty product's huge log is named instead of exhausting the harness, and a scenario that finds nothing in what was read reports `CANNOT_TEST`. A listed file is opened
+and whoever can swap a directory there already controls the harness's own code. A link INSIDE the old workspace is not refused: `shutil.rmtree` unlinks a symlink or a junction it meets without descending into it (on Windows since Python 3.8, so on the 3.11 floor too), and `test_rebuilding_the_workspace_never_deletes_through_a_junction_inside_it` pins that with a real junction. The run log is captured without following links: the chain from the repository root down to `.magi/logs` is tested again after the product exits (the product runs in the workspace and could swap it, or a component above it, for a link), a link anywhere on it leaves the capture empty and is named, and a link under the workspace's `.magi/logs` is never read and is named in `RunResult.review_log_unreadable`, and so is an entry that is not a regular file (a fifo, socket or device) and a file over the capture caps (`MAX_REVIEW_LOG_FILE_BYTES`, 16 MiB per file, and `MAX_REVIEW_LOG_TOTAL_BYTES`, 64 MiB per run; each file is read in chunks and no further than one byte past what the caps still allow, so a file that grew after its size was read is dropped without being held whole), so a faulty product's huge log is named instead of exhausting the harness, and a scenario that finds nothing in what was read reports `CANNOT_TEST`. Every other read of a log directory the product writes (`smoke.logs.scan`, and the decide, keys and vault scenarios' log searches) goes through the same walk and open, never through a link or a hard link, with `MAX_ENVIRONMENT_LOG_FILE_BYTES` (64 MiB) per file and `MAX_ENVIRONMENT_LOG_TOTAL_BYTES` (256 MiB) per read, far above what the environment writes; a file left out is named, never skipped in silence. A listed file is opened
 only if it is still the file the walk listed: its device and file number are recorded when it is
 listed and compared with the opened handle's (`os.fstat`; on Windows the volume serial and file
 index), and POSIX opens it with `O_NOFOLLOW` and `O_NONBLOCK`, so a file swapped afterwards for a
