@@ -123,7 +123,7 @@ pub(super) fn open_brace_line(
         // MAGI FIX (B2a 1): a parameter typed by a literal block (`opts: {`, `struct {`) opened
         // the signature's first brace, so the function ended where that block closed (`}) {`).
         if group_open(i) > 0 {
-            return Some(brace_after_parameter_list(scanned, i, search).unwrap_or(i));
+            return Some(brace_after_parameter_list(lines, scanned, i, search).unwrap_or(i));
         }
         return Some(i);
     }
@@ -226,8 +226,12 @@ pub(super) fn open_brace_line(
 /// this rule. The list is counted by the scanner in code context only
 /// ([`ScannedLine::group_delta`]). O(k) for the k lines walked.
 ///
+/// When the line that closes the list opens nothing and ends no statement (`})`), an Allman
+/// brace opening the next code line (`{`) is the body's; `});` still opens none.
+///
 /// # Arguments
 ///
+/// * `lines` - The text's lines.
 /// * `scanned` - The scanner's record of each line.
 /// * `i` - The 0-based line whose parameter list stays open after a brace it opens.
 /// * `search` - The pass's search bounds; only its budget is spent here.
@@ -236,6 +240,7 @@ pub(super) fn open_brace_line(
 ///
 /// The 0-based line holding the function's opening brace, or `None`.
 fn brace_after_parameter_list(
+    lines: &[&str],
     scanned: &[ScannedLine],
     i: usize,
     search: &BraceSearch<'_>,
@@ -251,10 +256,20 @@ fn brace_after_parameter_list(
         }
         open += code_group_delta(scanned, j);
         if open <= 0 {
-            return scanned
-                .get(j)
-                .filter(|s| s.brace_delta > s.min_delta)
-                .map(|_| j);
+            let record = scanned.get(j)?;
+            if record.brace_delta > record.min_delta {
+                return Some(j);
+            }
+            // MAGI FIX (loop 26, 4): an Allman brace on the line after `})` was never looked at,
+            // so the body of `function f(opts: {` ... `})` then `{` fell into a gap unit.
+            let next = j + 1;
+            let allman = !record.ends_statement
+                && scanned.get(next).is_some_and(|s| !s.is_non_code)
+                && lines
+                    .get(next)
+                    .is_some_and(|l| l.trim_start().starts_with('{'))
+                && search.spend();
+            return allman.then_some(next);
         }
     }
     None
