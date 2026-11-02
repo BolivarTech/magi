@@ -427,6 +427,21 @@ def _rust_fn_body(text: str, signature: str) -> str:
     return text[start:] if end == -1 else text[start:end]
 
 
+class RustFnBodyTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 27, F1b2a-balthasar] ``_rust_fn_body`` ends at its own closing brace."""
+
+    _TEXT = ("pub fn top() -> u8 {\n    0\n}\n\nimpl S {\n    pub fn method(&self) -> u8 {\n"
+             "        let x = 1;\n        x\n    }\n}\n")
+
+    def test_a_top_level_function_ends_at_its_unindented_brace(self) -> None:
+        body = _rust_fn_body(self._TEXT, "pub fn top(")
+        self.assertEqual("pub fn top() -> u8 {\n    0", body)
+
+    def test_a_method_ends_at_the_brace_on_its_own_indentation(self) -> None:
+        body = _rust_fn_body(self._TEXT, "pub fn method(")
+        self.assertEqual("    pub fn method(&self) -> u8 {\n        let x = 1;\n        x", body)
+
+
 class CountedKindTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 25, F1a1-melchior] a refusal run's absent provider kind is the counted one.
 
