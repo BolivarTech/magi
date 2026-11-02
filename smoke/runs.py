@@ -1779,6 +1779,13 @@ MODEL_COUNTER_CHUNK_BYTES = 64 * 1024
 #: probes a refusal run sends, so a run inside the contract is kept whole.
 MODEL_COUNTER_MAX_RECORDED = 64
 
+#: The longest one connection to the counter may stay open, from accept to
+#: close. A per-read timeout alone does not bound a client that keeps sending
+#: a byte at a time, and the counter's shutdown joins every handler thread, so
+#: without a total a trickling product would hold the smoke run open. Twice
+#: the per-read timeout leaves a well-behaved request far more than it needs.
+MODEL_COUNTER_CONNECTION_DEADLINE_S = 2 * ERROR_BACKEND_TIMEOUT_S
+
 
 class RequestLog:
     """A bounded, thread-safe record of the requests :func:`model_counter` saw.

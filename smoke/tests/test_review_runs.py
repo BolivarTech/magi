@@ -1426,6 +1426,45 @@ class ModelCounterShutdownTests(unittest.TestCase):
         self.assertEqual(1, log.past_the_probe_total)
         self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
 
+    def test_a_client_trickling_its_body_cannot_hold_the_counter_open(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1a1-caspar] the body drain was bounded only per read, and server_close joins
+        # every handler thread, so a product that declared a large body and sent a byte at a time held the
+        # counter -- and the whole smoke run -- open for as long as it kept sending.
+        import socket
+        import threading
+        import time
+        stop = threading.Event()
+        exited = threading.Event()
+        seen = {}
+
+        def trickle(port: int) -> None:
+            client = socket.create_connection(("127.0.0.1", port))
+            try:
+                client.sendall(b"POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\n")
+                while not stop.wait(0.05):
+                    client.sendall(b"x")
+            except OSError:
+                pass
+            finally:
+                client.close()
+
+        def serve() -> None:
+            with runs.model_counter() as (url, log):
+                seen["log"] = log
+                port = int(url.rsplit(":", 1)[1].split("/", 1)[0])
+                threading.Thread(target=trickle, args=(port,), daemon=True).start()
+                deadline = time.monotonic() + 30
+                while log.total == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            exited.set()
+
+        with mock.patch.object(runs, "MODEL_COUNTER_CONNECTION_DEADLINE_S", 0.5):
+            threading.Thread(target=serve, daemon=True).start()
+            finished = exited.wait(30)
+        stop.set()
+        self.assertTrue(finished, "the counter never closed while a client kept trickling its body")
+        self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(seen["log"]))
+
 
 if __name__ == "__main__":
     unittest.main()
