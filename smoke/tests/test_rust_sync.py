@@ -269,15 +269,34 @@ class NeverReviewedTests(unittest.TestCase):
         self.assertNotIn("==", body)
 
 
+class SummaryKeyExtractionTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 29, F1b2a-melchior] a key read in an access shape the guard does not parse fails it.
+
+    The keys were collected from two access shapes only, so a key read with brackets or another accessor
+    was missing from the set and the fixed-set comparison still passed.
+    """
+
+    _KNOWN = ('a = section.get("batches")\nitems, failure = _list_under(section, "findings")\n'
+              'def _list_under(section, key):\n    items = section.get(key)\n')
+
+    def test_the_two_known_shapes_are_read(self) -> None:
+        self.assertEqual({"batches", "findings"}, _summary_keys_read(self._KNOWN))
+
+    def test_any_other_access_shape_fails_the_read(self) -> None:
+        for shape in ('x = section["new_key"]', "x = section['new_key']", 'x = section.setdefault("k")',
+                      'x = section.get("k", 0)', "x = section.get(name)", 'x = _list_under(section, name)',
+                      'x = {**section}', "for k in section:\n    pass", "x = getattr(section, 'k')"):
+            with self.assertRaises(AssertionError, msg=shape):
+                _summary_keys_read(self._KNOWN + shape + "\n")
+
+
 class ReportKeyTests(unittest.TestCase):
     """The JSON keys S47 reads exist in the product's report and envelope."""
 
     # MAGI FIX (S6 loop 6): S47's keys sat outside the drift guard, so a rename
     # would surface as an unexplained FAIL at SMOKE time (F1a-m2).
     def test_every_summary_key_s47_reads_is_one_the_report_pins(self) -> None:
-        scenario = _source("smoke/scenarios/code_review.py")
-        read = set(re.findall(r'section\.get\("(\w+)"\)', scenario))
-        read.update(re.findall(r'_list_under\(section, "(\w+)"\)', scenario))
+        read = _summary_keys_read(_source("smoke/scenarios/code_review.py"))
         # [MAGI §6 MS2 loop 27, F1b2a-melchior] the keys were only inferred from two access shapes, so an access
         # rewritten in another shape dropped its key from the guard in silence. The set is written out: a key
         # the extraction stops seeing, or a new one, fails here and is reviewed on purpose.
