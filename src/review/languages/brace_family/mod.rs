@@ -5209,4 +5209,44 @@ int g(void) {
         assert_eq!(end("[b(T: 'a)] x"), Some("[b(T: 'a)]"));
         assert_eq!(end("[b(T: 'a, U: 'b)] x"), Some("[b(T: 'a, U: 'b)]"));
     }
+
+    #[test]
+    fn a_string_or_char_literal_in_a_c_attribute_hides_its_delimiters() {
+        // [MAGI loop 29, B2b1b] `next_c_attribute` balanced an attribute's brackets counting
+        // every character, so a `)` or `]` inside a string (`section(")")`, `deprecated("]")`)
+        // closed it early, and a `(` left it open: the construct after it on the line was no
+        // construct, or was named `__attribute__`.
+        let struct_s = |end| vec![unit("S", UnitKind::Struct, 1, end)];
+        let fn_f = |end| vec![unit("f", UnitKind::Function, 1, end)];
+        for (ext, code, expected) in [
+            (
+                BraceFamilyExtractor::cpp(),
+                "[[deprecated(\"]\")]] struct S {\n    int x;\n};\n",
+                struct_s(3),
+            ),
+            (
+                BraceFamilyExtractor::c(),
+                "__attribute__((section(\")\"))) struct S {\n    int x;\n};\n",
+                struct_s(3),
+            ),
+            (
+                BraceFamilyExtractor::c(),
+                "__attribute__((section(\"(\"))) static int f(void) {\n    return 1;\n}\n",
+                fn_f(3),
+            ),
+            (
+                BraceFamilyExtractor::c(),
+                "__attribute__((annotate(')'))) int f(void) {\n    return 1;\n}\n",
+                fn_f(3),
+            ),
+            // A digit separator is no quote: the attribute still closes at its own `)`.
+            (
+                BraceFamilyExtractor::cpp(),
+                "alignas(1'024) struct S {\n    int x;\n};\n",
+                struct_s(3),
+            ),
+        ] {
+            assert_eq!(sorted_spans(&ext, code), expected, "{code}");
+        }
+    }
 }
