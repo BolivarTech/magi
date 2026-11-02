@@ -6,6 +6,7 @@
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 from smoke.config import ModelProfile, Seat
 from smoke.env import (Environment, _apply_profile,
@@ -373,6 +374,15 @@ class TransplantedPathTests(unittest.TestCase):
         _reject_transplanted_path(
             'base_url = "http://localhost:11434/v1"',
             pathlib.Path(tempfile.gettempdir()) / "smoke-generated-xyz")
+
+    def test_a_scratch_path_that_cannot_be_resolved_is_a_harness_error(self) -> None:
+        # [MAGI §6 MS2 loop 28, sweep of F1a1-caspar] Path.resolve raises RuntimeError on a symlink loop
+        # (OSError from 3.13); the guard let it escape as a traceback instead of a named harness failure.
+        scratch = pathlib.Path(tempfile.gettempdir()) / "smoke-generated-xyz"
+        for error in (RuntimeError("Symlink loop"), OSError(40, "Too many levels of symbolic links")):
+            with mock.patch.object(pathlib.Path, "resolve", side_effect=error):
+                with self.assertRaises(HarnessError, msg=repr(error)):
+                    _reject_transplanted_path('base_url = "x"', scratch)
 
 
 class MemorySettingsTests(unittest.TestCase):
