@@ -889,6 +889,49 @@ class ReviewLogSwapTests(unittest.TestCase):
         self.assertTrue(unreadable[0].startswith("a.log ("), unreadable)
 
 
+class ReviewNestedLogDirectorySwapTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 25, F1a1-caspar] a nested log directory swapped after its link test is never listed.
+
+    The walk tested each entry for a link and listed an approved directory later, by path, so a directory
+    under ``.magi/logs`` replaced by a link in between had the walk list, and the read open, what the link
+    points at. The post-read chain test stops at ``.magi/logs`` and never saw it.
+    """
+
+    _OUTSIDE = b"bytes outside the workspace"
+
+    def test_a_nested_log_directory_swapped_for_a_link_after_its_test_is_never_read_through(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            logs_dir = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            nested = logs_dir / "sub"
+            nested.mkdir(parents=True)
+            (logs_dir / "a.log").write_bytes(b"this run's log")
+            (nested / "b.log").write_bytes(b"nested log")
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "b.log").write_bytes(self._OUTSIDE)
+            real_is_link = runs._is_link
+            swapped = []
+
+            def test_then_swap(path) -> bool:
+                found = real_is_link(path)
+                if pathlib.Path(path) == nested and not swapped:
+                    swapped.append(path)
+                    shutil.rmtree(nested)
+                    _make_directory_link(outside, nested)
+                return found
+
+            unreadable = []
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root), \
+                    mock.patch.object(runs, "_is_link", side_effect=test_then_swap):
+                captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
+            self.assertTrue(swapped, "the walk never tested the nested directory")
+            self.assertNotIn(self._OUTSIDE, b"".join(captured or ()))
+            self.assertIn(b"this run's log", b"".join(captured or ()))
+            self.assertTrue(any(entry.startswith("sub (") for entry in unreadable), unreadable)
+
+
 def _make_symlink(target: pathlib.Path, link: pathlib.Path) -> None:
     """Make *link* a real directory symlink to *target*.
 
