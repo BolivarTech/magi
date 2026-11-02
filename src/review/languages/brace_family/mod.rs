@@ -1933,6 +1933,17 @@ int bar(void) {
     }
 
     #[test]
+    fn a_split_declaration_group_keeps_a_wrapped_prototype_in_one_piece() {
+        // [MAGI S6 loop 25, B2b1a] the group joined a wrapped prototype (`int foo(` ... `);`)
+        // but its split did not see the opening line as a declaration, so the prototype was cut
+        // between a gap piece and a piece starting at its first parameter.
+        let code = "int a;\nint foo(\n    int x,\n    int y);\nint b;\nvoid g(void) {\n}\n";
+        let parts = split(&c_extractor(), code, 1, UnitKind::DeclarationGroup);
+        let decl = |a, b| ("declarations", UnitKind::DeclarationGroup, a, b);
+        assert_eq!(spans(&parts), vec![decl(1, 1), decl(2, 4), decl(5, 5)]);
+    }
+
+    #[test]
     fn a_c_declaration_list_with_a_function_declarator_splits_as_one_declaration() {
         // [MAGI B2b1 8] a list line holding a function declarator (`g(void),`) read as a
         // signature and ended the list before it, so a split group cut `int a, g(void), b;`
