@@ -355,6 +355,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST,
                          _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
 
+    def test_s47_fails_a_completed_batch_declared_failed_even_beside_a_clock_expired_tail(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1b2b-melchior] the overlap between a batch whose metrics show a report and the
+        # failed list is a FAIL however the later batches were lost.
+        doc = _review(5)
+        doc["code_review"].update(
+            batches_completed=2, failed_batches=[[2, "timeout: a"], [4, "clock expired"], [5, "clock expired"]],
+            batches=[{"index": 2, "input_tokens": 900, "output_tokens": 80, "ms": 10}])
+        self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[2]])
+
     def test_s47_fails_when_the_counts_agree_but_a_batch_is_declared_failed(self) -> None:
         # [MAGI §6 MS2 loop 12, F1a-c3] "every one completed" is checked against the failed list too.
         doc = _review(3)
