@@ -225,7 +225,11 @@ class ReportKeyTests(unittest.TestCase):
         scenario = _source("smoke/scenarios/code_review.py")
         read = set(re.findall(r'section\.get\("(\w+)"\)', scenario))
         read.update(re.findall(r'_list_under\(section, "(\w+)"\)', scenario))
-        self.assertTrue(read, "no code_review key read by S47 was found")
+        # [MAGI §6 MS2 loop 27, F1b2a-melchior] the keys were only inferred from two access shapes, so an access
+        # rewritten in another shape dropped its key from the guard in silence. The set is written out: a key
+        # the extraction stops seeing, or a new one, fails here and is reviewed on purpose.
+        self.assertEqual({"batches", "batches_completed", "batches_planned", "discarded", "failed_batches",
+                          "findings", "unmeasured_models"}, read)
         report = _source("src/review/report.rs")
         # The list is found by the comment that names its test, the one place a comment is the anchor;
         # the comment must be unique and the keys are read from code lines only.
