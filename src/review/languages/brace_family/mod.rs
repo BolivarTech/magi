@@ -193,10 +193,13 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// struct is reviewed whole, as is a Rust `macro_rules!` (a function-like unit whose token
     /// tree is opaque: no item is read inside it, `MACRO_RULES_KEYWORD`), and a construct no
     /// keyword table names (a JavaScript IIFE, a TypeScript `declare module "x" {`) is no
-    /// construct at all, so its lines fall into gap units. A single such unit, or one
+    /// construct at all, so its lines fall into gap units. A Go interface
+    /// (`type Reader interface {`, kind trait) never splits at its methods either: a Go method
+    /// signature carries no keyword (`Read(p []byte) (n int, err error)`), so no member is found
+    /// in its body and the interface is reviewed whole, declared. A single such unit, or one
     /// declaration, too large for one
     /// batch therefore ends the review with the typed `ReviewError::TooLargeForBatch` (RV03),
-    /// never a silent cut.
+    /// never a silent cut: no line is lost.
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         if unit.kind == UnitKind::DeclarationGroup {
             return self.split_declaration_group(unit);
