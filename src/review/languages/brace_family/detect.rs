@@ -141,9 +141,28 @@ impl BraceFamilyExtractor {
                 i = last + 1;
                 continue;
             }
-            if let Some((kind, name)) = self.construct_keyword(trimmed) {
-                let start = self.scan_back_for_docs(lines, scanned, i, floor);
-                let mut end = brace_block_end(lines, scanned, i, line_num, &search)?;
+            // MAGI FIX (loop 28, B2b1a): a construct on the line closing a wrapped attribute or
+            // template header (`typename U> class Box {`) matched no keyword; the line is read
+            // after the attribute's tail, and the attribute's lines belong to the construct.
+            let keyword = self
+                .construct_keyword(trimmed)
+                .map(|found| (i, found))
+                .or_else(|| {
+                    self.after_wrapped_attribute_tail(lines, scanned, i, floor, &search, |rest| {
+                        self.construct_keyword(rest)
+                    })
+                });
+            if let Some((head, (kind, name))) = keyword {
+                let start = self.scan_back_for_docs(lines, scanned, head, floor);
+                // A line closing an attribute's brace before opening the construct's
+                // (`}) export class C {`) nets no brace; it opens one after its lowest point.
+                let reopens =
+                    head != i && scanned.get(i).is_some_and(|s| s.brace_delta > s.min_delta);
+                let mut end = if reopens {
+                    block_end_after(lines, scanned, i, line_num, Some(i), &search)?
+                } else {
+                    brace_block_end(lines, scanned, i, line_num, &search)?
+                };
                 // MAGI FIX (S6 loop 17, B2-2): a `macro_rules! m (` ... `);` ended at the first
                 // brace of its arms; it runs to its own closing delimiter.
                 if self.opens_macro_rules(trimmed) {
@@ -164,20 +183,46 @@ impl BraceFamilyExtractor {
             // (an anonymous class in a field's initializer, `r = new Runnable() {`): taking it
             // for a member cut the field's header from its body.
             let nested = members && depth_before(i) != depth_before(0);
-            if let Some(name) = (!nested)
-                .then(|| self.line_signature(line, scanned, i, members))
-                .flatten()
-            {
+            // MAGI FIX (loop 28 sweep): a signature on the line closing a wrapped annotation
+            // (`x = 1) void m() {` under `@Ann(`) was no signature, the tail's `=` or `)` read as
+            // its own; the line is read after the annotation's tail too.
+            let signature = (!nested)
+                .then(|| {
+                    self.line_signature(line, scanned, i, members)
+                        .map(|name| (i, name))
+                        .or_else(|| {
+                            self.after_wrapped_attribute_tail(
+                                lines,
+                                scanned,
+                                i,
+                                floor,
+                                &search,
+                                |rest| self.line_signature(rest, scanned, i, members),
+                            )
+                        })
+                })
+                .flatten();
+            if let Some((attribute_head, name)) = signature {
                 // MAGI FIX (S6 loop 15): the brace search ran twice, once here and once in
                 // `brace_block_end`, spending a wrapped header's visits of the budget twice.
-                let open = open_brace_line(lines, scanned, i, &search);
+                // A line closing an annotation's brace before opening the body's (`}) void m() {`)
+                // nets no brace; it opens one after its lowest point.
+                let open = if attribute_head != i
+                    && scanned.get(i).is_some_and(|s| s.brace_delta > s.min_delta)
+                {
+                    Some(i)
+                } else {
+                    open_brace_line(lines, scanned, i, &search)
+                };
                 let opens = open.is_some();
                 // MAGI FIX (S6 loop 18, B2b-8): a one-line function was told by its text ending
                 // in `}`, so a comment after the brace (`void f() {} // note`) left it in a gap;
                 // the scanner says whether its code ends in `}`.
                 let one_line = scanned.get(i).is_some_and(|s| s.ends_block);
                 if opens || one_line || prototypes {
-                    let head = self.return_type_start(lines, scanned, i, floor, members);
+                    let head = self
+                        .return_type_start(lines, scanned, i, floor, members)
+                        .min(attribute_head);
                     let start = self.scan_back_for_docs(lines, scanned, head, floor);
                     // MAGI FIX (S6 loop 5): an abstract member (`User find(long id);`) ends at its
                     // `;`, which may sit on a later line of a wrapped signature.
@@ -1263,58 +1308,152 @@ impl BraceFamilyExtractor {
         // rule never matched, so it was cut from its member too.
         // MAGI FIX (loop 26, 3): a C++ `template <` header wrapped over lines ends in `>`; it is
         // recovered on its angle brackets, up to the line that opens it.
-        let (open, close, bracket_prefix) = match lines.get(last)?.trim_end().chars().last()? {
-            ']' => ('[', ']', true),
-            ')' => ('(', ')', false),
-            '>' if self.template_headers => ('<', '>', false),
+        let brackets = self.attribute_brackets(lines.get(last)?.trim_end().chars().last()?)?;
+        // MAGI FIX (S6 loop 19, B2b-4): the line the walk starts on must be code; a line wholly
+        // inside a string or a comment further up holds no bracket and is passed over.
+        if scanned.get(last)?.is_non_code {
+            return None;
+        }
+        let unclosed = brackets.net_closers(lines.get(last)?);
+        let above = last.checked_sub(1).filter(|&k| k >= floor)?;
+        if unclosed <= 0 {
+            return None;
+        }
+        self.attribute_opening_above(lines, scanned, floor..=above, unclosed, brackets, || true)
+    }
+
+    /// The bracket pair a multi-line attribute ending in `close` is recovered on, or `None` when
+    /// none ends so in this language: `]` (Rust's `#[serde(` ... `)]`, C's `[[deprecated(` ...
+    /// `)]]`), `)` (an `@` annotation's arguments) and, with `template_headers`, `>` (a C++
+    /// template header). O(1).
+    fn attribute_brackets(&self, close: char) -> Option<AttributeBrackets> {
+        let (open, bracket_prefix) = match close {
+            ']' => ('[', true),
+            ')' => ('(', false),
+            '>' if self.template_headers => ('<', false),
             _ => return None,
         };
+        Some(AttributeBrackets {
+            open,
+            close,
+            bracket_prefix,
+        })
+    }
+
+    /// The 0-based line that opens the attribute whose `unclosed` closers the lines below `span`
+    /// leave unmatched: the walk goes up from the last line of `span`, adding each code line's
+    /// closers less its openers ([`AttributeBrackets::net_closers`]) and passing over lines
+    /// wholly inside a string or a comment, until the count balances, on a line that must open
+    /// with an attribute prefix of the pair's kind ([`AttributeBrackets`]) or, for `>`, a
+    /// template header. `None` when it balances on another line, goes below zero, would leave
+    /// `span`, or `visit` stops it. O(k) for the k lines walked.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `span` - The 0-based lines the walk may look at: it starts on the last and never goes
+    ///   above the first.
+    /// * `unclosed` - The closers the lines below `span` leave unmatched, at least 1.
+    /// * `brackets` - The bracket pair counted.
+    /// * `visit` - Called once before each line looked at; `false` stops the walk.
+    ///
+    /// # Returns
+    ///
+    /// The attribute's 0-based opening line, or `None`.
+    fn attribute_opening_above(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        span: std::ops::RangeInclusive<usize>,
+        mut unclosed: i64,
+        brackets: AttributeBrackets,
+        mut visit: impl FnMut() -> bool,
+    ) -> Option<usize> {
         let opens_attribute = |text: &str| {
-            if close == '>' {
+            if brackets.close == '>' {
                 return opens_template_header(text);
             }
-            self.attribute_prefixes
-                .iter()
-                .any(|p| p.ends_with('[') == bracket_prefix && text.starts_with(p.as_str()))
+            self.attribute_prefixes.iter().any(|p| {
+                p.ends_with('[') == brackets.bracket_prefix && text.starts_with(p.as_str())
+            })
         };
-        let mut unclosed = 0i64;
-        let mut j = last;
+        let floor = *span.start();
+        let mut j = *span.end();
         loop {
-            let record = scanned.get(j)?;
-            // MAGI FIX (S6 loop 19, B2b-4): a line wholly inside a string of the arguments (a
-            // Java text block, a template literal) ended the walk, so the annotation was cut from
-            // its member; such a line (or one wholly inside a comment) holds no bracket and is
-            // passed over. The line the walk starts on must still be code.
-            if record.is_non_code {
-                if j == last {
-                    return None;
+            if !visit() {
+                return None;
+            }
+            if !scanned.get(j)?.is_non_code {
+                let line = lines.get(j)?;
+                unclosed += brackets.net_closers(line);
+                if unclosed <= 0 {
+                    return (unclosed == 0 && opens_attribute(line.trim())).then_some(j);
                 }
-                j = j.checked_sub(1).filter(|&k| k >= floor)?;
-                continue;
-            }
-            let line = lines.get(j)?;
-            // MAGI FIX (loop 27, B2b1b): the `>` of a comparison in parentheses
-            // (`bool B = (N >= 0)>`) counted as a close, so the header never balanced.
-            if close == '>' {
-                unclosed -= template_angle_delta(line);
-            } else {
-                unclosed += line.chars().fold(0, |n, c| {
-                    if c == close {
-                        n + 1
-                    } else if c == open {
-                        n - 1
-                    } else {
-                        n
-                    }
-                });
-            }
-            if unclosed <= 0 {
-                return (unclosed == 0 && j < last && opens_attribute(line.trim())).then_some(j);
             }
             // MAGI FIX (loop 26, 1): the walk had no floor and climbed to the top of the file
             // while the brackets stayed unbalanced, so `)` lines between functions cost O(n²).
             j = j.checked_sub(1).filter(|&k| k >= floor)?;
         }
+    }
+
+    /// What line `i` reads as after the tail of an attribute or a C++ template header wrapped from
+    /// the lines above it (`typename U> class Box {` under `template <typename T,`,
+    /// `}) export class C {` under `@Component({`, `Debug)] struct S {` under `#[derive(`), read
+    /// by `read`, with the 0-based line the attribute opens on.
+    ///
+    /// The tail is the line's text up to the first point where its closers less its openers of
+    /// one bracket pair ([`Self::attribute_brackets`]) are highest
+    /// ([`AttributeBrackets::leading_tail_end`]); the rest of the line must be non-empty and read
+    /// as something by `read` before the lines above are walked, up to the attribute's opening
+    /// line ([`Self::attribute_opening_above`]), each line charged to the pass's budget
+    /// ([`SearchBudget`]) and never above `floor`. `None` when the line is no code, opens with no
+    /// such tail, `read` reads nothing, or the walk finds no attribute. O(n) in the line plus the
+    /// k lines walked.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `i` - The 0-based line.
+    /// * `floor` - The 0-based line the walk never goes above.
+    /// * `search` - The bounds of the forward searches ([`BraceSearch`]); only its budget is spent.
+    /// * `read` - What the rest of the line is read as (a construct's kind and name).
+    ///
+    /// # Returns
+    ///
+    /// The attribute's 0-based opening line and what `read` read, or `None`.
+    pub(super) fn after_wrapped_attribute_tail<T>(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        i: usize,
+        floor: usize,
+        search: &BraceSearch<'_>,
+        read: impl Fn(&str) -> Option<T>,
+    ) -> Option<(usize, T)> {
+        let line = lines.get(i)?;
+        if scanned.get(i).is_none_or(|s| s.is_non_code) {
+            return None;
+        }
+        let above = i.checked_sub(1).filter(|&k| k >= floor)?;
+        [']', ')', '>']
+            .into_iter()
+            .filter_map(|close| self.attribute_brackets(close))
+            .find_map(|brackets| {
+                let (end, unclosed) = brackets.leading_tail_end(line)?;
+                let rest = line.get(end..)?.trim();
+                let value = (!rest.is_empty()).then(|| read(rest)).flatten()?;
+                let start = self.attribute_opening_above(
+                    lines,
+                    scanned,
+                    floor..=above,
+                    unclosed,
+                    brackets,
+                    || search.spend(),
+                )?;
+                Some((start, value))
+            })
     }
 
     /// The name and last line (0-based) of the function expression the declaration at line `i`

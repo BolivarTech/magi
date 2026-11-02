@@ -647,6 +647,66 @@ pub(super) fn template_angle_delta(line: &str) -> i64 {
     })
 }
 
+/// The bracket pair a multi-line attribute or a C++ template header wrapped over lines is
+/// recovered on (`BraceFamilyExtractor::attribute_brackets`): `[` and `]` (Rust's `#[`, C's
+/// `[[`), `(` and `)` (an `@` annotation's arguments), `<` and `>` (a template header).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AttributeBrackets {
+    /// The opening bracket.
+    pub(super) open: char,
+    /// The closing bracket.
+    pub(super) close: char,
+    /// Whether the attribute prefix the walk ends on ends in `[` (`#[`, `[[`), not `@`.
+    pub(super) bracket_prefix: bool,
+}
+
+impl AttributeBrackets {
+    /// The closers less the openers of this pair in `text`; for `<` and `>`, as
+    /// [`template_angle_delta`] counts them (none inside parentheses, no arrow), negated. O(n).
+    pub(super) fn net_closers(self, text: &str) -> i64 {
+        if self.close == '>' {
+            return -template_angle_delta(text);
+        }
+        text.chars().fold(0, |n, c| {
+            if c == self.close {
+                n + 1
+            } else if c == self.open {
+                n - 1
+            } else {
+                n
+            }
+        })
+    }
+
+    /// Where the tail of an attribute that `text` opens by closing ends: the byte offset right
+    /// after the first character at which the running count of closers less openers
+    /// ([`Self::net_closers`]'s count, read left to right) reaches its highest value, with that
+    /// value (`typename U> class Box : Base<T> {` ends its tail after `U>`, with 1). `None` when
+    /// the count never rises above zero: the line closes nothing it did not open. O(n).
+    pub(super) fn leading_tail_end(self, text: &str) -> Option<(usize, i64)> {
+        let mut parens = 0u32;
+        let mut count = 0i64;
+        let mut best: Option<(usize, i64)> = None;
+        for (at, c) in text.char_indices() {
+            let angles = self.close == '>';
+            match c {
+                '(' if angles => parens = parens.saturating_add(1),
+                ')' if angles => parens = parens.saturating_sub(1),
+                '<' if angles && parens == 0 => count -= 1,
+                '>' if angles && parens == 0 && closes_angle(text, at) => count += 1,
+                _ if angles => {}
+                c if c == self.close => count += 1,
+                c if c == self.open => count -= 1,
+                _ => {}
+            }
+            if count > best.map_or(0, |(_, high)| high) {
+                best = Some((at + c.len_utf8(), count));
+            }
+        }
+        best
+    }
+}
+
 /// `text` after the C++ template header it opens with: the word `template` followed, after any
 /// blanks, by a balanced `<...>` ([`skip_generics`]), trimmed at its start; empty when the
 /// header is the whole line or never closes on it. `text` when it opens with no such header
