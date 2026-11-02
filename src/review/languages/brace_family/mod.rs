@@ -5166,22 +5166,70 @@ int g(void) {
     }
 
     #[test]
-    fn a_braced_member_initializer_wrapped_over_lines_splits_the_constructor_declared() {
-        // [MAGI loop 28 sweep] declared: the brace a C++ constructor's member initializer opens
-        // (`Foo::Foo() : arr{`) is taken for the body's when the initializer wraps over lines,
-        // so the constructor ends where it closes and its body falls into later units. Telling it
-        // from a TypeScript return type (`): Foo {`, whose brace is the body) needs the language
-        // in the brace search; every line stays in exactly one unit.
+    fn a_braced_member_initializer_wrapped_over_lines_keeps_the_constructor_whole() {
+        // [MAGI loop 28 sweep, declared; fixed in MAGI loop 29, B2b1a] the brace a C++
+        // constructor's member initializer opens (`Foo::Foo() : arr{`) was taken for the body's
+        // when the initializer wrapped over lines, so the constructor ended where it closed and
+        // its body fell into later units (a gap and a declaration group). The C++ extractor now
+        // reads past the initializers to the body; a TypeScript return type (`): Foo {`, whose
+        // brace is the body) is read as before.
+        let ctor = |end| unit("Foo", UnitKind::Function, 1, end);
+        for (code, expected) in [
+            (
+                "Foo::Foo() : arr{\n    1, 2} {\n    x();\n}\nint g() {\n}\n",
+                vec![ctor(4), unit("g", UnitKind::Function, 5, 6)],
+            ),
+            (
+                "Foo::Foo() : a{\n    1\n}, b{\n    2\n} {\n    x();\n}\nint g() {\n}\n",
+                vec![ctor(7), unit("g", UnitKind::Function, 8, 9)],
+            ),
+            (
+                "Foo::Foo()\n    : arr{\n          1, 2} {\n    x();\n}\nint g() {\n}\n",
+                vec![ctor(5), unit("g", UnitKind::Function, 6, 7)],
+            ),
+            (
+                "Foo::Foo()\n    : a{1}\n    , b{\n          2}\n{\n    x();\n}\nint g() {\n}\n",
+                vec![ctor(7), unit("g", UnitKind::Function, 8, 9)],
+            ),
+            // Unchanged: a parenthesized initializer, and an initializer closed on its line.
+            (
+                "Foo::Foo() : a(1) {\n    x();\n}\nint g() {\n}\n",
+                vec![ctor(3), unit("g", UnitKind::Function, 4, 5)],
+            ),
+            (
+                "Foo::Foo() : a{1}, b{2} {\n    x();\n}\nint g() {\n}\n",
+                vec![ctor(3), unit("g", UnitKind::Function, 4, 5)],
+            ),
+        ] {
+            assert_eq!(
+                sorted_spans(&BraceFamilyExtractor::cpp(), code),
+                expected,
+                "{code}"
+            );
+        }
+        // Inside a class, the constructor is one method when the class splits.
+        let ext = BraceFamilyExtractor::cpp();
+        let code = "class Foo {\n    Foo() : arr{\n        1} {\n        x();\n    }\n    void m() {\n    }\n};\n";
+        let class = extract(&ext, code, &every_line(code));
+        let pieces = ext.split_block(class.first().expect("the class is a unit"));
+        assert_eq!(
+            spans(&pieces),
+            vec![
+                ("Foo", UnitKind::Class, 1, 1),
+                ("Foo", UnitKind::Method, 2, 5),
+                ("m", UnitKind::Method, 6, 7),
+                ("Foo", UnitKind::Class, 8, 8),
+            ]
+        );
+        // A TypeScript return type's brace is the body's, as before.
         assert_eq!(
             sorted_spans(
-                &BraceFamilyExtractor::cpp(),
-                "Foo::Foo() : arr{\n    1, 2} {\n    x();\n}\nint g() {\n}\n"
+                &BraceFamilyExtractor::typescript(),
+                "function f(): Foo {\n    return x;\n}\nfunction g() {\n}\n"
             ),
             vec![
-                unit("Foo", UnitKind::Function, 1, 2),
-                unit("declarations", UnitKind::DeclarationGroup, 3, 3),
-                unit("lines 4-4", UnitKind::TopLevel, 4, 4),
-                unit("g", UnitKind::Function, 5, 6),
+                unit("f", UnitKind::Function, 1, 3),
+                unit("g", UnitKind::Function, 4, 5),
             ]
         );
     }
