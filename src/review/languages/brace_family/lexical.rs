@@ -196,15 +196,28 @@ impl<'t> ListHead<'t> {
 
     /// Whether the text before the `(` holds an `=`, an assignment or initializer (`x = f(`),
     /// other than the `=` of an arrow (`foo<T extends () => void>(`), which a type bound holds,
-    /// and an `=` inside angle brackets, a type parameter's default (`get<T = unknown>(`). The
-    /// `>` of an arrow closes no bracket ([`closes_angle`]). O(n) in the text.
+    /// an `=` inside angle brackets, a type parameter's default (`get<T = unknown>(`), and an `=`
+    /// inside parentheses, the operand of a [`TYPE_OPERATORS`] word that [`parameter_list_head`]
+    /// reads past (`decltype(x = 1) f(`); a declarator in parentheses before an initializer
+    /// (`int (*p)(int) = make(`) leaves its `=` outside them. The `>` of an arrow closes no
+    /// bracket ([`closes_angle`]). O(n) in the text.
     // MAGI FIX (S6 loop 25, B2b1b): the arrow of a bound read as an assignment, so a generic
     // method bounded by a function type named no member.
     // MAGI FIX (loop 26, 5): the `=` of a generic default read as an assignment, so the method
     // was no member of its class.
+    // MAGI FIX (loop 28, B2b1b): the `=` of a `decltype(x = 1)` operand read as an assignment.
     fn assigns(&self) -> bool {
         let mut angles = 0usize;
+        let mut parens = 0usize;
         self.before.char_indices().any(|(at, c)| match c {
+            '(' => {
+                parens += 1;
+                false
+            }
+            ')' => {
+                parens = parens.saturating_sub(1);
+                false
+            }
             '<' => {
                 angles += 1;
                 false
@@ -215,6 +228,7 @@ impl<'t> ListHead<'t> {
             }
             '=' => {
                 angles == 0
+                    && parens == 0
                     && !self
                         .before
                         .get(at + 1..)
