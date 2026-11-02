@@ -1289,6 +1289,21 @@ class RefusalRunModelCallTests(unittest.TestCase):
         self.assertIn('# base_url = "http://commented.invalid/v1"', config)
 
     @unittest.skipUnless(_git_available(), "git is required")
+    def test_every_section_that_names_an_endpoint_is_pointed_at_the_counter(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1b1-melchior] the product's endpoint keys are the root's and those of
+        # [magi], [embedding], [decision] and [code_review]; the gate's own endpoint is pinned here too.
+        import tomllib
+        sections = ("magi", "embedding", "decision", "code_review")
+        config = 'base_url = "http://localhost:11434/v1"\n' + "".join(
+            '[%s]\nbase_url = "http://%s.invalid/v1"\n' % (name, name) for name in sections)
+        _, seen, env = self._execute("R13", (), config=config)
+        document = tomllib.loads(seen)
+        url = env[runs._BACKEND_URL_VARIABLE]
+        self.assertEqual({"": url, **{name: url for name in sections}},
+                         {"": document["base_url"],
+                          **{name: document[name]["base_url"] for name in sections}})
+
+    @unittest.skipUnless(_git_available(), "git is required")
     def test_a_config_without_a_root_endpoint_gets_one_pointing_at_the_counter(self) -> None:
         # Without a root base_url the product's built-in default, a real local daemon, would apply.
         _, config, _ = self._execute("R13", (), config='[magi]\nmelchior_model = "m"\n')
