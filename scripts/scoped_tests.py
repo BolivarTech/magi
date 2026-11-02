@@ -182,6 +182,26 @@ def repo_root():
     return out.strip().replace("\\", "/")
 
 
+TEST_MODULE_MARKER = "#[cfg(test)]"
+
+
+def _read_from_repo(path):
+    """Return the text of ``path`` under the repository root, or None.
+
+    Args:
+        path: Repository-relative path.
+
+    Returns:
+        Optional[str]: The file text; None when it is missing or unreadable.
+    """
+    try:
+        with open(os.path.join(repo_root(), path), encoding="utf-8",
+                  errors="replace") as handle:
+            return handle.read()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def packages():
     """Return [(package_name, dir_relative_to_repo_root)], longest dir first.
 
@@ -233,7 +253,23 @@ def module_filter(path, pkgs=None, single_crate=True, read_source=None):
 
     Returns ``"full"`` when the path forces a full run, ``None`` when it
     contributes no filter at all.
+
+    A non-``mod`` source file whose text has no ``#[cfg(test)]`` (or that cannot
+    be read, e.g. deleted in the diff) maps to its PARENT module's subtree: its
+    tests live in the parent's ``mod tests``, and its own narrow filter would
+    match zero tests -- a green that guards nothing. A testless child of the
+    crate root therefore widens to the crate root.
+
+    Args:
+        path: Repository-relative path, ``/``-separated.
+        pkgs: ``[(package, dir)]`` from ``packages()``, or None.
+        single_crate: True when the repository holds one package.
+        read_source: ``Callable[[str], Optional[str]]`` returning a file's text
+            by repository path, or None when unreadable. Defaults to reading
+            under ``repo_root()``.
     """
+    if read_source is None:
+        read_source = _read_from_repo
     lowered = path.lower()
     if lowered in FULL_SUITE_TRIGGERS:
         return "full"
@@ -272,6 +308,9 @@ def module_filter(path, pkgs=None, single_crate=True, read_source=None):
         parts = rel[len("src/"):-len(".rs")].split("/")
         if parts[-1] == "mod":
             # A module root: its children may depend on it, so take the subtree.
+            parts = parts[:-1]
+        elif TEST_MODULE_MARKER not in (read_source(path) or ""):
+            # No test module here: its tests are the parent's, so widen.
             parts = parts[:-1]
         if not parts or parts == ["main"] or parts == ["lib"]:
             # The crate root. In a workspace that means "this package"; in a
