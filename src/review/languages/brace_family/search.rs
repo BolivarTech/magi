@@ -197,8 +197,13 @@ pub(super) fn open_brace_line(
                     t.ends_with(',') && !LINE_OPENING_COMMENTS.iter().any(|c| t.starts_with(c))
                 })
         });
-        let ends_search = (open_before <= 0 && !continues && search.stops(j))
-            || lines.get(j).is_some_and(|l| opens_statement(l.trim()));
+        // MAGI FIX (S6 loop 25, B2b1b): a block comment's line opening with a keyword
+        // (`   return early */`) read as a statement and cut the body from its signature; a line
+        // that starts inside a comment or a string opens no statement.
+        let opens_code_statement = scanned.get(j).is_some_and(|s| !s.starts_in_literal)
+            && lines.get(j).is_some_and(|l| opens_statement(l.trim()));
+        let ends_search =
+            (open_before <= 0 && !continues && search.stops(j)) || opens_code_statement;
         if ends_search {
             return None;
         }
