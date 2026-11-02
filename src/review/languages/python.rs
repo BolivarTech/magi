@@ -13,8 +13,9 @@
 //! pinned by the test named:
 //!
 //! - Definitions, classes, imports and assignments are found at indent 0 only; one inside a
-//!   module-level compound statement leaves the whole block one gap unit
-//!   (`a_definition_inside_a_module_level_block_falls_into_a_whole_gap_unit`).
+//!   module-level compound statement leaves the whole block one gap unit, which splits at the
+//!   definitions it holds when it is too large for a batch
+//!   (`a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit`).
 //! - A byte order mark before the first line's keyword hides that construct
 //!   (`a_byte_order_mark_on_the_first_line_loses_no_line`).
 //! - A tab counts as one column of indentation. CPython compares indentation with tabs at 8
@@ -102,14 +103,17 @@ impl LanguageExtractor for PythonExtractor {
         units
     }
 
-    /// Splits a class at its methods: each `def` / `async def` at the indentation of the
-    /// class body, with its decorators, on a line that starts a logical line (outside
-    /// triple-quoted strings and brackets; see `continued_lines`). O(n) in the class's lines.
-    /// A `class` nested at that indentation is a member too, of kind class, as the trait asks of
-    /// other nested constructs; a function nested in a method stays in its method (RV03).
+    /// Splits a class at its methods: each `def` / `async def` of the class body, directly or in
+    /// a compound statement of it (`if`, `try`), with its decorators, on a line that starts a
+    /// logical line (outside triple-quoted strings and brackets; see `continued_lines`;
+    /// `definition_members`). O(n) in the class's lines. A nested `class` is a member too, of
+    /// kind class, as the trait asks of other nested constructs; a function nested in a method
+    /// stays in its method (RV03). A gap unit splits at the definitions it holds the same way
+    /// (`split_gap`).
     ///
-    /// A class with no such member (one holding only data attributes, as generated code may) or
-    /// a unit of another kind gives no pieces, and is batched whole: if it is larger than one
+    /// A class with no such member (one holding only data attributes, as generated code may), a
+    /// gap holding no definition, or a unit of another kind gives no pieces, and is batched
+    /// whole: if it is larger than one
     /// batch, the review ends with the typed `ReviewError::TooLargeForBatch` (RV03) before the
     /// clock starts, never a silent cut. Pinned by
     /// `construct_ranges_are_sorted_and_disjoint_and_a_memberless_class_does_not_split` here and
@@ -120,6 +124,9 @@ impl LanguageExtractor for PythonExtractor {
     fn split_block(&self, unit: &SemanticUnit) -> Vec<SemanticUnit> {
         if unit.kind == UnitKind::DeclarationGroup {
             return split_declaration_group(unit);
+        }
+        if unit.kind == UnitKind::TopLevel {
+            return split_gap(unit);
         }
         // MAGI FIX (S6 loop 3): a class too large for one batch is reviewed method by method.
         if unit.kind != UnitKind::Class {
@@ -136,42 +143,83 @@ impl LanguageExtractor for PythonExtractor {
         else {
             return Vec::new();
         };
-        let Some(body_indent) = lines
-            .iter()
-            .enumerate()
-            .skip(class_idx + 1)
-            .find(|&(j, l)| code(j) && !l.trim().is_empty() && !l.trim().starts_with('#'))
-            .map(|(_, l)| indentation(l))
-        else {
-            return Vec::new();
-        };
-        let mut members: Vec<Member> = Vec::new();
-        let mut j = class_idx + 1;
-        while let Some(&line) = lines.get(j) {
-            let trimmed = line.trim();
-            // MAGI FIX (loop 26, 8): only `def` lines were members, so a nested `class Inner:`
-            // stayed in the outer class's header piece; it is a member of kind class.
-            let member = def_rest(trimmed)
-                .map(|rest| (UnitKind::Function, rest))
-                .or_else(|| after_keyword(trimmed, "class").map(|rest| (UnitKind::Class, rest)));
-            if let Some((kind, rest)) =
-                member.filter(|_| code(j) && indentation(line) == body_indent)
-            {
-                let start = scan_back_decorators(&lines, &continued, j);
-                let end = find_block_end(&lines, &continued, j);
-                // MAGI FIX (S6 loop 9): a `u32::MAX` fallback split the class at a fabricated
-                // range; a line that does not fit `u32` leaves the class whole.
-                let Some((first, last)) = member_span(start, end) else {
-                    return Vec::new();
-                };
-                members.push((kind, python_name(Some(rest)), first, last));
-                j = end + 1;
-            } else {
-                j += 1;
-            }
-        }
-        split_into_members(unit, members)
+        // MAGI FIX (S6 loop 9): a `u32::MAX` fallback split the class at a fabricated range; a
+        // line that does not fit `u32` leaves the class whole.
+        definition_members(&lines, &continued, class_idx + 1)
+            .map(|members| split_into_members(unit, members))
+            .unwrap_or_default()
     }
+}
+
+/// The pieces of a gap unit too large for one batch: the definitions it holds, nested in
+/// module-level compound statements (`if TYPE_CHECKING:`, a `try:` around a compatibility
+/// import), each a member with its decorators ([`definition_members`]), and the lines between
+/// them (the statements' headers, the code around) as pieces of the gap's kind and name
+/// ([`split_into_members`]). Splitting at definitions is no silent cut (RV03): every line stays
+/// in exactly one piece.
+///
+/// # Arguments
+///
+/// * `unit` - A [`UnitKind::TopLevel`] unit of this extractor (a gap between constructs).
+///
+/// # Returns
+///
+/// The pieces in line order; empty when the gap holds no definition or a line number does not
+/// fit `u32`, so the caller batches it whole. O(n) in the gap's lines.
+// MAGI FIX (loop 29, B2b2): a gap was never split, so a module-level block larger than a batch
+// was refused as too large although each definition in it fits.
+fn split_gap(unit: &SemanticUnit) -> Vec<SemanticUnit> {
+    let lines: Vec<&str> = unit.content.split('\n').collect();
+    let continued = continued_lines(&lines);
+    definition_members(&lines, &continued, 0)
+        .map(|members| split_into_members(unit, members))
+        .unwrap_or_default()
+}
+
+/// The definitions (`def`, `async def`, `class`) of `lines` from index `from` on, as members of
+/// the block that holds them: each on a line that starts a logical line (`continued`), with its
+/// decorators ([`scan_back_decorators`]) and its whole block ([`find_block_end`]). The first
+/// definition in line order is a member and the scan goes on past its block, so a definition
+/// nested in another stays in it (a function in a method, RV03), while one in a compound
+/// statement (`if`, `try`, `with`, at any depth) is a member of its own. Members are sorted and
+/// disjoint: a decorator scan never reaches back into the member before. O(n) in the lines.
+///
+/// # Arguments
+///
+/// * `lines` - The block's lines.
+/// * `continued` - Whether each line continues a logical line ([`continued_lines`]).
+/// * `from` - The first line looked at, 0-based (past a class's header).
+///
+/// # Returns
+///
+/// The members, lines 1-based and counted from the block's first line, or `None` when a line
+/// number does not fit `u32`.
+// MAGI FIX (loop 29, B2b2): only a definition at the class body's own indentation was a
+// member, so a method in an `if` of the body stayed in the class's header piece.
+fn definition_members(lines: &[&str], continued: &[bool], from: usize) -> Option<Vec<Member>> {
+    let code = |j: usize| !continued.get(j).copied().unwrap_or(false);
+    let mut members: Vec<Member> = Vec::new();
+    let mut floor = from;
+    let mut j = from;
+    while let Some(&line) = lines.get(j) {
+        let trimmed = line.trim();
+        // MAGI FIX (loop 26, 8): only `def` lines were members, so a nested `class Inner:`
+        // stayed in the outer class's header piece; it is a member of kind class.
+        let member = def_rest(trimmed)
+            .map(|rest| (UnitKind::Function, rest))
+            .or_else(|| after_keyword(trimmed, "class").map(|rest| (UnitKind::Class, rest)));
+        if let Some((kind, rest)) = member.filter(|_| code(j)) {
+            let start = scan_back_decorators(lines, continued, j).max(floor);
+            let end = find_block_end(lines, continued, j);
+            let (first, last) = member_span(start, end)?;
+            members.push((kind, python_name(Some(rest)), first, last));
+            j = end + 1;
+            floor = j;
+        } else {
+            j += 1;
+        }
+    }
+    Some(members)
 }
 
 /// The pieces of a declaration group too large for one batch: each statement (a logical line,
@@ -344,10 +392,10 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
 ///
 /// - Definitions, classes, imports and assignments are found at indent 0 only. One inside a
 ///   module-level compound statement (`if TYPE_CHECKING:`, a `try:` around a compatibility
-///   import, a `with` block) is no unit of its own: the whole block is one gap unit, never
-///   split, so a block larger than a batch ends the review with the typed
-///   `ReviewError::TooLargeForBatch` (RV03) instead of being cut. Pinned by
-///   `a_definition_inside_a_module_level_block_falls_into_a_whole_gap_unit`.
+///   import, a `with` block) is no unit of its own: the whole block is one gap unit, which
+///   [`PythonExtractor::split_block`] splits at its definitions when it is larger than a batch
+///   (`split_gap`), never cut. Pinned by
+///   `a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit`.
 /// - A UTF-8 byte order mark before the first line's keyword (`\u{FEFF}def f():`) is kept by
 ///   `str::trim`, since U+FEFF is no whitespace, so that first construct is not recognised
 ///   (its header may read as a one-line assignment and its body falls into a gap unit). Only

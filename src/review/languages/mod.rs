@@ -196,7 +196,14 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
     // MAGI FIX (S6 loop 18, B2a-7): splitting on '\n' read a trailing newline as one more line,
     // so the last piece ran one line past the block; `str::lines` gives no such line.
     let lines: Vec<&str> = block.content.lines().collect();
-    let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    // MAGI FIX (loop 29, B2b2): `str::lines` gives no line for a last line that is empty, so a
+    // block ending in one (a gap unit's trailing blank line) left it in no piece; the block's own
+    // span counts its lines, and a piece past the text's end holds empty content.
+    let total = block
+        .end_line
+        .checked_sub(block.start_line)
+        .and_then(|span| span.checked_add(1))
+        .unwrap_or_else(|| u32::try_from(lines.len()).unwrap_or(u32::MAX));
     let base = block.start_line.saturating_sub(1);
     // MAGI FIX (S6 loop 19, B2a-6): the shares are taken by binary search, which needs the
     // changed lines sorted; a unit built by a caller with them unsorted gave pieces the wrong
