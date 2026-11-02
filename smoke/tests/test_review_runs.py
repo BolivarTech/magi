@@ -1273,6 +1273,23 @@ class RefusalRunModelCallTests(unittest.TestCase):
         self.assertEqual("", env.get("MAGI_PROVIDER"))
 
     @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_refusal_run_never_inherits_a_proxy_from_the_harness_environment(self) -> None:
+        # [MAGI loop 26] reqwest honours the system proxy and does not exempt 127.0.0.1, so an inherited
+        # HTTP_PROXY sent the counter's requests to the proxy and S48-S51 passed with nothing counted.
+        from smoke import binary
+        _, _, env = self._execute("R13", ())
+        inherited = {"HTTP_PROXY": "http://corp:3128", "https_proxy": "http://corp:3128",
+                     "ALL_PROXY": "socks5://corp:1080", "all_proxy": "socks5://corp:1080",
+                     "http_proxy": "http://corp:3128", "no_proxy": "corp.example"}
+        with mock.patch.dict(os.environ, inherited):
+            child = binary.child_environment(env)
+        proxies = {name for name in child
+                   if name.upper() in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"}}
+        self.assertEqual(set(), proxies)
+        self.assertEqual({"NO_PROXY": "127.0.0.1,localhost,::1"},
+                         {name: value for name, value in child.items() if name.upper() == "NO_PROXY"})
+
+    @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_that_times_out_still_records_what_it_sent(self) -> None:
         # [smoke review, Caspar] pins that the requests seen before a timeout are reported.
         def invoke(argv, stdin, env, timeout, cwd):

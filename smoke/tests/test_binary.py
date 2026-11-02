@@ -10,6 +10,7 @@ import sys
 import unittest
 from unittest import mock
 
+from smoke import binary
 from smoke.binary import ReleaseBinary
 from smoke.errors import PreflightError, ProductOutputError, TimedOut
 from smoke.tests import support
@@ -106,6 +107,33 @@ class WorkingDirectoryTests(unittest.TestCase):
                 ["-c", "import os; print(os.getcwd())"], timeout=30, cwd=workdir)
         self.assertEqual(0, output.exit_code)
         self.assertEqual(workdir, pathlib.Path(output.stdout.decode("utf-8").strip()).resolve())
+
+
+class ChildEnvironmentTests(unittest.TestCase):
+    """[MAGI loop 26] the overlay can REMOVE a variable, and matches names whatever their case.
+
+    A refusal run has to take the proxy variables out of the child's environment, and an overlay that
+    could only add values could not express that.
+    """
+
+    def test_a_none_value_removes_every_case_variant_of_the_name(self) -> None:
+        base = {"HTTP_PROXY": "http://corp:3128", "http_proxy": "http://corp:3128", "PATH": "p"}
+        self.assertEqual({"PATH": "p"}, binary.child_environment({"Http_Proxy": None}, base=base))
+
+    def test_a_value_replaces_every_case_variant_of_the_name(self) -> None:
+        base = {"no_proxy": "corp.example", "PATH": "p"}
+        self.assertEqual({"NO_PROXY": "127.0.0.1", "PATH": "p"},
+                         binary.child_environment({"NO_PROXY": "127.0.0.1"}, base=base))
+
+    def test_no_overlay_copies_the_base_without_touching_it(self) -> None:
+        base = {"PATH": "p"}
+        environment = binary.child_environment(None, base=base)
+        environment["EXTRA"] = "x"
+        self.assertEqual({"PATH": "p"}, base)
+
+    def test_the_default_base_is_the_harness_environment(self) -> None:
+        with mock.patch.dict("os.environ", {"SMOKE_CHILD_ENV_PROBE": "seen"}):
+            self.assertEqual("seen", binary.child_environment()["SMOKE_CHILD_ENV_PROBE"])
 
 
 if __name__ == "__main__":
