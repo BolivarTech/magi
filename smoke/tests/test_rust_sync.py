@@ -100,6 +100,14 @@ class BatchConstantTests(unittest.TestCase):
             self.assertEqual(copy, int(found.group(1)), name)
         self.assertEqual(24, code_review.MIN_NEED_PER_BATCH_SECS)
 
+    def test_the_trio_scenarios_budget_copy_is_the_one_pinned_here(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1b2b-balthasar] smoke.scenarios.trio carries its own copy of the budget
+        # constants, which the code-review self-tests now reuse; it is tied to the copy the guards above pin
+        # against src/magi/mod.rs, so neither can drift alone.
+        from smoke.scenarios import trio
+        self.assertEqual((code_review.CLASSIFY_SECS, code_review.SLACK_PCT, code_review.FLOOR_SECS),
+                         (trio.CLASSIFY_TIMEOUT_SECS, trio.TIMEOUT_SLACK_PCT, trio.CEILING_FLOOR_SECS))
+
     def test_the_budget_split_and_ceiling_are_the_ones_s50_checks(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-m2] _budget_fields_ok asserts wall == total // batches and a ceiling
         # below the floor: pre_budget's integer split and its RAW (never floor-lifted) refusal ceiling.
