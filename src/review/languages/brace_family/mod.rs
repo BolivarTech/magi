@@ -2700,6 +2700,22 @@ void g(void) {
     }
 
     #[test]
+    fn a_raw_string_in_a_rust_attribute_hides_its_quotes_and_brackets() {
+        // [MAGI S6 loop 25, B2b1a] the attribute's brackets were balanced with `"` as the only
+        // quote, so a raw string holding a `"` (`r#"a"b"#`) left the attribute unclosed and the
+        // item after it on the line was no construct.
+        let code = "#[doc = r#\"a\"b]\"#] fn f() {\n    x();\n}\n#[doc = r#\"a\"b\"#] const X: u8 = 1;\nfn g() {\n    y();\n}\n";
+        assert_eq!(
+            sorted_spans(&rust_extractor(), code),
+            vec![
+                ("f".to_string(), UnitKind::Function, 1, 3),
+                ("constants".to_string(), UnitKind::DeclarationGroup, 4, 4),
+                ("g".to_string(), UnitKind::Function, 5, 7),
+            ]
+        );
+    }
+
+    #[test]
     fn a_rust_item_after_an_attribute_on_its_own_line_is_a_unit_with_its_body() {
         // [MAGI S6 loop 14, B2b1] `construct_keyword` never read past a leading `#[...]`, so
         // `#[inline] fn f() {` and `#[derive(Debug)] struct S {` were no constructs and their
