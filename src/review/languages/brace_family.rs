@@ -6904,4 +6904,45 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_brace_opened_inside_a_parameter_list_is_not_the_function_body() {
+        // [MAGI B2a 1] a parameter whose type is a literal block (`opts: {`, `struct {`) opened
+        // the first brace of the signature, so the function ended where the parameter's block
+        // closed (`}) {`) and its body fell into a gap unit.
+        let ts = "function f(opts: {\n  a: number;\n}) {\n  body();\n}\nfunction g() {\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::typescript(),
+                ts,
+                &all_lines(ts)
+            )),
+            vec![
+                ("f", UnitKind::Function, 1, 5),
+                ("g", UnitKind::Function, 6, 7)
+            ]
+        );
+        let c = "void f(struct {\n    int a;\n} s) {\n    use(s);\n}\nint g(void) {\n    return 0;\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), c, &all_lines(c))),
+            vec![
+                ("f", UnitKind::Function, 1, 5),
+                ("g", UnitKind::Function, 6, 8)
+            ]
+        );
+        // A call passing a callback closes its list with no brace after it (`});`): the call
+        // keeps the block it opened, as before.
+        let call = "describe('x', () => {\n  it();\n});\nfunction g() {\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::javascript(),
+                call,
+                &all_lines(call)
+            )),
+            vec![
+                ("describe", UnitKind::Function, 1, 3),
+                ("g", UnitKind::Function, 4, 5)
+            ]
+        );
+    }
 }
