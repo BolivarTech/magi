@@ -1424,4 +1424,47 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn any_mix_of_string_prefixes_quotes_and_braces_loses_no_line() {
+        // The RV03 invariant under the f-string reader, declared green: whatever the quotes,
+        // prefixes, fields, specs, escapes and comments, valid or not, every line lands in
+        // exactly one unit and nothing panics. A fixed linear congruential generator keeps the
+        // texts deterministic.
+        const PIECES: [&str; 16] = [
+            "f\"",
+            "rf'",
+            "t\"\"\"",
+            "\"",
+            "'''",
+            "{",
+            "}",
+            "{{",
+            ":",
+            "(",
+            "]",
+            "\\",
+            "#",
+            "def f():",
+            "\n",
+            "\n    x = 1\n",
+        ];
+        const TEXTS: usize = 400;
+        const PIECES_PER_TEXT: usize = 40;
+        let mut seed: u64 = 0x5EED;
+        for _ in 0..TEXTS {
+            let mut code = String::new();
+            for _ in 0..PIECES_PER_TEXT {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let pick = usize::try_from(seed >> 60).unwrap_or(0);
+                code.push_str(PIECES.get(pick).copied().unwrap_or(""));
+            }
+            let total = u32::try_from(code.lines().count()).unwrap_or(u32::MAX);
+            let every: Vec<u32> = (1..=total).collect();
+            let units = extract(&code, &every);
+            assert_each_line_in_one_unit(&units, total);
+        }
+    }
 }
