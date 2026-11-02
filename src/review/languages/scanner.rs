@@ -2375,4 +2375,22 @@ void h() {
         let r = scanner.scan_all("const s = `${ {a: 1}\n}`;\n");
         assert!(!r[0].ends_block);
     }
+
+    #[test]
+    fn a_directive_after_a_block_comment_spanning_lines_is_still_read() {
+        // [MAGI loop 27, B2a] C reads a comment as one blank before preprocessing, so a `#` right
+        // after a block comment that opened at the start of an earlier line still opens a
+        // directive (`/* multi` then `line */ #ifdef FOO`); the directive was missed and both
+        // branches' braces counted. A comment opened after code leaves the `#` after that code,
+        // no directive, and the line reads as before.
+        let code = "int a;\n/* multi\n   line */ #ifdef FOO\nvoid f() {\n#else\nvoid f(int x) {\n#endif\n}\n";
+        let r = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(
+            r.iter().map(|l| l.depth_after).collect::<Vec<_>>(),
+            vec![0, 0, 0, 1, 0, 1, 1, 0]
+        );
+        let code = "int x; /* a\n b */ #if A\n{\n#else\n{\n#endif\n";
+        let r = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(r.last().map(|l| l.depth_after), Some(2));
+    }
 }
