@@ -4290,4 +4290,25 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_wrapped_attribute_search_never_climbs_above_the_previous_construct() {
+        // [MAGI loop 26, 1] the backward search for a wrapped attribute climbed to the top of
+        // the file while its brackets stayed unbalanced, so a file of `)` lines between
+        // functions took O(n²) line visits; it stops at the line after the previous construct.
+        // The `(` that balances line 3 lies inside `a`, so no attribute is recovered for `b`.
+        let java = "@Ann void a() { f(\n}\n)\nvoid b() {}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::java(),
+                java,
+                &all_lines(java)
+            )),
+            vec![
+                ("a", UnitKind::Function, 1, 2),
+                ("lines 3-3", UnitKind::TopLevel, 3, 3),
+                ("b", UnitKind::Function, 4, 4)
+            ]
+        );
+    }
 }
