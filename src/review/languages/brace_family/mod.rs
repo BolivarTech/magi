@@ -4553,4 +4553,46 @@ int g(void) {
             vec![("imports".to_string(), UnitKind::DeclarationGroup, 1, 2)]
         );
     }
+
+    #[test]
+    fn a_comparison_in_parentheses_inside_a_template_header_closes_no_bracket() {
+        // [MAGI loop 27, B2b1b] C++ requires a `>` or `>=` inside a template argument to sit in
+        // parentheses (`template <int N = (M >= 0)>`), but the angle brackets were counted
+        // there too, so the `>` of `>=` closed the header early: the function after it was read
+        // as a declaration and the class was no unit.
+        assert_eq!(skip_generics("<int N = (M >= 0)> void f() {"), "void f() {");
+        assert_eq!(skip_generics("<T: Fn(Vec<u8>) -> u8> Foo<T> {"), "Foo<T> {");
+        assert_eq!(
+            skip_generics("<T extends (a: X<Y>) => void>(x: T) {"),
+            "(x: T) {"
+        );
+        let ext = BraceFamilyExtractor::cpp();
+        let cases: [(&str, &str, UnitKind, (u32, u32)); 3] = [
+            (
+                "int a;\n\ntemplate <int N = (M >= 0)> void f() {\n    g();\n}\n",
+                "f",
+                UnitKind::Function,
+                (3, 5),
+            ),
+            (
+                "int a;\n\ntemplate <bool B = (N >= 0)> class C {\n    void m() {\n    }\n};\n",
+                "C",
+                UnitKind::Class,
+                (3, 6),
+            ),
+            (
+                "int a;\n\ntemplate <int N,\n          bool B = (N >= 0)>\nvoid f() {\n    g();\n}\n",
+                "f",
+                UnitKind::Function,
+                (3, 7),
+            ),
+        ];
+        for (code, name, kind, span) in &cases {
+            let found = sorted_spans(&ext, code);
+            assert!(
+                found.contains(&(name.to_string(), *kind, span.0, span.1)),
+                "{code}: {found:?}"
+            );
+        }
+    }
 }
