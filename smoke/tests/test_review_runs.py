@@ -1843,6 +1843,30 @@ def _send_raw(port: int, data: bytes) -> None:
             pass  # the counter may hang up before reading everything (an over-long line)
 
 
+class LoopbackOpenTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 28, F1b1-melchior] the stand-in doubles reach their loopback server on any host.
+
+    ``urllib.request.urlopen`` honours ``HTTP_PROXY`` when ``no_proxy`` does not cover 127.0.0.1, so on a
+    proxied host a stand-in's request never reached the counter and a test that asserts nothing was counted
+    passed vacuously.
+    """
+
+    def test_a_loopback_request_never_goes_through_the_hosts_proxy(self) -> None:
+        import urllib.error
+        import urllib.request
+        from smoke.tests import support
+        proxied = {"HTTP_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9",
+                   "ALL_PROXY": "http://127.0.0.1:9", "all_proxy": "http://127.0.0.1:9",
+                   "NO_PROXY": "", "no_proxy": ""}
+        with mock.patch.dict(os.environ, proxied), runs.model_counter() as (url, log):
+            request = urllib.request.Request(url[:-len("/v1")] + "/api/chat", data=b"{}", method="POST")
+            try:
+                support.loopback_open(request).close()
+            except urllib.error.HTTPError as exc:
+                exc.close()
+        self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
+
+
 class ModelCounterEveryRequestTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 28, F1a1-melchior] every request reaches the record, whatever its method or shape.
 
