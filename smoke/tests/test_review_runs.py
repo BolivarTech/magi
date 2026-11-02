@@ -1851,6 +1851,53 @@ def _send_raw(port: int, data: bytes) -> None:
             pass  # the counter may hang up before reading everything (an over-long line)
 
 
+class ErrorBackendBodyTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 28, coordinator] the echoing error backend answers whatever Content-Length it gets.
+
+    It read ``int(Content-Length)`` bytes in one call: a non-numeric value raised in the handler and the
+    product got no answer, a negative one read to EOF, and a huge one asked the reader for that many bytes at
+    once. Each must still get the backend's 401, as the counter's bounded drain does.
+    """
+
+    def _answer(self, length: bytes, half_close: bool) -> bytes:
+        """Send one POST declaring *length* with a 2-byte body; return the first bytes of the answer."""
+        import socket
+        with runs.error_backend() as url:
+            port = int(url.rsplit(":", 1)[1].split("/", 1)[0])
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as client:
+                client.sendall(b"POST /v1/chat HTTP/1.1\r\nHost: x\r\nContent-Length: " + length + b"\r\n\r\n{}")
+                if half_close:
+                    client.shutdown(socket.SHUT_WR)
+                try:
+                    return client.recv(64)
+                except OSError:
+                    return b""
+
+    def test_a_non_numeric_length_is_still_answered(self) -> None:
+        self.assertTrue(self._answer(b"abc", half_close=False).startswith(b"HTTP/1.0 401"))
+
+    def test_a_negative_length_does_not_read_to_the_end_of_the_stream(self) -> None:
+        # The client keeps its side open: a read to EOF waits until the per-read timeout instead of answering.
+        self.assertTrue(self._answer(b"-1", half_close=False).startswith(b"HTTP/1.0 401"))
+
+    def test_a_huge_length_is_drained_in_bounded_chunks_and_answered(self) -> None:
+        reads = []
+        real_drain = runs._drain_body
+
+        def recording(rfile, headers):
+            class Reader:
+                def read(self, size=-1):
+                    reads.append(size)
+                    return rfile.read(size)
+            return real_drain(Reader(), headers)
+
+        with mock.patch.object(runs, "_drain_body", side_effect=recording):
+            answer = self._answer(b"1000000000000000", half_close=True)
+        self.assertTrue(answer.startswith(b"HTTP/1.0 401"), answer)
+        self.assertTrue(reads)
+        self.assertTrue(all(0 < size <= runs.MODEL_COUNTER_CHUNK_BYTES for size in reads), reads)
+
+
 class LoopbackOpenTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 28, F1b1-melchior] the stand-in doubles reach their loopback server on any host.
 
