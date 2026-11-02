@@ -6729,4 +6729,25 @@ int g(void) {
             );
         }
     }
+
+    #[test]
+    fn a_cpp_inline_exported_nested_or_anonymous_namespace_is_a_module() {
+        // [MAGI B2b1 10] `inline namespace v1 {` and `export namespace m {` matched no keyword,
+        // so their functions were top-level units and their header and closing lines gaps; a
+        // nested `namespace a::b {` was named `a`.
+        let code = "inline namespace v1 {\nint f(int a) {\n    return a;\n}\n}\nnamespace a::b {\nint g() {\n    return 1;\n}\n}\nnamespace {\nint h() {\n    return 2;\n}\n}\nexport namespace m {\nint k() {\n    return 3;\n}\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::cpp(),
+                code,
+                &all_lines(code)
+            )),
+            vec![
+                ("v1", UnitKind::Module, 1, 5),
+                ("a::b", UnitKind::Module, 6, 10),
+                ("unnamed", UnitKind::Module, 11, 15),
+                ("m", UnitKind::Module, 16, 20)
+            ]
+        );
+    }
 }
