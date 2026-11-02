@@ -4733,4 +4733,29 @@ int g(void) {
             vec![func("f", 1, 5), func("g", 6, 7)]
         );
     }
+
+    /// `(name, kind, start, end)` with an owned name, as [`sorted_spans`] gives them.
+    fn unit(name: &str, kind: UnitKind, start: u32, end: u32) -> (String, UnitKind, u32, u32) {
+        (name.to_string(), kind, start, end)
+    }
+
+    #[test]
+    fn an_arrow_in_a_wrapped_template_header_closes_no_angle_bracket() {
+        // [MAGI loop 28, B2b1b] `template_angle_delta` read the `>` of a trailing return type
+        // (`-> void`) in a default template argument as a close, unlike `skip_generics`: the
+        // header balanced on the wrong line and was cut from the function it declares.
+        for code in [
+            "template <typename F = auto (*)(int) -> void,\n          typename G = int>\nvoid f() {\n    x();\n}\nint g() {\n}\n",
+            "template <typename T,\n          typename F = auto (*)(T) -> void>\nvoid f() {\n    x();\n}\nint g() {\n}\n",
+        ] {
+            assert_eq!(
+                sorted_spans(&BraceFamilyExtractor::cpp(), code),
+                vec![
+                    unit("f", UnitKind::Function, 1, 5),
+                    unit("g", UnitKind::Function, 6, 7),
+                ],
+                "{code}"
+            );
+        }
+    }
 }
