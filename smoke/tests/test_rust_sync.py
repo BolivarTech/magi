@@ -25,7 +25,7 @@ import unittest
 
 from smoke import logs, runs
 from smoke.scenarios import code_review
-from smoke.tests.rust_source import code_only, one_definition, one_occurrence, read_source
+from smoke.tests.rust_source import char_list, code_only, one_definition, one_occurrence, read_source
 
 #: The repository root, three levels above this file.
 _ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -98,7 +98,43 @@ class BatchConstantTests(unittest.TestCase):
                            ("HEADLESS_TIMEOUT_SLACK_PCT", code_review.SLACK_PCT)):
             found = one_definition(text, r"pub const %s: u64 = (\d+);" % name, "src/magi/mod.rs")
             self.assertEqual(copy, int(found.group(1)), name)
+        # [MAGI §6 MS2 loop 28, F1b2a-melchior] the 24 was a literal, so a product change to the
+        # derivation went unseen once the copies were updated. The derivation is pinned in the product
+        # (headless_consult_timeout_secs at the floor, with attempt_factor's most lenient config: no
+        # rotation, retry off) and the expected value is computed from the pinned copies.
+        for pattern in (r"CLASSIFY_TIMEOUT_SECS\.saturating_add\(\s*configured_ceiling\.saturating_mul\("
+                        r"attempt_factor\(max_rotations, retry_disabled\)\) / 100,",
+                        r"let attempts_per_model: u64 = if retry_disabled \{ 1 \} else \{ CALLS_PER_MODEL \};",
+                        r"let models_per_mage = u64::from\(max_rotations\)\.saturating_add\(1\);",
+                        r"\.saturating_mul\(100 \+ HEADLESS_TIMEOUT_SLACK_PCT\)"):
+            one_definition(text, pattern, "src/magi/mod.rs")
+        lenient_factor = 1 * (0 + 1) * (100 + code_review.SLACK_PCT)
+        self.assertEqual(code_review.CLASSIFY_SECS + code_review.FLOOR_SECS * lenient_factor // 100,
+                         code_review.MIN_NEED_PER_BATCH_SECS)
         self.assertEqual(24, code_review.MIN_NEED_PER_BATCH_SECS)
+
+    def test_the_trio_copy_of_the_ceiling_arithmetic_is_the_products(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1b2b-melchior] smoke.scenarios.trio's attempt_factor and raw_ceiling were
+        # copies of src/magi/mod.rs with nothing tying their arithmetic to it: a product change to the
+        # truncation or the saturation (a per-batch wall clock below the classifier's slice) went unseen.
+        from smoke.scenarios import trio
+        text = _source("src/magi/mod.rs")
+        body = one_definition(text, r"pub\(crate\) fn raw_ceiling_from_factor\(timeout_secs: u64, factor: u64\)"
+                                    r" -> u64 \{(.*?)\n\}", "src/magi/mod.rs", re.S).group(1)
+        self.assertEqual(["timeout_secs", ".saturating_sub(CLASSIFY_TIMEOUT_SECS)", ".saturating_mul(100)",
+                          ".checked_div(factor)", ".unwrap_or(0)"],
+                         [line.strip() for line in code_only(body).split("\n") if line.strip()])
+        one_definition(text, r"pub\(crate\) const CALLS_PER_MODEL: u64 = %d;" % trio.ATTEMPTS_WITH_RETRY,
+                       "src/magi/mod.rs")
+        self.assertEqual(1, trio.ATTEMPTS_WITHOUT_RETRY)
+        # The saturating subtraction: at or below the classifier's slice the raw ceiling is 0.
+        for factor in (120, 240, 720):
+            for wall in range(0, trio.CLASSIFY_TIMEOUT_SECS + 1):
+                self.assertEqual(0, trio.raw_ceiling(wall, factor), (wall, factor))
+        # The truncating division, and the factor's three terms.
+        self.assertEqual((20 - 6) * 100 // 720, trio.raw_ceiling(20, trio.attempt_factor(2, False)))
+        self.assertEqual(2 * 3 * 120, trio.attempt_factor(2, False))
+        self.assertEqual(1 * 1 * 120, trio.attempt_factor(0, True))
 
     def test_the_trio_scenarios_budget_copy_is_the_one_pinned_here(self) -> None:
         # [MAGI §6 MS2 loop 27, F1b2b-balthasar] smoke.scenarios.trio carries its own copy of the budget
@@ -204,7 +240,10 @@ class NeverReviewedTests(unittest.TestCase):
         items = code_only(listed.group(1))
         names = tuple(re.findall(r'"([^"]+)"', items))
         self.assertEqual(set(names), set(code_review.PROTECTED_DIRS))
-        self.assertIn("MEMORY_DB_PREFIX", items)
+        # [MAGI §6 MS2 loop 28, F1b2a-melchior] assertIn passed with any number of extra identifiers, whose
+        # values escaped the sync; the entries that are not literals are exactly the prefix's constant.
+        self.assertEqual(["MEMORY_DB_PREFIX"],
+                         [token.strip() for token in re.sub(r'"[^"]*"', "", items).split(",") if token.strip()])
 
     # MAGI FIX (S6 loop 17): same_product_name copies is_never_reviewed's folding rule with no pin, so
     # a wider product rule would have left S51's candidates behind in silence (F1a1-melchior).
@@ -213,10 +252,15 @@ class NeverReviewedTests(unittest.TestCase):
                                r"pub fn is_never_reviewed\(path: &str\) -> bool \{(.*?)\n\}",
                                "src/review/source.rs", re.S)
         body = found.group(1)
+        # [MAGI §6 MS2 loop 28, F1b2a-melchior] '(.)' could not read an escaped literal such as '\\\\', so a
+        # character the product trims could be missing from the harness's copy with the guard green.
         trimmed = one_occurrence(body, ".trim_end_matches([", "is_never_reviewed")
         rest = body[trimmed.end():]
-        chars = re.findall(r"'(.)'", rest[:rest.index("]")])
+        chars = char_list(rest[:rest.index("]")])
         self.assertEqual(sorted(chars), sorted(runs.TRIMMED_TRAILING))
+        split = one_occurrence(body, ".split([", "is_never_reviewed")
+        rest = body[split.end():]
+        self.assertEqual({"/", "\\"}, set(char_list(rest[:rest.index("]")])))
         one_occurrence(body, ".split(['/', '\\\\'])", "is_never_reviewed")
         # Every comparison folds ASCII case and nothing else, as same_product_name does.
         self.assertGreater(code_only(body).count("eq_ignore_ascii_case"), 0)
@@ -336,13 +380,17 @@ class SecretPrefixDocTests(unittest.TestCase):
         readme = _source("README.md")
         sentence = re.search(r"The patterns are named prefixes and shapes[.:](.*?)Not covered, by design", readme, re.S)
         self.assertIsNotNone(sentence, "the README's secret pattern list was not found")
+        # [MAGI §6 MS2 loop 28, F1b2a-melchior] the filter took only lowercase segments after a separator, so
+        # a prefix such as GITHUB_PAT_ or one with a digit was never checked. Any letters-and-digits segments
+        # ending in a separator count, compared ignoring case: the detector matches prefixes in any case.
         named = {token for token in re.findall(r"`([^`\s]+)`", sentence.group(1))
-                 if re.fullmatch(r"[A-Za-z]+(?:[-_][a-z]+)*[-_]|AKIA|ASIA|AIza", token)}
+                 if re.fullmatch(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*[-_]|AKIA|ASIA|AIza", token)}
         self.assertTrue(named)
+        self.assertIn("GITHUB_PAT_", named)
         prefixes = set()
         for array in re.findall(r"prefixes: &\[([^\]]*)\]", code_only(_source("src/review/secrets.rs"))):
             prefixes.update(re.findall(r'"([^"]+)"', array))
-        self.assertEqual(set(), named - prefixes)
+        self.assertEqual(set(), {token.lower() for token in named} - {prefix.lower() for prefix in prefixes})
 
 
 def _locked_version(crate: str) -> str:
@@ -388,8 +436,9 @@ def _registry_source(crate: str, relative: str) -> str:
         candidate = index / package / relative
         if candidate.is_file():
             return candidate.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
-    raise AssertionError("%s/%s not found under %s/registry/src; build the product first"
-                         % (package, relative, home))
+    raise AssertionError("%s/%s not found under %s/registry/src; build the product first. A vendored or "
+                         "path-overridden magi-core is not looked for: point CARGO_HOME at a cargo home whose "
+                         "registry holds this version" % (package, relative, home))
 
 
 #: How magi-core's ``OllamaProvider`` names a request's path: the segments after the
@@ -436,7 +485,8 @@ def _rust_fn_body(text: str, signature: str) -> str:
         at one indented like its ``fn``.
 
     Raises:
-        AssertionError: When no code line starts the declaration, or more than one does.
+        AssertionError: When no code line starts the declaration, or more than one does, or no
+            closing brace at its indentation ends it.
     """
     # MAGI FIX (S6 loop 27): the end was the first "    }" line whatever the
     # signature's indentation, so a top-level function ran on into the next
@@ -445,6 +495,8 @@ def _rust_fn_body(text: str, signature: str) -> str:
     start = match.start()
     indent = match.group(0)[:len(match.group(0)) - len(match.group(0).lstrip(" \t"))]
     end = text.find("\n%s}\n" % indent, start)
+    # MAGI FIX (S6 loop 28): no closing brace returned the rest of the file,
+    # where a pin could match a later item's line (F1b2a-melchior).
     return text[start:] if end == -1 else text[start:end]
 
 
@@ -461,6 +513,11 @@ class RustFnBodyTests(unittest.TestCase):
     def test_a_method_ends_at_the_brace_on_its_own_indentation(self) -> None:
         body = _rust_fn_body(self._TEXT, "pub fn method(")
         self.assertEqual("    pub fn method(&self) -> u8 {\n        let x = 1;\n        x", body)
+
+    def test_a_body_without_its_closing_brace_fails_loudly(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1b2a-melchior] it returned the rest of the file instead.
+        with self.assertRaisesRegex(AssertionError, "no closing brace"):
+            _rust_fn_body("pub fn top() -> u8 {\n    0\n}", "pub fn top(")
 
 
 class CountedKindTests(unittest.TestCase):
