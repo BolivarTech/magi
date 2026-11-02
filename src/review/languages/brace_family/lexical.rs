@@ -866,6 +866,70 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The quotes of a JavaScript or TypeScript string: `'`, `"` and the template literal's backtick.
+const JS_QUOTES: [char; 3] = ['"', '\'', '`'];
+
+/// Whether a JavaScript or TypeScript declaration's value is an arrow function: an `=>` stands at
+/// the value's top level, outside every bracket, string and comment (`(a, b) => {`,
+/// `async x => {`, `<T,>(x: T): T => {`). An arrow inside a call's arguments
+/// (`compute((x) => x, {`), a string (`"=>"`) or a comment (`// =>`) belongs to another value.
+/// A string or a block comment is read to its end on its own line only: a template literal or a
+/// comment that spans lines inside a declaration's header is not followed. O(n) in the text.
+///
+/// # Arguments
+///
+/// * `parts` - The value's text on the declaration's line (after its `=`), then each later line
+///   of its header, up to the line that opens its block.
+///
+/// # Returns
+///
+/// `true` when the value is an arrow function.
+// MAGI FIX (loop 29, B2b1a): any `=>` in the header's text, a callback's or a string's included,
+// made a declaration a function named after its variable.
+pub(super) fn arrow_at_top_level<'t>(parts: impl IntoIterator<Item = &'t str>) -> bool {
+    let mut depth = 0i64;
+    for part in parts {
+        let chars: Vec<char> = part.chars().collect();
+        let mut k = 0;
+        while let Some(&c) = chars.get(k) {
+            let next = chars.get(k + 1).copied();
+            match c {
+                '/' if next == Some('/') => break,
+                '/' if next == Some('*') => {
+                    let close = (k + 2..chars.len())
+                        .find(|&j| chars.get(j) == Some(&'*') && chars.get(j + 1) == Some(&'/'));
+                    match close {
+                        Some(j) => k = j + 2,
+                        None => break,
+                    }
+                    continue;
+                }
+                q if JS_QUOTES.contains(&q) => {
+                    let mut j = k + 1;
+                    while let Some(&d) = chars.get(j) {
+                        if d == '\\' {
+                            j += 2;
+                            continue;
+                        }
+                        if d == q {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    k = j + 1;
+                    continue;
+                }
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                '=' if next == Some('>') && depth <= 0 => return true,
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    false
+}
+
 /// The byte offset just past the `close` that matches the `open` `text` starts with, reading C
 /// and C++ strings and character constants past, or `None` when it never closes on the line.
 ///

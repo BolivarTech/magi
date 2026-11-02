@@ -1462,8 +1462,9 @@ impl BraceFamilyExtractor {
 
     /// The name and last line (0-based) of the function expression the declaration at line `i`
     /// assigns (`const f = () => {`, `let g = async function (x) {`, an arrow whose parameters
-    /// wrap over several lines): a `const`, `let` or `var` whose value is a `function` or whose
-    /// lines up to the block's opening brace hold `=>`, and whose value opens a block
+    /// wrap over several lines): a `const`, `let` or `var` whose value is a `function` or an
+    /// arrow function, its `=>` at the value's top level up to the block's opening brace
+    /// ([`arrow_at_top_level`]), and whose value opens a block
     /// ([`declaration_block`]). O(k) for the k lines of its header and body.
     fn function_expression(
         &self,
@@ -1482,7 +1483,9 @@ impl BraceFamilyExtractor {
             .collect();
         let value = rest.split_once('=')?.1.trim_start();
         let (open, close) = declaration_block(lines, scanned, i, search)?;
-        let arrow = lines.get(i..=open)?.iter().any(|l| l.contains("=>"));
+        let arrow = arrow_at_top_level(
+            std::iter::once(value).chain(lines.get(i + 1..=open)?.iter().copied()),
+        );
         let function = opens_function_value(value);
         (!name.is_empty() && (arrow || function)).then_some((name, close))
     }
