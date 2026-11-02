@@ -224,19 +224,16 @@ def _new_log_bytes(before):
     directory = logs.log_directory()
     if not directory.is_dir():
         return b""
-    chunks = []
-    for path in sorted(directory.rglob("*")):
-        try:
-            if not path.is_file():
-                continue
-            with path.open("rb") as handle:
-                handle.seek(before.get(path, 0))
-                chunks.append(handle.read())
-        except OSError:
-            # Unreadable is not empty, and saying so is better than a silent
-            # gap: the finding names the file the search could not cover.
-            chunks.append(b"<unreadable log: %s>"
-                          % str(path).encode("utf-8", errors="replace"))
+    # MAGI FIX (S6 loop 29, sweep of F1a1b-melchior): the walk was rglob and
+    # the read unbounded, so a link or a hard link under the persistent log
+    # directory had the search read bytes outside the environment, and one
+    # huge file was held whole. runs.read_log_files refuses both and bounds
+    # the read. Unreadable is not empty, and saying so is better than a
+    # silent gap: each file it leaves out is named in the bytes returned.
+    unreadable = []
+    chunks = list(runs.read_log_files(directory, unreadable, before))
+    chunks.extend(b"<unreadable log: %s>" % name.encode("utf-8", errors="replace")
+                  for name in unreadable)
     return b"".join(chunks)
 
 

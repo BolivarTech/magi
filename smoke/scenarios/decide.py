@@ -1990,6 +1990,13 @@ def _read_logs(root):
     Args:
         root: The workspace.
 
+    MAGI FIX (S6 loop 29, sweep of F1a1b-melchior): the walk was ``rglob``
+    and the read ``read_bytes``, which follow a link and hold any file whole,
+    and an unreadable file was skipped without a word. The directory is read
+    through :func:`smoke.runs.read_log_files` (no link, no hard link, bounded),
+    and each file it leaves out is named in the bytes returned, as
+    ``<unreadable log: <path> (<why>)>``, so a gap in the search is on record.
+
     Returns:
         bytes | None: The bytes, or None when the directory does not exist or
         holds nothing readable.
@@ -1997,13 +2004,10 @@ def _read_logs(root):
     directory = root.joinpath(*LOG_DIR_PARTS)
     if not directory.is_dir():
         return None
-    chunks = []
-    for path in sorted(directory.rglob("*")):
-        try:
-            if path.is_file():
-                chunks.append(path.read_bytes())
-        except OSError:
-            continue
+    unreadable = []
+    chunks = list(runs.read_log_files(directory, unreadable))
+    chunks.extend(b"<unreadable log: %s>" % name.encode("utf-8", errors="replace")
+                  for name in unreadable)
     return b"\n".join(chunks) if chunks else None
 
 

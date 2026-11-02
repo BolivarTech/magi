@@ -1777,41 +1777,76 @@ def _read_bounded(root, paths, refused, identities=None) -> list:
     return kept
 
 
-def read_log_files(directory, unreadable):
+#: The largest file :func:`read_log_files` reads from a log directory that is
+#: read whole. The product writes one file per day, a few hundred KB in the
+#: harness's environment; a file this large means a faulty or hostile product.
+MAX_ENVIRONMENT_LOG_FILE_BYTES = 64 * 1024 * 1024
+
+#: The most bytes one :func:`read_log_files` walk yields, over all files.
+#: Holds the environment's whole history many times over, and at least one
+#: file of :data:`MAX_ENVIRONMENT_LOG_FILE_BYTES`.
+MAX_ENVIRONMENT_LOG_TOTAL_BYTES = 256 * 1024 * 1024
+
+
+def read_log_files(directory, unreadable, offsets=None):
     """Yield the bytes of each regular file under *directory*, in sorted path order, never through a link.
 
     For a log directory that is read whole, such as the persistent
     environment's ``.magi/logs`` (:func:`smoke.logs.scan`): the walk is
     :func:`_regular_files_without_links` and each file is opened by
     :func:`_open_listed`, so a link, a hard link or a file swapped after the
-    listing is named, never read. Unlike the review-log capture, no byte cap
-    applies: that directory is the environment's whole history, and a cap
-    would turn a long-lived environment into a scenario that cannot test.
-    The walk's entry cap (:data:`MAX_REVIEW_LOG_ENTRIES`) does apply, and a
-    directory past it is named in *unreadable*.
+    listing is named, never read. The walk's entry cap
+    (:data:`MAX_REVIEW_LOG_ENTRIES`) applies, and a directory past it is
+    named in *unreadable*.
 
     MAGI FIX (S6 loop 28): ``smoke.logs.scan`` walked with ``rglob`` and read
     with ``read_bytes``, both of which follow a link (F1a1-melchior, the
     defect the review-log capture was fixed for).
 
+    MAGI FIX (S6 loop 29): each file was read whole with no bound, so one huge
+    file a faulty product wrote under the persistent directory exhausted the
+    harness before a scenario could report it (F1a1b-melchior). A file is
+    read only up to :data:`MAX_ENVIRONMENT_LOG_FILE_BYTES`, and the walk
+    yields at most :data:`MAX_ENVIRONMENT_LOG_TOTAL_BYTES`; a file past
+    either is named (:data:`OVER_FILE_CAP`, :data:`OVER_TOTAL_CAP`) and not
+    yielded. Both caps sit far above what the environment writes, so a
+    healthy one is read whole.
+
+    Complexity: ``O(bytes yielded)``, one file of at most
+    :data:`MAX_ENVIRONMENT_LOG_FILE_BYTES` held at a time.
+
     Args:
         directory: The directory to read.
         unreadable: A list that receives ``"<path> (<why>)"``, *path*
             relative to *directory*, for each entry left out or file that
-            could not be read.
+            could not be read or was over a cap.
+        offsets: For a file it names (by its path under *directory*, as
+            :func:`_regular_files_without_links` builds it), where the read
+            starts: the bytes before it are skipped and not counted. ``None``
+            reads every file from its start.
 
     Yields:
-        bytes: Each file's contents.
+        bytes: Each file's contents from its offset.
     """
-    identities = {}
+    identities, spent = {}, 0
     files = _regular_files_without_links(directory, unreadable, identities)
     for path in files:
+        limit = min(MAX_ENVIRONMENT_LOG_FILE_BYTES,
+                    MAX_ENVIRONMENT_LOG_TOTAL_BYTES - spent)
         try:
             with _open_listed(path, identities[path]) as handle:
-                data = handle.read()
+                handle.seek((offsets or {}).get(path, 0))
+                data = _read_at_most(handle, limit)
         except OSError as exc:
             unreadable.append("%s (%s)" % (_name_under(directory, path), exc))
             continue
+        if len(data) > limit:
+            why = (OVER_FILE_CAP % MAX_ENVIRONMENT_LOG_FILE_BYTES
+                   if limit == MAX_ENVIRONMENT_LOG_FILE_BYTES
+                   else OVER_TOTAL_CAP % MAX_ENVIRONMENT_LOG_TOTAL_BYTES)
+            unreadable.append("%s (%s)" % (_name_under(directory, path), why))
+            continue
+        spent += len(data)
         yield data
 
 
