@@ -1377,5 +1377,38 @@ class RequestLogTests(unittest.TestCase):
         self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
 
 
+class ModelCounterShutdownTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 25, F1a1-caspar] a request still waiting to be accepted at shutdown is counted.
+
+    ``serve_forever`` stops as soon as shutdown is requested, even with a connection ready to accept, so a
+    request the product sent just before it exited (or was killed) stayed in the listen backlog, was dropped
+    by ``server_close`` and never counted: a refusal run that paid for a model could pass.
+    """
+
+    def test_a_request_left_in_the_backlog_at_shutdown_is_still_counted(self) -> None:
+        import http.server
+        import socket
+        import time
+        real_serve = http.server.ThreadingHTTPServer.serve_forever
+
+        def serve_after_shutdown_is_requested(server, poll_interval=0.5):
+            # Hold the loop until shutdown is requested, so the request below is never accepted by it.
+            deadline = time.monotonic() + 30
+            while not server._BaseServer__shutdown_request and time.monotonic() < deadline:
+                time.sleep(0.01)
+            real_serve(server, poll_interval)
+
+        with mock.patch.object(http.server.ThreadingHTTPServer, "serve_forever",
+                               serve_after_shutdown_is_requested):
+            with runs.model_counter() as (url, log):
+                port = int(url.rsplit(":", 1)[1].split("/", 1)[0])
+                client = socket.create_connection(("127.0.0.1", port))
+                client.sendall(b"POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+                client.shutdown(socket.SHUT_WR)
+            client.close()
+        self.assertEqual(1, log.past_the_probe_total)
+        self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
+
+
 if __name__ == "__main__":
     unittest.main()
