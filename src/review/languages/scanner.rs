@@ -721,7 +721,7 @@ impl CodeScanner {
                         let literal = if self.rules.multichar_literals {
                             !is_digit_separator(&chars, i) && multichar_literal_closes(&chars, i)
                         } else {
-                            self.is_char_literal(&chars, i)
+                            rust_char_literal_len(&chars, i).is_some()
                         };
                         if literal {
                             last_code = Some(STRING_MARK);
@@ -1113,40 +1113,57 @@ impl CodeScanner {
             None
         }
     }
+}
 
-    /// Heuristic to distinguish character literal `'x'` from Rust lifetime `'a`.
-    ///
-    /// Returns `true` if this looks like a char literal, `false` for lifetime.
-    fn is_char_literal(&self, chars: &[char], i: usize) -> bool {
-        let len = chars.len();
-        // Need at least 3 chars: 'x' (quote, char, quote)
-        if i + 2 >= len {
-            return false;
-        }
+/// The most characters a Rust char literal spans, both quotes included: the opening quote, the
+/// backslash, the escape body and the closing quote ([`MAX_CHAR_ESCAPE_CHARS`] after the
+/// backslash). A caller reading a literal out of a longer text needs only that many characters
+/// from its quote ([`rust_char_literal_len`]).
+pub(crate) const RUST_CHAR_LITERAL_MAX_CHARS: usize = 2 + MAX_CHAR_ESCAPE_CHARS;
 
-        let next = char_at(chars, i + 1);
-
-        // Escaped char: '\n', '\\', '\'', and the multi-char escapes '\x00', '\012', '\u{1F600}'.
-        // MAGI FIX (S6 loop 3): the closing quote may sit up to MAX_CHAR_ESCAPE_CHARS after the
-        // backslash, with only escape-body chars between; a lifetime never follows a backslash.
-        // MAGI FIX (loop 26, 2): `_` was no escape-body char, though Rust allows it between the
-        // digits of a unicode escape (`'\u{1_0}'`), so the quote opened no char literal.
-        if next == '\\' {
-            return ((i + 3)..len.min(i + 3 + MAX_CHAR_ESCAPE_CHARS))
-                .map(|k| char_at(chars, k))
-                .take_while(|&c| {
-                    c == '\'' || c.is_ascii_alphanumeric() || matches!(c, '{' | '}' | '_')
-                })
-                .any(|c| c == '\'');
-        }
-        // Simple char: 'a'
-        if char_at(chars, i + 2) == '\'' {
-            return true;
-        }
-
-        // Otherwise it's a lifetime or label
-        false
+/// Heuristic to distinguish a Rust character literal `'x'` from a lifetime `'a`: the number of
+/// characters of the char literal whose opening quote is at `i`, both quotes included, or
+/// `None` when the quote opens a lifetime or a label (no closing quote where a literal's would
+/// be). Shared by the scanner and the brace family's attribute reader
+/// (`brace_family::lexical::rust_attribute_end`), so both read one rule. O(1): at most
+/// [`RUST_CHAR_LITERAL_MAX_CHARS`] characters are looked at.
+///
+/// # Arguments
+///
+/// * `chars` - The line's characters.
+/// * `i` - The index of a `'` in `chars`.
+///
+/// # Returns
+///
+/// The literal's length in characters, or `None`.
+pub(crate) fn rust_char_literal_len(chars: &[char], i: usize) -> Option<usize> {
+    let len = chars.len();
+    // Need at least 3 chars: 'x' (quote, char, quote)
+    if i + 2 >= len {
+        return None;
     }
+
+    let next = char_at(chars, i + 1);
+
+    // Escaped char: '\n', '\\', '\'', and the multi-char escapes '\x00', '\012', '\u{1F600}'.
+    // MAGI FIX (S6 loop 3): the closing quote may sit up to MAX_CHAR_ESCAPE_CHARS after the
+    // backslash, with only escape-body chars between; a lifetime never follows a backslash.
+    // MAGI FIX (loop 26, 2): `_` was no escape-body char, though Rust allows it between the
+    // digits of a unicode escape (`'\u{1_0}'`), so the quote opened no char literal.
+    if next == '\\' {
+        return ((i + 3)..len.min(i + 3 + MAX_CHAR_ESCAPE_CHARS))
+            .map(|k| char_at(chars, k))
+            .take_while(|&c| c == '\'' || c.is_ascii_alphanumeric() || matches!(c, '{' | '}' | '_'))
+            .position(|c| c == '\'')
+            .map(|at| at + 4);
+    }
+    // Simple char: 'a'
+    if char_at(chars, i + 2) == '\'' {
+        return Some(3);
+    }
+
+    // Otherwise it's a lifetime or label
+    None
 }
 
 /// Keywords after which a `/` starts a regular expression, not a division (`return /x/`).

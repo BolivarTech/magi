@@ -6,6 +6,7 @@
 //! names, keyword and modifier stripping, C and Rust attribute skipping, and construct naming.
 
 use super::*;
+use crate::review::languages::scanner::{rust_char_literal_len, RUST_CHAR_LITERAL_MAX_CHARS};
 
 /// The 1-based line number of the 0-based line `idx`.
 ///
@@ -907,8 +908,10 @@ const BYTE_STRING_PREFIX: char = 'b';
 ///
 /// A `"` string is read past, a `\` escaping the next character in it, and so is a raw string
 /// (`r"..."`, `r#"a"b"#`, `br"..."`), which ends only at a `"` followed by as many `#` as it
-/// opened with, so a quote or bracket inside one counts nothing. A `'` is no quote, since it may
-/// open a lifetime (`T: 'a`), which has no closing quote. An `r` inside an identifier
+/// opened with, so a quote or bracket inside one counts nothing. A `'` opens a char literal only
+/// where one closes, by the scanner's rule ([`rust_char_literal_len`]): `']'` and `'\''` hide
+/// their characters, and a lifetime (`T: 'a`), which has no closing quote, stays plain text. An
+/// `r` inside an identifier
 /// (`for"x"`) opens no raw string. A string that never closes makes the result `None`, and the
 /// caller keeps its text as it was. O(n) in the text: each character is read once.
 ///
@@ -942,6 +945,21 @@ pub(super) fn rust_attribute_end(text: &str) -> Option<usize> {
                 at = quoted_end(text, after)?;
                 previous = [Some('"'), None];
                 continue;
+            }
+            // MAGI FIX (loop 29, B2b1b): the `]` of a char literal (`#[doc = ']']`) closed the
+            // attribute, so the item after it on the line was no construct.
+            '\'' => {
+                let window: Vec<char> = text
+                    .get(at..)
+                    .unwrap_or("")
+                    .chars()
+                    .take(RUST_CHAR_LITERAL_MAX_CHARS)
+                    .collect();
+                if let Some(len) = rust_char_literal_len(&window, 0) {
+                    at += window.iter().take(len).map(|c| c.len_utf8()).sum::<usize>();
+                    previous = [Some('\''), None];
+                    continue;
+                }
             }
             '[' => depth = depth.saturating_add(1),
             ']' => {
