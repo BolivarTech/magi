@@ -380,7 +380,10 @@ scrubbed spawn in `src/system/review_git.rs`), none of which changes what that q
 (`NEVER_REVIEWED`, `MEMORY_DB_PREFIX` and the trailing-`.`/space trim and ASCII case fold of
 `is_never_reviewed` in `src/review/source.rs`, which `same_product_name` copies), among others) and fails when a copy or a pattern no
 longer matches, so a wording or constant change in the product shows up in the harness's own tests, not
-as an unexplained `FAIL` at SMOKE time.
+as an unexplained `FAIL` at SMOKE time. Every presence check goes through `smoke/tests/rust_source.py`,
+which reads only code lines (a line starting with `//` is skipped) and requires exactly one match, so
+an old value left in a `///` comment above a changed constant cannot answer for it, and a second
+definition fails the test instead of passing unnoticed.
 
 **How the input exists.** A review reads files from disk, and the product leaves out whatever
 `.gitignore` excludes when it reviews a directory inside a git repository. The environment's own
