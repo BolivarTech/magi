@@ -5371,4 +5371,53 @@ int g(void) {
             assert_eq!(sorted_spans(&ext, code), expected, "{code}");
         }
     }
+
+    #[test]
+    fn loop_29_shapes_checked_without_a_defect_keep_their_units() {
+        // [MAGI loop 29, B2b1a/B2b1b] checked, no defect: generator declarations in every form,
+        // a return type literal after a parameter typed with nested parentheses, a `(` inside a
+        // default argument's string before the one that holds the brace, and a class under a
+        // decorator whose object argument wraps over lines, which splits at its methods.
+        let f = |end| vec![unit("f", UnitKind::Function, 1, end)];
+        for (ext, code, expected) in [
+            (
+                BraceFamilyExtractor::javascript(),
+                "async function* g1() {\n    yield 1;\n}\nexport function* g2() {\n    yield 2;\n}\nexport async function* g3() {\n    yield 3;\n}\n",
+                vec![
+                    unit("g1", UnitKind::Function, 1, 3),
+                    unit("g2", UnitKind::Function, 4, 6),
+                    unit("g3", UnitKind::Function, 7, 9),
+                ],
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "function f(g: (x: T)): {\n    a: number;\n} {\n    return {a: 1};\n}\n",
+                f(5),
+            ),
+            (
+                BraceFamilyExtractor::cpp(),
+                "[[deprecated(\"(\")]] void f(int x = {\n    1}) {\n    body();\n}\n",
+                f(4),
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "function f(s = \"(\", o = {\n    a: 1}) {\n    body();\n}\n",
+                f(4),
+            ),
+        ] {
+            assert_eq!(sorted_spans(&ext, code), expected, "{code}");
+        }
+        let ext = BraceFamilyExtractor::typescript();
+        let code = "@Component({\n    selector: 'x',\n})\nexport class C {\n    a() {\n        x();\n    }\n}\n";
+        let class = extract(&ext, code, &every_line(code));
+        assert_eq!(spans(&class), vec![("C", UnitKind::Class, 1, 8)]);
+        assert_eq!(
+            spans(&ext.split_block(class.first().expect("the class is a unit"))),
+            vec![
+                ("C", UnitKind::Class, 1, 4),
+                ("a", UnitKind::Method, 5, 7),
+                ("C", UnitKind::Class, 8, 8),
+            ]
+        );
+    }
 }

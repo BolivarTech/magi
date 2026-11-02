@@ -1799,4 +1799,21 @@ def g():
             spans(&units)
         );
     }
+
+    #[test]
+    fn a_bare_comparison_at_module_level_is_no_assignment() {
+        // [MAGI loop 29, B2b2] checked, no defect: `has_top_level_assignment` passes over the
+        // two characters of `==`, so `a==b` (a bare expression statement) opens no declaration
+        // group and stays in a gap unit, while `x = 1` after it is one.
+        let units = extract("a==b\nx = 1\n", &[1, 2]);
+        let mut found = spans(&units);
+        found.sort_by_key(|s| s.2);
+        assert_eq!(
+            found,
+            vec![
+                ("lines 1-1", UnitKind::TopLevel, 1, 1),
+                ("x", UnitKind::DeclarationGroup, 2, 2),
+            ]
+        );
+    }
 }

@@ -2531,4 +2531,48 @@ void h() {
             "g ends at the last closing brace"
         );
     }
+
+    #[test]
+    fn a_prefixed_cpp_char_literal_hides_its_brace() {
+        // [MAGI loop 29, B2a] checked, no defect: `is_digit_separator` reads the first character
+        // of the word before the quote (`.rev()` then `.last()`), `u` in `u8'{'`, a letter, so
+        // the quote opens a literal and its brace is not counted; `1'000` stays a separator.
+        let results = CodeScanner::new(LexicalRules::cpp())
+            .scan_all("char c = u8'{';\nchar d = L'}';\nint x = 1'000;\nint f() {\n}\n");
+        let deltas: Vec<i32> = results.iter().map(|r| r.brace_delta).collect();
+        assert_eq!(deltas, vec![0, 0, 0, 1, -1]);
+    }
+
+    #[test]
+    fn ends_statement_reads_the_last_code_character_only() {
+        // [MAGI loop 29, B2a] the field had no test of its own: a `;` closes a statement, while
+        // one inside a trailing comment or a string, or a line ending in a brace, does not.
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(
+            "int x = 1;\nint f(void) // note;\nchar *s = \"a;\"\nint g(void) {\nint y = 2; // done\n",
+        );
+        let ends: Vec<bool> = results.iter().map(|r| r.ends_statement).collect();
+        assert_eq!(ends, vec![true, false, false, false, true]);
+    }
+
+    #[test]
+    fn a_conditional_whose_first_branch_opens_an_unclosed_body_keeps_it_open() {
+        // [MAGI loop 29, B2a] checked, declared: under `FOO` the body of `f` never closes, so
+        // the code is valid only with `FOO` undefined, and the first branch decides the depth
+        // after `#endif` (the declared limit): `f` runs on, no line lost. Reading a restoring
+        // directive as a close would end the valid both-branches-open form at its `#else`.
+        let unclosed = "#if FOO\nint f() {\n#else\nint f();\n#endif\nint g() {\n    return 1;\n}\n";
+        let results = CodeScanner::new(LexicalRules::cpp()).scan_all(unclosed);
+        assert_eq!(
+            find_closing_brace(&results, 1),
+            7,
+            "f runs to the last line"
+        );
+        let both_open = "#if FOO\nint f(int a) {\n#else\nint f(void) {\n#endif\n    return 0;\n}\n";
+        let results = CodeScanner::new(LexicalRules::cpp()).scan_all(both_open);
+        assert_eq!(
+            find_closing_brace(&results, 1),
+            6,
+            "f closes at its own brace"
+        );
+    }
 }
