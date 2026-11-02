@@ -4976,4 +4976,79 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_construct_on_the_line_closing_a_wrapped_attribute_keeps_the_attribute() {
+        // [MAGI loop 28, B2b1a, and its sweep] a construct on the line that closes a template
+        // header or an attribute wrapped from the lines above (`typename U> class Box {`,
+        // `}) export class C {`, `Debug)] struct S {`) matched no keyword, since the line opens
+        // with the attribute's tail: the construct fell into gap units and a large class did
+        // not split at its methods.
+        let class_box = "template <typename T,\n          typename U> class Box {\n    void m() {\n        x();\n    }\n};\nint g() {\n}\n";
+        assert_eq!(
+            sorted_spans(&BraceFamilyExtractor::cpp(), class_box),
+            vec![
+                unit("Box", UnitKind::Class, 1, 6),
+                unit("g", UnitKind::Function, 7, 8),
+            ]
+        );
+        assert!(spans(&split(
+            &BraceFamilyExtractor::cpp(),
+            class_box,
+            4,
+            UnitKind::Class
+        ))
+        .contains(&("m", UnitKind::Method, 3, 5)));
+        for (ext, code, expected) in [
+            (
+                BraceFamilyExtractor::cpp(),
+                "template <typename T,\n          typename U> struct Box : Base<T> {\n    T t;\n};\nint g() {\n}\n",
+                vec![
+                    unit("Box", UnitKind::Struct, 1, 4),
+                    unit("g", UnitKind::Function, 5, 6),
+                ],
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "@Component({\n    selector: 'x',\n}) export class C {\n    m() {\n        x();\n    }\n}\nfunction g() {\n}\n",
+                vec![
+                    unit("C", UnitKind::Class, 1, 7),
+                    unit("g", UnitKind::Function, 8, 9),
+                ],
+            ),
+            (
+                BraceFamilyExtractor::java(),
+                "@SuppressWarnings({\n    \"unchecked\"}) public class C {\n    void m() {\n        x();\n    }\n}\n",
+                vec![unit("C", UnitKind::Class, 1, 6)],
+            ),
+            (
+                BraceFamilyExtractor::rust(),
+                "#[derive(\n    Debug)] struct S {\n    a: u8,\n}\nfn g() {\n}\n",
+                vec![
+                    unit("S", UnitKind::Struct, 1, 4),
+                    unit("g", UnitKind::Function, 5, 6),
+                ],
+            ),
+        ] {
+            assert_eq!(sorted_spans(&ext, code), expected, "{code}");
+        }
+        // A method under an annotation whose arguments close on the method's line.
+        let java = "class C {\n    @Ann(\n        x = 1) void m() {\n        y();\n    }\n}\n";
+        assert!(
+            spans(&split(
+                &BraceFamilyExtractor::java(),
+                java,
+                4,
+                UnitKind::Class
+            ))
+            .contains(&("m", UnitKind::Method, 2, 5)),
+            "{:?}",
+            spans(&split(
+                &BraceFamilyExtractor::java(),
+                java,
+                4,
+                UnitKind::Class
+            ))
+        );
+    }
 }
