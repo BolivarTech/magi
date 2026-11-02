@@ -1649,4 +1649,47 @@ def g():
             );
         }
     }
+
+    #[test]
+    fn a_comment_line_ends_a_declaration_group_and_never_becomes_a_statement_piece() {
+        // [MAGI loop 27, B2b2] declared green, a false positive: an unindented comment ends an
+        // import or assignment group (`find_import_group_end`, `find_assignment_group_end`), and
+        // a comment inside a statement's brackets continues that statement, so no comment-only
+        // line is ever a statement piece of `split_declaration_group`.
+        let code = "import a\n# c\nimport b\n\nX = 1\n# d\nY = 2\n";
+        assert_eq!(
+            spans(&extract(code, &[1, 3, 5, 7])),
+            vec![
+                ("imports", UnitKind::DeclarationGroup, 1, 1),
+                ("imports", UnitKind::DeclarationGroup, 3, 3),
+                ("X", UnitKind::DeclarationGroup, 5, 5),
+                ("Y", UnitKind::DeclarationGroup, 7, 7),
+            ]
+        );
+        let units = extract("A = 1\nB = (\n    # c\n    2,\n)\n", &[1]);
+        let parts = PythonExtractor.split_block(&units[0]);
+        assert_eq!(
+            parts
+                .iter()
+                .map(|u| (u.start_line, u.end_line))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn two_backslashes_ending_a_line_outside_a_string_lose_no_line() {
+        // [MAGI loop 27, B2b2] declared green, a false positive: outside a string Python accepts
+        // a `\` only right before the newline, so `x = 1 \\` is a syntax error (CPython:
+        // "unexpected character after line continuation character") and counting the parity of
+        // the run would change no valid file. On such a line every line still lands in one unit.
+        let code = "x = 1 \\\\\ndef f():\n    pass\n\ndef g():\n    return 2\n";
+        let units = extract(code, &[1, 2, 3, 4, 5, 6]);
+        assert_each_line_in_one_unit(&units, 6);
+        assert!(
+            spans(&units).contains(&("g", UnitKind::Function, 5, 6)),
+            "{:?}",
+            spans(&units)
+        );
+    }
 }
