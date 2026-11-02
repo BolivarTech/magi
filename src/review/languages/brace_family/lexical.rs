@@ -697,7 +697,9 @@ pub(super) fn c_attribute_prefixes() -> Vec<String> {
 ///
 /// The line without its attributes, borrowed when it holds none.
 pub(super) fn strip_c_attributes(text: &str) -> Cow<'_, str> {
-    if !text.contains("[[") && !C_ATTRIBUTE_WORDS.iter().any(|w| text.contains(w)) {
+    if !text.contains(STANDARD_ATTRIBUTE_OPEN)
+        && !C_ATTRIBUTE_WORDS.iter().any(|w| text.contains(w))
+    {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len());
@@ -721,7 +723,7 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
         let word_starts = previous.is_none_or(|p| !is_identifier_char(p));
         previous = Some(c);
         let rest = text.get(at..).unwrap_or("");
-        if rest.starts_with("[[") {
+        if rest.starts_with(STANDARD_ATTRIBUTE_OPEN) {
             return balanced_end(rest, '[', ']').map(|end| (at, at + end));
         }
         if !word_starts {
