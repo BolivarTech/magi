@@ -88,7 +88,10 @@ impl BraceSearch<'_> {
 /// `void f(struct {`) is a parameter's too when the line closing the list opens one after its
 /// lowest point (`}) {`, [`brace_after_parameter_list`]); when that line opens none (a call
 /// passing a callback, `describe('x', () => {` ... `});`, which reads as a signature) line `i`'s
-/// brace is kept, so the call keeps its block. Any other brace on a later parameter line is taken
+/// brace is kept, so the call keeps its block. A brace line `i` ends with in its return type
+/// (`function f(): {`, `): Promise<{`, `func f() struct {`, [`opens_return_type_literal`]) is the
+/// type's too, and the body's is found the same way after the type closes
+/// ([`brace_after_return_type_literal`]). Any other brace on a later parameter line is taken
 /// for the construct's, declared: the construct ends at that brace's match, and the rest of its
 /// body falls into later units. No line is lost: every line stays in exactly one unit, so the
 /// body is still reviewed, only split from its signature.
@@ -128,6 +131,14 @@ pub(super) fn open_brace_line(
         // the signature's first brace, so the function ended where that block closed (`}) {`).
         if group_open(i) > 0 {
             return Some(brace_after_parameter_list(lines, scanned, i, search).unwrap_or(i));
+        }
+        // MAGI FIX (loop 28 sweep): the brace of a return type's literal block
+        // (`function f(): {`, `func f() struct {`) was the body's, and the body fell into a gap.
+        if lines
+            .get(i)
+            .is_some_and(|l| opens_return_type_literal(l.trim()))
+        {
+            return Some(brace_after_return_type_literal(lines, scanned, i, search).unwrap_or(i));
         }
         return Some(i);
     }
@@ -260,21 +271,97 @@ fn brace_after_parameter_list(
         }
         open += code_group_delta(scanned, j);
         if open <= 0 {
-            let record = scanned.get(j)?;
-            if record.brace_delta > record.min_delta {
-                return Some(j);
-            }
-            // MAGI FIX (loop 26, 4): an Allman brace on the line after `})` was never looked at,
-            // so the body of `function f(opts: {` ... `})` then `{` fell into a gap unit.
-            let next = j + 1;
-            let allman = !record.ends_statement
-                && scanned.get(next).is_some_and(|s| !s.is_non_code)
-                && lines
-                    .get(next)
-                    .is_some_and(|l| l.trim_start().starts_with('{'))
-                && search.spend();
-            return allman.then_some(next);
+            return body_brace_from(lines, scanned, j, search);
         }
+    }
+    None
+}
+
+/// The 0-based line holding a function's opening brace, given line `j`, where what kept the brace
+/// of line `i` from being the body's (a parameter list, a return type's literal block) closes:
+/// line `j` itself when it opens a brace after its lowest point (`}) {`, `} {`, `}> {`,
+/// `} => {`), else the next line when line `j` ends no statement and the next line is code
+/// opening with an Allman `{`. `None` otherwise (`});`, `};`), so the caller keeps line `i`'s
+/// brace. Looking at the next line spends one visit of the pass ([`SearchBudget`]). O(1).
+fn body_brace_from(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    j: usize,
+    search: &BraceSearch<'_>,
+) -> Option<usize> {
+    let record = scanned.get(j)?;
+    if record.brace_delta > record.min_delta {
+        return Some(j);
+    }
+    // MAGI FIX (loop 26, 4): an Allman brace on the line after `})` was never looked at,
+    // so the body of `function f(opts: {` ... `})` then `{` fell into a gap unit.
+    // MAGI FIX (loop 28, B2b1b): the look at the next line was charged only when it found a
+    // brace; every look is charged now.
+    let next = j + 1;
+    let allman = !record.ends_statement
+        && search.spend()
+        && scanned.get(next).is_some_and(|s| !s.is_non_code)
+        && lines
+            .get(next)
+            .is_some_and(|l| l.trim_start().starts_with('{'));
+    allman.then_some(next)
+}
+
+/// What the text before the `{` a TypeScript signature line ends with may end in when that brace
+/// opens an object type in the return type, not the body: the annotation's `:`
+/// (`function f(): {`), a type argument (`): Promise<{`, `): Map<K, {`), a union or an
+/// intersection (`): A | {`, `): A & {`).
+const RETURN_TYPE_POSITION_ENDS: [char; 5] = [':', '<', ',', '|', '&'];
+
+/// The Go keywords whose `{` after a function's parameter list opens an anonymous type in its
+/// result (`func f() struct {`), not the body.
+const GO_RESULT_TYPE_LITERALS: [&str; 2] = ["struct", "interface"];
+
+/// Whether the `{` a trimmed signature line ends with opens a literal type in the function's
+/// return type rather than its body: after the line's last `)` comes a TypeScript annotation
+/// (`:`) and the text before the brace ends in a type position ([`RETURN_TYPE_POSITION_ENDS`]),
+/// or a Go anonymous type keyword alone ([`GO_RESULT_TYPE_LITERALS`]). The `:` rules out a C++
+/// ref-qualifier (`void f() & {`) and a constructor's initializer list (`S() : a_{`), whose brace
+/// is a body or an initializer. A comment after the brace hides it, declared: the line then
+/// reads as opening the body, as before this rule. O(n) in the line.
+fn opens_return_type_literal(trimmed: &str) -> bool {
+    let Some(before) = trimmed.strip_suffix('{').map(str::trim_end) else {
+        return false;
+    };
+    let Some((_, after_list)) = before.rsplit_once(')') else {
+        return false;
+    };
+    let after_list = after_list.trim();
+    (after_list.starts_with(':') && before.ends_with(RETURN_TYPE_POSITION_ENDS))
+        || GO_RESULT_TYPE_LITERALS.contains(&after_list)
+}
+
+/// The 0-based line holding the body's brace of a function whose line `i` ends in a return
+/// type's literal block ([`opens_return_type_literal`]): the line where the braces line `i`
+/// leaves open all close, read as [`body_brace_from`] reads it. `None` when that line opens no
+/// body (a method signature with no body, `};`), when no line closes them within
+/// [`MAX_BRACE_SEARCH_LINES`] lines, or when the pass's budget is spent ([`SearchBudget`]); the
+/// caller then keeps line `i`'s brace, as before this rule. O(k) for the k lines walked.
+fn brace_after_return_type_literal(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    i: usize,
+    search: &BraceSearch<'_>,
+) -> Option<usize> {
+    let end = i
+        .saturating_add(1)
+        .saturating_add(MAX_BRACE_SEARCH_LINES)
+        .min(scanned.len());
+    let mut open = i64::from(scanned.get(i)?.brace_delta);
+    for j in (i + 1)..end {
+        if !search.spend() {
+            return None;
+        }
+        let record = scanned.get(j)?;
+        if open + i64::from(record.min_delta) <= 0 {
+            return body_brace_from(lines, scanned, j, search);
+        }
+        open += i64::from(record.brace_delta);
     }
     None
 }
