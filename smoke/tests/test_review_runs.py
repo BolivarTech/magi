@@ -66,8 +66,13 @@ class ReviewInputTests(unittest.TestCase):
         self.assertEqual(runs.review_input_files(), runs.review_input_files())
 
     def test_every_generated_function_name_is_unique(self) -> None:
-        names = [line for _, body in runs.review_input_files()
+        # [MAGI §6 MS2 loop 27, F1b1-melchior] whole declaration lines were compared, so one name declared
+        # twice with different parameters passed; the identifier is what must not repeat.
+        import re
+        lines = [line for _, body in runs.review_input_files()
                  for line in body.decode().splitlines() if line.startswith("pub fn ")]
+        names = [re.match(r"pub fn ([A-Za-z_][A-Za-z0-9_]*)\(", line).group(1) for line in lines]
+        self.assertTrue(names)
         self.assertEqual(len(names), len(set(names)))
 
     def test_the_generated_files_are_the_declared_paths(self) -> None:
