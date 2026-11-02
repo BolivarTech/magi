@@ -1839,6 +1839,15 @@ MODEL_COUNTER_MAX_RECORDED = 64
 #: the per-read timeout leaves a well-behaved request far more than it needs.
 MODEL_COUNTER_CONNECTION_DEADLINE_S = 2 * ERROR_BACKEND_TIMEOUT_S
 
+#: The longest request line the counter parses, the limit
+#: ``BaseHTTPRequestHandler`` applies; a longer one is recorded unparsed.
+MAX_REQUEST_LINE_BYTES = 65536
+
+#: How the counter records a connection whose request line did not parse (or
+#: whose path did not split as a URL). Its path is in no probe list, so it
+#: always counts as a request past the probe.
+UNPARSED_REQUEST = ("UNPARSED", "<request line that did not parse>")
+
 
 class RequestLog:
     """A bounded, thread-safe record of the requests :func:`model_counter` saw.
@@ -1949,9 +1958,70 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
         self._deadline.cancel()
         super().finish()
 
+    def handle_one_request(self) -> None:
+        """Read one request, record it whatever its shape, and answer it.
+
+        MAGI FIX (S6 loop 28): the request was recorded from the ``do_*``
+        methods, so a method the handler does not implement (``OPTIONS``,
+        ``TRACE``, an unknown verb) got the base class's 501, and a malformed
+        or over-long request line its 400 or 414, all unrecorded: a refusal
+        run whose product sent one passed (F1a1-melchior). Every connection
+        that carries a byte now leaves exactly one record, by method and path
+        when the request line parsed and as :data:`UNPARSED_REQUEST` when it
+        did not; every method is answered alike.
+        """
+        try:
+            carried = self.rfile.peek(1)[:1]
+        except OSError:
+            carried = b""
+        if not carried:
+            self.close_connection = True
+            return
+        self.command = self.path = None
+        try:
+            self.raw_requestline = self.rfile.readline(MAX_REQUEST_LINE_BYTES + 1)
+        except OSError:
+            self.server.log.record(*UNPARSED_REQUEST)
+            self.close_connection = True
+            return
+        parsed = False
+        try:
+            if len(self.raw_requestline) <= MAX_REQUEST_LINE_BYTES:
+                parsed = self.parse_request()
+        except OSError:
+            parsed = False
+        finally:
+            self.server.log.record(*self._parsed_key())
+        if not parsed:
+            self.close_connection = True
+            return
+        self._answer()
+        try:
+            self.wfile.flush()
+        except OSError:
+            self.close_connection = True
+
+    def _parsed_key(self) -> tuple[str, str]:
+        """The ``(method, path)`` of the request just parsed, or :data:`UNPARSED_REQUEST`.
+
+        ``parse_request`` sets the method and the path together, so a method
+        means the path is this request's. The path is kept without its query,
+        and a path that does not split as a URL is kept as unparsed rather
+        than raw: the authority of an absolute-form target may hold a
+        credential.
+
+        Returns:
+            tuple[str, str]: What :meth:`RequestLog.record` takes.
+        """
+        if not self.command or self.path is None:
+            return UNPARSED_REQUEST
+        try:
+            return self.command, urllib.parse.urlsplit(self.path).path
+        except ValueError:
+            return self.command, UNPARSED_REQUEST[1]
+
     def _answer(self) -> None:
-        """Record this request, drain its body and answer it unavailable."""
-        self.server.log.record(self.command, urllib.parse.urlsplit(self.path).path)
+        """Drain this request's body and answer it unavailable."""
         try:
             left = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -1970,8 +2040,6 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
             # The deadline cut the connection, or the client hung up: the
             # request is recorded, and there is nobody left to answer.
             self.close_connection = True
-
-    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = _answer
 
     def log_message(self, fmt: str, *args) -> None:
         """Swallow the access log, as :class:`_EchoingHandler` does.
