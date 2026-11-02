@@ -2352,4 +2352,20 @@ void h() {
         let results = scanner.scan_all("    f('\\u{1_0}','{');");
         assert_eq!(results[0].brace_delta, 0);
     }
+
+    #[test]
+    fn a_brace_closed_inside_a_template_expression_ends_no_block() {
+        // [MAGI loop 27, B2a] the `}` closing a brace nested in a `${...}` expression left
+        // `ends_block` true when it ended the line, although no brace of the expression is
+        // structure; the `}` that ends the expression already counted as template text.
+        let mut scanner = CodeScanner::new(LexicalRules::javascript());
+        let r = scanner.scan_all("const s = `${ f({a: 1}\n) }`;\nfunction g() {\n}\n");
+        assert_eq!(
+            r.iter().map(|l| l.ends_block).collect::<Vec<_>>(),
+            vec![false, false, false, true]
+        );
+        let mut scanner = CodeScanner::new(LexicalRules::javascript());
+        let r = scanner.scan_all("const s = `${ {a: 1}\n}`;\n");
+        assert!(!r[0].ends_block);
+    }
 }
