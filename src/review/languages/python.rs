@@ -1515,4 +1515,36 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn a_soft_keyword_used_as_a_name_is_an_assignment_and_its_statement_is_not() {
+        // [MAGI loop 27, B2b2] `match` and `case` are soft keywords (Python 3.10): they name a
+        // variable as legally as any word, so `match = 1` (which CPython parses) was an orphan
+        // gap unit instead of a declaration group. A `match` statement is still none.
+        for line in [
+            "match = 1",
+            "case = 2",
+            "match: int = 1",
+            "match[0] = 1",
+            "case += 1",
+        ] {
+            assert!(is_module_assignment(line), "{line}");
+        }
+        for line in [
+            "match x:",
+            "match (a, b):",
+            "case _:",
+            "match x:  # note = 1",
+        ] {
+            assert!(!is_module_assignment(line), "{line}");
+        }
+        let code = "match = 1\ncase = 2\n\ndef f():\n    return match\n";
+        assert_eq!(
+            spans(&extract(code, &[1, 2, 5])),
+            vec![
+                ("match", UnitKind::DeclarationGroup, 1, 2),
+                ("f", UnitKind::Function, 4, 5),
+            ]
+        );
+    }
 }
