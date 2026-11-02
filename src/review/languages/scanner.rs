@@ -2208,4 +2208,20 @@ void h() {
             assert_eq!(scanner.scan_line(1, line).brace_delta, delta, "{line}");
         }
     }
+
+    #[test]
+    fn a_conditional_after_a_closed_block_comment_is_still_a_conditional() {
+        // [MAGI B2a 6] a block comment before the `#` (`/* c */ #ifdef X`, valid C: a comment
+        // is a blank before preprocessing) hid the directive, so both branches' braces counted
+        // and the function after them was absorbed.
+        let code = "/* c */ #ifdef X\nint f(int a) {\n/* a */ /* b */ #else\nint f(void) {\n#endif\n}\nint g(void) {\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(find_closing_brace(&results, 1), 5);
+        assert_eq!(results[5].depth_after, 0);
+        assert_eq!(find_closing_brace(&results, 6), 7);
+        // A comment that does not close on the line hides the `#`: the line is no directive.
+        let open = "/* c #else */\nint f(void) {\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(open);
+        assert_eq!(results[1].brace_delta, 1);
+    }
 }
