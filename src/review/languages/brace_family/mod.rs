@@ -5249,4 +5249,21 @@ int g(void) {
             assert_eq!(sorted_spans(&ext, code), expected, "{code}");
         }
     }
+
+    #[test]
+    fn a_macro_rules_name_glued_to_or_spaced_from_its_bang_is_a_macro() {
+        // [MAGI loop 29, B2b1a] the keyword matched only as `macro_rules! ` with a blank after
+        // the `!`, so `macro_rules!foo {` (legal Rust: the blank is optional) and
+        // `macro_rules ! bar {` fell into a gap unit, their token tree read as items.
+        let code = "macro_rules!foo {\n    () => {};\n}\nmacro_rules ! bar {\n    () => {};\n}\n#[macro_export]\nmacro_rules!baz (\n    () => {}\n);\nfn g() {\n}\n";
+        assert_eq!(
+            sorted_spans(&rust_extractor(), code),
+            vec![
+                unit("foo", UnitKind::Function, 1, 3),
+                unit("bar", UnitKind::Function, 4, 6),
+                unit("baz", UnitKind::Function, 7, 10),
+                unit("g", UnitKind::Function, 11, 12),
+            ]
+        );
+    }
 }
