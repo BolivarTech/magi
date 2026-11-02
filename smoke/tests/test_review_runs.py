@@ -1592,6 +1592,36 @@ class ModelCounterShutdownTests(unittest.TestCase):
         self.assertEqual(1, log.past_the_probe_total)
         self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
 
+    def test_a_request_drained_at_shutdown_is_recorded_before_the_block_ends(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1a1-caspar] handle_request starts the drained request on a thread and
+        # returns at once; the log is complete only because server_close joins that thread
+        # (ThreadingMixIn, daemon_threads off). The record is slowed down so a missing join shows.
+        import http.server
+        import socket
+        import threading
+        import time
+        shutdown_requested = threading.Event()
+        real_record = runs.RequestLog.record
+
+        def slow_record(log, method, path):
+            time.sleep(0.5)
+            real_record(log, method, path)
+
+        def serve_accepting_nothing(server, poll_interval=0.5):
+            shutdown_requested.wait(30)
+
+        with mock.patch.object(http.server.ThreadingHTTPServer, "serve_forever", serve_accepting_nothing), \
+                mock.patch.object(http.server.ThreadingHTTPServer, "shutdown",
+                                  lambda server: shutdown_requested.set()), \
+                mock.patch.object(runs.RequestLog, "record", slow_record):
+            with runs.model_counter() as (url, log):
+                port = int(url.rsplit(":", 1)[1].split("/", 1)[0])
+                client = socket.create_connection(("127.0.0.1", port))
+                client.sendall(b"POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+                client.shutdown(socket.SHUT_WR)
+            client.close()
+            self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(log))
+
     def test_a_client_trickling_its_body_cannot_hold_the_counter_open(self) -> None:
         # [MAGI §6 MS2 loop 27, F1a1-caspar] the body drain was bounded only per read, and server_close joins
         # every handler thread, so a product that declared a large body and sent a byte at a time held the
