@@ -185,6 +185,15 @@ class HandlerThreadBoundTests(unittest.TestCase):
             with runs.model_counter():
                 pass
 
+    def test_the_decide_silent_endpoint_bounds_its_handler_threads_too(self) -> None:
+        # Swept: D10's listener parks one thread per connection until it shuts down.
+        from smoke.scenarios import decide
+        self.assertTrue(issubclass(decide._SilentServer, runs.BoundedThreadsMixIn))
+        self.assertTrue(issubclass(runs._BoundedThreadingServer, runs.BoundedThreadsMixIn))
+        with decide._silent_endpoint() as url:
+            with socket.create_connection(("127.0.0.1", _port(url)), timeout=5):
+                pass
+
     def test_past_the_cap_a_request_is_still_answered_and_counted_without_a_thread(self) -> None:
         import socketserver
         with mock.patch.object(runs, "MAX_LOOPBACK_HANDLER_THREADS", 0), \
