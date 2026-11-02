@@ -942,6 +942,33 @@ class ReviewLogSwapTests(unittest.TestCase):
         self.assertTrue(unreadable[0].startswith("a.log ("), unreadable)
 
 
+class LinkHelperTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 27, F1b1-melchior] the test helpers' links point where the tests mean them to.
+
+    ``_winapi.CreateJunction(src, dst)`` takes the existing target first and the junction to create second
+    (CPython's ``Lib/test`` uses it so). A reversed call would make every junction test exercise a link to
+    the wrong directory, or skip, so the direction is pinned on a real link.
+    """
+
+    def _assert_points_at(self, make_link) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "target"
+            target.mkdir()
+            (target / "marker").write_bytes(b"x")
+            link = pathlib.Path(tmp) / "link"
+            make_link(target, link)
+            self.assertTrue(runs._is_link(link))
+            self.assertFalse(runs._is_link(target))
+            self.assertEqual(os.path.realpath(target), os.path.realpath(link))
+            self.assertTrue((link / "marker").is_file())
+
+    def test_a_junction_points_at_its_target(self) -> None:
+        self._assert_points_at(_make_junction)
+
+    def test_a_directory_link_points_at_its_target(self) -> None:
+        self._assert_points_at(_make_directory_link)
+
+
 class ReviewNestedLogDirectorySwapTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 25, F1a1-caspar] a nested log directory swapped after its link test is never listed.
 
