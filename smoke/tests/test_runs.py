@@ -1341,8 +1341,15 @@ class LogScanLinkTests(unittest.TestCase):
         self.assertEqual(["linked (%s)" % runs.LINK_NOT_FOLLOWED], unreadable)
 
     def test_a_hard_link_under_the_log_directory_is_never_read(self) -> None:
-        found, _, unreadable, own = self._scan(
-            lambda logs_dir, outside: os.link(outside / "elsewhere.log", logs_dir / "planted.log"))
+        def plant(logs_dir, outside):
+            # [MAGI §6 MS2 loop 29, F1b2b-melchior] a file system without hard links (FAT, some network
+            # mounts) skips the test, as the symlink sibling does, instead of erroring.
+            try:
+                os.link(outside / "elsewhere.log", logs_dir / "planted.log")
+            except (OSError, NotImplementedError) as exc:
+                raise unittest.SkipTest("cannot create a hard link here: %s" % exc) from exc
+
+        found, _, unreadable, own = self._scan(plant)
         self.assertTrue(own)
         self.assertFalse(found)
         self.assertEqual(["planted.log (%s)" % runs.HARD_LINKED], unreadable)
