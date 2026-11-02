@@ -10,6 +10,12 @@ first sign would be an opaque ``FAIL`` at SMOKE time. These tests read the Rust
 source and fail here, at the harness's own gate, the moment the two sides
 drift. Each pattern must match: a pattern that matched nothing would let the
 comparison below it pass by never running.
+
+Every presence check reads through :mod:`smoke.tests.rust_source`, which looks
+only at code lines and insists on exactly one match ([MAGI loop 26]): a plain
+search over the file read a drifted constant's old value from a ``///`` comment
+left above the new line and stayed green. Absence checks (``assertNotIn``) stay
+on the raw text, where a comment can only make them stricter.
 """
 
 import os
@@ -19,17 +25,14 @@ import unittest
 
 from smoke import logs, runs
 from smoke.scenarios import code_review
+from smoke.tests.rust_source import code_only, one_definition, one_occurrence, read_source
 
 #: The repository root, three levels above this file.
 _ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 
 
 def _source(relative: str) -> str:
-    """Read a Rust source file with its line endings normalised.
-
-    rustfmt writes CRLF on Windows and LF elsewhere, so ``\\r`` is stripped
-    before any pattern runs. Bytes that are not UTF-8 (a test literal) are
-    replaced; nothing read here lives in them.
+    """Read a source file under :data:`_ROOT` with ``\\r`` stripped (:func:`read_source`).
 
     Args:
         relative: The path under the repository root, with forward slashes.
@@ -37,7 +40,7 @@ def _source(relative: str) -> str:
     Returns:
         str: The file's text.
     """
-    return (_ROOT / relative).read_bytes().decode("utf-8", errors="replace").replace("\r", "")
+    return read_source(relative, _ROOT)
 
 
 def _usize_const(text: str, name: str) -> int:
@@ -51,11 +54,10 @@ def _usize_const(text: str, name: str) -> int:
         int: Its value, with ``_`` separators removed.
 
     Raises:
-        AssertionError: When the declaration is not found.
+        AssertionError: When no code line declares it, or more than one does.
     """
-    match = re.search(r"pub const %s: usize = ([\d_]+);" % re.escape(name), text)
-    if match is None:
-        raise AssertionError("pub const %s: usize not found" % name)
+    match = one_definition(text, r"pub const %s: usize = ([\d_]+);" % re.escape(name),
+                           "const %s" % name)
     return int(match.group(1).replace("_", ""))
 
 
@@ -81,27 +83,31 @@ class BatchConstantTests(unittest.TestCase):
 
     def test_the_floor_is_the_products_two_minimums(self) -> None:
         text = _source("src/magi/mod.rs")
-        found = {name: int(secs) for name, secs in re.findall(
-            r"const (MIN_OPERATION_BUDGET|MIN_CLIENT_TIMEOUT): Duration = Duration::from_secs\((\d+)\);", text)}
-        self.assertEqual({"MIN_OPERATION_BUDGET", "MIN_CLIENT_TIMEOUT"}, set(found))
-        self.assertRegex(text, r"AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =\s*"
-                               r"MIN_OPERATION_BUDGET\.as_secs\(\) \+ MIN_CLIENT_TIMEOUT\.as_secs\(\);")
+        found = {name: int(one_definition(
+            text, r"const %s: Duration = Duration::from_secs\((\d+)\);" % name, "src/magi/mod.rs").group(1))
+            for name in ("MIN_OPERATION_BUDGET", "MIN_CLIENT_TIMEOUT")}
+        one_definition(text, r"pub const AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS: u64 =\s*"
+                             r"MIN_OPERATION_BUDGET\.as_secs\(\) \+ MIN_CLIENT_TIMEOUT\.as_secs\(\);",
+                       "src/magi/mod.rs")
         self.assertEqual(sum(found.values()), code_review.FLOOR_SECS)
 
     def test_the_least_need_per_batch_is_the_products_lenient_arithmetic(self) -> None:
         # [MAGI §6 MS2 loop 10, F1a-c3] S50's bounds lean on the classifier reserve and the slack.
         text = _source("src/magi/mod.rs")
-        self.assertIn("pub const CLASSIFY_TIMEOUT_SECS: u64 = %d;" % code_review.CLASSIFY_SECS, text)
-        self.assertIn("pub const HEADLESS_TIMEOUT_SLACK_PCT: u64 = %d;" % code_review.SLACK_PCT, text)
+        for name, copy in (("CLASSIFY_TIMEOUT_SECS", code_review.CLASSIFY_SECS),
+                           ("HEADLESS_TIMEOUT_SLACK_PCT", code_review.SLACK_PCT)):
+            found = one_definition(text, r"pub const %s: u64 = (\d+);" % name, "src/magi/mod.rs")
+            self.assertEqual(copy, int(found.group(1)), name)
         self.assertEqual(24, code_review.MIN_NEED_PER_BATCH_SECS)
 
     def test_the_budget_split_and_ceiling_are_the_ones_s50_checks(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-m2] _budget_fields_ok asserts wall == total // batches and a ceiling
         # below the floor: pre_budget's integer split and its RAW (never floor-lifted) refusal ceiling.
         text = _source("src/review/clock.rs")
-        self.assertRegex(text, r"Ok\(n\) => remaining_secs / n,")
-        self.assertRegex(text, r"let per_batch = batch_wall_clock_secs\(total_secs, batches\);")
-        self.assertRegex(text, r"per_batch_ceiling_secs: raw_ceiling_from_factor\(\s*per_batch,")
+        for pattern in (r"Ok\(n\) => remaining_secs / n,",
+                        r"let per_batch = batch_wall_clock_secs\(total_secs, batches\);",
+                        r"per_batch_ceiling_secs: raw_ceiling_from_factor\(\s*per_batch,"):
+            one_definition(text, pattern, "src/review/clock.rs")
 
 
 class StderrWordingTests(unittest.TestCase):
@@ -114,15 +120,15 @@ class StderrWordingTests(unittest.TestCase):
         self.filter = _source("src/review/filter.rs")
 
     def test_the_omission_causes_are_the_products(self) -> None:
-        body = re.search(r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n", self.filter, re.S)
-        self.assertIsNotNone(body, "SkipCause::as_str not found in src/review/filter.rs")
-        causes = re.findall(r'Self::\w+ => "([^"]+)"', body.group(1))
+        found = one_definition(self.filter, r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n",
+                               "src/review/filter.rs", re.S)
+        body = code_only(found.group(1))
+        causes = re.findall(r'Self::\w+ => "([^"]+)"', body)
         # [MAGI §6 MS2 loop 12] an arm may name a constant instead of a literal (HARD_LINK_CAUSE, which
         # src/review/source.rs defines because the explicit-file error shares it); resolve it there.
         source = _source("src/review/source.rs")
-        for name in re.findall(r"Self::\w+ => ([A-Z_]+),", body.group(1)):
-            value = re.search(r'pub const %s: &str = "([^"]+)";' % name, source)
-            self.assertIsNotNone(value, "%s not found in src/review/source.rs" % name)
+        for name in re.findall(r"Self::\w+ => ([A-Z_]+),", body):
+            value = one_definition(source, r'pub const %s: &str = "([^"]+)";' % name, "src/review/source.rs")
             causes.append(value.group(1))
         self.assertTrue(causes)
         self.assertEqual(sorted(causes), sorted(code_review.OMISSION_CAUSES))
@@ -130,24 +136,27 @@ class StderrWordingTests(unittest.TestCase):
     def test_missing_is_an_error_cause_never_an_omission_cause(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-c2] "missing" names an explicit file in NotReviewable; it is not a
         # SkipCause, so it can never reach the omission list and OMISSION_CAUSES must not carry it.
-        self.assertIn('pub(crate) const MISSING: &str = "missing";', self.filter)
-        self.assertIn('#[error("{} is not reviewable: {cause}", display_path(.path))]', self.error)
+        one_definition(self.filter, re.escape('pub(crate) const MISSING: &str = "missing";'),
+                       "src/review/filter.rs")
+        one_definition(self.error, re.escape('#[error("{} is not reviewable: {cause}", display_path(.path))]'),
+                       "src/review/error.rs")
         self.assertNotIn('=> "missing"', self.filter)
         self.assertNotIn("missing", code_review.OMISSION_CAUSES)
 
     def test_the_omission_list_is_rendered_as_the_patterns_expect(self) -> None:
-        self.assertIn('write!(f, "{} ({})", self.path, self.cause.as_str())', self.filter)
-        self.assertIn('format!("; left out: {}{more}", shown.join(", "))', self.error)
-        self.assertIn('format!(", and {rest} more")', self.error)
+        one_occurrence(self.filter, 'write!(f, "{} ({})", self.path, self.cause.as_str())', "src/review/filter.rs")
+        one_occurrence(self.error, 'format!("; left out: {}{more}", shown.join(", "))', "src/review/error.rs")
+        one_occurrence(self.error, 'format!(", and {rest} more")', "src/review/error.rs")
         rendered = "error: x; left out: a b (binary), .magi/c (ignored), and 2 more"
         entries, failure = code_review._omissions(rendered)
         self.assertEqual("", failure)
         self.assertEqual([("a b", "binary"), (".magi/c", "ignored")], entries)
 
     def test_the_budget_refusal_template_matches_the_pattern(self) -> None:
-        template = re.search(r'#\[error\(\s*"(\{batches\} batches leave.*?)",\s*budget_advice', self.error, re.S)
-        self.assertIsNotNone(template, "the Budget message was not found in src/review/error.rs")
-        self.assertIn('BudgetLimit::Timeout => format!("pass --timeout {min_secs} or more")', self.error)
+        template = one_definition(self.error, r'#\[error\(\s*"(\{batches\} batches leave.*?)",\s*budget_advice',
+                                  "src/review/error.rs", re.S)
+        one_definition(self.error, re.escape('BudgetLimit::Timeout => format!("pass --timeout {min_secs} or more")'),
+                       "src/review/error.rs")
         template_text = re.sub(r"\\\n\s*", "", template.group(1))
         # [MAGI §6 MS2 loop 10, F1a-m1] the count is the bare "{batches} batches" at every N: no plural
         # branch exists in the template, so one batch renders "1 batches" and the pattern still matches.
@@ -168,9 +177,9 @@ class StderrWordingTests(unittest.TestCase):
             self.assertTrue(code_review._budget_fields_ok(match), text)
 
     def test_the_fixed_phrases_are_the_products(self) -> None:
-        self.assertIn('"path is outside the workspace: {}"', self.error)
+        one_occurrence(self.error, '"path is outside the workspace: {}"', "src/review/error.rs")
         self.assertIn(code_review.OUTSIDE_WORKSPACE_TEXT, "path is outside the workspace")
-        self.assertIn('"nothing to review: no reviewable file in the input{}"', self.error)
+        one_occurrence(self.error, '"nothing to review: no reviewable file in the input{}"', "src/review/error.rs")
         self.assertIn(code_review.NOTHING_TO_REVIEW_TEXT, "nothing to review: no reviewable file")
 
 
@@ -180,30 +189,31 @@ class NeverReviewedTests(unittest.TestCase):
     # MAGI FIX (S6 loop 14): S51 left out the memory database prefix (F1a2-m2).
     def test_the_protected_names_are_the_products_never_reviewed_list(self) -> None:
         source = _source("src/review/source.rs")
-        prefix = re.search(r'const MEMORY_DB_PREFIX: &str = "([^"]+)";', source)
-        listed = re.search(r"pub const NEVER_REVIEWED: &\[&str\] = &\[([^\]]*)\];", source)
-        self.assertIsNotNone(prefix)
-        self.assertIsNotNone(listed)
+        prefix = one_definition(source, r'const MEMORY_DB_PREFIX: &str = "([^"]+)";', "src/review/source.rs")
+        listed = one_definition(source, r"pub const NEVER_REVIEWED: &\[&str\] = &\[([^\]]*)\];",
+                                "src/review/source.rs")
         self.assertEqual(prefix.group(1), code_review.MEMORY_DB_PREFIX)
-        names = tuple(re.findall(r'"([^"]+)"', listed.group(1)))
+        items = code_only(listed.group(1))
+        names = tuple(re.findall(r'"([^"]+)"', items))
         self.assertEqual(set(names), set(code_review.PROTECTED_DIRS))
-        self.assertIn("MEMORY_DB_PREFIX", listed.group(1))
+        self.assertIn("MEMORY_DB_PREFIX", items)
 
     # MAGI FIX (S6 loop 17): same_product_name copies is_never_reviewed's folding rule with no pin, so
     # a wider product rule would have left S51's candidates behind in silence (F1a1-melchior).
     def test_the_name_folding_is_the_one_is_never_reviewed_applies(self) -> None:
-        body = re.search(r"pub fn is_never_reviewed\(path: &str\) -> bool \{(.*?)\n\}",
-                         _source("src/review/source.rs"), re.S)
-        self.assertIsNotNone(body, "is_never_reviewed not found in src/review/source.rs")
-        trimmed = re.search(r"\.trim_end_matches\(\[([^\]]*)\]\)", body.group(1))
-        self.assertIsNotNone(trimmed, "is_never_reviewed no longer trims with trim_end_matches([...])")
-        chars = re.findall(r"'(.)'", trimmed.group(1))
+        found = one_definition(_source("src/review/source.rs"),
+                               r"pub fn is_never_reviewed\(path: &str\) -> bool \{(.*?)\n\}",
+                               "src/review/source.rs", re.S)
+        body = found.group(1)
+        trimmed = one_occurrence(body, ".trim_end_matches([", "is_never_reviewed")
+        rest = body[trimmed.end():]
+        chars = re.findall(r"'(.)'", rest[:rest.index("]")])
         self.assertEqual(sorted(chars), sorted(runs.TRIMMED_TRAILING))
-        self.assertIn(".split(['/', '\\\\'])", body.group(1))
+        one_occurrence(body, ".split(['/', '\\\\'])", "is_never_reviewed")
         # Every comparison folds ASCII case and nothing else, as same_product_name does.
-        self.assertGreater(body.group(1).count("eq_ignore_ascii_case"), 0)
-        self.assertNotIn("to_lowercase", body.group(1))
-        self.assertNotIn("==", body.group(1))
+        self.assertGreater(code_only(body).count("eq_ignore_ascii_case"), 0)
+        self.assertNotIn("to_lowercase", body)
+        self.assertNotIn("==", body)
 
 
 class ReportKeyTests(unittest.TestCase):
@@ -217,9 +227,12 @@ class ReportKeyTests(unittest.TestCase):
         read.update(re.findall(r'_list_under\(section, "(\w+)"\)', scenario))
         self.assertTrue(read, "no code_review key read by S47 was found")
         report = _source("src/review/report.rs")
+        # The list is found by the comment that names its test, the one place a comment is the anchor;
+        # the comment must be unique and the keys are read from code lines only.
+        self.assertEqual(1, report.count("every documented key is present"))
         pinned = re.search(r"every documented key is present.*?for k in \[(.*?)\]", report, re.S)
         self.assertIsNotNone(pinned, "the summary key list was not found in src/review/report.rs")
-        self.assertEqual(set(), read - set(re.findall(r'"(\w+)"', pinned.group(1))))
+        self.assertEqual(set(), read - set(re.findall(r'"(\w+)"', code_only(pinned.group(1)))))
 
     def test_the_entry_fields_s47_reads_are_serialized_under_their_own_names(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-m1] S47 reads file and line off each main finding and cause off each
@@ -227,18 +240,19 @@ class ReportKeyTests(unittest.TestCase):
         for path, struct, fields in (("src/review/consolidate.rs", "ConsolidatedFinding",
                                       ("pub file: Option<String>,", "pub line: Option<u32>,")),
                                      ("src/review/validate.rs", "Discarded", ("pub cause: DiscardCause,",))):
-            body = re.search(r"#\[derive\([^)]*serde::Serialize[^)]*\)\]\npub struct %s \{(.*?)\n\}" % struct,
-                             _source(path), re.S)
-            self.assertIsNotNone(body, "%s was not found in %s" % (struct, path))
-            self.assertNotIn("rename", body.group(1), struct)
+            body = one_definition(_source(path),
+                                  r"#\[derive\([^)]*serde::Serialize[^)]*\)\]\npub struct %s \{(.*?)\n\}" % struct,
+                                  path, re.S).group(1)
+            self.assertNotIn("rename", body, struct)
             for field in fields:
-                self.assertIn(field, body.group(1), struct)
+                one_definition(body, re.escape(field), "%s in %s" % (struct, path))
 
     def test_the_run_field_the_harness_matches_is_the_one_the_log_writes(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-m1] S50 binds its run-log line to this run through logs.run_needle;
         # the product spells the field once, in src/logging/render.rs.
-        self.assertIn('pub(crate) const RUN_FIELD: &str = "%s";' % logs.RUN_FIELD,
-                      _source("src/logging/render.rs"))
+        one_definition(_source("src/logging/render.rs"),
+                       re.escape('pub(crate) const RUN_FIELD: &str = "%s";' % logs.RUN_FIELD),
+                       "src/logging/render.rs")
         self.assertEqual(b"run=4242-deadbeef", logs.run_needle("4242-deadbeef"))
 
     def test_the_stderr_run_id_is_printed_whatever_the_log_level(self) -> None:
@@ -247,16 +261,17 @@ class ReportKeyTests(unittest.TestCase):
         # move into a tracing macro would make S50's log half unreachable and must fail here first.
         main = _source("src/main.rs")
         needle = 'magi_rs::notices::eprint_audited(&format!("%s{}", magi_rs::logging::run_id()));'
-        self.assertIn(needle % logs.STDERR_RUN_PREFIX, main)
+        one_definition(main, re.escape(needle % logs.STDERR_RUN_PREFIX), "src/main.rs")
         self.assertNotRegex(main, r'(?:info|warn|error|debug|trace|event)!\([^;]*"%s\{\}"'
                             % re.escape(logs.STDERR_RUN_PREFIX))
 
     def test_the_consensus_s47_reads_is_the_one_the_envelope_writes(self) -> None:
-        self.assertIn('"consensus".into(),\n        crate::tools::consult::consensus_json(&c.consensus)',
-                      _source("src/tools/code_review.rs"))
+        one_definition(_source("src/tools/code_review.rs"),
+                       re.escape('"consensus".into(),\n        crate::tools::consult::consensus_json(&c.consensus)'),
+                       "src/tools/code_review.rs")
         consult = _source("src/tools/consult.rs")
         for key in code_review.CONSENSUS_TEXT_KEYS:
-            self.assertIn('"%s": c.%s,' % (key, key), consult)
+            one_definition(consult, re.escape('"%s": c.%s,' % (key, key)), "src/tools/consult.rs")
 
 
 class GitConfigTests(unittest.TestCase):
@@ -265,10 +280,10 @@ class GitConfigTests(unittest.TestCase):
     # MAGI FIX (S6 loop 8): HARNESS_GIT_CONFIG claimed to be a subset of
     # NEUTRAL_GIT_CONFIG with nothing checking it (F1a-m3).
     def test_every_harness_git_setting_is_one_the_product_passes(self) -> None:
-        listing = re.search(r"pub\(crate\) const NEUTRAL_GIT_CONFIG: &\[&str\] = &\[(.*?)\];",
-                            _source("src/system/review_git.rs"), re.S)
-        self.assertIsNotNone(listing, "NEUTRAL_GIT_CONFIG was not found in src/system/review_git.rs")
-        product = set(re.findall(r'"([^"]*)"', listing.group(1)))
+        listing = one_definition(_source("src/system/review_git.rs"),
+                                 r"pub\(crate\) const NEUTRAL_GIT_CONFIG: &\[&str\] = &\[(.*?)\];",
+                                 "src/system/review_git.rs", re.S)
+        product = set(re.findall(r'"([^"]*)"', code_only(listing.group(1))))
         self.assertTrue(runs.HARNESS_GIT_CONFIG)
         self.assertEqual(set(), set(runs.HARNESS_GIT_CONFIG) - product)
 
@@ -276,10 +291,9 @@ class GitConfigTests(unittest.TestCase):
     # enumeration query with nothing checking it; a product query that dropped
     # one of its flags would surface as an opaque SMOKE FAIL.
     def test_the_visibility_query_uses_only_flags_the_products_listing_passes(self) -> None:
-        listing = re.search(r"const LS_FILES_ALL: &\[&str\] = &\[(.*?)\];",
-                            _source("src/review/input.rs"), re.S)
-        self.assertIsNotNone(listing, "LS_FILES_ALL was not found in src/review/input.rs")
-        product = re.findall(r'"([^"]*)"', listing.group(1))
+        listing = one_definition(_source("src/review/input.rs"), r"const LS_FILES_ALL: &\[&str\] = &\[(.*?)\];",
+                                 "src/review/input.rs", re.S)
+        product = re.findall(r'"([^"]*)"', code_only(listing.group(1)))
         self.assertEqual("ls-files", runs.GIT_VISIBLE_QUERY[0])
         self.assertEqual(product[0], runs.GIT_VISIBLE_QUERY[0])
         self.assertEqual(set(), set(runs.GIT_VISIBLE_QUERY) - set(product))
@@ -288,15 +302,15 @@ class GitConfigTests(unittest.TestCase):
     # on the grounds that none changes what the product's git sees, with
     # nothing checking the product's environment against that claim.
     def test_every_git_variable_the_product_passes_is_one_the_harness_assessed(self) -> None:
-        allowlist = re.search(r"const TOOL_ENV_ALLOWLIST: &\[&str\] = &\[(.*?)\];",
-                              _source("src/tools/proc_group.rs"), re.S)
-        self.assertIsNotNone(allowlist, "TOOL_ENV_ALLOWLIST was not found in src/tools/proc_group.rs")
-        spawn = re.search(r"\.env_clear\(\)\s*\.envs\(tool_child_env\(\)\)((?:\s*\.env\([^)]*\))*);",
-                          _source("src/system/review_git.rs"))
-        self.assertIsNotNone(spawn, "the scrubbed git spawn was not found in src/system/review_git.rs")
-        inherited = {name for name in re.findall(r'"([^"]*)"', allowlist.group(1))
+        allowlist = one_definition(_source("src/tools/proc_group.rs"),
+                                   r"pub\(crate\) const TOOL_ENV_ALLOWLIST: &\[&str\] = &\[(.*?)\];",
+                                   "src/tools/proc_group.rs", re.S)
+        spawn = one_definition(_source("src/system/review_git.rs"),
+                               r"\.env_clear\(\)\s*\.envs\(tool_child_env\(\)\)((?:\s*\.env\([^)]*\))*);",
+                               "src/system/review_git.rs")
+        inherited = {name for name in re.findall(r'"([^"]*)"', code_only(allowlist.group(1)))
                      if name.upper().startswith(runs.GIT_ENV_PREFIX)}
-        fixed = set(re.findall(r'\.env\("([^"]*)"', spawn.group(1)))
+        fixed = set(re.findall(r'\.env\("([^"]*)"', code_only(spawn.group(1))))
         self.assertTrue(fixed, "the git spawn sets no variable of its own: the pattern lost its subject")
         self.assertEqual(set(runs.PRODUCT_GIT_VARIABLES), inherited | fixed)
 
@@ -314,7 +328,7 @@ class SecretPrefixDocTests(unittest.TestCase):
                  if re.fullmatch(r"[A-Za-z]+(?:[-_][a-z]+)*[-_]|AKIA|ASIA|AIza", token)}
         self.assertTrue(named)
         prefixes = set()
-        for array in re.findall(r"prefixes: &\[([^\]]*)\]", _source("src/review/secrets.rs")):
+        for array in re.findall(r"prefixes: &\[([^\]]*)\]", code_only(_source("src/review/secrets.rs"))):
             prefixes.update(re.findall(r'"([^"]+)"', array))
         self.assertEqual(set(), named - prefixes)
 
@@ -376,8 +390,8 @@ class ProbePathTests(unittest.TestCase):
 
     def test_the_product_probes_through_the_ollama_provider_of_magi_core(self) -> None:
         probe = _source("src/magi/probe.rs")
-        self.assertIn("impl ProbeFactory for OllamaProbeFactory", probe)
-        self.assertIn("OllamaProvider::new(base_url.as_str(), model)", probe)
+        one_definition(probe, re.escape("impl ProbeFactory for OllamaProbeFactory"), "src/magi/probe.rs")
+        one_occurrence(probe, "OllamaProvider::new(base_url.as_str(), model)", "src/magi/probe.rs")
 
     def test_the_probe_paths_match_what_magi_core_requests(self) -> None:
         source = _registry_source("magi-core", "src/providers/ollama.rs")
@@ -385,7 +399,7 @@ class ProbePathTests(unittest.TestCase):
         self.assertNotEqual(-1, start, "the ProviderProbe impl was not found")
         end = source.find("\nimpl ", start + 1)
         block = source[start:] if end == -1 else source[start:end]
-        groups = _REQUEST_SEGMENTS.findall(block)
+        groups = _REQUEST_SEGMENTS.findall(code_only(block))
         self.assertEqual(2, len(groups), "expected the window and digest requests")
         paths = {"/" + "/".join(s.strip().strip('"') for s in group.split(",")) for group in groups}
         self.assertEqual(set(runs.PROBE_PATHS), paths)
@@ -402,11 +416,9 @@ def _rust_fn_body(text: str, signature: str) -> str:
         str: From the signature to the first line holding only the method's closing brace.
 
     Raises:
-        AssertionError: When the method is not found.
+        AssertionError: When no code line starts the declaration, or more than one does.
     """
-    start = text.find(signature)
-    if start == -1:
-        raise AssertionError("%s not found" % signature)
+    start = one_definition(text, re.escape(signature), signature).start()
     end = text.find("\n    }\n", start)
     return text[start:] if end == -1 else text[start:end]
 
@@ -422,22 +434,24 @@ class CountedKindTests(unittest.TestCase):
     def _counted_variant(self) -> str:
         """The ``ProviderKind`` variant ``src/magi/kind.rs`` parses ``runs._COUNTED_KIND`` into."""
         kind = _source("src/magi/kind.rs")
-        match = re.search(r'"%s" => Ok\(Some\(Self::(\w+)\)\)' % re.escape(runs._COUNTED_KIND), kind)
-        self.assertIsNotNone(match, "ProviderKind::parse no longer accepts %r" % runs._COUNTED_KIND)
+        match = one_definition(kind, r'"%s" => Ok\(Some\(Self::(\w+)\)\)' % re.escape(runs._COUNTED_KIND),
+                               "src/magi/kind.rs")
         return match.group(1)
 
     def test_an_absent_provider_resolves_to_the_counted_kind(self) -> None:
         body = _rust_fn_body(_source("src/config.rs"), "pub fn effective_provider(")
-        self.assertIn(".unwrap_or(ProviderKind::%s)" % self._counted_variant(), body)
+        one_definition(body, re.escape(".unwrap_or(ProviderKind::%s)" % self._counted_variant()), "effective_provider")
 
     def test_an_absent_magi_kind_inherits_the_provider(self) -> None:
         body = _rust_fn_body(_source("src/config.rs"), "pub fn effective_magi_kind(")
-        self.assertIn(".unwrap_or_else(|| self.effective_provider())", body)
+        one_definition(body, re.escape(".unwrap_or_else(|| self.effective_provider())"), "effective_magi_kind")
 
     def test_the_scaffold_declares_the_counted_kind(self) -> None:
         defaults = _source("src/defaults.rs")
-        self.assertIn('pub const DEFAULT_PROVIDER: &str = "%s";' % runs._COUNTED_KIND, defaults)
-        self.assertIn('writeln!(out, "provider = \\"{}\\"", DEFAULT_PROVIDER)', defaults)
+        one_definition(defaults, re.escape('pub const DEFAULT_PROVIDER: &str = "%s";' % runs._COUNTED_KIND),
+                       "src/defaults.rs")
+        one_definition(defaults, re.escape('writeln!(out, "provider = \\"{}\\"", DEFAULT_PROVIDER)'),
+                       "src/defaults.rs")
 
 
 if __name__ == "__main__":
