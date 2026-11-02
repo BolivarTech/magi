@@ -91,6 +91,77 @@ class CodeOnlyTests(unittest.TestCase):
         self.assertEqual(text, _helpers().code_only(text))
 
 
+class BlockCommentTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 28, F1b2a-caspar] a block comment never answers for code.
+
+    Only ``//`` lines were recognised, so a definition left inside ``/* ... */`` counted as code: with the
+    real line gone, the guard read the stale value from the comment and stayed green.
+    """
+
+    def test_a_definition_only_inside_a_block_comment_is_rejected(self) -> None:
+        text = "/*\npub const LIMIT: usize = 4;\n*/\nfn f() {}\n"
+        with self.assertRaisesRegex(AssertionError, "found 0"):
+            _helpers().one_definition(text, r"pub const LIMIT: usize = (\d+);", "x.rs")
+
+    def test_the_real_definition_wins_over_an_old_one_in_a_block_comment(self) -> None:
+        text = "/* was:\npub const LIMIT: usize = 4;\n*/\npub const LIMIT: usize = 5;\n"
+        match = _helpers().one_definition(text, r"pub const LIMIT: usize = (\d+);", "x.rs")
+        self.assertEqual("5", match.group(1))
+
+    def test_a_literal_only_inside_an_inline_block_comment_is_rejected(self) -> None:
+        text = 'let a = f(/* "path is outside" */ 1);\n'
+        with self.assertRaisesRegex(AssertionError, "found 0"):
+            _helpers().one_occurrence(text, '"path is outside"', "e.rs")
+
+    def test_nested_block_comments_close_where_rust_closes_them(self) -> None:
+        text = "/* a /* b */ pub const N: u8 = 1; */\npub const N: u8 = 2;\n"
+        self.assertEqual("2", _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs").group(1))
+
+    def test_a_comment_opener_inside_a_string_or_char_is_code(self) -> None:
+        text = ("let glob = \"src/**/*.rs\";\nlet c = '/';\nlet r = r#\"/* \"x\" */\"#;\n"
+                "fn f<'a>(x: &'a str) {}\npub const N: u8 = 3;\n")
+        self.assertEqual("3", _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs").group(1))
+        self.assertEqual(text, _helpers().code_only(text))
+
+    def test_a_block_comment_opener_inside_a_line_comment_opens_nothing(self) -> None:
+        text = "// see /* here\npub const N: u8 = 4;\n"
+        self.assertEqual("4", _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs").group(1))
+
+    def test_code_only_blanks_a_block_comment_and_keeps_the_lines(self) -> None:
+        text = 'a = [\n    "kept", /* "gone" */\n    /*\n    "gone too",\n    */\n]\n'
+        blanked = _helpers().code_only(text)
+        self.assertEqual(text.count("\n"), blanked.count("\n"))
+        self.assertNotIn("gone", blanked)
+        self.assertIn('"kept"', blanked)
+
+    def test_an_unterminated_block_comment_fails_loudly(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "unterminated"):
+            _helpers().code_only("pub const N: u8 = 1; /* never closed\n")
+
+
+class CharListTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 28, F1b2a-melchior] a Rust char-literal array is read whole, escapes included.
+
+    The trim-list pin read ``'(.)'``, which cannot see an escaped literal such as ``'\\\\'``: the guard read
+    fewer characters than the product lists and pinned the harness's copy to the shorter list.
+    """
+
+    def test_plain_literals_are_read_in_order(self) -> None:
+        self.assertEqual([".", " "], _helpers().char_list("'.', ' '"))
+
+    def test_escaped_literals_are_unescaped(self) -> None:
+        self.assertEqual(["/", "\\", "'", "\n", "\t", "\0", "A", "é"],
+                         _helpers().char_list(r"'/', '\\', '\'', '\n', '\t', '\0', '\x41', '\u{e9}'"))
+
+    def test_a_trailing_comma_and_line_breaks_are_allowed(self) -> None:
+        self.assertEqual([".", " "], _helpers().char_list("\n    '.',\n    ' ',\n"))
+
+    def test_anything_but_a_char_literal_fails_loudly(self) -> None:
+        for text in ("'.', SEPARATOR", "'.', \"x\"", "'ab'", ""):
+            with self.assertRaises(AssertionError, msg=text):
+                _helpers().char_list(text)
+
+
 class ReadSourceTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 27, F1b2a-melchior] ``read_source``, which every guard stands on, does what it says."""
 
@@ -114,6 +185,18 @@ class ReadSourceTests(unittest.TestCase):
 
     def test_the_root_override_is_where_the_file_is_read_from(self) -> None:
         self.assertEqual("only under the given root\n", self._read(b"only under the given root\n"))
+
+    def test_a_path_leaving_the_root_is_refused(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1b2a-balthasar] the helper joined any relative path to the root.
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "repo"
+            root.mkdir()
+            (pathlib.Path(tmp) / "outside.rs").write_bytes(b"secret\n")
+            for relative in ("../outside.rs", str(pathlib.Path(tmp) / "outside.rs")):
+                with self.assertRaises(ValueError, msg=relative):
+                    _helpers().read_source(relative, root)
 
     def test_without_a_root_the_repository_is_read(self) -> None:
         helpers = _helpers()
