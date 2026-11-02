@@ -1111,6 +1111,42 @@ class ReviewLogChainTests(unittest.TestCase):
             self.assertEqual((), captured)
             self.assertTrue(any(runs.LINK_NOT_FOLLOWED in entry for entry in unreadable), unreadable)
 
+    def test_a_log_directory_swapped_for_a_link_before_the_walk_is_never_read_once(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1a1-melchior] the walk listed its root by path, so a link swapped onto
+        # .magi/logs after the chain check had the walk list, and the read open, what it points at; the
+        # post-read check then dropped the capture, but the bytes outside the workspace had been read.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            executor = _executor(root)
+            outside = self._outside_log(root)
+            logs_dir = root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi" / "logs"
+            logs_dir.mkdir(parents=True)
+            (logs_dir / "magi-run.log").write_bytes(b"this run's log")
+            real_check = executor._first_link_down_to
+            checks = []
+
+            def check_then_swap(*below):
+                found = real_check(*below)
+                checks.append(below)
+                if len(checks) == 1:
+                    shutil.rmtree(logs_dir)
+                    _make_directory_link(outside / ".magi" / "logs", logs_dir)
+                return found
+
+            real_read = runs._read_bounded
+            read = []
+
+            def recording_read(*args, **kwargs):
+                captured = real_read(*args, **kwargs)
+                read.extend(captured)
+                return captured
+
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root), \
+                    mock.patch.object(executor, "_first_link_down_to", side_effect=check_then_swap), \
+                    mock.patch.object(runs, "_read_bounded", side_effect=recording_read):
+                executor._capture_review_log(runs.DEFINITIONS["R15"], [])
+            self.assertNotIn(b"not this run's log", b"".join(read))
+
 
 class RefusalRunModelCallTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 19, F1a1-balthasar] R13-R16 prove that no model was contacted.
