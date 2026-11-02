@@ -545,14 +545,30 @@ pub(super) fn skip_generics(text: &str) -> &str {
 /// header is the whole line or never closes on it. `text` when it opens with no such header
 /// (`templated()`, `template class Foo<int>;`). O(n) in the text.
 ///
-/// A header wrapped over several lines (`template <typename T,` then `typename U>`) is not
-/// recognised past its first line: the first line attaches to the construct only when it is the
-/// line right above it, so such a header's lines fall into a gap unit, each line in exactly one.
+/// A header wrapped over several lines (`template <typename T,` then `typename U>`) leaves this
+/// empty on its first line; detection passes over its lines and recovers them for the construct
+/// they declare (`BraceFamilyExtractor::wrapped_template_header_end`).
 pub(super) fn strip_template_header(text: &str) -> &str {
     match text.strip_prefix(TEMPLATE_KEYWORD).map(str::trim_start) {
         Some(rest) if rest.starts_with('<') => skip_generics(rest),
         _ => text,
     }
+}
+
+/// Whether `text` opens with a C++ template header: the word `template` followed, after any
+/// blanks, by `<` (`template <typename T,`, `template<int N>`). O(n) in the text.
+///
+/// # Arguments
+///
+/// * `text` - A trimmed line.
+///
+/// # Returns
+///
+/// `true` when the line opens a template header, closed on it or not.
+pub(super) fn opens_template_header(text: &str) -> bool {
+    text.strip_prefix(TEMPLATE_KEYWORD)
+        .map(str::trim_start)
+        .is_some_and(|rest| rest.starts_with('<'))
 }
 
 /// The Go keyword that declares an interface type (`type Reader interface {`).

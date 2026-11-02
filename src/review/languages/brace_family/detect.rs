@@ -118,6 +118,13 @@ impl BraceFamilyExtractor {
                 .last()
                 .map_or(0, |c: &Construct| c.end_line as usize);
 
+            // MAGI FIX (loop 26, 3): a `template <` header wrapped over lines was read as a
+            // declaration list and cut from the construct it declares; its lines are passed
+            // over to the one that closes it, and the scan back for docs recovers them.
+            if let Some(close) = self.wrapped_template_header_end(lines, scanned, i, &search) {
+                i = close;
+                continue;
+            }
             // MAGI FIX (S6 loop 7): Go's `type (` opened one nameless struct and its later
             // members fell into gaps; each member is a construct of its own.
             if let Some((last, group)) = self.grouped_types(lines, scanned, i, &search) {
@@ -1089,6 +1096,61 @@ impl BraceFamilyExtractor {
         .then_some(open)
     }
 
+    /// The 0-based line that closes the C++ template header opened, and left open, on line `i`
+    /// (`template <typename T,` ... `typename U>`), for extractors with `template_headers`.
+    /// `None` when line `i` opens no template header, closes it on the same line (a header alone
+    /// on its line, or before the construct it declares), the header never closes, or the
+    /// pass budget runs out ([`SearchBudget`]); the lines then read as before, each in exactly
+    /// one unit.
+    ///
+    /// Angle brackets are counted on the line text of code lines, comment lines passed over:
+    /// a `>` of an operator in a default argument (`->`, `>=`) may miscount, and the header
+    /// then reads as before, declared. O(k) for the k lines walked, each charged to `search`.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `i` - The 0-based line the header would open on.
+    /// * `search` - The bounds of the forward searches ([`BraceSearch`]).
+    ///
+    /// # Returns
+    ///
+    /// The 0-based line holding the header's closing `>`, always after `i`, or `None`.
+    fn wrapped_template_header_end(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        i: usize,
+        search: &BraceSearch<'_>,
+    ) -> Option<usize> {
+        let first = lines.get(i)?.trim();
+        if !self.template_headers
+            || !opens_template_header(first)
+            || !strip_template_header(first).is_empty()
+        {
+            return None;
+        }
+        let mut depth = 0i64;
+        for (j, line) in lines.iter().enumerate().skip(i) {
+            if j > i && !search.spend() {
+                return None;
+            }
+            if scanned.get(j).is_none_or(|s| s.is_non_code) {
+                continue;
+            }
+            depth += line.chars().fold(0, |n, c| match c {
+                '<' => n + 1,
+                '>' => n - 1,
+                _ => n,
+            });
+            if depth <= 0 {
+                return (j > i).then_some(j);
+            }
+        }
+        None
+    }
+
     /// The 0-based opening line of the attribute that spans lines and ends on line `last`
     /// (Rust's `#[serde(` ... `)]`): the lines above `last` are walked up while its square
     /// brackets stay unbalanced, up to the line that balances them, which must open with an
@@ -1107,6 +1169,11 @@ impl BraceFamilyExtractor {
     /// (`@SuppressWarnings(` ... `)`, `@Component({` ... `})`) is recovered the same way on its
     /// parentheses: `last` ends in `)` and the line that balances them opens with an attribute
     /// prefix that does not end in `[` (`@`).
+    ///
+    /// For an extractor with `template_headers` (C++), a template header wrapped over lines
+    /// (`template <typename T,` then `typename U>`) is recovered the same way on its angle
+    /// brackets: `last` ends in `>` and the line that balances them opens a template header
+    /// ([`opens_template_header`]).
     ///
     /// The walk never goes above `floor`, the line after the previous construct: an attribute
     /// opening above it would overlap that construct, and an unbounded walk made a file of
@@ -1135,12 +1202,18 @@ impl BraceFamilyExtractor {
         // so the attribute was cut from the item it controls and reviewed as a gap unit.
         // MAGI FIX (S6 loop 12): a wrapped `@` annotation ends in `)` or `})`, which the `[`
         // rule never matched, so it was cut from its member too.
+        // MAGI FIX (loop 26, 3): a C++ `template <` header wrapped over lines ends in `>`; it is
+        // recovered on its angle brackets, up to the line that opens it.
         let (open, close, bracket_prefix) = match lines.get(last)?.trim_end().chars().last()? {
             ']' => ('[', ']', true),
             ')' => ('(', ')', false),
+            '>' if self.template_headers => ('<', '>', false),
             _ => return None,
         };
         let opens_attribute = |text: &str| {
+            if close == '>' {
+                return opens_template_header(text);
+            }
             self.attribute_prefixes
                 .iter()
                 .any(|p| p.ends_with('[') == bracket_prefix && text.starts_with(p.as_str()))
@@ -1259,8 +1332,9 @@ impl BraceFamilyExtractor {
     /// it when that line holds only its return type, written GNU style on a line of its own
     /// (`static int` over `foo (int a)`), else `i`. Only for extractors with
     /// `semicolon_declarations` and outside a block body (`members`), where a line of type words
-    /// alone (identifier characters, blanks, `*`, `&`, `<`, `>` and `::`, not ending in `:`) is
-    /// no construct of its own: it fell into a gap unit, split from its function or prototype.
+    /// alone (identifier characters, blanks, `*`, `&`, `<`, `>` and `::`, not ending in `:`, its
+    /// angle brackets balanced) is no construct of its own: it fell into a gap unit, split from
+    /// its function or prototype.
     /// Never above `floor`, the line after the previous construct. O(n) in the two lines.
     ///
     /// # Arguments
@@ -1290,11 +1364,15 @@ impl BraceFamilyExtractor {
                 .get(k)
                 .is_some_and(|s| !s.is_non_code && !s.starts_in_literal)
         };
+        // MAGI FIX (loop 26, 3): the last line of a wrapped template header (`typename U>`) read
+        // as a return type, so the header's earlier lines were cut from the function; a return
+        // type's angle brackets balance on its line.
         let type_words = lines.get(above).map(|l| l.trim()).is_some_and(|t| {
             !t.is_empty()
                 && !t.ends_with(':')
                 && t.chars()
                     .all(|c| is_identifier_char(c) || RETURN_TYPE_CHARS.contains(c))
+                && t.matches('<').count() == t.matches('>').count()
         });
         let signature = lines
             .get(i)
