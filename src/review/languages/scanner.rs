@@ -497,6 +497,12 @@ impl CodeScanner {
     /// are 0) but may move `depth_after`: `#elif` and `#else` return it to the depth at `#if`,
     /// `#endif` to the depth the first branch reached
     /// ([`LexicalRules::preprocessor_directives`]). O(n) in the line's length.
+    ///
+    /// With preprocessor rules, a line that ends in `\` continues its directive or its `//`
+    /// comment onto the next line even when blanks follow the backslash: GCC and Clang splice
+    /// such a line (with a warning), and C++23 makes it the standard reading (P2223R2, trailing
+    /// whitespace after a line-splicing backslash). A compiler that does not splice it reads one
+    /// line differently, never a lost one.
     pub fn scan_line(&mut self, line_number: u32, line: &str) -> ScannedLine {
         let mut chars = std::mem::take(&mut self.chars);
         chars.clear();
