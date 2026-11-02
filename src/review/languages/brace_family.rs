@@ -56,9 +56,10 @@ pub struct BraceFamilyExtractor {
     /// `attribute_prefixes`): C++ only.
     template_headers: bool,
     /// The words that may stand right before a `(` without naming a function in this language
-    /// ([`Self::signature_name`]): [`NOT_FUNCTION_NAMES`], or for Java
-    /// [`JAVA_NOT_FUNCTION_NAMES`], since a word reserved only in another language (`delete`,
-    /// `typeof`) is a legal Java method name.
+    /// ([`Self::signature_name`]): [`NOT_FUNCTION_NAMES`], or for Java, C and C++ the words that
+    /// language reserves ([`JAVA_NOT_FUNCTION_NAMES`], [`C_NOT_FUNCTION_NAMES`],
+    /// [`CPP_NOT_FUNCTION_NAMES`]), since a word reserved only in another language (`delete` in
+    /// Java or C, `function` in C++) is a legal name there.
     // MAGI FIX (S6 loop 18, B2b-5): one list served every language.
     not_function_names: &'static [&'static str],
     /// Whether a method directly in a class body may be named by a word of
@@ -381,6 +382,23 @@ const JAVA_NOT_FUNCTION_NAMES: [&str; 15] = [
     "synchronized",
     "yield",
     "case",
+];
+
+/// The words of [`NOT_FUNCTION_NAMES`] that C reserves: its control flow, `sizeof` and C23's
+/// `typeof`. The others (`delete`, `new`, `try`, `function`, `await`, ...) are legal C function
+/// names (`int delete(int x) {`).
+// MAGI FIX (B2b1 9): C shared the list of every language, so such a function was no unit.
+const C_NOT_FUNCTION_NAMES: [&str; 10] = [
+    "if", "for", "while", "switch", "return", "sizeof", "else", "do", "case", "typeof",
+];
+
+/// The words of [`NOT_FUNCTION_NAMES`] that C++ reserves: C's ([`C_NOT_FUNCTION_NAMES`]),
+/// exception handling, `new` and `delete`, and the trailing clauses of a wrapped signature
+/// (`requires (C)`, `noexcept(true)`, `-> decltype(a + b)`). `function`, `finally`, `await` and
+/// `yield` are legal C++ names.
+const CPP_NOT_FUNCTION_NAMES: [&str; 18] = [
+    "if", "for", "while", "switch", "return", "sizeof", "else", "do", "case", "typeof", "catch",
+    "try", "throw", "new", "delete", "requires", "noexcept", "decltype",
 ];
 
 /// The words a JavaScript or TypeScript declaration may open with (`export default`,
@@ -3219,7 +3237,7 @@ impl BraceFamilyExtractor {
             signature_functions: true,
             semicolon_declarations: true,
             template_headers: false,
-            not_function_names: &NOT_FUNCTION_NAMES,
+            not_function_names: &C_NOT_FUNCTION_NAMES,
             reserved_word_methods: false,
             computed_member_names: false,
             anonymous_functions: false,
@@ -3255,6 +3273,7 @@ impl BraceFamilyExtractor {
         // out of the unit it declares.
         ext.template_headers = true;
         ext.operator_overloads = true;
+        ext.not_function_names = &CPP_NOT_FUNCTION_NAMES;
         ext.attribute_prefixes
             .extend(["template<".to_string(), "template <".to_string()]);
         ext
