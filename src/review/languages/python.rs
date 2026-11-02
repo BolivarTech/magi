@@ -1346,4 +1346,114 @@ def g():
         assert_eq!(block.kind, UnitKind::TopLevel, "{found:?}");
         assert!(PythonExtractor.split_block(block).is_empty());
     }
+
+    /// What follows each f-string line in the PEP 701 tests: two definitions, so a reader that
+    /// keeps a string or a bracket open past the line swallows them into the line's unit.
+    const FSTRING_TAIL: &str = "\ndef f():\n    return 1\n\ndef g():\n    return 2\n";
+
+    /// Asserts that `head`, one line assigning `x`, followed by [`FSTRING_TAIL`] gives three
+    /// units: the assignment on its own line and both definitions.
+    fn assert_line_ends_before_the_definitions(head: &str) {
+        let code = format!("{head}{FSTRING_TAIL}");
+        let units = extract(&code, &[1, 3, 6]);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("x", UnitKind::DeclarationGroup, 1, 1),
+                ("f", UnitKind::Function, 2, 3),
+                ("g", UnitKind::Function, 5, 6),
+            ],
+            "{head}"
+        );
+    }
+
+    #[test]
+    fn a_plain_assignment_ends_before_the_definitions() {
+        // The control of the PEP 701 tests: the spans every f-string line below must give.
+        assert_line_ends_before_the_definitions("x = 1");
+    }
+
+    #[test]
+    fn an_fstring_field_reusing_its_quote_around_a_bracket_ends_with_its_line() {
+        // [MAGI residual, PEP 701] a string inside a replacement field that reuses the outer
+        // quote closed the f-string early, so its `(` stayed counted open and the assignment
+        // took both definitions. Each line parses with CPython 3.12 (`t"` with 3.14).
+        for head in [
+            r#"x = f"{"(" if a else ""}""#,
+            r#"x = f"{f"{"(" if a else ""}"}""#,
+            r#"x = t"{"(" if a else ""}""#,
+        ] {
+            assert_line_ends_before_the_definitions(head);
+        }
+    }
+
+    #[test]
+    fn a_triple_quote_inside_an_fstring_field_opens_no_string() {
+        // [MAGI residual, PEP 701] the `'''` of a string inside a field read as the opening of a
+        // triple-quoted string, which ran to the end of the file.
+        assert_line_ends_before_the_definitions(r#"x = f"{d["'''"]}""#);
+        assert_line_ends_before_the_definitions(r#"x = f"""{d['"""']}""""#);
+    }
+
+    #[test]
+    fn an_fstring_field_spanning_lines_continues_its_statement() {
+        // [MAGI residual, PEP 701] a replacement field may span lines, a comment included; its
+        // lines continue the assignment and its `(` is string text.
+        for code in [
+            "x = f\"{\n    a\n} (\"\ndef f():\n    return 1\n",
+            "x = f\"{a # c (\n    + b\n} (\"\ndef f():\n    return 1\n",
+        ] {
+            let units = extract(code, &[1, 2, 5]);
+            assert_each_line_in_one_unit(&units, 5);
+            assert_eq!(
+                spans(&units),
+                vec![
+                    ("x", UnitKind::DeclarationGroup, 1, 3),
+                    ("f", UnitKind::Function, 4, 5),
+                ],
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn fstring_formats_escapes_and_prefixes_keep_their_unit_boundaries() {
+        // Declared green before the PEP 701 fix: the lines the old reader already got right,
+        // pinned so the f-string reader keeps them. A quote in a format spec is text, `{{` is
+        // no field, `\N{...}` is an escape except in a raw string, and a plain, byte or `u`
+        // string has no field at all.
+        for head in [
+            r#"x = f"{d["key"]}""#,
+            r#"x = f"{", ".join(y)}""#,
+            r#"x = f"{v:#x}""#,
+            r#"x = f"{v:'^10} (""#,
+            r#"x = f"{v:{w}>{n}} (""#,
+            r#"x = f"{v!r:>10} (""#,
+            r#"x = f"{{ ( }}""#,
+            r#"x = f"\N{EM DASH} (""#,
+            r#"x = rf"\{v} (""#,
+            r#"x = rf"\N{v} (""#,
+            r#"x = fr"{v}\" (""#,
+            r#"x = Rf"{v} (""#,
+            r#"x = fR"{v} (""#,
+            r#"x = F"{v} (""#,
+            r#"x = T"{v} (""#,
+            r#"x = f"{f"{v}"} (""#,
+            r#"x = "{" + ")""#,
+            r#"x = b"{" + b")""#,
+            r#"x = rb"{" + br")""#,
+            r#"x = u"{" + ")""#,
+        ] {
+            assert_line_ends_before_the_definitions(head);
+        }
+        let code = "x = f\"\"\"a {v} (\n{w:>{n}} \"\"\"\ndef f():\n    return 1\n";
+        let units = extract(code, &[1, 4]);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("x", UnitKind::DeclarationGroup, 1, 2),
+                ("f", UnitKind::Function, 3, 4),
+            ]
+        );
+    }
 }

@@ -2248,4 +2248,58 @@ void h() {
         let results = CodeScanner::new(LexicalRules::c()).scan_all(open);
         assert_eq!(results[1].brace_delta, 1);
     }
+
+    /// Asserts that `head`, one Python line, moves no brace and leaves no literal open: the
+    /// `y = {` after it starts in code and opens one block.
+    fn assert_python_line_closes_its_strings(head: &str) {
+        let code = format!("{head}\ny = {{\n");
+        let results = CodeScanner::new(LexicalRules::python()).scan_all(&code);
+        assert_eq!(
+            results[0].brace_delta, 0,
+            "{head}: its braces are string text"
+        );
+        assert!(!results[1].starts_in_literal, "{head}: every string closed");
+        assert_eq!(results[1].brace_delta, 1, "{head}");
+    }
+
+    #[test]
+    fn a_string_reusing_its_quote_inside_an_fstring_field_keeps_the_fstring_open() {
+        // [MAGI residual, PEP 701] since Python 3.12 a string inside a replacement field may
+        // reuse the outer quote; it closed the f-string, so the field's `{` counted as code and
+        // the `'''` of `d["'''"]` opened a triple-quoted string that ran to the end of the file.
+        for head in [
+            r#"x = f"{"{"}""#,
+            r#"x = f"{d["'''"]}""#,
+            r#"x = f"{f"{"{"}"}""#,
+            r#"x = t"{"{"}""#,
+        ] {
+            assert_python_line_closes_its_strings(head);
+        }
+    }
+
+    #[test]
+    fn python_fstring_specs_escapes_and_prefixes_leave_no_literal_open() {
+        // Declared green before the PEP 701 fix, pinned so the f-string reader keeps them: a
+        // quote in a format spec is text, `{{` is no field, `\N{...}` is an escape, a raw
+        // string's backslash keeps its quote from closing it, and a plain or byte string has
+        // no field.
+        for head in [
+            r#"x = f"{d["key"]}""#,
+            r#"x = f"{v:'^10}""#,
+            r#"x = f"{v:{w}>{n}}""#,
+            r#"x = f"{{ }}""#,
+            r#"x = f"\N{EM DASH}""#,
+            r#"x = rf"\N{v}""#,
+            r#"x = fr"{v}\"""#,
+            r#"x = "{" + "}""#,
+            r#"x = b"{" + rb"}""#,
+        ] {
+            assert_python_line_closes_its_strings(head);
+        }
+        let code = "x = f\"\"\"{v} {\n\"\"\"\ny = {\n";
+        let results = CodeScanner::new(LexicalRules::python()).scan_all(code);
+        assert!(results[1].starts_in_literal, "line 2 is string text");
+        assert!(!results[2].starts_in_literal);
+        assert_eq!(results[2].brace_delta, 1);
+    }
 }
