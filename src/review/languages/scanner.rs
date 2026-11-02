@@ -531,6 +531,12 @@ impl CodeScanner {
         // condition follows is read there, so a comment after it (`return /* c */ /x/`) does
         // not hide it.
         let mut last_code_end: usize = 0;
+        // Where the last `}` that closes a block of the code (not a brace of a `${...}`
+        // expression) ends, as `last_code_end` counts: the line ends a block only when its last
+        // code character is that `}`.
+        // MAGI FIX (loop 27, B2a): a `}` closing a brace nested in a template expression set
+        // `ends_block` when it ended the line.
+        let mut block_close_end: usize = 0;
         // A line that starts inside a template expression starts inside the template literal.
         let was_code_at_start = self.state == LexicalState::Code && self.templates.is_empty();
         let mut entered_code = false;
@@ -774,6 +780,7 @@ impl CodeScanner {
                                 delta -= 1;
                                 min_delta = min_delta.min(delta);
                                 self.depth = self.depth.saturating_sub(1);
+                                block_close_end = last_code_end;
                             }
                         }
                     }
@@ -983,7 +990,7 @@ impl CodeScanner {
             min_delta,
             group_delta,
             ends_statement: last_code == Some(';'),
-            ends_block: last_code == Some('}'),
+            ends_block: last_code == Some('}') && block_close_end == last_code_end,
             is_non_code,
             starts_in_literal: !was_code_at_start,
         }
