@@ -1184,11 +1184,7 @@ impl BraceFamilyExtractor {
             if scanned.get(j).is_none_or(|s| s.is_non_code) {
                 continue;
             }
-            depth += line.chars().fold(0, |n, c| match c {
-                '<' => n + 1,
-                '>' => n - 1,
-                _ => n,
-            });
+            depth += template_angle_delta(line);
             if depth <= 0 {
                 return (j > i).then_some(j);
             }
@@ -1279,15 +1275,21 @@ impl BraceFamilyExtractor {
                 continue;
             }
             let line = lines.get(j)?;
-            unclosed += line.chars().fold(0, |n, c| {
-                if c == close {
-                    n + 1
-                } else if c == open {
-                    n - 1
-                } else {
-                    n
-                }
-            });
+            // MAGI FIX (loop 27, B2b1b): the `>` of a comparison in parentheses
+            // (`bool B = (N >= 0)>`) counted as a close, so the header never balanced.
+            if close == '>' {
+                unclosed -= template_angle_delta(line);
+            } else {
+                unclosed += line.chars().fold(0, |n, c| {
+                    if c == close {
+                        n + 1
+                    } else if c == open {
+                        n - 1
+                    } else {
+                        n
+                    }
+                });
+            }
             if unclosed <= 0 {
                 return (unclosed == 0 && j < last && opens_attribute(line.trim())).then_some(j);
             }

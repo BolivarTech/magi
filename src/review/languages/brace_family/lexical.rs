@@ -572,11 +572,18 @@ pub(super) fn declaration_keyword_rest<'t>(text: &'t str, kw: &str) -> Option<&'
 
 /// `text` after the balanced `<...>` it opens with, trimmed at its start; empty when the list
 /// never closes. The `>` of an arrow (`impl<T: Fn(u8) -> u8>`, `<T extends () => void>`) closes
-/// nothing ([`closes_angle`]). O(n) in the text.
+/// nothing ([`closes_angle`]), and neither does a `<` or `>` inside parentheses: C++ requires a
+/// comparison in a template argument to sit in them (`template <int N = (M >= 0)>`), and a
+/// type in a parameter list there (`Fn(Vec<u8>)`) is balanced on its own. O(n) in the text.
 pub(super) fn skip_generics(text: &str) -> &str {
+    // MAGI FIX (loop 27, B2b1b): the `>` of `(M >= 0)` closed the header early.
     let mut depth = 0u32;
+    let mut parens = 0u32;
     for (i, c) in text.char_indices() {
         match c {
+            '(' => parens = parens.saturating_add(1),
+            ')' => parens = parens.saturating_sub(1),
+            '<' | '>' if parens > 0 => {}
             '<' => depth = depth.saturating_add(1),
             // MAGI FIX (S6 loop 6): the `>` of a `->` in a bound closed the list early.
             // MAGI FIX (S6 loop 25, B2b1b): so did the `>` of a TypeScript `=>`.
@@ -591,6 +598,36 @@ pub(super) fn skip_generics(text: &str) -> &str {
         }
     }
     ""
+}
+
+/// The angle brackets one line of a C++ template header wrapped over lines opens, less those it
+/// closes, counting neither inside the parentheses of the line, as [`skip_generics`] does: a
+/// comparison in a template argument sits in them (`bool B = (N >= 0)>` closes one). A `)` that
+/// closes a parenthesis of an earlier line is read as closing nothing, declared: the angle
+/// brackets of a comparison wrapped over lines may then count. O(n) in the line.
+///
+/// # Arguments
+///
+/// * `line` - One line of the header.
+///
+/// # Returns
+///
+/// The number of `<` minus the number of `>` outside its parentheses.
+pub(super) fn template_angle_delta(line: &str) -> i64 {
+    let mut parens = 0u32;
+    line.chars().fold(0, |n, c| match c {
+        '(' => {
+            parens = parens.saturating_add(1);
+            n
+        }
+        ')' => {
+            parens = parens.saturating_sub(1);
+            n
+        }
+        '<' if parens == 0 => n + 1,
+        '>' if parens == 0 => n - 1,
+        _ => n,
+    })
 }
 
 /// `text` after the C++ template header it opens with: the word `template` followed, after any
