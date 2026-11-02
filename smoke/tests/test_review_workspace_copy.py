@@ -35,7 +35,7 @@ def _environment(root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
     """
     magi = root / "env" / ".magi"
     (magi / "nested").mkdir(parents=True)
-    (magi / "magi.toml").write_text("# toy config\n", encoding="utf-8")
+    (magi / "magi.toml").write_bytes(b"# toy config\n")
     (magi / "nested" / "kept.bin").write_bytes(b"\x00kept")
     outside = root / "outside"
     outside.mkdir()
