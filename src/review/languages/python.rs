@@ -1467,4 +1467,30 @@ def g():
             assert_each_line_in_one_unit(&units, total);
         }
     }
+
+    #[test]
+    fn a_class_nested_in_a_class_body_is_a_member_of_its_own_kind() {
+        // [MAGI loop 26, 8] the members split took only `def` lines, so a nested `class Inner:`
+        // stayed in the outer class's header piece, against the `split_block` contract (other
+        // nested constructs keep their kind), which the brace family honors.
+        let code = "class C:\n    def a(self):\n        return 1\n\n    @decorate\n    class Inner:\n        def b(self):\n            return 2\n";
+        let every: HashSet<u32> = (1..=8).collect();
+        let block = PythonExtractor
+            .extract_units(code, "test.py", &every)
+            .into_iter()
+            .find(|u| u.kind == UnitKind::Class)
+            .expect("the class");
+        assert_eq!(
+            spans(&PythonExtractor.split_block(&block)),
+            vec![
+                ("C", UnitKind::Class, 1, 1),
+                ("a", UnitKind::Method, 2, 3),
+                ("C", UnitKind::Class, 4, 4),
+                ("Inner", UnitKind::Class, 5, 8),
+            ]
+        );
+        // A function nested in a function stays in its parent (RV03).
+        let def = extract("def f():\n    def g():\n        pass\n", &[2]);
+        assert!(PythonExtractor.split_block(&def[0]).is_empty());
+    }
 }
