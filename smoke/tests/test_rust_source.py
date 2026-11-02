@@ -212,5 +212,50 @@ class GuardRoutingTests(unittest.TestCase):
         self.assertEqual(5, test_rust_sync._usize_const(_DRIFTED, "BYTES_PER_TOKEN"))
 
 
+class LiteralScanTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 29, F1b2a] what the literal scan does with an open literal and a byte literal."""
+
+    def test_an_unterminated_string_fails_loudly_instead_of_swallowing_the_file(self) -> None:
+        # It consumed the rest of the file as string content, so no block comment after it was blanked and an
+        # old definition left in one answered for a real definition that no longer exists.
+        text = 'let s = "never closed;\n/*\npub const N: u8 = 1;\n*/\n'
+        with self.assertRaisesRegex(AssertionError, "unterminated"):
+            _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs")
+
+    def test_an_unterminated_raw_string_fails_loudly(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "unterminated"):
+            _helpers().code_only('let s = r#"never closed;\npub const N: u8 = 1;\n')
+
+    def test_a_string_may_span_lines_as_rust_allows(self) -> None:
+        text = 'let s = "one\n/* two */\n";\npub const N: u8 = 3;\n'
+        self.assertEqual("3", _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs").group(1))
+        self.assertIn("/* two */", _helpers().code_only(text))
+
+    def test_a_comment_opener_inside_a_byte_literal_opens_nothing(self) -> None:
+        text = "let b = b\"/*\";\nlet c = b'/';\nlet r = br#\"/*\"#;\npub const N: u8 = 4;\n"
+        self.assertEqual("4", _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs").group(1))
+        self.assertEqual(text, _helpers().code_only(text))
+
+
+class WithoutCommentsTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 29, F1b2a-melchior] a trailing comment is not code either."""
+
+    def test_a_trailing_line_comment_is_blanked_and_the_code_before_it_kept(self) -> None:
+        stripped = _helpers().without_comments("let x = 1; // context assembly failed\n")
+        self.assertNotIn("context assembly failed", stripped)
+        self.assertIn("let x = 1;", stripped)
+
+    def test_slashes_inside_a_string_are_not_a_comment(self) -> None:
+        text = 'let u = "http://host"; let m = "context assembly failed";\n'
+        self.assertEqual(text, _helpers().without_comments(text))
+
+    def test_block_and_doc_comments_are_blanked_and_the_lines_kept(self) -> None:
+        text = "/// doc marker\nlet a = 1; /* block marker */\n//! inner marker\n"
+        stripped = _helpers().without_comments(text)
+        self.assertEqual(text.count("\n"), stripped.count("\n"))
+        self.assertNotIn("marker", stripped)
+        self.assertIn("let a = 1;", stripped)
+
+
 if __name__ == "__main__":
     unittest.main()
