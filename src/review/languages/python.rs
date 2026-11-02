@@ -1365,22 +1365,19 @@ def g():
     }
 
     #[test]
-    fn a_definition_inside_a_module_level_block_falls_into_a_whole_gap_unit() {
-        // [MAGI S6 loop 14, B2b2] definitions are found at indent 0 only, a declared
-        // limitation: one inside `if TYPE_CHECKING:` is no unit of its own, its block is one gap
-        // unit, and that unit is never split, so a block larger than a batch is refused with the
-        // typed `ReviewError::TooLargeForBatch` (RV03) instead of being cut; no line is lost.
-        let code = "import os\n\nif TYPE_CHECKING:\n    def helper():\n        return 1\n\n    class Shim:\n        pass\n\ndef after():\n    return 2\n";
-        let every: Vec<u32> = (1..=11).collect();
+    fn a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit() {
+        // [MAGI S6 loop 14, B2b2, declared; fixed in MAGI loop 29, B2b2] definitions are found
+        // at indent 0 only, so one inside `if TYPE_CHECKING:` is no unit of its own and its
+        // block is one gap unit. That unit was never split, so a block larger than a batch was
+        // refused as too large although each definition in it fits (RV03); it now splits at the
+        // definitions it holds, at any depth of compound statements, each with its decorators.
+        let code = "import os\n\nif TYPE_CHECKING:\n    def helper():\n        return 1\n\n    @dec\n    class Shim:\n        pass\n\ndef after():\n    return 2\n";
+        let every: Vec<u32> = (1..=12).collect();
         let units = extract(code, &every);
-        assert_each_line_in_one_unit(&units, 11);
+        assert_each_line_in_one_unit(&units, 12);
         let found = spans(&units);
         assert!(
-            found.contains(&("after", UnitKind::Function, 10, 11)),
-            "{found:?}"
-        );
-        assert!(
-            !units.iter().any(|u| u.name == "helper" || u.name == "Shim"),
+            found.contains(&("after", UnitKind::Function, 11, 12)),
             "{found:?}"
         );
         let block = units
@@ -1388,7 +1385,49 @@ def g():
             .find(|u| u.start_line <= 4 && 4 <= u.end_line)
             .expect("a unit holds the nested def");
         assert_eq!(block.kind, UnitKind::TopLevel, "{found:?}");
-        assert!(PythonExtractor.split_block(block).is_empty());
+        let gap = "lines 2-10";
+        assert_eq!(
+            spans(&PythonExtractor.split_block(block)),
+            vec![
+                (gap, UnitKind::TopLevel, 2, 3),
+                ("helper", UnitKind::Function, 4, 5),
+                (gap, UnitKind::TopLevel, 6, 6),
+                ("Shim", UnitKind::Class, 7, 9),
+                (gap, UnitKind::TopLevel, 10, 10),
+            ]
+        );
+        // Nested compound statements: the definitions in each branch are members.
+        let code = "try:\n    if X:\n        def f():\n            pass\nexcept ImportError:\n    def f():\n        pass\n";
+        let units = extract(code, &(1..=7).collect::<Vec<_>>());
+        let block = units.first().expect("one gap unit");
+        let gap = "lines 1-7";
+        assert_eq!(
+            spans(&PythonExtractor.split_block(block)),
+            vec![
+                (gap, UnitKind::TopLevel, 1, 2),
+                ("f", UnitKind::Function, 3, 4),
+                (gap, UnitKind::TopLevel, 5, 5),
+                ("f", UnitKind::Function, 6, 7),
+            ]
+        );
+        // A class whose methods sit in a compound statement of its body splits at them too.
+        let code = "class C:\n    if X:\n        def m(self):\n            pass\n    else:\n        def m(self):\n            return 1\n";
+        let units = extract(code, &(1..=7).collect::<Vec<_>>());
+        let class = units.first().expect("the class is a unit");
+        assert_eq!(
+            spans(&PythonExtractor.split_block(class)),
+            vec![
+                ("C", UnitKind::Class, 1, 2),
+                ("m", UnitKind::Method, 3, 4),
+                ("C", UnitKind::Class, 5, 5),
+                ("m", UnitKind::Method, 6, 7),
+            ]
+        );
+        // A gap with no definition still gives no pieces: it is batched whole.
+        let units = extract("if X:\n    y = 1\n", &[1, 2]);
+        assert!(PythonExtractor
+            .split_block(units.first().expect("one gap unit"))
+            .is_empty());
     }
 
     /// What follows each f-string line in the PEP 701 tests: two definitions, so a reader that
