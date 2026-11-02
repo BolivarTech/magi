@@ -417,13 +417,21 @@ def _rust_fn_body(text: str, signature: str) -> str:
         signature: The declaration's start, e.g. ``pub fn effective_provider(``.
 
     Returns:
-        str: From the signature to the first line holding only the method's closing brace.
+        str: From the line the signature starts to the first line holding only a closing brace
+        at the signature's own indentation. rustfmt indents every inner block deeper, so that
+        brace is the function's; a top-level function ends at a ``}`` in column one, a method
+        at one indented like its ``fn``.
 
     Raises:
         AssertionError: When no code line starts the declaration, or more than one does.
     """
-    start = one_definition(text, re.escape(signature), signature).start()
-    end = text.find("\n    }\n", start)
+    # MAGI FIX (S6 loop 27): the end was the first "    }" line whatever the
+    # signature's indentation, so a top-level function ran on into the next
+    # item's method (F1b2a-balthasar).
+    match = one_definition(text, re.escape(signature), signature)
+    start = match.start()
+    indent = match.group(0)[:len(match.group(0)) - len(match.group(0).lstrip(" \t"))]
+    end = text.find("\n%s}\n" % indent, start)
     return text[start:] if end == -1 else text[start:end]
 
 
