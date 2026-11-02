@@ -4306,8 +4306,8 @@ int g(void) {
             )),
             vec![
                 ("a", UnitKind::Function, 1, 2),
-                ("lines 3-3", UnitKind::TopLevel, 3, 3),
-                ("b", UnitKind::Function, 4, 4)
+                ("b", UnitKind::Function, 4, 4),
+                ("lines 3-3", UnitKind::TopLevel, 3, 3)
             ]
         );
     }
