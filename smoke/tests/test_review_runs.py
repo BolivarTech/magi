@@ -1632,5 +1632,65 @@ class ModelCounterShutdownTests(unittest.TestCase):
         self.assertEqual(("POST /api/chat",), runs.requests_past_the_probe(seen["log"]))
 
 
+def _send_raw(port: int, data: bytes) -> None:
+    """Send *data* to the counter on *port*, half-close, and read until the counter hangs up."""
+    import socket
+    with socket.create_connection(("127.0.0.1", port), timeout=30) as client:
+        try:
+            client.sendall(data)
+            client.shutdown(socket.SHUT_WR)
+            while client.recv(65536):
+                pass
+        except OSError:
+            pass  # the counter may hang up before reading everything (an over-long line)
+
+
+class ModelCounterEveryRequestTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 28, F1a1-melchior] every request reaches the record, whatever its method or shape.
+
+    The counter recorded only from its ``do_*`` methods, so a method it does not implement (OPTIONS, TRACE,
+    an unknown verb) was answered 501 by the base class, and a malformed or over-long request line 400 or
+    414, all without a record: a refusal run whose product sent one passed as having reached no model.
+    """
+
+    def _counted(self, *requests: bytes) -> runs.RequestLog:
+        """Send each raw request on its own connection to a counter, and return its log once it closed."""
+        with runs.model_counter() as (url, log):
+            port = int(url.rsplit(":", 1)[1].split("/", 1)[0])
+            for data in requests:
+                _send_raw(port, data)
+        return log
+
+    def test_a_method_the_counter_does_not_implement_is_still_counted(self) -> None:
+        methods = ("OPTIONS", "TRACE", "CONNECT", "BREW")
+        log = self._counted(*(b"%s /api/chat HTTP/1.1\r\nHost: x\r\n\r\n" % m.encode() for m in methods))
+        self.assertEqual(tuple("%s /api/chat" % m for m in methods), runs.requests_past_the_probe(log))
+
+    def test_a_malformed_request_is_still_counted(self) -> None:
+        malformed = (b"GARBAGE\r\n\r\n",                         # no method and path
+                     b"GET /api/chat HTTP/9.9\r\n\r\n",           # a version the server refuses
+                     b"GET /" + b"a" * 70000 + b" HTTP/1.1\r\n",   # a line past the 64 KiB limit
+                     b"POS")                                       # a line cut before its end
+        log = self._counted(*malformed)
+        self.assertEqual(len(malformed), log.past_the_probe_total)
+        self.assertEqual(len(malformed), len(runs.requests_past_the_probe(log)))
+
+    def test_a_path_that_does_not_parse_as_a_url_is_still_counted(self) -> None:
+        # urlsplit raises on an unclosed IPv6 host, which killed the handler before its record.
+        log = self._counted(b"GET http://[x/api/chat HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertEqual(1, log.past_the_probe_total)
+        self.assertEqual(1, len(runs.requests_past_the_probe(log)))
+
+    def test_a_connection_that_sends_nothing_is_no_request(self) -> None:
+        log = self._counted(b"")
+        self.assertEqual(0, log.total)
+
+    def test_a_probe_with_any_method_is_still_the_probe(self) -> None:
+        log = self._counted(b"POST /api/show HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n",
+                            b"GET /api/tags HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertEqual(2, log.total)
+        self.assertEqual((), runs.requests_past_the_probe(log))
+
+
 if __name__ == "__main__":
     unittest.main()
