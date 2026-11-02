@@ -20,7 +20,14 @@ that follow from it are declared rather than handled:
   before any pattern runs, by a scan that skips string, raw-string and char
   literals so an opener inside one (``"src/**/*.rs"``) opens nothing; a
   lifetime (``'a``) is not taken for a char literal. An unterminated block
-  comment fails loudly. [MAGI §6 MS2 loop 28, F1b2a-caspar]
+  comment fails loudly. [MAGI §6 MS2 loop 28, F1b2a-caspar] So does an
+  unterminated string or raw string, which would otherwise hide every block
+  comment after it; a byte literal (``b"/*"``) is read like the plain one.
+  [MAGI §6 MS2 loop 29, F1b2a-caspar, F1b2a-balthasar]
+- A guard asking whether a phrase or a key appears in code reads
+  :func:`without_comments`, which also blanks a trailing ``//`` comment;
+  :func:`code_only` keeps such a line whole. [MAGI §6 MS2 loop 29,
+  F1b2a-melchior]
 - A line inside a multi-line (raw) string literal that starts with ``//`` is
   taken for a comment and skipped.
 - Uniqueness is per line: two matches on one physical line count once.
@@ -126,25 +133,43 @@ def _literal_end(text: str, index: int) -> int:
         text: Source text.
         index: A position in it.
 
+    A byte string or byte char (``b"..."``, ``b'.'``) is read as its ``b``
+    followed by the plain literal, which ends at the same place; ``br"..."``
+    is a raw string.
+
+    MAGI FIX (S6 loop 29): a string or raw string that never closed ran to the
+    end of the file, so no block comment after it was blanked and an old
+    definition left in one answered for a real definition (F1b2a-caspar).
+    The product compiles, so a literal that does not close means the scan
+    misread the file; it now fails loudly.
+
     Returns:
         int: The index just past the literal; *index* itself when no literal
         starts there (a lifetime's quote included).
+
+    Raises:
+        AssertionError: When a string or raw string starting at *index* is
+            never closed.
     """
     raw = _RAW_STRING.match(text, index)
     if raw is not None and (index == 0 or not (text[index - 1].isalnum() or text[index - 1] == "_")):
         closing = '"' + raw.group(1)
         end = text.find(closing, raw.end())
-        return len(text) if end == -1 else end + len(closing)
+        if end == -1:
+            raise AssertionError("unterminated raw string literal at offset %d" % index)
+        return end + len(closing)
     if text.startswith('"', index):
         cursor = index + 1
         while cursor < len(text) and text[cursor] != '"':
             cursor += 2 if text[cursor] == "\\" else 1
-        return min(cursor + 1, len(text))
+        if cursor >= len(text):
+            raise AssertionError("unterminated string literal at offset %d" % index)
+        return cursor + 1
     char = _CHAR_LITERAL.match(text, index)
     return char.end() if char is not None else index
 
 
-def _without_block_comments(text: str) -> str:
+def _without_block_comments(text: str, line_comments: bool = False) -> str:
     """*text* with every block comment blanked, its newlines kept.
 
     Line comments, string and char literals are skipped whole, so a ``/*``
@@ -152,15 +177,21 @@ def _without_block_comments(text: str) -> str:
 
     Complexity: ``O(len(text))``.
 
+    Args:
+        text: Source text.
+        line_comments: Whether every ``//`` comment, trailing ones included,
+            is blanked too (:func:`without_comments`); kept when ``False``.
+
     Raises:
-        AssertionError: When a block comment is never closed.
+        AssertionError: When a block comment or a string literal is never
+            closed.
     """
     out, index = [], 0
     while index < len(text):
         if text.startswith("//", index):
             end = text.find("\n", index)
             end = len(text) if end == -1 else end
-            out.append(text[index:end])
+            out.append(_blank(text[index:end]) if line_comments else text[index:end])
         elif text.startswith("/*", index):
             end = _block_comment_end(text, index)
             out.append(_blank(text[index:end]))
@@ -171,6 +202,33 @@ def _without_block_comments(text: str) -> str:
             out.append(text[index:end])
         index = end
     return "".join(out)
+
+
+def without_comments(text: str) -> str:
+    """*text* with every comment blanked, trailing line comments included, every line kept in place.
+
+    MAGI FIX (S6 loop 29): a guard that asks whether a phrase appears in code
+    read :func:`code_only`, which keeps a line whole when code precedes a
+    trailing ``//`` comment, so the phrase surviving only in such a comment
+    passed (F1b2a-melchior). Here a ``//`` outside a literal starts a comment
+    wherever it sits; ``//`` inside a string (a URL) is code.
+
+    Complexity: ``O(len(text))``.
+
+    Args:
+        text: Source text, ``\\r`` stripped.
+
+    Returns:
+        str: The same text with each comment's characters turned into spaces.
+
+    Raises:
+        AssertionError: When a block comment or a string literal is never closed.
+
+    Example:
+        >>> without_comments('let u = "a//b"; // note\\n')
+        'let u = "a//b";        \\n'
+    """
+    return _without_block_comments(text, line_comments=True)
 
 
 def code_only(text: str) -> str:

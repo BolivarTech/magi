@@ -25,7 +25,8 @@ import unittest
 
 from smoke import logs, runs
 from smoke.scenarios import code_review
-from smoke.tests.rust_source import char_list, code_only, one_definition, one_occurrence, read_source
+from smoke.tests.rust_source import (char_list, one_definition, one_occurrence, read_source,
+                                     without_comments)
 
 #: The repository root, three levels above this file.
 _ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -123,7 +124,7 @@ class BatchConstantTests(unittest.TestCase):
                                     r" -> u64 \{(.*?)\n\}", "src/magi/mod.rs", re.S).group(1)
         self.assertEqual(["timeout_secs", ".saturating_sub(CLASSIFY_TIMEOUT_SECS)", ".saturating_mul(100)",
                           ".checked_div(factor)", ".unwrap_or(0)"],
-                         [line.strip() for line in code_only(body).split("\n") if line.strip()])
+                         [line.strip() for line in without_comments(body).split("\n") if line.strip()])
         one_definition(text, r"pub\(crate\) const CALLS_PER_MODEL: u64 = %d;" % trio.ATTEMPTS_WITH_RETRY,
                        "src/magi/mod.rs")
         self.assertEqual(1, trio.ATTEMPTS_WITHOUT_RETRY)
@@ -166,7 +167,7 @@ class StderrWordingTests(unittest.TestCase):
     def test_the_omission_causes_are_the_products(self) -> None:
         found = one_definition(self.filter, r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n",
                                "src/review/filter.rs", re.S)
-        body = code_only(found.group(1))
+        body = without_comments(found.group(1))
         causes = re.findall(r'Self::\w+ => "([^"]+)"', body)
         # [MAGI §6 MS2 loop 12] an arm may name a constant instead of a literal (HARD_LINK_CAUSE, which
         # src/review/source.rs defines because the explicit-file error shares it); resolve it there.
@@ -237,7 +238,7 @@ class NeverReviewedTests(unittest.TestCase):
         listed = one_definition(source, r"pub const NEVER_REVIEWED: &\[&str\] = &\[([^\]]*)\];",
                                 "src/review/source.rs")
         self.assertEqual(prefix.group(1), code_review.MEMORY_DB_PREFIX)
-        items = code_only(listed.group(1))
+        items = without_comments(listed.group(1))
         names = tuple(re.findall(r'"([^"]+)"', items))
         self.assertEqual(set(names), set(code_review.PROTECTED_DIRS))
         # [MAGI §6 MS2 loop 28, F1b2a-melchior] assertIn passed with any number of extra identifiers, whose
@@ -263,7 +264,7 @@ class NeverReviewedTests(unittest.TestCase):
         self.assertEqual({"/", "\\"}, set(char_list(rest[:rest.index("]")])))
         one_occurrence(body, ".split(['/', '\\\\'])", "is_never_reviewed")
         # Every comparison folds ASCII case and nothing else, as same_product_name does.
-        self.assertGreater(code_only(body).count("eq_ignore_ascii_case"), 0)
+        self.assertGreater(without_comments(body).count("eq_ignore_ascii_case"), 0)
         self.assertNotIn("to_lowercase", body)
         self.assertNotIn("==", body)
 
@@ -288,7 +289,7 @@ class ReportKeyTests(unittest.TestCase):
         self.assertEqual(1, report.count("every documented key is present"))
         pinned = re.search(r"every documented key is present.*?for k in \[(.*?)\]", report, re.S)
         self.assertIsNotNone(pinned, "the summary key list was not found in src/review/report.rs")
-        self.assertEqual(set(), read - set(re.findall(r'"(\w+)"', code_only(pinned.group(1)))))
+        self.assertEqual(set(), read - set(re.findall(r'"(\w+)"', without_comments(pinned.group(1)))))
 
     def test_the_entry_fields_s47_reads_are_serialized_under_their_own_names(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-m1] S47 reads file and line off each main finding and cause off each
@@ -339,7 +340,7 @@ class GitConfigTests(unittest.TestCase):
         listing = one_definition(_source("src/system/review_git.rs"),
                                  r"pub\(crate\) const NEUTRAL_GIT_CONFIG: &\[&str\] = &\[(.*?)\];",
                                  "src/system/review_git.rs", re.S)
-        product = set(re.findall(r'"([^"]*)"', code_only(listing.group(1))))
+        product = set(re.findall(r'"([^"]*)"', without_comments(listing.group(1))))
         self.assertTrue(runs.HARNESS_GIT_CONFIG)
         self.assertEqual(set(), set(runs.HARNESS_GIT_CONFIG) - product)
 
@@ -349,7 +350,7 @@ class GitConfigTests(unittest.TestCase):
     def test_the_visibility_query_uses_only_flags_the_products_listing_passes(self) -> None:
         listing = one_definition(_source("src/review/input.rs"), r"const LS_FILES_ALL: &\[&str\] = &\[(.*?)\];",
                                  "src/review/input.rs", re.S)
-        product = re.findall(r'"([^"]*)"', code_only(listing.group(1)))
+        product = re.findall(r'"([^"]*)"', without_comments(listing.group(1)))
         self.assertEqual("ls-files", runs.GIT_VISIBLE_QUERY[0])
         self.assertEqual(product[0], runs.GIT_VISIBLE_QUERY[0])
         self.assertEqual(set(), set(runs.GIT_VISIBLE_QUERY) - set(product))
@@ -364,9 +365,9 @@ class GitConfigTests(unittest.TestCase):
         spawn = one_definition(_source("src/system/review_git.rs"),
                                r"\.env_clear\(\)\s*\.envs\(tool_child_env\(\)\)((?:\s*\.env\([^)]*\))*);",
                                "src/system/review_git.rs")
-        inherited = {name for name in re.findall(r'"([^"]*)"', code_only(allowlist.group(1)))
+        inherited = {name for name in re.findall(r'"([^"]*)"', without_comments(allowlist.group(1)))
                      if name.upper().startswith(runs.GIT_ENV_PREFIX)}
-        fixed = set(re.findall(r'\.env\("([^"]*)"', code_only(spawn.group(1))))
+        fixed = set(re.findall(r'\.env\("([^"]*)"', without_comments(spawn.group(1))))
         self.assertTrue(fixed, "the git spawn sets no variable of its own: the pattern lost its subject")
         self.assertEqual(set(runs.PRODUCT_GIT_VARIABLES), inherited | fixed)
 
@@ -388,7 +389,7 @@ class SecretPrefixDocTests(unittest.TestCase):
         self.assertTrue(named)
         self.assertIn("GITHUB_PAT_", named)
         prefixes = set()
-        for array in re.findall(r"prefixes: &\[([^\]]*)\]", code_only(_source("src/review/secrets.rs"))):
+        for array in re.findall(r"prefixes: &\[([^\]]*)\]", without_comments(_source("src/review/secrets.rs"))):
             prefixes.update(re.findall(r'"([^"]+)"', array))
         self.assertEqual(set(), {token.lower() for token in named} - {prefix.lower() for prefix in prefixes})
 
@@ -465,7 +466,7 @@ class ProbePathTests(unittest.TestCase):
         self.assertNotEqual(-1, start, "the ProviderProbe impl was not found")
         end = source.find("\nimpl ", start + 1)
         block = source[start:] if end == -1 else source[start:end]
-        groups = _REQUEST_SEGMENTS.findall(code_only(block))
+        groups = _REQUEST_SEGMENTS.findall(without_comments(block))
         self.assertEqual(2, len(groups), "expected the window and digest requests")
         paths = {"/" + "/".join(s.strip().strip('"') for s in group.split(",")) for group in groups}
         self.assertEqual(set(runs.PROBE_PATHS), paths)
