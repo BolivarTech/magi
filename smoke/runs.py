@@ -35,6 +35,7 @@ import os
 import pathlib
 import selectors
 import shutil
+import socket
 import stat
 import string
 import subprocess
@@ -1868,6 +1869,34 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
     #: run (or the server's shutdown, which joins its threads) open.
     timeout = ERROR_BACKEND_TIMEOUT_S
 
+    def setup(self) -> None:
+        """Open the connection's streams and arm its total deadline.
+
+        MAGI FIX (S6 loop 27): the per-read :attr:`timeout` does not bound a
+        client that sends a byte at a time, and the counter's shutdown joins
+        this thread, so a trickling product held the smoke run open
+        (F1a1-caspar). After :data:`MODEL_COUNTER_CONNECTION_DEADLINE_S` the
+        socket is shut down, which ends any read in progress; the request,
+        recorded once its headers arrived, still counts.
+        """
+        super().setup()
+        self._deadline = threading.Timer(MODEL_COUNTER_CONNECTION_DEADLINE_S,
+                                         self._cut)
+        self._deadline.daemon = True
+        self._deadline.start()
+
+    def _cut(self) -> None:
+        """Shut the connection down once its deadline passes."""
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # already closed by the client or by finish()
+
+    def finish(self) -> None:
+        """Disarm the deadline, then close the connection's streams."""
+        self._deadline.cancel()
+        super().finish()
+
     def _answer(self) -> None:
         """Record this request, drain its body and answer it unavailable."""
         self.server.log.record(self.command, urllib.parse.urlsplit(self.path).path)
@@ -1875,15 +1904,20 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
             left = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             left = 0
-        while left > 0:
-            chunk = self.rfile.read(min(MODEL_COUNTER_CHUNK_BYTES, left))
-            if not chunk:
-                break
-            left -= len(chunk)
-        self.send_response(MODEL_COUNTER_STATUS)
-        self.send_header("Content-Length", "0")
-        self.send_header("Connection", "close")
-        self.end_headers()
+        try:
+            while left > 0:
+                chunk = self.rfile.read(min(MODEL_COUNTER_CHUNK_BYTES, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+            self.send_response(MODEL_COUNTER_STATUS)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        except OSError:
+            # The deadline cut the connection, or the client hung up: the
+            # request is recorded, and there is nobody left to answer.
+            self.close_connection = True
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = _answer
 
@@ -1908,7 +1942,8 @@ def model_counter():
     """
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
     # Joined on close, unlike ThreadingHTTPServer's default, so the log is
-    # complete when the block ends; the handler's timeout bounds the join.
+    # complete when the block ends; each connection's total deadline
+    # (MODEL_COUNTER_CONNECTION_DEADLINE_S) bounds the join.
     server.daemon_threads = False
     server.log = RequestLog()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
