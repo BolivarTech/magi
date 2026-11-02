@@ -1368,8 +1368,10 @@ def _regular_files_without_links(directory, refused, identities=None):
     with :func:`_is_link` first.
 
     Args:
-        directory: The directory to walk; it is not itself tested (the caller tests it, as
-            :meth:`RunExecutor._capture_review_log` does).
+        directory: The directory to walk. It is listed like every nested
+            directory (:func:`_listed_directory`), so a link there is refused
+            and named, never listed; the chain above it is the caller's to
+            test, as :meth:`RunExecutor._capture_review_log` does.
         refused: A list that receives ``"<path> (<why>)"``, *path* relative
             to *directory* (:func:`_name_under`), for each entry
             left out: a link (neither listed nor read), an entry that is
@@ -1396,15 +1398,20 @@ def _regular_files_without_links(directory, refused, identities=None):
     # link lost the directory that says which one was left out (F1a1-b2).
     # A nested directory carries its identity from the listing of its parent,
     # so it is listed only while it is still that directory
-    # (:func:`_listed_directory`). The root has none: the caller tests it.
-    files, pending = [], [(root, None)]
+    # (:func:`_listed_directory`).
+    # MAGI FIX (S6 loop 27): the root was listed by path, so a link swapped
+    # onto it after the caller's test was listed, and its files read, once
+    # before the caller's second test dropped the capture (F1a1-melchior). The
+    # root is listed the same way, from its identity now, which refuses a link.
+    files, pending = [], []
+    try:
+        pending.append((root, _identity(os.lstat(root))))
+    except OSError as exc:
+        refused.append("%s (%s)" % (_name_under(root, root), exc))
     while pending:
         current, expected = pending.pop()
         try:
-            if expected is None:
-                entries = [(entry.name, entry) for entry in os.scandir(current)]
-            else:
-                entries = _listed_directory(current, expected)
+            entries = _listed_directory(current, expected)
         except OSError as exc:
             refused.append("%s (%s)" % (_name_under(root, current), exc))
             continue
