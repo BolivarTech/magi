@@ -598,7 +598,10 @@ const C_ATTRIBUTE_WORDS: [&str; 4] = ["__attribute__", "__declspec", "alignas", 
 /// keyword and name read as without them (`struct __attribute__((packed)) Hdr {` reads
 /// `struct Hdr {`). An attribute that does not close on the line is kept with the rest of the
 /// line, so the line reads as before. The text is only matched, never reviewed: the unit keeps
-/// the line as written. O(n × k) in the line, for k attribute words.
+/// the line as written. Strings are not read, declared: a `[[...]]` inside one
+/// (`const char *s = "[[x]]";`) is stripped from the matched text as well, which leaves its
+/// keyword, its name and its ending `;` or `{` as they were, and the scanner's records, which
+/// read strings, still decide every brace. O(n × k) in the line, for k attribute words.
 ///
 /// # Arguments
 ///
