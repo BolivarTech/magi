@@ -87,8 +87,10 @@ impl LanguageExtractor for PythonExtractor {
     /// Splits a class at its methods: each `def` / `async def` at the indentation of the
     /// class body, with its decorators, on a line that starts a logical line (outside
     /// triple-quoted strings and brackets; see `continued_lines`). O(n) in the class's lines.
+    /// A `class` nested at that indentation is a member too, of kind class, as the trait asks of
+    /// other nested constructs; a function nested in a method stays in its method (RV03).
     ///
-    /// A class with no such method (one holding only data attributes, as generated code may) or
+    /// A class with no such member (one holding only data attributes, as generated code may) or
     /// a unit of another kind gives no pieces, and is batched whole: if it is larger than one
     /// batch, the review ends with the typed `ReviewError::TooLargeForBatch` (RV03) before the
     /// clock starts, never a silent cut. Pinned by
@@ -129,8 +131,14 @@ impl LanguageExtractor for PythonExtractor {
         let mut j = class_idx + 1;
         while let Some(&line) = lines.get(j) {
             let trimmed = line.trim();
-            let def = def_rest(trimmed);
-            if code(j) && def.is_some() && indentation(line) == body_indent {
+            // MAGI FIX (loop 26, 8): only `def` lines were members, so a nested `class Inner:`
+            // stayed in the outer class's header piece; it is a member of kind class.
+            let member = def_rest(trimmed)
+                .map(|rest| (UnitKind::Function, rest))
+                .or_else(|| after_keyword(trimmed, "class").map(|rest| (UnitKind::Class, rest)));
+            if let Some((kind, rest)) =
+                member.filter(|_| code(j) && indentation(line) == body_indent)
+            {
                 let start = scan_back_decorators(&lines, &continued, j);
                 let end = find_block_end(&lines, &continued, j);
                 // MAGI FIX (S6 loop 9): a `u32::MAX` fallback split the class at a fabricated
@@ -138,7 +146,7 @@ impl LanguageExtractor for PythonExtractor {
                 let Some((first, last)) = member_span(start, end) else {
                     return Vec::new();
                 };
-                members.push((UnitKind::Function, python_name(def), first, last));
+                members.push((kind, python_name(Some(rest)), first, last));
                 j = end + 1;
             } else {
                 j += 1;
