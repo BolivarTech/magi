@@ -5266,4 +5266,52 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn only_an_arrow_at_the_top_of_a_declaration_value_makes_it_a_function() {
+        // [MAGI loop 29, B2b1a] `function_expression` took any `=>` in the header's text, so a
+        // callback argument (`compute((x) => x, {`), a string or a comment holding `=>` made a
+        // plain declaration a function named after its variable.
+        let constants = |end| vec![unit("constants", UnitKind::DeclarationGroup, 1, end)];
+        let f = |end| vec![unit("f", UnitKind::Function, 1, end)];
+        for (ext, code, expected) in [
+            (
+                BraceFamilyExtractor::javascript(),
+                "const cfg = compute((x) => x, {\n    a: 1,\n});\n",
+                constants(3),
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "const s = \"=>\" + make({\n    a: 1,\n});\n",
+                constants(3),
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "const t = make({ // =>\n    a: 1,\n});\n",
+                constants(3),
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "const f = (a,\n    b) => {\n    return a;\n};\n",
+                f(4),
+            ),
+            (
+                BraceFamilyExtractor::javascript(),
+                "const f = async x => {\n    return x;\n};\n",
+                f(3),
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "const f: (x: number) => void = (x) => {\n    y(x);\n};\n",
+                f(3),
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "const f = <T,>(x: T): T => {\n    return x;\n};\n",
+                f(3),
+            ),
+        ] {
+            assert_eq!(sorted_spans(&ext, code), expected, "{code}");
+        }
+    }
 }
