@@ -4311,4 +4311,33 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_template_header_wrapped_over_lines_belongs_to_its_construct() {
+        // [MAGI loop 26, 3] a `template <` line that left its `<` open was read as a declaration
+        // list, so the header became a declaration group apart from the function it declares.
+        let cpp = "template <typename T,\n          typename U>\nvoid f(T t, U u) {\n    g();\n}\n";
+        assert_eq!(
+            spans(&extract(&BraceFamilyExtractor::cpp(), cpp, &all_lines(cpp))),
+            vec![("f", UnitKind::Function, 1, 5)]
+        );
+        let three = "template <typename T,\n          typename U,\n          typename V>\nvoid f(T t) {\n    g();\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::cpp(),
+                three,
+                &all_lines(three)
+            )),
+            vec![("f", UnitKind::Function, 1, 6)]
+        );
+        let class = "template <typename T,\n          typename U>\nclass Box {\n    T t;\n};\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::cpp(),
+                class,
+                &all_lines(class)
+            )),
+            vec![("Box", UnitKind::Class, 1, 5)]
+        );
+    }
 }
