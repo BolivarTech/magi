@@ -4758,4 +4758,31 @@ int g(void) {
             );
         }
     }
+
+    #[test]
+    fn an_equals_sign_inside_a_parenthesized_return_type_is_no_assignment() {
+        // [MAGI loop 28, B2b1b] `ListHead::assigns` read the `=` of a `decltype` operand, which
+        // `parameter_list_head` reads past, as an assignment, so the function was no unit. An
+        // `=` before the list at parenthesis depth zero still makes an initializer.
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::cpp(),
+                "decltype(x = 1) f() {\n    x();\n}\nint g() {\n}\n"
+            ),
+            vec![
+                unit("f", UnitKind::Function, 1, 3),
+                unit("g", UnitKind::Function, 4, 5),
+            ]
+        );
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::cpp(),
+                "int (*p)(int) = make(1);\nint g() {\n}\n"
+            ),
+            vec![
+                unit("declarations", UnitKind::DeclarationGroup, 1, 1),
+                unit("g", UnitKind::Function, 2, 3),
+            ]
+        );
+    }
 }
