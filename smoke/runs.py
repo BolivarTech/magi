@@ -2201,6 +2201,79 @@ class _EchoingHandler(http.server.BaseHTTPRequestHandler):
         """
 
 
+#: The most connections a loopback stand-in serves on threads of their own at
+#: once. A run talks to it over a handful; past this, a connection is served
+#: on the accepting thread (:class:`_BoundedThreadingServer`).
+MAX_LOOPBACK_HANDLER_THREADS = 32
+
+
+class _BoundedThreadingServer(http.server.ThreadingHTTPServer):
+    """A threading HTTP server that never runs more than a fixed number of handler threads.
+
+    MAGI FIX (S6 loop 29): ``ThreadingHTTPServer`` starts a thread per
+    connection, and each lives until its deadline, so a product that opened
+    connections faster than they closed grew the harness's thread count
+    without bound (F1a1b-caspar). Up to :data:`MAX_LOOPBACK_HANDLER_THREADS`
+    connections run on threads; past that, a connection is served on the
+    accepting thread itself, so accepting slows down while every request is
+    still answered and, by the counter, recorded. A connection's own deadline
+    (the handlers' ``timeout``, and the counter's total deadline) bounds how
+    long one served inline holds the accepting thread.
+
+    Example:
+        >>> server = _BoundedThreadingServer(("127.0.0.1", 0), _EchoingHandler)
+        >>> server._slots.acquire(blocking=False)
+        True
+        >>> server.server_close()
+    """
+
+    def __init__(self, address, handler) -> None:
+        """Bind *address* for *handler*, with :data:`MAX_LOOPBACK_HANDLER_THREADS` read now.
+
+        Args:
+            address: The ``(host, port)`` to bind.
+            handler: The request handler class.
+
+        Raises:
+            OSError: When the address cannot be bound.
+        """
+        super().__init__(address, handler)
+        self._slots = threading.BoundedSemaphore(MAX_LOOPBACK_HANDLER_THREADS)
+
+    def process_request(self, request, client_address) -> None:
+        """Serve one accepted connection on a thread of its own, or here when every slot is taken.
+
+        Args:
+            request: The accepted socket.
+            client_address: The peer's address.
+        """
+        if self._slots.acquire(blocking=False):
+            try:
+                super().process_request(request, client_address)
+            except BaseException:
+                self._slots.release()
+                raise
+            return
+        try:
+            self.finish_request(request, client_address)
+        except Exception:  # noqa: BLE001 - reported the way a handler thread reports it
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def process_request_thread(self, request, client_address) -> None:
+        """Serve one connection on its thread, then give the thread's slot back.
+
+        Args:
+            request: The accepted socket.
+            client_address: The peer's address.
+        """
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 @contextlib.contextmanager
 def error_backend(log=None):
     """Serve an error-answering endpoint on loopback for the block's duration.
@@ -2213,7 +2286,7 @@ def error_backend(log=None):
     Yields:
         str: The base URL to point the product at, already ending in ``/v1``.
     """
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _EchoingHandler)
+    server = _BoundedThreadingServer(("127.0.0.1", 0), _EchoingHandler)
     server.daemon_threads = True
     server.log = log
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2508,7 +2581,7 @@ def model_counter():
         :data:`MODEL_COUNTER_MAX_RECORDED` by ``(method, path)``. Read it
         after the block: leaving it joins every request's thread.
     """
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _CountingHandler)
+    server = _BoundedThreadingServer(("127.0.0.1", 0), _CountingHandler)
     # Joined on close, unlike ThreadingHTTPServer's default, so the log is
     # complete when the block ends; each connection's total deadline
     # (MODEL_COUNTER_CONNECTION_DEADLINE_S) bounds the join.
