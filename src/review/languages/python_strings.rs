@@ -421,6 +421,47 @@ mod tests {
     }
 
     #[test]
+    fn a_brace_in_a_format_spec_opens_a_nested_field_as_cpython_reads_it() {
+        // [MAGI loop 28, B2b2] declared green, a false positive: in a format spec `{{` is no
+        // literal brace (CPython 3.15: `f"{x:{{}}>10}"` parses as a nested field holding the dict
+        // `{}`, then `>10`; `f"{value:{{}"` is a syntax error), so reading every `{` of a spec as
+        // a nested field is right. A lambda in a field must be parenthesized
+        // (`f"{lambda x: x}"` is a syntax error), so its `:` sits inside a bracket and starts no
+        // spec.
+        for line in [
+            r#"x = f"{x:{{}}>10}" + y"#,
+            r#"x = f"{x:{{}}}" + y"#,
+            r#"x = f"{(lambda v: v)(1):>4}" + y"#,
+        ] {
+            let close = line.find(" + y").unwrap_or(0);
+            assert_eq!(string_end(line), (Some(close), false), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_stack_never_holds_more_than_the_cap_plus_one_frame() {
+        // [MAGI loop 28, B2b2] declared green, a false positive: a string opens only at the top
+        // of the stack, in a replacement field (or with nothing open), and a field opens only
+        // while fewer than `MAX_FSTRING_NESTING` frames are open (`push_field`), as an f-string
+        // opened past that has no fields (`push_string`), so a string inside the deepest field is
+        // the one frame past the cap. Measured after every prefix of a chain of
+        // f-strings whose fields each hold a closed string before the next f-string.
+        let depth = MAX_FSTRING_NESTING * 2;
+        let line = format!("{}x", "f\"{'a' + ".repeat(depth));
+        let chars: Vec<char> = line.chars().collect();
+        for end in 1..=chars.len() {
+            let prefix = chars.get(..end).unwrap_or(&[]);
+            let mut strings = PythonStrings::default();
+            strings.open(prefix, 1);
+            assert!(
+                strings.frames.len() <= MAX_FSTRING_NESTING + 1,
+                "{} frames after {end} characters",
+                strings.frames.len()
+            );
+        }
+    }
+
+    #[test]
     fn a_field_left_open_at_the_line_end_carries_over() {
         let mut strings = PythonStrings::default();
         let first: Vec<char> = "x = f\"{".chars().collect();

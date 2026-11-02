@@ -5074,4 +5074,73 @@ int g(void) {
             ))
         );
     }
+
+    #[test]
+    fn loop_28_shapes_read_as_one_unit_each() {
+        // [MAGI loop 28] declared green, false positives each: a TypeScript type literal over
+        // lines is one declaration (B2a); a `#define` whose text holds a keyword or a function,
+        // continued by `\`, stays in the defines group, its braces no structure (B2a); a C
+        // `typedef struct` or `typedef enum` is one declaration with its `} Name;` line (B2b1a);
+        // a parameter's literal block closing before the line that closes the list, which opens
+        // the body (`other: number) {`), keeps the body (B2b1b).
+        let decl = |name: &str, end| unit(name, UnitKind::DeclarationGroup, 1, end);
+        let func = |name: &str, start, end| unit(name, UnitKind::Function, start, end);
+        let ts = BraceFamilyExtractor::typescript();
+        let c = BraceFamilyExtractor::c();
+        for (ext, code, expected) in [
+            (
+                &ts,
+                "type T = {\n    a: number;\n};\nfunction f() {\n}\n",
+                vec![decl("type aliases", 3), func("f", 4, 5)],
+            ),
+            (
+                &c,
+                "#define DECL struct S {\nint g(void) {\n}\n",
+                vec![decl("defines", 1), func("g", 2, 3)],
+            ),
+            (
+                &c,
+                "#define FOO(x) \\\n    static int f(void) { return x; }\nint g(void) {\n}\n",
+                vec![decl("defines", 2), func("g", 3, 4)],
+            ),
+            (
+                &c,
+                "typedef struct Point {\n    int x;\n} Point;\nint g(void) {\n}\n",
+                vec![decl("typedefs", 3), func("g", 4, 5)],
+            ),
+            (
+                &c,
+                "typedef enum {\n    A,\n    B\n} E;\nint g(void) {\n}\n",
+                vec![decl("typedefs", 4), func("g", 5, 6)],
+            ),
+            (
+                &ts,
+                "function f(opts: {\n    a: number;\n},\nother: number) {\n    body();\n}\nfunction g() {\n}\n",
+                vec![func("f", 1, 6), func("g", 7, 8)],
+            ),
+        ] {
+            assert_eq!(sorted_spans(ext, code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_braced_member_initializer_wrapped_over_lines_splits_the_constructor_declared() {
+        // [MAGI loop 28 sweep] declared: the brace a C++ constructor's member initializer opens
+        // (`Foo::Foo() : arr{`) is taken for the body's when the initializer wraps over lines,
+        // so the constructor ends where it closes and its body falls into later units. Telling it
+        // from a TypeScript return type (`): Foo {`, whose brace is the body) needs the language
+        // in the brace search; every line stays in exactly one unit.
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::cpp(),
+                "Foo::Foo() : arr{\n    1, 2} {\n    x();\n}\nint g() {\n}\n"
+            ),
+            vec![
+                unit("Foo", UnitKind::Function, 1, 2),
+                unit("declarations", UnitKind::DeclarationGroup, 3, 3),
+                unit("lines 4-4", UnitKind::TopLevel, 4, 4),
+                unit("g", UnitKind::Function, 5, 6),
+            ]
+        );
+    }
 }

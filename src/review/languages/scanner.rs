@@ -2412,4 +2412,60 @@ void h() {
         let r = CodeScanner::new(LexicalRules::c()).scan_all(code);
         assert_eq!(r.last().map(|l| l.depth_after), Some(2));
     }
+
+    #[test]
+    fn a_regex_character_class_closes_at_its_first_bracket_as_ecmascript_lexes_it() {
+        // [MAGI loop 28, B2a] declared green, a false positive: ECMAScript's lexical grammar
+        // (RegularExpressionClassChars) closes a class at its first unescaped `]`, so `[]` is an
+        // empty class (`/[]/` is valid) and `/[]/]/` is a syntax error; reading a leading `]` as
+        // a member, as PCRE does, would keep the class open and hide the braces after it. A `/`
+        // inside a class (`/[^/]/`) closes nothing.
+        for (line, delta) in [
+            ("const r = /[]/; if (x) {", 1),
+            ("const r = /[^/]/; if (x) {", 1),
+            (r"const r = /[\]/]/; if (x) {", 1),
+        ] {
+            let mut scanner = CodeScanner::new(LexicalRules::javascript());
+            assert_eq!(scanner.scan_line(1, line).brace_delta, delta, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_closing_brace_search_on_an_unclosed_block_returns_the_last_line() {
+        // [MAGI loop 28, B2b1b] the documented result for a block that never closes: the last
+        // line's index, a line that exists, so a construct ends at the end of the file.
+        let results = CodeScanner::new(LexicalRules::rust()).scan_all("fn f() {\n    x();\n");
+        assert_eq!(find_closing_brace(&results, 0), 1);
+        assert_eq!(
+            find_closing_brace_within(&results, 0, results.len(), || true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_later_branch_that_closes_the_block_it_is_in_is_seen_by_the_closing_search() {
+        // [MAGI loop 28, B2a] declared: each later branch is scanned from the depth at its `#if`,
+        // so a branch that closes the enclosing block on its own (`}` then a new header, under
+        // `#else`) dips the depth, and the closing-brace search, which reads each line's lowest
+        // point, ends the block there. That is the structure of the `#else` configuration; the
+        // first branch's depth is restored at `#endif` all the same. No line is lost: the next
+        // header is a construct of its own.
+        let code =
+            "void f(void) {\n#if A\n    x();\n#else\n    y();\n}\nvoid g(void) {\n#endif\n    z();\n}\n";
+        let results = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(
+            find_closing_brace(&results, 0),
+            5,
+            "f ends at the closing brace of the #else branch"
+        );
+        assert_eq!(
+            results[7].depth_after, 1,
+            "#endif restores the first branch's depth"
+        );
+        assert_eq!(
+            find_closing_brace(&results, 6),
+            9,
+            "g ends at the last closing brace"
+        );
+    }
 }
