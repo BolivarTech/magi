@@ -4460,4 +4460,38 @@ int g(void) {
         let parts = ext.split_block(&units[0]);
         assert_eq!(span_of(&parts, "m"), (2, 5), "{:?}", spans(&parts));
     }
+
+    #[test]
+    fn an_annotation_after_a_modifier_is_read_past() {
+        // [MAGI loop 27, B2b1a] annotations were read past only before the modifiers, so
+        // `public @Deprecated class C {` (legal Java, annotations and modifiers mix in any order)
+        // was no class, `public @A final @B("x") class C {` a function named `B`, and
+        // TypeScript's `export @dec class C {` (decorators after `export`, TS 5.0) ran into the
+        // import group above it.
+        let class = |n: &str, a, b| (n.to_string(), UnitKind::Class, a, b);
+        let cases: [(BraceFamilyExtractor, &str); 3] = [
+            (
+                BraceFamilyExtractor::java(),
+                "import a.B;\n\npublic @Deprecated class C {\n    void m() {\n    }\n}\n",
+            ),
+            (
+                BraceFamilyExtractor::java(),
+                "import a.B;\n\npublic @A final @B(\"x\") class C {\n    void m() {\n    }\n}\n",
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "import a from 'a';\n\nexport @dec class C {\n  m() {\n  }\n}\n",
+            ),
+        ];
+        for (ext, code) in &cases {
+            let found = sorted_spans(ext, code);
+            assert!(found.contains(&class("C", 3, 6)), "{code}: {found:?}");
+        }
+        let ext = BraceFamilyExtractor::java();
+        let code =
+            "class C {\n    public @Ann(\"x\") void m() {\n    }\n    void n() {\n    }\n}\n";
+        let units = extract(&ext, code, &[1, 2, 3, 4, 5, 6]);
+        let parts = ext.split_block(&units[0]);
+        assert_eq!(span_of(&parts, "m"), (2, 3), "{:?}", spans(&parts));
+    }
 }
