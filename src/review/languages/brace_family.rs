@@ -6803,4 +6803,44 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_blank_line_between_an_attribute_and_its_construct_keeps_them_together() {
+        // [MAGI B2b1 12] the walk up over attributes stopped at the first blank line, so an
+        // attribute separated from its item by one (`#[derive(Debug)]`, blank, `struct S {`) was
+        // a gap unit of its own, cut from the item it governs.
+        let rust = "fn a() {\n}\n#[derive(Debug)]\n\nstruct S {\n    x: u8,\n}\n";
+        assert_eq!(
+            spans(&extract(&rust_extractor(), rust, &all_lines(rust))),
+            vec![
+                ("a", UnitKind::Function, 1, 2),
+                ("S", UnitKind::Struct, 3, 7)
+            ]
+        );
+        let java = "@Deprecated\n\npublic class A {\n    int x;\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::java(),
+                java,
+                &all_lines(java)
+            )),
+            vec![("A", UnitKind::Class, 1, 5)]
+        );
+        let member = "class A {\n    @Override\n\n    public void f() {\n        x();\n    }\n}\n";
+        let parts = split(&BraceFamilyExtractor::java(), member, 5, UnitKind::Class);
+        assert!(
+            spans(&parts).contains(&("f", UnitKind::Method, 2, 6)),
+            "{:?}",
+            spans(&parts)
+        );
+        // A plain comment above a blank line is no attribute: it stays apart.
+        let comment = "// note\n\nfn f() {\n}\n";
+        assert_eq!(
+            spans(&extract(&rust_extractor(), comment, &all_lines(comment))),
+            vec![
+                ("f", UnitKind::Function, 3, 4),
+                ("lines 1-2", UnitKind::TopLevel, 1, 2)
+            ]
+        );
+    }
 }
