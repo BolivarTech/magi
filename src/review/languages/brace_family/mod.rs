@@ -2669,6 +2669,29 @@ void g(void) {
     }
 
     #[test]
+    fn the_walk_up_from_a_wrapped_attribute_tail_spends_the_pass_budget() {
+        // [MAGI loop 28] a line opening with a closer and holding a construct after it
+        // (`) struct S {`) walks up to the attribute that opens it; a file of such lines with no
+        // attribute would walk to the floor from each, O(n²), unless every line walked is
+        // charged to the pass's budget, which is linear in the lines ([`SearchBudget`]).
+        let code = "x(\n    a,\n    b) struct S {\n";
+        let ext = c_extractor();
+        let lines: Vec<&str> = code.lines().collect();
+        let scanned = CodeScanner::new(ext.lexical_rules.clone()).scan_all(code);
+        let budget = SearchBudget::for_lines(lines.len());
+        let stops = |j: usize| ext.starts_construct(&lines, &scanned, j, false);
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &budget,
+        };
+        let found = ext.after_wrapped_attribute_tail(&lines, &scanned, 2, 0, &search, |rest| {
+            ext.construct_keyword(rest)
+        });
+        assert!(found.is_none(), "`x(` opens no attribute");
+        assert_eq!(budget.spent(), 2, "each line walked is charged");
+    }
+
+    #[test]
     fn a_wrapped_signature_spends_its_brace_search_once() {
         // [MAGI S6 loop 15, B2b1] The signature path searched for the brace to know whether one
         // opened, then searched again to find the block's end, so every wrapped signature spent
