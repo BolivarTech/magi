@@ -4340,4 +4340,43 @@ int g(void) {
             vec![("Box", UnitKind::Class, 1, 5)]
         );
     }
+
+    #[test]
+    fn an_allman_brace_after_a_parameter_that_opens_a_block_is_the_body() {
+        // [MAGI loop 26, 4] with a parameter typed by a literal block (`opts: {`), the body's
+        // brace was sought only on the line closing the list (`})`), so an Allman `{` on the next
+        // line left the body in a gap unit.
+        let ts = "function f(opts: {\n    a: number;\n})\n{\n    body();\n}\nfunction g() {\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::typescript(),
+                ts,
+                &all_lines(ts)
+            )),
+            vec![
+                ("f", UnitKind::Function, 1, 6),
+                ("g", UnitKind::Function, 7, 8)
+            ]
+        );
+        let c = "void f(struct {\n    int a;\n} s)\n{\n    use(s);\n}\nint g(void) {\n    return 0;\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), c, &all_lines(c))),
+            vec![
+                ("f", UnitKind::Function, 1, 6),
+                ("g", UnitKind::Function, 7, 9)
+            ]
+        );
+        // A call that closes its list with `});` keeps the block it opened, as before.
+        let call = "run({\n  a: 1,\n});\n{\n  x();\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::javascript(),
+                call,
+                &all_lines(call)
+            ))
+            .first()
+            .map(|s| (s.2, s.3)),
+            Some((1, 3))
+        );
+    }
 }
