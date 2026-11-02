@@ -391,5 +391,54 @@ class ProbePathTests(unittest.TestCase):
         self.assertEqual(set(runs.PROBE_PATHS), paths)
 
 
+def _rust_fn_body(text: str, signature: str) -> str:
+    """The body of the method whose declaration starts with *signature*, up to its closing brace.
+
+    Args:
+        text: A Rust source file's text, ``\\r`` stripped.
+        signature: The declaration's start, e.g. ``pub fn effective_provider(``.
+
+    Returns:
+        str: From the signature to the first line holding only the method's closing brace.
+
+    Raises:
+        AssertionError: When the method is not found.
+    """
+    start = text.find(signature)
+    if start == -1:
+        raise AssertionError("%s not found" % signature)
+    end = text.find("\n    }\n", start)
+    return text[start:] if end == -1 else text[start:end]
+
+
+class CountedKindTests(unittest.TestCase):
+    """[MAGI §6 MS2 loop 25, F1a1-melchior] a refusal run's absent provider kind is the counted one.
+
+    ``endpoints_off_the_counter`` accepts a configuration with no ``provider`` and no ``[magi].kind``,
+    which is sound only while the product resolves both, when absent, to ``runs._COUNTED_KIND``: a
+    different default would let a refusal run reach a fixed-URL provider the counter never sees.
+    """
+
+    def _counted_variant(self) -> str:
+        """The ``ProviderKind`` variant ``src/magi/kind.rs`` parses ``runs._COUNTED_KIND`` into."""
+        kind = _source("src/magi/kind.rs")
+        match = re.search(r'"%s" => Ok\(Some\(Self::(\w+)\)\)' % re.escape(runs._COUNTED_KIND), kind)
+        self.assertIsNotNone(match, "ProviderKind::parse no longer accepts %r" % runs._COUNTED_KIND)
+        return match.group(1)
+
+    def test_an_absent_provider_resolves_to_the_counted_kind(self) -> None:
+        body = _rust_fn_body(_source("src/config.rs"), "pub fn effective_provider(")
+        self.assertIn(".unwrap_or(ProviderKind::%s)" % self._counted_variant(), body)
+
+    def test_an_absent_magi_kind_inherits_the_provider(self) -> None:
+        body = _rust_fn_body(_source("src/config.rs"), "pub fn effective_magi_kind(")
+        self.assertIn(".unwrap_or_else(|| self.effective_provider())", body)
+
+    def test_the_scaffold_declares_the_counted_kind(self) -> None:
+        defaults = _source("src/defaults.rs")
+        self.assertIn('pub const DEFAULT_PROVIDER: &str = "%s";' % runs._COUNTED_KIND, defaults)
+        self.assertIn('writeln!(out, "provider = \\"{}\\"", DEFAULT_PROVIDER)', defaults)
+
+
 if __name__ == "__main__":
     unittest.main()
