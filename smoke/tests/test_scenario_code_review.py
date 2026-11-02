@@ -55,16 +55,20 @@ _BUDGET_LOG = b'ERROR run=%s target=magi_rs::code_review ' + _BUDGET_MSG + _NL
 def _product_refusal(batches: int, rotations: int, retry_disabled: bool) -> bytes:
     """The refusal ``pre_budget`` renders for R15's total over *batches* under one ``[magi]`` config.
 
-    A mirror of ``src/review/clock.rs`` and ``src/magi/mod.rs`` for the tests only: classifier 6 s, attempt
-    factor ``calls x models x 120`` in hundredths, raw ceiling ``(wall - 6) x 100 // factor``.
+    The arithmetic of ``src/review/clock.rs`` and ``src/magi/mod.rs``, read from the trio scenario's copy of it
+    (:mod:`smoke.scenarios.trio`, whose own tests pin it against the product) rather than written out again:
+    attempt factor in hundredths, a batch's need ``classifier + floor x factor // 100``, raw ceiling of the
+    per-batch wall clock.
     """
-    factor = (1 if retry_disabled else 2) * (rotations + 1) * 120
+    # [MAGI §6 MS2 loop 27, F1b2b-balthasar] the formulas were a second hand copy beside trio's.
+    from smoke.scenarios import trio
+    factor = trio.attempt_factor(rotations, retry_disabled)
     wall = runs.REVIEW_TOO_SHORT_TIMEOUT_S // batches
-    need = 6 + 15 * factor // 100
-    ceiling = max(wall - 6, 0) * 100 // factor
-    return (b"error: %d batches leave %d s per batch, less than the %d s a batch needs at the 15 s floor "
-            b"(per-batch ceiling %d s); pass --timeout %d or more" % (batches, wall, need, ceiling, batches * need)
-            + _NL)
+    need = trio.CLASSIFY_TIMEOUT_SECS + trio.CEILING_FLOOR_SECS * factor // 100
+    ceiling = trio.raw_ceiling(wall, factor)
+    return (b"error: %d batches leave %d s per batch, less than the %d s a batch needs at the %d s floor "
+            b"(per-batch ceiling %d s); pass --timeout %d or more"
+            % (batches, wall, need, trio.CEILING_FLOOR_SECS, ceiling, batches * need) + _NL)
 
 
 def _with_id(tail: bytes) -> bytes:
