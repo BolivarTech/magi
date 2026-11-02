@@ -497,7 +497,9 @@ def _rust_fn_body(text: str, signature: str) -> str:
     end = text.find("\n%s}\n" % indent, start)
     # MAGI FIX (S6 loop 28): no closing brace returned the rest of the file,
     # where a pin could match a later item's line (F1b2a-melchior).
-    return text[start:] if end == -1 else text[start:end]
+    if end == -1:
+        raise AssertionError("%s: no closing brace at its own indentation" % signature)
+    return text[start:end]
 
 
 class RustFnBodyTests(unittest.TestCase):
