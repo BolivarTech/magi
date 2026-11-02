@@ -33,6 +33,13 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 use crate::review::context::FileContext;
+use crate::review::source::MAX_REVIEW_FILE_BYTES;
+
+// A reviewed file holds at most `MAX_REVIEW_FILE_BYTES` bytes, so at most that many lines: the
+// extractors' `u32::try_from(lines.len()).unwrap_or(u32::MAX)` never takes its fallback on a
+// file the review reads. Checked at compile time, so raising the cap past `u32::MAX` fails the
+// build instead of letting a line number saturate.
+const _: () = assert!(MAX_REVIEW_FILE_BYTES <= u32::MAX as u64);
 
 /// Kind of semantic code unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

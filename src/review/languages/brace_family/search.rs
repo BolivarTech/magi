@@ -299,6 +299,7 @@ fn body_brace_from(
     // brace; every look is charged now.
     let next = j + 1;
     let allman = !record.ends_statement
+        && next < lines.len()
         && search.spend()
         && scanned.get(next).is_some_and(|s| !s.is_non_code)
         && lines

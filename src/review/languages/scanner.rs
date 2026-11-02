@@ -40,15 +40,21 @@
 //!   brace; the extractors decide whose it is (`brace_family`'s
 //!   `loop_28_shapes_read_as_one_unit_each` and `a_return_type_literal_block_keeps_the_function_body`).
 //! - A block that never closes ends on the last line
-//!   (`a_closing_brace_search_on_an_unclosed_block_returns_the_last_line`).
+//!   (`a_closing_brace_search_on_an_unclosed_block_returns_the_last_line`), so a body the
+//!   first branch of a conditional leaves open runs on
+//!   (`a_conditional_whose_first_branch_opens_an_unclosed_body_keeps_it_open`).
+//! - A directive after a block comment that opened after code on its line is not read as one,
+//!   as C reads it (the `#` follows no new-line;
+//!   `a_directive_after_a_block_comment_spanning_lines_is_still_read`).
 
 use super::python_strings::PythonStrings;
 
 /// Character at `i`, or NUL past the end of the line.
 ///
-/// Reads never index: release builds abort on panic (`panic = "abort"`), so the scanner reads
-/// through `.get()`. Every call site is guarded by the loop bounds, so the NUL fallback is
-/// never observed on a path that previously indexed in range.
+/// Reads never index, so no read can panic: `.get()` with the NUL fallback is what keeps every
+/// read in bounds, not the build's panic strategy (release builds abort on a panic,
+/// `panic = "abort"`, which would end the review). Every call site is guarded by the loop
+/// bounds, so the NUL fallback is never observed on a path that previously indexed in range.
 fn char_at(chars: &[char], i: usize) -> char {
     chars.get(i).copied().unwrap_or('\0')
 }

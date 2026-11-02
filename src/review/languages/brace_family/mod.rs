@@ -157,7 +157,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
         // MAGI FIX (S6 loop 15): a `zip` with fewer shares than constructs dropped the last
         // constructs' changed lines from every unit; a mismatch, out of reach while `assign`
         // keeps its contract, now reviews the changed lines as gaps, none lost.
-        let (pairs, ranges, orphans) = match construct_shares(&constructs, shares) {
+        let (pairs, gap_bounds, orphans) = match construct_shares(&constructs, shares) {
             Some(pairs) => (pairs, ranges, orphans),
             None => (Vec::new(), Vec::new(), changed_lines.assign(&[], total).1),
         };
@@ -194,7 +194,7 @@ impl LanguageExtractor for BraceFamilyExtractor {
         }
 
         // Orphan fallback: one unit per gap between constructs that holds changed lines.
-        units.extend(gap_units(&lines, file_path, &ranges, orphans));
+        units.extend(gap_units(&lines, file_path, &gap_bounds, orphans));
 
         units
     }
