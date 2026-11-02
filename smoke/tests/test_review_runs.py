@@ -782,6 +782,15 @@ class ProductSpellingTests(unittest.TestCase):
             self.assertEqual(("a/b/.MAGI./x.toml", "a\\.magi\\y"),
                              runs.protected_candidates(pathlib.Path(".")))
 
+    def test_protected_candidates_are_sorted_whatever_order_git_lists_them_in(self) -> None:
+        # [MAGI §6 MS2 loop 29, F1b1a-caspar] the tests above hand over a frozenset, whose order follows the
+        # hash seed, and expect one fixed tuple: they rely on the sort. The sort is pinned here on an
+        # ordered listing, reversed, so dropping it fails every time rather than under some seeds.
+        listed = (".magi/z", "src/.magi/y", ".MAGI/b", ".magi/a")
+        with mock.patch.object(runs, "visible_paths", return_value=listed):
+            self.assertEqual((".MAGI/b", ".magi/a", ".magi/z", "src/.magi/y"),
+                             runs.protected_candidates(pathlib.Path(".")))
+
     def test_protected_candidates_never_fold_a_non_ascii_letter(self) -> None:
         # The product folds ASCII only: a dotted or dotless I is not the "i" of ".magi".
         listed = frozenset({".magİ/a", ".MAGı/b"})
