@@ -215,9 +215,14 @@ impl BraceFamilyExtractor {
                 // MAGI FIX (S6 loop 13): a comment line ending in `;` joined the group; only code
                 // does, as in the main scan.
                 // MAGI FIX (loop 27, B2b1a): `export class C {` after an import joined its group
-                // (`export` is a declaration keyword) and the group ran through the class.
+                // (`export` is a declaration keyword) and the group ran through the class; and a
+                // template header wrapped over lines (`template <typename T,`), which the main
+                // scan passes over first, joined it as a declaration list.
                 let joins = |j: usize| {
                     scanned.get(j).is_some_and(|s| !s.is_non_code)
+                        && self
+                            .wrapped_template_header_end(lines, scanned, j, &search)
+                            .is_none()
                         && (lines.get(j).is_some_and(|l| {
                             self.construct_keyword(l.trim()).is_none()
                                 && (self.is_declaration(l.trim(), scanned.get(j))
