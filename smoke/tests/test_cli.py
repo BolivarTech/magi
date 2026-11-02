@@ -6,6 +6,7 @@
 import contextlib
 import io
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -240,11 +241,13 @@ class ImportTimeFailureTests(unittest.TestCase):
         root = support.scratch_dir(self)
         shutil.copytree(pathlib.Path(main.__file__).parent, root / "smoke")
         target = root / "smoke" / "runs.py"
-        source = target.read_text(encoding="utf-8")
-        needle = "\nREVIEW_FILE_BYTES = 96000\n"
-        self.assertIn(needle, source.replace("\r", ""))
-        target.write_text(source.replace("\r", "").replace(
-            needle, "\nREVIEW_FILE_BYTES = 1000\n"), encoding="utf-8")
+        source = target.read_text(encoding="utf-8").replace("\r", "")
+        # [MAGI §6 MS2 loop 28, F1b2b-balthasar] the rewrite matched one exact spelling of the line; it now
+        # takes any value and spacing, and still insists on exactly one definition to rewrite.
+        definition = re.compile(r"^REVIEW_FILE_BYTES[ \t]*=[ \t]*[\d_]+[ \t]*$", re.M)
+        self.assertEqual(1, len(definition.findall(source)),
+                         "smoke/runs.py must define REVIEW_FILE_BYTES once, as an integer literal")
+        target.write_text(definition.sub("REVIEW_FILE_BYTES = 1000", source), encoding="utf-8")
         code, stderr = self._exit_code(root)
         self.assertEqual(EXIT_HARNESS, code,
                          "a broken harness invariant must not report the "

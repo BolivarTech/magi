@@ -18,6 +18,7 @@ from smoke.registry import DEFAULT_REGISTRY, Registry
 from smoke.runner import Ambient, Runner
 from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
+from smoke.scenarios import trio
 
 #: The ``.magi/`` files git lists in R16's workspace when the environment's ``.magi`` is copied in (the three
 #: :data:`_ROOT_STDERR` names). [MAGI §6 MS2 loop 9, F1a-c1] S51 reads them off the result.
@@ -61,7 +62,8 @@ def _product_refusal(batches: int, rotations: int, retry_disabled: bool) -> byte
     per-batch wall clock.
     """
     # [MAGI §6 MS2 loop 27, F1b2b-balthasar] the formulas were a second hand copy beside trio's.
-    from smoke.scenarios import trio
+    # [MAGI §6 MS2 loop 28, F1b2b-balthasar] trio is imported with the module, not here, so a rename
+    # fails at import rather than in the first test that renders a refusal.
     factor = trio.attempt_factor(rotations, retry_disabled)
     wall = runs.REVIEW_TOO_SHORT_TIMEOUT_S // batches
     need = trio.CLASSIFY_TIMEOUT_SECS + trio.CEILING_FLOOR_SECS * factor // 100
@@ -319,7 +321,10 @@ class CodeReviewScenarioTests(unittest.TestCase):
         # one provider failure beside it, or a shortfall the failed list does not account for.
         cases = ([[3, "response contract violated: no verdict"]],
                  [[3, "timeout: slow"], [4, "the trio build did not finish: panicked"]],
-                 [], [[3, "timeout: slow"], [4, "timeout: slow"]], [["3", 7]], "timeout")
+                 [], [[3, "timeout: slow"], [4, "timeout: slow"]], [["3", 7]],
+                 # failed_batches as a bare string, not a list of [batch, cause] pairs: a malformed
+                 # document, which must not read as the provider-class shortfall its text resembles.
+                 "timeout")
         for failed in cases:
             doc = _review(5)
             doc["code_review"].update(batches_completed=4, failed_batches=failed)
