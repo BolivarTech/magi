@@ -2337,4 +2337,13 @@ void h() {
         assert!(!results[2].starts_in_literal);
         assert_eq!(results[2].brace_delta, 1);
     }
+
+    #[test]
+    fn a_unicode_escape_with_an_underscore_is_a_char_literal() {
+        // [MAGI loop 26, 2] the escape body rejected `_`, which Rust allows (`'\u{1_0}'`), so the
+        // quote opened no char literal and a later `'{'` counted as a brace: the function ran on.
+        let mut scanner = CodeScanner::new(LexicalRules::rust());
+        let results = scanner.scan_all("    f('\\u{1_0}','{');");
+        assert_eq!(results[0].brace_delta, 0);
+    }
 }
