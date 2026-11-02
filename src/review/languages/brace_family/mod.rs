@@ -4409,4 +4409,55 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_c_attribute_on_its_own_line_belongs_to_the_construct_below_it() {
+        // [MAGI loop 27, B2b1a] a standard attribute (`[[nodiscard]]`, C23 and C++11) or a GCC or
+        // MSVC one (`__attribute__((noreturn))`) on the line above a function was no attribute
+        // line, so it was reviewed as a gap unit apart from the function it qualifies; on the
+        // construct's own line it was already read past.
+        let cases: [(BraceFamilyExtractor, &str, &str, (u32, u32)); 5] = [
+            (
+                BraceFamilyExtractor::c(),
+                "int a;\n\n__attribute__((noreturn))\nvoid die(void) {\n    exit(1);\n}\n",
+                "die",
+                (3, 6),
+            ),
+            (
+                BraceFamilyExtractor::c(),
+                "int a;\n\n[[nodiscard]]\nint f(void) {\n    return 1;\n}\n",
+                "f",
+                (3, 6),
+            ),
+            (
+                BraceFamilyExtractor::cpp(),
+                "int a;\n\n[[nodiscard]]\n[[deprecated(\"use g\")]]\nint f(int x) {\n    return x;\n}\n",
+                "f",
+                (3, 7),
+            ),
+            (
+                BraceFamilyExtractor::cpp(),
+                "int a;\n\n[[deprecated(\n    \"use g\")]]\nint f(int x) {\n    return x;\n}\n",
+                "f",
+                (3, 7),
+            ),
+            (
+                BraceFamilyExtractor::cpp(),
+                "int a;\n\n__declspec(dllexport)\nint f(int x) {\n    return x;\n}\n",
+                "f",
+                (3, 6),
+            ),
+        ];
+        for (ext, code, name, span) in &cases {
+            let total = u32::try_from(code.lines().count()).expect("small");
+            let units = extract(ext, code, &(1..=total).collect::<Vec<_>>());
+            assert_each_line_in_one_unit(&units, total);
+            assert_eq!(span_of(&units, name), *span, "{code}: {:?}", spans(&units));
+        }
+        let code = "class C {\n    [[nodiscard]]\n    int m() {\n        return 1;\n    }\n};\n";
+        let ext = BraceFamilyExtractor::cpp();
+        let units = extract(&ext, code, &[1, 2, 3, 4, 5, 6]);
+        let parts = ext.split_block(&units[0]);
+        assert_eq!(span_of(&parts, "m"), (2, 5), "{:?}", spans(&parts));
+    }
 }
