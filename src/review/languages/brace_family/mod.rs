@@ -4681,4 +4681,56 @@ int g(void) {
         };
         assert_eq!(bare_initializer_end(&lines, &scanned, 0, &search), 0);
     }
+
+    #[test]
+    fn unicode_names_arrows_in_strings_and_calls_in_default_arguments_keep_their_units() {
+        // [MAGI loop 27, B2b1a] declared green, three false positives measured: an identifier
+        // character is any Unicode letter or digit (`is_identifier_char`), so `fn café()` is a
+        // function; an `=>` inside a string makes no function expression of an object
+        // initializer; and a wrapped parameter whose default value is a call
+        // (`int x = make(1),`) names no function, since an `=` before the `(` rules a signature
+        // out (`identifier_before_paren`), so the outer function keeps its body.
+        let func = |n: &str, a, b| (n.to_string(), UnitKind::Function, a, b);
+        for (ext, code) in [
+            (
+                BraceFamilyExtractor::rust(),
+                "fn café() {\n    x();\n}\nfn z() {\n}\n",
+            ),
+            (
+                BraceFamilyExtractor::go(),
+                "func café() {\n    x()\n}\nfunc z() {\n}\n",
+            ),
+            (
+                BraceFamilyExtractor::typescript(),
+                "function café() {\n    x();\n}\nfunction z() {\n}\n",
+            ),
+            (
+                BraceFamilyExtractor::c(),
+                "int café(void) {\n    return 1;\n}\nint z(void) {\n}\n",
+            ),
+        ] {
+            assert_eq!(
+                sorted_spans(&ext, code),
+                vec![func("café", 1, 3), func("z", 4, 5)],
+                "{code}"
+            );
+        }
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::javascript(),
+                "const options = { note: \"=>\" };\nfunction f() {\n}\n"
+            ),
+            vec![
+                ("constants".to_string(), UnitKind::DeclarationGroup, 1, 1),
+                func("f", 2, 3),
+            ]
+        );
+        assert_eq!(
+            sorted_spans(
+                &BraceFamilyExtractor::cpp(),
+                "int f(int a,\n      int x = make(1),\n      int y = 2) {\n    return a;\n}\nint g() {\n}\n"
+            ),
+            vec![func("f", 1, 5), func("g", 6, 7)]
+        );
+    }
 }
