@@ -1283,6 +1283,79 @@ def _open_listed(path, expected):
         raise
 
 
+#: The flags :func:`_listed_directory` opens a nested log directory with on
+#: POSIX: the open itself refuses a link, and the listing reads the directory
+#: that was opened, never a path that may have changed since.
+_DIRECTORY_OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0))
+
+#: Whether :func:`_listed_directory` can list a directory it holds open:
+#: ``os.scandir`` takes a descriptor and ``O_NOFOLLOW`` exists (POSIX only).
+_LISTS_BY_DESCRIPTOR = os.scandir in os.supports_fd and hasattr(os, "O_NOFOLLOW")
+
+
+def _unchanged_directory(path, expected) -> None:
+    """Refuse *path* unless it is still the directory *expected* names, not a link.
+
+    Args:
+        path: The directory to test.
+        expected: Its :func:`_identity` when the walk listed it.
+
+    Raises:
+        OSError: When it is a link, not a directory, or another directory now,
+            with :data:`CHANGED_AFTER_LISTING` as its text; or when it cannot
+            be inspected.
+    """
+    status = os.lstat(path)
+    if (_is_link(path) or not stat.S_ISDIR(status.st_mode)
+            or _identity(status) != expected):
+        raise OSError(CHANGED_AFTER_LISTING)
+
+
+def _listed_directory(path, expected) -> list:
+    """List the nested log directory *path*, only if it is still the one listed.
+
+    MAGI FIX (S6 loop 25): an approved directory was listed later by path, and
+    ``os.scandir`` follows a link, so one swapped in after its link test had
+    the walk list, and the read open, what it points at (F1a1-caspar).
+
+    On POSIX the directory is opened with :data:`_DIRECTORY_OPEN_FLAGS`, its
+    identity read from the open descriptor, and the listing taken from that
+    descriptor, so no later swap can redirect it. Windows can list only by
+    path, so the directory is tested before and after the listing; a swap that
+    sneaks in and out between the two still fails the identity each listed
+    file is opened against (:func:`_open_listed`), which then names a file
+    under the real directory, never one behind the link.
+
+    Args:
+        path: The directory to list.
+        expected: Its :func:`_identity` when its parent was listed.
+
+    Returns:
+        list[tuple[str, os.DirEntry]]: Each entry's name and the entry, whose
+        ``is_dir``/``is_file`` with ``follow_symlinks=False`` describe it as
+        listed.
+
+    Raises:
+        OSError: When the directory cannot be opened or listed, or is not the
+            one *expected* names (:data:`CHANGED_AFTER_LISTING`).
+    """
+    if not _LISTS_BY_DESCRIPTOR:
+        _unchanged_directory(path, expected)
+        entries = [(entry.name, entry) for entry in os.scandir(path)]
+        _unchanged_directory(path, expected)
+        return entries
+    descriptor = os.open(path, _DIRECTORY_OPEN_FLAGS)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or _identity(opened) != expected:
+            raise OSError(CHANGED_AFTER_LISTING)
+        with os.scandir(descriptor) as listing:
+            return [(entry.name, entry) for entry in listing]
+    finally:
+        os.close(descriptor)
+
+
 def _regular_files_without_links(directory, refused, identities=None):
     """The files under *directory*, sorted, without descending into or reading a link.
 
@@ -1318,22 +1391,28 @@ def _regular_files_without_links(directory, refused, identities=None):
     root = pathlib.Path(directory)
     # MAGI FIX (S6 loop 15): entries were named by ``path.name``, so a nested
     # link lost the directory that says which one was left out (F1a1-b2).
-    files, pending = [], [root]
+    # A nested directory carries its identity from the listing of its parent,
+    # so it is listed only while it is still that directory
+    # (:func:`_listed_directory`). The root has none: the caller tests it.
+    files, pending = [], [(root, None)]
     while pending:
-        current = pending.pop()
+        current, expected = pending.pop()
         try:
-            entries = list(os.scandir(current))
+            if expected is None:
+                entries = [(entry.name, entry) for entry in os.scandir(current)]
+            else:
+                entries = _listed_directory(current, expected)
         except OSError as exc:
             refused.append("%s (%s)" % (_name_under(root, current), exc))
             continue
-        for entry in entries:
-            path = pathlib.Path(entry.path)
+        for name, entry in entries:
+            path = current / name
             try:
                 if _is_link(path):
                     refused.append("%s (%s)" % (_name_under(root, path),
                                                 LINK_NOT_FOLLOWED))
                 elif entry.is_dir(follow_symlinks=False):
-                    pending.append(path)
+                    pending.append((path, _identity(os.lstat(path))))
                 elif entry.is_file(follow_symlinks=False):
                     if identities is not None:
                         identities[path] = _identity(os.lstat(path))
