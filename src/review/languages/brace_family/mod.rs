@@ -5185,4 +5185,28 @@ int g(void) {
             ]
         );
     }
+
+    #[test]
+    fn a_char_literal_in_a_rust_attribute_hides_its_bracket() {
+        // [MAGI loop 29, B2b1b] `rust_attribute_end` read no `'`, since one may open a lifetime,
+        // so the `]` of a char literal (`#[doc = ']']`) closed the attribute and the item after
+        // it on the line was no construct: its lines fell into a gap unit.
+        let code = "#[doc = ']'] fn f() {\n    x();\n}\n#[a(']', '\\'')] struct S {\n    x: u8,\n}\nfn g<'a>(x: &'a u8) {\n}\n";
+        assert_eq!(
+            sorted_spans(&rust_extractor(), code),
+            vec![
+                unit("f", UnitKind::Function, 1, 3),
+                unit("S", UnitKind::Struct, 4, 6),
+                unit("g", UnitKind::Function, 7, 8),
+            ]
+        );
+        fn end(t: &str) -> Option<&str> {
+            rust_attribute_end(t).and_then(|e| t.get(..e))
+        }
+        assert_eq!(end("[doc = ']'] x"), Some("[doc = ']']"));
+        assert_eq!(end("[a('\\u{5D}', ']')] x"), Some("[a('\\u{5D}', ']')]"));
+        // A lifetime has no closing quote and stays plain text.
+        assert_eq!(end("[b(T: 'a)] x"), Some("[b(T: 'a)]"));
+        assert_eq!(end("[b(T: 'a, U: 'b)] x"), Some("[b(T: 'a, U: 'b)]"));
+    }
 }
