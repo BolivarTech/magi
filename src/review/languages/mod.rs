@@ -26,6 +26,7 @@
 
 pub mod brace_family;
 pub mod python;
+pub(crate) mod python_strings;
 pub mod scanner;
 
 use std::borrow::Cow;

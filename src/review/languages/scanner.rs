@@ -21,6 +21,8 @@
 //! assert_eq!(results[2].brace_delta, -1); // closing }
 //! ```
 
+use super::python_strings::PythonStrings;
+
 /// Character at `i`, or NUL past the end of the line.
 ///
 /// Reads never index: release builds abort on panic (`panic = "abort"`), so the scanner reads
@@ -132,8 +134,11 @@ enum LexicalState {
     RawString { hashes: u32 },
     /// Inside a C++ raw string: `R"delim(...)delim"`; `delimiter` may be empty.
     CppRawString { delimiter: Vec<char> },
-    /// Inside a Python triple-quoted string (`"""` or `'''`).
+    /// Inside a Java text block (`"""`).
     TripleQuote { quote: char },
+    /// Inside a Python string, f-strings and their replacement fields included; the scanner's
+    /// [`PythonStrings`] holds what is open.
+    PythonString,
     /// Inside a character literal (`'...'` in C/Rust/Java).
     CharLiteral,
     /// Inside the text of a JS/TS template literal (`` `...` ``). A `${` returns to code for the
@@ -154,9 +159,11 @@ pub enum RawStringSyntax {
     None,
     /// Rust-style: `r#"..."#` with variable hash count.
     RustHashes,
-    /// Python-style `"""..."""` or `'''...'''`, and Java's `"""` text blocks; a backslash
-    /// escapes the next character.
+    /// Java's `"""` text blocks; a backslash escapes the next character.
     TripleQuote,
+    /// Python's strings: an optional prefix, one or three quotes, and the replacement fields
+    /// of f-strings and t-strings (PEP 701, PEP 750), read by `PythonStrings`.
+    PythonStrings,
     /// Go-style: backtick raw strings (`` `...` ``).
     GoBacktick,
     /// C++11-style: `R"delim(...)delim"`, with an optional `u8`, `u`, `U` or `L` prefix; no
@@ -309,15 +316,13 @@ impl LexicalRules {
         Self::javascript()
     }
 
-    /// Python: `#` line comments, no block comments, no char literals,
-    /// triple-quote raw strings.
+    /// Python: `#` line comments, no block comments, no char literals, and Python's strings
+    /// ([`RawStringSyntax::PythonStrings`]): prefixes, triple quotes and f-string fields.
     ///
     /// Python's string syntax is read in a second place, `LogicalLines` in
     /// `review::languages::python`, which tracks `(` and `[` as well to find where a logical
-    /// line ends; that reader's rustdoc says why the two overlap. A change to Python's string
-    /// syntax here must reach it too (and the other way round): `continued_lines` takes the
-    /// union of both, so a drift only between them shows as wrong unit boundaries, not as a
-    /// lost line.
+    /// line ends. Both hand every string to `PythonStrings` in
+    /// `review::languages::python_strings`, so the two readers share one string grammar.
     // MAGI FIX (S6 loop 8): cross-referenced so a fix to one Python string reader reaches both.
     pub fn python() -> Self {
         Self {
@@ -325,7 +330,9 @@ impl LexicalRules {
             block_comments: false,
             nested_comments: false,
             char_literals: false,
-            raw_strings: RawStringSyntax::TripleQuote,
+            // MAGI FIX (PEP 701): one open string at a time closed `f"{"("}"` at its inner
+            // quote, so the field's brackets and quotes were read as code.
+            raw_strings: RawStringSyntax::PythonStrings,
             template_literals: false,
             regex_literals: false,
             preprocessor_directives: false,
@@ -406,6 +413,9 @@ pub struct CodeScanner {
     /// For each open `(` of a regex-literal language, whether it opens the condition of a
     /// [`CONDITION_KEYWORDS`] keyword. It lives across lines, as a condition may span them.
     parens: Vec<bool>,
+    /// The Python strings open ([`RawStringSyntax::PythonStrings`]), read while the state is
+    /// `LexicalState::PythonString`.
+    python: PythonStrings,
     /// For each open `${...}` template expression, innermost last, how many `{` it holds still
     /// open: its `}` with none open returns to the template text.
     templates: Vec<u32>,
@@ -443,6 +453,7 @@ impl CodeScanner {
             state: LexicalState::Code,
             depth: 0,
             parens: Vec::new(),
+            python: PythonStrings::default(),
             templates: Vec::new(),
             in_directive: false,
             conditionals: Vec::new(),
@@ -605,7 +616,18 @@ impl CodeScanner {
                         }
                     }
 
-                    // Check for triple-quote strings (Python)
+                    if self.rules.raw_strings == RawStringSyntax::PythonStrings {
+                        if let Some(end) = self.python.open(&chars, i) {
+                            last_code = Some(STRING_MARK);
+                            if self.python.is_open() {
+                                self.state = LexicalState::PythonString;
+                            }
+                            i = end;
+                            continue;
+                        }
+                    }
+
+                    // Check for triple-quote strings (Java)
                     if self.rules.raw_strings == RawStringSyntax::TripleQuote
                         && i + 2 < len
                         && (char_at(&chars, i) == '"' || char_at(&chars, i) == '\'')
@@ -857,6 +879,13 @@ impl CodeScanner {
                     i += 1;
                 }
 
+                LexicalState::PythonString => {
+                    i = self.python.read(&chars, i);
+                    if !self.python.is_open() {
+                        self.state = LexicalState::Code;
+                    }
+                }
+
                 LexicalState::CharLiteral => {
                     if char_at(&chars, i) == '\\' {
                         i += 2; // skip escaped char
@@ -917,6 +946,12 @@ impl CodeScanner {
         // MAGI FIX (B2a 4): in C and C++ a backslash before the newline splices the next line
         // into the comment (translation phase 2), so `// note \` hides the next line's braces.
         // Trailing blanks after the backslash are tolerated, as for a continued directive.
+        if self.state == LexicalState::PythonString {
+            self.python.end_line();
+            if !self.python.is_open() {
+                self.state = LexicalState::Code;
+            }
+        }
         let spliced_comment = self.rules.preprocessor_directives
             && self.state == LexicalState::LineComment
             && line.trim_end().ends_with('\\');
@@ -2296,7 +2331,7 @@ void h() {
         ] {
             assert_python_line_closes_its_strings(head);
         }
-        let code = "x = f\"\"\"{v} {\n\"\"\"\ny = {\n";
+        let code = "x = f\"\"\"{v} {{\n\"\"\"\ny = {\n";
         let results = CodeScanner::new(LexicalRules::python()).scan_all(code);
         assert!(results[1].starts_in_literal, "line 2 is string text");
         assert!(!results[2].starts_in_literal);

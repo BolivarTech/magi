@@ -7,6 +7,7 @@
 //! Recognizes `def`, `async def`, `class`, `import`/`from`, and module-level
 //! assignments. Block boundaries are determined by indentation level changes.
 
+use super::python_strings::PythonStrings;
 use super::scanner::{CodeScanner, LexicalRules};
 use super::{
     gap_units, split_into_members, ChangedLines, LanguageExtractor, Member, SemanticUnit, UnitKind,
@@ -229,97 +230,64 @@ fn continued_lines(lines: &[&str]) -> Vec<bool> {
         .collect()
 }
 
-/// A Python string being read: its quote and whether it is triple-quoted.
-#[derive(Clone, Copy)]
-struct OpenString {
-    quote: char,
-    triple: bool,
-}
-
 /// What carries a Python logical line over to the next physical line: open brackets, an open
-/// triple-quoted string, or a trailing `\`. Strings and comments are read so that their
-/// brackets do not count.
+/// string (a triple-quoted one, a replacement field of an f-string, or a one-quote string
+/// continued by an escaped newline), or a trailing `\`. Strings and comments are read so that
+/// their brackets do not count.
 ///
 /// It overlaps [`CodeScanner`] on purpose: the scanner counts braces only and knows nothing of
-/// `(` and `[`, which carry a Python line as much as `{` does. [`continued_lines`] takes the
-/// union of both, so a string state this reader drops (a one-quote string continued by an
-/// escaped newline) is still marked by the scanner's `starts_in_literal`. A change to Python's
-/// string syntax must reach both.
+/// `(` and `[`, which carry a Python line as much as `{` does. Both hand every string to
+/// [`PythonStrings`], so they share one string grammar, f-strings included (PEP 701: a string
+/// inside a replacement field may reuse the outer quote, as in `f"{"("}"`, and a field may
+/// span lines); [`continued_lines`] takes the union of both.
 ///
-/// A string prefix (`r`, `b`, `f`, `rb`) is not read, on purpose: in Python's tokenizer a
-/// backslash escapes the next character in a raw string too as far as where the string ends
-/// (`r"\""` is the two characters `\"`, and `r"""a\"""` never closes), so every string ends
-/// where this reader ends it; the scanner skips the character after a backslash alike. Only a
-/// `\` outside every string and comment continues a line, and Python accepts one there only
-/// right before the newline, so no parity of backslashes is counted. Both are pinned by
+/// In Python's tokenizer a backslash escapes the next character in a raw string too as far as
+/// where the string ends (`r"\""` is the two characters `\"`, and `r"""a\"""` never closes),
+/// and [`PythonStrings`] reads it so. Only a `\` outside every string and comment continues a
+/// line, and Python accepts one there only right before the newline, so no parity of
+/// backslashes is counted. Both are pinned by
 /// `a_backslash_before_a_quote_in_a_raw_string_never_closes_it` and
 /// `an_escaped_backslash_or_a_comment_ending_in_one_continues_no_line`.
-///
-/// Declared: one open string is tracked at a time, so a Python 3.12 f-string that nests the
-/// same quote inside a replacement field (`f"{"("}"`) is read as closing early, and a bracket
-/// inside it may stay counted open. The following lines are then marked continued and the
-/// construct open there takes them, up to the end of the file at worst; every line still lands
-/// in exactly one unit, so none is lost.
-// MAGI FIX (S6 loop 13): the raw-string, backslash and nested f-string behavior is declared.
+// MAGI FIX (S6 loop 13): the raw-string and backslash behavior is declared.
+// MAGI FIX (PEP 701): one open string at a time read `f"{"("}"` as closing early and kept its
+// `(` counted open, so the construct there took the rest of the file.
 #[derive(Default)]
 struct LogicalLines {
     depth: u32,
-    string: Option<OpenString>,
+    strings: PythonStrings,
     backslash: bool,
 }
 
 impl LogicalLines {
     /// Whether the next line to read continues the current logical line.
     fn continues(&self) -> bool {
-        self.depth > 0 || self.backslash || self.string.is_some_and(|s| s.triple)
+        self.depth > 0 || self.backslash || self.strings.is_open()
     }
 
     /// Reads one physical line. O(n) in the line.
     fn read(&mut self, line: &str) {
         let chars: Vec<char> = line.chars().collect();
-        let at = |k: usize| chars.get(k).copied();
         let mut last_code: Option<char> = None;
-        let mut k = 0;
-        while let Some(c) = at(k) {
-            match self.string {
-                Some(open) => {
-                    if c == '\\' {
-                        k += 2;
-                        continue;
-                    }
-                    let closes = c == open.quote
-                        && (!open.triple
-                            || (at(k + 1) == Some(open.quote) && at(k + 2) == Some(open.quote)));
-                    if closes {
-                        self.string = None;
-                        k += if open.triple { 3 } else { 1 };
-                        continue;
-                    }
+        let mut k = self.strings.read(&chars, 0);
+        while let Some(&c) = chars.get(k) {
+            match c {
+                '#' => break,
+                '"' | '\'' => {
+                    last_code = Some(c);
+                    k = self.strings.open(&chars, k).unwrap_or(k + 1);
+                    continue;
                 }
-                None => match c {
-                    '#' => break,
-                    '"' | '\'' => {
-                        let triple = at(k + 1) == Some(c) && at(k + 2) == Some(c);
-                        self.string = Some(OpenString { quote: c, triple });
-                        last_code = Some(c);
-                        k += if triple { 3 } else { 1 };
-                        continue;
-                    }
-                    '(' | '[' | '{' => self.depth = self.depth.saturating_add(1),
-                    ')' | ']' | '}' => self.depth = self.depth.saturating_sub(1),
-                    _ => {}
-                },
+                '(' | '[' | '{' => self.depth = self.depth.saturating_add(1),
+                ')' | ']' | '}' => self.depth = self.depth.saturating_sub(1),
+                _ => {}
             }
-            if self.string.is_none() && !c.is_whitespace() {
+            if !c.is_whitespace() {
                 last_code = Some(c);
             }
             k += 1;
         }
-        // A one-quote string cannot span lines without a `\`; an unclosed one ends here.
-        if self.string.is_some_and(|s| !s.triple) {
-            self.string = None;
-        }
-        self.backslash = self.string.is_none() && last_code == Some('\\');
+        self.strings.end_line();
+        self.backslash = !self.strings.is_open() && last_code == Some('\\');
     }
 }
 
