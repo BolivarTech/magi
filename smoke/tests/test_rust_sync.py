@@ -367,6 +367,11 @@ def _locked_version(crate: str) -> str:
 def _registry_source(crate: str, relative: str) -> str:
     """Read *relative* from the locked version of *crate* in cargo's registry.
 
+    It assumes cargo's default layout, ``$CARGO_HOME/registry/src/<index>/<crate>-<version>``,
+    which a build fills. A vendored or path-overridden dependency is not looked for there, and
+    then the guard fails with the message below instead of skipping: a skip would leave the
+    probe paths unguarded without a word.
+
     Args:
         crate: The package name.
         relative: The path inside the package, with forward slashes.

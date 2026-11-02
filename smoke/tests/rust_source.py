@@ -13,8 +13,19 @@ which look only at code lines and insist on exactly one match; a list a guard
 collects with ``findall`` is first passed through :func:`code_only`.
 
 A comment line is one whose first non-blank characters are ``//`` (``//``,
-``///``, ``//!``). Block comments are not recognised; the product does not use
-them where these guards look.
+``///``, ``//!``). The reading is by line, not a Rust lexer, and the limits
+that follow from it are declared rather than handled:
+
+- Block comments (``/* ... */``) are not recognised: a definition inside one
+  would count as code. The product does not put one where these guards look
+  (an inline ``/* safe */`` argument is ordinary code to them).
+- A line inside a multi-line (raw) string literal that starts with ``//`` is
+  taken for a comment and skipped.
+- Uniqueness is per line: two matches on one physical line count once.
+  rustfmt, which the product's CI enforces, puts each item on its own line.
+- :func:`one_occurrence` reads a line only up to its first ``//``, whether or
+  not that opens a comment, so a needle after a string holding ``//`` (a URL)
+  is not found. That fails loudly, never as a false pass.
 
 Example:
     >>> text = "/// was `const N: u8 = 1;`\\nconst N: u8 = 2;\\n"
@@ -127,10 +138,12 @@ def one_definition(text: str, pattern: str, where: str, flags: int = 0) -> re.Ma
 
 
 def one_occurrence(text: str, needle: str, where: str) -> re.Match:
-    """The one code line that holds the literal *needle*, anywhere before a trailing comment.
+    """The one code line that holds the literal *needle* before the line's first ``//``.
 
     For wording a guard pins inside a larger line, such as a message in an
-    ``#[error(...)]`` attribute. The needle may span lines.
+    ``#[error(...)]`` attribute. The needle may span lines. The scan stops at
+    the first ``//`` on the line even inside a string literal, so a needle
+    after a URL on the same line is reported missing (see the module notes).
 
     Complexity: ``O(len(text) * len(needle))`` in the worst case.
 
