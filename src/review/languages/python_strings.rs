@@ -134,7 +134,9 @@ impl PythonStrings {
     /// # Returns
     ///
     /// The index right after the string, or the line's length when it stays open; `None` when
-    /// `chars[i]` is no quote, with nothing read.
+    /// `chars[i]` is no quote, with nothing read. A returned index is always greater than `i`
+    /// (the opening delimiter is read), so a caller that moves to it always advances. Pinned by
+    /// `open_and_read_always_move_the_cursor_forward`.
     pub(crate) fn open(&mut self, chars: &[char], i: usize) -> Option<usize> {
         let start = self.push_string(chars, i)?;
         Some(self.read(chars, start))
@@ -151,7 +153,10 @@ impl PythonStrings {
     /// # Returns
     ///
     /// The index right after the outermost string, or the line's length when it stays open;
-    /// `i` when no string is open.
+    /// `i` when no string is open. With a string open and `i` inside the line, the index is
+    /// greater than `i`: every character read moves past at least itself, and the read stops
+    /// only when the strings close or the line ends. Pinned by
+    /// `open_and_read_always_move_the_cursor_forward`.
     pub(crate) fn read(&mut self, chars: &[char], mut i: usize) -> usize {
         self.escaped_newline = false;
         while let (Some(frame), Some(&c)) = (self.frames.last().copied(), chars.get(i)) {
