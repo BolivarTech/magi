@@ -1098,12 +1098,11 @@ fn regex_may_start(
             REGEX_PRECEDING_KEYWORDS.iter().any(|k| word_is(word, k))
         }
         // `a++ / 2` divides; a single `+` or `-` is an operator, so a regex may follow it.
-        Some(c @ ('+' | '-')) => !before
-            .iter()
-            .rev()
-            .filter(|p| !p.is_whitespace())
-            .take(2)
-            .all(|&p| p == c),
+        // MAGI FIX (B2a 3, 5): a lone sign (`+/x/` opening a line) and a binary one after a
+        // postfix (`x++ + /x/`) read as `++`. The run of adjacent signs ending the code decides:
+        // tokens pair from its left, so an even run ends in `++` (an operand's end) and an odd
+        // one in a lone operator.
+        Some(c @ ('+' | '-')) => before.iter().rev().take_while(|&&p| p == c).count() % 2 == 1,
         Some(_) => true,
     }
 }
