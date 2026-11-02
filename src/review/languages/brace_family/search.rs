@@ -98,6 +98,10 @@ impl BraceSearch<'_> {
 /// already means the construct ends on its own line: the lines after it fall into later units,
 /// so none is lost. Preparation runs before the review clock (RV06), so these two bounds are
 /// the only ones on a file built to keep a parameter list open.
+///
+/// `lines` and `scanned` describe the same text, both split with [`str::lines`]
+/// ([`CodeScanner::scan_all`]), so they have one length; a line with no record would read as
+/// opening no brace and being no code, which ends the search, never a panic.
 pub(super) fn open_brace_line(
     lines: &[&str],
     scanned: &[ScannedLine],

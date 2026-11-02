@@ -253,9 +253,11 @@ fn continued_lines(lines: &[&str]) -> Vec<bool> {
 /// where the string ends (`r"\""` is the two characters `\"`, and `r"""a\"""` never closes),
 /// and [`PythonStrings`] reads it so. Only a `\` outside every string and comment continues a
 /// line, and Python accepts one there only right before the newline, so no parity of
-/// backslashes is counted. Both are pinned by
-/// `a_backslash_before_a_quote_in_a_raw_string_never_closes_it` and
-/// `an_escaped_backslash_or_a_comment_ending_in_one_continues_no_line`.
+/// backslashes is counted: a run of two (`x = 1 \\`) is a syntax error, and on such a line no
+/// line is lost either. They are pinned by
+/// `a_backslash_before_a_quote_in_a_raw_string_never_closes_it`,
+/// `an_escaped_backslash_or_a_comment_ending_in_one_continues_no_line` and
+/// `two_backslashes_ending_a_line_outside_a_string_lose_no_line`.
 // MAGI FIX (S6 loop 13): the raw-string and backslash behavior is declared.
 // MAGI FIX (PEP 701): one open string at a time read `f"{"("}"` as closing early and kept its
 // `(` counted open, so the construct there took the rest of the file.

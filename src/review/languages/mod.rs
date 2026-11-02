@@ -94,7 +94,11 @@ pub struct SemanticUnit {
     ///
     /// The extractors leave it at [`FileContext::default`] in v0.25.0 and no stage reads it: a
     /// batch names its file's language in its [`file_header`](crate::review::batching::file_header),
-    /// computed from the path. It is kept for the retrieval stage that will fill it.
+    /// computed from the path. It is kept for the retrieval stage that will fill it. Every unit
+    /// an extractor gives (a construct, a gap unit, a piece of a split block) carries the
+    /// default, so both paths a file may take carry the same metadata; only
+    /// [`fallback_extract`], which no stage calls in v0.25.0, stores the context its caller
+    /// passes. Pinned by `every_extracted_unit_and_split_piece_carries_the_default_context`.
     pub context: FileContext,
 }
 
