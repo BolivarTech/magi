@@ -28,6 +28,12 @@ class OneDefinitionTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, r"x\.rs.*LIMIT.*found 0"):
             _helpers().one_definition(text, r"pub const LIMIT: usize = (\d+);", "x.rs")
 
+    def test_a_pattern_that_could_start_on_the_slashes_still_skips_a_comment_line(self) -> None:
+        # The anchor alone cannot exclude a comment when the pattern itself may start with '/'.
+        text = "/// LIMIT = 4;\nfn f() {}\n"
+        with self.assertRaisesRegex(AssertionError, "found 0"):
+            _helpers().one_definition(text, r".*LIMIT = (\d+);", "x.rs")
+
     def test_the_real_definition_wins_over_an_old_one_left_in_a_doc_comment(self) -> None:
         match = _helpers().one_definition(_DRIFTED, r"pub const BYTES_PER_TOKEN: usize = (\d+);", "w.rs")
         self.assertEqual("5", match.group(1))
