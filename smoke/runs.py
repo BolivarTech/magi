@@ -2203,22 +2203,23 @@ class _EchoingHandler(http.server.BaseHTTPRequestHandler):
 
 #: The most connections a loopback stand-in serves on threads of their own at
 #: once. A run talks to it over a handful; past this, a connection is served
-#: on the accepting thread (:class:`_BoundedThreadingServer`).
+#: on the accepting thread (:class:`BoundedThreadsMixIn`).
 MAX_LOOPBACK_HANDLER_THREADS = 32
 
 
-class _BoundedThreadingServer(http.server.ThreadingHTTPServer):
-    """A threading HTTP server that never runs more than a fixed number of handler threads.
+class BoundedThreadsMixIn:
+    """Mixed in before a ``socketserver.ThreadingMixIn`` server: never more than a fixed number of handler threads.
 
-    MAGI FIX (S6 loop 29): ``ThreadingHTTPServer`` starts a thread per
+    MAGI FIX (S6 loop 29): a threading server starts a thread per
     connection, and each lives until its deadline, so a product that opened
     connections faster than they closed grew the harness's thread count
     without bound (F1a1b-caspar). Up to :data:`MAX_LOOPBACK_HANDLER_THREADS`
     connections run on threads; past that, a connection is served on the
     accepting thread itself, so accepting slows down while every request is
     still answered and, by the counter, recorded. A connection's own deadline
-    (the handlers' ``timeout``, and the counter's total deadline) bounds how
-    long one served inline holds the accepting thread.
+    (the handlers' ``timeout``, the counter's total deadline, a silent
+    listener's release) bounds how long one served inline holds the
+    accepting thread.
 
     Example:
         >>> server = _BoundedThreadingServer(("127.0.0.1", 0), _EchoingHandler)
@@ -2227,17 +2228,17 @@ class _BoundedThreadingServer(http.server.ThreadingHTTPServer):
         >>> server.server_close()
     """
 
-    def __init__(self, address, handler) -> None:
-        """Bind *address* for *handler*, with :data:`MAX_LOOPBACK_HANDLER_THREADS` read now.
+    def __init__(self, *args, **kwargs) -> None:
+        """Build the server, with :data:`MAX_LOOPBACK_HANDLER_THREADS` read now.
 
         Args:
-            address: The ``(host, port)`` to bind.
-            handler: The request handler class.
+            *args: The server's own positional arguments.
+            **kwargs: Its keyword arguments.
 
         Raises:
-            OSError: When the address cannot be bound.
+            OSError: When the server's address cannot be bound.
         """
-        super().__init__(address, handler)
+        super().__init__(*args, **kwargs)
         self._slots = threading.BoundedSemaphore(MAX_LOOPBACK_HANDLER_THREADS)
 
     def process_request(self, request, client_address) -> None:
@@ -2272,6 +2273,10 @@ class _BoundedThreadingServer(http.server.ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self._slots.release()
+
+
+class _BoundedThreadingServer(BoundedThreadsMixIn, http.server.ThreadingHTTPServer):
+    """The loopback stand-ins' HTTP server, its handler threads bounded (:class:`BoundedThreadsMixIn`)."""
 
 
 @contextlib.contextmanager

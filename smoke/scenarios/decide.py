@@ -2019,8 +2019,13 @@ class _SilentHandler(socketserver.BaseRequestHandler):
         self.server.release.wait()
 
 
-class _SilentServer(socketserver.ThreadingTCPServer):
+class _SilentServer(runs.BoundedThreadsMixIn, socketserver.ThreadingTCPServer):
     """A listener that accepts and stays quiet, for D10's timeout.
+
+    Each connection parks a thread until shutdown, so the threads are bounded
+    (:class:`smoke.runs.BoundedThreadsMixIn`, MAGI S6 loop 29 sweep of
+    F1a1b-caspar); past the bound a connection parks the accepting thread,
+    which shutdown's release ends the same way.
 
     Attributes:
         release: Set on shutdown so the parked handler threads end.
