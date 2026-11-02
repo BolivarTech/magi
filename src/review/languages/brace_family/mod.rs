@@ -415,9 +415,43 @@ const CPP_NOT_FUNCTION_NAMES: [&str; 18] = [
 /// C++20 module export `export namespace m {`. Qualifiers only, so they are stripped before the
 /// block and function tables and never before the declaration table.
 // MAGI FIX (B2b1 10): both namespaces matched no keyword and their functions became top-level.
+// MAGI FIX (loop 28, B2b1a): C's storage classes and cv-qualifiers ([`C_QUALIFIERS`]) too.
 const CPP_MODIFIERS: Modifiers = Modifiers {
     visibility: &[],
-    qualifiers: &["inline", "export"],
+    qualifiers: &[
+        "inline",
+        "export",
+        "static",
+        "extern",
+        "const",
+        "volatile",
+        "register",
+        "thread_local",
+        "_Thread_local",
+    ],
+};
+
+/// The C storage classes and cv-qualifiers an aggregate defined with a variable may open with
+/// (`static struct S {` ... `} s;`, `const struct S {` ... `} s = {1};`). Qualifiers only, so
+/// they are stripped before the block and function tables and never before the declaration
+/// table: `static int n;` stays a declaration. A variable of the type (`static struct S s;`) or
+/// a function returning it (`static struct S *make(void) {`) still reads as one
+/// ([`declares_variable`], [`returns_from_function`]).
+const C_QUALIFIERS: [&str; 7] = [
+    "static",
+    "extern",
+    "const",
+    "volatile",
+    "register",
+    "thread_local",
+    "_Thread_local",
+];
+
+/// C's modifiers: no visibility, the qualifiers of [`C_QUALIFIERS`].
+// MAGI FIX (loop 28, B2b1a): `static struct S {` matched no keyword and fell into gap units.
+const C_MODIFIERS: Modifiers = Modifiers {
+    visibility: &[],
+    qualifiers: &C_QUALIFIERS,
 };
 
 /// The words a JavaScript or TypeScript declaration may open with (`export default`,
@@ -593,7 +627,7 @@ impl BraceFamilyExtractor {
             ],
             doc_comment_prefixes: vec!["/**".to_string(), "///".to_string()],
             attribute_prefixes: c_attribute_prefixes(),
-            modifiers: &NO_MODIFIERS,
+            modifiers: &C_MODIFIERS,
             lexical_rules: LexicalRules::c(),
             signature_functions: true,
             semicolon_declarations: true,
