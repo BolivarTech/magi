@@ -324,8 +324,8 @@ class CodeReviewScenarioTests(unittest.TestCase):
 
     def test_s47_fails_a_provider_shortfall_whose_batch_ids_are_not_the_missing_batches(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-b1] the ids were never read: a repeated, zero-based, out-of-range or
-        # non-integer id, a completed batch declared failed, or a clock expiry that is not the tail all read as
-        # CANNOT_TEST beside a provider-class cause.
+        # non-integer id, a completed batch declared failed, or a clock expiry that is not the tail used to
+        # read as CANNOT_TEST beside a provider-class cause. Each one is a FAIL now.
         completed_batch = {"index": 2, "input_tokens": 900, "output_tokens": 80, "ms": 10}
         cases = (
             (3, [[2, "timeout: a"], [2, "timeout: b"]], None),
@@ -347,7 +347,10 @@ class CodeReviewScenarioTests(unittest.TestCase):
 
     def test_s47_cannot_test_a_clock_expiry_over_the_last_batches(self) -> None:
         # [MAGI §6 MS2 loop 13, F1a-b1] the product declares every batch from the one the clock cut to the
-        # last as clock expired, after any earlier provider failure.
+        # last as clock expired, after any earlier provider failure. Here batch 2 fails at the provider and
+        # the run goes on (src/review/pipeline.rs runs the next batch after a provider failure): 1 and 3
+        # complete, the clock cuts 4, and 5 never starts. Batch 2's metrics entry is the time it spent with
+        # no tokens, which is what a failed batch records, so it is not a completed batch declared failed.
         doc = _review(5)
         doc["code_review"].update(
             batches_completed=2, failed_batches=[[2, "timeout: a"], [4, "clock expired"], [5, "clock expired"]],
