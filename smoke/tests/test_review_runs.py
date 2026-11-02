@@ -459,10 +459,58 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             directory = pathlib.Path(tmp) / "d"
             directory.mkdir()
-            with mock.patch.object(runs.os, "chmod") as chmod:
+            with mock.patch.object(runs, "_set_mode") as set_mode:
                 runs._retry_writable(os.rmdir, str(directory), PermissionError(13, "access denied"))
             self.assertFalse(directory.exists())
-        chmod.assert_called_once_with(str(directory), stat.S_IRWXU)
+        set_mode.assert_called_once_with(str(directory), stat.S_IRWXU)
+
+    @unittest.skipUnless(os.chmod in os.supports_follow_symlinks,
+                         "this platform's chmod cannot leave a link unfollowed")
+    def test_the_mode_change_asks_chmod_not_to_follow_a_link(self) -> None:
+        # [MAGI §6 MS2 loop 27, F1a1-caspar] _retry_writable tests for a link and then changed the mode by path,
+        # which follows a link swapped in between: the mode of whatever it points at changed.
+        import stat
+        with mock.patch.object(runs.os, "chmod") as chmod:
+            runs._set_mode("x", stat.S_IRWXU)
+        chmod.assert_called_once_with("x", stat.S_IRWXU, follow_symlinks=False)
+
+    @unittest.skipUnless(os.chmod not in os.supports_follow_symlinks and hasattr(os, "O_NOFOLLOW"),
+                         "only where chmod follows every link and O_NOFOLLOW exists (Linux)")
+    def test_the_mode_change_goes_through_a_descriptor_opened_without_following(self) -> None:
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "x"
+            path.write_bytes(b"x")
+            real_open = os.open
+            flags = []
+
+            def recording_open(target, flag, *args, **kwargs):
+                flags.append(flag)
+                return real_open(target, flag, *args, **kwargs)
+
+            with mock.patch.object(runs.os, "open", side_effect=recording_open):
+                runs._set_mode(str(path), stat.S_IREAD | stat.S_IWRITE)
+            self.assertTrue(flags and all(flag & os.O_NOFOLLOW for flag in flags), flags)
+            self.assertEqual(stat.S_IREAD | stat.S_IWRITE, stat.S_IMODE(os.stat(path).st_mode))
+
+    def test_the_mode_change_never_reaches_through_a_symlink(self) -> None:
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            target = pathlib.Path(tmp) / "outside"
+            target.write_bytes(b"x")
+            os.chmod(target, stat.S_IREAD)
+            before = os.stat(target).st_mode
+            link = pathlib.Path(tmp) / "link"
+            try:
+                os.symlink(target, link)
+            except (OSError, NotImplementedError) as exc:
+                raise unittest.SkipTest("cannot create a symlink here: %s" % exc) from exc
+            try:
+                runs._set_mode(str(link), stat.S_IREAD | stat.S_IWRITE)
+            except OSError:
+                pass  # refusing the link outright is as good as changing the link itself
+            self.assertEqual(before, os.stat(target).st_mode)
+            os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
 
     def test_a_failed_deletion_of_a_file_is_retried_once_writable(self) -> None:
         import stat

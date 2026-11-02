@@ -1149,6 +1149,16 @@ def _reject_links(top) -> None:
                     "workspace never follows one" % (top, path))
 
 
+def _set_mode(path, mode: int) -> None:
+    """Set the mode of *path*.
+
+    Args:
+        path: The entry.
+        mode: The new mode.
+    """
+    os.chmod(path, mode)
+
+
 def _retry_writable(func, path, error: BaseException) -> None:
     """The deletion error handler of :func:`_remove_tree`: retry once, writable.
 
