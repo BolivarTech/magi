@@ -1896,12 +1896,15 @@ impl SearchBudget {
 /// A brace that a default argument opens while the list is still open (`void f(int cb = []() {`,
 /// `function f(cb = () => {`: a line holding a bare `=`, [`holds_bare_assignment`]) is the
 /// argument's: the search passes over the lines to the one that closes the list, whose brace
-/// after its lowest point (`}) {`) is the function's. Any other brace on a parameter line is
-/// taken for the construct's, declared: an anonymous struct parameter, or a lambda passed with no
-/// `=` (a call `describe('x', () => {`, which reads as a signature and keeps its block), makes
-/// the construct end at that brace's match, and the rest of its body falls into later units. No
-/// line is lost: every line stays in exactly one unit, so the body is still reviewed, only split
-/// from its signature.
+/// after its lowest point (`}) {`) is the function's. A brace that line `i` opens with its list
+/// still open and no `=` (a parameter typed by a literal block, `function f(opts: {`,
+/// `void f(struct {`) is a parameter's too when the line closing the list opens one after its
+/// lowest point (`}) {`, [`brace_after_parameter_list`]); when that line opens none (a call
+/// passing a callback, `describe('x', () => {` ... `});`, which reads as a signature) line `i`'s
+/// brace is kept, so the call keeps its block. Any other brace on a later parameter line is taken
+/// for the construct's, declared: the construct ends at that brace's match, and the rest of its
+/// body falls into later units. No line is lost: every line stays in exactly one unit, so the
+/// body is still reviewed, only split from its signature.
 ///
 /// The search looks at most [`MAX_BRACE_SEARCH_LINES`] lines past line `i`, and no more than the
 /// detection pass has left ([`SearchBudget`]), and then degrades to "no brace found", which
@@ -1930,6 +1933,11 @@ fn open_brace_line(
                 .is_some_and(|(_, list)| holds_bare_assignment(list))
         });
     if opens(i) && !in_default_argument {
+        // MAGI FIX (B2a 1): a parameter typed by a literal block (`opts: {`, `struct {`) opened
+        // the signature's first brace, so the function ended where that block closed (`}) {`).
+        if group_open(i) > 0 {
+            return Some(brace_after_parameter_list(scanned, i, search).unwrap_or(i));
+        }
         return Some(i);
     }
     // A line whose code ends in `}` after opening nothing net (`fn f() -> u8 { 1 }`) is a
@@ -2012,6 +2020,49 @@ fn open_brace_line(
         }
         if ends_statement(j) {
             return None;
+        }
+    }
+    None
+}
+
+/// The 0-based line that closes the parameter list line `i` leaves open and, after its lowest
+/// point, opens a brace (`}) {`): the body of a function one of whose parameters opened a block
+/// on line `i` (`function f(opts: {`, `void f(struct {`). `None` when the line that closes the
+/// list opens nothing after it (a call passing a callback, `});`), when no line closes the list
+/// within [`MAX_BRACE_SEARCH_LINES`] lines, or when the pass's budget is spent
+/// ([`SearchBudget`]); the caller then keeps line `i`'s brace, as [`open_brace_line`] did before
+/// this rule. The list is counted by the scanner in code context only
+/// ([`ScannedLine::group_delta`]). O(k) for the k lines walked.
+///
+/// # Arguments
+///
+/// * `scanned` - The scanner's record of each line.
+/// * `i` - The 0-based line whose parameter list stays open after a brace it opens.
+/// * `search` - The pass's search bounds; only its budget is spent here.
+///
+/// # Returns
+///
+/// The 0-based line holding the function's opening brace, or `None`.
+fn brace_after_parameter_list(
+    scanned: &[ScannedLine],
+    i: usize,
+    search: &BraceSearch<'_>,
+) -> Option<usize> {
+    let end = i
+        .saturating_add(1)
+        .saturating_add(MAX_BRACE_SEARCH_LINES)
+        .min(scanned.len());
+    let mut open = code_group_delta(scanned, i);
+    for j in (i + 1)..end {
+        if !search.spend() {
+            return None;
+        }
+        open += code_group_delta(scanned, j);
+        if open <= 0 {
+            return scanned
+                .get(j)
+                .filter(|s| s.brace_delta > s.min_delta)
+                .map(|_| j);
         }
     }
     None
