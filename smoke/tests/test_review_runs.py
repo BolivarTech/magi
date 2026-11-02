@@ -550,6 +550,57 @@ class ReviewWorkspaceLinkTests(unittest.TestCase):
                     executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
             self.assertIn("locked", str(caught.exception))
 
+    def test_a_path_that_cannot_be_resolved_is_a_harness_error(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1a1-caspar] Path.resolve raises RuntimeError on a symlink loop (OSError
+        # from 3.13), outside the try that names a harness error, so the run ended in a traceback.
+        for error in (RuntimeError("Symlink loop from 'x'"), OSError(40, "Too many levels of symbolic links")):
+            with tempfile.TemporaryDirectory() as tmp:
+                executor = _executor(pathlib.Path(tmp))
+                with mock.patch.object(pathlib.Path, "resolve", side_effect=error):
+                    with self.assertRaises(HarnessError, msg=repr(error)):
+                        executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+                    with self.assertRaises(HarnessError, msg=repr(error)):
+                        executor._write_files(runs.DEFINITIONS["R12"], pathlib.Path(tmp))
+                    with self.assertRaises(HarnessError, msg=repr(error)):
+                        executor._command(runs.DEFINITIONS["R14"])
+
+    def test_an_environment_magi_that_is_itself_a_link_is_never_copied(self) -> None:
+        # [MAGI §6 MS2 loop 28, F1b1-balthasar] copytree follows a .magi that is a link and copies what it
+        # points at into the workspace the product reads.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "elsewhere.toml").write_text("not the environment's\n", encoding="utf-8")
+            env_dir = root / "env"
+            env_dir.mkdir()
+            _make_directory_link(outside, env_dir / ".magi")
+            env = types.SimpleNamespace(root=env_dir, magi_dir=env_dir / ".magi", scratch_dir=root / "scratch")
+            executor = runs.RunExecutor(binary=None, env=env, config=None)
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root):
+                with self.assertRaises(HarnessError) as caught:
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn(".magi", str(caught.exception))
+            self.assertFalse((root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi").exists())
+
+    def test_an_environment_magi_under_a_linked_directory_is_never_copied(self) -> None:
+        # The link test covered .magi and what lies under it, not the directories above it: an environment
+        # directory swapped for a link had copytree copy the tree it points at.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            outside = root / "outside"
+            (outside / ".magi").mkdir(parents=True)
+            (outside / ".magi" / "magi.toml").write_text("# not the environment's\n", encoding="utf-8")
+            _make_directory_link(outside, root / "env")
+            env = types.SimpleNamespace(root=root / "env", magi_dir=root / "env" / ".magi",
+                                        scratch_dir=root / "scratch")
+            executor = runs.RunExecutor(binary=None, env=env, config=None)
+            with mock.patch.object(runs, "REPOSITORY_ROOT", root):
+                with self.assertRaises(HarnessError) as caught:
+                    executor._prepare_review_workspace(runs.DEFINITIONS["R14"])
+            self.assertIn("env", str(caught.exception))
+            self.assertFalse((root / "scratch" / runs.REVIEW_WORKSPACE_DIR / ".magi").exists())
+
 
 class ReviewWorkingDirectoryTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 4, F1-2] a review run's relative input means the same under either base."""
