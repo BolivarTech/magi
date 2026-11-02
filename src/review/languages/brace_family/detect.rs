@@ -231,6 +231,8 @@ impl BraceFamilyExtractor {
                     } else {
                         line_number(statement_end(lines, scanned, i, &search))?
                     };
+                    let end =
+                        self.past_member_initializers(lines, scanned, i, open, end, &search)?;
                     constructs.push(Construct {
                         kind: UnitKind::Function,
                         name,
@@ -1488,6 +1490,93 @@ impl BraceFamilyExtractor {
         );
         let function = opens_function_value(value);
         (!name.is_empty() && (arrow || function)).then_some((name, close))
+    }
+
+    /// The last line, 1-based, of the function whose signature is at line `i`, read past a C++
+    /// constructor's member initializers (`member_initializers`): when its header opens a member
+    /// initializer list ([`opens_member_initializer_list`]), the block found at `open` may be an
+    /// initializer's (`Foo::Foo() : arr{` ... `1, 2} {`), so while the line closing it opens
+    /// another brace after its lowest point (`} {`, `}, b{`), or the next code line starts the
+    /// next initializer or the body (`, b{`, `{`, Allman), the block opened there is searched
+    /// too. Without a list, or in another language, `end` is kept. Each search starts past the
+    /// last one's closing line, so the walk is linear in the constructor's lines; the lines
+    /// between two blocks are charged to the pass's [`SearchBudget`].
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - The text's lines.
+    /// * `scanned` - The scanner's record of each line.
+    /// * `i` - The 0-based signature line.
+    /// * `open` - The 0-based line of the brace the search found, if any.
+    /// * `end` - The function's last line as found from `open`, 1-based.
+    /// * `search` - The bounds of the forward searches ([`BraceSearch`]).
+    ///
+    /// # Returns
+    ///
+    /// The last line, 1-based, or `None` when it does not fit `u32`.
+    // MAGI FIX (loop 29, B2b1a): a braced member initializer wrapped over lines ended the
+    // constructor, its body falling into later units.
+    fn past_member_initializers(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        i: usize,
+        open: Option<usize>,
+        end: u32,
+        search: &BraceSearch<'_>,
+    ) -> Option<u32> {
+        let Some(open) = open.filter(|_| self.member_initializers) else {
+            return Some(end);
+        };
+        if !opens_member_initializer_list(lines.get(i..=open).unwrap_or(&[])) {
+            return Some(end);
+        }
+        let Some(mut close) = (end as usize).checked_sub(1) else {
+            return Some(end);
+        };
+        loop {
+            let reopens = scanned
+                .get(close)
+                .is_some_and(|s| s.brace_delta > s.min_delta);
+            let next_open = if reopens {
+                Some(close)
+            } else {
+                self.next_initializer_or_body(lines, scanned, close + 1, search)
+                    .and_then(|j| open_brace_line(lines, scanned, j, search))
+            };
+            let Some(next_open) = next_open else {
+                break;
+            };
+            let next_close = find_closing_brace(scanned, next_open);
+            if next_close <= close {
+                break;
+            }
+            close = next_close;
+        }
+        line_number(close)
+    }
+
+    /// The first code line from `from` on (blank lines and comments passed over, each charged to
+    /// the pass's budget) when it starts a constructor's next member initializer or its body
+    /// (`, b{`, `{`); `None` for any other line, past the text's end or once the budget is spent.
+    fn next_initializer_or_body(
+        &self,
+        lines: &[&str],
+        scanned: &[ScannedLine],
+        from: usize,
+        search: &BraceSearch<'_>,
+    ) -> Option<usize> {
+        (from..lines.len())
+            .take_while(|_| search.spend())
+            .find(|&j| {
+                scanned.get(j).is_some_and(|s| !s.is_non_code)
+                    && lines.get(j).is_some_and(|l| !l.trim().is_empty())
+            })
+            .filter(|&j| {
+                lines
+                    .get(j)
+                    .is_some_and(|l| l.trim_start().starts_with(['{', ',']))
+            })
     }
 
     /// Whether a signature ending in `;` is a member of a block body: in Java, JavaScript and

@@ -866,6 +866,57 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// Whether a C++ function's header opens a constructor's member initializer list: after its
+/// parameter list closes, a single `:` (not `::`) stands outside every bracket, string and
+/// comment, before any `{` there (`Foo::Foo() : a{1}`, the `:` on a later line of a wrapped
+/// header). A `:` inside the parameter list (a default argument's `a ? b : c`) or a scope
+/// operator (`Foo::Foo`) opens none. O(n) in the header's text.
+///
+/// # Arguments
+///
+/// * `header` - The lines of the header, from the signature's line to the one holding the brace
+///   the brace search found.
+///
+/// # Returns
+///
+/// `true` when the header opens a member initializer list.
+pub(super) fn opens_member_initializer_list(header: &[&str]) -> bool {
+    let mut depth = 0i64;
+    let mut list_closed = false;
+    for line in header {
+        let chars: Vec<char> = line.chars().collect();
+        let mut k = 0;
+        while let Some(&c) = chars.get(k) {
+            let previous = k.checked_sub(1).and_then(|p| chars.get(p)).copied();
+            let next = chars.get(k + 1).copied();
+            let quoted_last = match c {
+                '/' if next == Some('/') => break,
+                '"' => c_string_end(&chars, k),
+                '\'' => c_char_literal_end(&chars, k),
+                _ => None,
+            };
+            if let Some(last) = quoted_last {
+                k = last + 1;
+                continue;
+            }
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => {
+                    depth -= 1;
+                    list_closed |= c == ')' && depth == 0;
+                }
+                '{' if depth == 0 => return false,
+                ':' if depth == 0 && list_closed && previous != Some(':') && next != Some(':') => {
+                    return true;
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    false
+}
+
 /// The quotes of a JavaScript or TypeScript string: `'`, `"` and the template literal's backtick.
 const JS_QUOTES: [char; 3] = ['"', '\'', '`'];
 

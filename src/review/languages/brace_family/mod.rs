@@ -27,9 +27,6 @@
 //!   `} Name;` line, not a struct (`loop_28_shapes_read_as_one_unit_each`).
 //! - A comment after a return type's brace (`function f(): { // shape`) hides the type, and the
 //!   brace reads as the body's (`a_comment_after_a_return_type_brace_hides_the_type_declared`).
-//! - A C++ braced member initializer wrapped over lines (`Foo::Foo() : arr{`) splits the
-//!   constructor from its body
-//!   (`a_braced_member_initializer_wrapped_over_lines_splits_the_constructor_declared`).
 
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -113,6 +110,10 @@ pub struct BraceFamilyExtractor {
     /// Whether a member may be optional, a `?` glued between its name and its parameter list
     /// (`foo?(x: number): void;`), named without the `?` ([`optional_member_name`]): TypeScript.
     optional_members: bool,
+    /// Whether a constructor's member initializers (`Foo::Foo() : a{1}, b(2) {`) may open
+    /// braces before its body's ([`BraceFamilyExtractor::past_member_initializers`]): C++. In
+    /// TypeScript the brace after `): Foo` is the body's, so the rule is no other language's.
+    member_initializers: bool,
 }
 
 impl LanguageExtractor for BraceFamilyExtractor {
@@ -626,6 +627,7 @@ impl BraceFamilyExtractor {
             anonymous_functions: false,
             operator_overloads: false,
             optional_members: false,
+            member_initializers: false,
         }
     }
 
@@ -661,6 +663,7 @@ impl BraceFamilyExtractor {
             anonymous_functions: false,
             operator_overloads: false,
             optional_members: false,
+            member_initializers: false,
         }
     }
 
@@ -691,6 +694,9 @@ impl BraceFamilyExtractor {
         // out of the unit it declares.
         ext.template_headers = true;
         ext.operator_overloads = true;
+        // MAGI FIX (loop 29, B2b1a): a braced member initializer wrapped over lines ended the
+        // constructor, its body falling into later units.
+        ext.member_initializers = true;
         ext.not_function_names = &CPP_NOT_FUNCTION_NAMES;
         ext.modifiers = &CPP_MODIFIERS;
         ext.attribute_prefixes
@@ -723,6 +729,7 @@ impl BraceFamilyExtractor {
             anonymous_functions: false,
             operator_overloads: false,
             optional_members: false,
+            member_initializers: false,
         }
     }
 
@@ -760,6 +767,7 @@ impl BraceFamilyExtractor {
             anonymous_functions: false,
             operator_overloads: false,
             optional_members: false,
+            member_initializers: false,
         }
     }
 
@@ -806,6 +814,7 @@ impl BraceFamilyExtractor {
             anonymous_functions: true,
             operator_overloads: false,
             optional_members: false,
+            member_initializers: false,
         }
     }
 
