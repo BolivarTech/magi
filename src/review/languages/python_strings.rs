@@ -439,4 +439,46 @@ mod tests {
         strings.end_line();
         assert!(strings.is_open());
     }
+
+    #[test]
+    fn open_and_read_always_move_the_cursor_forward() {
+        // [MAGI loop 27, B2a] declared green: the scanner's loop and `LogicalLines` advance by
+        // what `open` and `read` return, so each must return an index past the one it was given
+        // (or the line's end); one that returned it unchanged would spin. Pinned over a fixed
+        // pseudo-random mix of quotes, prefixes, fields, escapes and comments.
+        const PIECES: [&str; 12] = [
+            "f\"", "rf'", "\"\"\"", "'", "{", "}", "{{", "\\", "#", ":", "x", "(",
+        ];
+        const LINES: usize = 2_000;
+        const PIECES_PER_LINE: usize = 12;
+        let mut seed: u64 = 0xC0FFEE;
+        let mut strings = PythonStrings::default();
+        for _ in 0..LINES {
+            let mut line = String::new();
+            for _ in 0..PIECES_PER_LINE {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let pick = usize::try_from(seed >> 60).unwrap_or(0) % PIECES.len();
+                line.push_str(PIECES.get(pick).copied().unwrap_or(""));
+            }
+            let chars: Vec<char> = line.chars().collect();
+            let mut k = 0;
+            if strings.is_open() {
+                k = strings.read(&chars, 0);
+                assert!(k > 0, "{line}");
+            }
+            while let Some(&c) = chars.get(k) {
+                if c == '"' || c == '\'' {
+                    let next = strings.open(&chars, k).expect("a quote opens a string");
+                    assert!(next > k, "{line} at {k}");
+                    assert!(!strings.is_open() || next == chars.len(), "{line}");
+                    k = next;
+                } else {
+                    k += 1;
+                }
+            }
+            strings.end_line();
+        }
+    }
 }
