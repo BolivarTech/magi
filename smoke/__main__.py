@@ -275,13 +275,11 @@ def main(argv: list[str] | None = None) -> int:
         certify(args, profile, findings, env, binary, run_results, growth)
     except PreflightError as exc:
         print(f"preflight: {exc}", file=sys.stderr)
+        _print_notes(exc)
         return EXIT_PREFLIGHT
     except HarnessError as exc:
         print(f"harness failure: {exc}", file=sys.stderr)
-        # A note carries evidence gathered on the way out, such as the
-        # requests a refusal run's counter saw (smoke.runs).
-        for note in getattr(exc, "__notes__", ()):
-            print(note, file=sys.stderr)
+        _print_notes(exc)
         return EXIT_HARNESS
     finally:
         # Released once EVERYTHING that touches the shared environment is
@@ -293,6 +291,24 @@ def main(argv: list[str] | None = None) -> int:
         if lock is not None:
             lock.release()
     return exit_code_for(findings)
+
+
+def _print_notes(exc: BaseException) -> None:
+    """Print the notes *exc* carries to ``stderr``, one per line.
+
+    A note carries evidence gathered on the way out, such as the requests a
+    refusal run's counter saw (smoke.runs). An exception reported by its
+    message alone would drop it; one that reaches the outer guard has it
+    printed with its traceback (Python 3.11 and later).
+
+    MAGI FIX (S6 loop 28): only a harness failure printed its notes
+    (F1a1-caspar).
+
+    Args:
+        exc: The exception being reported.
+    """
+    for note in getattr(exc, "__notes__", ()):
+        print(note, file=sys.stderr)
 
 
 def certify(args, profile, findings, env, binary, run_results, growth) -> None:
