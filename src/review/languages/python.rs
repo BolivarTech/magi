@@ -536,9 +536,24 @@ fn has_top_level_assignment(line: &str) -> bool {
     false
 }
 
-/// Get indentation level (number of leading spaces/tabs).
+/// The indentation of `line` as Python's tokenizer orders it: the characters of its leading
+/// whitespace after the last form feed in it, since a form feed resets the column to 0
+/// (`\x0cdef f():` is a module-level function).
+///
+/// A tab counts as one character. CPython compares indentation with tabs at 8 columns and at 1,
+/// and rejects a file (`TabError`) where the two orders disagree, so in any file it accepts
+/// this count orders the lines as Python does. Pinned by
+/// `tab_indentation_gives_the_same_units_as_space_indentation`. O(n) in the leading whitespace.
 fn indentation(line: &str) -> usize {
-    line.len() - line.trim_start().len()
+    // MAGI FIX (loop 27, B2b2): a form feed counted as indentation, so a definition after one
+    // at the start of its line was no module-level construct.
+    let leading = line
+        .get(..line.len() - line.trim_start().len())
+        .unwrap_or("");
+    leading
+        .rsplit('\u{c}')
+        .next()
+        .map_or(0, |after| after.chars().count())
 }
 
 /// Find the end of a Python indented block: the last line before the first code line indented
