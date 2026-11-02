@@ -278,6 +278,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_PREFLIGHT
     except HarnessError as exc:
         print(f"harness failure: {exc}", file=sys.stderr)
+        # A note carries evidence gathered on the way out, such as the
+        # requests a refusal run's counter saw (smoke.runs).
+        for note in getattr(exc, "__notes__", ()):
+            print(note, file=sys.stderr)
         return EXIT_HARNESS
     finally:
         # Released once EVERYTHING that touches the shared environment is

@@ -2561,7 +2561,9 @@ class RunExecutor:
         off the counter is the harness's setup, not the product's verdict, so
         it is a :class:`HarnessError` (exit 3), never a scenario ``FAIL``. The
         requests the counter saw are recorded even when the run times out:
-        the timeout is caught inside this block.
+        the timeout is caught inside this block. Any other exception that
+        leaves the block carries them as a note (``add_note``), which
+        :mod:`smoke.__main__` prints beside the harness failure.
 
         The proof covers exactly what the configuration and these variables
         steer. A product defect that reached a model some other way
@@ -2601,20 +2603,32 @@ class RunExecutor:
         except (OSError, UnicodeError) as exc:
             raise HarnessError("could not read %s to count its endpoints: %s"
                                % (config, exc)) from exc
-        with model_counter() as (url, log):
-            point_config_at(config, url)
-            off = (endpoints_off_the_counter(config, url)
-                   + changes_besides_endpoints(original, config))
-            if off:
-                raise HarnessError(
-                    "run %s forbids model calls, but its configuration could "
-                    "still reach past the request counter: %s"
-                    % (definition.run_id, "; ".join(off)))
-            yield dataclasses.replace(
-                definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),
-                                                  (_PROVIDER_VARIABLE, ""))
-                + tuple((name, None) for name in _PROXY_VARIABLES)
-                + ((_NO_PROXY_VARIABLE, _LOOPBACK_HOSTS),))
+        log = None
+        try:
+            with model_counter() as (url, log):
+                point_config_at(config, url)
+                off = (endpoints_off_the_counter(config, url)
+                       + changes_besides_endpoints(original, config))
+                if off:
+                    raise HarnessError(
+                        "run %s forbids model calls, but its configuration could "
+                        "still reach past the request counter: %s"
+                        % (definition.run_id, "; ".join(off)))
+                yield dataclasses.replace(
+                    definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),
+                                                      (_PROVIDER_VARIABLE, ""))
+                    + tuple((name, None) for name in _PROXY_VARIABLES)
+                    + ((_NO_PROXY_VARIABLE, _LOOPBACK_HOSTS),))
+        except BaseException as escaping:
+            # MAGI FIX (S6 loop 27): an exception other than the timeout
+            # skipped the record, so the exit-3 report lost the requests that
+            # would explain it (F1a1-melchior). The counter has been joined
+            # here, so the log is complete; it rides on the exception.
+            seen = () if log is None else requests_past_the_probe(log)
+            if seen:
+                escaping.add_note("requests the counter saw before this "
+                                  "failure: %s" % "; ".join(seen))
+            raise
         contacted.extend(requests_past_the_probe(log))
 
     def _review_workspace(self) -> pathlib.Path:
