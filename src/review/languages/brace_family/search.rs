@@ -734,7 +734,11 @@ fn holds_bare_assignment(text: &str) -> bool {
 /// construct and when the pass's budget is spent); with none, as in JavaScript or Go without
 /// semicolons, the next line when it is code that starts no construct, through the parentheses
 /// or brackets it leaves open ([`group_end`], `g(` ... `)`), so the value is kept and the
-/// declaration after it is never taken. `i` when line `i` is no code ending in a bare `=`
+/// declaration after it is never taken. A next line the stop rule reads as a construct is the
+/// value too when it leaves a delimiter open whose closing line opens no body (a wrapped call,
+/// `g(` ... `);`, which reads like a signature in JavaScript), whether or not `;` ends the
+/// statement; one that does (`function (` ... `) {`) stays the construct it starts.
+/// `i` when line `i` is no code ending in a bare `=`
 /// ([`ends_in_bare_equal`]), or no line qualifies. O(k) for the k lines searched.
 pub(super) fn bare_initializer_end(
     lines: &[&str],
@@ -765,13 +769,22 @@ pub(super) fn bare_initializer_end(
     if end > before_value {
         return end;
     }
-    let value = is_code(next)
-        && lines.get(next).is_some_and(|l| !l.trim().is_empty())
-        && !search.stops(next);
+    if !is_code(next) || lines.get(next).is_none_or(|l| l.trim().is_empty()) {
+        return i;
+    }
     // MAGI FIX (B2b1 6): a value wrapped over lines without a `;` (`g(` ... `)`, `[` ... `]`)
     // ended on its first line; it runs to the delimiter that line leaves open.
-    if value {
-        group_end(lines, scanned, next, search)
+    if !search.stops(next) {
+        return group_end(lines, scanned, next, search);
+    }
+    // MAGI FIX (B2b1b): a call wrapped after the `=` (`g(` ... `);`) reads like a signature to
+    // the stop rule in JavaScript and TypeScript, so the declaration ended on its `=` line and the
+    // call fell into a gap unit. It is the value unless the line closing its delimiters opens a
+    // body (`function (` ... `) {`), which stays the construct the stop rule found.
+    let end = group_end(lines, scanned, next, search);
+    let wrapped_call = end > next && scanned.get(end).is_some_and(|s| s.brace_delta <= 0);
+    if wrapped_call {
+        end
     } else {
         i
     }
