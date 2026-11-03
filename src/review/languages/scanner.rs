@@ -687,11 +687,13 @@ impl CodeScanner {
                     }
 
                     // Check for triple-quote strings (Java)
+                    // MAGI FIX (B2a): `'''` opened a text block too, though Java has only `"""`,
+                    // so a malformed `char c = ''';` made the rest of the file a string.
                     if self.rules.raw_strings == RawStringSyntax::TripleQuote
                         && i + 2 < len
-                        && (char_at(&chars, i) == '"' || char_at(&chars, i) == '\'')
-                        && char_at(&chars, i + 1) == char_at(&chars, i)
-                        && char_at(&chars, i + 2) == char_at(&chars, i)
+                        && char_at(&chars, i) == '"'
+                        && char_at(&chars, i + 1) == '"'
+                        && char_at(&chars, i + 2) == '"'
                     {
                         let q = char_at(&chars, i);
                         last_code = Some(STRING_MARK);
