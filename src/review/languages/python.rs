@@ -137,7 +137,15 @@ impl LanguageExtractor for PythonExtractor {
             .iter()
             .enumerate()
             // MAGI FIX (S6 loop 13): a `class` line inside a decorator's string was the header.
-            .position(|(j, l)| code(j) && after_keyword(l.trim(), "class").is_some())
+            // MAGI FIX (B2b2): the byte order mark on a file's first line hid the header there,
+            // as it hid the class from detection (`try_detect_python_constructs`).
+            .position(|(j, l)| {
+                let l = l
+                    .strip_prefix(BYTE_ORDER_MARK)
+                    .filter(|_| j == 0)
+                    .unwrap_or(l);
+                code(j) && after_keyword(l.trim(), "class").is_some()
+            })
         else {
             return Vec::new();
         };
