@@ -365,8 +365,9 @@ Only refusal runs lose the proxy; the others keep the shell's environment, becau
 real backend off loopback that an operator behind a proxy needs it for. Every product invocation,
 refusal or not, gets loopback added to whatever `NO_PROXY` it inherits, so R6's error backend and
 the decide and memory scenarios' loopback stand-ins are reached directly on a proxied host too; R6
-also records how many requests its backend answered, and S10 reports `CANNOT_TEST` when it saw
-none (the product's error path the scenario searches was never walked). The probe
+also records how many requests its backend answered, and when it saw none S10 reports a clean
+search as `CANNOT_TEST` (the product's error path the scenario searches was never walked); a
+credential it does find there is still a `FAIL`. The probe
 paths are pinned to magi-core's `OllamaProvider` requests by `tests/test_rust_sync.py`.
 
 **What they copy from the product.** S50 and S51 read refusals, and a refusal writes no JSON, so

@@ -85,30 +85,33 @@ def no_credential_leaks(run):
     # backend (sent to a proxy, say) also exits non-zero, so the exit code
     # alone let S10 search output from a path the backend never answered
     # (F1a1b-melchior). The backend counts what it answered; ``None`` is a
-    # run double that does not say.
-    if getattr(run, "backend_requests", None) == 0:
-        for index in range(len(ASSERTIONS)):
-            yield _finding(index, Outcome.CANNOT_TEST,
-                           "the error backend answered no request, so the "
-                           "product never received the 401 that carries the "
-                           "credential onto its error path; finding no leak "
-                           "there proves nothing")
-        return
+    # run double that does not say. Only a CLEAN search is downgraded: a
+    # leak found on that path (in a transport error, say) is still a leak,
+    # and returning before the search reported it as untested (F1a2).
+    unanswered = getattr(run, "backend_requests", None) == 0
 
     planted = tuple(run.planted)
     streams = run.output.raw()
     log = _archived_log(run.run_id)
 
-    yield _leak_finding(0, streams, planted,
-                        "stdout and stderr")
-    yield _leak_finding(1, run.output.stdout, planted, "the JSON output")
+    findings = [_leak_finding(0, streams, planted, "stdout and stderr"),
+                _leak_finding(1, run.output.stdout, planted,
+                              "the JSON output")]
     if log is None:
-        yield _finding(2, Outcome.CANNOT_TEST,
-                       "no archived run log was found for %s, so it could not "
-                       "be searched" % run.run_id)
+        findings.append(_finding(2, Outcome.CANNOT_TEST,
+                                 "no archived run log was found for %s, so it "
+                                 "could not be searched" % run.run_id))
     else:
-        yield _leak_finding(2, log, planted, "the run log")
-    yield _authority_finding(streams, log)
+        findings.append(_leak_finding(2, log, planted, "the run log"))
+    findings.append(_authority_finding(streams, log))
+    for index, finding in enumerate(findings):
+        if unanswered and finding.outcome is Outcome.PASS:
+            finding = _finding(index, Outcome.CANNOT_TEST,
+                               "the error backend answered no request, so the "
+                               "product never received the 401 that carries "
+                               "the credential onto its error path; finding no "
+                               "leak there proves nothing")
+        yield finding
 
 
 def _leak_finding(index, data, planted, channel):
