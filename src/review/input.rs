@@ -2611,4 +2611,40 @@ mod tests {
         let leaf = format!("{}leaf.rs", "d/".repeat(DEPTH));
         assert_eq!(found, vec![leaf]);
     }
+
+    #[test]
+    fn a_subdirectory_deleted_before_the_walk_lists_it_is_collected_not_fatal() {
+        // [MAGI S6 loop 33, A1] a subdirectory deleted between its parent's listing and its own
+        // failed the whole review with an I/O error, while a deleted file is set aside by the
+        // filter as `disappeared`. The race is reproduced deterministically by queueing a
+        // directory that no longer exists, as the parent's listing would have.
+        let d = tempfile::tempdir().expect("tempdir");
+        let ignored = HashSet::new();
+        let mut found = Vec::new();
+        let mut not_utf8 = Vec::new();
+        let mut budget = u64::MAX;
+        let mut state = Walk {
+            ignored: &ignored,
+            found: &mut found,
+            not_utf8: &mut not_utf8,
+            budget: &mut budget,
+            pending: vec![(d.path().join("gone"), "gone".to_string())],
+        };
+        let r = state.run();
+        assert!(r.is_ok(), "{:?}", r.err());
+        assert_eq!(found, vec!["gone".to_string()]);
+        // The directory the caller names is not raced: its absence still fails.
+        let mut found = Vec::new();
+        let mut not_utf8 = Vec::new();
+        let mut budget = u64::MAX;
+        let root = walk(
+            &d.path().join("absent"),
+            "absent",
+            &ignored,
+            &mut found,
+            &mut not_utf8,
+            &mut budget,
+        );
+        assert!(matches!(root, Err(ReviewError::Io(_))), "{root:?}");
+    }
 }
