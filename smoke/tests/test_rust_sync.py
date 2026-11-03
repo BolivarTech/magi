@@ -279,6 +279,20 @@ class BatchConstantTests(unittest.TestCase):
         percent = _usize_const(self.window, "BATCH_WINDOW_FRACTION_PERCENT")
         self.assertGreaterEqual(round(runs.BATCH_WINDOW_FRACTION * 100), percent)
 
+    def test_a_harness_fraction_just_under_the_products_fails_the_check(self) -> None:
+        # MAGI FIX (S6 loop 33): the check rounded the harness's percent, so 0.495 passed against a product 50 %
+        # and the harness planned for a batch smaller than the one the product fills.
+        percent = _usize_const(self.window, "BATCH_WINDOW_FRACTION_PERCENT")
+        for under in ((percent - 0.5) / 100, (percent - 0.49) / 100, (percent - 0.01) / 100):
+            with self.subTest(fraction=under), mock.patch.object(runs, "BATCH_WINDOW_FRACTION", under):
+                with self.assertRaises(AssertionError):
+                    self.test_the_harness_sizes_for_a_batch_at_least_as_large_as_the_product_fills()
+        # The exact value still passes, also where float arithmetic lands just under it (0.57 * 100 < 57).
+        for exact, product in ((percent / 100, percent), (0.57, 57), (0.29, 29)):
+            with self.subTest(fraction=exact), mock.patch.object(runs, "BATCH_WINDOW_FRACTION", exact), \
+                    mock.patch.dict(globals(), {"_usize_const": lambda _text, _name, value=product: value}):
+                self.test_the_harness_sizes_for_a_batch_at_least_as_large_as_the_product_fills()
+
     def test_the_floor_is_the_products_two_minimums(self) -> None:
         text = _source("src/magi/mod.rs")
         found = {name: int(one_definition(
