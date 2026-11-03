@@ -870,7 +870,8 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
 /// parameter list closes, a single `:` (not `::`) stands outside every bracket, string and
 /// comment, before any `{` there (`Foo::Foo() : a{1}`, the `:` on a later line of a wrapped
 /// header). A `:` inside the parameter list (a default argument's `a ? b : c`) or a scope
-/// operator (`Foo::Foo`) opens none. O(n) in the header's text.
+/// operator (`Foo::Foo`) opens none, nor does one in a `//` or `/* */` comment, a block comment
+/// spanning the header's lines included. O(n) in the header's text.
 ///
 /// # Arguments
 ///
@@ -883,12 +884,25 @@ fn next_c_attribute(text: &str) -> Option<(usize, usize)> {
 pub(super) fn opens_member_initializer_list(header: &[&str]) -> bool {
     let mut depth = 0i64;
     let mut list_closed = false;
+    // MAGI FIX (S6 loop 30, B2b1b): only `//` comments were skipped, so the `:` of
+    // `void f() /* ratio: 2 */ {` opened a list. A block comment may span the header's lines.
+    let mut in_comment = false;
     for line in header {
         let chars: Vec<char> = line.chars().collect();
         let mut k = 0;
         while let Some(&c) = chars.get(k) {
             let previous = k.checked_sub(1).and_then(|p| chars.get(p)).copied();
             let next = chars.get(k + 1).copied();
+            if in_comment {
+                in_comment = !(c == '*' && next == Some('/'));
+                k += if in_comment { 1 } else { 2 };
+                continue;
+            }
+            if c == '/' && next == Some('*') {
+                in_comment = true;
+                k += 2;
+                continue;
+            }
             let quoted_last = match c {
                 '/' if next == Some('/') => break,
                 '"' => c_string_end(&chars, k),
