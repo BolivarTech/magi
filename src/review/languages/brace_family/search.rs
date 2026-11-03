@@ -91,10 +91,11 @@ impl BraceSearch<'_> {
 /// brace is kept, so the call keeps its block. A brace line `i` ends with in its return type
 /// (`function f(): {`, `): Promise<{`, `func f() struct {`, [`opens_return_type_literal`]) is the
 /// type's too, and the body's is found the same way after the type closes
-/// ([`brace_after_return_type_literal`]). Any other brace on a later parameter line is taken
-/// for the construct's, declared: the construct ends at that brace's match, and the rest of its
-/// body falls into later units. No line is lost: every line stays in exactly one unit, so the
-/// body is still reviewed, only split from its signature.
+/// ([`brace_after_return_type_literal`]). A brace a later parameter line opens while the outer
+/// list stays open after it (`options: {` under `function f(`) is a parameter's too, read the
+/// same way: the body's brace is the one the line closing the list opens (`) {`, `}) {`) or an
+/// Allman `{` after it ([`brace_after_open_list`]), and when that line opens none the later
+/// line's brace is kept, as for line `i`'s.
 ///
 /// The search looks at most [`MAX_BRACE_SEARCH_LINES`] lines past line `i`, and no more than the
 /// detection pass has left ([`SearchBudget`]), and then degrades to "no brace found", which
@@ -223,6 +224,14 @@ pub(super) fn open_brace_line(
             return None;
         }
         if opens(j) {
+            // MAGI FIX (S6 loop 30, B2b1b): a brace on a later parameter line with the list still
+            // open (`options: {` under `function f(`) was taken for the body's; it is the
+            // parameter's type, and the body's brace is found after the list closes.
+            if open_before > 0 && list_open > 0 {
+                return Some(
+                    brace_after_open_list(lines, scanned, j, list_open, search).unwrap_or(j),
+                );
+            }
             return Some(j);
         }
         if ends_statement(j) {
@@ -260,11 +269,38 @@ fn brace_after_parameter_list(
     i: usize,
     search: &BraceSearch<'_>,
 ) -> Option<usize> {
+    brace_after_open_list(lines, scanned, i, code_group_delta(scanned, i), search)
+}
+
+/// The 0-based line that closes a parameter list still open after line `i`, `open` of its
+/// parentheses and brackets open there, and opens a brace after its lowest point, read as
+/// [`brace_after_parameter_list`] reads it: line `i` holds a parameter's brace, either on the
+/// line the list opens (`function f(opts: {`) or on a later parameter line (`options: {` under
+/// `function f(`). `None` as there. O(k) for the k lines walked, at most
+/// [`MAX_BRACE_SEARCH_LINES`] past line `i`, each charged to the pass's [`SearchBudget`].
+///
+/// # Arguments
+///
+/// * `lines` - The text's lines.
+/// * `scanned` - The scanner's record of each line.
+/// * `i` - The 0-based line holding the parameter's brace.
+/// * `open` - The parentheses and brackets of the list still open after line `i`.
+/// * `search` - The pass's search bounds; only its budget is spent here.
+///
+/// # Returns
+///
+/// The 0-based line holding the function's opening brace, or `None`.
+fn brace_after_open_list(
+    lines: &[&str],
+    scanned: &[ScannedLine],
+    i: usize,
+    mut open: i64,
+    search: &BraceSearch<'_>,
+) -> Option<usize> {
     let end = i
         .saturating_add(1)
         .saturating_add(MAX_BRACE_SEARCH_LINES)
         .min(scanned.len());
-    let mut open = code_group_delta(scanned, i);
     for j in (i + 1)..end {
         if !search.spend() {
             return None;
