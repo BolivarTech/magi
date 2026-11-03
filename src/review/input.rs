@@ -671,10 +671,57 @@ fn walk(
     not_utf8: &mut Vec<String>,
     budget: &mut u64,
 ) -> Result<(), ReviewError> {
-    let mut pending = vec![(dir.to_path_buf(), rel.to_string())];
-    while let Some((dir, rel)) = pending.pop() {
+    let mut state = Walk {
+        ignored,
+        found,
+        not_utf8,
+        budget,
+        pending: Vec::new(),
+    };
+    state.list(dir, rel)?;
+    state.run()
+}
+
+/// The state of one [`walk`]: what it collects, what it may still spend, and the directories
+/// it has entered but not listed yet.
+struct Walk<'a> {
+    /// Paths never entered nor collected (a directory with a trailing `/`).
+    ignored: &'a HashSet<String>,
+    /// Every non-directory entry collected so far.
+    found: &'a mut Vec<String>,
+    /// Every name that is not UTF-8, listed lossily.
+    not_utf8: &'a mut Vec<String>,
+    /// The listing bytes still available ([`spend`]).
+    budget: &'a mut u64,
+    /// Directories entered (and paid for) but not listed yet, with their relative paths.
+    pending: Vec<(PathBuf, String)>,
+}
+
+impl Walk<'_> {
+    /// Lists every directory in `pending`, and those found below them, until none is left.
+    /// O(entries).
+    ///
+    /// # Errors
+    ///
+    /// What [`Walk::list`] returns for the first directory that fails.
+    fn run(&mut self) -> Result<(), ReviewError> {
+        while let Some((dir, rel)) = self.pending.pop() {
+            self.list(&dir, &rel)?;
+        }
+        Ok(())
+    }
+
+    /// Lists `dir` (relative path `rel`) once: collects its non-directory entries, sets aside
+    /// what is never reviewed or ignored, and queues its subdirectories in `pending`. Every name
+    /// kept is paid from `budget`. O(entries of `dir`).
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::Io`] naming `dir` when it or one of its entries cannot be read;
+    /// [`ReviewError::InputTooLarge`] when a name passes what is left of `budget`.
+    fn list(&mut self, dir: &Path, rel: &str) -> Result<(), ReviewError> {
         let io = |e: std::io::Error| ReviewError::Io(format!("{}: {e}", dir.display()));
-        for entry in std::fs::read_dir(&dir).map_err(io)? {
+        for entry in std::fs::read_dir(dir).map_err(io)? {
             let entry = entry.map_err(io)?;
             let name = entry.file_name();
             let joined = |n: &str| {
@@ -686,29 +733,29 @@ fn walk(
             };
             let Some(path) = name.to_str().map(joined) else {
                 let lossy = joined(&name.to_string_lossy());
-                spend(budget, &lossy)?;
-                not_utf8.push(lossy);
+                spend(self.budget, &lossy)?;
+                self.not_utf8.push(lossy);
                 continue;
             };
             // MAGI FIX (S6 loop 3): `.git`, `.magi` and the memory database are pruned here,
             // before the walk enters them, so a large nested `.git` is never enumerated.
             if is_never_reviewed(&path)
-                || ignored.contains(&path)
-                || ignored.contains(&format!("{path}/"))
+                || self.ignored.contains(&path)
+                || self.ignored.contains(&format!("{path}/"))
             {
                 continue;
             }
             let is_dir = entry.file_type().map_err(io)?.is_dir();
             // MAGI FIX (S6 loop 9): an empty directory cost the walk without paying the cap.
-            spend(budget, &path)?;
+            spend(self.budget, &path)?;
             if is_dir {
-                pending.push((entry.path(), path));
+                self.pending.push((entry.path(), path));
             } else {
-                found.push(path);
+                self.found.push(path);
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Takes the cost of listing `path` (its bytes plus one) from `budget`, the bytes a walk may
