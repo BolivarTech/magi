@@ -18,8 +18,9 @@ and refusing the inputs it must refuse before a model is paid for.
 * **S49** (R14): a directory holding only a binary and a file with a secret has
   nothing to review: exit 2, and the omission list names each file with its
   cause, ``binary`` and ``secret``, and nothing else.
-* **S50** (R15): ``--timeout 20`` over three batches is refused before any model
-  call, naming the floor and the ``--timeout`` that would do.
+* **S50** (R15): ``--timeout 20`` over the S47 tree is refused before any model
+  call, naming the batches (at least :data:`MIN_REFUSED_BATCHES`), the floor
+  and the ``--timeout`` that would do.
 * **S51** (R16): reviewing the workspace ROOT, which holds ``.magi`` and
   ``.git`` beside a binary and a secret, is "nothing to review": no protected
   file was taken for review, and any protected path the refusal names is left

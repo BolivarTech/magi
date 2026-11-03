@@ -111,10 +111,10 @@ class ScenarioEntry:
             that timed out. S7 reads ``applied_caps`` out of what R4 emitted
             before hanging, which is how SS5.1 tells a degraded ceiling from a
             slow provider -- on evidence, never inferred from configuration.
-            S48-S51 declare it because their runs are refused before any model
-            is reached, so a hang there is a product defect they report as
-            ``FAIL``. Everything else gets ``CANNOT_TEST`` and never sees the
-            partial result.
+            S46 and S48-S51 declare it because their runs are refused before
+            any model is reached, so a hang there is a product defect they
+            report as ``FAIL``. Everything else gets ``CANNOT_TEST`` and never
+            sees the partial result.
     """
 
     scenario_id: str
