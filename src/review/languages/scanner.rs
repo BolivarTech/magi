@@ -2026,6 +2026,20 @@ void h() {
     }
 
     #[test]
+    fn three_single_quotes_open_no_java_text_block() {
+        // [MAGI B2a] the text-block opener accepted `'''` as well as `"""`, though Java has only
+        // the latter, so a malformed `char c = ''';` made the rest of the file a string.
+        let code = "class A {\n    char c = ''';\n    void f() {\n        x();\n    }\n}\n";
+        let results = CodeScanner::new(LexicalRules::java()).scan_all(code);
+        assert_eq!(results[2].brace_delta, 1, "line 3 is code");
+        assert_eq!(
+            find_closing_brace(&results, 0),
+            5,
+            "the class closes on its own brace"
+        );
+    }
+
+    #[test]
     fn a_line_closing_more_groups_than_it_opens_reports_a_negative_net() {
         // [MAGI S6 loop 18, B2a-1] `group_delta` is a signed net per line, as `brace_delta` is:
         // the closing line of a wrapped parameter list (`) {`) reports -1, which the extractor's
