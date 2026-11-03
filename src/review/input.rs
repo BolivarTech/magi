@@ -419,8 +419,10 @@ fn ensure_root_commit(git: &dyn GitCommand, sha: &str) -> Result<(), ReviewError
 /// Declared, not isolated further (S6 loop 9, A1-c3): a git older than 2.46 ignores
 /// `attr.tree` and reads the working tree's `.gitattributes`, and every git reads
 /// `$GIT_DIR/info/attributes`. Neither changes which revision's bytes are diffed (RV21 holds):
-/// an attribute only decides whether a section shows as binary, so the worst case is the file
-/// left out as `binary`, which the report names. Refusing revision reviews below 2.46 would cut
+/// an attribute only decides whether a section shows as binary, so the worst case is a text file
+/// reviewed whole from the revision instead of by hunks (`filter::suppressed_diff`), which an
+/// INFO entry in the run log records. MAGI FIX (S6 loop 34): this said the file was left out as
+/// `binary`, true only before the loop 13 fix. Refusing revision reviews below 2.46 would cut
 /// supported gits for no gain in what is sent. Pinned by
 /// `a_non_revision_attribute_only_hides_a_revision_section_never_changes_its_bytes`.
 ///
