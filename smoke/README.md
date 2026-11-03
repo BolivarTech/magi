@@ -337,11 +337,11 @@ assertions.
 | S51 | `--timeout 20 .` over the review workspace's root, which holds its `.magi` and `.git` beside R14's binary and secret, exits 2 and `stderr` says there is nothing to review, and one of the `.magi/` files git listed in the workspace before the run is named among the omissions as `ignored`, while no `.magi/` or `.git/` path, nor a `.magi-rs-memory.db*` file, carries any other cause. Those names are read as the product reads them: any component, ASCII-case-insensitive, trailing dots and spaces trimmed, and the paths git listed are compared with `\` read as `/` like the omission list. A protected file taken for review would make the input reviewable and end at the budget refusal instead; one opened and classified would carry `binary`, `secret` or `not utf-8`. S51 reads the product's report, not its file accesses: a product that opened a protected file and still reported it as `ignored` would pass here. That nothing protected is read is held in Rust (`src/review/filter.rs` leaves a protected path out by its name before any read), and the harness adds no instrumentation to the release binary. The omission list is parsed entry by entry, each anchored on one of the product's causes, so a path may hold commas, semicolons or spaces; a list that is missing, empty (the product writes the marker only before an entry) or does not parse to the end is `FAIL`, never an empty pass | `CANNOT_TEST` for the third assertion when git lists no `.magi/` file in the workspace (a global ignore rule, for one, hides it from the product too), so the exclusion had nothing to exclude, and when one of the `.magi/` names git lists holds ` (<cause>), ` or ends in ` (<cause>)`: the list reads such a name as two entries, so it cannot say what the product did with it; and when the refusal cut its list with `, and N more` (the product names at most 20 omissions) without naming every listed `.magi/` file as `ignored`, because the unnamed ones may be in the cut tail, read and classified. A refusal whose uncut list names no `.magi/` file while git listed some is `FAIL` |
 
 **A hung refusal is `FAIL`.** Everywhere else a run that outlives its timeout is `CANNOT_TEST`,
-because a slow provider is not a product defect. R13 to R16 reach no provider: the product refuses
-them before any model call, so a timeout there is a hang in path validation, git handling or
-filtering, or a model call that should never have happened. S48 to S51 therefore declare
-`inspects_timeouts` and report every assertion of a timed-out run as `FAIL`, without judging the
-exit code 0 the executor gives a run it had to kill.
+because a slow provider is not a product defect. R11 and R13 to R16 reach no provider: the product
+refuses them before any model call, so a timeout there is a hang in envelope parsing, path
+validation, git handling or filtering, or a model call that should never have happened. S46 and
+S48 to S51 therefore declare `inspects_timeouts` and report every assertion of a timed-out run as
+`FAIL`, without judging the exit code 0 the executor gives a run it had to kill.
 
 **That no model was reached is measured.** A refusal's exit code and `stderr` read the same whether
 or not the product paid for a model first, so R13 to R16 declare `forbids_model_calls`. The

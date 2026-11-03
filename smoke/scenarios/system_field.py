@@ -114,6 +114,28 @@ def _all_cannot_test(texts, run_id, detail):
         yield _finding(texts, index, Outcome.CANNOT_TEST, run_id, detail)
 
 
+def _all_hung(texts, run_id, run):
+    """One ``FAIL`` finding per assertion when a refusal before any model hung.
+
+    MAGI FIX (F1a2): R11 is refused before any model is reached, so a timeout
+    there has no slow provider to blame. The executor builds a hung run with
+    ``exit_code`` 0 and whatever output it caught, so no assertion is judged on
+    that synthetic result. The same rule as S48-S51.
+
+    Args:
+        texts: The scenario's assertion texts.
+        run_id: The shared run that hung.
+        run: Its ``RunResult``.
+
+    Yields:
+        Finding: ``FAIL`` for every entry of *texts*, in order.
+    """
+    detail = ("run %s timed out after %.0f s: a refusal that needs no model "
+              "must not hang" % (run_id, run.duration_s))
+    for index in range(len(texts)):
+        yield _finding(texts, index, Outcome.FAIL, run_id, detail)
+
+
 def _applied_caps(run):
     """Read ``applied_caps`` from the run's stdout document.
 
@@ -243,9 +265,12 @@ def _stdout_has_no_output(run):
     return all(document.get(key) is None for key in OUTPUT_KEYS)
 
 
-@scenario("S46", assertions=S46_ASSERTIONS, run="R11")
+@scenario("S46", assertions=S46_ASSERTIONS, run="R11", inspects_timeouts=True)
 def an_oversized_system_is_refused(run):
     """Check that a ``system`` over the cap is refused before any model runs.
+
+    The scenario declares ``inspects_timeouts``: the refusal needs no model,
+    so a timed-out R11 is a hang and every assertion is ``FAIL``.
 
     Args:
         run: R11's ``RunResult``, or ``None`` when the run produced no capture.
@@ -256,6 +281,9 @@ def an_oversized_system_is_refused(run):
     if run is None:
         yield from _all_cannot_test(S46_ASSERTIONS, "R11",
                                     "run R11 produced no capture to inspect")
+        return
+    if run.timed_out:
+        yield from _all_hung(S46_ASSERTIONS, "R11", run)
         return
     code = run.output.exit_code
     yield _verdict(S46_ASSERTIONS, 0, "R11", code == EXIT_MISUSE,
