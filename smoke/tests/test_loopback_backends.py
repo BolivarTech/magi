@@ -192,6 +192,20 @@ class _BrokenWriter:
         raise ConnectionAbortedError("the client hung up")
 
 
+class _FlushFailingWriter:
+    """A response stream that takes every write and fails only on flush, as when the client hangs up last."""
+
+    def __init__(self) -> None:
+        self.written = b""
+
+    def write(self, data: bytes) -> int:
+        self.written += data
+        return len(data)
+
+    def flush(self) -> None:
+        raise ConnectionAbortedError("the client hung up")
+
+
 class EchoingHandlerHardeningTests(unittest.TestCase):
     """[MAGI F1a1b] the error backend records and answers whatever arrives, as the counter does.
 
@@ -208,7 +222,9 @@ class EchoingHandlerHardeningTests(unittest.TestCase):
         handler.wfile = io.BytesIO() if wfile is None else wfile
         handler.server = types.SimpleNamespace(log=log)
         handler.client_address = ("127.0.0.1", 0)
-        handler.close_connection = True
+        # [F1b2c] Preset to the value the handler must CHANGE, so an assertion that it closed the connection
+        # reads what the handler did and not what this helper started it with.
+        handler.close_connection = False
         return handler
 
     def test_a_request_line_that_does_not_parse_is_recorded(self) -> None:
@@ -232,6 +248,24 @@ class EchoingHandlerHardeningTests(unittest.TestCase):
             handler.handle_one_request()
         except OSError as exc:
             self.fail("the answer's write failure escaped the handler: %r" % exc)
+        self.assertEqual((("POST", "/v1/chat"),), log.recorded)
+        self.assertTrue(handler.close_connection)
+
+    def test_a_flush_that_fails_after_the_answer_closes_the_connection(self) -> None:
+        """[F1b2c] the flush's own guard, isolated from the two that also close.
+
+        An HTTP/1.0 parse and a failed write in ``_answer`` both set ``close_connection`` already, so the
+        test above stays green with the flush guard removed. Here the request is HTTP/1.1 on an HTTP/1.1
+        handler (the parse keeps the connection open) and only the flush fails.
+        """
+        log = runs.RequestLog()
+        handler = self._handler(b"POST /v1/chat HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", log,
+                                _FlushFailingWriter())
+        handler.protocol_version = "HTTP/1.1"
+        try:
+            handler.handle_one_request()
+        except OSError as exc:
+            self.fail("the flush failure escaped the handler: %r" % exc)
         self.assertEqual((("POST", "/v1/chat"),), log.recorded)
         self.assertTrue(handler.close_connection)
 
