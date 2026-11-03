@@ -1545,6 +1545,71 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_text_file_whose_diff_git_suppressed_is_reviewed_as_a_deletion() {
+        // [Review residual A2-b] `gone.rs -diff` in `.gitattributes`, then `git rm gone.rs`:
+        // git prints the section below (measured with git 2.56), with no hunk. The file was left
+        // out as `binary`, a false cause, and its deleted lines were never reviewed.
+        let section = concat!(
+            "diff --git a/gone.rs b/gone.rs\n",
+            "deleted file mode 100644\n",
+            "index 83021ca..0000000\n",
+            "Binary files a/gone.rs and /dev/null differ\n",
+        );
+        let deleted = || ReviewFile {
+            path: "gone.rs".into(),
+            diff: Some(section.into()),
+        };
+        let src = MapSource::new(&[], &[("gone.rs", "fn a() {}\nfn b() {}\n")]);
+        let reg = LanguageRegistry::new();
+        let f = filter_files(vec![deleted()], &src, &reg, false, &|_| false)
+            .expect("the deletion is kept");
+        assert_eq!(f.skipped, vec![]);
+        let kept: Vec<_> = f.kept.iter().map(|k| k.path.as_str()).collect();
+        assert_eq!(kept, vec!["gone.rs"]);
+        let diff = f.kept.first().and_then(|k| k.diff.as_deref()).unwrap_or("");
+        assert!(!is_binary_section(diff), "{diff:?}");
+        assert!(
+            diff.ends_with("@@ -1,2 +0,0 @@\n-fn a() {}\n-fn b() {}\n"),
+            "{diff:?}"
+        );
+        // It is batched as any deletion: one hunk over the old lines 1-2.
+        let batches = crate::review::batching::plan_batches(&f.kept, &src, &reg, 10_000)
+            .expect("the deletion is batched");
+        let hunks: Vec<_> = batches
+            .iter()
+            .flat_map(|b| &b.items)
+            .filter_map(|i| match i {
+                crate::review::batching::BatchItem::Hunk {
+                    old_first_line,
+                    old_last_line,
+                    ..
+                } => Some((*old_first_line, *old_last_line)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hunks, vec![(1, 2)]);
+        // A secret on the old side keeps it out, as for any deletion (RV22).
+        let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        let old_key = format!("const K: &str = \"{key}\";\n");
+        let leaky = MapSource::new(&[("a.rs", "fn f() {}\n")], &[("gone.rs", old_key.as_str())]);
+        let files = vec![
+            deleted(),
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &leaky, &reg, false, &|_| false).expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "gone.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+    }
+
+    #[test]
     fn a_binary_section_of_a_diff_is_skipped_as_binary() {
         let files = vec![
             ReviewFile {
