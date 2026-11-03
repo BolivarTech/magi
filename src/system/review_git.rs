@@ -111,12 +111,14 @@ const GIT_PROGRAM: &str = "git";
 /// * `workdir` - The reviewed workspace; no entry inside it may provide git.
 ///
 /// # Returns
-/// The absolute path of git, or `None` when no entry qualifies.
+/// The absolute path of git, or `None` when no entry qualifies or `workdir` cannot be
+/// canonicalized (the check that git lies outside it needs its canonical form, so it fails
+/// closed).
 // MAGI FIX (S6 loop 9): git was spawned by bare name, so a planted git could run (A1-c1).
+// MAGI FIX (S6 loop 33): a workspace that could not be canonicalized fell back to its raw
+// path, so the outside-the-workspace check could stop protecting; it now fails closed.
 fn resolve_git(path_var: &std::ffi::OsStr, workdir: &Path) -> Option<PathBuf> {
-    let root = workdir
-        .canonicalize()
-        .unwrap_or_else(|_| workdir.to_path_buf());
+    let root = workdir.canonicalize().ok()?;
     std::env::split_paths(path_var)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(GIT_PROGRAM))
