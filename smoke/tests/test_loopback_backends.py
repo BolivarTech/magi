@@ -24,6 +24,7 @@ from smoke.binary import ReleaseBinary
 from smoke.outcome import Outcome
 from smoke.product import ProductOutput
 from smoke.scenarios import redaction
+from smoke.secrets import PlantedSecret
 from smoke.tests import support
 
 
@@ -162,6 +163,23 @@ class ErrorBackendReachedTests(unittest.TestCase):
         self.assertEqual(len(redaction.ASSERTIONS), len(findings))
         self.assertTrue(all(f.outcome is Outcome.CANNOT_TEST for f in findings), findings)
         self.assertIn("error backend", findings[0].detail)
+
+    def test_s10_fails_a_leak_even_when_the_backend_saw_no_request(self) -> None:
+        """[F1a2] an unanswered backend downgrades a clean search, never a leak.
+
+        A product that leaks the planted credential in a transport error -- the backend never answered, so
+        nothing reached the 401 path -- still printed the secret. S10 used to return CANNOT_TEST for every
+        assertion before searching, so that leak read as untested instead of FAIL.
+        """
+        secret = PlantedSecret("sup3r@s3cr3t/value#1", "backend credential")
+        stderr = b"error: connect to https://u:sup3r@s3cr3t/value#1@host/v1 refused"
+        run = mock.Mock(output=ProductOutput(stdout=b"", stderr=stderr, exit_code=1, command=["magi-rs"]),
+                        planted=(secret,), timed_out=False, run_id="R6", backend_requests=0)
+        outcomes = [f.outcome for f in redaction.no_credential_leaks(run)]
+        self.assertEqual(len(redaction.ASSERTIONS), len(outcomes))
+        self.assertIs(Outcome.FAIL, outcomes[0], outcomes)
+        self.assertIs(Outcome.FAIL, outcomes[3], outcomes)
+        self.assertIs(Outcome.CANNOT_TEST, outcomes[1], outcomes)
 
 
 class _BrokenWriter:
