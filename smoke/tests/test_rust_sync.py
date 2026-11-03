@@ -90,7 +90,7 @@ class _SectionReads:
     """
 
     def __init__(self, source: str) -> None:
-        """Parse *source* and index each node's parent and enclosing function.
+        """Parse *source* and index each node's parent and each module function's parameters.
 
         Args:
             source: A Python module's source.
@@ -99,16 +99,12 @@ class _SectionReads:
             SyntaxError: When it does not parse.
         """
         self._tree = ast.parse(source)
-        self._parents, self._functions = {}, {}
+        self._parents = {}
         self._parameters = {node.name: [arg.arg for arg in node.args.posonlyargs + node.args.args]
                             for node in self._tree.body if isinstance(node, ast.FunctionDef)}
         for node in ast.walk(self._tree):
             for child in ast.iter_child_nodes(node):
                 self._parents[child] = node
-            if isinstance(node, ast.FunctionDef):
-                for inner in ast.walk(node):
-                    if inner is not node:
-                        self._functions[inner] = node.name
 
     def keys(self) -> set[str]:
         """The literal keys read from ``section``.
