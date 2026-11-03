@@ -3946,7 +3946,7 @@ void g(void) {
                 ("g", UnitKind::Function, 5, 6)
             ]
         );
-        let js = "const x =\n\n  g(\n    1\n  )\nfunction f() {\n}\n";
+        let js = "const x =\n\n  [\n    1\n  ]\nfunction f() {\n}\n";
         assert_eq!(
             spans(&extract(
                 &BraceFamilyExtractor::javascript(),
