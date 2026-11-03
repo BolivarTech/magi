@@ -253,6 +253,20 @@ class LiteralScanTests(unittest.TestCase):
         self.assertEqual("4", _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs").group(1))
         self.assertEqual(text, _helpers().code_only(text))
 
+    def test_a_comment_opener_inside_a_c_string_literal_opens_nothing(self) -> None:
+        # [F1b2a] ``cr#"..."#`` was not taken for a raw string: its ``r`` follows a letter, so the scan read
+        # ``"a"`` as a plain string and ``/*"#;`` as an unterminated block comment. ``cr"\"`` holds a backslash
+        # that a plain-string reading takes for an escape.
+        text = ('let a = cr#"a"/*"#;\nlet b = cr"\\";\nlet c = c"/*";\n'
+                "pub const N: u8 = 5;\n")
+        self.assertEqual("5", _helpers().one_definition(text, r"pub const N: u8 = (\d+);", "n.rs").group(1))
+        self.assertEqual(text, _helpers().code_only(text))
+
+    def test_an_identifier_ending_in_c_before_r_is_not_a_raw_string(self) -> None:
+        # The prefix is the whole token: ``abcr#"`` is an identifier, never a C raw string.
+        text = 'let s = "x"; let abcr = 1; /* old */\npub const N: u8 = 6;\n'
+        self.assertNotIn("old", _helpers().code_only(text))
+
 
 class WithoutCommentsTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 29, F1b2a-melchior] a trailing comment is not code either."""
