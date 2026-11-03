@@ -136,11 +136,10 @@ fn resolve_git(path_var: &std::ffi::OsStr, workdir: &Path) -> Option<PathBuf> {
         .map(|dir| dir.join(GIT_PROGRAM))
         .filter(|candidate| candidate.is_file())
         .find(|candidate| {
-            candidate.canonicalize().is_ok_and(|real| {
-                !real.starts_with(repository)
-                    && !real.starts_with(&root)
-                    && !candidate.starts_with(workdir)
-            })
+            // `repository` is `root` or an ancestor of it, so this also refuses the workspace.
+            candidate
+                .canonicalize()
+                .is_ok_and(|real| !real.starts_with(repository) && !candidate.starts_with(workdir))
         })
 }
 
