@@ -452,8 +452,9 @@ pub struct CodeScanner {
     /// For each open `${...}` template expression, innermost last, how many `{` it holds still
     /// open: its `}` with none open returns to the template text.
     templates: Vec<u32>,
-    /// Whether the previous line was a preprocessor directive ending in `\`, so this line
-    /// continues it ([`LexicalRules::preprocessor_directives`]).
+    /// Whether the previous line was a preprocessor directive ending in `\` or inside a block
+    /// comment the directive opened, so this line continues it
+    /// ([`LexicalRules::preprocessor_directives`]).
     in_directive: bool,
     /// The preprocessor conditionals open at this point, innermost last, at most
     /// [`MAX_CONDITIONAL_NESTING`] ([`CodeScanner::apply_conditional`]).
@@ -1021,6 +1022,12 @@ impl CodeScanner {
             )
         {
             self.state = LexicalState::Code;
+        }
+        // MAGI FIX (S6 loop 30, B2a): C reads a comment as one blank, so a block comment opened
+        // in a directive continues it past the newline; the text after its `*/` (`#define X /*
+        // c` then `*/ {`) was read as code and its `{` deepened the rest of the file.
+        if directive && matches!(self.state, LexicalState::BlockComment { .. }) {
+            self.in_directive = true;
         }
 
         // MAGI FIX (B2a 2, 4): each line started as if nothing preceded it, so a `/` opening a
