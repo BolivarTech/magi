@@ -4441,6 +4441,30 @@ int g(void) {
     }
 
     #[test]
+    fn an_equals_sign_in_a_string_or_comment_is_no_default_argument() {
+        // [MAGI B2b1b] the bare `=` that marks a default argument was looked for in the raw
+        // text, so one inside a string or a comment (`describe('x = y', () => {`) made the
+        // call's brace an argument's, and the call split into a gap, its callback and a gap.
+        for call in [
+            "describe('x = y', () => {\n  it();\n});\n",
+            "describe(\"x = y\", () => {\n  it();\n});\n",
+            "describe(`x = y`, () => {\n  it();\n});\n",
+            "describe('x', () => { // a = b\n  it();\n});\n",
+            "describe('x', /* a = b */ () => {\n  it();\n});\n",
+        ] {
+            assert_eq!(
+                spans(&extract(
+                    &BraceFamilyExtractor::javascript(),
+                    call,
+                    &all_lines(call)
+                )),
+                vec![("describe", UnitKind::Function, 1, 3)],
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
     fn a_wrapped_attribute_search_never_climbs_above_the_previous_construct() {
         // [MAGI loop 26, 1] the backward search for a wrapped attribute climbed to the top of
         // the file while its brackets stayed unbalanced, so a file of `)` lines between
