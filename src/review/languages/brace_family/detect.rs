@@ -1639,8 +1639,9 @@ impl BraceFamilyExtractor {
     /// it when that line holds only its return type, written GNU style on a line of its own
     /// (`static int` over `foo (int a)`), else `i`. Only for extractors with
     /// `semicolon_declarations` and outside a block body (`members`), where a line of type words
-    /// alone (identifier characters, blanks, `*`, `&`, `<`, `>` and `::`, not ending in `:`, its
-    /// angle brackets balanced) is no construct of its own: it fell into a gap unit, split from
+    /// alone (identifier characters, blanks, `*`, `&`, `<`, `>` and `::`, and `,` inside angle
+    /// brackets, not ending in `:`, its angle brackets balanced) is no construct of its own: it
+    /// fell into a gap unit, split from
     /// its function or prototype.
     /// Never above `floor`, the line after the previous construct. O(n) in the two lines.
     ///
@@ -1674,11 +1675,22 @@ impl BraceFamilyExtractor {
         // MAGI FIX (loop 26, 3): the last line of a wrapped template header (`typename U>`) read
         // as a return type, so the header's earlier lines were cut from the function; a return
         // type's angle brackets balance on its line.
+        // MAGI FIX (B2b1a): a `,` between type arguments (`std::pair<int, double>`) made no
+        // return type, so the line fell into a gap; one inside angle brackets is a type's.
+        let mut angle = 0usize;
         let type_words = lines.get(above).map(|l| l.trim()).is_some_and(|t| {
             !t.is_empty()
                 && !t.ends_with(':')
-                && t.chars()
-                    .all(|c| is_identifier_char(c) || RETURN_TYPE_CHARS.contains(c))
+                && t.chars().all(|c| {
+                    match c {
+                        '<' => angle += 1,
+                        '>' => angle = angle.saturating_sub(1),
+                        _ => {}
+                    }
+                    is_identifier_char(c)
+                        || RETURN_TYPE_CHARS.contains(c)
+                        || (c == ',' && angle > 0)
+                })
                 && t.matches('<').count() == t.matches('>').count()
         });
         let signature = lines
