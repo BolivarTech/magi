@@ -678,8 +678,14 @@ fn walk(
         budget,
         pending: Vec::new(),
     };
-    state.list(dir, rel)?;
+    let entries = std::fs::read_dir(dir).map_err(|e| walk_io_error(dir, &e))?;
+    state.list(dir, rel, entries)?;
     state.run()
+}
+
+/// The [`ReviewError::Io`] of a walk that could not read `dir` or one of its entries.
+fn walk_io_error(dir: &Path, e: &std::io::Error) -> ReviewError {
+    ReviewError::Io(format!("{}: {e}", dir.display()))
 }
 
 /// The state of one [`walk`]: what it collects, what it may still spend, and the directories
@@ -701,27 +707,44 @@ impl Walk<'_> {
     /// Lists every directory in `pending`, and those found below them, until none is left.
     /// O(entries).
     ///
+    /// A queued subdirectory that no longer exists (deleted after its parent was listed) is
+    /// collected as an ordinary name, already paid for when it was queued, so the filter sets it
+    /// aside as `disappeared`, as it does a deleted file, instead of failing the review.
+    ///
     /// # Errors
     ///
-    /// What [`Walk::list`] returns for the first directory that fails.
+    /// [`ReviewError::Io`] naming a queued directory that cannot be read for any other reason,
+    /// or what [`Walk::list`] returns for the first directory that fails.
+    // MAGI FIX (S6 loop 33): a subdirectory deleted mid-walk failed the whole review.
     fn run(&mut self) -> Result<(), ReviewError> {
         while let Some((dir, rel)) = self.pending.pop() {
-            self.list(&dir, &rel)?;
+            match std::fs::read_dir(&dir) {
+                Ok(entries) => self.list(&dir, &rel, entries)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.found.push(rel),
+                Err(e) => return Err(walk_io_error(&dir, &e)),
+            }
         }
         Ok(())
     }
 
-    /// Lists `dir` (relative path `rel`) once: collects its non-directory entries, sets aside
-    /// what is never reviewed or ignored, and queues its subdirectories in `pending`. Every name
-    /// kept is paid from `budget`. O(entries of `dir`).
+    /// Lists `entries`, the listing of `dir` (relative path `rel`), once: collects its
+    /// non-directory entries, sets aside what is never reviewed or ignored, and queues its
+    /// subdirectories in `pending`. Every name kept is paid from `budget`. An entry whose type
+    /// cannot be read because it was deleted after the listing is collected as a name, for the
+    /// filter to set aside as `disappeared`. O(entries of `dir`).
     ///
     /// # Errors
     ///
-    /// [`ReviewError::Io`] naming `dir` when it or one of its entries cannot be read;
+    /// [`ReviewError::Io`] naming `dir` when one of its entries cannot be read;
     /// [`ReviewError::InputTooLarge`] when a name passes what is left of `budget`.
-    fn list(&mut self, dir: &Path, rel: &str) -> Result<(), ReviewError> {
-        let io = |e: std::io::Error| ReviewError::Io(format!("{}: {e}", dir.display()));
-        for entry in std::fs::read_dir(dir).map_err(io)? {
+    fn list(
+        &mut self,
+        dir: &Path,
+        rel: &str,
+        entries: std::fs::ReadDir,
+    ) -> Result<(), ReviewError> {
+        let io = |e: std::io::Error| walk_io_error(dir, &e);
+        for entry in entries {
             let entry = entry.map_err(io)?;
             let name = entry.file_name();
             let joined = |n: &str| {
@@ -745,7 +768,12 @@ impl Walk<'_> {
             {
                 continue;
             }
-            let is_dir = entry.file_type().map_err(io)?.is_dir();
+            // MAGI FIX (S6 loop 33): an entry deleted after the listing failed the review.
+            let is_dir = match entry.file_type() {
+                Ok(kind) => kind.is_dir(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => return Err(io(e)),
+            };
             // MAGI FIX (S6 loop 9): an empty directory cost the walk without paying the cap.
             spend(self.budget, &path)?;
             if is_dir {
