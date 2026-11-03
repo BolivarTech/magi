@@ -534,10 +534,18 @@ const BRACE_SEARCH_VISITS_PER_LINE: usize = 32;
 
 /// The line visits the forward searches of one detection pass may spend:
 /// [`BRACE_SEARCH_VISITS_PER_LINE`] per line of the text, plus [`MAX_BRACE_SEARCH_LINES`] so
-/// that a short text still allows one full search. Each search is bounded on its own
-/// ([`open_brace_line`]), but a file of `f(` lines starts one per line, O(n ×
+/// that a short text still allows one full search. It covers the forward searches for a brace
+/// or a group's closing delimiter ([`open_brace_line`] and the searches built on it). Each is
+/// bounded on its own, but a file of `f(` lines starts one per line, O(n ×
 /// [`MAX_BRACE_SEARCH_LINES`]) visits (minutes for an 8 MiB file, before the review clock and
-/// with the TUI not cancellable); the shared budget keeps a pass O(n).
+/// with the TUI not cancellable); the shared budget keeps those searches O(n) in a pass.
+///
+/// Not every forward walk spends it: the closing-brace walk from a found brace
+/// ([`find_closing_brace`]; only a Go type group's member is charged, as its search is bounded
+/// by the group) and the walk to a directive's last line ([`preprocessor_end`]) spend none.
+/// They stay linear without it
+/// because they never overlap: each construct or directive found moves the scan past the line
+/// they return, so each line is walked by them once in a pass.
 ///
 /// Once it is spent, every later search of the pass degrades as one past its own bound does:
 /// a construct whose brace is on its own line is still found, one whose brace is on a later line
