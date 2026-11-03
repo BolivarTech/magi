@@ -2483,6 +2483,28 @@ void h() {
     }
 
     #[test]
+    fn a_block_comment_spanning_a_directive_newline_keeps_the_rest_directive_text() {
+        // [MAGI S6 loop 30, B2a] C reads a comment as one blank, so a block comment opened in a
+        // directive keeps the directive going past its close: the `{` after `*/` on the next
+        // line is directive text (`#define X /* c` then `*/ {`). It counted as structure, one
+        // level deeper for the rest of the file. The directive ends with the line the comment
+        // closes on, so the next line's braces count again.
+        let code = "#define X /* c\n*/ {\nvoid f() {\n}\n";
+        let r = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(
+            r.iter().map(|l| l.brace_delta).collect::<Vec<_>>(),
+            vec![0, 0, 1, -1]
+        );
+        assert_eq!(
+            r.iter().map(|l| l.depth_after).collect::<Vec<_>>(),
+            vec![0, 0, 1, 0]
+        );
+        let code = "#define X /* a\n b\n c */ {\nint y;\n";
+        let r = CodeScanner::new(LexicalRules::c()).scan_all(code);
+        assert_eq!(r.last().map(|l| l.depth_after), Some(0));
+    }
+
+    #[test]
     fn a_regex_character_class_closes_at_its_first_bracket_as_ecmascript_lexes_it() {
         // [MAGI loop 28, B2a] declared green, a false positive: ECMAScript's lexical grammar
         // (RegularExpressionClassChars) closes a class at its first unescaped `]`, so `[]` is an
