@@ -200,6 +200,12 @@ const URL_USERINFO_STOP: &[u8] = b" \t\r\n/?#\"`<>";
 /// The bytes a placeholder's name may hold (besides ASCII letters and digits): `db_password`,
 /// `.Values.password`, `db-pass`.
 const URL_PLACEHOLDER_NAME_BYTES: &[u8] = b"_.-";
+/// The bytes besides ASCII letters and digits that may open a URL's host (RFC 3986 §3.2.2): the
+/// other unreserved bytes (`-` `.` `_` `~`), `%` for a pct-encoded one, the sub-delims
+/// (`!` `$` `&` `'` `(` `)` `*` `+` `,` `;` `=`) and `[` for an IP literal.
+// MAGI FIX (S6 loop 33, A2, security): only a letter, a digit or `[` counted, so
+// `user:password@_cache` went undetected and its file was sent.
+const URL_HOST_START_BYTES: &[u8] = b"-._~%!$&'()*+,;=[";
 
 /// The patterns, in the order that decides the name of a match: `anthropic-key` comes before
 /// `openai-key` because an Anthropic key also starts with `sk-`. A Stripe key needs no such
@@ -434,8 +440,8 @@ impl Matcher {
 /// Where the userinfo of a URL credential that opens at `from` (just past `://`) ends: past the
 /// last `@` within [`MAX_URL_USERINFO`] bytes that ends a credential (a password may hold an
 /// unencoded `@`): one with a `:` before it, a password between them that is not a placeholder
-/// ([`is_url_placeholder`]), and a host after it (an ASCII letter or digit, or `[` for an IPv6
-/// literal). Every such `@` is tried, so a later `@` that ends nothing never hides an earlier
+/// ([`is_url_placeholder`]), and a host after it (an ASCII letter or digit, or a byte of
+/// [`URL_HOST_START_BYTES`]). Every such `@` is tried, so a later `@` that ends nothing never hides an earlier
 /// credential. The user may be empty (`redis://:password@host`). The authority ends at a
 /// [`URL_USERINFO_STOP`] byte or a control character; `None` when no `@` ends a credential.
 /// O([`MAX_URL_USERINFO`]²), a constant, per `://`: one placeholder check per `@`.
@@ -466,7 +472,7 @@ fn url_userinfo_end(bytes: &[u8], from: usize) -> Option<usize> {
         let real = !password.is_empty() && !is_url_placeholder(password);
         let host = run
             .get(at_sign + 1)
-            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'[');
+            .is_some_and(|b| b.is_ascii_alphanumeric() || URL_HOST_START_BYTES.contains(b));
         (real && host).then_some(from + at_sign + 1)
     })
 }
