@@ -18,6 +18,7 @@ left above the new line and stayed green. Absence checks (``assertNotIn``) stay
 on the raw text, where a comment can only make them stricter.
 """
 
+import ast
 import os
 import pathlib
 import re
@@ -44,9 +45,114 @@ def _source(relative: str) -> str:
     return read_source(relative, _ROOT)
 
 
-#: The only parameter name a ``section.get`` may take instead of a literal key:
-#: ``_list_under``'s own, whose keys are read at its call sites.
+#: The name the scenario module gives the ``code_review`` summary object.
+_SECTION_NAME = "section"
+
+#: The helper that reads a list under a key of the summary, and the parameter
+#: its own ``section.get`` takes instead of a literal key (read at its call sites).
+_LIST_UNDER = "_list_under"
 _LIST_UNDER_PARAMETER = "key"
+
+#: Calls that may take ``section`` without reading a key from it.
+_KEYLESS_CALLS = frozenset({"isinstance"})
+
+
+def _literal_key(node) -> str | None:
+    """The string *node* holds when it is a string literal, else ``None``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+class _SectionReads:
+    """Every use of the name ``section`` in a module, each one either read for its key or refused.
+
+    MAGI FIX (F1b2a): the keys were found with regular expressions, so a legal
+    form they did not anticipate (``section . get("k")``, an alias, a helper
+    that received ``section``) read a key the guard never saw. The module is
+    parsed instead, and every ``Name`` node called ``section`` must be one of
+    the forms below; any other use fails loudly.
+
+    Accepted: a binding (an assignment target or a parameter);
+    ``section.get("<lit>")`` with exactly one argument;
+    ``section.get(key)`` inside ``_list_under``; ``_list_under(section,
+    "<lit>")``; ``isinstance(section, ...)``; and ``section`` passed
+    positionally to a function defined in the module whose parameter at that
+    position is also named ``section``, whose own body the same walk reads.
+
+    Complexity: ``O(nodes)``.
+    """
+
+    def __init__(self, source: str) -> None:
+        """Parse *source* and index each node's parent and enclosing function.
+
+        Args:
+            source: A Python module's source.
+
+        Raises:
+            SyntaxError: When it does not parse.
+        """
+        self._tree = ast.parse(source)
+        self._parents, self._functions = {}, {}
+        self._parameters = {node.name: [arg.arg for arg in node.args.posonlyargs + node.args.args]
+                            for node in self._tree.body if isinstance(node, ast.FunctionDef)}
+        for node in ast.walk(self._tree):
+            for child in ast.iter_child_nodes(node):
+                self._parents[child] = node
+            if isinstance(node, ast.FunctionDef):
+                for inner in ast.walk(node):
+                    if inner is not node:
+                        self._functions[inner] = node.name
+
+    def keys(self) -> set[str]:
+        """The literal keys read from ``section``.
+
+        Returns:
+            set[str]: Every key named literally in an accepted read.
+
+        Raises:
+            AssertionError: Naming the line of the first use the walk cannot follow.
+        """
+        keys = set()
+        for node in ast.walk(self._tree):
+            if isinstance(node, ast.Name) and node.id == _SECTION_NAME:
+                if isinstance(node.ctx, ast.Store):
+                    continue
+                key = self._key_of(node)
+                if key is not None:
+                    keys.add(key)
+        return keys
+
+    def _key_of(self, node) -> str | None:
+        """The key one load of ``section`` reads, ``None`` for a keyless accepted use.
+
+        Raises:
+            AssertionError: When the use is none of the accepted forms.
+        """
+        parent = self._parents.get(node)
+        if isinstance(parent, ast.Attribute) and parent.attr == "get":
+            call = self._parents.get(parent)
+            if isinstance(call, ast.Call) and call.func is parent and len(call.args) == 1 and not call.keywords:
+                key = _literal_key(call.args[0])
+                if key is not None:
+                    return key
+                if (isinstance(call.args[0], ast.Name) and call.args[0].id == _LIST_UNDER_PARAMETER
+                        and self._functions.get(node) == _LIST_UNDER):
+                    return None
+        if isinstance(parent, ast.Call) and node in parent.args and isinstance(parent.func, ast.Name):
+            callee, position = parent.func.id, parent.args.index(node)
+            if callee == _LIST_UNDER and position == 0 and len(parent.args) == 2 and not parent.keywords:
+                key = _literal_key(parent.args[1])
+                if key is not None:
+                    return key
+            elif callee in _KEYLESS_CALLS:
+                return None
+            elif callee != _LIST_UNDER:
+                parameters = self._parameters.get(callee, [])
+                if position < len(parameters) and parameters[position] == _SECTION_NAME:
+                    return None
+        raise AssertionError("line %d: a use of section the key guard does not follow: %s"
+                             % (node.lineno, ast.unparse(parent if parent is not None else node)))
 
 
 def _summary_keys_read(scenario: str) -> set[str]:
@@ -55,8 +161,9 @@ def _summary_keys_read(scenario: str) -> set[str]:
     MAGI FIX (S6 loop 29): the keys were collected from two access shapes, so a
     key read in a third one (brackets, another accessor, a key held in a
     variable) was left out and the fixed-set comparison still passed
-    (F1b2a-melchior). Every use of ``section`` must now be one of the shapes
-    parsed here, or the read fails and the access is reviewed on purpose.
+    (F1b2a-melchior). MAGI FIX (F1b2a): the shapes are read off the parsed
+    module (:class:`_SectionReads`), so spacing, aliases and helpers cannot
+    hide a read either.
 
     Args:
         scenario: The scenario module's source.
@@ -66,32 +173,13 @@ def _summary_keys_read(scenario: str) -> set[str]:
         ``_list_under(section, "<key>")``.
 
     Raises:
-        AssertionError: Naming an access shape the read does not parse:
-            ``section[...]``, any accessor but ``.get``, a ``.get`` whose
-            argument is neither a literal key nor ``_list_under``'s own
-            parameter, a ``_list_under`` call without a literal key, or
-            ``section`` unpacked or iterated.
+        AssertionError: Naming a use of ``section`` the read does not follow:
+            brackets, any accessor but ``.get``, a ``.get`` whose argument is
+            neither a literal key nor ``_list_under``'s own parameter, a
+            ``_list_under`` call without a literal key, an alias, ``section``
+            unpacked or iterated, or passed to a function the walk cannot read.
     """
-    for pattern in (r"\bsection\s*\[", r"\*\*\s*section\b", r"\bin\s+section\b", r"getattr\(\s*section\b"):
-        found = re.search(pattern, scenario)
-        if found is not None:
-            raise AssertionError("an access to section the key guard does not parse: %r" % found.group(0))
-    accessors = set(re.findall(r"\bsection\s*\.\s*(\w+)", scenario))
-    if accessors - {"get"}:
-        raise AssertionError("section accessors the key guard does not parse: %s" % sorted(accessors - {"get"}))
-    keys = set()
-    for argument in re.findall(r"\bsection\.get\(([^)]*)\)", scenario):
-        literal = re.fullmatch(r'\s*"(\w+)"\s*', argument)
-        if literal is not None:
-            keys.add(literal.group(1))
-        elif argument.strip() != _LIST_UNDER_PARAMETER:
-            raise AssertionError("section.get(%s) does not name its key literally" % argument)
-    for argument in re.findall(r"(?<!def )\b_list_under\(section,([^)]*)\)", scenario):
-        literal = re.fullmatch(r'\s*"(\w+)"\s*', argument)
-        if literal is None:
-            raise AssertionError("_list_under(section,%s) does not name its key literally" % argument)
-        keys.add(literal.group(1))
-    return keys
+    return _SectionReads(scenario).keys()
 
 
 def _usize_const(text: str, name: str) -> int:
