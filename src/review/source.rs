@@ -398,9 +398,11 @@ impl WorktreeSource<'_> {
         // either still escapes, or names another file than the one opened.
         // MAGI FIX (S6 loop 16, A2-4): a file unlinked right after the open reads as absent here
         // too, as it does at every earlier step; nothing of it is read either way.
+        // MAGI FIX (review residual A2-c): any other failure is the I/O error it is, as at every
+        // earlier step; it was `outside workspace`, an escape the path never had.
         let now = match std::fs::canonicalize(&joined) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            other => other.map_err(|_| ReviewError::OutsideWorkspace(path.to_string()))?,
+            other => other.map_err(io)?,
         };
         let still_inside = now
             .strip_prefix(canonical_root)
