@@ -1038,7 +1038,14 @@ impl BraceFamilyExtractor {
             if let Some(rest) = keyword_rest(trimmed, kw) {
                 // MAGI FIX (B2b1 9): `namespace` is no reserved word in TypeScript or C, so
                 // `namespace = 2;` assigns a variable; a namespace is named, never assigned.
-                if kw.trim() == "namespace" && rest.starts_with('=') {
+                // MAGI FIX (B2b1a): a C++ alias (`namespace fs = std::filesystem;`) is a
+                // declaration too: a `=` before the block's `{` or a `;` makes no namespace.
+                if kw.trim() == "namespace"
+                    && rest
+                        .split(['{', ';'])
+                        .next()
+                        .is_some_and(|head| head.contains('='))
+                {
                     continue;
                 }
                 // MAGI FIX (S6 loop 5): the tables hold bare keywords and the modifiers are
