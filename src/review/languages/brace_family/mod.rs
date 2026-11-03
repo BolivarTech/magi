@@ -4126,6 +4126,64 @@ void g(void) {
     }
 
     #[test]
+    fn a_call_wrapped_after_a_bare_equal_sign_stays_with_its_declaration() {
+        // [MAGI B2b1b] a call value wrapped over lines after a bare `=` (`g(` ... `);`) was read
+        // as a construct of its own by the stop rule, so the declaration ended on its `=` line
+        // and the call fell into a gap unit, unlike the same value in brackets.
+        let cases: [(&str, BraceFamilyExtractor, &str, &str); 6] = [
+            (
+                "javascript",
+                BraceFamilyExtractor::javascript(),
+                "const x =\n  g(\n    1\n  );\nfunction f() {\n}\n",
+                "constants",
+            ),
+            (
+                "javascript without semicolons",
+                BraceFamilyExtractor::javascript(),
+                "const x =\n  g(\n    1\n  )\nfunction f() {\n}\n",
+                "constants",
+            ),
+            (
+                "typescript",
+                BraceFamilyExtractor::typescript(),
+                "const x =\n  g(\n    1\n  );\nfunction f() {\n}\n",
+                "constants",
+            ),
+            (
+                "c",
+                c_extractor(),
+                "static int n =\n    g(\n        1\n    );\nint f(void) {\n}\n",
+                "statics",
+            ),
+            (
+                "rust",
+                rust_extractor(),
+                "pub static N: u8 =\n    g(\n        1\n    );\nfn f() {\n}\n",
+                "statics",
+            ),
+            (
+                "go",
+                BraceFamilyExtractor::go(),
+                "var x =\n\tg(\n\t\t1,\n\t)\nfunc f() {\n}\n",
+                "variables",
+            ),
+        ];
+        let split: Vec<String> = cases
+            .into_iter()
+            .filter_map(|(label, ext, code, group)| {
+                let units = extract(&ext, code, &all_lines(code));
+                let found = spans(&units);
+                let expected = vec![
+                    (group, UnitKind::DeclarationGroup, 1, 4),
+                    ("f", UnitKind::Function, 5, 6),
+                ];
+                (found != expected).then(|| format!("{label}: {found:?}"))
+            })
+            .collect();
+        assert!(split.is_empty(), "split statements: {split:#?}");
+    }
+
+    #[test]
     fn the_member_searches_of_a_go_type_group_spend_the_pass_budget() {
         // [MAGI S6 loop 19, B2b-2] a member's closing-brace search ran past the group's `)` to
         // the end of the file, outside the pass budget, so a file of groups whose members never
