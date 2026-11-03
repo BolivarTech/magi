@@ -932,7 +932,7 @@ pub(super) fn opens_member_initializer_list(header: &[&str]) -> bool {
 }
 
 /// The quotes of a JavaScript or TypeScript string: `'`, `"` and the template literal's backtick.
-const JS_QUOTES: [char; 3] = ['"', '\'', '`'];
+pub(super) const JS_QUOTES: [char; 3] = ['"', '\'', '`'];
 
 /// Whether a JavaScript or TypeScript declaration's value is an arrow function: an `=>` stands at
 /// the value's top level, outside every bracket, string and comment (`(a, b) => {`,

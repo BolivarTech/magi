@@ -681,8 +681,12 @@ fn ends_in_bare_equal(trimmed: &str) -> bool {
 }
 
 /// Whether `text` holds a bare `=`, an assignment or a default argument (`cb = () => {`), not
-/// part of `==`, `!=`, `<=`, `>=`, `=>` or a compound assignment (`+=`). A heuristic on the
-/// text: a `=` inside a string counts too. O(n) in the text.
+/// part of `==`, `!=`, `<=`, `>=`, `=>` or a compound assignment (`+=`), outside strings and
+/// comments: a `//` comment ends the text, a `/* */` one and a string quoted by `"`, `'` or a
+/// backtick are read past to their close on the line, a backslash escaping the next character
+/// (`describe('x = y', () => {` holds none). A quote that never closes on the line (a Rust
+/// lifetime, `&'a str`) is read as code. A heuristic on the text, for every language of the
+/// family. O(n) in the text.
 ///
 /// # Arguments
 ///
@@ -691,17 +695,54 @@ fn ends_in_bare_equal(trimmed: &str) -> bool {
 /// # Returns
 ///
 /// Whether a bare `=` is in it.
+// MAGI FIX (B2b1b): a `=` inside a string or a comment (`describe('x = y', () => {`) read as a
+// default argument, so the call's brace was the argument's and the call was split.
 fn holds_bare_assignment(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
     let mut previous = ' ';
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let next = chars.peek().copied().unwrap_or(' ');
+    let mut k = 0;
+    while let Some(&c) = chars.get(k) {
+        let next = chars.get(k + 1).copied().unwrap_or(' ');
+        let skip_to = match c {
+            '/' if next == '/' => return false,
+            '/' if next == '*' => Some(
+                (k + 2..chars.len())
+                    .find(|&j| chars.get(j) == Some(&'*') && chars.get(j + 1) == Some(&'/'))
+                    .map_or(chars.len(), |j| j + 2),
+            ),
+            q if JS_QUOTES.contains(&q) => quote_close(&chars, k).map(|j| j + 1),
+            _ => None,
+        };
+        if let Some(after) = skip_to {
+            previous = ' ';
+            k = after;
+            continue;
+        }
         if c == '=' && !OPERATOR_BEFORE_EQUAL.contains(previous) && !matches!(next, '=' | '>') {
             return true;
         }
         previous = c;
+        k += 1;
     }
     false
+}
+
+/// The index of the quote closing the string whose quote is at `open` in `chars`, a backslash
+/// escaping the next character, or `None` when it does not close on the line. O(n) in the line.
+fn quote_close(chars: &[char], open: usize) -> Option<usize> {
+    let quote = chars.get(open).copied()?;
+    let mut j = open + 1;
+    while let Some(&d) = chars.get(j) {
+        if d == '\\' {
+            j += 2;
+            continue;
+        }
+        if d == quote {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
 }
 
 /// The 0-based last line of the value a declaration at line `i` puts after a bare `=` on the
