@@ -19,6 +19,11 @@ from unittest import mock
 from smoke import runs
 from smoke.scenarios import decide, vault
 
+#: The day file the caps must hold whole: ``runs.MAX_ENVIRONMENT_LOG_FILE_BYTES``'s
+#: comment says the product writes "a few hundred KB" a day in the harness's
+#: environment, and nothing measures it, so this is that claim rounded up.
+_HEALTHY_DAY_FILE_BYTES = 1024 * 1024
+
 
 def _hard_link(target: pathlib.Path, link: pathlib.Path) -> None:
     """Make *link* a hard link to *target*, or skip where the file system refuses one.
@@ -100,6 +105,10 @@ class ReadLogFilesBoundTests(unittest.TestCase):
 
     def test_the_caps_hold_every_file_the_environment_writes_in_a_day(self) -> None:
         # The bounds must never refuse a healthy environment: a day file is a few hundred KB.
+        # [F1b2c] Asserted against that size, not only cap against cap: shrinking every cap together below
+        # a day file kept the relative checks green. No size is measured anywhere, so the floor is the
+        # claim's own "a few hundred KB", rounded up.
+        self.assertGreaterEqual(runs.MAX_ENVIRONMENT_LOG_FILE_BYTES, _HEALTHY_DAY_FILE_BYTES)
         self.assertGreaterEqual(runs.MAX_ENVIRONMENT_LOG_FILE_BYTES, runs.MAX_REVIEW_LOG_FILE_BYTES)
         self.assertGreaterEqual(runs.MAX_ENVIRONMENT_LOG_TOTAL_BYTES, runs.MAX_ENVIRONMENT_LOG_FILE_BYTES)
 
