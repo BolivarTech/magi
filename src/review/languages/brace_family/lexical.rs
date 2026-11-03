@@ -935,9 +935,10 @@ pub(super) fn opens_member_initializer_list(header: &[&str]) -> bool {
 pub(super) const JS_QUOTES: [char; 3] = ['"', '\'', '`'];
 
 /// Whether a JavaScript or TypeScript declaration's value is an arrow function: an `=>` stands at
-/// the value's top level, outside every bracket, string and comment (`(a, b) => {`,
-/// `async x => {`, `<T,>(x: T): T => {`). An arrow inside a call's arguments
-/// (`compute((x) => x, {`), a string (`"=>"`) or a comment (`// =>`) belongs to another value.
+/// the value's top level, outside every bracket, type argument list, string and comment
+/// (`(a, b) => {`, `async x => {`, `<T,>(x: T): T => {`). An arrow inside a call's arguments
+/// (`compute((x) => x, {`), its type arguments (`make<() => void>({`, a `<` right after an
+/// identifier), a string (`"=>"`) or a comment (`// =>`) belongs to another value.
 /// A string or a block comment is read to its end on its own line only: a template literal or a
 /// comment that spans lines inside a declaration's header is not followed. O(n) in the text.
 ///
@@ -951,8 +952,13 @@ pub(super) const JS_QUOTES: [char; 3] = ['"', '\'', '`'];
 /// `true` when the value is an arrow function.
 // MAGI FIX (loop 29, B2b1a): any `=>` in the header's text, a callback's or a string's included,
 // made a declaration a function named after its variable.
+// MAGI FIX (B2b1b): `<` was no bracket, so the `=>` of a function type in a call's type
+// arguments (`make<() => void>({`) stood at the top level.
 pub(super) fn arrow_at_top_level<'t>(parts: impl IntoIterator<Item = &'t str>) -> bool {
     let mut depth = 0i64;
+    // Open type argument lists: a `<` right after an identifier (`make<`, `Map<`). A `<` after
+    // anything else (`<T,>(x: T) =>`, a generic arrow's own parameters) opens none.
+    let mut angle = 0i64;
     for part in parts {
         let chars: Vec<char> = part.chars().collect();
         let mut k = 0;
@@ -975,13 +981,33 @@ pub(super) fn arrow_at_top_level<'t>(parts: impl IntoIterator<Item = &'t str>) -
                 }
                 '(' | '[' | '{' => depth += 1,
                 ')' | ']' | '}' => depth -= 1,
-                '=' if next == Some('>') && depth <= 0 => return true,
+                '<' if k
+                    .checked_sub(1)
+                    .and_then(|p| chars.get(p))
+                    .is_some_and(|&p| is_js_identifier_char(p)) =>
+                {
+                    angle += 1;
+                }
+                '>' if angle > 0 => angle -= 1,
+                '=' if next == Some('>') => {
+                    if depth <= 0 && angle == 0 {
+                        return true;
+                    }
+                    // The arrow's `>` closes no type argument list.
+                    k += 2;
+                    continue;
+                }
                 _ => {}
             }
             k += 1;
         }
     }
     false
+}
+
+/// Whether `c` can be part of a JavaScript or TypeScript identifier (`$` included).
+fn is_js_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
 }
 
 /// The index of the quote closing the string whose quote is at `open` in `chars`, a backslash
