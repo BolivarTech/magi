@@ -1462,8 +1462,11 @@ class RefusalRunModelCallTests(unittest.TestCase):
         import urllib.error
         import urllib.request
         seen = {}
+        # [MAGI F1b1b] every launch of the stand-in, so a refusal can be shown to come before the product ran.
+        self.invocations = []
 
         def invoke(argv, stdin, env, timeout, cwd):
+            self.invocations.append(tuple(argv))
             text = (pathlib.Path(cwd) / ".magi" / "magi.toml").read_text(encoding="utf-8")
             seen["config"], seen["env"] = text, env
             base = tomllib.loads(text)["base_url"]
@@ -1558,6 +1561,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
                        '[[magi.fallback]]\n"base_url" = "http://elsewhere.invalid/v1"\n'):
             with self.assertRaises(HarnessError, msg=config):
                 self._execute("R13", (), config=config)
+            self.assertEqual([], self.invocations, config)
 
     @unittest.skipUnless(_git_available(), "git is required")
     def test_an_anthropic_kind_in_a_refusal_run_is_a_harness_error(self) -> None:
@@ -1565,6 +1569,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
         for config in ('provider = "anthropic"\n', '[magi]\nkind = "anthropic"\n'):
             with self.assertRaises(HarnessError, msg=config):
                 self._execute("R13", (), config=config)
+            self.assertEqual([], self.invocations, config)
 
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_accepts_only_ollama_where_the_product_reads_a_provider_kind(self) -> None:
@@ -1574,6 +1579,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
                        'provider = "Ollama"\n'):
             with self.assertRaises(HarnessError, msg=config):
                 self._execute("R13", (), config=config)
+            self.assertEqual([], self.invocations, config)
 
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_keeps_the_embedding_provider_label_and_blank_kinds(self) -> None:
@@ -1592,6 +1598,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
                      'base_url = "kept verbatim"\n"""\n')
         with self.assertRaises(HarnessError):
             self._execute("R13", (), config=multiline)
+        self.assertEqual([], self.invocations)
 
         original = runs.point_config_at
 
@@ -1603,6 +1610,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
         with mock.patch.object(runs, "point_config_at", rewrite_and_drift):
             with self.assertRaises(HarnessError):
                 self._execute("R13", ())
+        self.assertEqual([], self.invocations)
 
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_blanks_the_provider_override_of_the_harness_environment(self) -> None:
