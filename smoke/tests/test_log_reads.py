@@ -82,6 +82,33 @@ class ReadLogFilesBoundTests(unittest.TestCase):
         self.assertGreaterEqual(runs.MAX_ENVIRONMENT_LOG_TOTAL_BYTES, runs.MAX_ENVIRONMENT_LOG_FILE_BYTES)
 
 
+class AnchoredOpenDescriptorTests(unittest.TestCase):
+    """[MAGI F1a1b] ``_open_anchored`` never leaks a descriptor when closing the one above fails."""
+
+    def test_a_failed_close_of_the_parent_closes_the_child_and_raises(self) -> None:
+        import types
+        opened, closed = [], []
+
+        def fake_open(path, flags, dir_fd=None):
+            opened.append(100 + len(opened))
+            return opened[-1]
+
+        def fake_close(descriptor):
+            closed.append(descriptor)
+            if descriptor == 100 and closed.count(100) == 1:
+                raise OSError("close failed")
+
+        fake_os = types.SimpleNamespace(open=fake_open, close=fake_close, O_RDONLY=0, O_DIRECTORY=0)
+        with mock.patch.object(runs, "_chain_from_repository",
+                               return_value=(pathlib.Path("base"), pathlib.PurePosixPath("a/b/c"))), \
+                mock.patch.object(runs, "os", fake_os):
+            with self.assertRaises(OSError):
+                runs._open_anchored("base/a/b/c", 0)
+        # The base (100) and the first child (101) were opened; each is closed exactly once.
+        self.assertEqual([100, 101], opened)
+        self.assertEqual([100, 101], closed)
+
+
 class DecideLogReadTests(unittest.TestCase):
     """The decide and keys scenarios read a workspace log without following a link."""
 
