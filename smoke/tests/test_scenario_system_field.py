@@ -103,6 +103,8 @@ class SystemFieldScenarioTests(unittest.TestCase):
         self.assertTrue(all("timed out" in f.detail for f in findings))
 
     def test_s46_fails_when_stdout_carries_model_output(self) -> None:
+        # [MAGI F1b2b] an emptied OUTPUT_KEYS made the loop below run nothing and pass; the keys are pinned.
+        self.assertEqual(("response", "consult"), system_field.OUTPUT_KEYS)
         for key in system_field.OUTPUT_KEYS:
             with self.subTest(key=key):
                 r = _result("R11", 2, {key: {"text": "x"}},
