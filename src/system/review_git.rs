@@ -95,7 +95,8 @@ const GIT_PROGRAM: &str = "git.exe";
 const GIT_PROGRAM: &str = "git";
 
 /// The git executable a review runs: [`GIT_PROGRAM`] in the first entry of `path_var` (a
-/// `PATH` value) that is absolute, lies outside `workdir` and holds it as a file.
+/// `PATH` value) that is absolute, lies outside `workdir` and outside the outermost repository
+/// that encloses it (the farthest ancestor holding a `.git` entry), and holds it as a file.
 ///
 /// A bare `Command::new("git")` let the platform search pick the program: a relative entry
 /// (`.`, an empty one) resolves against the process's working directory, often the reviewed
@@ -105,10 +106,14 @@ const GIT_PROGRAM: &str = "git";
 /// later no longer search the working directory itself on Windows; a relative entry still
 /// does, which the test below reproduces.) Resolving to an absolute path once closes all of
 /// these; the cost is that a git reached only through a relative PATH entry is not found.
+/// When the workspace is a subdirectory of a repository (or of a submodule's superproject),
+/// the whole repository is refused, not just the workspace: a git installed under a directory
+/// that is itself a repository (a home directory kept under git) is therefore not found either.
 ///
 /// # Arguments
 /// * `path_var` - The `PATH` value to search.
-/// * `workdir` - The reviewed workspace; no entry inside it may provide git.
+/// * `workdir` - The reviewed workspace; no entry inside it, or inside the outermost repository
+///   that encloses it, may provide git.
 ///
 /// # Returns
 /// The absolute path of git, or `None` when no entry qualifies or `workdir` cannot be
@@ -117,16 +122,25 @@ const GIT_PROGRAM: &str = "git";
 // MAGI FIX (S6 loop 9): git was spawned by bare name, so a planted git could run (A1-c1).
 // MAGI FIX (S6 loop 33): a workspace that could not be canonicalized fell back to its raw
 // path, so the outside-the-workspace check could stop protecting; it now fails closed.
+// MAGI FIX (S6 loop 35): only the workspace was refused, so with the workspace inside a
+// repository a git planted elsewhere in that repository ran; the repository is refused too.
 fn resolve_git(path_var: &std::ffi::OsStr, workdir: &Path) -> Option<PathBuf> {
     let root = workdir.canonicalize().ok()?;
+    let repository = root
+        .ancestors()
+        .filter(|dir| dir.join(".git").exists())
+        .last()
+        .unwrap_or(&root);
     std::env::split_paths(path_var)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(GIT_PROGRAM))
         .filter(|candidate| candidate.is_file())
         .find(|candidate| {
-            candidate
-                .canonicalize()
-                .is_ok_and(|real| !real.starts_with(&root) && !candidate.starts_with(workdir))
+            candidate.canonicalize().is_ok_and(|real| {
+                !real.starts_with(repository)
+                    && !real.starts_with(&root)
+                    && !candidate.starts_with(workdir)
+            })
         })
 }
 
@@ -362,7 +376,8 @@ impl ScrubbedGit {
             .clone()
             .ok_or_else(|| {
                 ReviewError::Git(
-                    "cannot find git in an absolute PATH entry outside the workspace".to_string(),
+                    "cannot find git in an absolute PATH entry outside the workspace and its repository"
+                        .to_string(),
                 )
             })?;
         let mut command_line = Command::new(program);
@@ -2099,7 +2114,7 @@ mod tests {
         // than 2.46 reads the working tree's `.gitattributes`; every git reads
         // `$GIT_DIR/info/attributes`) were read as a breach of RV21. They decide only whether a
         // section shows as binary, never which revision's bytes are diffed: the worst case is
-        // the file left out as binary, which the report declares. With git 2.46 or later the
+        // the file reviewed whole from the revision, with an INFO run-log entry. With git 2.46 or later the
         // working tree's file is not read at all.
         let d = repo();
         std::fs::write(
