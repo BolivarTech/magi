@@ -86,7 +86,8 @@ pub struct BraceFamilyExtractor {
     /// ([`Self::signature_name`]): [`NOT_FUNCTION_NAMES`], or for Java, C and C++ the words that
     /// language reserves ([`JAVA_NOT_FUNCTION_NAMES`], [`C_NOT_FUNCTION_NAMES`],
     /// [`CPP_NOT_FUNCTION_NAMES`]), since a word reserved only in another language (`delete` in
-    /// Java or C, `function` in C++) is a legal name there.
+    /// Java or C, `function` in C++) is a legal name there; JavaScript and TypeScript add their
+    /// `with` statement ([`JS_NOT_FUNCTION_NAMES`]).
     // MAGI FIX (S6 loop 18, B2b-5): one list served every language.
     not_function_names: &'static [&'static str],
     /// Whether a method directly in a class body may be named by a word of
@@ -420,6 +421,37 @@ const NOT_FUNCTION_NAMES: [&str; 23] = [
     "requires",
     "noexcept",
     "decltype",
+];
+
+/// The words that stand before a `(` without naming a function in JavaScript and TypeScript:
+/// [`NOT_FUNCTION_NAMES`] and the sloppy-mode `with (obj) {` statement. `with` stays a legal name
+/// in Rust and Go, and for a method in a class body (`reserved_word_methods`).
+// MAGI FIX (B2b1a): `with (obj) {` was a function named `with`.
+const JS_NOT_FUNCTION_NAMES: [&str; 24] = [
+    "if",
+    "for",
+    "while",
+    "switch",
+    "return",
+    "sizeof",
+    "else",
+    "do",
+    "catch",
+    "try",
+    "finally",
+    "new",
+    "delete",
+    "throw",
+    "synchronized",
+    "function",
+    "typeof",
+    "await",
+    "yield",
+    "case",
+    "requires",
+    "noexcept",
+    "decltype",
+    "with",
 ];
 
 /// The words of [`NOT_FUNCTION_NAMES`] that Java reserves: its control flow and statements
@@ -854,7 +886,7 @@ impl BraceFamilyExtractor {
             semicolon_declarations: false,
             template_headers: false,
             // MAGI FIX (S6 loop 14): a method named `delete`, `new` or `catch` was no member.
-            not_function_names: &NOT_FUNCTION_NAMES,
+            not_function_names: &JS_NOT_FUNCTION_NAMES,
             reserved_word_methods: true,
             // MAGI FIX (S6 loop 17, B2-3): `[key]() {` and `#m() {` were no members.
             computed_member_names: true,
