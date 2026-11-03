@@ -1799,6 +1799,28 @@ MAX_ENVIRONMENT_LOG_FILE_BYTES = 64 * 1024 * 1024
 MAX_ENVIRONMENT_LOG_TOTAL_BYTES = 256 * 1024 * 1024
 
 
+def _directory_chain_refusal(directory):
+    """Why a read under *directory* must be dropped: it, or a component above it, is a link.
+
+    Args:
+        directory: The directory a walk read under.
+
+    Returns:
+        str | None: ``"<component> (<why>)"`` for the first linked component
+        from the repository root down to *directory* itself, or for a test
+        that failed; ``None`` when none is a link.
+    """
+    try:
+        linked = _linked_ancestor(directory)
+        if linked is None and _is_link(directory):
+            linked = pathlib.Path(directory)
+    except OSError as exc:
+        return "%s (%s)" % (_name_under(directory, directory), exc)
+    if linked is None:
+        return None
+    return "%s (%s)" % (linked, LINK_NOT_FOLLOWED)
+
+
 def read_log_files(directory, unreadable, offsets=None):
     """Yield the bytes of each regular file under *directory*, in sorted path order, never through a link.
 
@@ -1836,6 +1858,14 @@ def read_log_files(directory, unreadable, offsets=None):
             starts: the bytes before it are skipped and not counted. ``None``
             reads every file from its start.
 
+    MAGI FIX (F1a1): Windows lists and opens by path, so a link swapped onto
+    a component above *directory* during the read had a scenario see the
+    bytes behind it; unlike :meth:`RunExecutor._capture_review_log`, nothing
+    tested the chain again after reading. Each file's bytes are yielded only
+    after the chain (:func:`_directory_chain_refusal`) is tested once more;
+    when it fails, the refusal is named in *unreadable* and the walk stops,
+    so nothing read since the last passing test is yielded.
+
     Yields:
         bytes: Each file's contents from its offset.
     """
@@ -1851,6 +1881,10 @@ def read_log_files(directory, unreadable, offsets=None):
         except OSError as exc:
             unreadable.append("%s (%s)" % (_name_under(directory, path), exc))
             continue
+        refusal = _directory_chain_refusal(directory)
+        if refusal is not None:
+            unreadable.append(refusal)
+            return
         if len(data) > limit:
             why = (OVER_FILE_CAP % MAX_ENVIRONMENT_LOG_FILE_BYTES
                    if limit == MAX_ENVIRONMENT_LOG_FILE_BYTES
