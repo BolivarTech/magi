@@ -181,6 +181,26 @@ class CopyWithoutLinksTests(unittest.TestCase):
             self.assertEqual(0o600, stat.S_IMODE(os.stat(destination / "magi.toml").st_mode))
             self.assertEqual(0o700, stat.S_IMODE(os.stat(destination / "nested").st_mode))
 
+    def test_every_copied_mode_is_set_without_following_a_link(self) -> None:
+        # [MAGI F1a1b] the copied modes were applied with os.chmod by path, which follows a link swapped in at
+        # the target after the copy and changes the mode of whatever it points at; _set_mode never follows.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            magi, _ = _environment(root)
+            destination = root / "copy"
+            seen = []
+            real_set_mode = runs._set_mode
+
+            def spy(path, mode):
+                seen.append(pathlib.Path(path))
+                real_set_mode(path, mode)
+
+            with mock.patch.object(runs, "_set_mode", spy):
+                self._copy(magi, destination)
+            expected = {destination, destination / "magi.toml", destination / "nested",
+                        destination / "nested" / "kept.bin"}
+            self.assertEqual(expected, set(seen))
+
     def test_a_read_only_file_is_copied_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
