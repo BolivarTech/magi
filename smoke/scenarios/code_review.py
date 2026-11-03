@@ -444,6 +444,30 @@ def _provider_failures_only(failed, planned, shortfall, metrics=None):
     return not set(batches) & _completed_by_metrics(metrics)
 
 
+def _every_batch_lost_to_the_backend(section):
+    """Whether the review lost every planned batch, each to a cause the backend gave.
+
+    MAGI FIX (F1b2b): with no batch completed the product exits non-zero
+    (``no batch completed`` in ``src/review/pipeline.rs``) and writes no
+    consensus, so a backend that refused every batch read as two product
+    ``FAIL``\\ s; D-17 makes a down backend ``CANNOT_TEST``.
+
+    Args:
+        section: The ``code_review`` object.
+
+    Returns:
+        bool: ``True`` when ``batches_planned`` is a positive integer,
+        ``batches_completed`` is 0 and ``failed_batches`` names every planned
+        batch with a backend cause (:func:`_provider_failures_only`).
+    """
+    planned = section.get("batches_planned")
+    completed = section.get("batches_completed")
+    return (_is_count(planned) and planned >= 1 and _is_count(completed)
+            and completed == 0
+            and _provider_failures_only(section.get("failed_batches"), planned,
+                                        planned, section.get("batches")))
+
+
 def _batches_finding(section, run_id):
     """Judge ``code_review.batches_planned`` and ``code_review.batches_completed``.
 
@@ -741,15 +765,14 @@ def a_large_review_yields_one_report(run):
                                     "run R12 produced no capture to inspect")
         return
     code = run.output.exit_code
-    yield _verdict(S47_ASSERTIONS, 0, "R12", code == EXIT_OK, "exited %d" % code)
     try:
         document = run.output.json()
     except ProductOutputError as exc:
+        yield _verdict(S47_ASSERTIONS, 0, "R12", code == EXIT_OK, "exited %d" % code)
         for index in range(1, len(S47_ASSERTIONS)):
             yield _finding(S47_ASSERTIONS, index, Outcome.FAIL, "R12",
                            "stdout is not a JSON document: %s" % exc)
         return
-    yield _finding(S47_ASSERTIONS, 1, Outcome.PASS, "R12")
     # MAGI FIX (S6 loop 15): F1a2-m2/c1 read document.get as able to meet a
     # JSON array or scalar. It cannot: ProductOutput.json raises
     # ProductOutputError for any top level that is not an object, so that
@@ -758,13 +781,25 @@ def a_large_review_yields_one_report(run):
     section = document.get(CODE_REVIEW_KEY)
     if not isinstance(section, dict):
         section = {}
+    lost = code != EXIT_OK and _every_batch_lost_to_the_backend(section)
+    lost_detail = ("exited %d with every planned batch lost to the backend: %r"
+                   % (code, section.get("failed_batches")))
+    if lost:
+        yield _finding(S47_ASSERTIONS, 0, Outcome.CANNOT_TEST, "R12", lost_detail)
+    else:
+        yield _verdict(S47_ASSERTIONS, 0, "R12", code == EXIT_OK, "exited %d" % code)
+    yield _finding(S47_ASSERTIONS, 1, Outcome.PASS, "R12")
     yield _batches_finding(section, "R12")
     consult = document.get(CONSULT_KEY)
     # MAGI FIX (S6 loop 6): any truthy value passed, a list of two reports
     # included, and a repeated key was dropped by the parser (F1a-c3).
-    yield _verdict(S47_ASSERTIONS, 3, "R12",
-                   _consensus_ok(consult, run.output.stdout),
-                   "consult.consensus is not one consensus report object")
+    if lost:
+        yield _finding(S47_ASSERTIONS, 3, Outcome.CANNOT_TEST, "R12",
+                       "no consensus: " + lost_detail)
+    else:
+        yield _verdict(S47_ASSERTIONS, 3, "R12",
+                       _consensus_ok(consult, run.output.stdout),
+                       "consult.consensus is not one consensus report object")
     yield _locations_finding(section, "R12")
     yield _causes_finding(section, "R12")
 
