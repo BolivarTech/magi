@@ -63,6 +63,12 @@ _SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
 #: Calls that may take ``section`` without reading a key from it.
 _KEYLESS_CALLS = frozenset({"isinstance"})
 
+#: The constant the scenario module names the summary's key with, the name of
+#: the parsed stdout it reads the summary from, and the key's value.
+_SUMMARY_KEY_NAME = "CODE_REVIEW_KEY"
+_DOCUMENT_NAME = "document"
+_SUMMARY_KEY = code_review.CODE_REVIEW_KEY
+
 
 def _literal_key(node) -> str | None:
     """The string *node* holds when it is a string literal, else ``None``."""
@@ -118,6 +124,32 @@ def _names_bound_by(node) -> list[str]:
     return []
 
 
+def _same_scope_nodes(statements: list):
+    """Every node under *statements* that is not inside a nested scope (:data:`_SCOPE_NODES`).
+
+    Args:
+        statements: A function's body.
+
+    Yields:
+        ast.AST: Each node in the scope the statements open, nested scope nodes excluded with their contents.
+    """
+    pending = list(statements)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, _SCOPE_NODES):
+            continue
+        yield node
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def _is_section_get_of_parameter(node) -> bool:
+    """Whether *node* is ``section.get(key)`` with exactly that one argument, ``key`` being the helper's parameter."""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == _SECTION_NAME
+            and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.Name) and node.args[0].id == _LIST_UNDER_PARAMETER)
+
+
 def _trusted_list_under(tree: ast.Module) -> ast.FunctionDef | None:
     """The module's ``_list_under`` when its calls and its ``section.get(key)`` can be credited, else ``None``.
 
@@ -134,7 +166,10 @@ def _trusted_list_under(tree: ast.Module) -> ast.FunctionDef | None:
         ``_list_under`` exactly once (by any form :func:`_names_bound_by`
         knows, anywhere in the module), that binding is an undecorated
         top-level ``def _list_under(section, key)`` taking exactly those two
-        positional parameters, and nothing in its body binds ``key`` again.
+        positional parameters, nothing in its body binds ``key`` again, and its
+        own scope reads ``section.get(key)`` at least once. MAGI FIX (S6 loop
+        34): a helper of that shape whose body read nothing (``{}.get(key)``)
+        had its calls' keys credited all the same.
     """
     bindings = [node for node in ast.walk(tree) if _LIST_UNDER in _names_bound_by(node)]
     if len(bindings) != 1:
@@ -149,7 +184,35 @@ def _trusted_list_under(tree: ast.Module) -> ast.FunctionDef | None:
     if any(_LIST_UNDER_PARAMETER in _names_bound_by(inner)
            for statement in helper.body for inner in ast.walk(statement)):
         return None
+    if not any(_is_section_get_of_parameter(node) for node in _same_scope_nodes(helper.body)):
+        return None
     return helper
+
+
+def _is_summary_definition(node) -> bool:
+    """Whether *node* is ``CODE_REVIEW_KEY = "<the summary key>"``: one ``Name`` target, the literal value."""
+    return (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == _SUMMARY_KEY_NAME and _literal_key(node.value) == _SUMMARY_KEY)
+
+
+def _is_section_assignment(node) -> bool:
+    """Whether *node* is exactly ``section = document.get(CODE_REVIEW_KEY)``, the scenario module's one summary read."""
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == _SECTION_NAME and isinstance(node.value, ast.Call)):
+        return False
+    call = node.value
+    return (isinstance(call.func, ast.Attribute) and call.func.attr == "get"
+            and isinstance(call.func.value, ast.Name) and call.func.value.id == _DOCUMENT_NAME
+            and len(call.args) == 1 and not call.keywords
+            and isinstance(call.args[0], ast.Name) and call.args[0].id == _SUMMARY_KEY_NAME)
+
+
+def _names_the_summary(node) -> bool:
+    """Whether *node* refers to the summary: the name ``CODE_REVIEW_KEY`` in any form, or the key's literal."""
+    return ((isinstance(node, ast.Name) and node.id == _SUMMARY_KEY_NAME)
+            or (isinstance(node, ast.Attribute) and node.attr == _SUMMARY_KEY_NAME)
+            or _SUMMARY_KEY_NAME in _names_bound_by(node)
+            or _literal_key(node) == _SUMMARY_KEY)
 
 
 class _SectionReads:
@@ -169,6 +232,14 @@ class _SectionReads:
     closed); ``isinstance(section, ...)``; and ``section`` passed
     positionally to a function defined in the module whose parameter at that
     position is also named ``section``, whose own body the same walk reads.
+
+    MAGI FIX (S6 loop 34): only the name ``section`` was followed, so the
+    summary read through any other path (``cr = document.get(CODE_REVIEW_KEY)``,
+    a chained ``.get``, ``document["code_review"]``) credited no key and the
+    guard stayed green. Every reference to ``CODE_REVIEW_KEY`` and every
+    literal equal to the summary key must now be part of the module's single
+    top-level ``CODE_REVIEW_KEY = "<key>"`` or its single
+    ``section = document.get(CODE_REVIEW_KEY)``; any other one fails closed.
 
     Complexity: ``O(nodes)``.
     """
@@ -200,6 +271,7 @@ class _SectionReads:
         Raises:
             AssertionError: Naming the line of the first use the walk cannot follow.
         """
+        self._check_summary_references()
         keys = set()
         for node in ast.walk(self._tree):
             if isinstance(node, ast.Name) and node.id == _SECTION_NAME:
@@ -209,6 +281,27 @@ class _SectionReads:
                 if key is not None:
                     keys.add(key)
         return keys
+
+    def _check_summary_references(self) -> None:
+        """Refuse every reference to the summary outside its one definition and its one ``section`` assignment.
+
+        Raises:
+            AssertionError: Naming the line of the first other reference, or of a second definition or
+                assignment.
+        """
+        definitions = [node for node in self._tree.body if _is_summary_definition(node)]
+        assignments = [node for node in ast.walk(self._tree) if _is_section_assignment(node)]
+        allowed = set()
+        if len(definitions) == 1:
+            allowed.update((definitions[0].targets[0], definitions[0].value))
+        if len(assignments) == 1:
+            allowed.add(assignments[0].value.args[0])
+        for node in ast.walk(self._tree):
+            if _names_the_summary(node) and node not in allowed:
+                parent = self._parents.get(node)
+                raise AssertionError("line %d: a read of the summary the key guard does not follow: %s"
+                                     % (getattr(node, "lineno", getattr(parent, "lineno", 0)),
+                                        ast.unparse(parent if parent is not None else node)))
 
     def _key_of(self, node) -> str | None:
         """The key one load of ``section`` reads, ``None`` for a keyless accepted use.
@@ -288,7 +381,9 @@ def _summary_keys_read(scenario: str) -> set[str]:
             brackets, any accessor but ``.get``, a ``.get`` whose argument is
             neither a literal key nor ``_list_under``'s own parameter, a
             ``_list_under`` call without a literal key, an alias, ``section``
-            unpacked or iterated, or passed to a function the walk cannot read.
+            unpacked or iterated, or passed to a function the walk cannot read;
+            or the summary reached by any path but its single
+            ``section = document.get(CODE_REVIEW_KEY)``.
     """
     return _SectionReads(scenario).keys()
 
