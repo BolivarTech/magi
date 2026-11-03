@@ -903,7 +903,13 @@ pub fn is_binary_section(section: &str) -> bool {
     section
         .lines()
         .take_while(|l| !l.starts_with("@@"))
-        .any(|l| l.starts_with(BINARY_MARKER) || l == BINARY_PATCH_MARKER)
+        .any(is_binary_marker_line)
+}
+
+/// Whether one header line of a diff section is git's binary marker (`Binary files … differ`
+/// or `GIT binary patch`). O(line).
+pub(crate) fn is_binary_marker_line(line: &str) -> bool {
+    line.starts_with(BINARY_MARKER) || line == BINARY_PATCH_MARKER
 }
 
 /// The path of a section worth reviewing (it has hunks, or it is binary and gets listed), or

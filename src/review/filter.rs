@@ -14,7 +14,8 @@ use std::path::Path;
 
 use super::error::ReviewError;
 use super::input::{
-    in_work_tree, is_binary_section, renamed_from, split_nul, ReviewFile, ReviewInput,
+    in_work_tree, is_binary_marker_line, is_binary_section, renamed_from, split_nul, ReviewFile,
+    ReviewInput,
 };
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
@@ -24,6 +25,10 @@ use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LIN
 pub(crate) const MISSING: &str = "missing";
 /// The tracing target of the filter's run-log entries.
 const LOG_TARGET: &str = "magi_rs::review";
+/// The marker that opens and closes a hunk header line (`@@ -a,b +c,d @@`).
+const HUNK_START: &str = "@@";
+/// What git writes after a last diff line that has no newline, newline included.
+const NO_NEWLINE_AT_EOF: &str = "\n\\ No newline at end of file\n";
 /// `ls-files` for a file named by the caller: tracked or untracked, when a rule excludes it.
 const LS_FILES_IGNORED_ANY: &[&str] = &[
     "ls-files",
@@ -147,6 +152,9 @@ enum Verdict {
     Keep,
     /// Reviewed whole, from its new side: a text file whose diff git printed as binary.
     KeepWhole,
+    /// Reviewed through the diff given, which replaces the file's own: a deleted text file whose
+    /// diff git printed as binary.
+    KeepDiff(String),
     /// Left out, with its cause.
     Skip(SkipCause),
 }
@@ -163,8 +171,9 @@ enum Verdict {
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker
 /// ([`is_binary_section`]) is judged by its bytes the same way, and when both sides are text it
 /// is kept with no diff, reviewed whole from its new side; a side that cannot be read is left
-/// out under its own cause, as for any file, and it stays `binary` only when the file has no new
-/// side (`suppressed_diff`).
+/// out under its own cause, as for any file; a deleted text file is kept with the deletion diff
+/// git would have printed, and it stays `binary` only when the file has neither side
+/// (`suppressed_diff`).
 /// The binary and UTF-8 checks run on both sides that exist (binary first). The
 /// secret scan covers both whole sides, not only what is sent: the safe direction. A renamed
 /// file's old side is read under its old path (`rename from`).
@@ -228,6 +237,18 @@ pub fn filter_files(
                 filtered.kept.push(ReviewFile {
                     path: file.path,
                     diff: None,
+                });
+            }
+            Verdict::KeepDiff(diff) => {
+                if registry.get(&file.path).is_none() {
+                    filtered.no_extractor.push(display_path(&file.path));
+                }
+                // Both sides stay: the deleted lines are read from the old side, as for any
+                // deletion.
+                kept_sides.extend(sides_of(&file));
+                filtered.kept.push(ReviewFile {
+                    path: file.path,
+                    diff: Some(diff),
                 });
             }
             Verdict::Skip(cause) if explicit => {
@@ -414,8 +435,9 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2], diff: Option<&str>) ->
 /// git printed no hunks for it (one INFO entry says so). A side that fails to read is mapped
 /// as for any file ([`read_side`]): it is left out under its own cause (`unreadable`, `too
 /// large`, `outside workspace`, …), and an error that is not a skip (the review's total cap)
-/// fails the review. Only a file with no new side (a deletion) stays `binary`, the label the
-/// section carries.
+/// fails the review. A deletion (no new side) whose old side is text is kept with the diff git
+/// would have printed ([`deletion_diff`]), so its deleted lines are reviewed like any deletion's;
+/// it stays `binary`, the label the section carries, only when it has no old side either.
 ///
 /// # Arguments
 ///
@@ -426,7 +448,7 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2], diff: Option<&str>) ->
 ///
 /// # Returns
 ///
-/// [`Verdict::KeepWhole`] or the skip.
+/// [`Verdict::KeepWhole`], [`Verdict::KeepDiff`] or the skip.
 ///
 /// # Errors
 ///
@@ -455,8 +477,15 @@ fn suppressed_diff(
     if let Some(skip) = content_verdict(path, sides, file.diff.as_deref()) {
         return Ok(skip);
     }
+    // MAGI FIX (review residual A2-b): a deleted text file marked `-diff` was left out as
+    // `binary`, a false cause; its deletion is rebuilt from the old side, already scanned above.
     if new.is_none() {
-        return Ok(Verdict::Skip(SkipCause::Binary));
+        return Ok(
+            match (old.as_deref().map(std::str::from_utf8), &file.diff) {
+                (Some(Ok(old)), Some(section)) => Verdict::KeepDiff(deletion_diff(section, old)),
+                _ => Verdict::Skip(SkipCause::Binary),
+            },
+        );
     }
     let shown = display_path(path);
     tracing::event!(
@@ -466,6 +495,41 @@ fn suppressed_diff(
         "git printed a text file's diff as binary; it is reviewed whole"
     );
     Ok(Verdict::KeepWhole)
+}
+
+/// The unified diff of the deletion of a file whose old side is `old`, built on the header lines
+/// of git's `section` (those before its binary marker): one hunk `@@ -1,N +0,0 @@` with every
+/// old line as `-`, and git's `\ No newline at end of file` after a last line without one. An
+/// empty `old` gives the header alone, with no hunk, as git prints an empty file's deletion.
+/// O(old + section).
+///
+/// The text is only what `old` and `section` hold, both scanned for secrets by
+/// [`content_verdict`]; the batches scan it again as any diff's on the way out.
+fn deletion_diff(section: &str, old: &str) -> String {
+    let mut diff = String::with_capacity(section.len() + old.len() * 2);
+    for line in section
+        .lines()
+        .take_while(|l| !l.starts_with(HUNK_START) && !is_binary_marker_line(l))
+    {
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    let lines: Vec<&str> = old.split_inclusive('\n').collect();
+    if lines.is_empty() {
+        return diff;
+    }
+    diff.push_str(&format!(
+        "{HUNK_START} -1,{} +0,0 {HUNK_START}\n",
+        lines.len()
+    ));
+    for line in lines {
+        diff.push('-');
+        diff.push_str(line);
+        if !line.ends_with('\n') {
+            diff.push_str(NO_NEWLINE_AT_EOF);
+        }
+    }
+    diff
 }
 
 /// A `secret` skip, logged with the shown path and the pattern's name (never the value).
