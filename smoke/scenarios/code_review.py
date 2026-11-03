@@ -133,6 +133,11 @@ TRAILING_COMPONENT_CHARS = ". "
 #: was opened and classified by its content.
 PROTECTED_CAUSE = "ignored"
 
+#: The suffixes of SQLite's side files, which the store opens and removes as
+#: it works: one git listed before R16 may be gone when the product lists the
+#: tree, so S51 never requires one to be named.
+SQLITE_SIDE_SUFFIXES = ("-wal", "-shm")
+
 #: Every cause the product prints for a file it leaves out
 #: (``SkipCause::as_str`` in ``src/review/filter.rs``). An entry is anchored on
 #: these words, so a path may hold commas, semicolons or spaces.
@@ -1209,7 +1214,8 @@ def _exclusion_finding(run, stderr):
         without naming every one of them as ``ignored``, so the rest may be in
         the unnamed tail, read and classified;
         ``FAIL`` when git listed some and the uncut list names none of
-        them as ``ignored``; else ``PASS``. Names are compared with ``\\``
+        them, or not every one apart from SQLite side files
+        (:data:`SQLITE_SIDE_SUFFIXES`), as ``ignored``; else ``PASS``. Names are compared with ``\\``
         read as ``/``.
     """
     read, failure = _protected_read(stderr)
@@ -1261,6 +1267,13 @@ def _exclusion_finding(run, stderr):
             "its list at %s more, so the rest may be among the unnamed"
             % (", ".join(run.protected_visible), len(named & visible),
                cut.group("more")))
-    return _verdict(S51_ASSERTIONS, 2, "R16", found,
-                    "git lists %s, and stderr names none of them as ignored"
-                    % ", ".join(run.protected_visible))
+    # MAGI FIX (F1a2-h): an uncut list names every entry the product left
+    # out, so one visible .magi/ file absent from it was taken elsewhere; the
+    # intersection alone passed a list naming one of three.
+    stable = {path for path in visible
+              if not path.endswith(SQLITE_SIDE_SUFFIXES)}
+    missing = sorted(stable - named)
+    return _verdict(S51_ASSERTIONS, 2, "R16", found and not missing,
+                    "git lists %s, and stderr does not name %s as ignored"
+                    % (", ".join(run.protected_visible),
+                       ", ".join(missing) if found else "any of them"))
