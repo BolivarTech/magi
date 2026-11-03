@@ -855,9 +855,14 @@ class ReviewLogBoundTests(unittest.TestCase):
             for name in ("a.log", "b.log", "c.log"):
                 (logs_dir / name).write_bytes(b"123")
             unreadable = []
-            with mock.patch.object(runs, "MAX_REVIEW_LOG_TOTAL_BYTES", 6):
+            # [MAGI F1b1b] the file past the total cap must never be opened, not only left out of the capture:
+            # without the pre-open total check it was opened and read one byte past the cap, then named alike.
+            with mock.patch.object(runs, "MAX_REVIEW_LOG_TOTAL_BYTES", 6), \
+                    mock.patch.object(runs, "_open_listed",
+                                      side_effect=runs._open_listed) as read:
                 captured = executor._capture_review_log(runs.DEFINITIONS["R15"], unreadable)
             self.assertEqual((b"123", b"123"), captured)
+            self.assertEqual(["a.log", "b.log"], [pathlib.Path(call.args[0]).name for call in read.call_args_list])
             self.assertEqual(1, len(unreadable))
             self.assertTrue(unreadable[0].startswith("c.log ("))
 
