@@ -29,7 +29,9 @@ that follow from it are declared rather than handled:
   :func:`code_only` keeps such a line whole. [MAGI §6 MS2 loop 29,
   F1b2a-melchior]
 - A line inside a multi-line (raw) string literal that starts with ``//`` is
-  taken for a comment and skipped.
+  taken for a comment and skipped. :func:`one_definition` skips every line
+  that starts inside such a literal; :func:`one_occurrence` does not, so a
+  needle pinned inside a multi-line string is still found. [MAGI F1b2a]
 - Uniqueness is per line: two matches on one physical line count once.
   rustfmt, which the product's CI enforces, puts each item on its own line.
 - :func:`one_occurrence` reads a line only up to its first ``//``, whether or
@@ -42,6 +44,7 @@ Example:
     '2'
 """
 
+import bisect
 import pathlib
 import re
 
@@ -169,7 +172,7 @@ def _literal_end(text: str, index: int) -> int:
     return char.end() if char is not None else index
 
 
-def _without_block_comments(text: str, line_comments: bool = False) -> str:
+def _without_block_comments(text: str, line_comments: bool = False, literals: list | None = None) -> str:
     """*text* with every block comment blanked, its newlines kept.
 
     Line comments, string and char literals are skipped whole, so a ``/*``
@@ -181,6 +184,9 @@ def _without_block_comments(text: str, line_comments: bool = False) -> str:
         text: Source text.
         line_comments: Whether every ``//`` comment, trailing ones included,
             is blanked too (:func:`without_comments`); kept when ``False``.
+        literals: A list that receives the ``(start, end)`` span of every
+            string, raw-string and char literal, in order; ``None`` records
+            nothing.
 
     Raises:
         AssertionError: When a block comment or a string literal is never
@@ -199,6 +205,8 @@ def _without_block_comments(text: str, line_comments: bool = False) -> str:
             end = _literal_end(text, index)
             if end == index:
                 end = index + 1
+            elif literals is not None:
+                literals.append((index, end))
             out.append(text[index:end])
         index = end
     return "".join(out)
@@ -301,13 +309,32 @@ def char_list(text: str) -> list[str]:
     return chars
 
 
-def _exactly_one(regex: re.Pattern, text: str, where: str) -> re.Match:
+def _starts_inside(spans: list, position: int) -> bool:
+    """Whether *position* lies inside one of *spans*, past its first character.
+
+    Args:
+        spans: Sorted, disjoint ``(start, end)`` literal spans.
+        position: An index in the text.
+
+    Returns:
+        bool: ``True`` when some span has ``start < position < end``: the
+        position is in the literal's contents or on its closing quote, never
+        on its opening.
+    """
+    index = bisect.bisect_left(spans, (position,)) - 1
+    return index >= 0 and position < spans[index][1]
+
+
+def _exactly_one(regex: re.Pattern, text: str, where: str, outside_literals: bool = False) -> re.Match:
     """The single match of *regex* in *text* that does not sit on a comment line.
 
     Args:
         regex: A pattern anchored at a line start (``re.M``).
         text: Source text.
         where: The file the text came from, for the failure message.
+        outside_literals: Whether a match whose first non-blank character
+            lies inside a string or raw-string literal (a line of a
+            multi-line fixture) is skipped too.
 
     Returns:
         re.Match: The one match.
@@ -316,8 +343,12 @@ def _exactly_one(regex: re.Pattern, text: str, where: str) -> re.Match:
         AssertionError: When there is no such match or more than one, naming
             *where*, the pattern and the count.
     """
-    found = [match for match in regex.finditer(_without_block_comments(text))
-             if not match.group(0).lstrip().startswith(_COMMENT)]
+    spans = [] if outside_literals else None
+    view = _without_block_comments(text, literals=spans)
+    found = [match for match in regex.finditer(view)
+             if not match.group(0).lstrip().startswith(_COMMENT)
+             and not (outside_literals and _starts_inside(
+                 spans, match.start() + len(match.group(0)) - len(match.group(0).lstrip())))]
     if len(found) != 1:
         raise AssertionError("%s: expected exactly one code line matching %r, found %d"
                              % (where, regex.pattern, len(found)))
@@ -329,8 +360,12 @@ def one_definition(text: str, pattern: str, where: str, flags: int = 0) -> re.Ma
 
     The pattern is anchored with ``^[ \\t]*`` under ``re.M``: it must be the
     first thing on its line, so an old copy left in a comment, or quoted mid
-    line, never answers for the real definition. The pattern's own groups are
-    available on the result.
+    line, never answers for the real definition. MAGI FIX (F1b2a): nor does a
+    line that starts inside a string or raw-string literal, such as a test
+    fixture spread over a multi-line ``r#"..."#``. The match is still read off
+    the source with its literals intact, so a pattern may capture a string's
+    contents when the literal opens on the definition's own line. The
+    pattern's own groups are available on the result.
 
     Complexity: ``O(len(text))`` for a pattern without catastrophic
     backtracking.
@@ -347,7 +382,8 @@ def one_definition(text: str, pattern: str, where: str, flags: int = 0) -> re.Ma
     Raises:
         AssertionError: When no code line matches, or more than one does.
     """
-    return _exactly_one(re.compile(r"^[ \t]*(?:%s)" % pattern, re.M | flags), text, where)
+    return _exactly_one(re.compile(r"^[ \t]*(?:%s)" % pattern, re.M | flags), text, where,
+                        outside_literals=True)
 
 
 def one_occurrence(text: str, needle: str, where: str) -> re.Match:
