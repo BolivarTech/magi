@@ -188,10 +188,16 @@ CLASSIFY_SECS = 6
 #: (``HEADLESS_TIMEOUT_SLACK_PCT`` in ``src/magi/mod.rs``).
 SLACK_PCT = 20
 
+#: What each whole attempt adds to a batch's need at the floor, in seconds:
+#: the attempt factor is ``attempts x models x (100 + SLACK_PCT)`` hundredths
+#: (``attempt_factor`` in ``src/magi/mod.rs``), so a need is always
+#: ``CLASSIFY_SECS + k x`` this step for a whole ``k >= 1`` (15 x 1.2 = 18 s,
+#: exact in integers because 15 x 120 is a multiple of 100).
+NEED_STEP_SECS = FLOOR_SECS * (100 + SLACK_PCT) // 100
+
 #: The least wall clock any batch needs at the floor: the most lenient
-#: ``[magi]`` (no rotation, no retry) gives an attempt factor of
-#: ``100 + SLACK_PCT`` hundredths, so 6 + 15 x 1.2 = 24 s.
-MIN_NEED_PER_BATCH_SECS = CLASSIFY_SECS + FLOOR_SECS * (100 + SLACK_PCT) // 100
+#: ``[magi]`` (no rotation, no retry) gives ``k = 1``, so 6 + 18 = 24 s.
+MIN_NEED_PER_BATCH_SECS = CLASSIFY_SECS + NEED_STEP_SECS
 
 #: The product's refusal, as ``ReviewError::Budget`` renders it
 #: (``src/review/error.rs``): batches, wall clock per batch, the wall clock a
@@ -902,7 +908,9 @@ def _budget_fields_ok(match):
     Returns:
         bool: ``True`` for at least :data:`MIN_REFUSED_BATCHES` batch; a wall
         clock of exactly the total asked for divided by the batches; a need of
-        at least :data:`MIN_NEED_PER_BATCH_SECS`; the :data:`FLOOR_SECS`
+        :data:`CLASSIFY_SECS` plus a whole, positive number of
+        :data:`NEED_STEP_SECS` (so at least :data:`MIN_NEED_PER_BATCH_SECS`);
+        the :data:`FLOOR_SECS`
         floor; a ceiling below the floor and not above the wall clock; and a
         minimum of exactly batches x need. That the need exceeds the wall clock
         and the minimum the total follows: the total (20 s) is below
@@ -927,6 +935,9 @@ def _budget_fields_ok(match):
     # not read; the formula is pinned in Rust (headless_consult_timeout_secs in
     # src/magi/mod.rs and pre_budget in src/review/clock.rs), and minimum ==
     # batches x need ties the advice to whatever need the product printed.
+    # MAGI FIX (F1a2-g): "at least 24 s" still passed a need no config can
+    # print (25 s). Every config's need is CLASSIFY_SECS + k x NEED_STEP_SECS
+    # for a whole k >= 1, so the shape is checked without reading [magi].
     if match is None:
         return False
     batches, wall, need, floor, ceiling, minimum = (
@@ -937,6 +948,7 @@ def _budget_fields_ok(match):
     asked = runs.REVIEW_TOO_SHORT_TIMEOUT_S
     return (wall == asked // batches
             and need >= MIN_NEED_PER_BATCH_SECS
+            and (need - CLASSIFY_SECS) % NEED_STEP_SECS == 0
             and floor == FLOOR_SECS
             and ceiling < FLOOR_SECS
             and ceiling <= wall
