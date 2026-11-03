@@ -164,6 +164,60 @@ class ErrorBackendReachedTests(unittest.TestCase):
         self.assertIn("error backend", findings[0].detail)
 
 
+class _BrokenWriter:
+    """A response stream whose every write fails, as when the client hangs up before the answer."""
+
+    def write(self, data: bytes) -> int:
+        raise ConnectionAbortedError("the client hung up")
+
+    def flush(self) -> None:
+        raise ConnectionAbortedError("the client hung up")
+
+
+class EchoingHandlerHardeningTests(unittest.TestCase):
+    """[MAGI F1a1b] the error backend records and answers whatever arrives, as the counter does.
+
+    The echoing handler recorded from ``do_POST``: a request line that did not parse never reached it and
+    went unrecorded, a target ``urlsplit`` refuses (``http://[x``) raised before the record, and a write to a
+    client that had hung up raised out of the handler.
+    """
+
+    def _handler(self, request: bytes, log, wfile=None):
+        import io
+        import types
+        handler = runs._EchoingHandler.__new__(runs._EchoingHandler)
+        handler.rfile = io.BufferedReader(io.BytesIO(request))
+        handler.wfile = io.BytesIO() if wfile is None else wfile
+        handler.server = types.SimpleNamespace(log=log)
+        handler.client_address = ("127.0.0.1", 0)
+        handler.close_connection = True
+        return handler
+
+    def test_a_request_line_that_does_not_parse_is_recorded(self) -> None:
+        log = runs.RequestLog()
+        with runs.error_backend(log) as url:
+            _first_bytes(_port(url), b"NOT A REQUEST LINE AT ALL\r\n\r\n")
+        self.assertEqual((runs.UNPARSED_REQUEST,), log.recorded)
+
+    def test_a_target_that_does_not_split_is_recorded_unparsed_and_answered(self) -> None:
+        log = runs.RequestLog()
+        with runs.error_backend(log) as url:
+            # An absolute-form target with an unclosed IPv6 bracket: urlsplit raises ValueError on it.
+            answer = _first_bytes(_port(url), b"POST http://[x/v1 HTTP/1.0\r\nContent-Length: 0\r\n\r\n")
+        self.assertEqual((("POST", runs.UNPARSED_REQUEST[1]),), log.recorded)
+        self.assertTrue(answer.startswith(b"HTTP/1.0 %d" % runs.ERROR_BACKEND_STATUS), answer[:80])
+
+    def test_a_client_gone_before_the_answer_raises_nothing(self) -> None:
+        log = runs.RequestLog()
+        handler = self._handler(b"POST /v1/chat HTTP/1.0\r\nContent-Length: 0\r\n\r\n", log, _BrokenWriter())
+        try:
+            handler.handle_one_request()
+        except OSError as exc:
+            self.fail("the answer's write failure escaped the handler: %r" % exc)
+        self.assertEqual((("POST", "/v1/chat"),), log.recorded)
+        self.assertTrue(handler.close_connection)
+
+
 class HandlerThreadBoundTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 29, F1a1b-caspar] a flood of connections cannot spawn handler threads without bound.
 
