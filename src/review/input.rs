@@ -2515,4 +2515,44 @@ mod tests {
             assert!(walk_in(u.path(), 5).is_ok());
         }
     }
+
+    #[test]
+    fn a_walk_of_a_deep_tree_does_not_grow_the_call_stack() {
+        // [MAGI S6 loop 33, A1] the walk recursed once per directory level with no depth cap,
+        // so a deep enough tree overflowed the stack and aborted the process. It runs here on
+        // a thread with a deliberately small stack, so a depth the recursion could not survive
+        // stays small enough for any file system.
+        const DEPTH: usize = 300;
+        const SMALL_STACK_BYTES: usize = 64 * 1024;
+        let d = tempfile::tempdir().expect("tempdir");
+        let mut deepest = d.path().to_path_buf();
+        for _ in 0..DEPTH {
+            deepest.push("d");
+        }
+        std::fs::create_dir_all(&deepest).expect("mkdir");
+        std::fs::write(deepest.join("leaf.rs"), "x\n").expect("write");
+        let root = d.path().to_path_buf();
+        let found = std::thread::Builder::new()
+            .stack_size(SMALL_STACK_BYTES)
+            .spawn(move || {
+                let mut found = Vec::new();
+                let mut not_utf8 = Vec::new();
+                let mut budget = u64::MAX;
+                walk(
+                    &root,
+                    "",
+                    &HashSet::new(),
+                    &mut found,
+                    &mut not_utf8,
+                    &mut budget,
+                )
+                .map(|()| found)
+            })
+            .expect("spawn")
+            .join()
+            .expect("join")
+            .expect("walk");
+        let leaf = format!("{}leaf.rs", "d/".repeat(DEPTH));
+        assert_eq!(found, vec![leaf]);
+    }
 }
