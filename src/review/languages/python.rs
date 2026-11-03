@@ -1892,4 +1892,29 @@ def g():
             ]
         );
     }
+
+    #[test]
+    fn a_lone_carriage_return_is_not_a_line_break() {
+        // [MAGI B2b2] git counts only '\n' as a line break, and hunk ranges come from git, so a
+        // classic-Mac file is one line here too: one unit on line 1, the '\r's kept inside it.
+        let code = "import a\rdef f():\r    return 1\r";
+        let units = extract(code, &[1, 2, 3]);
+        assert_eq!(
+            spans(&units),
+            vec![("imports", UnitKind::DeclarationGroup, 1, 1)]
+        );
+        assert!(
+            units[0].content.contains("\rdef f():\r"),
+            "{:?}",
+            units[0].content
+        );
+    }
+
+    #[test]
+    fn a_crlf_source_still_splits_into_its_real_lines() {
+        // The other half of the lone-'\r' contract: "\r\n" stays one line break.
+        let units = extract("def f():\r\n    return 1\r\n", &[2]);
+        assert_eq!(spans(&units), vec![("f", UnitKind::Function, 1, 2)]);
+        assert!(!units[0].content.contains('\r'), "{:?}", units[0].content);
+    }
 }
