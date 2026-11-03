@@ -5017,6 +5017,27 @@ int g(void) {
     }
 
     #[test]
+    fn a_brace_typing_a_later_parameter_line_keeps_the_function_body() {
+        // [MAGI S6 loop 30, B2b1b] a brace opened on a later parameter line while the parameter
+        // list stayed open (`options: {` under `function f(`) was taken for the body's, so the
+        // function ended where the type closed and its body fell into later units. The body's
+        // brace is found after the outer list closes (`) {`, `}) {` or an Allman `{`).
+        let ts = BraceFamilyExtractor::typescript();
+        for code in [
+            "function f(\n  options: {\n    enabled: boolean;\n  },\n) {\n  body();\n}\n",
+            "function f(\n  a: number,\n  options: {\n    enabled: boolean;\n  }) {\n  body();\n}\n",
+            "function f(\n  options: {\n    enabled: boolean;\n  },\n)\n{\n  body();\n}\n",
+        ] {
+            let last = u32::try_from(code.lines().count()).expect("small");
+            assert_eq!(
+                sorted_spans(&ts, code),
+                vec![unit("f", UnitKind::Function, 1, last)],
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn a_return_type_literal_block_keeps_the_function_body() {
         // [MAGI loop 28 sweep, B2a/B2b1b] the brace a return type opens (`function f(): {`, a
         // TypeScript object type, or `func f() struct {`, a Go anonymous struct) was taken for
