@@ -9,6 +9,7 @@ comment and the guard stayed green; two definitions were never noticed either.
 """
 
 import importlib
+import re
 import unittest
 
 _DRIFTED = ("/// Was `pub const BYTES_PER_TOKEN: usize = 4;` before the change.\n"
@@ -69,6 +70,21 @@ class OneDefinitionTests(unittest.TestCase):
         text = "let old = 1; let per_batch = split(total);\n"
         with self.assertRaises(AssertionError):
             _helpers().one_definition(text, r"let per_batch = split\(total\);", "c.rs")
+
+    def test_a_wildcard_pattern_never_reads_a_value_from_a_trailing_comment(self) -> None:
+        # MAGI FIX (S6 loop 34): a trailing // comment stayed in the searched view, so a pattern with a
+        # leading wildcard read an old copy left in that comment as the definition.
+        text = "fn f() {} // pub const X: usize = 4;\n"
+        with self.assertRaisesRegex(AssertionError, "found 0"):
+            _helpers().one_definition(text, r".*pub const X: usize = (\d+);", "f")
+
+    def test_a_body_capture_spanning_lines_leaves_a_trailing_comment_out(self) -> None:
+        # MAGI FIX (S6 loop 34): a re.S body capture carried a trailing comment's text with it.
+        text = "fn f() {\n    let a = 1; // stale: let a = 2;\n}\n"
+        body = _helpers().one_definition(text, r"fn f\(\) \{(.*?)\n\}", "f", flags=re.S).group(1)
+        self.assertIn("let a = 1;", body)
+        self.assertNotIn("stale", body)
+        self.assertNotIn("//", body)
 
 
 class OneOccurrenceTests(unittest.TestCase):
