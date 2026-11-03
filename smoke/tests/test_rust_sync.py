@@ -817,6 +817,44 @@ class SummaryKeyExtractionTests(unittest.TestCase):
         self.assertEqual({"batches", "findings"},
                          _summary_keys_read(self._KNOWN + "ok = isinstance(section, dict)\nsection = {}\n"))
 
+    #: A module helper that takes ``section`` by that name, and its call.
+    _HELPER = 'def _helper(run_id, section):\n    return section.get("inner")\ny = _helper("R12", section)\n'
+
+    def test_a_shadowed_or_rebound_module_helper_fails_the_read(self) -> None:
+        # MAGI FIX (S6 loop 35): a call was credited by the name of a top-level def, so a local def of the same
+        # name, a later rebinding of it or a decorator that replaces it ran code the walk never read.
+        for shape in ('def f():\n    def _helper(run_id, other):\n        return other.get("hidden")\n'
+                      '    return _helper("R12", section)',
+                      '_helper = lambda run_id, other: other.get("hidden")',
+                      'from json import loads as _helper',
+                      'class _helper:\n    pass'):
+            with self.subTest(shape=shape), self.assertRaises(AssertionError):
+                _summary_keys_read(self._KNOWN + self._HELPER + shape + "\n")
+        decorated = self._HELPER.replace("def _helper(", "@_wrap\ndef _helper(")
+        with self.assertRaises(AssertionError):
+            _summary_keys_read(self._KNOWN + decorated)
+
+    def test_the_summary_reached_without_naming_its_key_fails_the_read(self) -> None:
+        # MAGI FIX (S6 loop 35): only the key's name and literal were followed, so the summary read with a key
+        # built at run time, through the document's values, or by a reflection builtin credited no key.
+        bound = self._BOUND + self._KNOWN
+        consult = 'CONSULT_KEY = "consult"\nconsult = document.get(CONSULT_KEY)\n'
+        self.assertEqual({"batches", "findings"}, _summary_keys_read(bound + consult))
+        for shape in ('cr = document.get("code" + "_review")\nz = cr.get("hidden")',
+                      'k = "code" + "_review"\ncr = document.get(k)\nz = cr.get("hidden")',
+                      'OTHER_KEY = "code" + "_review"\ncr = document.get(OTHER_KEY)',
+                      'cr = next(iter(document.values()))\nz = cr.get("hidden")',
+                      'alias = document\nz = alias.get("x")',
+                      'cr = document.get(CONSULT_KEY, {})',
+                      'z = vars()["section"].get("hidden")',
+                      'z = globals()["section"].get("hidden")',
+                      'z = locals()["section"].get("hidden")',
+                      'z = getattr(document, "get")("x")',
+                      'z = eval("section").get("hidden")',
+                      'CONSULT_KEY = "other"'):
+            with self.subTest(shape=shape), self.assertRaises(AssertionError):
+                _summary_keys_read(bound + consult + shape + "\n")
+
 
 class ReportKeyTests(unittest.TestCase):
     """The JSON keys S47 reads exist in the product's report and envelope."""
