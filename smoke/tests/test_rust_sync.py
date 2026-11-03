@@ -19,6 +19,7 @@ on the raw text, where a comment can only make them stricter.
 """
 
 import ast
+import fractions
 import os
 import pathlib
 import re
@@ -259,6 +260,32 @@ def _usize_const(text: str, name: str) -> int:
     return int(match.group(1).replace("_", ""))
 
 
+def _fraction_covers_percent(fraction: float, percent: int) -> bool:
+    """Whether the harness's batch *fraction* is at least the product's *percent*, compared exactly.
+
+    MAGI FIX (S6 loop 33): the check was ``round(fraction * 100) >= percent``,
+    so 0.495 rounded up to 50 and passed against a product 50 %. Neither
+    rounding nor plain float arithmetic is exact (``0.57 * 100`` is
+    ``56.99999999999999``), so the fraction is read as the decimal it is
+    written as: ``Fraction(str(fraction))`` takes the shortest repr, which for
+    a literal such as ``0.60`` is that literal, and compares in rationals.
+
+    Args:
+        fraction: The harness's batch window fraction (``runs.BATCH_WINDOW_FRACTION``).
+        percent: The product's ``BATCH_WINDOW_FRACTION_PERCENT``.
+
+    Returns:
+        bool: ``True`` when ``fraction * 100 >= percent`` holds exactly.
+
+    Example:
+        >>> _fraction_covers_percent(0.57, 57)
+        True
+        >>> _fraction_covers_percent(0.495, 50)
+        False
+    """
+    return fractions.Fraction(str(fraction)) * 100 >= percent
+
+
 class BatchConstantTests(unittest.TestCase):
     """The batch arithmetic R12's input is sized with (``smoke/runs.py``)."""
 
@@ -277,7 +304,8 @@ class BatchConstantTests(unittest.TestCase):
         # The harness sizes at the larger of the product's two values (50 provisional, 60 measured);
         # a product fraction above the harness's would plan fewer batches than R12's input assumes.
         percent = _usize_const(self.window, "BATCH_WINDOW_FRACTION_PERCENT")
-        self.assertGreaterEqual(round(runs.BATCH_WINDOW_FRACTION * 100), percent)
+        self.assertTrue(_fraction_covers_percent(runs.BATCH_WINDOW_FRACTION, percent),
+                        (runs.BATCH_WINDOW_FRACTION, percent))
 
     def test_a_harness_fraction_just_under_the_products_fails_the_check(self) -> None:
         # MAGI FIX (S6 loop 33): the check rounded the harness's percent, so 0.495 passed against a product 50 %
