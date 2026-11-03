@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -100,14 +101,24 @@ class WorkingDirectoryTests(unittest.TestCase):
     def test_a_path_working_directory_reaches_the_child(self) -> None:
         """R16's relative input ``.`` names the review workspace only if the
         child really starts there; a ``Path`` must be accepted, not only a str.
-        The child is the running interpreter, standing in for the product."""
-        workdir = support.scratch_dir(self).resolve()
+        The child is the running interpreter, standing in for the product.
+
+        [F1b2c] The binary's repository root is a DIFFERENT directory from the
+        ``cwd`` asked for: when they were the same, an ``invoke`` that started
+        the child in the repository root passed as well.
+        """
+        scratch = support.scratch_dir(self).resolve()
+        repo_root, workdir = scratch / "repo", scratch / "work"
+        repo_root.mkdir()
+        workdir.mkdir()
         with mock.patch.object(ReleaseBinary, "path", new_callable=mock.PropertyMock,
                                return_value=pathlib.Path(sys.executable)):
-            output = ReleaseBinary(workdir).invoke(
+            output = ReleaseBinary(repo_root).invoke(
                 ["-c", "import os; print(os.getcwd())"], timeout=30, cwd=workdir)
         self.assertEqual(0, output.exit_code)
-        self.assertEqual(workdir, pathlib.Path(output.stdout.decode("utf-8").strip()).resolve())
+        # realpath on both sides: TEMP may arrive in its 8.3 short form.
+        self.assertEqual(os.path.realpath(workdir),
+                         os.path.realpath(output.stdout.decode("utf-8").strip()))
 
 
 class InvokeEnvironmentTests(unittest.TestCase):
