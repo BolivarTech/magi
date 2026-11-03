@@ -1450,6 +1450,39 @@ def g():
     }
 
     #[test]
+    fn a_class_opening_with_a_byte_order_mark_splits_at_its_own_header() {
+        // [MAGI B2b2] the BOM was passed over to detect the class but not to find its header
+        // when splitting, so the class gave no pieces (a large one was refused as too large),
+        // or a nested class's header anchored the split and its methods were misattributed.
+        let code = "\u{FEFF}class C:\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2\n";
+        let units = extract(code, &[1, 2, 3, 4, 5, 6]);
+        let parts = PythonExtractor.split_block(&units[0]);
+        assert_each_line_in_one_unit(&parts, 6);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("C", UnitKind::Class, 1, 1),
+                ("a", UnitKind::Method, 2, 3),
+                ("C", UnitKind::Class, 4, 4),
+                ("b", UnitKind::Method, 5, 6),
+            ]
+        );
+        let code = "\u{FEFF}class Outer:\n    def a(self):\n        return 1\n\n    class Inner:\n        def b(self):\n            pass\n";
+        let units = extract(code, &[1, 2, 3, 4, 5, 6, 7]);
+        let parts = PythonExtractor.split_block(&units[0]);
+        assert_each_line_in_one_unit(&parts, 7);
+        assert_eq!(
+            spans(&parts),
+            vec![
+                ("Outer", UnitKind::Class, 1, 1),
+                ("a", UnitKind::Method, 2, 3),
+                ("Outer", UnitKind::Class, 4, 4),
+                ("Inner", UnitKind::Class, 5, 7),
+            ]
+        );
+    }
+
+    #[test]
     fn a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit() {
         // [MAGI S6 loop 14, B2b2, declared; fixed in MAGI loop 29, B2b2] definitions are found
         // at indent 0 only, so one inside `if TYPE_CHECKING:` is no unit of its own and its
