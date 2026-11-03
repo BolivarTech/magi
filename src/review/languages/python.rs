@@ -16,8 +16,6 @@
 //!   module-level compound statement leaves the whole block one gap unit, which splits at the
 //!   definitions it holds when it is too large for a batch
 //!   (`a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit`).
-//! - A byte order mark before the first line's keyword hides that construct
-//!   (`a_byte_order_mark_on_the_first_line_loses_no_line`).
 //! - A tab counts as one column of indentation. CPython compares indentation with tabs at 8
 //!   columns and at 1 and rejects (`TabError`) a file where the two orders disagree, so in every
 //!   file it accepts this orders the lines as Python does; checked over 4 880 accepted files
@@ -367,6 +365,10 @@ impl LogicalLines {
     }
 }
 
+/// The UTF-8 byte order mark a file may open with, read past on its first line to find the
+/// keyword there ([`try_detect_python_constructs`]).
+const BYTE_ORDER_MARK: char = '\u{FEFF}';
+
 /// Intermediate detected construct.
 struct PythonConstruct {
     kind: UnitKind,
@@ -388,23 +390,33 @@ fn detect_python_constructs(lines: &[&str]) -> Vec<PythonConstruct> {
 /// the failure mode explicit, as the brace family's detection and [`member_span`] do. O(n) in
 /// the lines.
 ///
-/// Two limitations, declared, both in the safe direction (every line stays in exactly one unit):
+/// One limitation, declared, in the safe direction (every line stays in exactly one unit):
+/// definitions, classes, imports and assignments are found at indent 0 only. One inside a
+/// module-level compound statement (`if TYPE_CHECKING:`, a `try:` around a compatibility
+/// import, a `with` block) is no unit of its own: the whole block is one gap unit, which
+/// [`PythonExtractor::split_block`] splits at its definitions when it is larger than a batch
+/// (`split_gap`), never cut. Pinned by
+/// `a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit`.
 ///
-/// - Definitions, classes, imports and assignments are found at indent 0 only. One inside a
-///   module-level compound statement (`if TYPE_CHECKING:`, a `try:` around a compatibility
-///   import, a `with` block) is no unit of its own: the whole block is one gap unit, which
-///   [`PythonExtractor::split_block`] splits at its definitions when it is larger than a batch
-///   (`split_gap`), never cut. Pinned by
-///   `a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit`.
-/// - A UTF-8 byte order mark before the first line's keyword (`\u{FEFF}def f():`) is kept by
-///   `str::trim`, since U+FEFF is no whitespace, so that first construct is not recognised
-///   (its header may read as a one-line assignment and its body falls into a gap unit). Only
-///   the unit structure of that construct degrades; every line is still reviewed. Pinned by
-///   `a_byte_order_mark_on_the_first_line_loses_no_line`.
+/// A UTF-8 byte order mark before the first line (`\u{FEFF}def f():`) is passed over to read
+/// that line, since `str::trim` keeps it (U+FEFF is no whitespace); the constructs' lines are
+/// the file's, and the units' content, cut by the caller from its own lines, keeps it.
 // MAGI FIX (S6 loop 14): the indent-0 and byte-order-mark limitations are declared and pinned.
+// MAGI FIX (S6 loop 30, B2b2): the byte order mark hid the first line's definition.
 fn try_detect_python_constructs(lines: &[&str]) -> Option<Vec<PythonConstruct>> {
     // MAGI FIX (S6 loop 12): the conversions fell back to `u32::MAX`, `1` or the line number,
     // unlike the brace family since loop 10; an unrepresentable line now aborts detection.
+    let without_bom: Vec<&str>;
+    let lines = match lines
+        .split_first()
+        .and_then(|(first, rest)| Some((first.strip_prefix(BYTE_ORDER_MARK)?, rest)))
+    {
+        Some((first, rest)) => {
+            without_bom = std::iter::once(first).chain(rest.iter().copied()).collect();
+            without_bom.as_slice()
+        }
+        None => lines,
+    };
     let continued = continued_lines(lines);
     let mut constructs = Vec::new();
     let mut i = 0;
