@@ -1217,6 +1217,47 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_re_resolution_after_the_open_is_an_io_error_not_an_escape() {
+        // [Review residual A2-c] the re-resolution after the open mapped every failure that was
+        // not `NotFound` to `OutsideWorkspace`, naming a sandbox escape for an I/O failure. The
+        // opener stands in for a directory swapped, after the open, for a link to itself: the
+        // path then fails to resolve (a loop), with no escape anywhere.
+        fn self_loop(dir: &std::path::Path) -> std::io::Result<()> {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(dir, dir)
+            }
+            #[cfg(windows)]
+            {
+                // A directory junction needs no privilege, unlike a symlink.
+                let made = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(dir)
+                    .arg(dir)
+                    .output()?;
+                if made.status.success() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("mklink /J failed"))
+                }
+            }
+        }
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("d");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("a.rs"), "fn f() {}\n").expect("write");
+        let src = WorktreeSource::new(root.path().to_path_buf());
+        let open_then_loop = |p: &std::path::Path| -> std::io::Result<std::fs::File> {
+            let file = open_for_review(p)?;
+            std::fs::remove_dir_all(&dir)?;
+            self_loop(&dir)?;
+            Ok(file)
+        };
+        let read = src.read_with("d/a.rs", &open_then_loop);
+        assert!(matches!(read, Err(ReviewError::Io(_))), "{read:?}");
+    }
+
+    #[test]
     fn a_file_swapped_between_the_check_and_the_open_is_refused() {
         // [MAGI §6 MS2 D loop 2, security] the opener stands in for a component swapped for an
         // escaping link after the containment check: what was opened is not what the path names.
