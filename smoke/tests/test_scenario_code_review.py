@@ -270,6 +270,22 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST, outcome.outcome)
         self.assertIn("2 more", outcome.detail)
 
+    def test_s51_fails_when_an_uncut_list_names_only_some_visible_magi_files(self) -> None:
+        # [MAGI F1a2-h] an uncut list names every entry the product left out, so a visible .magi/ file missing
+        # from it was taken somewhere else: one named file among three passed on the intersection alone.
+        stderr = _ROOT_STDERR.replace(b".magi/logs/magi-2026-10-29.log (ignored), ", b"")
+        r = _result("R16", 2, None, _with_id(stderr))
+        outcome = [f for f in DEFAULT_REGISTRY.get("S51").func(r)][2]
+        self.assertEqual(Outcome.FAIL, outcome.outcome)
+        self.assertIn(".magi/logs/magi-2026-10-29.log", outcome.detail)
+
+    def test_s51_does_not_require_a_sqlite_side_file_in_an_uncut_list(self) -> None:
+        # [MAGI F1a2-h] SQLite's -wal and -shm files come and go with the store, so one git listed before the run
+        # may be gone when the product enumerates: only the stable .magi/ files must all be named.
+        visible = _R16_PROTECTED + (".magi/.magi-rs-memory.db-wal", ".magi/.magi-rs-memory.db-shm")
+        r = _result("R16", 2, None, _with_id(_ROOT_STDERR), protected_visible=visible)
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
+
     def test_s51_fails_on_a_wrong_exit(self) -> None:
         r = _result("R16", 0, None, _with_id(_ROOT_STDERR))
         self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[0]])
