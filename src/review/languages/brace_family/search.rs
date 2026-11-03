@@ -728,7 +728,8 @@ fn holds_bare_assignment(text: &str) -> bool {
 }
 
 /// The 0-based last line of the value a declaration at line `i` puts after a bare `=` on the
-/// next lines (`pub static T: &[u8] =` then `&[1, 2, 3];`): the end of that statement, the first
+/// next lines (`pub static T: &[u8] =` then `&[1, 2, 3];`), past any blank lines right after the
+/// `=`: the end of that statement, the first
 /// later line whose code ends in `;` ([`statement_end`], which stops at a blank line, at the next
 /// construct and when the pass's budget is spent); with none, as in JavaScript or Go without
 /// semicolons, the next line when it is code that starts no construct, through the parentheses
@@ -745,11 +746,25 @@ pub(super) fn bare_initializer_end(
     if !is_code(i) || !lines.get(i).is_some_and(|l| ends_in_bare_equal(l.trim())) {
         return i;
     }
-    let end = statement_end(lines, scanned, i, search);
-    if end > i {
+    // MAGI FIX (B2b1b): a blank line right after the `=` ended the value's search, so the
+    // declaration ended on its own line and its value fell into a gap unit; the blank lines
+    // before the value are passed over, each spending one visit of the pass.
+    let mut next = i + 1;
+    while lines.get(next).is_some_and(|l| l.trim().is_empty()) && search.spend() {
+        next += 1;
+    }
+    // A value on one line ending in `;` (`5;`) ends the statement there, though it reads like a
+    // statement of its own to the stop rule: its place after the `=` makes it the value.
+    let ends_statement = |j: usize| scanned.get(j).is_some_and(|s| s.ends_statement);
+    if is_code(next) && ends_statement(next) {
+        return next;
+    }
+    // The last line before the value: `i`, or the last blank line passed over.
+    let before_value = next - 1;
+    let end = statement_end(lines, scanned, before_value, search);
+    if end > before_value {
         return end;
     }
-    let next = i + 1;
     let value = is_code(next)
         && lines.get(next).is_some_and(|l| !l.trim().is_empty())
         && !search.stops(next);
