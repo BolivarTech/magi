@@ -388,9 +388,14 @@ def _exactly_one(regex: re.Pattern, text: str, where: str, outside_literals: boo
     Raises:
         AssertionError: When there is no such match or more than one, naming
             *where*, the pattern and the count.
+
+    MAGI FIX (S6 loop 34): trailing ``//`` comments stayed in the searched
+    view, so a pattern with a leading or middle wildcard read a value from an
+    old copy left in such a comment, and a ``re.S`` body capture carried the
+    comment's text. Every line comment is now blanked first.
     """
     spans = [] if outside_literals else None
-    view = _without_block_comments(text, literals=spans)
+    view = _without_block_comments(text, line_comments=True, literals=spans)
     found = [match for match in regex.finditer(view)
              if not match.group(0).lstrip().startswith(_COMMENT)
              and not (outside_literals and _starts_inside(
