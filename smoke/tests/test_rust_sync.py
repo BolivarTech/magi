@@ -69,6 +69,11 @@ _SUMMARY_KEY_NAME = "CODE_REVIEW_KEY"
 _DOCUMENT_NAME = "document"
 _SUMMARY_KEY = code_review.CODE_REVIEW_KEY
 
+#: Builtins that reach a name or a member without writing it: through any of
+#: them the summary could be read in a form the guard does not follow.
+_REFLECTION_BUILTINS = frozenset({"vars", "locals", "globals", "getattr", "eval", "exec", "compile",
+                                  "__import__"})
+
 
 def _literal_key(node) -> str | None:
     """The string *node* holds when it is a string literal, else ``None``."""
@@ -189,6 +194,26 @@ def _trusted_list_under(tree: ast.Module) -> ast.FunctionDef | None:
     return helper
 
 
+def _binding_counts(tree: ast.Module) -> dict[str, int]:
+    """How many times each name is bound anywhere in *tree*, by every form :func:`_names_bound_by` knows.
+
+    Args:
+        tree: A parsed module.
+
+    Returns:
+        dict[str, int]: The number of bindings of each name bound at least once.
+
+    Example:
+        >>> _binding_counts(ast.parse("a = 1\\ndef f(a):\\n    pass"))
+        {'a': 2, 'f': 1}
+    """
+    counts: dict[str, int] = {}
+    for node in ast.walk(tree):
+        for name in _names_bound_by(node):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def _is_summary_definition(node) -> bool:
     """Whether *node* is ``CODE_REVIEW_KEY = "<the summary key>"``: one ``Name`` target, the literal value."""
     return (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
@@ -241,6 +266,18 @@ class _SectionReads:
     top-level ``CODE_REVIEW_KEY = "<key>"`` or its single
     ``section = document.get(CODE_REVIEW_KEY)``; any other one fails closed.
 
+    MAGI FIX (S6 loop 35): a call was credited by the name of a top-level
+    ``def``, so a local ``def`` of that name, a later rebinding or a decorator
+    ran code the walk never read; only an undecorated top-level ``def`` whose
+    name the module binds exactly once is credited now. And the summary could
+    be reached without naming its key (a key built at run time, the
+    document's values, ``vars()``): every load of ``document`` must now be
+    ``document.get(NAME)`` with ``NAME`` a top-level constant bound once to a
+    string literal, and no reflection builtin (:data:`_REFLECTION_BUILTINS`)
+    may be named. Declared limit: a second name bound to the parsed JSON
+    (another ``run.output.json()``) read with a computed key is not followed;
+    the guard reads the module's ``document`` only.
+
     Complexity: ``O(nodes)``.
     """
 
@@ -256,8 +293,15 @@ class _SectionReads:
         self._tree = ast.parse(source)
         self._list_under = _trusted_list_under(self._tree)
         self._parents = {}
+        counts = _binding_counts(self._tree)
         self._parameters = {node.name: [arg.arg for arg in node.args.posonlyargs + node.args.args]
-                            for node in self._tree.body if isinstance(node, ast.FunctionDef)}
+                            for node in self._tree.body
+                            if isinstance(node, ast.FunctionDef) and not node.decorator_list
+                            and counts.get(node.name) == 1}
+        self._constants = {node.targets[0].id for node in self._tree.body
+                           if isinstance(node, ast.Assign) and len(node.targets) == 1
+                           and isinstance(node.targets[0], ast.Name) and _literal_key(node.value) is not None
+                           and counts.get(node.targets[0].id) == 1}
         for node in ast.walk(self._tree):
             for child in ast.iter_child_nodes(node):
                 self._parents[child] = node
@@ -272,6 +316,7 @@ class _SectionReads:
             AssertionError: Naming the line of the first use the walk cannot follow.
         """
         self._check_summary_references()
+        self._check_document_reads()
         keys = set()
         for node in ast.walk(self._tree):
             if isinstance(node, ast.Name) and node.id == _SECTION_NAME:
@@ -302,6 +347,27 @@ class _SectionReads:
                 raise AssertionError("line %d: a read of the summary the key guard does not follow: %s"
                                      % (getattr(node, "lineno", getattr(parent, "lineno", 0)),
                                         ast.unparse(parent if parent is not None else node)))
+
+    def _check_document_reads(self) -> None:
+        """Refuse every reflection builtin and every load of ``document`` but ``document.get(<constant>)``.
+
+        Raises:
+            AssertionError: Naming the line of the first reflection builtin, or of the first load of
+                ``document`` that is not ``.get`` with one top-level constant bound once to a literal.
+        """
+        for node in ast.walk(self._tree):
+            if isinstance(node, ast.Name) and node.id in _REFLECTION_BUILTINS:
+                raise AssertionError("line %d: %s reaches names the key guard does not follow"
+                                     % (node.lineno, node.id))
+            if isinstance(node, ast.Name) and node.id == _DOCUMENT_NAME and isinstance(node.ctx, ast.Load):
+                attribute = self._parents.get(node)
+                call = self._parents.get(attribute)
+                if not (isinstance(attribute, ast.Attribute) and attribute.attr == "get"
+                        and isinstance(call, ast.Call) and call.func is attribute
+                        and len(call.args) == 1 and not call.keywords
+                        and isinstance(call.args[0], ast.Name) and call.args[0].id in self._constants):
+                    raise AssertionError("line %d: a read of the document the key guard does not follow: %s"
+                                         % (node.lineno, ast.unparse(call if call is not None else node)))
 
     def _key_of(self, node) -> str | None:
         """The key one load of ``section`` reads, ``None`` for a keyless accepted use.
