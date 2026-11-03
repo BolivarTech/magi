@@ -1413,6 +1413,30 @@ def g():
     }
 
     #[test]
+    fn a_byte_order_mark_on_the_first_line_hides_no_definition() {
+        // [MAGI S6 loop 30, B2b2] the BOM before the first line's keyword (U+FEFF is no
+        // whitespace) hid the first `def` or `class`, so its body fell into a gap unit. It is
+        // passed over to read the keyword only: the unit's content keeps it and the line
+        // numbers are the file's.
+        let code = "\u{FEFF}def f():\n    return 1\ndef g():\n    pass\n";
+        let units = extract(code, &[1, 2, 3, 4]);
+        assert_each_line_in_one_unit(&units, 4);
+        assert_eq!(
+            spans(&units),
+            vec![
+                ("f", UnitKind::Function, 1, 2),
+                ("g", UnitKind::Function, 3, 4)
+            ]
+        );
+        assert!(units
+            .first()
+            .is_some_and(|u| u.content.starts_with("\u{FEFF}def f():")));
+        let code = "\u{FEFF}@dec\nclass C:\n    pass\n";
+        let units = extract(code, &[1, 2, 3]);
+        assert_eq!(spans(&units), vec![("C", UnitKind::Class, 1, 3)]);
+    }
+
+    #[test]
     fn a_definition_inside_a_module_level_block_splits_out_of_its_gap_unit() {
         // [MAGI S6 loop 14, B2b2, declared; fixed in MAGI loop 29, B2b2] definitions are found
         // at indent 0 only, so one inside `if TYPE_CHECKING:` is no unit of its own and its
