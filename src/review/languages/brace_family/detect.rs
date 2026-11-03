@@ -21,9 +21,11 @@ impl BraceFamilyExtractor {
     /// Detect all constructs in the file or, with `members`, in a block's body, where a
     /// signature that ends in `;` is a member too ([`Self::member_prototypes`]).
     ///
-    /// No constructs when a line number does not fit `u32` ([`Self::try_detect_constructs`]):
-    /// the file's changed lines then fall into gap units and a block is reviewed whole, as
-    /// [`shift_members`] leaves it, never split at fabricated coordinates.
+    /// No constructs when a line number does not fit `u32` ([`Self::try_detect_constructs`]) or
+    /// when a forward search stopped short because the pass spent its whole budget
+    /// ([`SearchBudget`]): the file's changed lines then fall into gap units and a block is
+    /// reviewed whole, as [`shift_members`] leaves it, never split at fabricated coordinates nor
+    /// at a construct cut from its body.
     ///
     /// Invariant: the constructs come sorted by their first line and their ranges are disjoint,
     /// which `ChangedLines::assign` and `split_into_members` rely on; lines no construct holds
@@ -46,7 +48,10 @@ impl BraceFamilyExtractor {
         members: bool,
     ) -> Vec<Construct> {
         let budget = SearchBudget::for_lines(lines.len());
+        // MAGI FIX (B2b1a): a search cut short by the spent budget ended its construct on its
+        // own line, a unit cut with no signal (RV03); such a pass gives no constructs.
         self.try_detect_constructs(lines, scanned, members, &budget)
+            .filter(|_| !budget.exhausted())
             .unwrap_or_default()
     }
 

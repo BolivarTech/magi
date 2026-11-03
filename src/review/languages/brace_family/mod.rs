@@ -549,9 +549,13 @@ const BRACE_SEARCH_VISITS_PER_LINE: usize = 32;
 ///
 /// Once it is spent, every later search of the pass degrades as one past its own bound does:
 /// a construct whose brace is on its own line is still found, one whose brace is on a later line
-/// ends on its own line, and the lines after it fall into later units. No line is lost: every
-/// line stays in exactly one unit. Pinned by
-/// `the_brace_searches_of_a_whole_file_spend_a_budget_linear_in_its_lines`.
+/// ends on its own line, and the lines after it fall into later units. Since that cuts a unit
+/// from its body with no signal (RV03), a pass that ran out discards what it found
+/// (`BraceFamilyExtractor::detect_constructs`): its lines are reviewed as gap units, whole, and
+/// one too large for a batch ends the review with the typed `ReviewError::TooLargeForBatch`. No
+/// line is lost: every line stays in exactly one unit. Pinned by
+/// `the_brace_searches_of_a_whole_file_spend_a_budget_linear_in_its_lines` and
+/// `a_file_that_spends_the_whole_search_budget_is_no_longer_cut_into_constructs`.
 ///
 /// The worst case is accepted, declared: a file crafted to keep a parameter list open on every
 /// line spends the whole budget, about 2.7 × 10⁸ line visits for an 8 MiB file. The budget counts
@@ -572,6 +576,8 @@ struct SearchBudget {
     cap: usize,
     /// The visits spent so far.
     spent: Cell<usize>,
+    /// Whether a visit was asked for with none left, so a search stopped short.
+    refused: Cell<bool>,
 }
 
 impl SearchBudget {
@@ -584,6 +590,7 @@ impl SearchBudget {
                 .saturating_mul(BRACE_SEARCH_VISITS_PER_LINE)
                 .saturating_add(MAX_BRACE_SEARCH_LINES),
             spent: Cell::new(0),
+            refused: Cell::new(false),
         }
     }
 
@@ -592,10 +599,16 @@ impl SearchBudget {
     fn spend(&self) -> bool {
         let spent = self.spent.get();
         if spent >= self.cap {
+            self.refused.set(true);
             return false;
         }
         self.spent.set(spent + 1);
         true
+    }
+
+    /// Whether a search of the pass stopped short for want of visits. O(1).
+    fn exhausted(&self) -> bool {
+        self.refused.get()
     }
 
     /// The line visits spent so far.
