@@ -2735,6 +2735,32 @@ void g(void) {
     }
 
     #[test]
+    fn a_file_that_spends_the_whole_search_budget_is_no_longer_cut_into_constructs() {
+        // [MAGI B2b1a] once the pass's budget was spent, a construct whose brace is on a later
+        // line ended on its own line, its body falling into a gap: a unit cut with no signal
+        // (RV03). Such a file now gives no constructs, its lines reviewed as gaps, whole, so a
+        // gap too large for a batch ends the review with the typed error instead.
+        let code = format!(
+            "{}int h(\n    int a)\n{{\n    return a;\n}}\n",
+            "f(\n".repeat(5_000)
+        );
+        let total = u32::try_from(code.lines().count()).expect("small");
+        let units = extract(&c_extractor(), &code, &(1..=total).collect::<Vec<_>>());
+        assert_each_line_in_one_unit(&units, total);
+        assert!(
+            units.iter().all(|u| u.kind == UnitKind::TopLevel),
+            "{:?}",
+            spans(&units)
+        );
+        // A file that spends only part of it keeps its constructs.
+        let code = "int h(\n    int a)\n{\n    return a;\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), code, &all_lines(code))),
+            vec![("h", UnitKind::Function, 1, 5)]
+        );
+    }
+
+    #[test]
     fn the_walk_up_from_a_wrapped_attribute_tail_spends_the_pass_budget() {
         // [MAGI loop 28] a line opening with a closer and holding a construct after it
         // (`) struct S {`) walks up to the attribute that opens it; a file of such lines with no
