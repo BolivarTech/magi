@@ -536,6 +536,16 @@ class CodeReviewScenarioTests(unittest.TestCase):
             r = _result("R15", 2, None, _with_id(text))
             self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], text)
 
+    def test_s50_fails_on_a_need_no_config_can_derive(self) -> None:
+        # [MAGI F1a2-g] the product's need is the classifier plus the floor's 18 s times a whole attempt
+        # count (attempts x models), so 25 s, 41 s or 115 s is no [magi] config's need, even with the
+        # minimum kept at batches x need and every other number coherent.
+        for need in (25, 41, 115):
+            text = _BUDGET_STDERR.replace(b"the 114 s a batch", b"the %d s a batch" % need).replace(
+                b"--timeout 342", b"--timeout %d" % (3 * need))
+            r = _result("R15", 2, None, _with_id(text))
+            self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], need)
+
     def test_s50_fails_when_the_floor_is_not_the_15_s_one(self) -> None:
         text = _BUDGET_STDERR.replace(b"the 15 s floor", b"the 20 s floor")
         r = _result("R15", 2, None, _with_id(text))
