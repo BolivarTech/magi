@@ -657,6 +657,12 @@ pub const NOT_A_DIRECTORY: &str = "not a directory";
 /// of S6 loop 6 asked to drop them here): the reader refuses each one and the filter lists it
 /// as `not a regular file`, so the report names it instead of passing over it in silence.
 /// Pinned by `an_enumerated_link_to_a_directory_or_fifo_is_skipped_as_not_a_regular_file`.
+///
+/// The walk keeps the directories still to list on an explicit stack, so a tree of any depth
+/// takes heap, paid from `budget`, and never the call stack; the order it lists names in is
+/// not part of the contract (the caller sorts `found`).
+// MAGI FIX (S6 loop 33): the walk recursed once per level with no depth cap, so a deep tree
+// overflowed the stack and aborted the process.
 fn walk(
     dir: &Path,
     rel: &str,
@@ -665,38 +671,41 @@ fn walk(
     not_utf8: &mut Vec<String>,
     budget: &mut u64,
 ) -> Result<(), ReviewError> {
-    let io = |e: std::io::Error| ReviewError::Io(format!("{}: {e}", dir.display()));
-    for entry in std::fs::read_dir(dir).map_err(io)? {
-        let entry = entry.map_err(io)?;
-        let name = entry.file_name();
-        let joined = |n: &str| {
-            if rel.is_empty() {
-                n.to_string()
-            } else {
-                format!("{rel}/{n}")
+    let mut pending = vec![(dir.to_path_buf(), rel.to_string())];
+    while let Some((dir, rel)) = pending.pop() {
+        let io = |e: std::io::Error| ReviewError::Io(format!("{}: {e}", dir.display()));
+        for entry in std::fs::read_dir(&dir).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            let name = entry.file_name();
+            let joined = |n: &str| {
+                if rel.is_empty() {
+                    n.to_string()
+                } else {
+                    format!("{rel}/{n}")
+                }
+            };
+            let Some(path) = name.to_str().map(joined) else {
+                let lossy = joined(&name.to_string_lossy());
+                spend(budget, &lossy)?;
+                not_utf8.push(lossy);
+                continue;
+            };
+            // MAGI FIX (S6 loop 3): `.git`, `.magi` and the memory database are pruned here,
+            // before the walk enters them, so a large nested `.git` is never enumerated.
+            if is_never_reviewed(&path)
+                || ignored.contains(&path)
+                || ignored.contains(&format!("{path}/"))
+            {
+                continue;
             }
-        };
-        let Some(path) = name.to_str().map(joined) else {
-            let lossy = joined(&name.to_string_lossy());
-            spend(budget, &lossy)?;
-            not_utf8.push(lossy);
-            continue;
-        };
-        // MAGI FIX (S6 loop 3): `.git`, `.magi` and the memory database are pruned here, before
-        // the walk recurses, so a large nested `.git` is never enumerated.
-        if is_never_reviewed(&path)
-            || ignored.contains(&path)
-            || ignored.contains(&format!("{path}/"))
-        {
-            continue;
-        }
-        if entry.file_type().map_err(io)?.is_dir() {
+            let is_dir = entry.file_type().map_err(io)?.is_dir();
             // MAGI FIX (S6 loop 9): an empty directory cost the walk without paying the cap.
             spend(budget, &path)?;
-            walk(&entry.path(), &path, ignored, found, not_utf8, budget)?;
-        } else {
-            spend(budget, &path)?;
-            found.push(path);
+            if is_dir {
+                pending.push((entry.path(), path));
+            } else {
+                found.push(path);
+            }
         }
     }
     Ok(())
