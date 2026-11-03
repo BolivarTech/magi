@@ -55,6 +55,20 @@ class SystemFieldScenarioTests(unittest.TestCase):
         r = _result("R9", 0, _caps(system_ignored=False), WARNING)
         self.assertEqual(Outcome.FAIL, _outcomes("S44", r)[system_field.S44_ASSERTIONS[2]])
 
+    def test_s44_reads_an_environmental_error_as_untested_not_failed(self) -> None:
+        # [F1a2] a backend that passed preflight and failed mid-run is the environment, as in S45.
+        for kind in ("provider", "timeout"):
+            r = _result("R9", 1, {**_caps(system_ignored=True),
+                                  "error": {"kind": kind, "message": "quota exhausted"}}, WARNING)
+            outcomes = _outcomes("S44", r)
+            self.assertEqual(Outcome.CANNOT_TEST, outcomes[system_field.S44_ASSERTIONS[0]], kind)
+            self.assertEqual(Outcome.PASS, outcomes[system_field.S44_ASSERTIONS[2]], kind)
+
+    def test_s44_still_fails_the_exit_on_an_error_of_the_product_s_own(self) -> None:
+        r = _result("R9", 2, {**_caps(system_ignored=True),
+                              "error": {"kind": "misuse", "message": "refused"}}, WARNING)
+        self.assertEqual(Outcome.FAIL, _outcomes("S44", r)[system_field.S44_ASSERTIONS[0]])
+
     def test_s45_passes_when_the_override_reached_the_mages(self) -> None:
         r = _result("R10", 0, {**_caps(system_override_applied=True), "consult": {}})
         self.assertEqual({Outcome.PASS}, set(_outcomes("S45", r).values()))
