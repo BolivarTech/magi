@@ -230,8 +230,10 @@ class ReviewWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             command = _executor(root)._command(runs.DEFINITIONS["R13"])
-            expected = str(root / "scratch" / runs.REVIEW_WORKSPACE_DIR)
-            self.assertEqual(expected, command[command.index("-w") + 1])
+            # A temporary directory can arrive as a Windows 8.3 short path while the executor hands
+            # over the long form, so both sides are compared resolved.
+            expected = os.path.realpath(root / "scratch" / runs.REVIEW_WORKSPACE_DIR)
+            self.assertEqual(expected, os.path.realpath(command[command.index("-w") + 1]))
 
     def test_a_relative_scratch_area_still_hands_the_product_an_absolute_workspace(self) -> None:
         # MAGI FIX (S6 loop 11, F1a-m1): the product starts with cwd = the review workspace, so a
