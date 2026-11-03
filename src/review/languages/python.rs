@@ -1411,9 +1411,10 @@ def g():
 
     #[test]
     fn a_byte_order_mark_on_the_first_line_loses_no_line() {
-        // [MAGI S6 loop 14, B2b2] a UTF-8 BOM before `def` hides the keyword (U+FEFF is no
-        // whitespace), a declared limitation: the first construct's unit structure degrades,
-        // but every line still lands in exactly one unit and the next construct is found.
+        // [MAGI S6 loop 14, B2b2] a UTF-8 BOM before `def` (U+FEFF is no whitespace) loses no
+        // line: every line lands in exactly one unit and the next construct is found. Since
+        // MAGI S6 loop 30 the first construct is found too
+        // (`a_byte_order_mark_on_the_first_line_hides_no_definition`).
         let code = "\u{FEFF}def f():\n    return 1\n\ndef g():\n    pass\n";
         let units = extract(code, &[1, 2, 3, 4, 5]);
         assert_each_line_in_one_unit(&units, 5);
