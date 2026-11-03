@@ -32,7 +32,6 @@ pub mod scanner;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
-use crate::review::context::FileContext;
 use crate::review::source::MAX_REVIEW_FILE_BYTES;
 
 // A reviewed file holds at most `MAX_REVIEW_FILE_BYTES` bytes, so at most that many lines: the
@@ -97,16 +96,6 @@ pub struct SemanticUnit {
     pub content: String,
     /// Lines within this unit that were modified in the PR.
     pub changed_lines: Vec<u32>,
-    /// File context metadata for this unit's file.
-    ///
-    /// The extractors leave it at [`FileContext::default`] in v0.25.0 and no stage reads it: a
-    /// batch names its file's language in its [`file_header`](crate::review::batching::file_header),
-    /// computed from the path. It is kept for the retrieval stage that will fill it. Every unit
-    /// an extractor gives (a construct, a gap unit, a piece of a split block) carries the
-    /// default, so both paths a file may take carry the same metadata; only
-    /// [`fallback_extract`], which no stage calls in v0.25.0, stores the context its caller
-    /// passes. Pinned by `every_extracted_unit_and_split_piece_carries_the_default_context`.
-    pub context: FileContext,
 }
 
 /// Language-specific code extractor.
@@ -241,7 +230,6 @@ pub(crate) fn split_into_members(block: &SemanticUnit, members: Vec<Member>) -> 
             last.saturating_add(base),
         )
         .to_vec(),
-        context: block.context.clone(),
     };
     let ranges: Vec<(u32, u32)> = members.iter().map(|m| (m.2, m.3)).collect();
     // MAGI FIX (B2a A4): every line is changed here, so only the orphans are needed; taking
@@ -566,7 +554,6 @@ pub(crate) fn gap_units(
                 .unwrap_or(&[])
                 .join("\n"),
             changed_lines,
-            context: FileContext::default(),
         })
         .collect()
 }
@@ -631,7 +618,6 @@ const FALLBACK_CONTEXT_LINES: u32 = 20;
 /// * `content` - Full file content.
 /// * `file_path` - Path to the file.
 /// * `changed_lines` - Set of changed line numbers.
-/// * `context` - File context metadata.
 ///
 /// # Returns
 ///
@@ -642,7 +628,6 @@ pub fn fallback_extract(
     content: &str,
     file_path: &str,
     changed_lines: &HashSet<u32>,
-    context: &FileContext,
 ) -> Vec<SemanticUnit> {
     let lines: Vec<&str> = content.lines().collect();
     let total = u32::try_from(lines.len()).unwrap_or(u32::MAX);
@@ -684,7 +669,6 @@ pub fn fallback_extract(
                 .unwrap_or(&[])
                 .join("\n"),
             changed_lines: changed,
-            context: context.clone(),
         })
         .collect()
 }
@@ -713,10 +697,9 @@ mod tests {
         // [MAGI S6 loop 3, B6] one span from the first change to the last held everything
         // between two distant changes.
         let content: String = (1..=200).map(|n| format!("line {n}\n")).collect();
-        let ctx = FileContext::default();
         let spans = |changed: &[u32]| -> Vec<(u32, u32, Vec<u32>)> {
             let set: HashSet<u32> = changed.iter().copied().collect();
-            fallback_extract(&content, "a.txt", &set, &ctx)
+            fallback_extract(&content, "a.txt", &set)
                 .into_iter()
                 .map(|u| (u.start_line, u.end_line, u.changed_lines))
                 .collect()
@@ -931,7 +914,7 @@ mod tests {
         let units = ext.extract_units(code, "a.rs", ChangedLines::All);
         let parts: Vec<SemanticUnit> = units.iter().flat_map(|u| ext.split_block(u)).collect();
         let every: HashSet<u32> = (1..=5).collect();
-        let fallback = fallback_extract(code, "a.rs", &every, &FileContext::default());
+        let fallback = fallback_extract(code, "a.rs", &every);
         for unit in units.iter().chain(&parts).chain(&fallback) {
             assert!(!unit.content.contains('\r'), "{:?}", unit.content);
         }
@@ -966,10 +949,9 @@ mod tests {
     fn fallback_extract_ignores_changed_lines_past_the_end_of_the_file() {
         // [MAGI S6 loop 18, B2a-4] a changed line past the last line opened a window whose
         // start fell after its end, with no content and a changed line outside its range.
-        let ctx = FileContext::default();
         let spans = |content: &str, changed: &[u32]| -> Vec<(u32, u32, Vec<u32>)> {
             let set: HashSet<u32> = changed.iter().copied().collect();
-            fallback_extract(content, "a.txt", &set, &ctx)
+            fallback_extract(content, "a.txt", &set)
                 .into_iter()
                 .map(|u| (u.start_line, u.end_line, u.changed_lines))
                 .collect()
@@ -1040,7 +1022,6 @@ mod tests {
             end_line: 12,
             content: "impl X {\n    fn a() {}\n}\n".to_string(),
             changed_lines: vec![11],
-            context: FileContext::default(),
         };
         let pieces = split_into_members(&block, vec![(UnitKind::Function, "a".to_string(), 2, 2)]);
         let spans: Vec<(&str, UnitKind, u32, u32, Vec<u32>)> = pieces
@@ -1069,11 +1050,10 @@ mod tests {
     fn a_changed_line_zero_gives_no_unit() {
         // [MAGI S6 loop 19, B2a-1] lines are 1-based, but a set holding 0 opened a fallback
         // window holding a line outside its range, and a gap unit ending before its start.
-        let ctx = FileContext::default();
         let set: HashSet<u32> = [0].into_iter().collect();
-        assert!(fallback_extract("a\nb\n", "a.txt", &set, &ctx).is_empty());
+        assert!(fallback_extract("a\nb\n", "a.txt", &set).is_empty());
         let with_two: HashSet<u32> = [0, 2].into_iter().collect();
-        let units = fallback_extract("a\nb\n", "a.txt", &with_two, &ctx);
+        let units = fallback_extract("a\nb\n", "a.txt", &with_two);
         assert_eq!(
             units
                 .iter()
@@ -1109,7 +1089,6 @@ mod tests {
             end_line: 4,
             content: "impl X {\n    fn a() {}\n    fn b() {}\n}".to_string(),
             changed_lines: vec![3, 4, 1, 2],
-            context: FileContext::default(),
         };
         let pieces: Vec<(String, Vec<u32>)> = rust
             .split_block(&block)
@@ -1124,51 +1103,6 @@ mod tests {
                 ("b".to_string(), vec![3]),
                 ("X".to_string(), vec![4]),
             ]
-        );
-    }
-
-    #[test]
-    fn every_extracted_unit_and_split_piece_carries_the_default_context() {
-        // [MAGI loop 27, B2a] declared: no stage reads `SemanticUnit::context` in v0.25.0, and
-        // every unit an extractor gives (its constructs, its gap units, the pieces of a split
-        // block) leaves it at `FileContext::default`, so the two paths a file may take carry the
-        // same metadata. Only `fallback_extract`, which no stage calls in v0.25.0, stores the
-        // context its caller passes.
-        let samples = [
-            (
-                "a.rs",
-                "use a;\n\nimpl S {\n    fn a() {}\n\n    fn b() {}\n}\n",
-            ),
-            (
-                "a.py",
-                "import a\n\nclass C:\n    def a(self):\n        pass\n",
-            ),
-        ];
-        let default = format!("{:?}", FileContext::default());
-        let registry = LanguageRegistry::new();
-        for (path, code) in samples {
-            let ext = registry.get(path).expect("a registered extension");
-            let units = ext.extract_units(code, path, ChangedLines::All);
-            assert!(units.len() > 1, "{path}: constructs and a gap");
-            for unit in &units {
-                assert_eq!(format!("{:?}", unit.context), default, "{path}");
-                for piece in ext.split_block(unit) {
-                    assert_eq!(format!("{:?}", piece.context), default, "{path}");
-                }
-            }
-        }
-        let given = FileContext {
-            language: "text".to_string(),
-            ..FileContext::default()
-        };
-        let set: HashSet<u32> = [1].into_iter().collect();
-        let units = fallback_extract("a\n", "a.txt", &set, &given);
-        assert_eq!(
-            units
-                .iter()
-                .map(|u| u.context.language.as_str())
-                .collect::<Vec<_>>(),
-            vec!["text"]
         );
     }
 }

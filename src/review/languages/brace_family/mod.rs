@@ -37,7 +37,6 @@ use super::scanner::{
 use super::{
     gap_units, split_into_members, ChangedLines, LanguageExtractor, Member, SemanticUnit, UnitKind,
 };
-use crate::review::context::FileContext;
 
 mod detect;
 mod lexical;
@@ -189,7 +188,6 @@ impl LanguageExtractor for BraceFamilyExtractor {
                     end_line: construct.end_line,
                     content: unit_content,
                     changed_lines: changed_in_unit,
-                    context: FileContext::default(),
                 });
             }
         }

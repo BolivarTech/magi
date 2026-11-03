@@ -4,43 +4,8 @@
 
 //! File context for the review pipeline.
 //!
-//! Carries the structured metadata a semantic unit keeps about its source file
-//! ([`FileContext`]) and detects a file's language from its extension
+//! Finds a file's extension ([`file_extension`]) and detects its language from it
 //! ([`detect_language`]).
-
-use serde::Serialize;
-
-/// Structured metadata about a source file, carried by each semantic unit.
-///
-/// No stage fills or reads it in v0.25.0: every extractor sets it to [`FileContext::default`]
-/// (all fields empty, `language` included), and a batch names its file's language in its file
-/// header from the path ([`detect_language`]). It is kept as the slot for the retrieval stage
-/// that will fill it; until then none of its fields says anything about the file.
-///
-/// # Examples
-///
-/// ```
-/// use magi_rs::review::context::{detect_language, FileContext};
-///
-/// let ctx = FileContext {
-///     language: detect_language("src/main.rs"),
-///     ..FileContext::default()
-/// };
-/// assert_eq!(ctx.language, "rust");
-/// ```
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct FileContext {
-    /// Programming language (e.g., "rust", "c", "python", "unknown").
-    pub language: String,
-    /// Whether the file is entirely new in this PR.
-    pub is_new_file: bool,
-    /// Whether a corresponding test file likely exists.
-    pub has_test_file: bool,
-    /// Number of added/modified lines in this file.
-    pub lines_changed: u32,
-    /// Detected framework/library hints from imports in the diff.
-    pub framework_hints: Vec<String>,
-}
 
 /// The extension of a file path, as written: what follows the last `.` of its file name (the
 /// text after its last `/` or `\`). A name without a dot, or whose only dot leads it, has none
