@@ -426,6 +426,17 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'x = {**section}', "for k in section:\n    pass", "x = getattr(section, 'k')"):
             with self.assertRaises(AssertionError, msg=shape):
                 _summary_keys_read(self._KNOWN + shape + "\n")
+        # [MAGI F1b2a-c] section.get(key) passed anywhere the innermost def was named _list_under, so a key
+        # rebound inside it, bound by a lambda default or a comprehension, or a nested _list_under read a
+        # literal the guard never saw.
+        for shape in ('def _list_under(section, key):\n    key = "hidden"\n    return section.get(key)',
+                      'def _list_under(section, key):\n    f = lambda key="hidden": section.get(key)\n'
+                      '    return f()',
+                      'def _list_under(section, key):\n    return [section.get(key) for key in ("hidden",)]',
+                      'def _outer(section):\n    def _list_under(key="hidden"):\n        return section.get(key)\n'
+                      '    return _list_under()\ny = _outer(section)'):
+            with self.assertRaises(AssertionError, msg=shape):
+                _summary_keys_read(self._KNOWN + shape + "\n")
 
     def test_a_spaced_get_still_reads_its_key(self) -> None:
         # [MAGI F1b2a] the regex wanted "section.get(" with no space, so a legal "section . get(...)" read a key
