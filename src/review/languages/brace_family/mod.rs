@@ -3230,6 +3230,29 @@ void g(void) {
     }
 
     #[test]
+    fn a_cpp_namespace_alias_is_a_declaration_not_a_namespace() {
+        // [MAGI B2b1a] only a `=` right after the keyword ruled a namespace out, so an alias
+        // (`namespace fs = std::filesystem;`) was a one-line namespace unit of its own instead
+        // of a declaration with the ones around it.
+        let code = "namespace fs = std::filesystem;\nint counter = 0;\nvoid f() {\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &every_line(code));
+        assert_each_line_in_one_unit(&units, 4);
+        let found: Vec<(UnitKind, u32, u32)> = units
+            .iter()
+            .map(|u| (u.kind, u.start_line, u.end_line))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (UnitKind::DeclarationGroup, 1, 2),
+                (UnitKind::Function, 3, 4)
+            ],
+            "{:?}",
+            spans(&units)
+        );
+    }
+
+    #[test]
     fn the_quote_aware_delimiter_match_skips_quoted_runs_and_keeps_an_unclosed_text() {
         // [MAGI S6 loop 14, B2b1] the bounds of `balanced_end_outside_quotes`, which the Rust
         // attribute and annotation rules share.
