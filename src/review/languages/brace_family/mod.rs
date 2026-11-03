@@ -4222,6 +4222,25 @@ int g(void) {
     }
 
     #[test]
+    fn a_return_type_line_with_a_comma_inside_its_type_arguments_stays_with_its_function() {
+        // [MAGI B2b1a] a GNU-style return type line could not hold a `,`, so one with several
+        // type arguments (`std::pair<int, double>`) fell into a gap, split from its function.
+        // A `,` outside angle brackets still makes no return type.
+        let code = "std::pair<int, double>\nfoo(int a) {\n  return {};\n}\n";
+        assert_eq!(
+            sorted_spans(&BraceFamilyExtractor::cpp(), code),
+            vec![("foo".to_string(), UnitKind::Function, 1, 4)]
+        );
+        let code = "int a, b\nfoo(int x) {\n  return x;\n}\n";
+        let units = extract(&BraceFamilyExtractor::cpp(), code, &every_line(code));
+        assert!(
+            spans(&units).contains(&("foo", UnitKind::Function, 2, 4)),
+            "{:?}",
+            spans(&units)
+        );
+    }
+
+    #[test]
     fn a_closing_parenthesis_line_never_opens_a_declaration_of_its_own() {
         // The `);` that closes a wrapped prototype ends in `;`, so it read as a declaration of
         // its own and split the prototype; it now stays with the lines it closes, whether the
