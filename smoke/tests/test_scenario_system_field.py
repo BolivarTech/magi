@@ -3,6 +3,7 @@
 # Date: 2026-10-22
 """Unit tests for S44-S46 (envelope system field, REQ-SY02/SY03/SY06)."""
 
+import dataclasses
 import json
 import unittest
 
@@ -90,6 +91,16 @@ class SystemFieldScenarioTests(unittest.TestCase):
     def test_s46_fails_when_the_run_succeeded(self) -> None:
         r = _result("R11", 0, _caps())
         self.assertEqual(Outcome.FAIL, _outcomes("S46", r)[system_field.S46_ASSERTIONS[0]])
+
+    def test_s46_reads_a_hung_refusal_as_a_failure(self) -> None:
+        # [MAGI F1a2] R11 is refused before any model, so a timeout is a product hang, never a slow provider:
+        # S46 must see timed-out runs (the runner otherwise turns them into CANNOT_TEST) and fail every
+        # assertion, without judging the synthetic exit 0 and empty stdout the executor gives a killed run.
+        self.assertTrue(DEFAULT_REGISTRY.get("S46").inspects_timeouts)
+        r = dataclasses.replace(_result("R11", 0, None, b""), timed_out=True)
+        findings = list(DEFAULT_REGISTRY.get("S46").func(r))
+        self.assertEqual([Outcome.FAIL] * len(system_field.S46_ASSERTIONS), [f.outcome for f in findings])
+        self.assertTrue(all("timed out" in f.detail for f in findings))
 
     def test_s46_fails_when_stdout_carries_model_output(self) -> None:
         for key in system_field.OUTPUT_KEYS:
