@@ -96,6 +96,10 @@ _CHAR_LITERAL = re.compile(
 #: and was not taken for one.
 _RAW_STRING = re.compile(r'[bc]?r(#*)"')
 
+#: The largest code point, and the surrogate range a Rust ``char`` cannot hold.
+_MAX_CODE_POINT = 0x10FFFF
+_SURROGATES = (0xD800, 0xDFFF)
+
 #: The escapes :func:`char_list` unescapes, besides ``\\x`` and ``\\u{}``.
 _SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0",
                    "\\": "\\", "'": "'", '"': '"'}
@@ -337,7 +341,12 @@ def char_list(text: str) -> list[str]:
         elif body[1] == "x":
             chars.append(chr(int(body[2:], 16)))
         elif body[1] == "u":
-            chars.append(chr(int(body[3:-1], 16)))
+            # [F1b2a] six hex digits reach past U+10FFFF, and a surrogate is
+            # no char in Rust either; chr raised ValueError or accepted one.
+            point = int(body[3:-1], 16)
+            if point > _MAX_CODE_POINT or _SURROGATES[0] <= point <= _SURROGATES[1]:
+                raise AssertionError("not a Unicode scalar value: %r in %r" % (match.group(0), text))
+            chars.append(chr(point))
         else:
             chars.append(_SIMPLE_ESCAPES[body[1]])
         index = match.end()
