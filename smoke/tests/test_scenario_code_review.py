@@ -258,6 +258,18 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST, outcome.outcome)
         self.assertIn("3 more", outcome.detail)
 
+    def test_s51_cannot_test_the_exclusion_when_a_cut_list_names_only_some_visible_magi_files(self) -> None:
+        # [MAGI F1a2] one visible .magi/ file named as ignored passed even with the list cut, though another
+        # could sit in the unnamed tail read and classified by its content: only a cut list naming every
+        # listed .magi/ file can pass.
+        stderr = (b"error: nothing to review: no reviewable file in the input; left out: "
+                  b".magi/magi.toml (ignored), skipped/leak.txt (secret), skipped/pixel.png (binary), "
+                  b"and 2 more" + _NL)
+        r = _result("R16", 2, None, _with_id(stderr))
+        outcome = [f for f in DEFAULT_REGISTRY.get("S51").func(r)][2]
+        self.assertEqual(Outcome.CANNOT_TEST, outcome.outcome)
+        self.assertIn("2 more", outcome.detail)
+
     def test_s51_fails_on_a_wrong_exit(self) -> None:
         r = _result("R16", 0, None, _with_id(_ROOT_STDERR))
         self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[0]])
