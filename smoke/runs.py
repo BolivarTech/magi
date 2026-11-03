@@ -1471,8 +1471,11 @@ def _open_anchored(path, flags: int) -> int:
     try:
         for part in parts[:-1]:
             child = os.open(part, _DIRECTORY_OPEN_FLAGS, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = child
+            # MAGI FIX (F1a1b): the child is the one held before the parent
+            # is closed, so a failed close leaves the finally to close the
+            # child instead of leaking it (and closing the parent twice).
+            parent, descriptor = descriptor, child
+            os.close(parent)
         return os.open(parts[-1], flags, dir_fd=descriptor)
     finally:
         os.close(descriptor)
