@@ -22,7 +22,8 @@ that follow from it are declared rather than handled:
   lifetime (``'a``) is not taken for a char literal. An unterminated block
   comment fails loudly. [MAGI §6 MS2 loop 28, F1b2a-caspar] So does an
   unterminated string or raw string, which would otherwise hide every block
-  comment after it; a byte literal (``b"/*"``) is read like the plain one.
+  comment after it; a byte or C string literal (``b"/*"``, ``c"/*"``,
+  ``cr#"/*"#``) is read like the plain or raw one.
   [MAGI §6 MS2 loop 29, F1b2a-caspar, F1b2a-balthasar]
 - A guard asking whether a phrase or a key appears in code reads
   :func:`without_comments`, which also blanks a trailing ``//`` comment;
@@ -90,8 +91,10 @@ def read_source(relative: str, root: pathlib.Path | None = None) -> str:
 _CHAR_LITERAL = re.compile(
     r"'(\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]{1,6}\}|[nrt0\\'\"])|[^\\'\n])'")
 
-#: A raw string's opening: ``r`` or ``br``, any number of ``#``, then ``"``.
-_RAW_STRING = re.compile(r'b?r(#*)"')
+#: A raw string's opening: ``r``, ``br`` or ``cr``, any number of ``#``, then
+#: ``"``. [F1b2a] Without ``cr`` the ``r`` of a C raw string followed a letter
+#: and was not taken for one.
+_RAW_STRING = re.compile(r'[bc]?r(#*)"')
 
 #: The escapes :func:`char_list` unescapes, besides ``\\x`` and ``\\u{}``.
 _SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0",
@@ -136,9 +139,9 @@ def _literal_end(text: str, index: int) -> int:
         text: Source text.
         index: A position in it.
 
-    A byte string or byte char (``b"..."``, ``b'.'``) is read as its ``b``
-    followed by the plain literal, which ends at the same place; ``br"..."``
-    is a raw string.
+    A byte string, byte char or C string (``b"..."``, ``b'.'``, ``c"..."``)
+    is read as its prefix followed by the plain literal, which ends at the
+    same place; ``br"..."`` and ``cr"..."`` are raw strings.
 
     MAGI FIX (S6 loop 29): a string or raw string that never closed ran to the
     end of the file, so no block comment after it was blanked and an old
