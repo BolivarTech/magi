@@ -1938,6 +1938,32 @@ mod tests {
     }
 
     #[test]
+    fn a_url_credential_is_found_for_a_host_that_opens_with_an_underscore() {
+        // [MAGI S6 loop 33, A2, security] only an ASCII letter or digit, or `[`, counted as the
+        // start of a host, so `user:password@_cache` went undetected and its file was sent.
+        assert_url_credential_found("postgres://svc:S3cr3t@_cache/app");
+    }
+
+    #[test]
+    fn a_url_credential_is_found_for_a_host_that_opens_with_a_hyphen() {
+        // [MAGI S6 loop 33, A2, security] same gap: a host may open with any unreserved byte.
+        assert_url_credential_found("postgres://svc:S3cr3t@-cache/app");
+    }
+
+    #[test]
+    fn a_url_credential_is_found_for_a_host_that_opens_percent_encoded() {
+        // [MAGI S6 loop 33, A2, security] same gap: a reg-name may open with a pct-encoded byte.
+        assert_url_credential_found("postgres://svc:S3cr3t@%63ache/app");
+    }
+
+    /// Asserts that `secret` is detected as a URL credential and masked so its password is gone.
+    fn assert_url_credential_found(secret: &str) {
+        assert_eq!(find_secret(secret), Some("url-credential"), "{secret}");
+        let masked = mask_secrets(secret);
+        assert!(!masked.contains("S3cr3t"), "{masked}");
+    }
+
+    #[test]
     fn a_url_credential_is_found_whatever_follows_its_at_sign() {
         // [MAGI S6 loop 14, A2-1, security review] only the run's last `@` was tried, so a later
         // `@` with no host after it (`'@'`) or past the userinfo cap (a minified line) hid a real
