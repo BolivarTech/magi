@@ -3927,6 +3927,40 @@ void g(void) {
     }
 
     #[test]
+    fn a_blank_line_after_a_bare_equal_sign_keeps_the_value_with_its_declaration() {
+        // [MAGI B2b1b] the search for the value's end stopped at the blank line right after the
+        // bare `=`, so the declaration ended on its own line and its value fell into a gap unit.
+        let rust = "pub static TABLE: &[u8] =\n\n    &[1, 2, 3];\nfn f() {\n}\n";
+        assert_eq!(
+            spans(&extract(&rust_extractor(), rust, &all_lines(rust))),
+            vec![
+                ("statics", UnitKind::DeclarationGroup, 1, 3),
+                ("f", UnitKind::Function, 4, 5)
+            ]
+        );
+        let c = "static int n =\n\n\n    5;\nint g(void) {\n}\n";
+        assert_eq!(
+            spans(&extract(&c_extractor(), c, &all_lines(c))),
+            vec![
+                ("statics", UnitKind::DeclarationGroup, 1, 4),
+                ("g", UnitKind::Function, 5, 6)
+            ]
+        );
+        let js = "const x =\n\n  g(\n    1\n  )\nfunction f() {\n}\n";
+        assert_eq!(
+            spans(&extract(
+                &BraceFamilyExtractor::javascript(),
+                js,
+                &all_lines(js)
+            )),
+            vec![
+                ("constants", UnitKind::DeclarationGroup, 1, 5),
+                ("f", UnitKind::Function, 6, 7)
+            ]
+        );
+    }
+
+    #[test]
     fn a_value_wrapped_after_a_bare_equal_sign_runs_to_its_closing_delimiter_without_a_semicolon() {
         // [MAGI B2b1 6] in Go or JavaScript without semicolons, the value after a bare `=` was
         // only the next line, so a call or a literal wrapped over lines (`g(` ... `)`, `[` ...
