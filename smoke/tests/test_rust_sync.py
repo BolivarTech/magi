@@ -707,6 +707,14 @@ class RustFnBodyTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "no closing brace"):
             _rust_fn_body("pub fn top() -> u8 {\n    0\n}", "pub fn top(")
 
+    def test_a_brace_line_inside_a_literal_or_comment_does_not_end_the_body(self) -> None:
+        # [F1b2a] the end was found on the raw text, so a ``}`` line inside a multi-line raw string or block
+        # comment, at the function's indentation, cut the body short of the pinned lines after it.
+        text = ('pub fn top() -> &\'static str {\n    let s = r#"\n}\n"#;\n    /*\n}\n    */\n'
+                "    s\n}\n\npub fn next() {}\n")
+        body = _rust_fn_body(text, "pub fn top(")
+        self.assertEqual(text[:text.index("    s\n") + len("    s")], body)
+
 
 class CountedKindTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 25, F1a1-melchior] a refusal run's absent provider kind is the counted one.
