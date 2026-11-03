@@ -551,6 +551,47 @@ class SummaryKeyExtractionTests(unittest.TestCase):
             with self.assertRaises(AssertionError, msg=shape):
                 _summary_keys_read(self._KNOWN + shape + "\n")
 
+    #: The calls of :data:`_KNOWN` without its helper, for shapes that define ``_list_under`` themselves.
+    _CALLS = 'a = section.get("batches")\nitems, failure = _list_under(section, "findings")\n'
+
+    def test_a_list_under_the_read_cannot_trust_fails_the_read(self) -> None:
+        # MAGI FIX (S6 loop 33): _list_under's calls were credited by its name alone, so a helper whose parameters
+        # were renamed, a lambda or import bound to the name, or a second binding of it read a key unseen.
+        for shape in ('def _list_under(other, key):\n    return other.get("hidden")',
+                      'def _list_under(section, name):\n    return section.get(name)',
+                      'def _list_under(key, section):\n    return section.get(key)',
+                      'def _list_under(section, key, extra=None):\n    return section.get(key)',
+                      'def _list_under(section, *, key):\n    return section.get(key)',
+                      '_list_under = lambda section, key: section.get("hidden")',
+                      'from json import loads as _list_under',
+                      'import _list_under',
+                      'async def _list_under(section, key):\n    return section.get(key)'):
+            with self.subTest(shape=shape), self.assertRaises(AssertionError):
+                _summary_keys_read(self._CALLS + shape + "\n")
+        helper = 'def _list_under(section, key):\n    return section.get(key)\n'
+        for rebinding in ('_list_under = lambda s, k: s.get("hidden")', 'from json import loads as _list_under',
+                          'class _list_under:\n    pass', 'for _list_under in ():\n    pass',
+                          'with open("x") as _list_under:\n    pass', 'def _list_under(section, key):\n    pass',
+                          'def f():\n    global _list_under\n    _list_under = None',
+                          'try:\n    pass\nexcept OSError as _list_under:\n    pass',
+                          'match 1:\n    case _list_under:\n        pass', 'del _list_under'):
+            with self.subTest(rebinding=rebinding), self.assertRaises(AssertionError):
+                _summary_keys_read(self._CALLS + helper + rebinding + "\n")
+        # Every form that rebinds key inside the helper.
+        for body in ('    match "hidden":\n        case key:\n            pass',
+                     '    match ["hidden"]:\n        case [*key]:\n            pass',
+                     '    match {"a": "hidden"}:\n        case {**key}:\n            pass',
+                     '    import os as key', '    from os import sep as key', '    import key',
+                     '    try:\n        pass\n    except OSError as key:\n        pass',
+                     '    def key():\n        pass', '    class key:\n        pass',
+                     '    def inner():\n        global key', '    def inner():\n        nonlocal key',
+                     '    async def key():\n        pass'):
+            shape = 'def _list_under(section, key):\n%s\n    return section.get(key)' % body
+            with self.subTest(body=body), self.assertRaises(AssertionError):
+                _summary_keys_read(self._CALLS + shape + "\n")
+        # The trusted helper alone, called with literal keys, is still read.
+        self.assertEqual({"batches", "findings"}, _summary_keys_read(self._CALLS + helper))
+
     def test_a_spaced_get_still_reads_its_key(self) -> None:
         # [MAGI F1b2a] the regex wanted "section.get(" with no space, so a legal "section . get(...)" read a key
         # the fixed-set comparison never saw.
