@@ -2147,7 +2147,98 @@ def _drain_body(rfile, headers) -> None:
         left -= len(chunk)
 
 
-class _EchoingHandler(http.server.BaseHTTPRequestHandler):
+class _RecordingHandler(http.server.BaseHTTPRequestHandler):
+    """Reads one request, records it whatever its shape, and hands it to :meth:`_answer`.
+
+    The loopback stand-ins share this: every connection that carries a byte
+    leaves exactly one record in the server's ``log`` (a :class:`RequestLog`,
+    or ``None`` to record nothing), by method and path when the request line
+    parsed and as :data:`UNPARSED_REQUEST` when it did not, and every method is
+    answered alike. A subclass implements :meth:`_answer`, which must catch
+    the ``OSError`` of a client that hung up.
+    """
+
+    def handle_one_request(self) -> None:
+        """Read one request, record it whatever its shape, and answer it.
+
+        MAGI FIX (S6 loop 28): the request was recorded from the ``do_*``
+        methods, so a method the handler does not implement (``OPTIONS``,
+        ``TRACE``, an unknown verb) got the base class's 501, and a malformed
+        or over-long request line its 400 or 414, all unrecorded: a refusal
+        run whose product sent one passed (F1a1-melchior). MAGI FIX (F1a1b):
+        the error backend kept that old shape; both stand-ins read requests
+        here now.
+        """
+        try:
+            carried = self.rfile.peek(1)[:1]
+        except OSError:
+            carried = b""
+        if not carried:
+            self.close_connection = True
+            return
+        self.command = self.path = None
+        try:
+            self.raw_requestline = self.rfile.readline(MAX_REQUEST_LINE_BYTES + 1)
+        except OSError:
+            self._record(UNPARSED_REQUEST)
+            self.close_connection = True
+            return
+        parsed = False
+        try:
+            if len(self.raw_requestline) <= MAX_REQUEST_LINE_BYTES:
+                parsed = self.parse_request()
+        except OSError:
+            parsed = False
+        finally:
+            self._record(self._parsed_key())
+        if not parsed:
+            self.close_connection = True
+            return
+        self._answer()
+        try:
+            self.wfile.flush()
+        except OSError:
+            self.close_connection = True
+
+    def _record(self, key: tuple[str, str]) -> None:
+        """Record *key* in the server's log, when it has one.
+
+        Args:
+            key: The ``(method, path)`` pair :meth:`RequestLog.record` takes.
+        """
+        log = getattr(self.server, "log", None)
+        if log is not None:
+            log.record(*key)
+
+    def _parsed_key(self) -> tuple[str, str]:
+        """The ``(method, path)`` of the request just parsed, or :data:`UNPARSED_REQUEST`.
+
+        ``parse_request`` sets the method and the path together, so a method
+        means the path is this request's. The path is kept without its query,
+        and a path that does not split as a URL is kept as unparsed rather
+        than raw: the authority of an absolute-form target may hold a
+        credential.
+
+        Returns:
+            tuple[str, str]: What :meth:`RequestLog.record` takes.
+        """
+        if not self.command or self.path is None:
+            return UNPARSED_REQUEST
+        try:
+            return self.command, urllib.parse.urlsplit(self.path).path
+        except ValueError:
+            return self.command, UNPARSED_REQUEST[1]
+
+    def _answer(self) -> None:
+        """Answer the request just recorded.
+
+        Raises:
+            NotImplementedError: Always; each stand-in answers its own way.
+        """
+        raise NotImplementedError
+
+
+class _EchoingHandler(_RecordingHandler):
     """Answers every request with an error that repeats what it was sent.
 
     Echoing the Authorization header is the whole point rather than a
@@ -2162,33 +2253,25 @@ class _EchoingHandler(http.server.BaseHTTPRequestHandler):
     #: the run open past its ceiling.
     timeout = ERROR_BACKEND_TIMEOUT_S
 
-    def do_POST(self) -> None:  # noqa: N802 - the base class names it
-        """Answer one POST with :data:`ERROR_BACKEND_STATUS`, recording it first."""
-        log = getattr(self.server, "log", None)
-        if log is not None:
-            log.record(self.command, urllib.parse.urlsplit(self.path).path)
+    def _answer(self) -> None:
+        """Drain the request's body and answer it :data:`ERROR_BACKEND_STATUS`, echoing it."""
         try:
             _drain_body(self.rfile, self.headers)
+            body = json.dumps({
+                "error": {
+                    "message": "unauthorized",
+                    "authorization": self.headers.get("Authorization", ""),
+                    "url": self.path,
+                }
+            }).encode("utf-8")
+            self.send_response(ERROR_BACKEND_STATUS)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         except OSError:
             # The client stopped mid-body or hung up: nobody is left to answer.
             self.close_connection = True
-            return
-        body = json.dumps({
-            "error": {
-                "message": "unauthorized",
-                "authorization": self.headers.get("Authorization", ""),
-                "url": self.path,
-            }
-        }).encode("utf-8")
-        self.send_response(ERROR_BACKEND_STATUS)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self) -> None:  # noqa: N802 - the base class names it
-        """Answer one GET the same way, so a probe gets an answer too."""
-        self.do_POST()
 
     def log_message(self, fmt: str, *args) -> None:
         """Swallow the access log.
@@ -2453,7 +2536,7 @@ class RequestLog:
             return self._total > len(self._recorded)
 
 
-class _CountingHandler(http.server.BaseHTTPRequestHandler):
+class _CountingHandler(_RecordingHandler):
     """Records every request, then answers it :data:`MODEL_COUNTER_STATUS`.
 
     The request is recorded as soon as its line and headers are read, before
@@ -2493,68 +2576,6 @@ class _CountingHandler(http.server.BaseHTTPRequestHandler):
         """Disarm the deadline, then close the connection's streams."""
         self._deadline.cancel()
         super().finish()
-
-    def handle_one_request(self) -> None:
-        """Read one request, record it whatever its shape, and answer it.
-
-        MAGI FIX (S6 loop 28): the request was recorded from the ``do_*``
-        methods, so a method the handler does not implement (``OPTIONS``,
-        ``TRACE``, an unknown verb) got the base class's 501, and a malformed
-        or over-long request line its 400 or 414, all unrecorded: a refusal
-        run whose product sent one passed (F1a1-melchior). Every connection
-        that carries a byte now leaves exactly one record, by method and path
-        when the request line parsed and as :data:`UNPARSED_REQUEST` when it
-        did not; every method is answered alike.
-        """
-        try:
-            carried = self.rfile.peek(1)[:1]
-        except OSError:
-            carried = b""
-        if not carried:
-            self.close_connection = True
-            return
-        self.command = self.path = None
-        try:
-            self.raw_requestline = self.rfile.readline(MAX_REQUEST_LINE_BYTES + 1)
-        except OSError:
-            self.server.log.record(*UNPARSED_REQUEST)
-            self.close_connection = True
-            return
-        parsed = False
-        try:
-            if len(self.raw_requestline) <= MAX_REQUEST_LINE_BYTES:
-                parsed = self.parse_request()
-        except OSError:
-            parsed = False
-        finally:
-            self.server.log.record(*self._parsed_key())
-        if not parsed:
-            self.close_connection = True
-            return
-        self._answer()
-        try:
-            self.wfile.flush()
-        except OSError:
-            self.close_connection = True
-
-    def _parsed_key(self) -> tuple[str, str]:
-        """The ``(method, path)`` of the request just parsed, or :data:`UNPARSED_REQUEST`.
-
-        ``parse_request`` sets the method and the path together, so a method
-        means the path is this request's. The path is kept without its query,
-        and a path that does not split as a URL is kept as unparsed rather
-        than raw: the authority of an absolute-form target may hold a
-        credential.
-
-        Returns:
-            tuple[str, str]: What :meth:`RequestLog.record` takes.
-        """
-        if not self.command or self.path is None:
-            return UNPARSED_REQUEST
-        try:
-            return self.command, urllib.parse.urlsplit(self.path).path
-        except ValueError:
-            return self.command, UNPARSED_REQUEST[1]
 
     def _answer(self) -> None:
         """Drain this request's body and answer it unavailable."""
