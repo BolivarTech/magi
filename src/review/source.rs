@@ -126,6 +126,20 @@ pub trait GitCommand: Send + Sync {
 }
 
 /// Reads the content of a review, as bytes (binary and non-UTF-8 files are filtered later).
+///
+/// # Line contract
+///
+/// Every stage that reads through a source (hunks, the reviewed ranges of RV09, units, the gate
+/// state) numbers lines the way git does: a line ends at `\n` only. A `\r\n` is one line end,
+/// and stages that split with `str::lines` drop its `\r`. A lone `\r` is not a line break; it
+/// stays inside its line. Counting as git counts is what keeps the hunk ranges git reports in
+/// agreement with the lines every stage shows and checks. The consequence, kept on purpose: a
+/// file with classic-Mac endings (lone `\r` only) is one line and so one unit; when that unit
+/// does not fit a batch it is a typed error (RV03), never a silent cut. Pinned by
+/// `a_lone_carriage_return_is_not_a_line_break` and
+/// `a_crlf_source_still_splits_into_its_real_lines` (`review::languages::python`).
+// MAGI FIX (B2b2): the lone-`\r` behaviour was undeclared; normalizing it here would number
+// lines differently from git's hunks.
 pub trait ContentSource: Send + Sync {
     /// Reads `path` (relative, `/`-separated) from the new side, or the worktree.
     ///

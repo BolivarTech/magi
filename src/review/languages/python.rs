@@ -23,6 +23,9 @@
 //! - Code CPython rejects (two backslashes ending a line outside a string) still loses no line
 //!   (`two_backslashes_ending_a_line_outside_a_string_lose_no_line`).
 //! - String and f-string limits are those of `python_strings`.
+//! - Lines follow the review's line contract (`review::source::ContentSource`): a lone `\r` is
+//!   not a line break, as in git, so a classic-Mac file is one line
+//!   (`a_lone_carriage_return_is_not_a_line_break`).
 
 use super::python_strings::PythonStrings;
 use super::scanner::{CodeScanner, LexicalRules};
