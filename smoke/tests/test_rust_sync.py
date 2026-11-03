@@ -339,6 +339,34 @@ class SummaryKeyExtractionTests(unittest.TestCase):
             with self.assertRaises(AssertionError, msg=shape):
                 _summary_keys_read(self._KNOWN + shape + "\n")
 
+    def test_a_spaced_get_still_reads_its_key(self) -> None:
+        # [MAGI F1b2a] the regex wanted "section.get(" with no space, so a legal "section . get(...)" read a key
+        # the fixed-set comparison never saw.
+        for shape in ('x = section . get("new_key")', 'x = section.get( "new_key" )', 'x = (section).get("new_key")'):
+            self.assertIn("new_key", _summary_keys_read(self._KNOWN + shape + "\n"), shape)
+
+    def test_an_alias_of_section_fails_the_read(self) -> None:
+        # [MAGI F1b2a] reading through another name dropped the key from the guard in silence.
+        for shape in ('s2 = section\ny = s2.get("new_key")', 's2, s3 = section, 0', 'y = [section][0].get("k")',
+                      'y = section if True else None'):
+            with self.assertRaises(AssertionError, msg=shape):
+                _summary_keys_read(self._KNOWN + shape + "\n")
+
+    def test_passing_section_to_a_function_the_read_cannot_follow_fails_it(self) -> None:
+        # [MAGI F1b2a] a helper outside the module, or one whose parameter is named otherwise, reads keys the
+        # walk never sees.
+        for shape in ('y = _elsewhere(section)', 'y = json.dumps(section)', 'y = _helper(other=section)',
+                      'def _renamed(other):\n    return other.get("k")\ny = _renamed(section)',
+                      'y = section.get(key)'):
+            with self.assertRaises(AssertionError, msg=shape):
+                _summary_keys_read(self._KNOWN + shape + "\n")
+
+    def test_a_module_helper_taking_section_by_that_name_has_its_reads_collected(self) -> None:
+        shape = 'def _helper(run_id, section):\n    return section.get("inner")\ny = _helper("R12", section)\n'
+        self.assertEqual({"batches", "findings", "inner"}, _summary_keys_read(self._KNOWN + shape))
+        self.assertEqual({"batches", "findings"},
+                         _summary_keys_read(self._KNOWN + "ok = isinstance(section, dict)\nsection = {}\n"))
+
 
 class ReportKeyTests(unittest.TestCase):
     """The JSON keys S47 reads exist in the product's report and envelope."""
