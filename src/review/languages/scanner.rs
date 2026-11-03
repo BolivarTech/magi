@@ -1354,8 +1354,9 @@ fn is_digit_separator(chars: &[char], i: usize) -> bool {
         .is_some_and(char::is_ascii_digit)
 }
 
-/// Whether `c` can be part of a JS identifier or keyword (`$` included).
-fn is_js_word_char(c: char) -> bool {
+/// Whether `c` can be part of a JS identifier or keyword (`$` included). Shared by the scanner
+/// and the brace family's arrow reader (`brace_family::lexical`).
+pub(crate) fn is_js_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$'
 }
 

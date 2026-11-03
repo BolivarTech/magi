@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::review::languages::scanner::{
-    c_char_literal_end, rust_char_literal_len, RUST_CHAR_LITERAL_MAX_CHARS,
+    c_char_literal_end, is_js_word_char, rust_char_literal_len, RUST_CHAR_LITERAL_MAX_CHARS,
 };
 
 /// The 1-based line number of the 0-based line `idx`.
@@ -984,7 +984,7 @@ pub(super) fn arrow_at_top_level<'t>(parts: impl IntoIterator<Item = &'t str>) -
                 '<' if k
                     .checked_sub(1)
                     .and_then(|p| chars.get(p))
-                    .is_some_and(|&p| is_js_identifier_char(p)) =>
+                    .is_some_and(|&p| is_js_word_char(p)) =>
                 {
                     angle += 1;
                 }
@@ -1003,11 +1003,6 @@ pub(super) fn arrow_at_top_level<'t>(parts: impl IntoIterator<Item = &'t str>) -
         }
     }
     false
-}
-
-/// Whether `c` can be part of a JavaScript or TypeScript identifier (`$` included).
-fn is_js_identifier_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '$'
 }
 
 /// The index of the quote closing the string whose quote is at `open` in `chars`, a backslash
