@@ -697,6 +697,29 @@ class CodeReviewScenarioTests(unittest.TestCase):
         del doc["consult"]["consensus"]
         self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[3]])
 
+    def _all_lost(self, failed) -> dict:
+        """A review whose every planned batch failed: the product exits 1 with no consult object."""
+        doc = _review(3, [], [])
+        doc["consult"] = None
+        doc["code_review"].update(batches_completed=0, failed_batches=failed)
+        return _outcomes("S47", _result("R12", 1, doc))
+
+    def test_s47_cannot_test_the_exit_and_consensus_when_the_backend_lost_every_batch(self) -> None:
+        # [MAGI F1b2b] with every batch lost to quota or transport the product exits 1 ("no batch completed")
+        # and writes no consensus, which read as two product FAILs; D-17 makes a down backend CANNOT_TEST.
+        outcomes = self._all_lost([[1, "http error 429: quota"], [2, "network error: reset"],
+                                   [3, "timeout: no answer"]])
+        for index in (0, 2, 3):
+            self.assertEqual(Outcome.CANNOT_TEST, outcomes[code_review.S47_ASSERTIONS[index]], index)
+
+    def test_s47_still_fails_the_exit_when_a_lost_batch_was_not_the_backend(self) -> None:
+        outcomes = self._all_lost([[1, "http error 429: quota"], [2, "response contract violated: x"],
+                                   [3, "timeout: no answer"]])
+        self.assertEqual(Outcome.FAIL, outcomes[code_review.S47_ASSERTIONS[0]])
+        self.assertEqual(Outcome.FAIL, outcomes[code_review.S47_ASSERTIONS[3]])
+        outcomes = self._all_lost([[1, "http error 429: quota"], [2, "timeout: no answer"]])
+        self.assertEqual(Outcome.FAIL, outcomes[code_review.S47_ASSERTIONS[0]])
+
     def test_s47_fails_on_a_json_document_that_is_not_an_object(self) -> None:
         # [MAGI §6 MS2 loop 14, F1a2-m1] read as an AttributeError inside the scenario (a harness defect,
         # exit 3); ProductOutput.json() refuses a non-object with ProductOutputError, which S47 turns into a
