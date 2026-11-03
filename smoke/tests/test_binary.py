@@ -4,6 +4,7 @@
 """Tests for locating, hashing and invoking the release binary."""
 
 import hashlib
+import json
 import pathlib
 import subprocess
 import sys
@@ -107,6 +108,26 @@ class WorkingDirectoryTests(unittest.TestCase):
                 ["-c", "import os; print(os.getcwd())"], timeout=30, cwd=workdir)
         self.assertEqual(0, output.exit_code)
         self.assertEqual(workdir, pathlib.Path(output.stdout.decode("utf-8").strip()).resolve())
+
+
+class InvokeEnvironmentTests(unittest.TestCase):
+    """[F1b1b] the overlay reaches the child on the REAL invoke path, not only through the helper.
+
+    The proxy-egress pins called :func:`binary.child_environment` directly, so an ``invoke`` that built the
+    child's environment from ``os.environ`` alone, dropping the overlay, left every one of them green.
+    """
+
+    def test_an_overlay_removal_reaches_the_child_started_by_invoke(self) -> None:
+        """The child is the running interpreter, standing in for the product, printing its environment."""
+        script = ("import json, os; print(json.dumps({k.upper(): v for k, v in os.environ.items()"
+                  " if k.upper() in ('HTTP_PROXY', 'SMOKE_OVERLAY_PROBE')}))")
+        with mock.patch.dict("os.environ", {"HTTP_PROXY": "http://corp:3128"}), \
+                mock.patch.object(ReleaseBinary, "path", new_callable=mock.PropertyMock,
+                                  return_value=pathlib.Path(sys.executable)):
+            output = ReleaseBinary(support.scratch_dir(self)).invoke(
+                ["-c", script], timeout=30, env={"http_proxy": None, "SMOKE_OVERLAY_PROBE": "set"})
+        self.assertEqual(0, output.exit_code, output.stderr)
+        self.assertEqual({"SMOKE_OVERLAY_PROBE": "set"}, json.loads(output.stdout.decode("utf-8")))
 
 
 class ChildEnvironmentTests(unittest.TestCase):
