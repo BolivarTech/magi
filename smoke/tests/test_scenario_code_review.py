@@ -562,6 +562,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
             r = _result("R15", 2, None, _with_id(text))
             self.assertEqual(Outcome.FAIL, _outcomes("S50", r)[code_review.S50_ASSERTIONS[1]], need)
 
+    def test_s50_fails_on_a_wrong_exit(self) -> None:
+        # [MAGI F1b2b-j] the exit verdict had no negative test, so a check reduced to True survived: a
+        # refusal printed with exit 0 or 1 is not the misuse exit RV-S7 promises, whatever stderr says.
+        for code in (0, 1):
+            r = _result("R15", code, None, _with_id(_BUDGET_STDERR))
+            outcomes = _outcomes("S50", r, log=_BUDGET_LOG % RUN_ID.encode())
+            self.assertEqual(Outcome.FAIL, outcomes[code_review.S50_ASSERTIONS[0]], code)
+            self.assertEqual(Outcome.PASS, outcomes[code_review.S50_ASSERTIONS[1]], code)
+
     def test_s50_fails_when_the_floor_is_not_the_15_s_one(self) -> None:
         text = _BUDGET_STDERR.replace(b"the 15 s floor", b"the 20 s floor")
         r = _result("R15", 2, None, _with_id(text))
