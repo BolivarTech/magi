@@ -312,7 +312,7 @@ assertions.
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| S44 | `query` fed an envelope with a `system` field and no override flag exits 0, writes the ignored-field warning to `stderr` even at `--log-level error`, and reports `applied_caps.system_ignored: true` and `system_override_applied: false` | `CANNOT_TEST` with no reachable backend (the runner's backend rule) |
+| S44 | `query` fed an envelope with a `system` field and no override flag exits 0, writes the ignored-field warning to `stderr` even at `--log-level error`, and reports `applied_caps.system_ignored: true` and `system_override_applied: false` | `CANNOT_TEST` with no reachable backend (the runner's backend rule); the exit assertion is `CANNOT_TEST` when the run fails with a `provider` or `timeout` error, as in S45 |
 | S45 | `consult --allow-system-override` fed the same envelope reports `system_override_applied: true` and `system_ignored: false`. Both flags are read from any JSON document the run wrote, error envelopes included, since they record what was installed before the mages were called. Only the first assertion needs a healthy trio | the first assertion is `CANNOT_TEST` on a provider or timeout error; the other two are `CANNOT_TEST` only when the run left no capture, and `FAIL` when stdout carries no `applied_caps` |
 | S46 | a `system` one byte over the default `max_system_bytes` (16 384) exits 2, names `max_system_bytes` on `stderr` and writes no `response` or `consult` output to `stdout` | none: the refusal comes before any model is reached |
 

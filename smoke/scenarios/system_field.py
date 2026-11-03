@@ -23,7 +23,8 @@ parses, and the size cap refusing before a model is paid for.
 from smoke.errors import ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
-from smoke.scenarios.trio import _envelope_of
+from smoke.scenarios.trio import (ENVIRONMENTAL_ERROR_KINDS, ERROR_KEY,
+                                  _envelope_of)
 
 #: The verbatim assertion texts of S44, S45 and S46.
 S44_ASSERTIONS = (
@@ -190,6 +191,36 @@ def _stderr_text(run):
     return run.output.stderr.decode("utf-8", errors="replace")
 
 
+def _exit_finding(run):
+    """Judge S44's exit, degrading a failure the environment caused.
+
+    MAGI FIX (F1a2): a backend that passes preflight and then fails during the
+    run (provider error, quota, missing model, timeout) makes ``query`` exit
+    non-zero with a typed ``error`` whose kind is the environment's, not the
+    product's. A bare exit-code check called that a product FAIL; S45 and the
+    trio scenarios already read the same kinds as ``CANNOT_TEST``.
+
+    Args:
+        run: R9's ``RunResult`` (never ``None``).
+
+    Returns:
+        Finding: ``PASS`` on exit 0, ``CANNOT_TEST`` on an environmental error,
+        ``FAIL`` otherwise.
+    """
+    code = run.output.exit_code
+    if code != EXIT_OK:
+        try:
+            error = run.output.json().get(ERROR_KEY)
+        except ProductOutputError:
+            error = None
+        if isinstance(error, dict) and error.get("kind") in ENVIRONMENTAL_ERROR_KINDS:
+            return _finding(S44_ASSERTIONS, 0, Outcome.CANNOT_TEST, "R9",
+                            "exited %d with a %s error: %s"
+                            % (code, error.get("kind"), error.get("message", "")))
+    return _verdict(S44_ASSERTIONS, 0, "R9", code == EXIT_OK,
+                    "exited %d" % code)
+
+
 @scenario("S44", assertions=S44_ASSERTIONS, run="R9", needs_backend=True)
 def an_ignored_system_is_announced(run):
     """Check that an ignored ``system`` is reported on stderr and in the JSON.
@@ -204,9 +235,7 @@ def an_ignored_system_is_announced(run):
         yield from _all_cannot_test(S44_ASSERTIONS, "R9",
                                     "run R9 produced no capture to inspect")
         return
-    code = run.output.exit_code
-    yield _verdict(S44_ASSERTIONS, 0, "R9", code == EXIT_OK,
-                   "exited %d" % code)
+    yield _exit_finding(run)
     yield _verdict(S44_ASSERTIONS, 1, "R9",
                    IGNORED_SYSTEM_WARNING in _stderr_text(run),
                    "stderr does not carry the warning")
