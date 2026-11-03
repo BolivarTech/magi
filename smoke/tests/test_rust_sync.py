@@ -71,6 +71,87 @@ def _literal_key(node) -> str | None:
     return None
 
 
+#: The type-parameter nodes (3.12+) that bind a name; absent on 3.11, where no such syntax exists.
+_TYPE_PARAMETER_NODES = tuple(getattr(ast, name) for name in ("TypeVar", "ParamSpec", "TypeVarTuple")
+                              if hasattr(ast, name))
+
+
+def _names_bound_by(node) -> list[str]:
+    """The names *node* binds in its scope, by every binding form Python has.
+
+    MAGI FIX (S6 loop 33): only ``Name`` stores and deletes were looked for, so a
+    ``match`` capture, an ``except ... as``, an import alias, a nested ``def``
+    or ``class``, or a ``global``/``nonlocal`` declaration rebound a name the
+    guard trusted.
+
+    Args:
+        node: Any AST node.
+
+    Returns:
+        list[str]: The names bound: a stored or deleted ``Name``; a function's or
+        class's name; an import alias (its ``asname``, else the first dotted part
+        of the imported name); a ``match`` capture (``MatchAs``, ``MatchStar``,
+        ``MatchMapping.rest``); an exception handler's name; the names a
+        ``global`` or ``nonlocal`` declares; a parameter; a type parameter.
+        Empty for a node that binds nothing.
+
+    Example:
+        >>> _names_bound_by(ast.parse("import os.path as key").body[0].names[0])
+        ['key']
+        >>> _names_bound_by(ast.parse("x + 1").body[0])
+        []
+    """
+    if isinstance(node, ast.Name):
+        return [node.id] if isinstance(node.ctx, (ast.Store, ast.Del)) else []
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, ast.alias):
+        return [node.asname or node.name.split(".")[0]]
+    if isinstance(node, (ast.MatchAs, ast.MatchStar, ast.ExceptHandler) + _TYPE_PARAMETER_NODES):
+        return [node.name] if node.name else []
+    if isinstance(node, ast.MatchMapping):
+        return [node.rest] if node.rest else []
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return list(node.names)
+    if isinstance(node, ast.arg):
+        return [node.arg]
+    return []
+
+
+def _trusted_list_under(tree: ast.Module) -> ast.FunctionDef | None:
+    """The module's ``_list_under`` when its calls and its ``section.get(key)`` can be credited, else ``None``.
+
+    MAGI FIX (S6 loop 33): the helper was trusted by its name, so one whose
+    parameters were renamed, a lambda or import bound to the name, or a second
+    binding of it read a key the guard never saw; and ``key`` was only checked
+    for ``Name`` stores, so a ``match`` capture or an import alias rebound it.
+
+    Args:
+        tree: The parsed scenario module.
+
+    Returns:
+        ast.FunctionDef | None: The helper, only when the module binds
+        ``_list_under`` exactly once (by any form :func:`_names_bound_by`
+        knows, anywhere in the module), that binding is an undecorated
+        top-level ``def _list_under(section, key)`` taking exactly those two
+        positional parameters, and nothing in its body binds ``key`` again.
+    """
+    bindings = [node for node in ast.walk(tree) if _LIST_UNDER in _names_bound_by(node)]
+    if len(bindings) != 1:
+        return None
+    helper = bindings[0]
+    if not (isinstance(helper, ast.FunctionDef) and helper in tree.body and not helper.decorator_list):
+        return None
+    arguments = helper.args
+    if ([arg.arg for arg in arguments.posonlyargs + arguments.args] != [_SECTION_NAME, _LIST_UNDER_PARAMETER]
+            or arguments.vararg or arguments.kwonlyargs or arguments.kwarg):
+        return None
+    if any(_LIST_UNDER_PARAMETER in _names_bound_by(inner)
+           for statement in helper.body for inner in ast.walk(statement)):
+        return None
+    return helper
+
+
 class _SectionReads:
     """Every use of the name ``section`` in a module, each one either read for its key or refused.
 
@@ -82,9 +163,10 @@ class _SectionReads:
 
     Accepted: a binding (an assignment target or a parameter);
     ``section.get("<lit>")`` with exactly one argument;
-    ``section.get(key)`` directly inside the module-level ``_list_under``,
-    whose ``key`` nothing rebinds; ``_list_under(section,
-    "<lit>")``; ``isinstance(section, ...)``; and ``section`` passed
+    ``section.get(key)`` directly inside the module's ``_list_under`` and
+    ``_list_under(section, "<lit>")``, both only while
+    :func:`_trusted_list_under` returns the helper (otherwise both fail
+    closed); ``isinstance(section, ...)``; and ``section`` passed
     positionally to a function defined in the module whose parameter at that
     position is also named ``section``, whose own body the same walk reads.
 
@@ -101,6 +183,7 @@ class _SectionReads:
             SyntaxError: When it does not parse.
         """
         self._tree = ast.parse(source)
+        self._list_under = _trusted_list_under(self._tree)
         self._parents = {}
         self._parameters = {node.name: [arg.arg for arg in node.args.posonlyargs + node.args.args]
                             for node in self._tree.body if isinstance(node, ast.FunctionDef)}
@@ -145,7 +228,9 @@ class _SectionReads:
                     return None
         if isinstance(parent, ast.Call) and node in parent.args and isinstance(parent.func, ast.Name):
             callee, position = parent.func.id, parent.args.index(node)
-            if callee == _LIST_UNDER and position == 0 and len(parent.args) == 2 and not parent.keywords:
+            # MAGI FIX (S6 loop 33): a _list_under call is credited only through the trusted helper.
+            if (callee == _LIST_UNDER and self._list_under is not None and position == 0
+                    and len(parent.args) == 2 and not parent.keywords):
                 key = _literal_key(parent.args[1])
                 if key is not None:
                     return key
@@ -171,20 +256,14 @@ class _SectionReads:
 
         Returns:
             bool: ``True`` only when the nearest enclosing scope (function,
-            lambda, comprehension or class) is a module-level
-            ``_list_under`` that takes ``key`` positionally and never stores
-            or deletes it anywhere in its body.
+            lambda, comprehension or class) is the helper
+            :func:`_trusted_list_under` returned. MAGI FIX (S6 loop 33): the
+            rebinding scan now lives there and covers every binding form.
         """
         scope = self._parents.get(node)
         while scope is not None and not isinstance(scope, _SCOPE_NODES):
             scope = self._parents.get(scope)
-        if not (isinstance(scope, ast.FunctionDef) and scope.name == _LIST_UNDER
-                and self._parents.get(scope) is self._tree):
-            return False
-        if _LIST_UNDER_PARAMETER not in [arg.arg for arg in scope.args.posonlyargs + scope.args.args]:
-            return False
-        return not any(isinstance(inner, ast.Name) and inner.id == _LIST_UNDER_PARAMETER
-                       and isinstance(inner.ctx, (ast.Store, ast.Del)) for inner in ast.walk(scope))
+        return self._list_under is not None and scope is self._list_under
 
 
 def _summary_keys_read(scenario: str) -> set[str]:
