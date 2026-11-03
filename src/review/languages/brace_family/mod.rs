@@ -3269,6 +3269,38 @@ void g(void) {
     }
 
     #[test]
+    fn a_javascript_with_statement_is_no_function() {
+        // [MAGI B2b1a] `with` was missing from the words that stand before a `(` without
+        // naming a function, so a sloppy-mode `with (obj) {` block was a function named `with`.
+        // It stays a legal name in a class body, and in Rust and Go.
+        let js = "with (obj) {\n  a();\n}\nfunction g() {\n}\n";
+        let units = extract(&BraceFamilyExtractor::javascript(), js, &all_lines(js));
+        assert!(
+            units.iter().all(|u| u.name != "with"),
+            "{:?}",
+            spans(&units)
+        );
+        assert!(spans(&units).contains(&("g", UnitKind::Function, 4, 5)));
+        let class = "class C {\n  with(fields) {\n    return 1;\n  }\n}\n";
+        let parts = split(
+            &BraceFamilyExtractor::javascript(),
+            class,
+            1,
+            UnitKind::Class,
+        );
+        assert!(
+            spans(&parts).contains(&("with", UnitKind::Method, 2, 4)),
+            "{:?}",
+            spans(&parts)
+        );
+        let go = "func with(x int) {\n}\n";
+        assert_eq!(
+            spans(&extract(&BraceFamilyExtractor::go(), go, &all_lines(go))),
+            vec![("with", UnitKind::Function, 1, 2)]
+        );
+    }
+
+    #[test]
     fn a_cpp_namespace_alias_is_a_declaration_not_a_namespace() {
         // [MAGI B2b1a] only a `=` right after the keyword ruled a namespace out, so an alias
         // (`namespace fs = std::filesystem;`) was a one-line namespace unit of its own instead
