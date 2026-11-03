@@ -727,24 +727,6 @@ fn holds_bare_assignment(text: &str) -> bool {
     false
 }
 
-/// The index of the quote closing the string whose quote is at `open` in `chars`, a backslash
-/// escaping the next character, or `None` when it does not close on the line. O(n) in the line.
-fn quote_close(chars: &[char], open: usize) -> Option<usize> {
-    let quote = chars.get(open).copied()?;
-    let mut j = open + 1;
-    while let Some(&d) = chars.get(j) {
-        if d == '\\' {
-            j += 2;
-            continue;
-        }
-        if d == quote {
-            return Some(j);
-        }
-        j += 1;
-    }
-    None
-}
-
 /// The 0-based last line of the value a declaration at line `i` puts after a bare `=` on the
 /// next lines (`pub static T: &[u8] =` then `&[1, 2, 3];`): the end of that statement, the first
 /// later line whose code ends in `;` ([`statement_end`], which stops at a blank line, at the next

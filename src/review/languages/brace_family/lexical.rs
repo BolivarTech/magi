@@ -970,18 +970,7 @@ pub(super) fn arrow_at_top_level<'t>(parts: impl IntoIterator<Item = &'t str>) -
                     continue;
                 }
                 q if JS_QUOTES.contains(&q) => {
-                    let mut j = k + 1;
-                    while let Some(&d) = chars.get(j) {
-                        if d == '\\' {
-                            j += 2;
-                            continue;
-                        }
-                        if d == q {
-                            break;
-                        }
-                        j += 1;
-                    }
-                    k = j + 1;
+                    k = quote_close(&chars, k).map_or(chars.len(), |j| j + 1);
                     continue;
                 }
                 '(' | '[' | '{' => depth += 1,
@@ -993,6 +982,24 @@ pub(super) fn arrow_at_top_level<'t>(parts: impl IntoIterator<Item = &'t str>) -
         }
     }
     false
+}
+
+/// The index of the quote closing the string whose quote is at `open` in `chars`, a backslash
+/// escaping the next character, or `None` when it does not close on the line. O(n) in the line.
+pub(super) fn quote_close(chars: &[char], open: usize) -> Option<usize> {
+    let quote = chars.get(open).copied()?;
+    let mut j = open + 1;
+    while let Some(&d) = chars.get(j) {
+        if d == '\\' {
+            j += 2;
+            continue;
+        }
+        if d == quote {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
 }
 
 /// The byte offset just past the `close` that matches the `open` `text` starts with, reading C
