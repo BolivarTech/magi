@@ -48,6 +48,23 @@ class OneDefinitionTests(unittest.TestCase):
         match = _helpers().one_definition(text, r"Ok\(n\) => remaining_secs / n,", "c.rs")
         self.assertEqual("        Ok(n) => remaining_secs / n,", match.group(0))
 
+    def test_a_line_inside_a_string_literal_is_not_a_definition(self) -> None:
+        # [MAGI F1b2a] a fixture line inside a multi-line string started its own line, so it was read as the
+        # definition: alone it answered for a constant the file never defines, beside the real one it made two.
+        for fixture in ('pub const FIXTURE: &str = r#"\npub const LIMIT: usize = 9;\n"#;\n',
+                        'pub const FIXTURE: &str = "\npub const LIMIT: usize = 9;\n";\n',
+                        'const B: &[u8] = br"\npub const LIMIT: usize = 9;\n";\n'):
+            with self.assertRaisesRegex(AssertionError, "found 0", msg=fixture):
+                _helpers().one_definition(fixture, r"pub const LIMIT: usize = (\d+);", "x.rs")
+            match = _helpers().one_definition(fixture + "pub const LIMIT: usize = 5;\n",
+                                              r"pub const LIMIT: usize = (\d+);", "x.rs")
+            self.assertEqual("5", match.group(1), fixture)
+
+    def test_a_definition_that_opens_a_string_still_reads_its_contents(self) -> None:
+        text = 'pub const CAUSE: &str = "secret";\n'
+        self.assertEqual("secret", _helpers().one_definition(text, r'pub const CAUSE: &str = "([^"]+)";', "x.rs")
+                         .group(1))
+
     def test_a_pattern_never_starts_mid_line(self) -> None:
         text = "let old = 1; let per_batch = split(total);\n"
         with self.assertRaises(AssertionError):
