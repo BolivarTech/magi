@@ -5533,6 +5533,39 @@ int g(void) {
     }
 
     #[test]
+    fn an_arrow_inside_generic_type_arguments_makes_no_function() {
+        // [MAGI B2b1b] the `=>` of a function type in a call's type arguments
+        // (`make<() => void>({`) stood outside every bracket, as `<` was no bracket, so the
+        // declaration read as an arrow function named after its variable.
+        let constants = |end| vec![unit("constants", UnitKind::DeclarationGroup, 1, end)];
+        let f = |end| vec![unit("f", UnitKind::Function, 1, end)];
+        for (code, expected) in [
+            (
+                "const x = make<() => void>({\n    a: 1,\n});\n",
+                constants(3),
+            ),
+            (
+                "const x = make<Map<string, (y: T) => U>>({\n    a: 1,\n});\n",
+                constants(3),
+            ),
+            (
+                "const f = <T,>(x: T): Map<string, T> => {\n    return x;\n};\n",
+                f(3),
+            ),
+            (
+                "const f = (x: Array<() => void>) => {\n    return x;\n};\n",
+                f(3),
+            ),
+        ] {
+            assert_eq!(
+                sorted_spans(&BraceFamilyExtractor::typescript(), code),
+                expected,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
     fn loop_29_shapes_checked_without_a_defect_keep_their_units() {
         // [MAGI loop 29, B2b1a/B2b1b] checked, no defect: generator declarations in every form,
         // a return type literal after a parameter typed with nested parentheses, a `(` inside a
