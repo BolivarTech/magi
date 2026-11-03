@@ -213,6 +213,34 @@ def _summary_keys_read(scenario: str) -> set[str]:
     return _SectionReads(scenario).keys()
 
 
+#: The fewest words a copied stderr phrase may hold: one word ("the") matches
+#: nearly any error line, so it would let a scenario pass on unrelated text.
+_MIN_PHRASE_WORDS = 2
+
+
+def _is_word_bounded_phrase(copy: str, text: str) -> bool:
+    """Whether *copy* is a phrase of *text* that cannot match unrelated stderr.
+
+    Args:
+        copy: The harness's copy of a product phrase.
+        text: The product's literal it was copied from.
+
+    Returns:
+        bool: ``True`` when *copy* has no surrounding whitespace, holds at least
+        :data:`_MIN_PHRASE_WORDS` words, and occurs in *text* with no word
+        character right before or after it.
+
+    Example:
+        >>> _is_word_bounded_phrase("outside the workspace", "path is outside the workspace: {}")
+        True
+        >>> _is_word_bounded_phrase("side the work", "path is outside the workspace: {}")
+        False
+    """
+    if copy != copy.strip() or len(re.findall(r"\w+", copy)) < _MIN_PHRASE_WORDS:
+        return False
+    return re.search(r"(?<!\w)%s(?!\w)" % re.escape(copy), text) is not None
+
+
 def _usize_const(text: str, name: str) -> int:
     """The value of ``pub const <name>: usize = <n>;`` in *text*.
 
@@ -391,10 +419,13 @@ class StderrWordingTests(unittest.TestCase):
             self.assertTrue(code_review._budget_fields_ok(match), text)
 
     def test_the_fixed_phrases_are_the_products(self) -> None:
-        one_occurrence(self.error, '"path is outside the workspace: {}"', "src/review/error.rs")
-        self.assertIn(code_review.OUTSIDE_WORKSPACE_TEXT, "path is outside the workspace")
-        one_occurrence(self.error, '"nothing to review: no reviewable file in the input{}"', "src/review/error.rs")
-        self.assertIn(code_review.NOTHING_TO_REVIEW_TEXT, "nothing to review: no reviewable file")
+        # [MAGI F1b2a-e] a bare assertIn passed an empty or one-letter copy; each copy must be a phrase of
+        # at least two words standing at word boundaries of the very literal found in the Rust source.
+        for copy, product in ((code_review.OUTSIDE_WORKSPACE_TEXT, "path is outside the workspace: {}"),
+                              (code_review.NOTHING_TO_REVIEW_TEXT,
+                               "nothing to review: no reviewable file in the input{}")):
+            one_occurrence(self.error, '"%s"' % product, "src/review/error.rs")
+            self.assertTrue(_is_word_bounded_phrase(copy, product), (copy, product))
 
     def test_a_trivial_copy_of_a_fixed_phrase_fails_the_check(self) -> None:
         # [MAGI F1b2a-e] assertIn(copy, product_text) held for an empty copy, and S48/S49/S51 then matched
