@@ -204,8 +204,11 @@ impl LanguageExtractor for BraceFamilyExtractor {
     /// the top level (indented functions included). O(n) in the block's lines.
     ///
     /// A heuristic, declared: the opening brace is the first code line of the unit, from the
-    /// block's header on (the first code line a block keyword opens, so a decorator or annotation
-    /// wrapped over lines above it is passed over), whose braces open more than they close. A
+    /// block's header on (the first code line a block keyword opens, read after the tail of a
+    /// decorator or annotation wrapped from the lines above as the top-level scan reads it, so
+    /// `}) export class C {` under `@Component({` is the header and the decorator is passed
+    /// over), whose braces open more than they close, or the header itself when it closes the
+    /// decorator's brace before opening its own. A
     /// header line before it that leaves a brace open (a const
     /// generic argument wrapped over lines, `impl Foo<{` then `N` then `}> {`) is taken for the
     /// block, so the members are searched in the wrong span and the block may not split, or split
@@ -241,17 +244,40 @@ impl LanguageExtractor for BraceFamilyExtractor {
         // (`@Component({` ... `})`) held the unit's first opening brace, so the members were
         // sought inside the decorator's object and the class did not split. The search starts
         // at the block's own header, the first code line its keyword opens.
+        // MAGI FIX (S6 loop 30, B2b1a): a header on the line closing a wrapped decorator
+        // (`}) export class C {` under `@Component({`) matched no keyword, so the search started
+        // at line 0, inside the decorator's object; the line is read after the decorator's tail,
+        // as the top-level scan reads it.
         let is_code = |j: usize| scanned.get(j).is_some_and(|s| !s.is_non_code);
+        let budget = SearchBudget::for_lines(lines.len());
+        let stops = |j: usize| self.starts_construct(&lines, &scanned, j, false);
+        let search = BraceSearch {
+            stops: &stops,
+            budget: &budget,
+        };
         let header = lines
             .iter()
             .enumerate()
-            .position(|(j, l)| is_code(j) && self.construct_keyword(l.trim()).is_some())
+            .position(|(j, l)| {
+                is_code(j)
+                    && (self.construct_keyword(l.trim()).is_some()
+                        || self
+                            .after_wrapped_attribute_tail(&lines, &scanned, j, 0, &search, |rest| {
+                                self.construct_keyword(rest)
+                            })
+                            .is_some())
+            })
             .unwrap_or(0);
+        // A header closing the decorator's brace before opening its own (`}) export class C {`)
+        // nets no brace; it opens one after its lowest point.
         let Some(open) = scanned
             .iter()
             .enumerate()
             .skip(header)
-            .position(|(_, s)| !s.is_non_code && s.brace_delta > 0)
+            .position(|(j, s)| {
+                !s.is_non_code
+                    && (s.brace_delta > 0 || (j == header && s.brace_delta > s.min_delta))
+            })
             .map(|p| p + header)
         else {
             return Vec::new();
