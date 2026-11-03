@@ -174,7 +174,8 @@ class CharListTests(unittest.TestCase):
         self.assertEqual([".", " "], _helpers().char_list("\n    '.',\n    ' ',\n"))
 
     def test_anything_but_a_char_literal_fails_loudly(self) -> None:
-        for text in ("'.', SEPARATOR", "'.', \"x\"", "'ab'", ""):
+        # [F1b2a] ``'\u{FFFFFF}'`` fits the six-digit pattern but is no Unicode scalar: chr raised ValueError.
+        for text in ("'.', SEPARATOR", "'.', \"x\"", "'ab'", "", r"'\u{FFFFFF}'", r"'\u{D800}'"):
             with self.assertRaises(AssertionError, msg=text):
                 _helpers().char_list(text)
 
