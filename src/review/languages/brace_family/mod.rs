@@ -5232,6 +5232,30 @@ int g(void) {
     }
 
     #[test]
+    fn a_colon_inside_a_block_comment_opens_no_member_initializer_list() {
+        // [MAGI S6 loop 30, B2b1b] only `//` comments were skipped, so the `:` of a block
+        // comment after the parameter list (`void f() /* ratio: 2 */ {`) read as the list's
+        // colon, though the rustdoc promises a `:` outside every comment; a comment spanning
+        // the header's lines hid nothing either.
+        assert!(!opens_member_initializer_list(&[
+            "void f() /* ratio: 2 */ {"
+        ]));
+        assert!(!opens_member_initializer_list(&[
+            "void f() /* ratio",
+            "   a: 2 */",
+            "{"
+        ]));
+        // A list after a closed comment is still one.
+        assert!(opens_member_initializer_list(&[
+            "Foo::Foo() /* c */ : a{1} {"
+        ]));
+        assert!(opens_member_initializer_list(&[
+            "Foo::Foo() /* c",
+            "  d */ : a{1} {"
+        ]));
+    }
+
+    #[test]
     fn a_braced_member_initializer_wrapped_over_lines_keeps_the_constructor_whole() {
         // [MAGI loop 28 sweep, declared; fixed in MAGI loop 29, B2b1a] the brace a C++
         // constructor's member initializer opens (`Foo::Foo() : arr{`) was taken for the body's
