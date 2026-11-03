@@ -53,6 +53,11 @@ _SECTION_NAME = "section"
 _LIST_UNDER = "_list_under"
 _LIST_UNDER_PARAMETER = "key"
 
+#: The nodes that open a scope of their own: a ``key`` bound by one of them
+#: between a ``section.get(key)`` and ``_list_under`` is not the helper's own.
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
 #: Calls that may take ``section`` without reading a key from it.
 _KEYLESS_CALLS = frozenset({"isinstance"})
 
@@ -75,7 +80,8 @@ class _SectionReads:
 
     Accepted: a binding (an assignment target or a parameter);
     ``section.get("<lit>")`` with exactly one argument;
-    ``section.get(key)`` inside ``_list_under``; ``_list_under(section,
+    ``section.get(key)`` directly inside the module-level ``_list_under``,
+    whose ``key`` nothing rebinds; ``_list_under(section,
     "<lit>")``; ``isinstance(section, ...)``; and ``section`` passed
     positionally to a function defined in the module whose parameter at that
     position is also named ``section``, whose own body the same walk reads.
@@ -137,7 +143,7 @@ class _SectionReads:
                 if key is not None:
                     return key
                 if (isinstance(call.args[0], ast.Name) and call.args[0].id == _LIST_UNDER_PARAMETER
-                        and self._functions.get(node) == _LIST_UNDER):
+                        and self._reads_the_list_under_parameter(node)):
                     return None
         if isinstance(parent, ast.Call) and node in parent.args and isinstance(parent.func, ast.Name):
             callee, position = parent.func.id, parent.args.index(node)
@@ -153,6 +159,34 @@ class _SectionReads:
                     return None
         raise AssertionError("line %d: a use of section the key guard does not follow: %s"
                              % (node.lineno, ast.unparse(parent if parent is not None else node)))
+
+    def _reads_the_list_under_parameter(self, node) -> bool:
+        """Whether *node*'s ``section.get(key)`` reads the ``key`` its module-level ``_list_under`` was called with.
+
+        MAGI FIX (F1b2a-c): the innermost function's name alone was checked, so
+        a ``key`` rebound in the body, bound by a lambda default or a
+        comprehension, or a nested ``_list_under`` read a literal the guard
+        never saw.
+
+        Args:
+            node: A load of ``section`` whose ``.get`` takes the name ``key``.
+
+        Returns:
+            bool: ``True`` only when the nearest enclosing scope (function,
+            lambda, comprehension or class) is a module-level
+            ``_list_under`` that takes ``key`` positionally and never stores
+            or deletes it anywhere in its body.
+        """
+        scope = self._parents.get(node)
+        while scope is not None and not isinstance(scope, _SCOPE_NODES):
+            scope = self._parents.get(scope)
+        if not (isinstance(scope, ast.FunctionDef) and scope.name == _LIST_UNDER
+                and self._parents.get(scope) is self._tree):
+            return False
+        if _LIST_UNDER_PARAMETER not in [arg.arg for arg in scope.args.posonlyargs + scope.args.args]:
+            return False
+        return not any(isinstance(inner, ast.Name) and inner.id == _LIST_UNDER_PARAMETER
+                       and isinstance(inner.ctx, (ast.Store, ast.Del)) for inner in ast.walk(scope))
 
 
 def _summary_keys_read(scenario: str) -> set[str]:
