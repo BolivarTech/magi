@@ -242,6 +242,40 @@ def without_comments(text: str) -> str:
     return _without_block_comments(text, line_comments=True)
 
 
+def structure_only(text: str) -> str:
+    """*text* with every comment and every literal blanked, at the same offsets.
+
+    For a guard that locates structure (a closing brace) by searching the
+    text: a brace line inside a multi-line string or a block comment is not
+    the code's. Offsets match *text*, so a span found here slices the source.
+
+    Complexity: ``O(len(text))``.
+
+    Args:
+        text: Source text, ``\\r`` stripped.
+
+    Returns:
+        str: The same text with each comment's and literal's characters,
+        newlines excepted, turned into spaces.
+
+    Raises:
+        AssertionError: When a block comment or a string literal is never closed.
+
+    Example:
+        >>> structure_only('let s = "}";\\n')
+        'let s =    ;\\n'
+    """
+    spans = []
+    view = _without_block_comments(text, line_comments=True, literals=spans)
+    out, previous = [], 0
+    for start, end in spans:
+        out.append(view[previous:start])
+        out.append(_blank(view[start:end]))
+        previous = end
+    out.append(view[previous:])
+    return "".join(out)
+
+
 def code_only(text: str) -> str:
     """*text* with every comment line and block comment blanked, every line kept in place.
 

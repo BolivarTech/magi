@@ -27,7 +27,7 @@ import unittest
 from smoke import logs, runs
 from smoke.scenarios import code_review
 from smoke.tests.rust_source import (char_list, one_definition, one_occurrence, read_source,
-                                     without_comments)
+                                     structure_only, without_comments)
 
 #: The repository root, three levels above this file.
 _ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -680,7 +680,10 @@ def _rust_fn_body(text: str, signature: str) -> str:
     match = one_definition(text, re.escape(signature), signature)
     start = match.start()
     indent = match.group(0)[:len(match.group(0)) - len(match.group(0).lstrip(" \t"))]
-    end = text.find("\n%s}\n" % indent, start)
+    # MAGI FIX (F1b2a): searched on the raw text, a "}" line inside a
+    # multi-line literal or block comment ended the body early; the view
+    # blanks both at the same offsets, and the original is sliced.
+    end = structure_only(text).find("\n%s}\n" % indent, start)
     # MAGI FIX (S6 loop 28): no closing brace returned the rest of the file,
     # where a pin could match a later item's line (F1b2a-melchior).
     if end == -1:
