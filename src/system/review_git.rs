@@ -2567,6 +2567,38 @@ mod tests {
     }
 
     #[test]
+    fn git_is_not_resolved_from_the_enclosing_repository_of_a_sub_workspace() {
+        // [MAGI S6 loop 35, A1, security] only entries under the workspace were refused: with
+        // the workspace a subdirectory of a repository, a git planted elsewhere in that
+        // repository (a vendored `tools/`, an activated `.venv`) ran. Every directory of the
+        // outermost enclosing repository is now repository data.
+        let outer = tempfile::tempdir().expect("outer repo");
+        std::fs::create_dir(outer.path().join(".git")).expect("outer .git");
+        let inner_repo = outer.path().join("module");
+        std::fs::create_dir(&inner_repo).expect("submodule dir");
+        std::fs::write(inner_repo.join(".git"), b"gitdir: ../.git/modules/module\n")
+            .expect("submodule .git file");
+        let workdir = inner_repo.join("sub");
+        std::fs::create_dir(&workdir).expect("workdir");
+        let tools = outer.path().join("tools");
+        let vendored = inner_repo.join("tools");
+        let trusted = tempfile::tempdir().expect("trusted");
+        for dir in [tools.as_path(), vendored.as_path(), trusted.path()] {
+            std::fs::create_dir_all(dir).expect("dir");
+            std::fs::write(dir.join(GIT_PROGRAM), b"").expect("plant");
+        }
+        let planted = std::env::join_paths([tools.as_path(), vendored.as_path()]).expect("join");
+        assert_eq!(resolve_git(&planted, &workdir), None);
+        let with_trusted =
+            std::env::join_paths([tools.as_path(), vendored.as_path(), trusted.path()])
+                .expect("join");
+        assert_eq!(
+            resolve_git(&with_trusted, &workdir),
+            Some(trusted.path().join(GIT_PROGRAM))
+        );
+    }
+
+    #[test]
     fn an_uncommitted_review_in_a_sub_workspace_names_ignored_files_like_its_diff() {
         // [MAGI S6 loop 13, A2-m1, false positive] the review read `ls-files` as repository-root
         // relative: it is relative to its cwd (the workspace, `-C`) unless `--full-name` is
