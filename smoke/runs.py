@@ -1923,7 +1923,7 @@ def _copy_listed_file(source, target, expected) -> None:
         with os.fdopen(os.open(target, _COPY_CREATE_FLAGS, _COPY_CREATE_MODE),
                        "wb") as writer:
             shutil.copyfileobj(reader, writer, READ_CHUNK_BYTES)
-    os.chmod(target, mode)
+    _set_mode(target, mode)
 
 
 def _copy_tree_without_links(source, destination, ignore) -> None:
@@ -2011,7 +2011,7 @@ def _copy_tree_without_links(source, destination, ignore) -> None:
                 raise HarnessError("refusing to copy %s: %s is %s"
                                    % (source, path, NOT_A_REGULAR_FILE))
     for directory, mode in reversed(modes):
-        os.chmod(directory, mode)
+        _set_mode(directory, mode)
 
 
 def _skip_top_level_logs(magi_dir):
