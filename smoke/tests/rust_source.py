@@ -10,7 +10,8 @@ survived in a ``///`` comment above the new one was read from the comment, and
 a definition repeated somewhere else was never noticed. Every presence check a
 guard makes goes through :func:`one_definition` or :func:`one_occurrence`,
 which look only at code lines and insist on exactly one match; a list a guard
-collects with ``findall`` is first passed through :func:`code_only`.
+collects with ``findall`` is first passed through :func:`without_comments`,
+which also blanks a trailing ``//`` comment.
 
 A comment line is one whose first non-blank characters are ``//`` (``//``,
 ``///``, ``//!``). The reading is by line, not a Rust lexer, and the limits
