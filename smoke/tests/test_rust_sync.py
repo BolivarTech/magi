@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import unittest
+from unittest import mock
 
 from smoke import logs, runs
 from smoke.scenarios import code_review
@@ -394,6 +395,15 @@ class StderrWordingTests(unittest.TestCase):
         self.assertIn(code_review.OUTSIDE_WORKSPACE_TEXT, "path is outside the workspace")
         one_occurrence(self.error, '"nothing to review: no reviewable file in the input{}"', "src/review/error.rs")
         self.assertIn(code_review.NOTHING_TO_REVIEW_TEXT, "nothing to review: no reviewable file")
+
+    def test_a_trivial_copy_of_a_fixed_phrase_fails_the_check(self) -> None:
+        # [MAGI F1b2a-e] assertIn(copy, product_text) held for an empty copy, and S48/S49/S51 then matched
+        # any stderr at all: the copy must be a phrase of words, cut at word boundaries of the product's text.
+        for name in ("OUTSIDE_WORKSPACE_TEXT", "NOTHING_TO_REVIEW_TEXT"):
+            for trivial in ("", " ", "e", "the", "side the work", "nothing to rev"):
+                with mock.patch.object(code_review, name, trivial):
+                    with self.assertRaises(AssertionError, msg=(name, trivial)):
+                        self.test_the_fixed_phrases_are_the_products()
 
 
 class NeverReviewedTests(unittest.TestCase):
