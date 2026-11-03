@@ -629,6 +629,25 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       '    return _list_under()\ny = _outer(section)'):
             with self.assertRaises(AssertionError, msg=shape):
                 _summary_keys_read(self._KNOWN + shape + "\n")
+        # MAGI FIX (S6 loop 34): only the name section was followed, so the summary read through another path
+        # (another name, a chained get, brackets on the document) credited no key and the guard stayed green.
+        bound = self._BOUND + self._KNOWN
+        self.assertEqual({"batches", "findings"}, _summary_keys_read(bound))
+        for shape in ('cr = document.get(CODE_REVIEW_KEY)\nz = cr.get("hidden")',
+                      'z = document.get(CODE_REVIEW_KEY).get("hidden")',
+                      '_bogus = document.get(CODE_REVIEW_KEY, {}).get("no_such_key")',
+                      'z = document["code_review"]["hidden"]',
+                      'z = document.get("code_review")',
+                      'z = code_review.CODE_REVIEW_KEY',
+                      'CODE_REVIEW_KEY = "elsewhere"',
+                      'section = document.get(CODE_REVIEW_KEY)'):
+            with self.subTest(shape=shape), self.assertRaises(AssertionError):
+                _summary_keys_read(bound + shape + "\n")
+
+    #: The summary key's definition and the one assignment that reads the summary, as the scenario module writes
+    #: them (``smoke/scenarios/code_review.py``).
+    _BOUND = ('CODE_REVIEW_KEY = %r\ndocument = {}\nsection = document.get(CODE_REVIEW_KEY)\n'
+              % code_review.CODE_REVIEW_KEY)
 
     #: The calls of :data:`_KNOWN` without its helper, for shapes that define ``_list_under`` themselves.
     _CALLS = 'a = section.get("batches")\nitems, failure = _list_under(section, "findings")\n'
@@ -644,7 +663,10 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       '_list_under = lambda section, key: section.get("hidden")',
                       'from json import loads as _list_under',
                       'import _list_under',
-                      'async def _list_under(section, key):\n    return section.get(key)'):
+                      'async def _list_under(section, key):\n    return section.get(key)',
+                      # MAGI FIX (S6 loop 34): a trusted-shaped helper credited its call's key while reading nothing.
+                      'def _list_under(section, key):\n    return {}.get(key)',
+                      'def _list_under(section, key):\n    return (lambda: section.get(key))()'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(self._CALLS + shape + "\n")
         helper = 'def _list_under(section, key):\n    return section.get(key)\n'
@@ -653,7 +675,8 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                           'with open("x") as _list_under:\n    pass', 'def _list_under(section, key):\n    pass',
                           'def f():\n    global _list_under\n    _list_under = None',
                           'try:\n    pass\nexcept OSError as _list_under:\n    pass',
-                          'match 1:\n    case _list_under:\n        pass', 'del _list_under'):
+                          'match 1:\n    case _list_under:\n        pass', 'del _list_under',
+                          '(_list_under := lambda section, key: section.get(key))'):
             with self.subTest(rebinding=rebinding), self.assertRaises(AssertionError):
                 _summary_keys_read(self._CALLS + helper + rebinding + "\n")
         # Every form that rebinds key inside the helper.
@@ -664,7 +687,7 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                      '    try:\n        pass\n    except OSError as key:\n        pass',
                      '    def key():\n        pass', '    class key:\n        pass',
                      '    def inner():\n        global key', '    def inner():\n        nonlocal key',
-                     '    async def key():\n        pass'):
+                     '    async def key():\n        pass', '    (key := "h")'):
             shape = 'def _list_under(section, key):\n%s\n    return section.get(key)' % body
             with self.subTest(body=body), self.assertRaises(AssertionError):
                 _summary_keys_read(self._CALLS + shape + "\n")
