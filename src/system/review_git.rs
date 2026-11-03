@@ -2552,6 +2552,19 @@ mod tests {
     }
 
     #[test]
+    fn git_is_not_resolved_when_the_workspace_cannot_be_canonicalized() {
+        // [MAGI S6 loop 33, A1, security] a workspace that could not be canonicalized fell back
+        // to its raw path, so the check that git lies outside the workspace compared a
+        // canonical candidate against a non-canonical root and could stop protecting. It now
+        // fails closed: no git is resolved.
+        let trusted = tempfile::tempdir().expect("trusted");
+        std::fs::write(trusted.path().join(GIT_PROGRAM), b"").expect("plant");
+        let missing = tempfile::tempdir().expect("parent").path().join("missing");
+        let path_var = std::env::join_paths([trusted.path()]).expect("join");
+        assert_eq!(resolve_git(&path_var, &missing), None);
+    }
+
+    #[test]
     fn an_uncommitted_review_in_a_sub_workspace_names_ignored_files_like_its_diff() {
         // [MAGI S6 loop 13, A2-m1, false positive] the review read `ls-files` as repository-root
         // relative: it is relative to its cwd (the workspace, `-C`) unless `--full-name` is
