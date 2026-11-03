@@ -3817,6 +3817,29 @@ void g(void) {
     }
 
     #[test]
+    fn a_class_on_the_line_closing_a_wrapped_decorator_splits_at_its_members() {
+        // [MAGI S6 loop 30, B2b1a] the block's header was sought only by its keyword, so a class
+        // on the line that closes a wrapped decorator (`}) export class C {` under
+        // `@Component({`) had none: the members were sought inside the decorator's object, the
+        // class never split, and an oversized one ended the review in `TooLargeForBatch`.
+        let ts = "@Component({\n  selector: 'x',\n}) export class C {\n  run() {\n    x();\n  }\n  stop() {}\n}\n";
+        assert_eq!(
+            spans(&split(
+                &BraceFamilyExtractor::typescript(),
+                ts,
+                3,
+                UnitKind::Class
+            )),
+            vec![
+                ("C", UnitKind::Class, 1, 3),
+                ("run", UnitKind::Method, 4, 6),
+                ("stop", UnitKind::Method, 7, 7),
+                ("C", UnitKind::Class, 8, 8),
+            ]
+        );
+    }
+
+    #[test]
     fn an_annotation_whose_argument_holds_a_multi_line_literal_stays_with_its_member() {
         // [MAGI S6 loop 19, B2b-4] the walk up an annotation's lines gave up at a line that lies
         // wholly inside a string (a text block, a template literal), so the annotation was cut
