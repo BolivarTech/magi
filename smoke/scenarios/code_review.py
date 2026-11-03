@@ -1156,9 +1156,10 @@ def _exclusion_finding(run, stderr):
         candidate, or when one of their names holds `` (<cause>), `` or ends
         in `` (<cause>)`` (:data:`AMBIGUOUS_PATH_PATTERN`), so the list
         cannot be split around it (a split that already reads as a protected
-        path with another cause is the ``FAIL`` above); ``CANNOT_TEST`` too when the list names
-        none of them but was cut at the product's display cap
-        (:data:`OMISSION_CUT_PATTERN`), so they may be in the unnamed rest;
+        path with another cause is the ``FAIL`` above); ``CANNOT_TEST`` too when the list was
+        cut at the product's display cap (:data:`OMISSION_CUT_PATTERN`)
+        without naming every one of them as ``ignored``, so the rest may be in
+        the unnamed tail, read and classified;
         ``FAIL`` when git listed some and the uncut list names none of
         them as ``ignored``; else ``PASS``. Names are compared with ``\\``
         read as ``/``.
@@ -1195,18 +1196,23 @@ def _exclusion_finding(run, stderr):
              if cause == PROTECTED_CAUSE}
     # MAGI FIX (S6 loop 14): only the omission list was read with "\\" as "/",
     # so a backslash-separated listing never matched (F1a2-c2).
-    found = bool(named & {_slashed(path) for path in run.protected_visible})
+    visible = {_slashed(path) for path in run.protected_visible}
+    found = bool(named & visible)
     # MAGI FIX (S6 loop 14): the product names at most MAX_OMISSIONS_SHOWN
     # entries, so with the list cut every listed .magi/ file could sit in the
     # unnamed rest and S51 read the environment's size as a FAIL (F1a1-m2).
+    # MAGI FIX (F1a2): one named file is not enough either, since another
+    # could sit in the unnamed rest read and classified; a cut list passes
+    # only when it names every listed .magi/ file as ignored.
     cut = OMISSION_CUT_PATTERN.search(
         OMISSION_LIST_PATTERN.search(stderr).group("list"))
-    if not found and cut is not None:
+    if cut is not None and not visible <= named:
         return _finding(
             S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
-            "git lists %s, the refusal names none of them and cut its list "
-            "at %s more, so they may be among the unnamed"
-            % (", ".join(run.protected_visible), cut.group("more")))
+            "git lists %s, the refusal names %d of them as ignored and cut "
+            "its list at %s more, so the rest may be among the unnamed"
+            % (", ".join(run.protected_visible), len(named & visible),
+               cut.group("more")))
     return _verdict(S51_ASSERTIONS, 2, "R16", found,
                     "git lists %s, and stderr names none of them as ignored"
                     % ", ".join(run.protected_visible))
