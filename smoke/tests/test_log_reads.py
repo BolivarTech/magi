@@ -76,6 +76,28 @@ class ReadLogFilesBoundTests(unittest.TestCase):
             data = list(runs.read_log_files(directory, [], offsets))
             self.assertEqual([b"12", b"56", b""], data)
 
+    def test_a_link_swapped_above_the_directory_during_the_read_drops_what_was_read(self) -> None:
+        # [MAGI F1a1] Windows lists and opens by path, so a link swapped onto a component above the log
+        # directory during the read had the bytes behind it reach a scenario: unlike the review-log capture,
+        # the live scan never tested the chain again after reading. The chain test flips after the first open.
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = self._logs(tmp)
+            unreadable, swapped = [], []
+            real_open, real_ancestor = runs._open_listed, runs._linked_ancestor
+
+            def opening(path, expected):
+                swapped.append(path)
+                return real_open(path, expected)
+
+            def ancestor(path):
+                return pathlib.Path(tmp) if swapped else real_ancestor(path)
+
+            with mock.patch.object(runs, "_open_listed", opening), \
+                    mock.patch.object(runs, "_linked_ancestor", ancestor):
+                data = list(runs.read_log_files(directory, unreadable))
+            self.assertEqual([], data)
+            self.assertTrue(any(runs.LINK_NOT_FOLLOWED in entry for entry in unreadable), unreadable)
+
     def test_the_caps_hold_every_file_the_environment_writes_in_a_day(self) -> None:
         # The bounds must never refuse a healthy environment: a day file is a few hundred KB.
         self.assertGreaterEqual(runs.MAX_ENVIRONMENT_LOG_FILE_BYTES, runs.MAX_REVIEW_LOG_FILE_BYTES)
