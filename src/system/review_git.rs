@@ -850,6 +850,77 @@ mod tests {
     }
 
     #[test]
+    fn a_graft_file_never_changes_the_reviewed_parent_or_merge_base() {
+        // [MAGI S6 loop 36, A1, security] `$GIT_DIR/info/grafts` is repository data that
+        // `core.useReplaceRefs=false` does not neutralize: a graft `C A` made git read A as C's
+        // parent, so a review of C diffed A..C, and a graft to a commit with C's tree emptied it.
+        let d = repo();
+        let mut shas = Vec::new();
+        for text in ["a\n", "b\n", "c\n"] {
+            std::fs::write(d.path().join("a.rs"), text).expect("write");
+            git(d.path(), &["add", "a.rs"]);
+            git(d.path(), &["commit", "-q", "-m", text.trim()]);
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("git runs");
+            shas.push(
+                String::from_utf8(out.stdout)
+                    .expect("utf-8")
+                    .trim()
+                    .to_string(),
+            );
+        }
+        let (a, b, c) = (&shas[0], &shas[1], &shas[2]);
+        std::fs::write(
+            d.path().join(".git").join("info").join("grafts"),
+            format!("{c} {a}\n"),
+        )
+        .expect("graft");
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let allow = |p: &std::path::Path| -> Result<std::path::PathBuf, ReviewError> {
+            Ok(p.to_path_buf())
+        };
+        let diff_of = |r: &magi_rs::review::input::ResolvedInput| {
+            r.files
+                .iter()
+                .find(|f| f.path == "a.rs")
+                .and_then(|f| f.diff.clone())
+                .unwrap_or_default()
+        };
+        let commit = magi_rs::review::input::resolve_input(
+            &ReviewInput::Commit(Some(c.clone())),
+            d.path(),
+            &g,
+            &allow,
+        )
+        .expect("resolves");
+        let parent = match &commit.source_kind {
+            magi_rs::review::input::SourceKind::Revision { old_rev, .. } => old_rev.clone(),
+            _ => None,
+        };
+        assert_eq!(
+            parent.as_deref(),
+            Some(b.as_str()),
+            "the graft moved C's parent"
+        );
+        assert!(diff_of(&commit).contains("-b"), "{}", diff_of(&commit));
+        let branches = magi_rs::review::input::resolve_input(
+            &ReviewInput::Branches {
+                base: b.clone(),
+                head: c.clone(),
+            },
+            d.path(),
+            &g,
+            &allow,
+        )
+        .expect("resolves");
+        assert!(diff_of(&branches).contains("-b"), "{}", diff_of(&branches));
+    }
+
+    #[test]
     fn a_core_worktree_that_points_outside_the_workspace_is_never_read() {
         // [MAGI §6 MS2 A loop 1] core.worktree is repository config: an untrusted repository can point git's work
         // tree at a directory outside the workspace, and `git diff <HEAD>` then embeds that directory's files.
