@@ -204,8 +204,8 @@ def _binding_counts(tree: ast.Module) -> dict[str, int]:
         dict[str, int]: The number of bindings of each name bound at least once.
 
     Example:
-        >>> _binding_counts(ast.parse("a = 1\\ndef f(a):\\n    pass"))
-        {'a': 2, 'f': 1}
+        >>> sorted(_binding_counts(ast.parse("a = 1\\ndef f(a):\\n    pass")).items())
+        [('a', 2), ('f', 1)]
     """
     counts: dict[str, int] = {}
     for node in ast.walk(tree):
