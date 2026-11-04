@@ -1410,6 +1410,15 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'import importlib\nz = importlib.import_module("smoke.scenarios.code_review")'
                       '.section.get("hidden")',
                       'import sys\nz = sys.modules[__name__].__dict__["section"].get("hidden")',
+                      # [MAGI S6 loop 41, F1b2a-melchior] a denylist left frames and string lookups open; only
+                      # the imports, free names and module members the scenario uses today are allowed now.
+                      'import inspect\nz = inspect.currentframe().f_locals["section"].get("hidden")',
+                      'import operator\nz = operator.attrgetter("section")(document).get("hidden")',
+                      'import sys\nz = sys._getframe().f_globals["section"].get("hidden")',
+                      'from smoke import runs\nz = runs.os.environ',
+                      'import re\nz = re.enum.sys._getframe().f_globals["section"].get("hidden")',
+                      'def g():\n    yield\nz = g().gi_frame.f_globals["section"].get("hidden")',
+                      'z = breakpoint',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")
