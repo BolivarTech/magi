@@ -623,7 +623,10 @@ def one_definition(text: str, pattern: str, where: str, flags: int = 0) -> re.Ma
     fixture spread over a multi-line ``r#"..."#``. The match is still read off
     the source with its literals intact, so a pattern may capture a string's
     contents when the literal opens on the definition's own line. The
-    pattern's own groups are available on the result.
+    pattern's own groups are available on the result. A group may capture a
+    literal's contents only whole, opened by the pattern's own quote, and a
+    match may not end inside one: a wildcard that ran into a string never
+    reads a value from it. [MAGI S6 loop 46, F1b2a-caspar]
 
     Complexity: ``O(len(text))`` for a pattern without catastrophic
     backtracking.
