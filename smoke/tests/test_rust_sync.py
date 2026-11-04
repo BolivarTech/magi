@@ -115,8 +115,8 @@ def _require_allowed_reach(tree) -> None:
     route (builtins, the module object) and left another open (``inspect`` frames, ``sys._getframe``,
     ``operator.attrgetter``, a module reached through another one's attributes). Every route is now
     allowlisted: imports from :data:`_ALLOWED_IMPORTS` only, no relative import; free names (unbound in
-    the scope that reads them, per :func:`_unbound_names`) from :data:`_ALLOWED_FREE_NAMES` only, none of
-    :data:`_ALLOWED_BUILTINS` bound anywhere in the module; on a
+    the scope that reads them, per :func:`_unbound_names`) from :data:`_ALLOWED_FREE_NAMES` only, no
+    builtin's name (:data:`_BUILTIN_NAMES`) bound anywhere in the module; on a
     name bound once to an imported module, only an attribute the module has that is not itself a
     module; and no dunder attribute and no frame attribute (``f_locals``, ``gi_frame``, ...) anywhere.
 

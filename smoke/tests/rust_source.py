@@ -35,11 +35,11 @@ that follow from it are declared rather than handled:
   :func:`one_occurrence` skip every line that starts inside such a literal,
   and :func:`one_occurrence` also skips a needle that starts inside one.
   [MAGI F1b2a; S6 loops 38 and 44]
-- Both skip every ``#[cfg(test)]`` item that starts with a keyword (``mod``,
-  ``fn``, ``const``, ``let``...): a fixture there never answers for production
-  code. A ``#[cfg(test)]`` on a field or an expression statement is not
-  skipped (a declared limit: a copy there still counts, and never hides the
-  real line, which then makes two). [MAGI S6 loop 44, F1b2a-melchior]
+- Both skip every test-only item, field, statement or match arm (an outer
+  ``#[cfg(...)]`` whose predicate requires ``test``): a fixture there never
+  answers for production code. An inner ``#![cfg(test)]`` and
+  ``not(not(test))`` are not recognised (declared: a copy there still counts).
+  [MAGI S6 loops 44 and 45, F1b2a-melchior, F1b2a-caspar]
 - Uniqueness is per line: two matches on one physical line count once.
   rustfmt, which the product's CI enforces, puts each item on its own line.
 - :func:`one_occurrence` reads a line only up to its first ``//``, whether or
