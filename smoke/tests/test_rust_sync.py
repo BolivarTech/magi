@@ -75,6 +75,45 @@ _REFLECTION_BUILTINS = frozenset({"vars", "locals", "globals", "getattr", "eval"
                                   "__import__"})
 
 
+#: The names of the module that holds the builtins: through it every reflection builtin is an attribute.
+_BUILTINS_MODULES = frozenset({"builtins", "__builtins__"})
+
+
+def _reflection_reached(node) -> str | None:
+    """The reflection builtin or builtins module *node* names, ``None`` when it names neither.
+
+    MAGI FIX (S6 loop 38): only bare names were refused, so ``builtins.vars()``,
+    ``__builtins__.globals()`` or ``from builtins import vars as v`` reached the
+    same functions and read the summary unseen.
+
+    Args:
+        node: Any AST node.
+
+    Every path to the module goes through one of these: its name, an import of it, or its name as a string
+    (``sys.modules["builtins"]``, ``importlib.import_module("builtins")``). An attribute named like a builtin
+    is not refused on its own (``re.compile`` is not the builtin); reaching the module is.
+
+    Returns:
+        str | None: The name reached: a bare :data:`_REFLECTION_BUILTINS` name, a
+        :data:`_BUILTINS_MODULES` name or string literal, or a ``builtins`` import.
+
+    Example:
+        >>> _reflection_reached(ast.parse("builtins.vars()").body[0].value.func.value)
+        'builtins'
+        >>> _reflection_reached(ast.parse("re.compile").body[0].value) is None
+        True
+    """
+    if isinstance(node, ast.Name) and (node.id in _REFLECTION_BUILTINS or node.id in _BUILTINS_MODULES):
+        return node.id
+    if _literal_key(node) in _BUILTINS_MODULES:
+        return node.value
+    if isinstance(node, ast.alias) and node.name.split(".")[0] in _BUILTINS_MODULES:
+        return node.name
+    if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in _BUILTINS_MODULES:
+        return node.module
+    return None
+
+
 def _literal_key(node) -> str | None:
     """The string *node* holds when it is a string literal, else ``None``."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -356,9 +395,10 @@ class _SectionReads:
                 ``document`` that is not ``.get`` with one top-level constant bound once to a literal.
         """
         for node in ast.walk(self._tree):
-            if isinstance(node, ast.Name) and node.id in _REFLECTION_BUILTINS:
+            reached = _reflection_reached(node)
+            if reached is not None:
                 raise AssertionError("line %d: %s reaches names the key guard does not follow"
-                                     % (node.lineno, node.id))
+                                     % (getattr(node, "lineno", 0), reached))
             if isinstance(node, ast.Name) and node.id == _DOCUMENT_NAME and isinstance(node.ctx, ast.Load):
                 attribute = self._parents.get(node)
                 call = self._parents.get(attribute)
@@ -808,8 +848,17 @@ _ATTEMPT_FACTOR_LINES = ["let attempts_per_model: u64 = if retry_disabled { 1 } 
 
 
 def _attempt_factor_lines(text: str) -> list[str]:
-    """The code lines of ``attempt_factor``'s body in *text* (``src/magi/mod.rs``), stripped, comments dropped."""
-    return []
+    """The code lines of ``attempt_factor``'s body in *text* (``src/magi/mod.rs``), stripped, comments dropped.
+
+    MAGI FIX (S6 loop 38): its lines were pinned one by one, so recombining them left the smoke copy stale
+    with every guard green; the body is compared whole against :data:`_ATTEMPT_FACTOR_LINES`.
+
+    Raises:
+        AssertionError: When the function is not defined exactly once.
+    """
+    body = one_definition(text, r"pub fn attempt_factor\(max_rotations: u32, retry_disabled: bool\) -> u64 \{(.*?)\n\}",
+                          "src/magi/mod.rs", re.S).group(1)
+    return [line.strip() for line in without_comments(body).split("\n") if line.strip()]
 
 
 def _is_document_assignment(node) -> bool:
@@ -824,6 +873,42 @@ def _is_empty_fallback(node) -> bool:
     """Whether *node* is ``section = {}``: one ``Name`` target, an empty dict literal."""
     return (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
             and node.targets[0].id == _SECTION_NAME and isinstance(node.value, ast.Dict) and not node.value.keys)
+
+
+def _is_not_a_dict_test(node) -> bool:
+    """Whether *node* is exactly ``not isinstance(section, dict)``."""
+    return (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not) and isinstance(node.operand, ast.Call)
+            and isinstance(node.operand.func, ast.Name) and node.operand.func.id == "isinstance"
+            and len(node.operand.args) == 2 and not node.operand.keywords
+            and isinstance(node.operand.args[0], ast.Name) and node.operand.args[0].id == _SECTION_NAME
+            and isinstance(node.operand.args[1], ast.Name) and node.operand.args[1].id == "dict")
+
+
+def _guarded_fallback(assignment, parents: dict):
+    """The one ``section = {}`` the summary read may be followed by, or ``None`` when it has none.
+
+    MAGI FIX (S6 loop 38): any ``section = {}`` in the read's scope was accepted, so an unconditional
+    one, or a second one, replaced the summary at run time while the key guard still read the later
+    ``.get`` calls. Only the statement right after the read, an ``if not isinstance(section, dict):``
+    with no ``else`` whose whole body is ``section = {}``, carries the fallback.
+
+    Args:
+        assignment: The module's one ``section = document.get(CODE_REVIEW_KEY)``.
+        parents: Each node's parent in the module.
+
+    Returns:
+        ast.Assign | None: The fallback assignment, when that ``if`` follows the read.
+    """
+    block = next((getattr(parents.get(assignment), field) for field in ("body", "orelse", "finalbody")
+                  if assignment in getattr(parents.get(assignment), field, [])), [])
+    following = block[block.index(assignment) + 1:block.index(assignment) + 2]
+    if not following or not isinstance(following[0], ast.If):
+        return None
+    guard = following[0]
+    if (_is_not_a_dict_test(guard.test) and not guard.orelse and len(guard.body) == 1
+            and _is_empty_fallback(guard.body[0])):
+        return guard.body[0]
+    return None
 
 
 def _require_one_summary_binding(scenario: str) -> None:
@@ -844,8 +929,8 @@ def _require_one_summary_binding(scenario: str) -> None:
     Raises:
         AssertionError: When the key is not defined once at top level or the summary not read once
             (naming both counts); when ``document`` is bound other than once, by ``document = <expr>.json()``;
-            or naming the line of a binding of ``section`` that is none of: the summary assignment, the empty
-            fallback ``section = {}`` in the same scope as that assignment, or a parameter of an undecorated
+            or naming the line of a binding of ``section`` that is none of: the summary assignment, the one
+            guarded fallback right after it (:func:`_guarded_fallback`), or a parameter of an undecorated
             top-level ``def`` the module binds once.
     """
     tree = ast.parse(scenario)
@@ -862,21 +947,14 @@ def _require_one_summary_binding(scenario: str) -> None:
     counts = _binding_counts(tree)
     credited = {node for node in tree.body
                 if isinstance(node, ast.FunctionDef) and not node.decorator_list and counts.get(node.name) == 1}
-
-    def scope_of(node):
-        scope = parents.get(node)
-        while scope is not None and not isinstance(scope, _SCOPE_NODES):
-            scope = parents.get(scope)
-        return scope
-
-    summary_scope = scope_of(assignments[0])
+    fallback = _guarded_fallback(assignments[0], parents)
     for node in ast.walk(tree):
         if _SECTION_NAME not in _names_bound_by(node):
             continue
         statement = parents.get(node)
         if statement is assignments[0] and node is assignments[0].targets[0]:
             continue
-        if _is_empty_fallback(statement) and scope_of(statement) is summary_scope:
+        if statement is fallback and fallback is not None:
             continue
         if isinstance(node, ast.arg) and parents.get(statement) in credited:
             continue

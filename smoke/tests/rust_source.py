@@ -447,7 +447,9 @@ def one_occurrence(text: str, needle: str, where: str) -> re.Match:
     """The one code line that holds the literal *needle* before the line's first ``//``.
 
     For wording a guard pins inside a larger line, such as a message in an
-    ``#[error(...)]`` attribute. The needle may span lines. The scan stops at
+    ``#[error(...)]`` attribute. The needle may span lines. A line that starts
+    inside a multi-line string or raw-string literal is not a code line and
+    is never counted. The scan stops at
     the first ``//`` on the line even inside a string literal, so a needle
     after a URL on the same line is reported missing (see the module notes).
 
@@ -465,4 +467,6 @@ def one_occurrence(text: str, needle: str, where: str) -> re.Match:
         AssertionError: When no code line holds it, or more than one does.
     """
     regex = re.compile(r"^[ \t]*%s%s" % (_CODE_BEFORE, re.escape(needle)), re.M)
-    return _exactly_one(regex, text, where)
+    # MAGI FIX (S6 loop 38): a line inside a multi-line literal (a test fixture) was counted, so with the
+    # production line gone a stale fixture copy answered for it.
+    return _exactly_one(regex, text, where, outside_literals=True)
