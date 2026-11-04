@@ -118,7 +118,8 @@ def _require_allowed_reach(tree) -> None:
     the scope that reads them, per :func:`_unbound_names`) from :data:`_ALLOWED_FREE_NAMES` only, no
     builtin's name (:data:`_BUILTIN_NAMES`) bound anywhere in the module; on a
     name bound once to an imported module, only an attribute the module has that is not itself a
-    module; and no dunder attribute and no frame attribute (``f_locals``, ``gi_frame``, ...) anywhere.
+    module; and no dunder attribute, no frame attribute (``f_locals``, ``gi_frame``, ...) and no string
+    formatting method (``format``, ``format_map``, whose templates reach members) anywhere.
 
     Args:
         tree: The parsed scenario module.

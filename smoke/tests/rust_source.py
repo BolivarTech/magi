@@ -567,9 +567,10 @@ def without_test_items(text: str) -> str:
     A guard pins production code; a copy in a test module is a fixture, and with the production line
     gone it would answer for it. Offsets and newlines are kept. Test-only means an outer ``#[cfg(...)]``
     whose predicate requires ``test`` (``test``, ``all(..., test)``; never ``not(test)`` nor an ``any``
-    with another branch), on any item, field, statement or match arm. Declared limits: an inner
-    ``#![cfg(test)]`` (the product has none) and ``not(not(test))`` are not recognised, so a copy there
-    still counts.
+    with another branch), on any item, field, statement or match arm. A non-block item whose end the
+    delimiter cannot place (a closure's ``|a, b|``, a comparison before a ``,``, generics that never
+    close) fails the guard instead of being guessed. Declared limits: an inner ``#![cfg(test)]`` (the
+    product has none) and ``not(not(test))`` are not recognised, so a copy there still counts.
 
     Complexity: ``O(len(text))`` per attribute.
 
@@ -580,7 +581,7 @@ def without_test_items(text: str) -> str:
         str: The text with each test item's characters, newlines excepted, turned into spaces.
 
     Raises:
-        AssertionError: When a test item never ends.
+        AssertionError: When a test item never ends or its end is ambiguous (:func:`_test_item_end`).
 
     Example:
         >>> without_test_items('#[cfg(test)]\\nmod t { fn f() {} }\\nfn g() {}\\n')
