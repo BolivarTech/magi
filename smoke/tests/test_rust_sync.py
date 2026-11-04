@@ -820,6 +820,36 @@ def _pinned_report_keys(report: str) -> set[str]:
 #: The envelope's summary field in ``src/headless/output.rs``: omitted when absent, never renamed.
 _ENVELOPE_SUMMARY_FIELD = (r'#\[serde\(skip_serializing_if = "is_absent"\)\]\n[ \t]*(\w+): '
                            r"&'a Option<serde_json::Value>,")
+#: The headless envelope's struct in ``src/headless/output.rs``: serde writes its fields as the envelope's keys.
+_ENVELOPE_STRUCT = "struct WireOutcome<'a> {"
+#: A serde argument that changes a serialized key, on a field (``rename``) or the struct (``rename_all``).
+_SERDE_RENAME = re.compile(r"\brename(?:_all)?\s*[=(]")
+
+
+def _envelope_struct(output: str) -> str:
+    """The envelope struct's outer attributes and body, comments blanked: all that names its keys.
+
+    Args:
+        output: ``src/headless/output.rs``, ``\\r`` stripped.
+
+    Returns:
+        str: The attribute lines above the struct, up to the previous item's last line (one that ends
+        in ``}``, ``;`` or ``{``), then the struct through its closing ``}`` in column one.
+
+    Raises:
+        AssertionError: When the struct is not declared exactly once, or never closes.
+    """
+    view = without_comments(output)
+    start = one_definition(output, re.escape(_ENVELOPE_STRUCT), "src/headless/output.rs").start()
+    end = structure_only(output).find("\n}\n", start)
+    if end == -1:
+        raise AssertionError("src/headless/output.rs: %r never closes" % _ENVELOPE_STRUCT)
+    head = []
+    for line in reversed(view[:start].split("\n")[:-1]):
+        if line.rstrip().endswith(("}", ";", "{")):
+            break
+        head.append(line)
+    return "\n".join(reversed(head)) + "\n" + view[start:end]
 
 
 def _envelope_summary_key(output: str) -> str:
@@ -832,12 +862,19 @@ def _envelope_summary_key(output: str) -> str:
         output: ``src/headless/output.rs``, ``\\r`` stripped.
 
     Returns:
-        str: The field's name, which serde writes unchanged (no ``rename`` in its attribute).
+        str: The field's name, which serde writes unchanged: no ``rename`` on any of the struct's
+        fields, nor a ``rename_all`` on the struct.
 
     Raises:
-        AssertionError: When no such field is declared in code, or more than one is.
+        AssertionError: When the struct renames a key, or no such field is declared in it, or more than one is.
     """
-    return one_definition(output, _ENVELOPE_SUMMARY_FIELD, "src/headless/output.rs").group(1)
+    # MAGI FIX (S6 loop 39, F1b2a-melchior): only the attribute right above the field was read, so a
+    # rename on a line of its own, or a rename_all on the struct, moved the key with the guard green.
+    struct = _envelope_struct(output)
+    renamed = _SERDE_RENAME.search(struct)
+    if renamed is not None:
+        raise AssertionError("src/headless/output.rs: the envelope struct renames a key (%r)" % renamed.group(0))
+    return one_definition(struct, _ENVELOPE_SUMMARY_FIELD, "WireOutcome in src/headless/output.rs").group(1)
 
 
 #: The code lines of the product's ``attempt_factor`` body, comments dropped, the smoke copies' arithmetic.
@@ -1476,8 +1513,8 @@ def _rust_fn_body(text: str, signature: str) -> str:
 
     Returns:
         str: From the line the signature starts to the first line holding only a closing brace
-        at the signature's own indentation. rustfmt indents every inner block deeper, so that
-        brace is the function's; a top-level function ends at a ``}`` in column one, a method
+        (a trailing comment allowed) at the signature's own indentation. rustfmt indents every
+        inner block deeper, so that brace is the function's; a top-level function ends at a ``}`` in column one, a method
         at one indented like its ``fn``.
 
     Raises:
@@ -1493,12 +1530,14 @@ def _rust_fn_body(text: str, signature: str) -> str:
     # MAGI FIX (F1b2a): searched on the raw text, a "}" line inside a
     # multi-line literal or block comment ended the body early; the view
     # blanks both at the same offsets, and the original is sliced.
-    end = structure_only(text).find("\n%s}\n" % indent, start)
+    # MAGI FIX (S6 loop 39, F1b2a-melchior): a "} // note" closing line was
+    # missed; the view blanks the comment, so trailing blanks are allowed.
+    end = re.compile(r"\n%s\}[ \t]*\n" % re.escape(indent)).search(structure_only(text), start)
     # MAGI FIX (S6 loop 28): no closing brace returned the rest of the file,
     # where a pin could match a later item's line (F1b2a-melchior).
-    if end == -1:
+    if end is None:
         raise AssertionError("%s: no closing brace at its own indentation" % signature)
-    return text[start:end]
+    return text[start:end.start()]
 
 
 class RustFnBodyTests(unittest.TestCase):
