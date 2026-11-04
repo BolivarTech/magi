@@ -114,6 +114,16 @@ def _reflection_reached(node) -> str | None:
     return None
 
 
+def _is_dunder(name: str) -> bool:
+    """Whether *name* is a dunder (``__dict__``): through one, a module's names are reached by string.
+
+    Example:
+        >>> _is_dunder("__dict__"), _is_dunder("get")
+        (True, False)
+    """
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
 def _literal_key(node) -> str | None:
     """The string *node* holds when it is a string literal, else ``None``."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -399,6 +409,11 @@ class _SectionReads:
             if reached is not None:
                 raise AssertionError("line %d: %s reaches names the key guard does not follow"
                                      % (getattr(node, "lineno", 0), reached))
+            # MAGI FIX (S6 loop 40, F1b2a-caspar): the module object (``sys.modules[__name__]``, an
+            # ``import_module`` of the scenario) reached ``section`` as an attribute, unseen by the walk.
+            if isinstance(node, ast.Attribute) and (node.attr == _SECTION_NAME or _is_dunder(node.attr)):
+                raise AssertionError("line %d: a member access the key guard does not follow: %s"
+                                     % (node.lineno, ast.unparse(node)))
             if isinstance(node, ast.Name) and node.id == _DOCUMENT_NAME and isinstance(node.ctx, ast.Load):
                 attribute = self._parents.get(node)
                 call = self._parents.get(attribute)
@@ -759,9 +774,8 @@ class StderrWordingTests(unittest.TestCase):
                         self.test_the_fixed_phrases_are_the_products()
 
 
-#: The comment in ``src/review/report.rs`` that names the test listing every summary key, and the list it heads.
+#: The comment in ``src/review/report.rs`` that heads the test's list of every summary key.
 _REPORT_KEYS_ANCHOR = "every documented key is present"
-_REPORT_KEYS_LIST = re.compile(r"for k in \[(.*?)\]", re.S)
 
 
 def _call_list(body: str, call: str, where: str) -> str:
@@ -802,19 +816,28 @@ def _pinned_report_keys(report: str) -> set[str]:
         set[str]: Every quoted key in the list.
 
     Raises:
-        AssertionError: When the anchor is not there exactly once, or no list follows it.
+        AssertionError: When the anchor is not there exactly once, or not in a comment, or the code right
+            after it is not the list.
 
     MAGI FIX (S6 loop 36): the list was searched in the raw text, so an old copy left in a comment after
     the anchor answered for it. The anchor (itself a comment) is found in the raw text and the list in
     :func:`without_comments`'s view from there; both keep offsets.
+
+    MAGI FIX (S6 loop 40, F1b2a-melchior): that view kept literals, so a fixture after the anchor answered
+    for a list that had gone. The list is now located in :func:`structure_only`'s view, as the first code
+    after the anchor, and the anchor must be a comment.
     """
     if report.count(_REPORT_KEYS_ANCHOR) != 1:
         raise AssertionError("expected the anchor %r once in src/review/report.rs" % _REPORT_KEYS_ANCHOR)
-    pinned = _REPORT_KEYS_LIST.search(without_comments(report),
-                                      report.index(_REPORT_KEYS_ANCHOR) + len(_REPORT_KEYS_ANCHOR))
-    if pinned is None:
-        raise AssertionError("the summary key list was not found in src/review/report.rs")
-    return set(re.findall(r'"(\w+)"', pinned.group(1)))
+    if _REPORT_KEYS_ANCHOR in without_comments(report):
+        raise AssertionError("the anchor %r is not a comment in src/review/report.rs" % _REPORT_KEYS_ANCHOR)
+    view = structure_only(report)
+    after = report.index(_REPORT_KEYS_ANCHOR) + len(_REPORT_KEYS_ANCHOR)
+    opening = re.compile(r"\s*for k in \[").match(view, after)
+    close = view.find("]", opening.end()) if opening is not None else -1
+    if close < 0:
+        raise AssertionError("the code after the anchor in src/review/report.rs is not the summary key list")
+    return set(re.findall(r'"(\w+)"', report[opening.end():close]))
 
 
 #: The envelope's summary field in ``src/headless/output.rs``: omitted when absent, never renamed.
@@ -826,11 +849,13 @@ _ENVELOPE_STRUCT = "struct WireOutcome<'a> {"
 _SERDE_RENAME = re.compile(r"\brename(?:_all)?\s*[=(]")
 
 
-def _envelope_struct(output: str) -> str:
-    """The envelope struct's outer attributes and body, comments blanked: all that names its keys.
+def _struct_with_attributes(text: str, declaration: str, where: str) -> str:
+    """A struct's outer attributes and body, comments blanked: all that names its serialized keys.
 
     Args:
-        output: ``src/headless/output.rs``, ``\\r`` stripped.
+        text: A Rust source file, ``\\r`` stripped.
+        declaration: The struct's declaration line through its ``{``.
+        where: The file, for the failure message.
 
     Returns:
         str: The attribute lines above the struct, up to the previous item's last line (one that ends
@@ -839,11 +864,11 @@ def _envelope_struct(output: str) -> str:
     Raises:
         AssertionError: When the struct is not declared exactly once, or never closes.
     """
-    view = without_comments(output)
-    start = one_definition(output, re.escape(_ENVELOPE_STRUCT), "src/headless/output.rs").start()
-    end = structure_only(output).find("\n}\n", start)
+    view = without_comments(text)
+    start = one_definition(text, re.escape(declaration), where).start()
+    end = structure_only(text).find("\n}\n", start)
     if end == -1:
-        raise AssertionError("src/headless/output.rs: %r never closes" % _ENVELOPE_STRUCT)
+        raise AssertionError("%s: %r never closes" % (where, declaration))
     head = []
     for line in reversed(view[:start].split("\n")[:-1]):
         if line.rstrip().endswith(("}", ";", "{")):
@@ -870,7 +895,7 @@ def _envelope_summary_key(output: str) -> str:
     """
     # MAGI FIX (S6 loop 39, F1b2a-melchior): only the attribute right above the field was read, so a
     # rename on a line of its own, or a rename_all on the struct, moved the key with the guard green.
-    struct = _envelope_struct(output)
+    struct = _struct_with_attributes(output, _ENVELOPE_STRUCT, "src/headless/output.rs")
     renamed = _SERDE_RENAME.search(struct)
     if renamed is not None:
         raise AssertionError("src/headless/output.rs: the envelope struct renames a key (%r)" % renamed.group(0))
@@ -881,26 +906,68 @@ def _envelope_summary_key(output: str) -> str:
 _ENTRY_STRUCTS = (("src/review/consolidate.rs", "ConsolidatedFinding",
                    ("pub file: Option<String>,", "pub line: Option<u32>,")),
                   ("src/review/validate.rs", "Discarded", ("pub cause: DiscardCause,",)))
+#: The one serde argument the entry structs may carry: it changes a value's form, never its key.
+_ENTRY_SERDE_ARGUMENTS = frozenset({"serialize_with"})
+
+
+def _serde_arguments(view: str) -> list[str]:
+    """The name of every top-level argument of every ``serde(...)`` in *view*.
+
+    Args:
+        view: Rust code with comments and literals blanked (:func:`structure_only`).
+
+    Returns:
+        list[str]: Each argument's leading identifier, in order; ``cfg_attr``'s inner ``serde(...)`` included.
+
+    Raises:
+        AssertionError: When a ``serde(`` never closes.
+
+    Example:
+        >>> _serde_arguments("#[serde(rename(serialize =    ), skip)]")
+        ['rename', 'skip']
+    """
+    names = []
+    for match in re.finditer(r"\bserde\s*\(", view):
+        depth, start = 1, match.end()
+        for index in range(start, len(view)):
+            depth += {"(": 1, ")": -1}.get(view[index], 0)
+            if depth == 0:
+                break
+        else:
+            raise AssertionError("a serde( attribute never closes")
+        flat, level = [], 0
+        for char in view[start:index]:
+            level += {"(": 1, ")": -1}.get(char, 0)
+            flat.append(char if level == 0 or char in "()" else " ")
+        names += re.findall(r"(?:^|,)\s*(\w+)", "".join(flat))
+    return names
 
 
 def _require_entry_fields_serialized(source) -> None:
     """Fail unless every field of :data:`_ENTRY_STRUCTS` is serialized under its own name.
 
+    MAGI FIX (S6 loop 40, F1b2a-melchior): only ``rename`` in the body was refused, so a
+    ``skip_serializing``, ``flatten`` or a serde attribute above the struct's derive dropped a key S47
+    reads with the guard green. Every serde argument on the struct and its fields is now checked against
+    :data:`_ENTRY_SERDE_ARGUMENTS`.
+
     Args:
         source: Reads a repository path into its text, ``\\r`` stripped.
 
     Raises:
-        AssertionError: When a struct is not declared once with a serde derive, renames a field, or does
-            not declare a field.
+        AssertionError: When a struct is not declared once, has no serde ``Serialize`` derive, carries a
+            serde argument outside the allowed set, or does not declare a field.
     """
     for path, struct, fields in _ENTRY_STRUCTS:
-        body = one_definition(source(path),
-                              r"#\[derive\([^)]*serde::Serialize[^)]*\)\]\npub struct %s \{(.*?)\n\}" % struct,
-                              path, re.S).group(1)
-        if "rename" in body:
-            raise AssertionError("%s renames a field" % struct)
+        text = _struct_with_attributes(source(path), "pub struct %s {" % struct, path)
+        view = structure_only(text)
+        if re.search(r"#\[derive\([^)]*\bserde::Serialize\b", view) is None:
+            raise AssertionError("%s in %s: no serde::Serialize derive" % (struct, path))
+        refused = [name for name in _serde_arguments(view) if name not in _ENTRY_SERDE_ARGUMENTS]
+        if refused:
+            raise AssertionError("%s in %s: serde arguments that can move or drop a key: %s" % (struct, path, refused))
         for field in fields:
-            one_definition(body, re.escape(field), "%s in %s" % (struct, path))
+            one_definition(text, re.escape(field), "%s in %s" % (struct, path))
 
 
 #: The code lines of the product's ``attempt_factor`` body, comments dropped, the smoke copies' arithmetic.
