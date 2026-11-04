@@ -763,6 +763,54 @@ def _pinned_report_keys(report: str) -> set[str]:
     return set(re.findall(r'"(\w+)"', without_comments(pinned.group(1))))
 
 
+def _envelope_summary_key(output: str) -> str | None:
+    """The name the headless envelope serializes the code-review summary under (stub)."""
+    return None
+
+
+def _require_one_summary_binding(scenario: str) -> None:
+    """Fail unless *scenario* defines the summary key once and reads the summary once (stub)."""
+
+
+class SyncGuardMutationTests(unittest.TestCase):
+    """[MAGI S6 loop 36, F1b2a] guards that stayed green with the guarded thing broken."""
+
+    def test_a_call_only_inside_a_literal_fails_the_call_list_read(self) -> None:
+        # one_occurrence did not skip lines inside a multi-line string, so the trim list was read from a fixture
+        # while the code had drifted.
+        body = ('\n    let fixture = r"\n.trim_end_matches([\'.\', \' \'])\n";\n'
+                "    trim_more(path).split(['/', '\\\\'])\n")
+        with self.assertRaises(AssertionError):
+            _call_list(body, ".trim_end_matches([", "is_never_reviewed")
+        self.assertEqual("'.', ' '", _call_list("    path.trim_end_matches(['.', ' '])\n",
+                                                ".trim_end_matches([", "is_never_reviewed"))
+
+    def test_a_key_list_read_from_a_comment_fails_the_report_key_read(self) -> None:
+        # The list was searched in the raw text, so an old copy in a comment after the anchor answered for it.
+        report = ('    // every documented key is present\n    // was: for k in ["batches", "old"]\n'
+                  '    for k in ["batches", "new"] {\n')
+        self.assertEqual({"batches", "new"}, _pinned_report_keys(report))
+
+    def test_the_envelope_serializes_the_summary_under_the_key_s47_reads(self) -> None:
+        # Nothing tied "code_review" to the product: renaming the envelope field left every test green.
+        output = _source("src/headless/output.rs")
+        self.assertEqual(code_review.CODE_REVIEW_KEY, _envelope_summary_key(output))
+        renamed = output.replace('#[serde(skip_serializing_if = "is_absent")]',
+                                 '#[serde(skip_serializing_if = "is_absent", rename = "review_summary")]')
+        with self.assertRaises(AssertionError):
+            _envelope_summary_key(renamed)
+
+    def test_a_scenario_that_reads_another_section_fails_the_binding_check(self) -> None:
+        # The definition and the one assignment were only allowed, never required: the real scenario reading
+        # another section stayed green.
+        _require_one_summary_binding(_source("smoke/scenarios/code_review.py"))
+        for scenario in ('CODE_REVIEW_KEY = %r\nCONSULT_KEY = "consult"\ndocument = {}\n'
+                         'section = document.get(CONSULT_KEY)\n' % code_review.CODE_REVIEW_KEY,
+                         'CONSULT_KEY = "consult"\ndocument = {}\nsection = document.get(CONSULT_KEY)\n'):
+            with self.subTest(scenario=scenario), self.assertRaises(AssertionError):
+                _require_one_summary_binding(scenario)
+
+
 class NeverReviewedTests(unittest.TestCase):
     """The protected names S51 checks are the ones the product never reviews."""
 
