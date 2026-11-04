@@ -120,6 +120,22 @@ class OneOccurrenceTests(unittest.TestCase):
         production = '    format!(", and {rest} more")\n'
         _helpers().one_occurrence(fixture + production, 'format!(", and {rest} more")', "e.rs")
 
+    def test_a_copy_in_a_test_item_is_not_counted(self) -> None:
+        # [MAGI S6 loop 44, F1b2a-melchior] a one-line fixture in a test module was a code line, so with the
+        # production line gone it still answered for the wording.
+        tests = ('#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let stale = "x is gone";\n'
+                 '        assert!(f() != "{");\n    }\n}\n')
+        for text in (tests, '#[cfg(test)]\nconst STALE: &str = "x is gone";\n'):
+            with self.subTest(text=text), self.assertRaisesRegex(AssertionError, "found 0"):
+                _helpers().one_occurrence(text, '"x is gone"', "e.rs")
+        production = 'fn f() -> &str {\n    "x is gone"\n}\n'
+        self.assertIn('"x is gone"', _helpers().one_occurrence(production + tests, '"x is gone"', "e.rs").group(0))
+
+    def test_a_needle_that_starts_inside_a_literal_is_not_counted(self) -> None:
+        # [MAGI S6 loop 44, F1b2a-melchior] a needle found inside any string answered for the production code.
+        with self.assertRaisesRegex(AssertionError, "found 0"):
+            _helpers().one_occurrence('let s = "the path is outside";\n', "path is outside", "e.rs")
+
 
 class CodeOnlyTests(unittest.TestCase):
     """``code_only`` blanks comment lines and keeps every other line where it was."""
@@ -142,6 +158,12 @@ class BlockCommentTests(unittest.TestCase):
 
     def test_a_definition_only_inside_a_block_comment_is_rejected(self) -> None:
         text = "/*\npub const LIMIT: usize = 4;\n*/\nfn f() {}\n"
+        with self.assertRaisesRegex(AssertionError, "found 0"):
+            _helpers().one_definition(text, r"pub const LIMIT: usize = (\d+);", "x.rs")
+
+    def test_a_definition_only_inside_a_test_module_is_rejected(self) -> None:
+        # [MAGI S6 loop 44, F1b2a-melchior] a copy in a test module answered for a production definition.
+        text = "#[cfg(test)]\nmod tests {\n    pub const LIMIT: usize = 4;\n}\n"
         with self.assertRaisesRegex(AssertionError, "found 0"):
             _helpers().one_definition(text, r"pub const LIMIT: usize = (\d+);", "x.rs")
 

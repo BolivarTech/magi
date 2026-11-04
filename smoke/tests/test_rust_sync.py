@@ -1215,6 +1215,18 @@ class SyncGuardMutationTests(unittest.TestCase):
             with self.subTest(new=new), self.assertRaises(AssertionError):
                 _pinned_report_keys(report.replace(anchor, new))
 
+    def test_a_key_in_a_comment_inside_the_list_is_not_pinned(self) -> None:
+        # [MAGI §6 MS2 loop 44, F1b2a-melchior] the keys were read off the raw text, so a stale key left in a
+        # comment inside the list counted as pinned.
+        report = _source("src/review/report.rs")
+        opening = report.find("for k in [", report.find(_REPORT_KEYS_ANCHOR))
+        line_end = report.find("\n", opening)
+        for comment in (' // "hidden"', ' /* "hidden" */'):
+            with self.subTest(comment=comment):
+                keys = _pinned_report_keys(report[:line_end] + comment + report[line_end:])
+                self.assertNotIn("hidden", keys)
+                self.assertEqual(_pinned_report_keys(report), keys)
+
     def test_the_envelope_serializes_the_summary_under_the_key_s47_reads(self) -> None:
         # Nothing tied "code_review" to the product: renaming the envelope field left every test green.
         output = _source("src/headless/output.rs")
@@ -1704,6 +1716,24 @@ def _locked_version(crate: str, lock: str) -> str:
     return match.group(1)
 
 
+def _dependency_root(crate: str, metadata: dict, lock: str) -> pathlib.Path:
+    """The directory of the one *crate* checkout cargo resolved, the one the build compiles.
+
+    Args:
+        crate: The package name.
+        metadata: ``cargo metadata --format-version 1`` output, parsed.
+        lock: ``Cargo.lock``'s text, ``\\r`` stripped.
+
+    Returns:
+        pathlib.Path: The directory holding the package's ``Cargo.toml``.
+
+    Raises:
+        AssertionError: When cargo resolved no such package or more than one, or the one it resolved is not
+            the crates.io package at the locked version.
+    """
+    return pathlib.Path()
+
+
 def _registry_source(crate: str, relative: str) -> str:
     """Read *relative* from the locked version of *crate* in cargo's registry.
 
@@ -1779,6 +1809,20 @@ class ProbePathTests(unittest.TestCase):
         second = '[[package]]\nname = "magi-core"\nversion = "3.9.0"\nsource = "%s"\n\n' % _CRATES_IO_SOURCE
         with self.assertRaises(AssertionError):
             _locked_version("magi-core", lock.replace("[[package]]\n" + entry, second + "[[package]]\n" + entry))
+
+    def test_the_probe_reads_the_checkout_cargo_resolved(self) -> None:
+        # [MAGI §6 MS2 loop 44, F1b2a-melchior] the first registry/src/*/<crate>-<ver> was read, which with
+        # another index or a source replacement need not be the checkout the build compiles.
+        lock = _source("Cargo.lock")
+        package = {"name": "magi-core", "version": "4.2.0", "source": _CRATES_IO_SOURCE,
+                   "manifest_path": str(pathlib.Path("cargo-home", "magi-core-4.2.0", "Cargo.toml"))}
+        other = {"name": "serde", "version": "1.0.0", "source": _CRATES_IO_SOURCE, "manifest_path": "x"}
+        self.assertEqual(pathlib.Path("cargo-home", "magi-core-4.2.0"),
+                         _dependency_root("magi-core", {"packages": [other, package]}, lock))
+        for packages in ([other], [package, dict(package, version="3.9.0")],
+                         [dict(package, source=None)], [dict(package, version="4.1.0")]):
+            with self.subTest(packages=packages), self.assertRaises(AssertionError):
+                _dependency_root("magi-core", {"packages": packages}, lock)
 
 
 def _rust_fn_body(text: str, signature: str) -> str:
