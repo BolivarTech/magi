@@ -506,6 +506,15 @@ class EmbedderDownTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 self.test_the_marker_is_a_phrase_the_product_actually_emits()
 
+    def test_the_marker_guard_fails_on_a_marker_left_only_in_a_test_module(self) -> None:
+        # [MAGI §6 MS2 loop 46, F1b2a-caspar] the guard read every code line, test modules included, so a
+        # fixture asserting on the marker answered for a production path that no longer emits it.
+        fixture = ('fn run() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n'
+                   '        assert!(m.contains("%s"));\n    }\n}\n' % memory.DEGRADATION_MARKER)
+        with mock.patch(__name__ + ".read_source", return_value=fixture):
+            with self.assertRaises(AssertionError):
+                self.test_the_marker_is_a_phrase_the_product_actually_emits()
+
     def test_the_probe_plants_a_memory_before_it_breaks_the_embedder(self) -> None:
         """The fixture could not trip the condition either.
 

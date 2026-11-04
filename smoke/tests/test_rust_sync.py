@@ -803,6 +803,19 @@ class StderrWordingTests(unittest.TestCase):
         self.assertTrue(causes)
         self.assertEqual(sorted(causes), sorted(code_review.OMISSION_CAUSES))
 
+    def test_an_omission_arm_the_guard_cannot_resolve_fails(self) -> None:
+        # [MAGI §6 MS2 loop 46, F1b2a-melchior] only literal and bare-constant arms were read, so an arm in
+        # another form (a path, a macro) dropped its cause from the comparison without a word.
+        source = _source("src/review/source.rs")
+        self.assertEqual(sorted(code_review.OMISSION_CAUSES), sorted(_omission_causes(self.filter, source)))
+        arm = re.search(r"\n([ \t]*)Self::\w+ => \"[^\"]+\",\n", self.filter)
+        self.assertIsNotNone(arm)
+        for extra in ('Self::Other => source::HARD_LINK_CAUSE,', 'Self::Other => concat!("a", "b"),',
+                      'Self::Other | Self::More => "x",'):
+            mutated = self.filter.replace(arm.group(0), arm.group(0) + arm.group(1) + extra + "\n", 1)
+            with self.subTest(extra=extra), self.assertRaises(AssertionError):
+                _omission_causes(mutated, source)
+
     def test_missing_is_an_error_cause_never_an_omission_cause(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-c2] "missing" names an explicit file in NotReviewable; it is not a
         # SkipCause, so it can never reach the omission list and OMISSION_CAUSES must not carry it.
@@ -863,6 +876,23 @@ class StderrWordingTests(unittest.TestCase):
                 with mock.patch.object(code_review, name, trivial):
                     with self.assertRaises(AssertionError, msg=(name, trivial)):
                         self.test_the_fixed_phrases_are_the_products()
+
+
+def _omission_causes(filter_text: str, source_text: str) -> list[str]:
+    """The cause string of every arm of ``SkipCause::as_str`` in ``src/review/filter.rs``.
+
+    Args:
+        filter_text: ``src/review/filter.rs``, ``\\r`` stripped.
+        source_text: ``src/review/source.rs``, where a constant an arm names is defined.
+
+    Returns:
+        list[str]: One cause per arm, in order.
+
+    Raises:
+        AssertionError: When ``as_str`` is not defined once, or an arm is neither a string literal nor a
+            bare constant defined in ``src/review/source.rs``.
+    """
+    return []
 
 
 #: The comment in ``src/review/report.rs`` that heads the test's list of every summary key.

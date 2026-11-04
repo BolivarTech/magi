@@ -78,6 +78,16 @@ class OneDefinitionTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "found 0"):
             _helpers().one_definition(text, r".*pub const X: usize = (\d+);", "f")
 
+    def test_a_wildcard_pattern_never_reads_a_value_from_inside_a_literal(self) -> None:
+        # [MAGI S6 loop 46, F1b2a-caspar] only the match's start was checked, so a leading or middle wildcard ran
+        # into a string and captured a stale copy's value from inside it.
+        for text, pattern in (('let s = "pub const LIMIT: usize = 4;";\n', r".*pub const LIMIT: usize = (\d+);"),
+                              ('pub const LIMIT: u8 = f("= 4;");\n', r"pub const LIMIT.*= (\d+);")):
+            with self.subTest(text=text), self.assertRaisesRegex(AssertionError, "found 0"):
+                _helpers().one_definition(text, pattern, "x.rs")
+        self.assertEqual("5", _helpers().one_definition('let s = "x";\npub const LIMIT: usize = 5;\n',
+                                                        r".*pub const LIMIT: usize = (\d+);", "x.rs").group(1))
+
     def test_a_body_capture_spanning_lines_leaves_a_trailing_comment_out(self) -> None:
         # MAGI FIX (S6 loop 34): a re.S body capture carried a trailing comment's text with it.
         text = "fn f() {\n    let a = 1; // stale: let a = 2;\n}\n"
