@@ -1183,7 +1183,15 @@ class SyncGuardMutationTests(unittest.TestCase):
                          (field, '    #[serde(\n        rename(serialize = "review_summary")\n    )]\n' + field),
                          (struct, "#[derive(Debug, Serialize)]\n#[serde(rename_all = \"camelCase\")]\n"
                                   "struct WireOutcome<'a> {"),
-                         (struct, "#[serde(\n    rename_all = \"camelCase\",\n)]\n" + struct)):
+                         (struct, "#[serde(\n    rename_all = \"camelCase\",\n)]\n" + struct),
+                         # [MAGI §6 MS2 loop 42, F1b2a-caspar] only renames were refused, so a skip or a
+                         # flatten dropped the summary's key with the guard green.
+                         (field, "    #[serde(skip)]\n" + field),
+                         (field, "    #[serde(flatten)]\n" + field),
+                         (field, '    #[serde(skip_serializing_if = "is_absent", skip_serializing)]\n    code_review:'),
+                         (field, '    #[cfg_attr(test, serde(skip))]\n' + field),
+                         (struct, "#[serde(transparent)]\n" + struct),
+                         ("    v.is_none()\n}", "    true\n}")):
             self.assertEqual(1, output.count(old))
             with self.subTest(new=new), self.assertRaises(AssertionError):
                 _envelope_summary_key(output.replace(old, new))
@@ -1461,6 +1469,11 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'import re\nz = re.enum.sys._getframe().f_globals["section"].get("hidden")',
                       'def g():\n    yield\nz = g().gi_frame.f_globals["section"].get("hidden")',
                       'z = breakpoint',
+                      # [MAGI S6 loop 42, F1b2a-caspar] a name bound anywhere counted as bound everywhere, so a
+                      # parameter named like a builtin let the module scope call the builtin.
+                      'def _h(vars):\n    return vars\nz = vars()["section"].get("hidden")',
+                      'class _K:\n    getattr = 1\nz = getattr(section, "get")("hidden")',
+                      'def _f():\n    global eval\n    eval = 1\nz = eval("section").get("hidden")',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")
@@ -1601,11 +1614,12 @@ class SecretPrefixDocTests(unittest.TestCase):
         self.assertEqual(set(), {token.lower() for token in named} - {prefix.lower() for prefix in prefixes})
 
 
-def _locked_version(crate: str) -> str:
+def _locked_version(crate: str, lock: str) -> str:
     """The version of *crate* that ``Cargo.lock`` resolves.
 
     Args:
         crate: The package name.
+        lock: ``Cargo.lock``'s text, ``\\r`` stripped.
 
     Returns:
         str: Its locked version.
@@ -1613,8 +1627,7 @@ def _locked_version(crate: str) -> str:
     Raises:
         AssertionError: When the lockfile has no such package.
     """
-    match = re.search(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"' % re.escape(crate),
-                      _source("Cargo.lock"))
+    match = re.search(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"' % re.escape(crate), lock)
     if match is None:
         raise AssertionError("%s not found in Cargo.lock" % crate)
     return match.group(1)
@@ -1639,7 +1652,7 @@ def _registry_source(crate: str, relative: str) -> str:
         AssertionError: When no registry checkout of that version holds the file.
     """
     home = pathlib.Path(os.environ.get("CARGO_HOME") or pathlib.Path.home() / ".cargo")
-    package = "%s-%s" % (crate, _locked_version(crate))
+    package = "%s-%s" % (crate, _locked_version(crate, _source("Cargo.lock")))
     for index in sorted((home / "registry" / "src").glob("*")):
         candidate = index / package / relative
         if candidate.is_file():
@@ -1677,6 +1690,19 @@ class ProbePathTests(unittest.TestCase):
         self.assertEqual(2, len(groups), "expected the window and digest requests")
         paths = {"/" + "/".join(s.strip().strip('"') for s in group.split(",")) for group in groups}
         self.assertEqual(set(runs.PROBE_PATHS), paths)
+
+    def test_a_magi_core_not_from_crates_io_fails_the_locked_version(self) -> None:
+        # [MAGI §6 MS2 loop 42, F1b2a-caspar] the lock entry's source was never read, so a path or git
+        # override would have had the guard read a stale registry copy the build does not use.
+        lock = _source("Cargo.lock")
+        self.assertEqual("4.2.0", _locked_version("magi-core", lock))
+        entry = 'name = "magi-core"\nversion = "4.2.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n'
+        self.assertEqual(1, lock.count(entry))
+        for new in ('name = "magi-core"\nversion = "4.2.0"\n',
+                    'name = "magi-core"\nversion = "4.2.0"\nsource = "git+https://example.invalid/magi-core#abc"\n',
+                    'name = "magi-core"\nversion = "4.2.0"\nsource = "registry+https://example.invalid/index"\n'):
+            with self.subTest(new=new), self.assertRaises(AssertionError):
+                _locked_version("magi-core", lock.replace(entry, new))
 
 
 def _rust_fn_body(text: str, signature: str) -> str:
