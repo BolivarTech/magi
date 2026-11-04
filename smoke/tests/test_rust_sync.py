@@ -990,6 +990,21 @@ class SyncGuardMutationTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             _envelope_summary_key(renamed)
 
+    def test_a_rename_on_its_own_line_or_on_the_struct_fails_the_envelope_key(self) -> None:
+        # [MAGI §6 MS2 loop 39, F1b2a-melchior] only the attribute right above the field was read, so a
+        # ``rename`` on a line of its own, or a ``rename_all`` on the struct, moved the key with the guard green.
+        output = _source("src/headless/output.rs")
+        field = '    #[serde(skip_serializing_if = "is_absent")]\n    code_review:'
+        struct = "#[derive(Debug, Serialize)]\nstruct WireOutcome<'a> {"
+        for old, new in ((field, '    #[serde(rename = "review_summary")]\n' + field),
+                         (field, '    #[serde(\n        rename(serialize = "review_summary")\n    )]\n' + field),
+                         (struct, "#[derive(Debug, Serialize)]\n#[serde(rename_all = \"camelCase\")]\n"
+                                  "struct WireOutcome<'a> {"),
+                         (struct, "#[serde(\n    rename_all = \"camelCase\",\n)]\n" + struct)):
+            self.assertEqual(1, output.count(old))
+            with self.subTest(new=new), self.assertRaises(AssertionError):
+                _envelope_summary_key(output.replace(old, new))
+
     def test_a_scenario_that_reads_another_section_fails_the_binding_check(self) -> None:
         # The definition and the one assignment were only allowed, never required: the real scenario reading
         # another section stayed green.
@@ -1512,6 +1527,14 @@ class RustFnBodyTests(unittest.TestCase):
                 "    s\n}\n\npub fn next() {}\n")
         body = _rust_fn_body(text, "pub fn top(")
         self.assertEqual(text[:text.index("    s\n") + len("    s")], body)
+
+    def test_a_closing_brace_with_a_trailing_comment_ends_the_body(self) -> None:
+        # [MAGI §6 MS2 loop 39, F1b2a-melchior] the end was searched as a ``}`` alone on its line, so a
+        # ``} // note`` at the function's indentation was missed: a later item's brace ended the body, or none.
+        text = "pub fn top() -> u8 {\n    0\n} // end of top\n\npub fn next() -> u8 {\n    1\n}\n"
+        self.assertEqual("pub fn top() -> u8 {\n    0", _rust_fn_body(text, "pub fn top("))
+        method = "impl S {\n    pub fn m(&self) -> u8 {\n        0\n    } /* m */ \n}\n"
+        self.assertEqual("    pub fn m(&self) -> u8 {\n        0", _rust_fn_body(method, "pub fn m("))
 
 
 class CountedKindTests(unittest.TestCase):
