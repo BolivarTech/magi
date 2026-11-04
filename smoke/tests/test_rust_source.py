@@ -111,6 +111,15 @@ class OneOccurrenceTests(unittest.TestCase):
         match = _helpers().one_occurrence(text, '"consensus".into(),\n        consensus_json(&c)', "t.rs")
         self.assertTrue(match.group(0).endswith("consensus_json(&c)"))
 
+    def test_a_copy_inside_a_multi_line_literal_is_not_counted(self) -> None:
+        # [MAGI S6 loop 38, F1b2a-melchior] a fixture line inside a multi-line string was counted, so with the
+        # production line gone a stale copy in a test fixture still answered for it.
+        fixture = 'let fixture = r#"\n    format!(", and {rest} more")\n"#;\n'
+        with self.assertRaisesRegex(AssertionError, "found 0"):
+            _helpers().one_occurrence(fixture, 'format!(", and {rest} more")', "e.rs")
+        production = '    format!(", and {rest} more")\n'
+        _helpers().one_occurrence(fixture + production, 'format!(", and {rest} more")', "e.rs")
+
 
 class CodeOnlyTests(unittest.TestCase):
     """``code_only`` blanks comment lines and keeps every other line where it was."""

@@ -800,6 +800,18 @@ def _envelope_summary_key(output: str) -> str:
     return one_definition(output, _ENVELOPE_SUMMARY_FIELD, "src/headless/output.rs").group(1)
 
 
+#: The code lines of the product's ``attempt_factor`` body, comments dropped, the smoke copies' arithmetic.
+_ATTEMPT_FACTOR_LINES = ["let attempts_per_model: u64 = if retry_disabled { 1 } else { CALLS_PER_MODEL };",
+                         "let models_per_mage = u64::from(max_rotations).saturating_add(1);",
+                         "attempts_per_model", ".saturating_mul(models_per_mage)",
+                         ".saturating_mul(100 + HEADLESS_TIMEOUT_SLACK_PCT)"]
+
+
+def _attempt_factor_lines(text: str) -> list[str]:
+    """The code lines of ``attempt_factor``'s body in *text* (``src/magi/mod.rs``), stripped, comments dropped."""
+    return []
+
+
 def _is_document_assignment(node) -> bool:
     """Whether *node* is ``document = <expr>.json()``: one ``Name`` target, a no-argument ``.json()`` call."""
     return (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
@@ -934,9 +946,27 @@ class SyncGuardMutationTests(unittest.TestCase):
                         self._SCENARIO + 'section = {}\n',
                         self._SCENARIO.replace(tail, '    document = {"code_review": {}}\n' + tail),
                         self._SCENARIO.replace('document = run.output.json()', 'document = {}'),
-                        self._SCENARIO.replace(tail, '    document = run.output.json()\n' + tail)):
+                        self._SCENARIO.replace(tail, '    document = run.output.json()\n' + tail),
+                        # [MAGI S6 loop 38, F1b2a-melchior] an unconditional or a second empty fallback replaced
+                        # the summary at run time while the key guard still read the later .get calls.
+                        self._SCENARIO.replace('    if not isinstance(section, dict):\n        section = {}\n',
+                                               '    section = {}\n'),
+                        self._SCENARIO.replace(tail, '    section = {}\n' + tail),
+                        self._SCENARIO.replace('if not isinstance(section, dict):', 'if True:'),
+                        self._SCENARIO.replace('if not isinstance(section, dict):',
+                                               'if not isinstance(section, dict) or True:'),
+                        self._SCENARIO.replace('        section = {}\n', '        section = {}\n        pass\n')):
             with self.subTest(scenario=mutated), self.assertRaises(AssertionError):
                 _require_one_summary_binding(mutated)
+
+    def test_the_attempt_factor_is_pinned_as_a_whole(self) -> None:
+        # [MAGI S6 loop 38, F1b2a-melchior] its three lines were pinned one by one, so recombining them
+        # (adding where the product multiplies) kept every guard green with the smoke copy stale.
+        text = _source("src/magi/mod.rs")
+        self.assertEqual(_ATTEMPT_FACTOR_LINES, _attempt_factor_lines(text))
+        recombined = text.replace("        .saturating_mul(models_per_mage)\n", "        .saturating_add(models_per_mage)\n")
+        self.assertNotEqual(text, recombined)
+        self.assertNotEqual(_ATTEMPT_FACTOR_LINES, _attempt_factor_lines(recombined))
 
 
 class NeverReviewedTests(unittest.TestCase):
@@ -1133,6 +1163,12 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'z = locals()["section"].get("hidden")',
                       'z = getattr(document, "get")("x")',
                       'z = eval("section").get("hidden")',
+                      # [MAGI S6 loop 38, F1b2a-caspar] the ban read bare names only, so the builtins module
+                      # reached the same functions as an attribute.
+                      'import builtins\nz = builtins.vars()["section"].get("hidden")',
+                      'z = __builtins__.vars()["section"].get("hidden")',
+                      'from builtins import vars as v\nz = v()["section"].get("hidden")',
+                      'import builtins as b\nz = b.globals()["section"].get("hidden")',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")
