@@ -75,9 +75,11 @@ _SUMMARY_KEY = code_review.CODE_REVIEW_KEY
 
 #: The modules the scenario may import: a new import fails the guard and is reviewed on purpose.
 _ALLOWED_IMPORTS = frozenset({"json", "re", "smoke", "smoke.errors", "smoke.outcome", "smoke.registry"})
-#: The builtins the scenario may name, and the two names the guard tracks (free in its synthetic snippets).
-_ALLOWED_FREE_NAMES = frozenset({"all", "any", "bool", "dict", "int", "isinstance", "len", "list", "range", "set",
-                                 "sorted", "str", "tuple", "zip", _SECTION_NAME, _DOCUMENT_NAME})
+#: The builtins the scenario may name; none may be bound anywhere in it, so each one is the builtin.
+_ALLOWED_BUILTINS = frozenset({"all", "any", "bool", "dict", "int", "isinstance", "len", "list", "range", "set",
+                               "sorted", "str", "tuple", "zip"})
+#: The free names allowed: the builtins and the two names the guard tracks (free in its synthetic snippets).
+_ALLOWED_FREE_NAMES = _ALLOWED_BUILTINS | {_SECTION_NAME, _DOCUMENT_NAME}
 
 
 def _imported_module(alias, module: str | None):
@@ -125,6 +127,11 @@ def _require_allowed_reach(tree) -> None:
     for name in _unbound_names(ast.unparse(tree)):
         if name not in _ALLOWED_FREE_NAMES:
             raise AssertionError("a name the key guard does not allow: %s" % name)
+    # MAGI FIX (S6 loop 43, F1b2a-melchior): the keyless isinstance and the dict test trust the name, so a
+    # rebinding of either (a def, a lambda, an import alias, a parameter) read a key the guard never saw.
+    rebound = sorted(name for name in _ALLOWED_BUILTINS if counts.get(name))
+    if rebound:
+        raise AssertionError("builtins the key guard trusts are rebound: %s" % rebound)
     modules = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -1677,15 +1684,18 @@ def _locked_version(crate: str, lock: str) -> str:
         str: Its locked version.
 
     Raises:
-        AssertionError: When the lockfile has no such package, or its entry's ``source`` is not crates.io
+        AssertionError: When the lockfile has no such package or more than one, or its ``source`` is not crates.io
             (a path override has none, a git or other registry has another).
     """
     # MAGI FIX (S6 loop 42, F1b2a-caspar): the entry's source was never read, so with a path or git
     # override the guard would have read a stale registry copy the build does not use.
-    match = re.search(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"\n(?:source = "([^"]*)"\n)?'
-                      % re.escape(crate), lock)
-    if match is None:
-        raise AssertionError("%s not found in Cargo.lock" % crate)
+    # MAGI FIX (S6 loop 43, F1b2a-caspar): the first entry was read, so with two versions locked the guard
+    # could compare the one the build does not link; exactly one entry is required.
+    matches = list(re.finditer(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"\n(?:source = "([^"]*)"\n)?'
+                               % re.escape(crate), lock))
+    if len(matches) != 1:
+        raise AssertionError("expected one %s in Cargo.lock, found %d" % (crate, len(matches)))
+    match = matches[0]
     if match.group(2) != _CRATES_IO_SOURCE:
         raise AssertionError("%s in Cargo.lock does not come from crates.io (source %r): the registry copy the "
                              "guard reads is not the one the build uses" % (crate, match.group(2)))
