@@ -151,12 +151,35 @@ class OneOccurrenceTests(unittest.TestCase):
                         '#[cfg(all(unix, any(test)))]\nconst STALE: &str = "x is gone";\n',
                         'fn s() -> S {\n    S {\n        #[cfg(test)]\n        msg: "x is gone",\n        n: 1,\n    }\n}\n',
                         'fn s() {\n    #[cfg(test)]\n    f("x is gone");\n    g();\n}\n',
-                        'fn s(v: u8) {\n    match v {\n        #[cfg(test)]\n        0 => { f("x is gone") }\n    }\n}\n'):
+                        'fn s(v: u8) {\n    match v {\n        #[cfg(test)]\n        0 => { f("x is gone") }\n    }\n}\n',
+                        # [MAGI S6 loop 47, F1b2a1-caspar, F1b2a1-melchior] a generic argument's comma ended the
+                        # item, and so did the ``}`` of a struct pattern, leaving the copy after it counted.
+                        '#[cfg(test)]\nconst M: Foo<u8, u8> = Foo::new("x is gone");\n',
+                        'fn s() {\n    #[cfg(test)]\n    foo::<A, B>("x is gone");\n    g();\n}\n',
+                        'fn s() {\n    #[cfg(test)]\n    let x = <A as B<C, D>>::f("x is gone");\n    g();\n}\n',
+                        'fn s(p: P) {\n    match p {\n        #[cfg(test)]\n        P { x: 0 } => f("x is gone"),\n'
+                        '        _ => {}\n    }\n}\n',
+                        'fn s(p: P) {\n    match p {\n        #[cfg(test)]\n        P { x } if x > 0 => f("x is gone"),\n'
+                        '        _ => {}\n    }\n}\n',
+                        'fn s() {\n    #[cfg(test)]\n    let a = { 1 } + f("x is gone");\n    g();\n}\n',
+                        'fn s() {\n    #[cfg(test)]\n    let x = async {\n        1\n    }\n    .f("x is gone");\n'
+                        '    g();\n}\n',
+                        'fn s() {\n    #[cfg(test)]\n    let f = |a| g("x is gone");\n    g();\n}\n'):
             with self.subTest(fixture=fixture):
                 with self.assertRaisesRegex(AssertionError, "found 0"):
                     _helpers().one_occurrence(fixture, '"x is gone"', "e.rs")
                 _helpers().one_occurrence(fixture + production, '"x is gone"', "e.rs")
                 _helpers().one_occurrence(production + fixture, '"x is gone"', "e.rs")
+
+    def test_an_ambiguous_test_only_item_fails_loudly(self) -> None:
+        # [MAGI S6 loop 47] each loop found another comma or brace the delimiter misread; a comma it cannot place
+        # (a closure's parameters, a comparison) or a generic that never closes now fails instead of guessing.
+        for fixture in ('fn s() {\n    #[cfg(test)]\n    let f = |a, b| g("x is gone");\n    g();\n}\n',
+                        'fn s() -> S {\n    S {\n        #[cfg(test)]\n        ok: a < b,\n        n: f("x is gone"),\n'
+                        '    }\n}\n',
+                        'fn s() {\n    #[cfg(test)]\n    let ok = a<b;\n    f("x is gone");\n}\n'):
+            with self.subTest(fixture=fixture), self.assertRaisesRegex(AssertionError, "ambiguous"):
+                _helpers().one_occurrence(fixture, '"x is gone"', "e.rs")
 
     def test_a_cfg_that_does_not_require_test_is_production(self) -> None:
         for attribute in ("#[cfg(not(test))]", "#[cfg(any(test, unix))]", "#[cfg(unix)]",

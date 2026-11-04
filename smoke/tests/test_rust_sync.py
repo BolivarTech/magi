@@ -1594,6 +1594,12 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'vars = vars\nz = vars()["section"].get("hidden")',
                       'globals = globals\nz = globals()["section"].get("hidden")',
                       'def _f(eval=eval):\n    return eval("section").get("hidden")',
+                      # MAGI FIX (S6 loop 47, F1b2a2-melchior): a format template reads attributes the AST
+                      # never shows, so ``"{0.os.environ}".format(runs)`` passed the reach guard.
+                      'from smoke import runs\nz = "{0.os.environ}".format(runs)',
+                      'z = "{0}".format(section)',
+                      'z = str.format("{0.x}", section)',
+                      'z = "{hidden}".format_map(section)',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")
