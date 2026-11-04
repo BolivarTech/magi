@@ -1546,6 +1546,11 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'isinstance = lambda o, c: o.get("hidden")\nz = isinstance(section, dict)',
                       'from smoke.registry import isinstance\nz = isinstance(section, dict)',
                       'def dict(o):\n    return o\nz = isinstance(section, dict)',
+                      # [MAGI S6 loop 45, F1b2a-melchior] a module-level ``vars = vars`` made the builtin a bound
+                      # name, outside the allowlist of rebound builtins.
+                      'vars = vars\nz = vars()["section"].get("hidden")',
+                      'globals = globals\nz = globals()["section"].get("hidden")',
+                      'def _f(eval=eval):\n    return eval("section").get("hidden")',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")

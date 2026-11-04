@@ -131,6 +131,29 @@ class OneOccurrenceTests(unittest.TestCase):
         production = 'fn f() -> &str {\n    "x is gone"\n}\n'
         self.assertIn('"x is gone"', _helpers().one_occurrence(production + tests, '"x is gone"', "e.rs").group(0))
 
+    def test_every_test_only_form_is_skipped_and_nothing_after_it(self) -> None:
+        # [MAGI S6 loop 45, F1b2a-caspar, F1b2a-balthasar] a ``const fn`` was read as a ``;`` item and blanked the
+        # production code after it, and ``cfg(all(test, ...))``, fields and statements were not skipped at all.
+        production = 'fn prod() -> &str {\n    "x is gone"\n}\n'
+        for fixture in ('#[cfg(test)]\nconst fn h() -> u8 { 1 }\n',
+                        '#[cfg(test)]\npub(crate) const unsafe fn h() -> u8 { 1 }\n',
+                        '#[cfg(all(test, unix))]\nfn t() { f("x is gone"); }\n',
+                        '#[cfg(all(unix, any(test)))]\nconst STALE: &str = "x is gone";\n',
+                        'fn s() -> S {\n    S {\n        #[cfg(test)]\n        msg: "x is gone",\n        n: 1,\n    }\n}\n',
+                        'fn s() {\n    #[cfg(test)]\n    f("x is gone");\n    g();\n}\n',
+                        'fn s(v: u8) {\n    match v {\n        #[cfg(test)]\n        0 => { f("x is gone") }\n    }\n}\n'):
+            with self.subTest(fixture=fixture):
+                with self.assertRaisesRegex(AssertionError, "found 0"):
+                    _helpers().one_occurrence(fixture, '"x is gone"', "e.rs")
+                _helpers().one_occurrence(fixture + production, '"x is gone"', "e.rs")
+                _helpers().one_occurrence(production + fixture, '"x is gone"', "e.rs")
+
+    def test_a_cfg_that_does_not_require_test_is_production(self) -> None:
+        for attribute in ("#[cfg(not(test))]", "#[cfg(any(test, unix))]", "#[cfg(unix)]",
+                          '#[cfg(feature = "test")]'):
+            with self.subTest(attribute=attribute):
+                _helpers().one_occurrence(attribute + '\nfn f() { g("x is gone"); }\n', '"x is gone"', "e.rs")
+
     def test_a_needle_that_starts_inside_a_literal_is_not_counted(self) -> None:
         # [MAGI S6 loop 44, F1b2a-melchior] a needle found inside any string answered for the production code.
         with self.assertRaisesRegex(AssertionError, "found 0"):
