@@ -20,9 +20,12 @@ on the raw text, where a comment can only make them stricter.
 
 import ast
 import fractions
+import importlib
+import importlib.util
 import os
 import pathlib
 import re
+import types
 import unittest
 from unittest import mock
 
@@ -112,6 +115,90 @@ def _reflection_reached(node) -> str | None:
     if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in _BUILTINS_MODULES:
         return node.module
     return None
+
+
+#: The modules the scenario may import: a new import fails the guard and is reviewed on purpose.
+_ALLOWED_IMPORTS = frozenset({"json", "re", "smoke", "smoke.errors", "smoke.outcome", "smoke.registry"})
+#: The builtins the scenario may name, and the two names the guard tracks (free in its synthetic snippets).
+_ALLOWED_FREE_NAMES = frozenset({"all", "any", "bool", "dict", "int", "isinstance", "len", "list", "range", "set",
+                                 "sorted", "str", "tuple", "zip", _SECTION_NAME, _DOCUMENT_NAME})
+
+
+def _imported_module(alias, module: str | None):
+    """The module object an import binds through *alias*, ``None`` when the name it binds is not a module.
+
+    Args:
+        alias: One ``ast.alias`` of the import.
+        module: The ``from`` statement's module, ``None`` for a plain ``import``.
+
+    Returns:
+        types.ModuleType | None: ``json`` for ``import json``; the ``smoke`` package for
+        ``import smoke.errors`` (the name it binds); ``smoke.runs`` for ``from smoke import runs``;
+        ``None`` for ``from smoke.outcome import Finding``.
+    """
+    if module is None:
+        return importlib.import_module(alias.name.split(".")[0])
+    dotted = "%s.%s" % (module, alias.name)
+    parent = importlib.import_module(module)
+    if hasattr(parent, "__path__") and importlib.util.find_spec(dotted) is not None:
+        return importlib.import_module(dotted)
+    member = getattr(parent, alias.name, None)
+    return member if isinstance(member, types.ModuleType) else None
+
+
+def _require_allowed_reach(tree) -> None:
+    """Fail unless *tree* reaches nothing beyond the allowlisted imports, free names and module members.
+
+    MAGI FIX (S6 loop 41, F1b2a-melchior): the reflection guard was a denylist, so each loop closed one
+    route (builtins, the module object) and left another open (``inspect`` frames, ``sys._getframe``,
+    ``operator.attrgetter``, a module reached through another one's attributes). Every route is now
+    allowlisted: imports from :data:`_ALLOWED_IMPORTS` only, no relative import; free names (bound
+    nowhere in the module) from :data:`_ALLOWED_FREE_NAMES` only; on a name bound once to an imported
+    module, only an attribute the module has that is not itself a module; and no dunder attribute and
+    no frame attribute (``f_locals``, ``gi_frame``, ...) anywhere.
+
+    Args:
+        tree: The parsed scenario module.
+
+    Raises:
+        AssertionError: Naming the line of the first import, name or attribute outside the allowlist.
+    """
+    counts = _binding_counts(tree)
+    bound = {name for node in ast.walk(tree) for name in _names_bound_by(node)}
+    modules = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = node.module if isinstance(node, ast.ImportFrom) else None
+            for alias in node.names:
+                name = alias.name if module is None else module
+                if getattr(node, "level", 0) or name not in _ALLOWED_IMPORTS or alias.name == "*":
+                    raise AssertionError("line %d: an import the key guard does not allow: %s"
+                                         % (node.lineno, ast.unparse(node)))
+                imported = _imported_module(alias, module)
+                local = alias.asname or alias.name.split(".")[0]
+                if imported is not None:
+                    if counts.get(local) != 1:
+                        raise AssertionError("line %d: an imported module bound more than once: %s"
+                                             % (node.lineno, local))
+                    modules[local] = imported
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in bound \
+                and node.id not in _ALLOWED_FREE_NAMES:
+            raise AssertionError("line %d: a name the key guard does not allow: %s" % (node.lineno, node.id))
+        if isinstance(node, ast.Attribute):
+            if _is_dunder(node.attr) or node.attr in _FRAME_ATTRIBUTES:
+                raise AssertionError("line %d: a member access the key guard does not follow: %s"
+                                     % (node.lineno, ast.unparse(node)))
+            owner = modules.get(node.value.id) if isinstance(node.value, ast.Name) else None
+            if owner is not None and (not hasattr(owner, node.attr)
+                                      or isinstance(getattr(owner, node.attr), types.ModuleType)):
+                raise AssertionError("line %d: a module member the key guard does not allow: %s"
+                                     % (node.lineno, ast.unparse(node)))
+
+
+#: Attributes that hand out a frame or its namespaces, on frames, generators, coroutines and tracebacks.
+_FRAME_ATTRIBUTES = frozenset({"f_locals", "f_globals", "f_builtins", "f_back", "gi_frame", "cr_frame",
+                               "ag_frame", "tb_frame"})
 
 
 def _is_dunder(name: str) -> bool:
@@ -364,6 +451,7 @@ class _SectionReads:
         Raises:
             AssertionError: Naming the line of the first use the walk cannot follow.
         """
+        _require_allowed_reach(self._tree)
         self._check_summary_references()
         self._check_document_reads()
         keys = set()
