@@ -23,7 +23,6 @@ import fractions
 import importlib
 import importlib.util
 import json
-import os
 import pathlib
 import re
 import subprocess
@@ -1748,12 +1747,12 @@ def _dependency_root(crate: str, metadata: dict, lock: str) -> pathlib.Path:
 
 
 def _registry_source(crate: str, relative: str) -> str:
-    """Read *relative* from the locked version of *crate* in cargo's registry.
+    """Read *relative* from the checkout of *crate* that cargo resolved for this build.
 
-    It assumes cargo's default layout, ``$CARGO_HOME/registry/src/<index>/<crate>-<version>``,
-    which a build fills. A vendored or path-overridden dependency is not looked for there, and
-    then the guard fails with the message below instead of skipping: a skip would leave the
-    probe paths unguarded without a word.
+    ``cargo metadata --locked --offline`` names the package's manifest, so a source replacement or a
+    second index is followed as the build follows it (:func:`_dependency_root`). Anything else (cargo
+    missing, the package not the locked crates.io one, the file absent) fails instead of skipping: a
+    skip would leave the probe paths unguarded without a word.
 
     Args:
         crate: The package name.
@@ -1763,7 +1762,8 @@ def _registry_source(crate: str, relative: str) -> str:
         str: The file's text, ``\\r`` stripped.
 
     Raises:
-        AssertionError: When no registry checkout of that version holds the file.
+        AssertionError: When ``cargo metadata`` fails, the resolved package is not the locked crates.io
+            one, or its checkout does not hold the file.
     """
     # MAGI FIX (S6 loop 44, F1b2a-melchior): the first registry/src/*/<crate>-<ver> was read, which with
     # another index or a source replacement need not be what the build compiles; cargo names the checkout.

@@ -31,9 +31,15 @@ that follow from it are declared rather than handled:
   :func:`code_only` keeps such a line whole. [MAGI §6 MS2 loop 29,
   F1b2a-melchior]
 - A line inside a multi-line (raw) string literal that starts with ``//`` is
-  taken for a comment and skipped. :func:`one_definition` skips every line
-  that starts inside such a literal; :func:`one_occurrence` does not, so a
-  needle pinned inside a multi-line string is still found. [MAGI F1b2a]
+  taken for a comment and skipped. :func:`one_definition` and
+  :func:`one_occurrence` skip every line that starts inside such a literal,
+  and :func:`one_occurrence` also skips a needle that starts inside one.
+  [MAGI F1b2a; S6 loops 38 and 44]
+- Both skip every ``#[cfg(test)]`` item that starts with a keyword (``mod``,
+  ``fn``, ``const``, ``let``...): a fixture there never answers for production
+  code. A ``#[cfg(test)]`` on a field or an expression statement is not
+  skipped (a declared limit: a copy there still counts, and never hides the
+  real line, which then makes two). [MAGI S6 loop 44, F1b2a-melchior]
 - Uniqueness is per line: two matches on one physical line count once.
   rustfmt, which the product's CI enforces, puts each item on its own line.
 - :func:`one_occurrence` reads a line only up to its first ``//``, whether or
@@ -421,8 +427,8 @@ def _without_test_items(text: str) -> str:
     A guard pins production code; a copy in a test module is a fixture, and with the production line
     gone it would answer for it. Offsets and newlines are kept. Only an item that starts with a keyword
     (``mod``, ``fn``, ``const``, ``let``, ``thread_local!``...) is blanked: a ``#[cfg(test)]`` on a struct
-    field, a struct-literal field or an expression statement leaves that code in place (a limit, which
-    errs towards counting a copy, never towards hiding production code).
+    field, a struct-literal field or an expression statement leaves that code in place (a declared limit:
+    a copy there still counts; blanking by comma would hide production code that follows it).
 
     Complexity: ``O(len(text))`` per test item.
 
