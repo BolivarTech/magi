@@ -877,6 +877,32 @@ def _envelope_summary_key(output: str) -> str:
     return one_definition(struct, _ENVELOPE_SUMMARY_FIELD, "WireOutcome in src/headless/output.rs").group(1)
 
 
+#: The structs whose fields S47 reads off each entry, and those fields' declarations.
+_ENTRY_STRUCTS = (("src/review/consolidate.rs", "ConsolidatedFinding",
+                   ("pub file: Option<String>,", "pub line: Option<u32>,")),
+                  ("src/review/validate.rs", "Discarded", ("pub cause: DiscardCause,",)))
+
+
+def _require_entry_fields_serialized(source) -> None:
+    """Fail unless every field of :data:`_ENTRY_STRUCTS` is serialized under its own name.
+
+    Args:
+        source: Reads a repository path into its text, ``\\r`` stripped.
+
+    Raises:
+        AssertionError: When a struct is not declared once with a serde derive, renames a field, or does
+            not declare a field.
+    """
+    for path, struct, fields in _ENTRY_STRUCTS:
+        body = one_definition(source(path),
+                              r"#\[derive\([^)]*serde::Serialize[^)]*\)\]\npub struct %s \{(.*?)\n\}" % struct,
+                              path, re.S).group(1)
+        if "rename" in body:
+            raise AssertionError("%s renames a field" % struct)
+        for field in fields:
+            one_definition(body, re.escape(field), "%s in %s" % (struct, path))
+
+
 #: The code lines of the product's ``attempt_factor`` body, comments dropped, the smoke copies' arithmetic.
 _ATTEMPT_FACTOR_LINES = ["let attempts_per_model: u64 = if retry_disabled { 1 } else { CALLS_PER_MODEL };",
                          "let models_per_mage = u64::from(max_rotations).saturating_add(1);",
@@ -1017,6 +1043,17 @@ class SyncGuardMutationTests(unittest.TestCase):
         report = ('    // every documented key is present\n    // was: for k in ["batches", "old"]\n'
                   '    for k in ["batches", "new"] {\n')
         self.assertEqual({"batches", "new"}, _pinned_report_keys(report))
+
+    def test_a_key_list_in_a_literal_or_an_anchor_in_code_fails_the_report_key_read(self) -> None:
+        # [MAGI S6 loop 40, F1b2a-melchior] the list was searched with literals kept, so a fixture after the
+        # anchor answered for the real list; and the anchor itself could be a string, not the test's comment.
+        report = _source("src/review/report.rs")
+        anchor = "// [CP2 MS2 S2a2 loop 10] every documented key is present, so a dropped field goes red.\n"
+        self.assertEqual(1, report.count(anchor))
+        for new in (anchor + '        let _fixture = "for k in [\\"hidden\\"]";\n',
+                    'let _ = "every documented key is present";\n'):
+            with self.subTest(new=new), self.assertRaises(AssertionError):
+                _pinned_report_keys(report.replace(anchor, new))
 
     def test_the_envelope_serializes_the_summary_under_the_key_s47_reads(self) -> None:
         # Nothing tied "code_review" to the product: renaming the envelope field left every test green.
@@ -1301,6 +1338,11 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'import builtins as b\nz = b.globals()["section"].get("hidden")',
                       'import sys\nz = sys.modules["builtins"].vars()["section"].get("hidden")',
                       'import importlib\nz = importlib.import_module("builtins").vars()["section"].get("x")',
+                      # [MAGI S6 loop 40, F1b2a-caspar] the module object reached section as an attribute.
+                      'import sys\nz = sys.modules[__name__].section.get("hidden")',
+                      'import importlib\nz = importlib.import_module("smoke.scenarios.code_review")'
+                      '.section.get("hidden")',
+                      'import sys\nz = sys.modules[__name__].__dict__["section"].get("hidden")',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")
@@ -1326,15 +1368,30 @@ class ReportKeyTests(unittest.TestCase):
     def test_the_entry_fields_s47_reads_are_serialized_under_their_own_names(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-m1] S47 reads file and line off each main finding and cause off each
         # discarded one; a serde rename on either struct would surface as an opaque FAIL at SMOKE time.
-        for path, struct, fields in (("src/review/consolidate.rs", "ConsolidatedFinding",
-                                      ("pub file: Option<String>,", "pub line: Option<u32>,")),
-                                     ("src/review/validate.rs", "Discarded", ("pub cause: DiscardCause,",))):
-            body = one_definition(_source(path),
-                                  r"#\[derive\([^)]*serde::Serialize[^)]*\)\]\npub struct %s \{(.*?)\n\}" % struct,
-                                  path, re.S).group(1)
-            self.assertNotIn("rename", body, struct)
-            for field in fields:
-                one_definition(body, re.escape(field), "%s in %s" % (struct, path))
+        _require_entry_fields_serialized(_source)
+
+    def test_a_skipped_or_reshaped_entry_field_fails_the_entry_field_guard(self) -> None:
+        # [MAGI S6 loop 40, F1b2a-melchior] only ``rename`` in the body was refused, so a skip_serializing on a
+        # field S47 reads, or a serde attribute on the struct above its derive, dropped the key with the guard green.
+        file_field, cause_field = "    pub file: Option<String>,", "    pub cause: DiscardCause,"
+        struct = "/// One finding of the consolidated report.\n#[derive(Debug, Clone, serde::Serialize)]"
+        for path, old, new in (
+                ("src/review/consolidate.rs", file_field,
+                 '    #[serde(skip_serializing_if = "Option::is_none")]\n' + file_field),
+                ("src/review/consolidate.rs", file_field, "    #[serde(skip)]\n" + file_field),
+                ("src/review/consolidate.rs", file_field,
+                 '    #[cfg_attr(test, serde(skip_serializing))]\n' + file_field),
+                ("src/review/validate.rs", cause_field, "    #[serde(flatten)]\n" + cause_field),
+                ("src/review/consolidate.rs", struct, struct.replace("#[derive", '#[serde(into = "X")]\n#[derive')),
+                ("src/review/consolidate.rs", struct, struct + '\n#[serde(rename_all = "UPPERCASE")]')):
+            self.assertEqual(1, _source(path).count(old), (path, old))
+
+            def mutated(name: str, path=path, old=old, new=new) -> str:
+                text = _source(name)
+                return text.replace(old, new) if name == path else text
+
+            with self.subTest(new=new), self.assertRaises(AssertionError):
+                _require_entry_fields_serialized(mutated)
 
     def test_the_run_field_the_harness_matches_is_the_one_the_log_writes(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-m1] S50 binds its run-log line to this run through logs.run_needle;
