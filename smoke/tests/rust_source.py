@@ -377,8 +377,84 @@ def _starts_inside(spans: list, position: int) -> bool:
     return index >= 0 and position < spans[index][1]
 
 
-def _exactly_one(regex: re.Pattern, text: str, where: str, outside_literals: bool = False) -> re.Match:
-    """The single match of *regex* in *text* that does not sit on a comment line.
+#: ``#[cfg(test)]`` and the item it marks, up to the item's keyword: group 1 is a keyword whose item ends
+#: at its block's closing ``}`` (or a ``;``), group 2 one whose item ends at a ``;``.
+_TEST_ITEM = re.compile(r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
+                        r"(?:(?:async|unsafe|extern)\s+)*(?:(mod|fn|impl|struct|enum|trait|union)\b"
+                        r"|(thread_local!|macro_rules!)|(const|static|use|type|let)\b)")
+#: The brackets an item's end is counted over.
+_OPENERS, _CLOSERS = "([{", ")]}"
+
+
+def _test_item_end(view: str, start: int, block: bool) -> int:
+    """Where the test item whose keyword ends at *start* in *view* ends, its last character included.
+
+    Args:
+        view: :func:`structure_only`'s view of the text.
+        start: The offset right after the item's keyword.
+        block: Whether a ``}`` that closes a top-level ``{`` ends the item (``fn``, ``mod``...); otherwise
+            only a ``;`` outside every bracket does (``const``, ``let``...).
+
+    Returns:
+        int: The offset just past the item.
+
+    Raises:
+        AssertionError: When the item never ends.
+    """
+    depth = 0
+    for index in range(start, len(view)):
+        char = view[index]
+        if char in _OPENERS:
+            depth += 1
+        elif char in _CLOSERS:
+            depth -= 1
+            if depth == 0 and block and char == "}":
+                return index + 1
+        elif char == ";" and depth == 0:
+            return index + 1
+    raise AssertionError("a #[cfg(test)] item never ends")
+
+
+def _without_test_items(text: str) -> str:
+    """*text* with every ``#[cfg(test)]`` item blanked, attribute through its ``;`` or closing ``}``.
+
+    A guard pins production code; a copy in a test module is a fixture, and with the production line
+    gone it would answer for it. Offsets and newlines are kept. Only an item that starts with a keyword
+    (``mod``, ``fn``, ``const``, ``let``, ``thread_local!``...) is blanked: a ``#[cfg(test)]`` on a struct
+    field, a struct-literal field or an expression statement leaves that code in place (a limit, which
+    errs towards counting a copy, never towards hiding production code).
+
+    Complexity: ``O(len(text))`` per test item.
+
+    Args:
+        text: Source text, ``\\r`` stripped.
+
+    Returns:
+        str: The text with each test item's characters, newlines excepted, turned into spaces.
+
+    Raises:
+        AssertionError: When a test item never ends.
+
+    Example:
+        >>> _without_test_items('#[cfg(test)]\\nmod t { fn f() {} }\\nfn g() {}\\n')
+        '            \\n                  \\nfn g() {}\\n'
+    """
+    view = structure_only(text)
+    out, previous = [], 0
+    for attribute in _TEST_ITEM.finditer(view):
+        if attribute.start() < previous:
+            continue
+        stop = _test_item_end(view, attribute.end(), block=attribute.group(3) is None)
+        out.append(text[previous:attribute.start()])
+        out.append(_blank(text[attribute.start():stop]))
+        previous = stop
+    out.append(text[previous:])
+    return "".join(out)
+
+
+def _exactly_one(regex: re.Pattern, text: str, where: str, outside_literals: bool = False,
+                 needle_length: int = 0) -> re.Match:
+    """The single match of *regex* in *text* that does not sit on a comment line nor in a test item.
 
     Args:
         regex: A pattern anchored at a line start (``re.M``).
@@ -387,6 +463,8 @@ def _exactly_one(regex: re.Pattern, text: str, where: str, outside_literals: boo
         outside_literals: Whether a match whose first non-blank character
             lies inside a string or raw-string literal (a line of a
             multi-line fixture) is skipped too.
+        needle_length: When positive, the length of the needle that ends each match; a match whose
+            needle starts inside a literal is skipped too (requires *outside_literals*).
 
     Returns:
         re.Match: The one match.
@@ -399,13 +477,18 @@ def _exactly_one(regex: re.Pattern, text: str, where: str, outside_literals: boo
     view, so a pattern with a leading or middle wildcard read a value from an
     old copy left in such a comment, and a ``re.S`` body capture carried the
     comment's text. Every line comment is now blanked first.
+
+    MAGI FIX (S6 loop 44, F1b2a-melchior): a one-line fixture in a test module was a code line, so with
+    the production line gone it answered for it; ``#[cfg(test)]`` items are blanked first, and a needle
+    found inside some other string no longer counts.
     """
     spans = [] if outside_literals else None
-    view = _without_block_comments(text, line_comments=True, literals=spans)
+    view = _without_block_comments(_without_test_items(text), line_comments=True, literals=spans)
     found = [match for match in regex.finditer(view)
              if not match.group(0).lstrip().startswith(_COMMENT)
              and not (outside_literals and _starts_inside(
-                 spans, match.start() + len(match.group(0)) - len(match.group(0).lstrip())))]
+                 spans, match.start() + len(match.group(0)) - len(match.group(0).lstrip())))
+             and not (needle_length and _starts_inside(spans, match.end() - needle_length))]
     if len(found) != 1:
         raise AssertionError("%s: expected exactly one code line matching %r, found %d"
                              % (where, regex.pattern, len(found)))
@@ -469,4 +552,4 @@ def one_occurrence(text: str, needle: str, where: str) -> re.Match:
     regex = re.compile(r"^[ \t]*%s%s" % (_CODE_BEFORE, re.escape(needle)), re.M)
     # MAGI FIX (S6 loop 38): a line inside a multi-line literal (a test fixture) was counted, so with the
     # production line gone a stale fixture copy answered for it.
-    return _exactly_one(regex, text, where, outside_literals=True)
+    return _exactly_one(regex, text, where, outside_literals=True, needle_length=len(needle))

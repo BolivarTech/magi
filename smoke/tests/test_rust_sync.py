@@ -22,9 +22,11 @@ import ast
 import fractions
 import importlib
 import importlib.util
+import json
 import os
 import pathlib
 import re
+import subprocess
 import symtable
 import types
 import unittest
@@ -922,7 +924,9 @@ def _pinned_report_keys(report: str) -> set[str]:
     close = view.find("]", opening.end()) if opening is not None else -1
     if close < 0:
         raise AssertionError("the code after the anchor in src/review/report.rs is not the summary key list")
-    return set(re.findall(r'"(\w+)"', report[opening.end():close]))
+    # MAGI FIX (S6 loop 44, F1b2a-melchior): the keys were read off the raw text, so a stale key left in a
+    # comment inside the list counted as pinned; they are read from the comment-blanked view, same offsets.
+    return set(re.findall(r'"(\w+)"', without_comments(report)[opening.end():close]))
 
 
 #: The envelope's summary field in ``src/headless/output.rs``: omitted when absent, never renamed.
@@ -1685,6 +1689,8 @@ class SecretPrefixDocTests(unittest.TestCase):
 
 #: The ``source`` of a crates.io package in ``Cargo.lock``.
 _CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+#: How long ``cargo metadata --offline`` may take: about 2 s measured, so a hang fails instead of stalling.
+_CARGO_METADATA_TIMEOUT_S = 120
 
 
 def _locked_version(crate: str, lock: str) -> str:
@@ -1731,7 +1737,14 @@ def _dependency_root(crate: str, metadata: dict, lock: str) -> pathlib.Path:
         AssertionError: When cargo resolved no such package or more than one, or the one it resolved is not
             the crates.io package at the locked version.
     """
-    return pathlib.Path()
+    packages = [package for package in metadata.get("packages", []) if package.get("name") == crate]
+    if len(packages) != 1:
+        raise AssertionError("expected cargo to resolve one %s, found %d" % (crate, len(packages)))
+    package = packages[0]
+    if package.get("source") != _CRATES_IO_SOURCE or package.get("version") != _locked_version(crate, lock):
+        raise AssertionError("cargo resolved %s %s from %r, not the locked crates.io package"
+                             % (crate, package.get("version"), package.get("source")))
+    return pathlib.Path(package["manifest_path"]).parent
 
 
 def _registry_source(crate: str, relative: str) -> str:
@@ -1752,15 +1765,18 @@ def _registry_source(crate: str, relative: str) -> str:
     Raises:
         AssertionError: When no registry checkout of that version holds the file.
     """
-    home = pathlib.Path(os.environ.get("CARGO_HOME") or pathlib.Path.home() / ".cargo")
-    package = "%s-%s" % (crate, _locked_version(crate, _source("Cargo.lock")))
-    for index in sorted((home / "registry" / "src").glob("*")):
-        candidate = index / package / relative
-        if candidate.is_file():
-            return candidate.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
-    raise AssertionError("%s/%s not found under %s/registry/src; build the product first. A vendored or "
-                         "path-overridden magi-core is not looked for: point CARGO_HOME at a cargo home whose "
-                         "registry holds this version" % (package, relative, home))
+    # MAGI FIX (S6 loop 44, F1b2a-melchior): the first registry/src/*/<crate>-<ver> was read, which with
+    # another index or a source replacement need not be what the build compiles; cargo names the checkout.
+    try:
+        completed = subprocess.run(["cargo", "metadata", "--format-version", "1", "--locked", "--offline"],
+                                   cwd=_ROOT, capture_output=True, text=True, encoding="utf-8",
+                                   timeout=_CARGO_METADATA_TIMEOUT_S, check=True)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise AssertionError("cargo metadata failed (%s); build the product first" % error) from error
+    candidate = _dependency_root(crate, json.loads(completed.stdout), _source("Cargo.lock")) / relative
+    if not candidate.is_file():
+        raise AssertionError("%s not found in the %s checkout cargo resolved" % (relative, crate))
+    return candidate.read_bytes().decode("utf-8", errors="replace").replace("\r", "")
 
 
 #: How magi-core's ``OllamaProvider`` names a request's path: the segments after the
