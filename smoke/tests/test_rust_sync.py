@@ -859,6 +859,34 @@ class SyncGuardMutationTests(unittest.TestCase):
             with self.subTest(scenario=scenario), self.assertRaises(AssertionError):
                 _require_one_summary_binding(scenario)
 
+    #: The scenario module's shape: one parsed document, the one summary read, the empty fallback in the same
+    #: function, and a helper that takes ``section`` as its parameter.
+    _SCENARIO = ('CODE_REVIEW_KEY = %r\nCONSULT_KEY = "consult"\n'
+                 'def _list_under(section, key):\n    return section.get(key)\n'
+                 'def scenario(run):\n    document = run.output.json()\n'
+                 '    section = document.get(CODE_REVIEW_KEY)\n'
+                 '    if not isinstance(section, dict):\n        section = {}\n'
+                 '    return _list_under(section, "findings")\n' % code_review.CODE_REVIEW_KEY)
+
+    def test_a_section_or_document_rebound_fails_the_binding_check(self) -> None:
+        # [MAGI S6 loop 37, F1b2a] only the summary assignment was counted, so section rebound inside the helper or
+        # after the read, or the document rebound, left the scenario reading something else with every guard green.
+        _require_one_summary_binding(self._SCENARIO)
+        helper = '    return section.get(key)\n'
+        tail = '    return _list_under(section, "findings")\n'
+        for mutated in (self._SCENARIO.replace(helper, '    section = {}\n' + helper),
+                        self._SCENARIO.replace(helper, '    section = {"findings": []}\n' + helper),
+                        self._SCENARIO.replace(tail, '    section = document.get(CONSULT_KEY)\n' + tail),
+                        self._SCENARIO.replace('section = {}', 'section = {"findings": []}'),
+                        self._SCENARIO.replace(tail, '    for section in ({},):\n        pass\n' + tail),
+                        self._SCENARIO.replace(tail, '    f = lambda section: section\n' + tail),
+                        self._SCENARIO + 'section = {}\n',
+                        self._SCENARIO.replace(tail, '    document = {"code_review": {}}\n' + tail),
+                        self._SCENARIO.replace('document = run.output.json()', 'document = {}'),
+                        self._SCENARIO.replace(tail, '    document = run.output.json()\n' + tail)):
+            with self.subTest(scenario=mutated), self.assertRaises(AssertionError):
+                _require_one_summary_binding(mutated)
+
 
 class NeverReviewedTests(unittest.TestCase):
     """The protected names S51 checks are the ones the product never reviews."""
