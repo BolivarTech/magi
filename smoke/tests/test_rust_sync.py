@@ -790,16 +790,9 @@ class StderrWordingTests(unittest.TestCase):
         self.filter = _source("src/review/filter.rs")
 
     def test_the_omission_causes_are_the_products(self) -> None:
-        found = one_definition(self.filter, r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n",
-                               "src/review/filter.rs", re.S)
-        body = without_comments(found.group(1))
-        causes = re.findall(r'Self::\w+ => "([^"]+)"', body)
         # [MAGI §6 MS2 loop 12] an arm may name a constant instead of a literal (HARD_LINK_CAUSE, which
         # src/review/source.rs defines because the explicit-file error shares it); resolve it there.
-        source = _source("src/review/source.rs")
-        for name in re.findall(r"Self::\w+ => ([A-Z_]+),", body):
-            value = one_definition(source, r'pub const %s: &str = "([^"]+)";' % name, "src/review/source.rs")
-            causes.append(value.group(1))
+        causes = _omission_causes(self.filter, _source("src/review/source.rs"))
         self.assertTrue(causes)
         self.assertEqual(sorted(causes), sorted(code_review.OMISSION_CAUSES))
 
@@ -892,7 +885,22 @@ def _omission_causes(filter_text: str, source_text: str) -> list[str]:
         AssertionError: When ``as_str`` is not defined once, or an arm is neither a string literal nor a
             bare constant defined in ``src/review/source.rs``.
     """
-    return []
+    found = one_definition(filter_text, r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n",
+                           "src/review/filter.rs", re.S)
+    causes = []
+    # MAGI FIX (S6 loop 46, F1b2a-melchior): only literal and bare-constant arms were read, so an arm in
+    # another form dropped its cause without a word; every arm must now resolve.
+    for arm in re.findall(r"^[ \t]*(.*?=>.*?)[ \t]*$", without_comments(found.group(1)), re.M):
+        literal = re.fullmatch(r'Self::\w+ => "([^"]+)",?', arm)
+        constant = re.fullmatch(r"Self::\w+ => ([A-Z_]+),?", arm)
+        if literal is not None:
+            causes.append(literal.group(1))
+        elif constant is not None:
+            causes.append(one_definition(source_text, r'pub const %s: &str = "([^"]+)";' % constant.group(1),
+                                         "src/review/source.rs").group(1))
+        else:
+            raise AssertionError("src/review/filter.rs: an as_str arm the guard cannot resolve: %r" % arm)
+    return causes
 
 
 #: The comment in ``src/review/report.rs`` that heads the test's list of every summary key.

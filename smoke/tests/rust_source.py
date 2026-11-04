@@ -383,6 +383,38 @@ def _starts_inside(spans: list, position: int) -> bool:
     return index >= 0 and position < spans[index][1]
 
 
+def _span_at(spans: list, position: int) -> tuple | None:
+    """The literal span *position* lies in past its first character (see :func:`_starts_inside`), or ``None``."""
+    index = bisect.bisect_left(spans, (position,)) - 1
+    return spans[index] if index >= 0 and position < spans[index][1] else None
+
+
+def _reads_from_a_literal(match: re.Match, spans: list, text: str) -> bool:
+    """Whether *match* takes code text from inside a literal that its pattern did not open.
+
+    A group may capture a literal's contents only whole, opened by the pattern's own quote
+    (``= "([^"]+)";``); a group that starts elsewhere inside a literal, or a match whose last character is
+    in a literal's contents, read a stale copy a wildcard ran into (``let s = "pub const X: u8 = 4;";``).
+
+    Args:
+        match: A match over the comment-blanked view, offsets equal to *text*'s.
+        spans: The view's sorted literal spans.
+        text: The view.
+
+    Returns:
+        bool: ``True`` when the match reads from inside a literal.
+    """
+    last = _span_at(spans, match.end() - 1) if match.end() > match.start() else None
+    if last is not None and text[match.end() - 1] != '"':
+        return True
+    for group in range(1, (match.re.groups or 0) + 1):
+        start, end = match.span(group)
+        span = _span_at(spans, start) if start >= 0 and end > start else None
+        if span is not None and not (text[start - 1] == '"' and end < span[1] and text[end] == '"'):
+            return True
+    return False
+
+
 #: An outer attribute's opening, ``#[``; the ``cfg`` one names its predicate (group 1).
 _ATTRIBUTE_OPENING = re.compile(r"#\[\s*(cfg\s*\()?")
 #: The start of an item that ends at its block's closing ``}`` or at a ``;`` (``const fn`` included).
@@ -501,7 +533,7 @@ def _test_items(view: str):
             index = cursor
 
 
-def _without_test_items(text: str) -> str:
+def without_test_items(text: str) -> str:
     """*text* with every test-only item blanked, its attributes through its end (:func:`_test_item_end`).
 
     A guard pins production code; a copy in a test module is a fixture, and with the production line
@@ -523,7 +555,7 @@ def _without_test_items(text: str) -> str:
         AssertionError: When a test item never ends.
 
     Example:
-        >>> _without_test_items('#[cfg(test)]\\nmod t { fn f() {} }\\nfn g() {}\\n')
+        >>> without_test_items('#[cfg(test)]\\nmod t { fn f() {} }\\nfn g() {}\\n')
         '            \\n                  \\nfn g() {}\\n'
     """
     out, previous = [], 0
@@ -566,12 +598,15 @@ def _exactly_one(regex: re.Pattern, text: str, where: str, outside_literals: boo
     found inside some other string no longer counts.
     """
     spans = [] if outside_literals else None
-    view = _without_block_comments(_without_test_items(text), line_comments=True, literals=spans)
+    view = _without_block_comments(without_test_items(text), line_comments=True, literals=spans)
     found = [match for match in regex.finditer(view)
              if not match.group(0).lstrip().startswith(_COMMENT)
              and not (outside_literals and _starts_inside(
                  spans, match.start() + len(match.group(0)) - len(match.group(0).lstrip())))
-             and not (needle_length and _starts_inside(spans, match.end() - needle_length))]
+             and not (needle_length and _starts_inside(spans, match.end() - needle_length))
+             # MAGI FIX (S6 loop 46, F1b2a-caspar): only the start was checked, so a wildcard ran into a string
+             # and captured a stale copy's value from inside it.
+             and not (outside_literals and not needle_length and _reads_from_a_literal(match, spans, view))]
     if len(found) != 1:
         raise AssertionError("%s: expected exactly one code line matching %r, found %d"
                              % (where, regex.pattern, len(found)))

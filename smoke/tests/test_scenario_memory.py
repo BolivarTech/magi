@@ -20,7 +20,7 @@ from smoke.runner import Ambient
 from smoke.runs import RunResult
 from smoke.scenarios import memory  # noqa: F401 - import registers it
 from smoke.tests import support
-from smoke.tests.rust_source import read_source, without_comments
+from smoke.tests.rust_source import read_source, without_comments, without_test_items
 
 #: A minimal environment config the scenario can copy and patch.
 _ENV_CONFIG = (
@@ -492,7 +492,8 @@ class EmbedderDownTests(unittest.TestCase):
         """
         # The marker is a message fragment several code lines share, so this asks for at least one code
         # line (never a comment) rather than exactly one, as the definition guards do.
-        source = without_comments(read_source("src/agent/mod.rs"))
+        # [MAGI §6 MS2 loop 46, F1b2a-caspar] test modules are dropped too: a fixture there is not a path a run takes.
+        source = without_comments(without_test_items(read_source("src/agent/mod.rs")))
         self.assertTrue(
             memory.DEGRADATION_MARKER in source,
             "%r appears nowhere in src/agent/mod.rs, so no run can ever "
