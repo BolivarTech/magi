@@ -719,6 +719,50 @@ class StderrWordingTests(unittest.TestCase):
                         self.test_the_fixed_phrases_are_the_products()
 
 
+#: The comment in ``src/review/report.rs`` that names the test listing every summary key, and the list it heads.
+_REPORT_KEYS_ANCHOR = "every documented key is present"
+_REPORT_KEYS_LIST = re.compile(r"for k in \[(.*?)\]", re.S)
+
+
+def _call_list(body: str, call: str, where: str) -> str:
+    """The inside of the one array literal *call* (``.split([``-style, ending at ``[``) takes in *body*.
+
+    Args:
+        body: A Rust function body, ``\\r`` stripped.
+        call: The call's text up to and including its ``[``.
+        where: The function, for the failure message.
+
+    Returns:
+        str: The text between the call's ``[`` and the next ``]``.
+
+    Raises:
+        AssertionError: When no code line holds the call, or more than one does.
+    """
+    found = one_occurrence(body, call, where)
+    rest = body[found.end():]
+    return rest[:rest.index("]")]
+
+
+def _pinned_report_keys(report: str) -> set[str]:
+    """The keys the report's own test lists after :data:`_REPORT_KEYS_ANCHOR`, read from code only.
+
+    Args:
+        report: ``src/review/report.rs``, ``\\r`` stripped.
+
+    Returns:
+        set[str]: Every quoted key in the list.
+
+    Raises:
+        AssertionError: When the anchor is not there exactly once, or no list follows it.
+    """
+    if report.count(_REPORT_KEYS_ANCHOR) != 1:
+        raise AssertionError("expected the anchor %r once in src/review/report.rs" % _REPORT_KEYS_ANCHOR)
+    pinned = re.search(re.escape(_REPORT_KEYS_ANCHOR) + r".*?" + _REPORT_KEYS_LIST.pattern, report, re.S)
+    if pinned is None:
+        raise AssertionError("the summary key list was not found in src/review/report.rs")
+    return set(re.findall(r'"(\w+)"', without_comments(pinned.group(1))))
+
+
 class NeverReviewedTests(unittest.TestCase):
     """The protected names S51 checks are the ones the product never reviews."""
 
@@ -746,13 +790,9 @@ class NeverReviewedTests(unittest.TestCase):
         body = found.group(1)
         # [MAGI §6 MS2 loop 28, F1b2a-melchior] '(.)' could not read an escaped literal such as '\\\\', so a
         # character the product trims could be missing from the harness's copy with the guard green.
-        trimmed = one_occurrence(body, ".trim_end_matches([", "is_never_reviewed")
-        rest = body[trimmed.end():]
-        chars = char_list(rest[:rest.index("]")])
+        chars = char_list(_call_list(body, ".trim_end_matches([", "is_never_reviewed"))
         self.assertEqual(sorted(chars), sorted(runs.TRIMMED_TRAILING))
-        split = one_occurrence(body, ".split([", "is_never_reviewed")
-        rest = body[split.end():]
-        self.assertEqual({"/", "\\"}, set(char_list(rest[:rest.index("]")])))
+        self.assertEqual({"/", "\\"}, set(char_list(_call_list(body, ".split([", "is_never_reviewed"))))
         one_occurrence(body, ".split(['/', '\\\\'])", "is_never_reviewed")
         # Every comparison folds ASCII case and nothing else, as same_product_name does.
         self.assertGreater(without_comments(body).count("eq_ignore_ascii_case"), 0)
@@ -934,13 +974,7 @@ class ReportKeyTests(unittest.TestCase):
         # the extraction stops seeing, or a new one, fails here and is reviewed on purpose.
         self.assertEqual({"batches", "batches_completed", "batches_planned", "discarded", "failed_batches",
                           "findings", "unmeasured_models"}, read)
-        report = _source("src/review/report.rs")
-        # The list is found by the comment that names its test, the one place a comment is the anchor;
-        # the comment must be unique and the keys are read from code lines only.
-        self.assertEqual(1, report.count("every documented key is present"))
-        pinned = re.search(r"every documented key is present.*?for k in \[(.*?)\]", report, re.S)
-        self.assertIsNotNone(pinned, "the summary key list was not found in src/review/report.rs")
-        self.assertEqual(set(), read - set(re.findall(r'"(\w+)"', without_comments(pinned.group(1)))))
+        self.assertEqual(set(), read - _pinned_report_keys(_source("src/review/report.rs")))
 
     def test_the_entry_fields_s47_reads_are_serialized_under_their_own_names(self) -> None:
         # [MAGI §6 MS2 loop 7, F1a-m1] S47 reads file and line off each main finding and cause off each
