@@ -723,16 +723,19 @@ GIT_ENV_PREFIX = "GIT_"
 
 #: Every ``GIT_*`` variable the product's git runs DO carry: the two its tool
 #: allowlist inherits (``TOOL_ENV_ALLOWLIST``, ``src/tools/proc_group.rs``)
-#: and the two its scrubbed spawn sets (``src/system/review_git.rs``). None
+#: and the three its scrubbed spawn sets (``src/system/review_git.rs``). None
 #: changes what :data:`GIT_VISIBLE_QUERY` lists: ``GIT_EXEC_PATH`` only says
 #: where git's helpers live, ``GIT_TEMPLATE_DIR`` only feeds ``git init``
 #: (the harness's, which drops it; the product never runs ``init``),
 #: ``GIT_NO_LAZY_FETCH`` only stops a partial clone fetching, and
 #: ``GIT_LITERAL_PATHSPECS`` only reads a pathspec, which the query has none
-#: of. So :func:`git_env` drops them with the rest. ``test_rust_sync.py``
-#: fails when the product's set moves, so a new variable is assessed here.
+#: of, and ``GIT_GRAFT_FILE`` only changes commit ancestry, which a listing of
+#: the index and the working tree never reads. So :func:`git_env` drops them
+#: with the rest. ``test_rust_sync.py`` fails when the product's set moves, so
+#: a new variable is assessed here.
 PRODUCT_GIT_VARIABLES = frozenset({"GIT_EXEC_PATH", "GIT_TEMPLATE_DIR",
-                                   "GIT_NO_LAZY_FETCH", "GIT_LITERAL_PATHSPECS"})
+                                   "GIT_NO_LAZY_FETCH", "GIT_LITERAL_PATHSPECS",
+                                   "GIT_GRAFT_FILE"})
 
 
 def git_command(workspace, *args) -> list[str]:
