@@ -800,25 +800,76 @@ def _envelope_summary_key(output: str) -> str:
     return one_definition(output, _ENVELOPE_SUMMARY_FIELD, "src/headless/output.rs").group(1)
 
 
+def _is_document_assignment(node) -> bool:
+    """Whether *node* is ``document = <expr>.json()``: one ``Name`` target, a no-argument ``.json()`` call."""
+    return (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == _DOCUMENT_NAME and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "json"
+            and not node.value.args and not node.value.keywords)
+
+
+def _is_empty_fallback(node) -> bool:
+    """Whether *node* is ``section = {}``: one ``Name`` target, an empty dict literal."""
+    return (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == _SECTION_NAME and isinstance(node.value, ast.Dict) and not node.value.keys)
+
+
 def _require_one_summary_binding(scenario: str) -> None:
-    """Fail unless *scenario* defines the summary key once and reads the summary once.
+    """Fail unless *scenario* binds the summary key, the document and ``section`` only in their accepted forms.
 
     MAGI FIX (S6 loop 36): :class:`_SectionReads` only allowed the definition and the assignment, so a
     scenario reading another section under ``section`` kept every guard green. Checked on the real module
     only: the synthetic snippets of :class:`SummaryKeyExtractionTests` carry neither.
 
+    MAGI FIX (S6 loop 37): only the summary assignment was counted, so ``section`` rebound inside a helper or
+    after the read (``section = document.get(CONSULT_KEY)``), or the document rebound, left the scenario
+    reading something else with every guard green. Every binding, by any form :func:`_names_bound_by` knows,
+    is now checked.
+
     Args:
         scenario: The scenario module's source.
 
     Raises:
-        AssertionError: Naming the two counts, when either is not exactly one.
+        AssertionError: When the key is not defined once at top level or the summary not read once
+            (naming both counts); when ``document`` is bound other than once, by ``document = <expr>.json()``;
+            or naming the line of a binding of ``section`` that is none of: the summary assignment, the empty
+            fallback ``section = {}`` in the same scope as that assignment, or a parameter of an undecorated
+            top-level ``def`` the module binds once.
     """
     tree = ast.parse(scenario)
     definitions = sum(1 for node in tree.body if _is_summary_definition(node))
-    assignments = sum(1 for node in ast.walk(tree) if _is_section_assignment(node))
-    if (definitions, assignments) != (1, 1):
+    assignments = [node for node in ast.walk(tree) if _is_section_assignment(node)]
+    if (definitions, len(assignments)) != (1, 1):
         raise AssertionError("expected one %s definition and one section assignment, found %d and %d"
-                             % (_SUMMARY_KEY_NAME, definitions, assignments))
+                             % (_SUMMARY_KEY_NAME, definitions, len(assignments)))
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    document = [node for node in ast.walk(tree) if _DOCUMENT_NAME in _names_bound_by(node)]
+    if len(document) != 1 or not _is_document_assignment(parents.get(document[0])):
+        raise AssertionError("expected document bound once, by document = <expr>.json(), found %d binding(s)"
+                             % len(document))
+    counts = _binding_counts(tree)
+    credited = {node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and not node.decorator_list and counts.get(node.name) == 1}
+
+    def scope_of(node):
+        scope = parents.get(node)
+        while scope is not None and not isinstance(scope, _SCOPE_NODES):
+            scope = parents.get(scope)
+        return scope
+
+    summary_scope = scope_of(assignments[0])
+    for node in ast.walk(tree):
+        if _SECTION_NAME not in _names_bound_by(node):
+            continue
+        statement = parents.get(node)
+        if statement is assignments[0] and node is assignments[0].targets[0]:
+            continue
+        if _is_empty_fallback(statement) and scope_of(statement) is summary_scope:
+            continue
+        if isinstance(node, ast.arg) and parents.get(statement) in credited:
+            continue
+        raise AssertionError("line %d: a binding of section the key guard does not follow: %s"
+                             % (getattr(node, "lineno", 0), ast.unparse(statement if statement is not None else node)))
 
 
 class SyncGuardMutationTests(unittest.TestCase):
