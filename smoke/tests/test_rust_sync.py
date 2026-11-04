@@ -25,6 +25,7 @@ import importlib.util
 import os
 import pathlib
 import re
+import symtable
 import types
 import unittest
 from unittest import mock
@@ -119,7 +120,11 @@ def _require_allowed_reach(tree) -> None:
         AssertionError: Naming the line of the first import, name or attribute outside the allowlist.
     """
     counts = _binding_counts(tree)
-    bound = {name for node in ast.walk(tree) for name in _names_bound_by(node)}
+    # MAGI FIX (S6 loop 42, F1b2a-caspar): a name bound anywhere counted as bound everywhere, so a
+    # parameter named ``vars`` let the module scope call the builtin. Free names are resolved per scope.
+    for name in _unbound_names(ast.unparse(tree)):
+        if name not in _ALLOWED_FREE_NAMES:
+            raise AssertionError("a name the key guard does not allow: %s" % name)
     modules = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -137,9 +142,6 @@ def _require_allowed_reach(tree) -> None:
                                              % (node.lineno, local))
                     modules[local] = imported
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in bound \
-                and node.id not in _ALLOWED_FREE_NAMES:
-            raise AssertionError("line %d: a name the key guard does not allow: %s" % (node.lineno, node.id))
         if isinstance(node, ast.Attribute):
             if _is_dunder(node.attr) or node.attr in _FRAME_ATTRIBUTES:
                 raise AssertionError("line %d: a member access the key guard does not follow: %s"
@@ -149,6 +151,38 @@ def _require_allowed_reach(tree) -> None:
                                       or isinstance(getattr(owner, node.attr), types.ModuleType)):
                 raise AssertionError("line %d: a module member the key guard does not allow: %s"
                                      % (node.lineno, ast.unparse(node)))
+
+
+def _unbound_names(source: str) -> set[str]:
+    """The names *source* reads in some scope where neither that scope, an enclosing one nor the module binds them.
+
+    Python resolves such a name in the builtins. ``symtable`` gives each scope's resolution: a name read
+    as global (implicitly or by a ``global`` declaration) that the module scope never assigns, imports
+    or defines is unbound. A name assigned only through ``global`` inside a function counts as unbound:
+    the guard errs towards refusing.
+
+    Args:
+        source: A module's source.
+
+    Returns:
+        set[str]: The unbound names read.
+
+    Example:
+        >>> sorted(_unbound_names("def f(vars):\\n    return vars\\nz = vars()"))
+        ['vars']
+        >>> sorted(_unbound_names("x = 1\\ndef f():\\n    return x"))
+        []
+    """
+    top = symtable.symtable(source, "<scenario>", "exec")
+    module_bound = {symbol.get_name() for symbol in top.get_symbols()
+                    if symbol.is_assigned() or symbol.is_imported() or symbol.is_namespace()}
+    unbound, pending = set(), [top]
+    while pending:
+        table = pending.pop()
+        pending.extend(table.get_children())
+        unbound.update(symbol.get_name() for symbol in table.get_symbols()
+                       if symbol.is_referenced() and symbol.is_global() and symbol.get_name() not in module_bound)
+    return unbound
 
 
 #: Attributes that hand out a frame or its namespaces, on frames, generators, coroutines and tracebacks.
@@ -889,6 +923,10 @@ _ENVELOPE_SUMMARY_FIELD = (r'#\[serde\(skip_serializing_if = "is_absent"\)\]\n[ 
 _ENVELOPE_STRUCT = "struct WireOutcome<'a> {"
 #: A serde argument that changes a serialized key, on a field (``rename``) or the struct (``rename_all``).
 _SERDE_RENAME = re.compile(r"\brename(?:_all)?\s*[=(]")
+#: The one serde argument the envelope struct may carry: it omits an absent field, never a present one.
+_ENVELOPE_SERDE_ARGUMENTS = frozenset({"skip_serializing_if"})
+#: The summary field's omission predicate: it must omit the field only when the summary is absent.
+_ENVELOPE_ABSENT_PREDICATE = "fn is_absent(v: &&Option<serde_json::Value>) -> bool {\n    v.is_none()\n}"
 
 
 def _struct_with_attributes(text: str, declaration: str, where: str) -> str:
@@ -941,6 +979,13 @@ def _envelope_summary_key(output: str) -> str:
     renamed = _SERDE_RENAME.search(struct)
     if renamed is not None:
         raise AssertionError("src/headless/output.rs: the envelope struct renames a key (%r)" % renamed.group(0))
+    # MAGI FIX (S6 loop 42, F1b2a-caspar): only renames were refused, so a skip, a flatten or a
+    # transparent struct dropped the summary's key; and the predicate that omits it was never read.
+    refused = [name for name in _serde_arguments(structure_only(struct)) if name not in _ENVELOPE_SERDE_ARGUMENTS]
+    if refused:
+        raise AssertionError("src/headless/output.rs: envelope serde arguments that can move or drop a key: %s"
+                             % refused)
+    one_definition(output, re.escape(_ENVELOPE_ABSENT_PREDICATE), "src/headless/output.rs")
     return one_definition(struct, _ENVELOPE_SUMMARY_FIELD, "WireOutcome in src/headless/output.rs").group(1)
 
 
@@ -1614,6 +1659,10 @@ class SecretPrefixDocTests(unittest.TestCase):
         self.assertEqual(set(), {token.lower() for token in named} - {prefix.lower() for prefix in prefixes})
 
 
+#: The ``source`` of a crates.io package in ``Cargo.lock``.
+_CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+
+
 def _locked_version(crate: str, lock: str) -> str:
     """The version of *crate* that ``Cargo.lock`` resolves.
 
@@ -1625,11 +1674,18 @@ def _locked_version(crate: str, lock: str) -> str:
         str: Its locked version.
 
     Raises:
-        AssertionError: When the lockfile has no such package.
+        AssertionError: When the lockfile has no such package, or its entry's ``source`` is not crates.io
+            (a path override has none, a git or other registry has another).
     """
-    match = re.search(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"' % re.escape(crate), lock)
+    # MAGI FIX (S6 loop 42, F1b2a-caspar): the entry's source was never read, so with a path or git
+    # override the guard would have read a stale registry copy the build does not use.
+    match = re.search(r'\[\[package\]\]\nname = "%s"\nversion = "([^"]+)"\n(?:source = "([^"]*)"\n)?'
+                      % re.escape(crate), lock)
     if match is None:
         raise AssertionError("%s not found in Cargo.lock" % crate)
+    if match.group(2) != _CRATES_IO_SOURCE:
+        raise AssertionError("%s in Cargo.lock does not come from crates.io (source %r): the registry copy the "
+                             "guard reads is not the one the build uses" % (crate, match.group(2)))
     return match.group(1)
 
 
