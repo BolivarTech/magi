@@ -422,7 +422,8 @@ _BLOCK_ITEM = re.compile(r"\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:const|async|unsa
                          r"(?:mod|fn|impl|struct|enum|trait|union|macro_rules!|thread_local!)(?![\w!])")
 #: What lets a ``}`` end a non-block item: nothing else on its line, and no ``.`` or ``?`` continuing the
 #: expression on the next one. Anything else after it on the same line (``else``, ``=>``, ``if``, ``|``,
-#: an operator, a separator) carries the item on.
+#: an operator, a separator) carries the item on. Known, accepted limit: an operator or ``else`` that
+#: starts the next line does not (see :func:`without_test_items`).
 _ENDS_AFTER_BRACE = re.compile(r"[ \t]*(?:\n|$)(?!\s*[.?])")
 #: A ``<`` that opens generic arguments: right after an identifier or ``::``, not ``<<`` nor ``<=``.
 _GENERIC_OPENING = re.compile(r"(?<=[\w:])<(?![<=])")
@@ -569,8 +570,18 @@ def without_test_items(text: str) -> str:
     whose predicate requires ``test`` (``test``, ``all(..., test)``; never ``not(test)`` nor an ``any``
     with another branch), on any item, field, statement or match arm. A non-block item whose end the
     delimiter cannot place (a closure's ``|a, b|``, a comparison before a ``,``, generics that never
-    close) fails the guard instead of being guessed. Declared limits: an inner ``#![cfg(test)]`` (the
-    product has none) and ``not(not(test))`` are not recognised, so a copy there still counts.
+    close) fails the guard instead of being guessed; an or-pattern arm (``0 | 1 => f(),``) falls under the
+    same rule and fails too, toward red. Declared limits: an inner ``#![cfg(test)]`` (the product has none)
+    and ``not(not(test))`` are not recognised, so a copy there still counts.
+
+    Known limit, accepted (S6 loop 48, F1b2a1-caspar; user decision 2026-11-04): a non-block item whose
+    block expression goes on at the start of the next line with an operator or ``else``
+    (``let x = { a }`` then ``+ f("...")`` on the next line) ends at the ``}``, so the rest of it is read as
+    production and a copy there counts. Low probability: rustfmt writes ``} else {`` on one line, and the
+    36 non-block test items in ``src/`` (``use``, fields, one-line trace calls) have no such shape; it also
+    needs a guarded string copied into that remainder while the production line changes. Fix it
+    (:data:`_ENDS_AFTER_BRACE` also refusing a next line that starts with an operator, ``else``, ``as`` or
+    ``=>``) before adding a test-only statement of that shape.
 
     Complexity: ``O(len(text))`` per attribute.
 
@@ -656,6 +667,20 @@ def one_definition(text: str, pattern: str, where: str, flags: int = 0) -> re.Ma
     literal's contents only whole, opened by the pattern's own quote, and a
     match may not end inside one: a wildcard that ran into a string never
     reads a value from it. [MAGI S6 loop 46, F1b2a-caspar]
+
+    Known limit, accepted (S6 loop 48, F1b2a2-melchior; user decision
+    2026-11-04): "whole" is checked by the quotes around the group, not by the
+    literal's real delimiters. A lazy capture such as ``"(.*?)"`` stops at an
+    escaped ``\\"`` or at an interior ``"`` of a raw string and returns a
+    prefix, and a group may start right after an escaped quote, mid-literal.
+    Low probability: of the guards in this harness only three capture a
+    literal's contents (``MEMORY_DB_PREFIX`` and ``HARD_LINK_CAUSE`` with
+    ``[^"]+`` over values without quotes, and the ``batches leave`` message in
+    ``src/review/error.rs``); the prefix read is the product's own text, not a
+    stale copy, so the likely outcome is a red, not a false green. Fix it
+    (compare the group's ends with the span's real delimiters, raw-string
+    hashes and escapes included) before writing a capture over a literal that
+    holds a quote.
 
     Complexity: ``O(len(text))`` for a pattern without catastrophic
     backtracking.
