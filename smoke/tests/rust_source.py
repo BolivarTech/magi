@@ -383,26 +383,76 @@ def _starts_inside(spans: list, position: int) -> bool:
     return index >= 0 and position < spans[index][1]
 
 
-#: ``#[cfg(test)]`` and the item it marks, up to the item's keyword: group 1 is a keyword whose item ends
-#: at its block's closing ``}`` (or a ``;``), group 2 one whose item ends at a ``;``.
-_TEST_ITEM = re.compile(r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
-                        r"(?:(?:async|unsafe|extern)\s+)*(?:(mod|fn|impl|struct|enum|trait|union)\b"
-                        r"|(thread_local!|macro_rules!)|(const|static|use|type|let)\b)")
+#: An outer attribute's opening, ``#[``; the ``cfg`` one names its predicate (group 1).
+_ATTRIBUTE_OPENING = re.compile(r"#\[\s*(cfg\s*\()?")
+#: The start of an item that ends at its block's closing ``}`` or at a ``;`` (``const fn`` included).
+_BLOCK_ITEM = re.compile(r"\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern|default)\s+)*"
+                         r"(?:mod|fn|impl|struct|enum|trait|union|macro_rules!|thread_local!)(?![\w!])")
+#: What may follow a ``}`` inside an expression without ending it: a method call, ``?``, a separator.
+_EXPRESSION_GOES_ON = re.compile(r"\s*(?:[.?,;]|else\b)")
 #: The brackets an item's end is counted over.
 _OPENERS, _CLOSERS = "([{", ")]}"
 
 
+def _closing(view: str, start: int) -> int:
+    """The offset just past the bracket that closes the one right before *start*.
+
+    Raises:
+        AssertionError: When it never closes.
+    """
+    depth = 1
+    for index in range(start, len(view)):
+        depth += (view[index] in _OPENERS) - (view[index] in _CLOSERS)
+        if depth == 0:
+            return index + 1
+    raise AssertionError("an attribute never closes")
+
+
+def _arguments(text: str) -> list[str]:
+    """*text* split at its top-level commas, blank parts (a trailing comma) dropped."""
+    parts, depth, current = [], 0, []
+    for char in text:
+        depth += (char in _OPENERS) - (char in _CLOSERS)
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _requires_test(predicate: str) -> bool:
+    """Whether the ``cfg`` *predicate* holds only in a test build.
+
+    Example:
+        >>> [_requires_test(p) for p in ("test", "all(unix, test)", "any(test, unix)", "not(test)")]
+        [True, True, False, False]
+    """
+    call = re.fullmatch(r"\s*(all|any|not)\s*\((.*)\)\s*", predicate, re.S)
+    if call is None:
+        return predicate.strip() == "test"
+    arguments = _arguments(call.group(2))
+    if call.group(1) == "all":
+        return any(_requires_test(argument) for argument in arguments)
+    if call.group(1) == "any":
+        return bool(arguments) and all(_requires_test(argument) for argument in arguments)
+    return False
+
+
 def _test_item_end(view: str, start: int, block: bool) -> int:
-    """Where the test item whose keyword ends at *start* in *view* ends, its last character included.
+    """Where the test-only code that starts at *start* in *view* ends.
 
     Args:
         view: :func:`structure_only`'s view of the text.
-        start: The offset right after the item's keyword.
-        block: Whether a ``}`` that closes a top-level ``{`` ends the item (``fn``, ``mod``...); otherwise
-            only a ``;`` outside every bracket does (``const``, ``let``...).
+        start: The offset right after the item's attributes.
+        block: Whether the item is a block item (``fn``, ``mod``, ``const fn``...), which ends at the ``}``
+            that closes its block or at a ``;``. Anything else (``const``, ``let``, a field, a statement, a
+            match arm) ends at a top-level ``,`` or ``;``, at a top-level ``}`` the expression does not go on
+            after, or before the bracket that closes the code around it.
 
     Returns:
-        int: The offset just past the item.
+        int: The offset just past the item (at the enclosing closer, which is not the item's).
 
     Raises:
         AssertionError: When the item never ends.
@@ -414,23 +464,54 @@ def _test_item_end(view: str, start: int, block: bool) -> int:
             depth += 1
         elif char in _CLOSERS:
             depth -= 1
-            if depth == 0 and block and char == "}":
+            if depth < 0:
+                return index
+            if depth == 0 and char == "}" and (block or not _EXPRESSION_GOES_ON.match(view, index + 1)):
                 return index + 1
-        elif char == ";" and depth == 0:
+        elif depth == 0 and (char == ";" or (char == "," and not block)):
             return index + 1
-    raise AssertionError("a #[cfg(test)] item never ends")
+    raise AssertionError("a test-only item never ends")
+
+
+def _test_items(view: str):
+    """The ``(start, end)`` span of every item an outer ``#[cfg(...)]`` that requires ``test`` marks.
+
+    Args:
+        view: :func:`structure_only`'s view of the text.
+
+    Yields:
+        tuple[int, int]: From the item's first attribute to its end, in order, not overlapping.
+    """
+    index = 0
+    while True:
+        attribute = _ATTRIBUTE_OPENING.search(view, index)
+        if attribute is None:
+            return
+        start, test_only, cursor = attribute.start(), False, attribute.start()
+        while (following := _ATTRIBUTE_OPENING.match(view, cursor)) is not None:
+            if following.group(1) is not None:
+                test_only = test_only or _requires_test(view[following.end():_closing(view, following.end()) - 1])
+            cursor = _closing(view, following.start() + 2)
+            cursor += len(view[cursor:]) - len(view[cursor:].lstrip())
+        if test_only:
+            stop = _test_item_end(view, cursor, block=_BLOCK_ITEM.match(view, cursor) is not None)
+            yield start, stop
+            index = stop
+        else:
+            index = cursor
 
 
 def _without_test_items(text: str) -> str:
-    """*text* with every ``#[cfg(test)]`` item blanked, attribute through its ``;`` or closing ``}``.
+    """*text* with every test-only item blanked, its attributes through its end (:func:`_test_item_end`).
 
     A guard pins production code; a copy in a test module is a fixture, and with the production line
-    gone it would answer for it. Offsets and newlines are kept. Only an item that starts with a keyword
-    (``mod``, ``fn``, ``const``, ``let``, ``thread_local!``...) is blanked: a ``#[cfg(test)]`` on a struct
-    field, a struct-literal field or an expression statement leaves that code in place (a declared limit:
-    a copy there still counts; blanking by comma would hide production code that follows it).
+    gone it would answer for it. Offsets and newlines are kept. Test-only means an outer ``#[cfg(...)]``
+    whose predicate requires ``test`` (``test``, ``all(..., test)``; never ``not(test)`` nor an ``any``
+    with another branch), on any item, field, statement or match arm. Declared limits: an inner
+    ``#![cfg(test)]`` (the product has none) and ``not(not(test))`` are not recognised, so a copy there
+    still counts.
 
-    Complexity: ``O(len(text))`` per test item.
+    Complexity: ``O(len(text))`` per attribute.
 
     Args:
         text: Source text, ``\\r`` stripped.
@@ -445,14 +526,10 @@ def _without_test_items(text: str) -> str:
         >>> _without_test_items('#[cfg(test)]\\nmod t { fn f() {} }\\nfn g() {}\\n')
         '            \\n                  \\nfn g() {}\\n'
     """
-    view = structure_only(text)
     out, previous = [], 0
-    for attribute in _TEST_ITEM.finditer(view):
-        if attribute.start() < previous:
-            continue
-        stop = _test_item_end(view, attribute.end(), block=attribute.group(3) is None)
-        out.append(text[previous:attribute.start()])
-        out.append(_blank(text[attribute.start():stop]))
+    for start, stop in _test_items(structure_only(text)):
+        out.append(text[previous:start])
+        out.append(_blank(text[start:stop]))
         previous = stop
     out.append(text[previous:])
     return "".join(out)

@@ -19,6 +19,7 @@ on the raw text, where a comment can only make them stricter.
 """
 
 import ast
+import builtins
 import fractions
 import importlib
 import importlib.util
@@ -79,6 +80,8 @@ _ALLOWED_IMPORTS = frozenset({"json", "re", "smoke", "smoke.errors", "smoke.outc
 #: The builtins the scenario may name; none may be bound anywhere in it, so each one is the builtin.
 _ALLOWED_BUILTINS = frozenset({"all", "any", "bool", "dict", "int", "isinstance", "len", "list", "range", "set",
                                "sorted", "str", "tuple", "zip"})
+#: Every builtin's name: none may be bound in the scenario, so a name that reads as a builtin is one.
+_BUILTIN_NAMES = frozenset(dir(builtins))
 #: The free names allowed: the builtins and the two names the guard tracks (free in its synthetic snippets).
 _ALLOWED_FREE_NAMES = _ALLOWED_BUILTINS | {_SECTION_NAME, _DOCUMENT_NAME}
 
@@ -132,7 +135,9 @@ def _require_allowed_reach(tree) -> None:
             raise AssertionError("a name the key guard does not allow: %s" % name)
     # MAGI FIX (S6 loop 43, F1b2a-melchior): the keyless isinstance and the dict test trust the name, so a
     # rebinding of either (a def, a lambda, an import alias, a parameter) read a key the guard never saw.
-    rebound = sorted(name for name in _ALLOWED_BUILTINS if counts.get(name))
+    # MAGI FIX (S6 loop 45, F1b2a-melchior): only the allowed builtins were checked, so ``vars = vars`` made
+    # the reflection builtin a bound name the allowlist never looked at; no builtin's name may be bound.
+    rebound = sorted(name for name in counts if name in _BUILTIN_NAMES)
     if rebound:
         raise AssertionError("builtins the key guard trusts are rebound: %s" % rebound)
     modules = {}
