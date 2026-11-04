@@ -1247,6 +1247,8 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'z = __builtins__.vars()["section"].get("hidden")',
                       'from builtins import vars as v\nz = v()["section"].get("hidden")',
                       'import builtins as b\nz = b.globals()["section"].get("hidden")',
+                      'import sys\nz = sys.modules["builtins"].vars()["section"].get("hidden")',
+                      'import importlib\nz = importlib.import_module("builtins").vars()["section"].get("x")',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")
