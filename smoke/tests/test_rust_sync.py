@@ -108,10 +108,10 @@ def _require_allowed_reach(tree) -> None:
     MAGI FIX (S6 loop 41, F1b2a-melchior): the reflection guard was a denylist, so each loop closed one
     route (builtins, the module object) and left another open (``inspect`` frames, ``sys._getframe``,
     ``operator.attrgetter``, a module reached through another one's attributes). Every route is now
-    allowlisted: imports from :data:`_ALLOWED_IMPORTS` only, no relative import; free names (bound
-    nowhere in the module) from :data:`_ALLOWED_FREE_NAMES` only; on a name bound once to an imported
-    module, only an attribute the module has that is not itself a module; and no dunder attribute and
-    no frame attribute (``f_locals``, ``gi_frame``, ...) anywhere.
+    allowlisted: imports from :data:`_ALLOWED_IMPORTS` only, no relative import; free names (unbound in
+    the scope that reads them, per :func:`_unbound_names`) from :data:`_ALLOWED_FREE_NAMES` only; on a
+    name bound once to an imported module, only an attribute the module has that is not itself a
+    module; and no dunder attribute and no frame attribute (``f_locals``, ``gi_frame``, ...) anywhere.
 
     Args:
         tree: The parsed scenario module.
@@ -921,8 +921,6 @@ _ENVELOPE_SUMMARY_FIELD = (r'#\[serde\(skip_serializing_if = "is_absent"\)\]\n[ 
                            r"&'a Option<serde_json::Value>,")
 #: The headless envelope's struct in ``src/headless/output.rs``: serde writes its fields as the envelope's keys.
 _ENVELOPE_STRUCT = "struct WireOutcome<'a> {"
-#: A serde argument that changes a serialized key, on a field (``rename``) or the struct (``rename_all``).
-_SERDE_RENAME = re.compile(r"\brename(?:_all)?\s*[=(]")
 #: The one serde argument the envelope struct may carry: it omits an absent field, never a present one.
 _ENVELOPE_SERDE_ARGUMENTS = frozenset({"skip_serializing_if"})
 #: The summary field's omission predicate: it must omit the field only when the summary is absent.
@@ -967,18 +965,17 @@ def _envelope_summary_key(output: str) -> str:
         output: ``src/headless/output.rs``, ``\\r`` stripped.
 
     Returns:
-        str: The field's name, which serde writes unchanged: no ``rename`` on any of the struct's
-        fields, nor a ``rename_all`` on the struct.
+        str: The field's name, which serde writes unchanged and omits only when absent: the struct and
+        its fields carry no serde argument but :data:`_ENVELOPE_SERDE_ARGUMENTS`, and the omission
+        predicate is :data:`_ENVELOPE_ABSENT_PREDICATE`.
 
     Raises:
-        AssertionError: When the struct renames a key, or no such field is declared in it, or more than one is.
+        AssertionError: When the struct carries another serde argument (a rename, skip, flatten, ...),
+            the predicate changed, or the field is not declared in it exactly once.
     """
     # MAGI FIX (S6 loop 39, F1b2a-melchior): only the attribute right above the field was read, so a
     # rename on a line of its own, or a rename_all on the struct, moved the key with the guard green.
     struct = _struct_with_attributes(output, _ENVELOPE_STRUCT, "src/headless/output.rs")
-    renamed = _SERDE_RENAME.search(struct)
-    if renamed is not None:
-        raise AssertionError("src/headless/output.rs: the envelope struct renames a key (%r)" % renamed.group(0))
     # MAGI FIX (S6 loop 42, F1b2a-caspar): only renames were refused, so a skip, a flatten or a
     # transparent struct dropped the summary's key; and the predicate that omits it was never read.
     refused = [name for name in _serde_arguments(structure_only(struct)) if name not in _ENVELOPE_SERDE_ARGUMENTS]
