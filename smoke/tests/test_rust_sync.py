@@ -111,7 +111,8 @@ def _require_allowed_reach(tree) -> None:
     route (builtins, the module object) and left another open (``inspect`` frames, ``sys._getframe``,
     ``operator.attrgetter``, a module reached through another one's attributes). Every route is now
     allowlisted: imports from :data:`_ALLOWED_IMPORTS` only, no relative import; free names (unbound in
-    the scope that reads them, per :func:`_unbound_names`) from :data:`_ALLOWED_FREE_NAMES` only; on a
+    the scope that reads them, per :func:`_unbound_names`) from :data:`_ALLOWED_FREE_NAMES` only, none of
+    :data:`_ALLOWED_BUILTINS` bound anywhere in the module; on a
     name bound once to an imported module, only an attribute the module has that is not itself a
     module; and no dunder attribute and no frame attribute (``f_locals``, ``gi_frame``, ...) anywhere.
 
@@ -119,7 +120,8 @@ def _require_allowed_reach(tree) -> None:
         tree: The parsed scenario module.
 
     Raises:
-        AssertionError: Naming the line of the first import, name or attribute outside the allowlist.
+        AssertionError: Naming the line of the first import, name or attribute outside the allowlist,
+            or the allowed builtins the module rebinds.
     """
     counts = _binding_counts(tree)
     # MAGI FIX (S6 loop 42, F1b2a-caspar): a name bound anywhere counted as bound everywhere, so a
