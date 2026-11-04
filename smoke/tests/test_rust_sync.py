@@ -736,11 +736,20 @@ def _call_list(body: str, call: str, where: str) -> str:
         str: The text between the call's ``[`` and the next ``]``.
 
     Raises:
-        AssertionError: When no code line holds the call, or more than one does.
+        AssertionError: When the call does not appear in code exactly once, or its list never closes.
+
+    MAGI FIX (S6 loop 36): the call was found by line, so a line of a multi-line string holding the old
+    call answered for code that had drifted. It is now located in :func:`structure_only`'s view, where
+    comments and literals are blank at the same offsets, and the list is read from *body* at that offset.
     """
-    found = one_occurrence(body, call, where)
-    rest = body[found.end():]
-    return rest[:rest.index("]")]
+    view = structure_only(body)
+    starts = [match.end() for match in re.finditer(re.escape(call), view)]
+    if len(starts) != 1:
+        raise AssertionError("%s: expected %r once in code, found %d" % (where, call, len(starts)))
+    close = view.find("]", starts[0])
+    if close < 0:
+        raise AssertionError("%s: the list %r opens is never closed" % (where, call))
+    return body[starts[0]:close]
 
 
 def _pinned_report_keys(report: str) -> set[str]:
@@ -754,22 +763,62 @@ def _pinned_report_keys(report: str) -> set[str]:
 
     Raises:
         AssertionError: When the anchor is not there exactly once, or no list follows it.
+
+    MAGI FIX (S6 loop 36): the list was searched in the raw text, so an old copy left in a comment after
+    the anchor answered for it. The anchor (itself a comment) is found in the raw text and the list in
+    :func:`without_comments`'s view from there; both keep offsets.
     """
     if report.count(_REPORT_KEYS_ANCHOR) != 1:
         raise AssertionError("expected the anchor %r once in src/review/report.rs" % _REPORT_KEYS_ANCHOR)
-    pinned = re.search(re.escape(_REPORT_KEYS_ANCHOR) + r".*?" + _REPORT_KEYS_LIST.pattern, report, re.S)
+    pinned = _REPORT_KEYS_LIST.search(without_comments(report),
+                                      report.index(_REPORT_KEYS_ANCHOR) + len(_REPORT_KEYS_ANCHOR))
     if pinned is None:
         raise AssertionError("the summary key list was not found in src/review/report.rs")
-    return set(re.findall(r'"(\w+)"', without_comments(pinned.group(1))))
+    return set(re.findall(r'"(\w+)"', pinned.group(1)))
 
 
-def _envelope_summary_key(output: str) -> str | None:
-    """The name the headless envelope serializes the code-review summary under (stub)."""
-    return None
+#: The envelope's summary field in ``src/headless/output.rs``: omitted when absent, never renamed.
+_ENVELOPE_SUMMARY_FIELD = (r'#\[serde\(skip_serializing_if = "is_absent"\)\]\n[ \t]*(\w+): '
+                           r"&'a Option<serde_json::Value>,")
+
+
+def _envelope_summary_key(output: str) -> str:
+    """The name the headless envelope serializes the code-review summary under.
+
+    MAGI FIX (S6 loop 36): nothing tied S47's ``"code_review"`` to the product, so renaming the
+    envelope's field left every guard green and the drift surfaced only as a FAIL at SMOKE time.
+
+    Args:
+        output: ``src/headless/output.rs``, ``\\r`` stripped.
+
+    Returns:
+        str: The field's name, which serde writes unchanged (no ``rename`` in its attribute).
+
+    Raises:
+        AssertionError: When no such field is declared in code, or more than one is.
+    """
+    return one_definition(output, _ENVELOPE_SUMMARY_FIELD, "src/headless/output.rs").group(1)
 
 
 def _require_one_summary_binding(scenario: str) -> None:
-    """Fail unless *scenario* defines the summary key once and reads the summary once (stub)."""
+    """Fail unless *scenario* defines the summary key once and reads the summary once.
+
+    MAGI FIX (S6 loop 36): :class:`_SectionReads` only allowed the definition and the assignment, so a
+    scenario reading another section under ``section`` kept every guard green. Checked on the real module
+    only: the synthetic snippets of :class:`SummaryKeyExtractionTests` carry neither.
+
+    Args:
+        scenario: The scenario module's source.
+
+    Raises:
+        AssertionError: Naming the two counts, when either is not exactly one.
+    """
+    tree = ast.parse(scenario)
+    definitions = sum(1 for node in tree.body if _is_summary_definition(node))
+    assignments = sum(1 for node in ast.walk(tree) if _is_section_assignment(node))
+    if (definitions, assignments) != (1, 1):
+        raise AssertionError("expected one %s definition and one section assignment, found %d and %d"
+                             % (_SUMMARY_KEY_NAME, definitions, assignments))
 
 
 class SyncGuardMutationTests(unittest.TestCase):
@@ -1016,7 +1065,10 @@ class ReportKeyTests(unittest.TestCase):
     # MAGI FIX (S6 loop 6): S47's keys sat outside the drift guard, so a rename
     # would surface as an unexplained FAIL at SMOKE time (F1a-m2).
     def test_every_summary_key_s47_reads_is_one_the_report_pins(self) -> None:
-        read = _summary_keys_read(_source("smoke/scenarios/code_review.py"))
+        scenario = _source("smoke/scenarios/code_review.py")
+        _require_one_summary_binding(scenario)
+        self.assertEqual(code_review.CODE_REVIEW_KEY, _envelope_summary_key(_source("src/headless/output.rs")))
+        read = _summary_keys_read(scenario)
         # [MAGI §6 MS2 loop 27, F1b2a-melchior] the keys were only inferred from two access shapes, so an access
         # rewritten in another shape dropped its key from the guard in silence. The set is written out: a key
         # the extraction stops seeing, or a new one, fails here and is reviewed on purpose.
