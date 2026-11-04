@@ -288,6 +288,11 @@ def code_only(text: str) -> str:
     code. A block comment is blanked wherever it sits
     (:func:`_without_block_comments`).
 
+    Declared limit (MAGI S6 loop 37): a line inside a multi-line string
+    literal that starts with ``//`` is blanked too, as if it were a comment.
+    Such a line is fixture text, not code, so hiding it is what the pins
+    want; a pin that did need it would fail loudly (a false red).
+
     Complexity: ``O(len(text))``.
 
     Args:
