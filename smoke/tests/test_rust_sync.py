@@ -72,51 +72,6 @@ _SUMMARY_KEY_NAME = "CODE_REVIEW_KEY"
 _DOCUMENT_NAME = "document"
 _SUMMARY_KEY = code_review.CODE_REVIEW_KEY
 
-#: Builtins that reach a name or a member without writing it: through any of
-#: them the summary could be read in a form the guard does not follow.
-_REFLECTION_BUILTINS = frozenset({"vars", "locals", "globals", "getattr", "eval", "exec", "compile",
-                                  "__import__"})
-
-
-#: The names of the module that holds the builtins: through it every reflection builtin is an attribute.
-_BUILTINS_MODULES = frozenset({"builtins", "__builtins__"})
-
-
-def _reflection_reached(node) -> str | None:
-    """The reflection builtin or builtins module *node* names, ``None`` when it names neither.
-
-    MAGI FIX (S6 loop 38): only bare names were refused, so ``builtins.vars()``,
-    ``__builtins__.globals()`` or ``from builtins import vars as v`` reached the
-    same functions and read the summary unseen.
-
-    Args:
-        node: Any AST node.
-
-    Every path to the module goes through one of these: its name, an import of it, or its name as a string
-    (``sys.modules["builtins"]``, ``importlib.import_module("builtins")``). An attribute named like a builtin
-    is not refused on its own (``re.compile`` is not the builtin); reaching the module is.
-
-    Returns:
-        str | None: The name reached: a bare :data:`_REFLECTION_BUILTINS` name, a
-        :data:`_BUILTINS_MODULES` name or string literal, or a ``builtins`` import.
-
-    Example:
-        >>> _reflection_reached(ast.parse("builtins.vars()").body[0].value.func.value)
-        'builtins'
-        >>> _reflection_reached(ast.parse("re.compile").body[0].value) is None
-        True
-    """
-    if isinstance(node, ast.Name) and (node.id in _REFLECTION_BUILTINS or node.id in _BUILTINS_MODULES):
-        return node.id
-    if _literal_key(node) in _BUILTINS_MODULES:
-        return node.value
-    if isinstance(node, ast.alias) and node.name.split(".")[0] in _BUILTINS_MODULES:
-        return node.name
-    if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in _BUILTINS_MODULES:
-        return node.module
-    return None
-
-
 #: The modules the scenario may import: a new import fails the guard and is reviewed on purpose.
 _ALLOWED_IMPORTS = frozenset({"json", "re", "smoke", "smoke.errors", "smoke.outcome", "smoke.registry"})
 #: The builtins the scenario may name, and the two names the guard tracks (free in its synthetic snippets).
@@ -409,8 +364,8 @@ class _SectionReads:
     be reached without naming its key (a key built at run time, the
     document's values, ``vars()``): every load of ``document`` must now be
     ``document.get(NAME)`` with ``NAME`` a top-level constant bound once to a
-    string literal, and no reflection builtin (:data:`_REFLECTION_BUILTINS`)
-    may be named. Declared limit: a second name bound to the parsed JSON
+    string literal, and nothing outside :func:`_require_allowed_reach`'s
+    allowlist may be named. Declared limit: a second name bound to the parsed JSON
     (another ``run.output.json()``) read with a computed key is not followed;
     the guard reads the module's ``document`` only.
 
@@ -486,20 +441,19 @@ class _SectionReads:
                                         ast.unparse(parent if parent is not None else node)))
 
     def _check_document_reads(self) -> None:
-        """Refuse every reflection builtin and every load of ``document`` but ``document.get(<constant>)``.
+        """Refuse every ``.section`` member and every load of ``document`` but ``document.get(<constant>)``.
+
+        Reflection (builtins, frames, dunders, other modules) is refused before this, by
+        :func:`_require_allowed_reach` (MAGI FIX S6 loop 41: it replaced the denylist of loops 35-40).
 
         Raises:
-            AssertionError: Naming the line of the first reflection builtin, or of the first load of
+            AssertionError: Naming the line of the first ``.section`` member, or of the first load of
                 ``document`` that is not ``.get`` with one top-level constant bound once to a literal.
         """
         for node in ast.walk(self._tree):
-            reached = _reflection_reached(node)
-            if reached is not None:
-                raise AssertionError("line %d: %s reaches names the key guard does not follow"
-                                     % (getattr(node, "lineno", 0), reached))
             # MAGI FIX (S6 loop 40, F1b2a-caspar): the module object (``sys.modules[__name__]``, an
             # ``import_module`` of the scenario) reached ``section`` as an attribute, unseen by the walk.
-            if isinstance(node, ast.Attribute) and (node.attr == _SECTION_NAME or _is_dunder(node.attr)):
+            if isinstance(node, ast.Attribute) and node.attr == _SECTION_NAME:
                 raise AssertionError("line %d: a member access the key guard does not follow: %s"
                                      % (node.lineno, ast.unparse(node)))
             if isinstance(node, ast.Name) and node.id == _DOCUMENT_NAME and isinstance(node.ctx, ast.Load):
