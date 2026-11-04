@@ -1516,6 +1516,12 @@ class SummaryKeyExtractionTests(unittest.TestCase):
                       'def _h(vars):\n    return vars\nz = vars()["section"].get("hidden")',
                       'class _K:\n    getattr = 1\nz = getattr(section, "get")("hidden")',
                       'def _f():\n    global eval\n    eval = 1\nz = eval("section").get("hidden")',
+                      # [MAGI S6 loop 43, F1b2a-melchior] the keyless isinstance and the dict test trusted the
+                      # name's spelling, so a module-level rebinding of either read a key the guard never saw.
+                      'def isinstance(o, c):\n    return o.get("hidden")\nz = isinstance(section, dict)',
+                      'isinstance = lambda o, c: o.get("hidden")\nz = isinstance(section, dict)',
+                      'from smoke.registry import isinstance\nz = isinstance(section, dict)',
+                      'def dict(o):\n    return o\nz = isinstance(section, dict)',
                       'CONSULT_KEY = "other"'):
             with self.subTest(shape=shape), self.assertRaises(AssertionError):
                 _summary_keys_read(bound + consult + shape + "\n")
@@ -1756,6 +1762,11 @@ class ProbePathTests(unittest.TestCase):
                     'name = "magi-core"\nversion = "4.2.0"\nsource = "registry+https://example.invalid/index"\n'):
             with self.subTest(new=new), self.assertRaises(AssertionError):
                 _locked_version("magi-core", lock.replace(entry, new))
+        # [MAGI §6 MS2 loop 43, F1b2a-caspar] the first entry was read, so a second magi-core in the lock
+        # could have had the guard compare the version the build does not link.
+        second = '[[package]]\nname = "magi-core"\nversion = "3.9.0"\nsource = "%s"\n\n' % _CRATES_IO_SOURCE
+        with self.assertRaises(AssertionError):
+            _locked_version("magi-core", lock.replace("[[package]]\n" + entry, second + "[[package]]\n" + entry))
 
 
 def _rust_fn_body(text: str, signature: str) -> str:
