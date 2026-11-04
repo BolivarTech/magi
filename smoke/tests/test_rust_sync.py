@@ -158,7 +158,9 @@ def _require_allowed_reach(tree) -> None:
                     modules[local] = imported
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
-            if _is_dunder(node.attr) or node.attr in _FRAME_ATTRIBUTES:
+            # MAGI FIX (S6 loop 47, F1b2a2-melchior): ``"{0.os.environ}".format(runs)`` reached a module's
+            # members inside the template, where no Attribute node exists; formatting methods are refused.
+            if _is_dunder(node.attr) or node.attr in _FRAME_ATTRIBUTES or node.attr in _FORMAT_ATTRIBUTES:
                 raise AssertionError("line %d: a member access the key guard does not follow: %s"
                                      % (node.lineno, ast.unparse(node)))
             owner = modules.get(node.value.id) if isinstance(node.value, ast.Name) else None
@@ -203,6 +205,8 @@ def _unbound_names(source: str) -> set[str]:
 #: Attributes that hand out a frame or its namespaces, on frames, generators, coroutines and tracebacks.
 _FRAME_ATTRIBUTES = frozenset({"f_locals", "f_globals", "f_builtins", "f_back", "gi_frame", "cr_frame",
                                "ag_frame", "tb_frame"})
+#: String formatting methods: a template's replacement field reads attributes and items the AST never shows.
+_FORMAT_ATTRIBUTES = frozenset({"format", "format_map"})
 
 
 def _is_dunder(name: str) -> bool:

@@ -420,8 +420,14 @@ _ATTRIBUTE_OPENING = re.compile(r"#\[\s*(cfg\s*\()?")
 #: The start of an item that ends at its block's closing ``}`` or at a ``;`` (``const fn`` included).
 _BLOCK_ITEM = re.compile(r"\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern|default)\s+)*"
                          r"(?:mod|fn|impl|struct|enum|trait|union|macro_rules!|thread_local!)(?![\w!])")
-#: What may follow a ``}`` inside an expression without ending it: a method call, ``?``, a separator.
-_EXPRESSION_GOES_ON = re.compile(r"\s*(?:[.?,;]|else\b)")
+#: What lets a ``}`` end a non-block item: nothing else on its line, and no ``.`` or ``?`` continuing the
+#: expression on the next one. Anything else after it on the same line (``else``, ``=>``, ``if``, ``|``,
+#: an operator, a separator) carries the item on.
+_ENDS_AFTER_BRACE = re.compile(r"[ \t]*(?:\n|$)(?!\s*[.?])")
+#: A ``<`` that opens generic arguments: right after an identifier or ``::``, not ``<<`` nor ``<=``.
+_GENERIC_OPENING = re.compile(r"(?<=[\w:])<(?![<=])")
+#: A ``>`` that is not part of ``->``, ``=>`` nor ``>=``.
+_ANGLE_CLOSING = re.compile(r"(?<![-=])>(?!=)")
 #: The brackets an item's end is counted over.
 _OPENERS, _CLOSERS = "([{", ")]}"
 
@@ -480,28 +486,50 @@ def _test_item_end(view: str, start: int, block: bool) -> int:
         start: The offset right after the item's attributes.
         block: Whether the item is a block item (``fn``, ``mod``, ``const fn``...), which ends at the ``}``
             that closes its block or at a ``;``. Anything else (``const``, ``let``, a field, a statement, a
-            match arm) ends at a top-level ``,`` or ``;``, at a top-level ``}`` the expression does not go on
-            after, or before the bracket that closes the code around it.
+            match arm) ends at a top-level ``,`` or ``;`` outside generic arguments, at a top-level ``}``
+            that ends its line (:data:`_ENDS_AFTER_BRACE`), or before the bracket that closes the code
+            around it.
 
     Returns:
         int: The offset just past the item (at the enclosing closer, which is not the item's).
 
     Raises:
-        AssertionError: When the item never ends.
+        AssertionError: When the item never ends, or when a non-block item is ambiguous: a top-level ``,``
+            after an odd number of ``|`` (a closure's parameters) or after a ``<`` that opens no generic (a
+            comparison), or an end reached with generic arguments still open. A guess there either leaves
+            test code counted or hides production code, so the guard fails instead.
     """
-    depth = 0
+    # MAGI FIX (S6 loop 47, F1b2a1-caspar, F1b2a1-melchior): a generic argument's comma and a struct
+    # pattern's ``}`` ended the item early; each loop found another such token, so what cannot be placed fails.
+    depth, angles, pipes, comparison = 0, 0, 0, False
     for index in range(start, len(view)):
         char = view[index]
         if char in _OPENERS:
             depth += 1
         elif char in _CLOSERS:
             depth -= 1
-            if depth < 0:
-                return index
-            if depth == 0 and char == "}" and (block or not _EXPRESSION_GOES_ON.match(view, index + 1)):
+            if depth < 0 or (depth == 0 and char == "}" and (block or _ENDS_AFTER_BRACE.match(view, index + 1))):
+                if angles and not block:
+                    raise AssertionError("an ambiguous test-only item: generic arguments never close")
+                return index if depth < 0 else index + 1
+        elif depth or block:
+            if depth == 0 and char == ";":
                 return index + 1
-        elif depth == 0 and (char == ";" or (char == "," and not block)):
+        elif char == "<":
+            if _GENERIC_OPENING.match(view, index):
+                angles += 1
+            elif not (view.startswith(("<=", "<<"), index) or view.startswith("<<", index - 1)):
+                comparison = comparison or angles == 0
+        elif char == ">" and angles and _ANGLE_CLOSING.match(view, index):
+            angles -= 1
+        elif char == "|":
+            pipes += 1
+        elif char in ",;" and not angles:
+            if pipes % 2 or (char == "," and comparison):
+                raise AssertionError("an ambiguous test-only item: a %r it cannot place" % char)
             return index + 1
+        elif char == ";":
+            raise AssertionError("an ambiguous test-only item: generic arguments never close")
     raise AssertionError("a test-only item never ends")
 
 
