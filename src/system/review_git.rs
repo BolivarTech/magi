@@ -85,7 +85,19 @@ pub(crate) const NEUTRAL_GIT_CONFIG: &[&str] = &[
     // MAGI FIX (S6 loop 5): `refs/replace/*` is repository data; honoring it reviewed a
     // substitute object instead of what the pinned commit holds (RV21).
     "core.useReplaceRefs=false",
+    // MAGI FIX (S6 loop 36): naming a graft file ([`GRAFT_FILE_NONE`]) makes git print a
+    // deprecation hint on stderr, which a call that must print nothing there reads as failure.
+    "advice.graftFileDeprecated=false",
 ];
+
+/// The graft file every call names in `GIT_GRAFT_FILE`, so the repository's own
+/// `$GIT_DIR/info/grafts` is never read: a graft rewrites a commit's parents, which moved the
+/// parent a commit review diffs against and the merge base of a branch review, and a graft to a
+/// commit with the same tree emptied the diff (RV21). `core.useReplaceRefs=false` and
+/// `--no-replace-objects` leave grafts on. Git reads this path as an empty graft file (measured
+/// with Git for Windows 2.56, where `/dev/null` is emulated); a shallow clone's own boundary
+/// (`$GIT_DIR/shallow`) is unaffected.
+const GRAFT_FILE_NONE: &str = "/dev/null";
 
 /// The file name git has in a PATH entry.
 #[cfg(windows)]
@@ -385,7 +397,10 @@ impl ScrubbedGit {
             .env_clear()
             .envs(tool_child_env())
             .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_LITERAL_PATHSPECS", "1");
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            // MAGI FIX (S6 loop 36): `$GIT_DIR/info/grafts` is repository data that
+            // `core.useReplaceRefs=false` does not neutralize; it moved a commit's parent.
+            .env("GIT_GRAFT_FILE", GRAFT_FILE_NONE);
         #[cfg(test)]
         command_line.envs(self.test_env.iter().cloned());
         let mut child = command_line
