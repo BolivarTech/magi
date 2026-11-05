@@ -1102,6 +1102,22 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_only_in_the_section_still_drops_the_chunk() {
+        // The section travels with the chunk: a clean text does not save a secret name. A
+        // doc-comment chunk is the case where the section is not also part of the text.
+        let section = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA".to_string(); // allow-secret-scan
+        let chunk = DocChunk {
+            path: "src/m.rs".into(),
+            section,
+            text: "fine".into(),
+            hash: String::new(),
+        };
+        let (kept, dropped) = without_secrets(vec![chunk]);
+        assert!(kept.is_empty());
+        assert_eq!(dropped, vec!["src/m.rs".to_string()]);
+    }
+
+    #[test]
     fn indexing_is_bounded_and_the_truncation_is_reported() {
         // [CP2 MS3 loop 6] Reverse order, so keeping the first by path needs the sort, not only the cut.
         // [RV21 D+B, 2026-10-20] One chunk per source here; whole sources are kept.
