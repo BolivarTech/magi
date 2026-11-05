@@ -31,6 +31,13 @@ const DATA_TABLES: [&str; 4] = ["sessions", "messages", "knowledge", "memories"]
 /// encrypted rows cannot be read without the DEK and are **never** discarded.
 const DETAIL_DATA_WITHOUT_ENVELOPE: &str = "data present without envelope";
 
+/// `detail` for a database written before v0.25.0, which lacks `table` (RV19, RV-S17).
+// Red stub: the open paths call it in Green, which removes this allow.
+#[allow(dead_code)]
+pub(crate) fn pre_0_25_detail(table: &str) -> String {
+    todo!("{table}")
+}
+
 /// A master passphrase that clears the strength floor (`check_strength`), shared by every
 /// test fixture that bootstraps a fresh envelope. A sub-floor fixture would be refused at
 /// bootstrap, so fixtures that only need *a* working store use this one.
@@ -902,6 +909,11 @@ mod tests {
         // database holding nothing but a warm cache as `DbCorrupt` and refuse to bootstrap it,
         // over data whose entire purpose is to be disposable.
         expected.insert("model_capabilities".to_string());
+        // The code-review documentation index and its source list are not either, for the same
+        // reason: both are derived from the reviewed files and rebuilt by reindexing (RV19), so
+        // counting them would refuse to bootstrap a database holding nothing but a warm index.
+        expected.insert("code_review_docs".to_string());
+        expected.insert("code_review_doc_sources".to_string());
 
         assert_eq!(
             created, expected,
@@ -927,6 +939,10 @@ mod tests {
             !DATA_TABLES.contains(&"model_capabilities"),
             "model_capabilities is a reconstructible cache, not user data — counting it would \
              make a warm cache alone enough to refuse a bootstrap"
+        );
+        assert!(
+            !DATA_TABLES.contains(&"code_review_docs"),
+            "code_review_docs is a reconstructible index, not user data — counting it would make a warm index alone enough to refuse a bootstrap"
         );
     }
 
@@ -2042,5 +2058,272 @@ mod tests {
             vault.get("TOY_SECRET").expect("entry").as_str(),
             "toy-secret-value"
         );
+    }
+
+    /// A fresh encrypted DB (envelope + full schema), as `SqliteVectorStore`'s tests build one.
+    fn fresh_db() -> (EncryptedSqliteMemory, tempfile::NamedTempFile) {
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("fresh db");
+        (mem, tmp)
+    }
+
+    /// The main file and its `-wal` sidecar (absent = `None`): a write confined to the WAL
+    /// would leave the main file alone and still change the database.
+    fn db_state(path: &std::path::Path) -> (Vec<u8>, Option<Vec<u8>>) {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        (
+            std::fs::read(path).expect("bytes"),
+            std::fs::read(std::path::PathBuf::from(wal)).ok(),
+        )
+    }
+
+    /// A DB with an envelope whose `table` was dropped afterwards: what a 0.24.x file looks
+    /// like to v0.25.0.
+    fn db_with_envelope_then_drop_table(
+        table: &str,
+    ) -> (
+        std::path::PathBuf,
+        Zeroizing<String>,
+        tempfile::NamedTempFile,
+    ) {
+        let (mem, tmp) = fresh_db();
+        mem.conn_for_test()
+            .lock()
+            .expect("lock")
+            .execute_batch(&format!("DROP TABLE {table};"))
+            .expect("drop");
+        drop(mem);
+        (
+            tmp.path().to_path_buf(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+            tmp,
+        )
+    }
+
+    #[test]
+    fn init_creates_the_code_review_tables() {
+        let (db, _tmp) = fresh_db();
+        let conn = db.conn_for_test().lock().expect("lock");
+        // Three tables: the documentation index is keyed by source.
+        for t in [
+            "code_review_docs",
+            "code_review_doc_sources",
+            "code_review_history",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .expect("query");
+            assert_eq!(n, 1, "{t}");
+        }
+        // due() and validated_on_files() read through an index, never a full scan, and so
+        // does reindex's reuse lookup by chunk hash.
+        for i in [
+            "code_review_history_due",
+            "code_review_history_by_file",
+            "code_review_docs_by_chunk",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [i],
+                    |r| r.get(0),
+                )
+                .expect("query");
+            assert_eq!(n, 1, "{i}");
+        }
+    }
+
+    #[test]
+    fn a_database_without_the_new_tables_fails_naming_the_table_and_is_left_intact() {
+        let (path, pass, _tmp) = db_with_envelope_then_drop_table("code_review_docs");
+        let before = db_state(&path);
+        // `expect_err` needs `EncryptedSqliteMemory: Debug`, which it is not (it holds the DEK).
+        let err = EncryptedSqliteMemory::open_with_state_machine(path.clone(), pass)
+            .err()
+            .expect("old schema");
+        match err {
+            // The whole detail, verbatim: the remediation is part of the contract, and the
+            // error carries pre_0_25_detail's output, which the next test pins byte for byte.
+            VaultError::DbCorrupt { detail, .. } => {
+                assert_eq!(detail, pre_0_25_detail("code_review_docs"))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            db_state(&path),
+            before,
+            "never-delete: the file and its WAL must not change"
+        );
+    }
+
+    #[test]
+    fn the_older_version_detail_is_the_global_constraint_verbatim() {
+        // Built with concat! so no wrap can slip a run of spaces into it.
+        assert_eq!(
+            pre_0_25_detail("code_review_docs"),
+            concat!(
+                "missing table `code_review_docs`: this database was probably written by magi-rs 0.24.x or earlier; ",
+                "delete .magi-rs-memory.db* and load your vault secrets again with `magi-rs vault set`"
+            )
+        );
+    }
+
+    #[test]
+    fn a_0_24_scaffold_without_an_envelope_also_names_the_older_version() {
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        {
+            let conn = rusqlite::Connection::open(tmp.path()).expect("open");
+            // WAL, as every database the product writes: the open's own pragma then changes
+            // nothing.
+            let _: String = conn
+                .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+                .expect("wal");
+            init_schema(&conn).expect("schema");
+            // All three new tables gone: a faithful 0.24.x layout.
+            conn.execute_batch(
+                "DROP TABLE code_review_docs; DROP TABLE code_review_doc_sources; DROP TABLE code_review_history;",
+            )
+            .expect("drop");
+        }
+        let before = db_state(tmp.path());
+        let err = EncryptedSqliteMemory::open_with_state_machine(
+            tmp.path().to_path_buf(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .err()
+        .expect("old scaffold");
+        assert!(
+            matches!(err, VaultError::DbCorrupt { ref detail, .. } if detail.contains("0.24.x or earlier")),
+            "{err:?}"
+        );
+        assert_eq!(
+            db_state(tmp.path()),
+            before,
+            "never-delete: no envelope is written first, not even in the WAL"
+        );
+    }
+
+    #[test]
+    fn a_scaffold_without_an_envelope_missing_only_the_docs_table_names_the_older_version() {
+        // count_rows walks only code_review_history: the docs table is checked on its own.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        {
+            let conn = rusqlite::Connection::open(tmp.path()).expect("open");
+            init_schema(&conn).expect("schema");
+            conn.execute_batch("DROP TABLE code_review_docs;")
+                .expect("drop");
+        }
+        let err = EncryptedSqliteMemory::open_with_state_machine(
+            tmp.path().to_path_buf(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .err()
+        .expect("old scaffold");
+        assert!(
+            matches!(err, VaultError::DbCorrupt { ref detail, .. } if detail.contains("code_review_docs")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_database_without_the_history_table_also_fails_naming_it() {
+        // Each new table is checked, not only the first one.
+        let (path, pass, _tmp) = db_with_envelope_then_drop_table("code_review_history");
+        let err = EncryptedSqliteMemory::open_with_state_machine(path, pass)
+            .err()
+            .expect("old schema");
+        assert!(
+            matches!(err, VaultError::DbCorrupt { ref detail, .. } if detail.contains("missing table `code_review_history`")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_database_without_the_doc_sources_table_also_fails_naming_it() {
+        // The third new table is checked too.
+        let (path, pass, _tmp) = db_with_envelope_then_drop_table("code_review_doc_sources");
+        let err = EncryptedSqliteMemory::open_with_state_machine(path, pass)
+            .err()
+            .expect("old schema");
+        assert!(
+            matches!(err, VaultError::DbCorrupt { ref detail, .. } if detail.contains("missing table `code_review_doc_sources`")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_file_is_never_reported_as_an_older_version() {
+        // Zero tables is not 0.24.x: the never-delete open keeps its own generic answer.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let err = EncryptedSqliteMemory::open_with_state_machine(
+            tmp.path().to_path_buf(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .err()
+        .expect("no schema");
+        assert!(
+            matches!(err, VaultError::DbCorrupt { ref detail, .. } if !detail.contains("0.24.x")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_documented_purge_empties_the_tables_and_the_database_still_opens() {
+        // The purge is the README's SQL (no purge command exists); every table is seeded, so a
+        // purge that forgets one of them stays red, and the reopen proves DELETE (never DROP)
+        // keeps the schema.
+        const PURGE: &str = "DELETE FROM code_review_docs; DELETE FROM code_review_doc_sources; DELETE FROM code_review_history;";
+        let readme = include_str!("../../README.md").replace('\r', "");
+        assert!(
+            readme.contains(PURGE),
+            "the README documents exactly the purge this test runs"
+        );
+        let (db, tmp) = fresh_db();
+        {
+            let conn = db.conn_for_test().lock().expect("lock");
+            conn.execute(
+                "INSERT INTO code_review_history (id,file,line,reviewed_commit,finding_blob,status,created_at) \
+                 VALUES ('a','f',1,'c',x'00','pending',0)",
+                [],
+            )
+            .expect("insert history");
+            conn.execute(
+                "INSERT INTO code_review_docs (key,chunk_hash,path,section_blob,text_blob,embedding_blob,dim,index_id) \
+                 VALUES ('k','h','README.md',x'00',x'00',x'00',3,'test')",
+                [],
+            )
+            .expect("insert docs");
+            conn.execute(
+                "INSERT INTO code_review_doc_sources (path,key,index_id) VALUES ('README.md','k','test')",
+                [],
+            )
+            .expect("insert sources");
+            conn.execute_batch(PURGE).expect("purge");
+            for table in [
+                "code_review_docs",
+                "code_review_doc_sources",
+                "code_review_history",
+            ] {
+                let n: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .expect("count");
+                assert_eq!(n, 0, "{table}");
+            }
+        }
+        drop(db);
+        EncryptedSqliteMemory::open_with_state_machine(
+            tmp.path().to_path_buf(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("a purged database is not an old one");
     }
 }
