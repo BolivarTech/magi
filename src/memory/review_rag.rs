@@ -2235,6 +2235,56 @@ mod tests {
         );
     }
 
+    /// Fails its first request and answers every later one.
+    struct FailsFirst(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for FailsFirst {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Err(EmbeddingError::Http("down".into()))
+            } else {
+                Ok(texts.iter().map(|_| vec![0.5; 3]).collect())
+            }
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_failing_batch_of_sources_stops_the_rest() {
+        // A failure degrades the review (B); the batches after it are not attempted.
+        use crate::memory::review_docs::EMBED_BATCH_ITEMS;
+        let big: String = (0..EMBED_BATCH_ITEMS)
+            .map(|i| format!("# S{i}\nx{i}\n"))
+            .collect();
+        let f = RagFixture::new(&[("CLAUDE.md", "# B\ny\n"), ("README.md", big.as_str())]).await;
+        let embedder = FailsFirst(Default::default());
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &["CLAUDE.md".to_string(), "README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.docs_unavailable);
+        assert_eq!(embedder.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn a_down_embedder_is_seen_even_when_the_index_is_unavailable() {
         // [CP2 MS3 loop 14 (pasada final)] docs_unavailable skips the search, never the query embed: S51's signal holds.
