@@ -95,7 +95,7 @@ const CONST_MODIFIER_FOLLOWERS: &[&str] = &["fn", "unsafe", "async", "extern"];
 const SECTION_SEPARATOR: &str = " > ";
 
 /// Prefix of a working-tree content key; git blob ids are plain hex, so the two never collide.
-const WORKTREE_KEY_PREFIX: &str = "wt:";
+pub const WORKTREE_KEY_PREFIX: &str = "wt:";
 
 /// Deepest ATX heading level (`######`).
 const MAX_HEADING_LEVEL: usize = 6;
