@@ -84,7 +84,7 @@ ABSENT_DECISION_MODEL = "smoke-absent-decision-model:0"
 #: policy of the debug account (a real 404 the client must report properly).
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "typesafe/jev-1.13"
-OPENROUTER_POLICY_MODEL = "inception/mercury-decide:free"
+OPENROUTER_POLICY_MODEL = "respan/span-01-lite:free"
 
 #: The same host with the API prefix missing, for D7.
 OPENROUTER_NO_PREFIX_URL = "https://openrouter.ai"
