@@ -23,6 +23,7 @@ pub mod index;
 pub mod judge;
 pub mod profile;
 pub mod retrieval;
+pub mod review_docs;
 pub mod salience;
 pub mod store;
 pub mod tokens;
