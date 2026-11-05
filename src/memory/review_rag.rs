@@ -2178,6 +2178,63 @@ mod tests {
         );
     }
 
+    /// Answers its first request after 100 s and never answers again.
+    struct SlowThenHanging(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for SlowThenHanging {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_secs(100)).await;
+                Ok(texts.iter().map(|_| vec![0.5; 3]).collect())
+            } else {
+                std::future::pending().await
+            }
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_later_batch_gets_only_what_is_left_of_the_preparation_bound() {
+        // The first batch spends 100 of the 120 s; the second must get the 20 s left, not 120 more.
+        use crate::memory::review_docs::EMBED_BATCH_ITEMS;
+        let big: String = (0..EMBED_BATCH_ITEMS)
+            .map(|i| format!("# S{i}\nx{i}\n"))
+            .collect();
+        let f = RagFixture::new(&[("CLAUDE.md", "# B\ny\n"), ("README.md", big.as_str())]).await;
+        let embedder = SlowThenHanging(Default::default());
+        let prep = tokio::time::timeout(
+            BOUND + Duration::from_secs(5),
+            prepare_docs(
+                &f.docs,
+                None,
+                None,
+                &f.source,
+                &["CLAUDE.md".to_string(), "README.md".to_string()],
+                &|_: &str| true,
+                &f.registry,
+                &embedder,
+                BOUND,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(&prep, Ok(p) if p.docs_unavailable),
+            "{:?}",
+            prep.as_ref().map(|p| p.docs_unavailable)
+        );
+    }
+
     #[tokio::test]
     async fn a_down_embedder_is_seen_even_when_the_index_is_unavailable() {
         // [CP2 MS3 loop 14 (pasada final)] docs_unavailable skips the search, never the query embed: S51's signal holds.

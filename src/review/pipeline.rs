@@ -4456,6 +4456,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_batch_gets_its_whole_share_when_preparation_moved_the_clock() {
+        // RV06: a clock read before the preparation leaves the batch a zero wall clock, which the
+        // fake trio still answers; the production trio refuses a zero share as `clock expired`.
+        struct SlowPrep<'a>(&'a FakeClock);
+        #[async_trait::async_trait]
+        impl RagSource for SlowPrep<'_> {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                self.0.set(3_600);
+                Ok(Assembled {
+                    items: vec![],
+                    trimmed: vec![],
+                    without_embedder: true,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+        }
+        let dir = workspace(1);
+        let clock = FakeClock::default();
+        let rag = SlowPrep(&clock);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let client = gate_always("real_defect");
+        let git = FakeGit::from(&[(
+            "ls-files --others --ignored --exclude-standard --directory -z -- .",
+            Ok(""),
+        )]);
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(200_000usize))];
+        run_review(
+            ReviewRequest {
+                input: ReviewInput::Directory(dir.path().to_path_buf()),
+                workspace: dir.path(),
+                timeout_secs: Some(1_800),
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                approved_digest: None,
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &clock,
+                rag: Some(&rag),
+            },
+        )
+        .await
+        .expect("runs");
+        let clocks = consult.clocks.lock().expect("lock").clone();
+        assert_eq!(clocks, vec![Some(Duration::from_secs(1_800))]);
+    }
+
+    #[tokio::test]
     async fn withheld_context_reaches_the_summary() {
         // [CP2 MS3 loop 2] The context_withheld channel, end to end.
         let dir = workspace(1);
