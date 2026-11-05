@@ -82,7 +82,11 @@ DECLARED_SCENARIO_COUNT = 51
 #: it was CANNOT_TEST on every honest run; the discards are now an observation
 #: without a verdict and the cause property stays in the unit suite (user
 #: decision, SMOKE #2), v0.25.0.
-DECLARED_ASSERTION_COUNT = 152
+#:
+#: 153 on 2026-11-05: S49 adds "the toy secret reaches neither stdout, stderr
+#: nor the run log" (MAGI §6 loop 50: leaving the file out as secret said
+#: nothing about where its bytes went), v0.25.0.
+DECLARED_ASSERTION_COUNT = 153
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

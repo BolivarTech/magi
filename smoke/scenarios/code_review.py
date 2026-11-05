@@ -57,6 +57,7 @@ S48_ASSERTIONS = ("exit 2", "stderr names the outside path")
 S49_ASSERTIONS = (
     "exit 2",
     "stderr says nothing to review, leaving out the binary as binary and the secret as secret",
+    "the toy secret reaches neither stdout, stderr nor the run log",
 )
 S50_ASSERTIONS = (
     "exit 2",
@@ -104,6 +105,11 @@ S47_FILES = runs.REVIEW_GEN_PATHS
 S49_EXPECTED_OMISSIONS = tuple(
     (path, cause) for (path, _), cause
     in zip(runs.review_skipped_files(), ("binary", "secret")))
+
+#: The key-shaped value inside R14's secret file (``token = <value>``), read
+#: from the file the run writes so the two cannot drift. S49 looks for it in
+#: every output and never prints it.
+S49_SECRET = runs.review_skipped_files()[1][1].split(b"=", 1)[1].strip()
 
 #: The product's wording that S48 and S49 look for in stderr. Every stderr
 #: text S48-S51 parse (these two phrases, ``; left out: ``, ``, and N more``,
@@ -892,6 +898,41 @@ def only_skipped_files_are_nothing_to_review(run):
                         "stderr does not say there is nothing to review with "
                         "%s left out" % ", ".join(
                             "%s (%s)" % entry for entry in S49_EXPECTED_OMISSIONS))
+    if run is not None and not run.timed_out:
+        yield _secret_finding(run)
+
+
+def _secret_finding(run):
+    """Judge S49's third assertion: the toy secret's bytes left the process nowhere.
+
+    MAGI FIX (S6 loop 50): leaving the file out as ``secret`` proved nothing
+    about its bytes; a product that echoed them while classifying the file
+    passed every S49 assertion (F1a2-caspar; RV22 covers every byte that
+    leaves the process). The request counter already shows no model was
+    reached; this reads what the run printed and logged.
+
+    Args:
+        run: R14's ``RunResult``, neither missing nor hung.
+
+    Returns:
+        Finding: ``FAIL`` naming each output that holds :data:`S49_SECRET`
+        (never the secret itself); ``CANNOT_TEST`` when none does but a log
+        file could not be read; otherwise ``PASS``. No log directory is a
+        ``PASS``: a refusal may stop before logging, and an absent log carries
+        nothing.
+    """
+    outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
+               ("the run log", run.review_log or ()))
+    leaked = [name for name, bodies in outputs
+              if any(S49_SECRET in body for body in bodies)]
+    if leaked:
+        return _finding(S49_ASSERTIONS, 2, Outcome.FAIL, "R14",
+                        "the toy secret appears in %s" % ", ".join(leaked))
+    if run.review_log_unreadable:
+        return _finding(S49_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R14",
+                        "the run log could not be read whole: %s"
+                        % ", ".join(run.review_log_unreadable))
+    return _finding(S49_ASSERTIONS, 2, Outcome.PASS, "R14")
 
 
 @scenario("S50", assertions=S50_ASSERTIONS, run="R15",
@@ -964,6 +1005,11 @@ def _budget_fields_ok(match):
         >>> _budget_fields_ok(ok)
         True
     """
+    # MAGI §6 loop 50 (F1a2-caspar), declared, not fixed: the batch count is
+    # checked for agreement with the other numbers, never against the plan.
+    # How many batches the tree makes depends on the pool's window, which the
+    # harness does not read, so a wrong but self-consistent count passes; the
+    # count is pinned in Rust (pre_budget in src/review/clock.rs).
     # MAGI FIX (S6 loop 7): the ceiling was captured but never checked (F1a-c3).
     # MAGI FIX (S6 loop 10): loop 7 required a ceiling of at least the floor,
     # which the product's raw ceiling never is in a refusal, and each number
