@@ -3593,16 +3593,23 @@ mod tests {
             "fn f0() {{\n    let _x = 0;\n{}}}\n",
             "    let _x = 1;\n".repeat(23)
         );
+        // MS2's approved argv (the uncommitted fixtures of this module, e.g.
+        // `a_finding_on_a_deleted_file_reaches_the_gate_with_old_side_code`): the work-tree check,
+        // HEAD with `--quiet`, and the old side probed with `ls-tree … --` before its `show`.
         let git = FakeGit::from(&[
-            ("rev-parse --verify HEAD^{commit}", Ok("abc\n")),
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
             (
                 "diff --no-color --no-ext-diff --no-textconv --relative abc",
                 Ok(diff),
             ),
             ("ls-files --others --exclude-standard -z", Ok("")),
-            ("ls-tree -r --name-only -z abc", Ok("f0.rs\0")),
             (
-                "show --no-ext-diff --no-textconv abc:./f0.rs",
+                "ls-tree -z --end-of-options abc -- f0.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\tf0.rs\0"),
+            ),
+            (
+                "show --no-ext-diff --no-textconv --end-of-options abc:./f0.rs",
                 Ok(old.as_str()),
             ),
         ]);
