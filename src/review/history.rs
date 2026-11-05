@@ -4,17 +4,43 @@
 
 //! Finding history for the `code-review` context (RV07(4), RV08).
 //!
-//! A finding the trio reported and the gate kept is remembered with the commit it was reviewed
-//! at. Later, git alone says what became of it: the line changed in a later commit (attended),
-//! or the code merged untouched (weak reject). A model never validates history (RV08).
+//! A finding the trio reported and the gate judged is remembered with the commit it was first
+//! reviewed at. Later, git alone says what became of it: the reported line changed in a later
+//! commit (attended), or the code reached `HEAD` untouched (weak reject). **No model ever
+//! validates history** (RV08); there is no human mark either.
+//!
+//! The reading is by net state, between the reviewed commit and `HEAD`: a line changed and then
+//! reverted is the reviewed code again and is a weak reject, not attended.
+//!
+//! # Examples
+//!
+//! ```ignore
+//! let status = classify(&entry, "HEAD", &git);
+//! let (updates, to_record) = reclassify_then_record(&existing, &fresh, "HEAD", &git);
+//! ```
 
+use magi_core::finding_id::generate_finding_id;
+use magi_core::schema::Category;
+
+use super::consolidate::ConsolidatedFinding;
+use super::gate::{GateState, GateVerdict};
 use super::source::GitCommand;
+
+/// The category every located finding is keyed with: the neutral one consolidation uses
+/// (`consolidate::NEUTRAL_CATEGORY`), so the id here is the id magi-core computed there.
+const NEUTRAL_CATEGORY: Category = Category::Other;
+
+/// Separator that joins the merged titles and details of a finding.
+const MERGED_TEXT_SEPARATOR: &str = "\n";
+
+/// The only hunk-header prefix read from a diff.
+const HUNK_PREFIX: &str = "@@";
 
 /// What became of a remembered finding, judged from git alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryStatus {
-    /// No signal yet (no line, git failed, commit gone, or no later commit).
+    /// No signal yet: no line, git failed, the commit is gone, or no later commit exists.
     Pending,
     /// The reported line changed in a later commit.
     Attended,
@@ -22,52 +48,233 @@ pub enum HistoryStatus {
     WeakReject,
 }
 
+impl HistoryStatus {
+    /// The `snake_case` spelling stored in the `status` column (the `serde` one).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Attended => "attended",
+            Self::WeakReject => "weak_reject",
+        }
+    }
+
+    /// The status spelled `text`, or `None` for any other text.
+    ///
+    /// # Arguments
+    /// * `text` - a value of the `status` column.
+    pub fn parse(text: &str) -> Option<Self> {
+        [Self::Pending, Self::Attended, Self::WeakReject]
+            .into_iter()
+            .find(|s| s.as_str() == text)
+    }
+}
+
 /// One remembered finding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
-    /// The stable finding id.
+    /// The stable finding id (magi-core's `generate_finding_id`).
     pub id: String,
-    /// The reported file.
+    /// The reported file, relative to the workspace.
     pub file: String,
-    /// The reported 1-based line.
+    /// The reported 1-based line; `None` only in a row edited by hand.
     pub line: Option<u32>,
     /// The commit the finding was first reviewed at.
     pub reviewed_commit: String,
-    /// The merged titles.
+    /// The merged titles, one per line.
     pub title: String,
-    /// The merged details.
+    /// The merged details, one per line.
     pub detail: String,
     /// The current status.
     pub status: HistoryStatus,
 }
 
-/// Most existing entries reclassified per review.
+/// The most existing entries [`reclassify_then_record`] looks at per review.
+///
+/// Each costs at most three bounded git calls (`merge-base`, `diff` and, only before a weak
+/// reject, `rev-parse`), so one review pays at most `3 * MAX_RECLASSIFY_PER_REVIEW` of them.
 pub const MAX_RECLASSIFY_PER_REVIEW: usize = 200;
 
-/// Red stub.
-pub fn classify(_entry: &HistoryEntry, _head: &str, _git: &dyn GitCommand) -> HistoryStatus {
-    HistoryStatus::Attended
+/// Lines `a..a+b-1` of the old side that a hunk header `-a[,b]` covers; `b = 0` covers none.
+fn parse_range(token: &str, sign: char) -> Option<(u64, u64)> {
+    let body = token.strip_prefix(sign)?;
+    let (start, count) = match body.split_once(',') {
+        Some((a, b)) => (a, b),
+        None => (body, "1"),
+    };
+    Some((start.parse().ok()?, count.parse().ok()?))
 }
 
-/// Red stub.
+/// The old-side `(start, count)` of a `@@ -a[,b] +c[,d] @@ ...` header, or `None` if the line
+/// does not have that shape. What follows the second `@@` (git's function context) is ignored.
+fn parse_hunk_header(line: &str) -> Option<(u64, u64)> {
+    let mut parts = line
+        .strip_prefix(HUNK_PREFIX)?
+        .strip_prefix(' ')?
+        .split(' ');
+    let old = parse_range(parts.next()?, '-')?;
+    parse_range(parts.next()?, '+')?;
+    (parts.next()? == HUNK_PREFIX).then_some(old)
+}
+
+/// Whether the diff `text` changes `line` of the old side: `Some(true)` if a hunk covers it,
+/// `Some(false)` if none does, `None` if a hunk header cannot be read (never decide on a format
+/// that is not understood).
+///
+/// Complexity: O(lines of the diff).
+fn diff_covers(text: &str, line: u32) -> Option<bool> {
+    let line = u64::from(line);
+    let mut covered = false;
+    for header in text.lines().filter(|l| l.starts_with(HUNK_PREFIX)) {
+        let (start, count) = parse_hunk_header(header)?;
+        covered |= count > 0 && line >= start && line < start.saturating_add(count);
+    }
+    Some(covered)
+}
+
+/// Judges one remembered finding from git alone, never from a model (RV08).
+///
+/// Anchored to the reviewed commit: `git diff --unified=0 --relative <commit> <head> -- <file>`
+/// gives hunks in the coordinates of `<commit>`, the ones the finding's line uses, so lines
+/// inserted above never move it. A hunk covering the line means [`HistoryStatus::Attended`]; a
+/// deleted or renamed file is covered whole. Otherwise the line is untouched, and it is a
+/// [`HistoryStatus::WeakReject`] only once `head` is a commit after the reviewed one.
+///
+/// Anything that is not a signal is [`HistoryStatus::Pending`]: no line, a reference that
+/// starts with `-`, a commit that is not an ancestor of `head` (another branch, or gone), a git
+/// failure, a hunk header that cannot be read, or `head` still at the reviewed commit.
+///
+/// Complexity: three git calls at most, O(size of the diff of one file).
+///
+/// # Arguments
+/// * `entry` - the remembered finding.
+/// * `head` - the revision to compare against.
+/// * `git` - the git runner, rooted at the workspace so `--relative` and the paths agree.
+///
+/// # Returns
+/// The status the evidence supports.
+pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> HistoryStatus {
+    let commit = entry.reviewed_commit.as_str();
+    let Some(line) = entry.line else {
+        return HistoryStatus::Pending;
+    };
+    if commit.starts_with('-') || head.starts_with('-') {
+        return HistoryStatus::Pending;
+    }
+    if git
+        .run(&["merge-base", "--is-ancestor", commit, head])
+        .is_err()
+    {
+        return HistoryStatus::Pending;
+    }
+    let diff = git.run(&[
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--unified=0",
+        "--relative",
+        commit,
+        head,
+        "--",
+        entry.file.as_str(),
+    ]);
+    match diff.ok().and_then(|text| diff_covers(&text, line)) {
+        None => HistoryStatus::Pending,
+        Some(true) => HistoryStatus::Attended,
+        Some(false) => weak_reject_if_later(commit, head, git),
+    }
+}
+
+/// [`HistoryStatus::WeakReject`] when `head` resolves to a commit other than `commit`;
+/// otherwise [`HistoryStatus::Pending`]: with no commit after the reviewed one there is no
+/// signal yet, and a failing `rev-parse` is no signal either.
+fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> HistoryStatus {
+    match git.run(&["rev-parse", "--verify", &format!("{head}^{{commit}}")]) {
+        Ok(resolved) if resolved.trim() != commit => HistoryStatus::WeakReject,
+        _ => HistoryStatus::Pending,
+    }
+}
+
+/// Reclassifies the existing entries, then hands back the new ones untouched.
+///
+/// The order matters: an entry reviewed at `head` would classify as a weak reject if it were
+/// reclassified after being recorded (`head..head` is empty), so the new entries are only
+/// returned, as `Pending`, for the caller to record.
+///
+/// Existing entries of every status are reclassified (a weak reject is provisional, and an
+/// attended entry whose change was reverted goes back to a weak reject, RV08 by net state), but
+/// only the first [`MAX_RECLASSIFY_PER_REVIEW`], in the order received: the caller passes the
+/// least recently checked first (`ReviewHistoryStore::due`). The updates are only the statuses
+/// that change, and a `Pending` result never replaces a validated status.
+///
+/// Complexity: O(min(existing, [`MAX_RECLASSIFY_PER_REVIEW`])) classifications.
+///
+/// # Arguments
+/// * `existing` - entries already stored, least recently checked first.
+/// * `new` - entries of this review, not stored yet.
+/// * `head` - the revision to compare against.
+/// * `git` - the git runner.
+///
+/// # Returns
+/// `(id, new status)` for each existing entry whose status changed, and the new entries.
 pub fn reclassify_then_record(
-    _existing: &[HistoryEntry],
-    _new: &[HistoryEntry],
-    _head: &str,
-    _git: &dyn GitCommand,
+    existing: &[HistoryEntry],
+    new: &[HistoryEntry],
+    head: &str,
+    git: &dyn GitCommand,
 ) -> (Vec<(String, HistoryStatus)>, Vec<HistoryEntry>) {
-    (Vec::new(), Vec::new())
+    let updates = existing
+        .iter()
+        .take(MAX_RECLASSIFY_PER_REVIEW)
+        .filter_map(|e| {
+            let status = classify(e, head, git);
+            (status != HistoryStatus::Pending && status != e.status).then(|| (e.id.clone(), status))
+        })
+        .collect();
+    (updates, new.to_vec())
 }
 
-/// Red stub.
+/// What a review records: its judged main list, anchored to the reviewed commit.
+///
+/// Only `kept` and `low_confidence` findings enter. A `filtered` one is a false positive by the
+/// gate's own judgment, and an `unfiltered` one was never judged (timeout, exhausted chain,
+/// unauthorized), so recording either would serve it back later as validated context. A finding
+/// without a file or a line is not recorded either: [`classify`] needs both and could never take
+/// it out of `Pending`. The `id` is magi-core's `generate_finding_id` over file, line and the
+/// neutral category consolidation uses, so it is stable across reviews while file and line do
+/// not change; a failure that moves to another line is another id. It depends on magi-core's
+/// algorithm (pinned `=4.2.0`): a bump that changes it leaves old rows with ids no new review
+/// repeats, and must re-verify this.
+///
+/// Complexity: O(findings).
+///
+/// # Arguments
+/// * `findings` - the judged main list with each finding's gate verdict.
+/// * `reviewed_commit` - the pinned SHA of the reviewed revision.
+///
+/// # Returns
+/// One `Pending` entry per recordable finding.
 pub fn entries_from_review(
-    _findings: &[(
-        crate::review::consolidate::ConsolidatedFinding,
-        crate::review::gate::GateVerdict,
-    )],
-    _reviewed_commit: &str,
+    findings: &[(ConsolidatedFinding, GateVerdict)],
+    reviewed_commit: &str,
 ) -> Vec<HistoryEntry> {
-    Vec::new()
+    findings
+        .iter()
+        .filter(|(_, v)| matches!(v.state, GateState::Kept | GateState::LowConfidence))
+        .filter_map(|(f, _)| {
+            let (file, line) = (f.file.as_ref()?, f.line?);
+            Some(HistoryEntry {
+                id: generate_finding_id(file, line, NEUTRAL_CATEGORY),
+                file: file.clone(),
+                line: Some(line),
+                reviewed_commit: reviewed_commit.to_string(),
+                title: f.titles.join(MERGED_TEXT_SEPARATOR),
+                detail: f.details.join(MERGED_TEXT_SEPARATOR),
+                status: HistoryStatus::Pending,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

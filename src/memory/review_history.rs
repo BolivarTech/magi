@@ -2,57 +2,343 @@
 // Version: 0.24.3
 // Date: 2026-11-05
 
-//! Encrypted store of remembered review findings (RV07(4), RV08).
+//! Encrypted store of remembered review findings (RV07(4), RV08, RV19).
+//!
+//! The title and detail of a finding are encrypted with the data key, exactly like
+//! [`crate::memory::review_docs::ReviewDocStore`]; the file, line, commit, status and the two
+//! timestamps stay in the clear so rows can be selected and ordered without decrypting anything.
+//!
+//! # Lock discipline
+//!
+//! The connection lock is never held across an `.await` (nothing here is async) and never taken
+//! while the data-key lock is held (R-V08): rows are encrypted before the lock is taken and
+//! decrypted after it is released.
+//!
+//! # Examples
+//!
+//! ```ignore
+//! let store = ReviewHistoryStore::new(conn, dek)?;
+//! store.record(&entries)?;
+//! let (due, total) = store.due(200)?;
+//! let validated = store.validated_on_files(&["src/a.rs".to_string()])?;
+//! ```
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection, TransactionBehavior};
+use zeroize::Zeroizing;
 
 use crate::memory::error::MemoryError;
+use cryptovault::CryptoVault;
 use magi_rs::review::history::{HistoryEntry, HistoryStatus};
 use magi_rs::vault::MaskedDek;
 
-/// Red stub.
-#[allow(dead_code)] // Red stub: removed in Green
-pub struct ReviewHistoryStore {
-    conn: Arc<Mutex<Connection>>,
+/// Files per `validated_on_files` query: one parameter each plus none fixed, well under the
+/// 999-parameter limit of older SQLite builds.
+const FILES_PER_QUERY: usize = 400;
+
+/// The columns every read selects, in the order [`RawRow`] reads them.
+const COLUMNS: &str = "id, file, line, reviewed_commit, finding_blob, status";
+
+/// One row as stored: the finding text still encrypted.
+struct RawRow {
+    id: String,
+    file: String,
+    line: Option<i64>,
+    reviewed_commit: String,
+    finding_blob: Vec<u8>,
+    status: String,
 }
 
-#[allow(dead_code)] // Red stub: removed in Green
+/// Encrypted store of remembered findings, over the shared connection.
+// consumed by T3.6 (pipeline)
+#[allow(dead_code)]
+pub struct ReviewHistoryStore {
+    conn: Arc<Mutex<Connection>>,
+    vault: CryptoVault,
+    /// The data key, masked in RAM; the lock is never held across the connection lock (R-V08).
+    dek: Mutex<MaskedDek>,
+}
+
+fn db_err(e: rusqlite::Error) -> MemoryError {
+    MemoryError::Storage(e.to_string())
+}
+
+/// Seconds since the Unix epoch; 0 if the clock is before it.
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+// consumed by T3.6 (pipeline)
+#[allow(dead_code)]
 impl ReviewHistoryStore {
+    /// The shared connection, for tests that read raw rows.
     #[cfg(test)]
     pub(crate) fn connection_for_test(&self) -> &Arc<Mutex<Connection>> {
         &self.conn
     }
 
-    pub fn new(conn: Arc<Mutex<Connection>>, _dek: MaskedDek) -> Result<Self, MemoryError> {
-        Ok(Self { conn })
+    /// Opens the store over `conn`, making sure the schema exists.
+    ///
+    /// # Arguments
+    /// * `conn` - the connection shared with `EncryptedSqliteMemory`.
+    /// * `dek` - a masked duplicate of the data key.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] if the schema DDL fails.
+    pub fn new(conn: Arc<Mutex<Connection>>, dek: MaskedDek) -> Result<Self, MemoryError> {
+        {
+            let c = conn.lock().unwrap_or_else(|p| p.into_inner());
+            crate::system::database::init_schema(&c).map_err(db_err)?;
+        }
+        Ok(Self {
+            conn,
+            vault: CryptoVault::default(),
+            dek: Mutex::new(dek),
+        })
     }
 
-    pub fn record(&self, _entries: &[HistoryEntry]) -> Result<usize, MemoryError> {
-        Ok(0)
+    fn locked_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Encrypts `plaintext` with the data key. Never call while holding the connection lock.
+    fn seal(&self, plaintext: &str) -> Result<Vec<u8>, MemoryError> {
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        dek.with_dek(|k| self.vault.encrypt_with_key(k, plaintext))
+            .map(String::into_bytes)
+            .map_err(|e| MemoryError::Crypto(e.to_string()))
+    }
+
+    /// Decrypts a blob written by [`Self::seal`]. Same lock contract.
+    fn unseal(&self, blob: &[u8]) -> Result<Zeroizing<String>, MemoryError> {
+        let text = std::str::from_utf8(blob)
+            .map_err(|e| MemoryError::Crypto(format!("stored blob is not text: {e}")))?;
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        dek.with_dek(|k| self.vault.decrypt_with_key(k, text))
+            .map_err(|e| MemoryError::Crypto(e.to_string()))
+    }
+
+    /// The encrypted `(title, detail)` pair, as a self-describing JSON array: merged titles
+    /// carry newlines, which any separator-based encoding would split.
+    fn seal_text(&self, entry: &HistoryEntry) -> Result<Vec<u8>, MemoryError> {
+        let json = serde_json::to_string(&(&entry.title, &entry.detail))
+            .map_err(|e| MemoryError::Storage(format!("history text serialization: {e}")))?;
+        self.seal(&json)
+    }
+
+    /// Rebuilds an entry from a raw row, decrypting its text (off the connection lock).
+    fn decode(&self, row: RawRow) -> Result<HistoryEntry, MemoryError> {
+        let json = self.unseal(&row.finding_blob)?;
+        let (title, detail): (String, String) = serde_json::from_str(json.as_str())
+            .map_err(|e| MemoryError::Storage(format!("history text deserialization: {e}")))?;
+        let status = HistoryStatus::parse(&row.status).ok_or_else(|| {
+            MemoryError::Storage(format!(
+                "history entry `{}` has the unknown status `{}`",
+                row.id, row.status
+            ))
+        })?;
+        Ok(HistoryEntry {
+            id: row.id,
+            file: row.file,
+            line: row.line.and_then(|l| u32::try_from(l).ok()),
+            reviewed_commit: row.reviewed_commit,
+            title,
+            detail,
+            status,
+        })
+    }
+
+    fn decode_all(&self, rows: Vec<RawRow>) -> Result<Vec<HistoryEntry>, MemoryError> {
+        rows.into_iter().map(|r| self.decode(r)).collect()
+    }
+
+    /// Records new entries; an `id` already stored is kept as it is (first sighting wins), so
+    /// its `reviewed_commit` stays the one `classify` compares from. Replacing it would restart
+    /// the clock on every review, and a finding nobody attends would never become a weak reject.
+    ///
+    /// Complexity: O(entries), one transaction.
+    ///
+    /// # Returns
+    /// The rows actually inserted.
+    ///
+    /// # Errors
+    /// [`MemoryError::Crypto`] if encryption fails, [`MemoryError::Storage`] if a statement
+    /// fails (nothing is recorded then).
+    pub fn record(&self, entries: &[HistoryEntry]) -> Result<usize, MemoryError> {
+        let sealed: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|e| self.seal_text(e))
+            .collect::<Result<_, _>>()?;
+        let created_at = now_secs();
+        let mut c = self.locked_conn();
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_err)?;
+        let mut inserted = 0;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO code_review_history \
+                     (id, file, line, reviewed_commit, finding_blob, status, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(db_err)?;
+            for (e, blob) in entries.iter().zip(&sealed) {
+                inserted += stmt
+                    .execute(params![
+                        e.id,
+                        e.file,
+                        e.line.map(i64::from),
+                        e.reviewed_commit,
+                        blob,
+                        e.status.as_str(),
+                        created_at
+                    ])
+                    .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(inserted)
+    }
+
+    /// Every entry, decrypted. O(n). No order is promised: reclassification reads
+    /// [`Self::due`]. Test-only: no review path reads the whole history.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
     #[cfg(test)]
     pub(crate) fn all(&self) -> Result<Vec<HistoryEntry>, MemoryError> {
-        Ok(Vec::new())
+        let rows = self.raw_rows(&format!("SELECT {COLUMNS} FROM code_review_history"), [])?;
+        self.decode_all(rows)
     }
 
-    pub fn due(&self, _limit: usize) -> Result<(Vec<HistoryEntry>, usize), MemoryError> {
-        Ok((Vec::new(), 0))
+    /// Reads raw rows under the lock; the caller decrypts them after it is released.
+    fn raw_rows(&self, sql: &str, args: impl rusqlite::Params) -> Result<Vec<RawRow>, MemoryError> {
+        let c = self.locked_conn();
+        let mut stmt = c.prepare(sql).map_err(db_err)?;
+        let rows = stmt
+            .query_map(args, |r| {
+                Ok(RawRow {
+                    id: r.get(0)?,
+                    file: r.get(1)?,
+                    line: r.get(2)?,
+                    reviewed_commit: r.get(3)?,
+                    finding_blob: r.get(4)?,
+                    status: r.get(5)?,
+                })
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<_, _>>().map_err(db_err)
     }
 
-    pub fn validated_on_files(&self, _files: &[String]) -> Result<Vec<HistoryEntry>, MemoryError> {
-        Ok(Vec::new())
+    /// At most `limit` entries, of any status, least recently checked first (`checked_at`,
+    /// then `created_at`, then `id`), and how many entries exist in total.
+    ///
+    /// Every status is due: a weak reject can become attended, and an attended entry whose
+    /// change was reverted goes back to a weak reject. An entry that never resolves is checked
+    /// again only after all the others, so it never starves them. Decrypts at most `limit`
+    /// rows, so the cost of a review does not depend on the size of the history.
+    ///
+    /// Complexity: O(n log n) in SQLite to order, O(limit) to decrypt.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
+    pub fn due(&self, limit: usize) -> Result<(Vec<HistoryEntry>, usize), MemoryError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let total: i64 = self
+            .locked_conn()
+            .query_row("SELECT COUNT(*) FROM code_review_history", [], |r| r.get(0))
+            .map_err(db_err)?;
+        let rows = self.raw_rows(
+            &format!(
+                "SELECT {COLUMNS} FROM code_review_history \
+                 ORDER BY checked_at, created_at, id LIMIT ?1"
+            ),
+            [limit],
+        )?;
+        Ok((
+            self.decode_all(rows)?,
+            usize::try_from(total).unwrap_or(usize::MAX),
+        ))
     }
 
-    pub fn touch(&self, _ids: &[String], _now: i64) -> Result<(), MemoryError> {
+    /// The validated (`attended` / `weak_reject`) entries on `files`, by SQL over the clear
+    /// `file` and `status` columns: only the matching rows are decrypted. This is the context
+    /// read, once per batch. The files go in batches of [`FILES_PER_QUERY`] so no query passes
+    /// SQLite's parameter limit (a mass rename touches thousands).
+    ///
+    /// Complexity: O(files + matching rows).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
+    pub fn validated_on_files(&self, files: &[String]) -> Result<Vec<HistoryEntry>, MemoryError> {
+        let distinct: Vec<&String> = files.iter().collect::<BTreeSet<_>>().into_iter().collect();
+        let mut out = Vec::new();
+        for batch in distinct.chunks(FILES_PER_QUERY) {
+            let marks = vec!["?"; batch.len()].join(", ");
+            let rows = self.raw_rows(
+                &format!(
+                    "SELECT {COLUMNS} FROM code_review_history \
+                     WHERE status IN ('attended', 'weak_reject') AND file IN ({marks})"
+                ),
+                rusqlite::params_from_iter(batch.iter().copied()),
+            )?;
+            out.extend(self.decode_all(rows)?);
+        }
+        Ok(out)
+    }
+
+    /// Sets `checked_at = now` on `ids`, all or nothing.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] naming the first id no row has (nothing is touched then), or
+    /// if a statement fails.
+    pub fn touch(&self, ids: &[String], now: i64) -> Result<(), MemoryError> {
+        let mut c = self.locked_conn();
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_err)?;
+        for id in ids {
+            let changed = tx
+                .execute(
+                    "UPDATE code_review_history SET checked_at = ?1 WHERE id = ?2",
+                    params![now, id],
+                )
+                .map_err(db_err)?;
+            if changed == 0 {
+                return Err(unknown_id(id));
+            }
+        }
+        tx.commit().map_err(db_err)
+    }
+
+    /// Sets the status of one entry.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] naming the id when no row has it, or if the statement fails.
+    pub fn update_status(&self, id: &str, status: HistoryStatus) -> Result<(), MemoryError> {
+        let changed = self
+            .locked_conn()
+            .execute(
+                "UPDATE code_review_history SET status = ?1 WHERE id = ?2",
+                params![status.as_str(), id],
+            )
+            .map_err(db_err)?;
+        if changed == 0 {
+            return Err(unknown_id(id));
+        }
         Ok(())
     }
+}
 
-    pub fn update_status(&self, _id: &str, _status: HistoryStatus) -> Result<(), MemoryError> {
-        Ok(())
-    }
+/// The error for an id no row has; never a silent success.
+fn unknown_id(id: &str) -> MemoryError {
+    MemoryError::Storage(format!("no history entry has the id `{id}`"))
 }
 
 #[cfg(test)]
