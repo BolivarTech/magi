@@ -411,14 +411,14 @@ pub fn callers_for(
     let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
     let mut files: HashMap<String, Option<FileUnits>> = HashMap::new();
     for name in names {
-        let mut places: Vec<&(String, u32)> = index.occurrences(name).iter().collect();
+        let mut places: Vec<(&str, u32)> = index.occurrences(name).collect();
         places.sort_unstable();
         let defined = index.definitions(name);
         let mut kept = 0usize;
         for (file, line) in places {
             if defined
                 .iter()
-                .any(|(f, first, last)| f == file && (*first..=*last).contains(line))
+                .any(|(f, first, last)| f == file && (*first..=*last).contains(&line))
             {
                 continue;
             }
@@ -428,15 +428,15 @@ pub fn callers_for(
                         .map(|text| FileUnits::load(extractor, file, &text)),
                     None => None,
                 };
-                files.insert(file.clone(), loaded);
+                files.insert(file.to_string(), loaded);
             }
             let Some(Some(units)) = files.get(file) else {
                 continue;
             };
-            let Some(unit) = units.at(*line) else {
+            let Some(unit) = units.at(line) else {
                 continue;
             };
-            let key = (file.clone(), unit.start_line, unit.end_line);
+            let key = (file.to_string(), unit.start_line, unit.end_line);
             if seen.contains(&key) {
                 continue;
             }
@@ -783,6 +783,28 @@ mod tests {
                 .is_none(),
             "a whole file is its own unit"
         );
+    }
+
+    #[test]
+    fn a_hunk_in_one_method_of_a_large_impl_gets_that_method_not_the_whole_impl() {
+        // The extractor yields an impl as one top-level unit; narrowing by `split_block` keeps a
+        // hunk from dragging every method of the impl into the context.
+        use crate::review::test_support::MapSource;
+        let new = "struct A;\nimpl A {\n    fn one() {\n        a();\n    }\n    fn two() {\n        b();\n    }\n}\n";
+        let src = MapSource::new(&[("a.rs", new)], &[]);
+        let hunk = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "+        b();".into(),
+            first_line: 7,
+            last_line: 7,
+            old_first_line: 7,
+            old_last_line: 7,
+        };
+        let u = containing_unit(&hunk, &src, &LanguageRegistry::new())
+            .expect("reads")
+            .expect("inside two");
+        assert_eq!((u.label.as_str(), u.lines), ("two", Some((6, 8))));
+        assert!(!u.text.contains("one"), "{}", u.text);
     }
 
     #[test]

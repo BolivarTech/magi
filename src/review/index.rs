@@ -242,8 +242,12 @@ impl LexicalIndex {
     /// # Returns
     ///
     /// The places, empty when `name` does not occur.
-    pub fn occurrences(&self, name: &str) -> &[(String, u32)] {
-        self.occurrences.get(name).map(Vec::as_slice).unwrap_or(&[])
+    pub fn occurrences(&self, name: &str) -> impl Iterator<Item = (&str, u32)> + '_ {
+        self.occurrences
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|(file, line)| (file.as_str(), *line))
     }
 
     /// Whether `file` was given to `build` and has a language extractor. O(1) expected.
@@ -381,15 +385,16 @@ mod tests {
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         assert_eq!(index.definitions("parse"), &[("a.rs".to_string(), 1, 1)]);
         assert!(index.definitions("missing").is_empty());
-        // [RED-DRYRUN 2026-10-18] measured: the extractor also yields a gap unit "lines 2-3"; it is
-        // not a definition.
-        assert!(index.definitions("lines 2-3").is_empty());
+        // [RED-DRYRUN 2026-10-18] measured: the extractor also yields a gap unit, labelled
+        // "lines 2-2" for the one blank line here; it is not a definition.
+        assert!(index.definitions("lines 2-2").is_empty());
     }
 
     #[test]
     fn a_gap_between_definitions_is_not_a_definition() {
-        // The extractor names the gap between two functions after the lines it spans (measured:
-        // "lines 2-2" for the one blank line below); that label is not a definition.
+        // Same measured label as above, checked on its own with the line of the next definition
+        // too: the gap between two functions is named after the lines it spans, and that label is
+        // not a definition.
         let files = vec![(
             "a.rs".to_string(),
             "fn parse() {}\n\nfn only() {}\n".to_string(),
@@ -406,8 +411,24 @@ mod tests {
             "fn use_it() {\n    parse();\n}\n".to_string(),
         )];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
-        assert_eq!(index.occurrences("parse"), &[("b.rs".to_string(), 2)]);
-        assert!(index.occurrences("missing").is_empty());
+        assert_eq!(
+            index.occurrences("parse").collect::<Vec<_>>(),
+            vec![("b.rs", 2)]
+        );
+        assert_eq!(index.occurrences("missing").count(), 0);
+    }
+
+    #[test]
+    fn a_repeated_occurrence_on_one_line_is_recorded_once() {
+        let files = vec![(
+            "b.rs".to_string(),
+            "fn use_it() { parse(); parse(); }\nfn again() {\n    parse();\n}\n".to_string(),
+        )];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        assert_eq!(
+            index.occurrences("parse").collect::<Vec<_>>(),
+            vec![("b.rs", 1), ("b.rs", 3)]
+        );
     }
 
     #[test]

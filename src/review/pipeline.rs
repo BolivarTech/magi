@@ -1188,6 +1188,30 @@ mod tests {
     const POOL_WINDOW: usize = 120 * 100 / BATCH_WINDOW_FRACTION_PERCENT;
 
     #[test]
+    fn the_index_takes_definitions_and_occurrences_from_the_new_side_only() {
+        // `parse` moved from line 1 (old) to line 3 (new) and `gone` exists only on the old side:
+        // line-keyed data of the old side would give `parse` a second, false definition (a
+        // homonym) and `gone` a definition the new file does not have. The validator's
+        // `contains` still sees both sides.
+        use crate::review::test_support::MapSource;
+        let new = "fn other() {}\n\nfn parse() {}\n";
+        let old = "fn parse() {}\n\nfn gone() {}\n";
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some("@@ -1 +1 @@\n".into()),
+        }];
+        let source = MapSource::new(&[("a.rs", new)], &[("a.rs", old)]);
+        let index = build_index(&files, &source, &LanguageRegistry::new()).expect("builds");
+        assert_eq!(index.definitions("parse"), &[("a.rs".to_string(), 3, 3)]);
+        assert!(index.definitions("gone").is_empty());
+        assert_eq!(
+            index.occurrences("parse").collect::<Vec<_>>(),
+            vec![("a.rs", 3)]
+        );
+        assert!(index.contains("gone"), "the validator sees both sides");
+    }
+
+    #[test]
     fn nothing_left_after_batching_names_what_the_filter_left_out() {
         // [MAGI S6 loop 4, B1] the filter kept an empty file and left out a binary one; the
         // batching then found nothing and its error named no file at all.
