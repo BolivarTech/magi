@@ -1146,6 +1146,17 @@ stop using embeddings for context assembly and load the full history per turn (e
 removes tiered-memory records; the `sessions`, `messages`, and `knowledge` tables are
 unaffected.
 
+To purge what `code-review` keeps (the documentation index and the finding history), run
+this in the same database:
+
+```sql
+DELETE FROM code_review_docs; DELETE FROM code_review_doc_sources; DELETE FROM code_review_history;
+```
+
+Use `DELETE FROM`, never `DROP TABLE`, for these three: a database missing one of them is
+taken for one written by magi-rs 0.24.x or earlier and refuses to open. The documentation
+index is rebuilt on the next review.
+
 ---
 
 ## How It Works

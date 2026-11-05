@@ -25,17 +25,89 @@ const BUSY_TIMEOUT_SECS: u64 = 5;
 /// missing one is a partial/foreign schema ([`VaultError::DbCorrupt`]); any
 /// populated one is data with no key to read it ([`VaultError::DbCorrupt`]).
 /// Iterated in this deterministic order so the reported corruption is stable.
-const DATA_TABLES: [&str; 4] = ["sessions", "messages", "knowledge", "memories"];
+/// `code_review_history` is user data (validated review findings); the two code-review
+/// documentation tables are a reconstructible index and stay out, like `model_capabilities`.
+const DATA_TABLES: [&str; 5] = [
+    "sessions",
+    "messages",
+    "knowledge",
+    "memories",
+    "code_review_history",
+];
 
 /// `detail` for the §2.1 "no envelope, yet records present" corruption: the
 /// encrypted rows cannot be read without the DEK and are **never** discarded.
 const DETAIL_DATA_WITHOUT_ENVELOPE: &str = "data present without envelope";
 
-/// `detail` for a database written before v0.25.0, which lacks `table` (RV19, RV-S17).
-// Red stub: the open paths call it in Green, which removes this allow.
-#[allow(dead_code)]
+/// Tables v0.25.0 added for `code-review` (RV19), in the order the open checks them. A
+/// database that has the older data tables but lacks one of these was written by 0.24.x or
+/// earlier: there is no migration, so the open names the missing table instead.
+const PRE_0_25_MISSING_TABLES: [&str; 3] = [
+    "code_review_docs",
+    "code_review_doc_sources",
+    "code_review_history",
+];
+
+/// A table every database since v0.9.0 has: its presence is what tells an older database
+/// from an empty file, which is not one (the never-delete open answers that one itself).
+const PRE_0_25_MARKER_TABLE: &str = "messages";
+
+/// `detail` of the [`VaultError::DbCorrupt`] for a database written before v0.25.0 that
+/// lacks `table` (RV19, RV-S17). The single source of that text: both open paths use it.
+///
+/// # Arguments
+///
+/// * `table` — the v0.25.0 table that is missing.
+///
+/// # Returns
+///
+/// The message naming the table, the likely cause and the remediation.
 pub(crate) fn pre_0_25_detail(table: &str) -> String {
-    todo!("{table}")
+    format!(
+        "missing table `{table}`: this database was probably written by magi-rs 0.24.x or \
+         earlier; delete .magi-rs-memory.db* and load your vault secrets again with \
+         `magi-rs vault set`"
+    )
+}
+
+/// Whether `table` exists in the database behind `conn`.
+///
+/// # Errors
+///
+/// [`VaultError::Storage`] if `sqlite_master` cannot be read.
+fn table_exists(conn: &Connection, table: &str) -> std::result::Result<bool, VaultError> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| VaultError::Storage(e.to_string()))
+}
+
+/// Refuses a database written by 0.24.x or earlier, naming the first v0.25.0 table it lacks
+/// ([`PRE_0_25_MISSING_TABLES`]). Read-only: it runs before any write on both open paths, so
+/// the refused file stays byte for byte as it was. A file without the older data tables
+/// ([`PRE_0_25_MARKER_TABLE`]) is not an older database and passes, to get the open's own
+/// answer.
+///
+/// # Errors
+///
+/// - [`VaultError::DbCorrupt`] with [`pre_0_25_detail`] for the first missing table.
+/// - [`VaultError::Storage`] if `sqlite_master` cannot be read.
+fn check_pre_0_25_tables(conn: &Connection, db_path: &Path) -> std::result::Result<(), VaultError> {
+    if !table_exists(conn, PRE_0_25_MARKER_TABLE)? {
+        return Ok(());
+    }
+    for table in PRE_0_25_MISSING_TABLES {
+        if !table_exists(conn, table)? {
+            return Err(VaultError::DbCorrupt {
+                db_path: db_path.to_path_buf(),
+                detail: pre_0_25_detail(table),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A master passphrase that clears the strength floor (`check_strength`), shared by every
@@ -387,6 +459,7 @@ fn open_existing_envelope(
     wrapped_fec: &[u8],
     db_path: &Path,
 ) -> std::result::Result<Zeroizing<Vec<u8>>, VaultError> {
+    check_pre_0_25_tables(conn, db_path)?;
     let salt_fec: Vec<u8> = conn
         .query_row("SELECT value FROM vault_meta WHERE key = 'salt'", [], |r| {
             r.get(0)
@@ -446,6 +519,8 @@ fn bootstrap_fresh_envelope(
     // if every data table exists and is empty. Any present table with data ⇒
     // DbCorrupt; a missing table ⇒ DbCorrupt (via `count_rows`). Neither is EVER
     // wiped or bootstrapped over. Row counting is cheap and needs no write lock.
+    // An older (0.24.x) layout is named first, before any write (RV19).
+    check_pre_0_25_tables(conn, db_path)?;
     let mut total: i64 = 0;
     for table in DATA_TABLES {
         total = total
@@ -542,10 +617,12 @@ fn bootstrap_fresh_envelope(
 /// them in one place guarantees a freshly-`init`ed DB never self-reports
 /// `DbCorrupt` for a missing table.
 ///
-/// **Six tables, in three roles — and they are not interchangeable.** The four
-/// of [`DATA_TABLES`] (`sessions`, `messages`, `knowledge`, `memories`) are the
-/// ones the bootstrap state machine (MS1 Task 3) row-counts; `vault_meta` holds
-/// the envelope, and `model_capabilities` the measurement cache (REQ-R25).
+/// **Nine tables, in three roles — and they are not interchangeable.** The five
+/// of [`DATA_TABLES`] (`sessions`, `messages`, `knowledge`, `memories`,
+/// `code_review_history`) are the ones the bootstrap state machine (MS1 Task 3)
+/// row-counts; `vault_meta` holds the envelope; `model_capabilities` (the
+/// measurement cache, REQ-R25), `code_review_docs` and `code_review_doc_sources`
+/// (the code-review documentation index, RV19) are derived and reconstructible.
 ///
 /// The distinction is load-bearing, and this comment used to erase it by calling
 /// all of them "exactly the set the bootstrap state machine row-counts" — wrong
@@ -608,7 +685,40 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             scope TEXT NOT NULL DEFAULT 'root',
             distilled_at INTEGER
         );
-        CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);",
+        CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
+        CREATE TABLE IF NOT EXISTS code_review_docs (
+            key TEXT NOT NULL,
+            chunk_hash TEXT NOT NULL,
+            path TEXT NOT NULL,
+            section_blob BLOB NOT NULL,
+            text_blob BLOB NOT NULL,
+            embedding_blob BLOB NOT NULL,
+            dim INTEGER NOT NULL,
+            index_id TEXT NOT NULL,
+            PRIMARY KEY (key, chunk_hash)
+        );
+        CREATE INDEX IF NOT EXISTS code_review_docs_by_chunk
+            ON code_review_docs (chunk_hash, index_id);
+        CREATE TABLE IF NOT EXISTS code_review_doc_sources (
+            path TEXT NOT NULL,
+            key TEXT NOT NULL,
+            index_id TEXT NOT NULL,
+            PRIMARY KEY (path, key)
+        );
+        CREATE TABLE IF NOT EXISTS code_review_history (
+            id TEXT PRIMARY KEY,
+            file TEXT NOT NULL,
+            line INTEGER,
+            reviewed_commit TEXT NOT NULL,
+            finding_blob BLOB NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            checked_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS code_review_history_due
+            ON code_review_history (status, checked_at, created_at, id);
+        CREATE INDEX IF NOT EXISTS code_review_history_by_file
+            ON code_review_history (file, status);",
     )
 }
 
