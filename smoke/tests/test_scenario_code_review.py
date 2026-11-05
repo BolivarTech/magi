@@ -499,6 +499,29 @@ class CodeReviewScenarioTests(unittest.TestCase):
             r = _result("R14", 2, None, stderr)
             self.assertEqual(Outcome.FAIL, _outcomes("S49", r)[code_review.S49_ASSERTIONS[1]], stderr)
 
+    def test_s49_fails_when_the_toy_secret_reaches_any_output(self) -> None:
+        # [MAGI §6 loop 50, F1a2-caspar] classifying the file as secret proved nothing about its bytes: a product
+        # that echoed them to stdout, stderr or the run log passed every S49 assertion (RV22, every byte out).
+        secret = code_review.S49_SECRET
+        self.assertTrue(secret.startswith(b"sk-"))
+        leaking = (_result("R14", 2, {"leak": secret.decode()}, _SKIPPED_STDERR),
+                   _result("R14", 2, None, _SKIPPED_STDERR + secret + _NL))
+        for r in leaking:
+            self.assertEqual(Outcome.FAIL, _outcomes("S49", r)[code_review.S49_ASSERTIONS[2]])
+        r = _result("R14", 2, None, _SKIPPED_STDERR)
+        self.assertEqual(Outcome.FAIL, _outcomes("S49", r, log=b"x " + secret)[code_review.S49_ASSERTIONS[2]])
+
+    def test_s49_passes_the_secret_assertion_with_no_log_directory(self) -> None:
+        # A refusal may stop before any log is written; an absent log carries no secret.
+        r = _result("R14", 2, None, _SKIPPED_STDERR)
+        self.assertEqual(Outcome.PASS, _outcomes("S49", r, log=None)[code_review.S49_ASSERTIONS[2]])
+
+    def test_s49_cannot_test_the_secret_assertion_over_an_unreadable_log(self) -> None:
+        r = dataclasses.replace(_result("R14", 2, None, _SKIPPED_STDERR), review_log_unreadable=("a.log (locked)",))
+        finding = [f for f in _findings("S49", r) if f.assertion == code_review.S49_ASSERTIONS[2]][0]
+        self.assertEqual(Outcome.CANNOT_TEST, finding.outcome)
+        self.assertIn("a.log (locked)", finding.detail)
+
     def test_s50_passes_when_stderr_and_the_run_log_carry_the_refusal(self) -> None:
         # [MAGI §6 MS2 F loop 2] RV-S7: stderr AND the run log, naming batches, ceiling, floor and minimum.
         log = _BUDGET_LOG % RUN_ID.encode()
