@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 use magi_core::reporting::MagiReport;
 use sha2::{Digest, Sha256};
 
-use super::batching::{file_header, plan_batches, BatchItem, Companion, ReviewBatch};
+use super::batching::{
+    file_header, plan_batches, plan_batches_with, BatchItem, Companion, ReviewBatch,
+};
 use super::clock::{batch_wall_clock_secs, pre_budget};
 use super::consolidate::{
     apply_agreement, consolidate, BatchOutcome, Consolidated, ConsolidatedFinding,
@@ -29,11 +31,12 @@ use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
 use super::input::{renamed_from, resolve_input, ReviewFile, ReviewInput, SourceKind};
 use super::languages::LanguageRegistry;
-use super::rag::{Assembled, ContextKind};
-use super::report::{name, BatchMetrics, ReviewSummary};
-use super::secrets::display_path;
+use super::rag::{Assembled, ContextItem, ContextKind};
+use super::report::{name, BatchMetrics, ReviewSummary, TrimmedItem};
+use super::secrets::{display_path, find_secret};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
+use super::window::estimate_tokens;
 use super::window::{batch_limit_tokens, pool_window, PoolWindow};
 use crate::redact::redact_foreign_text;
 
@@ -173,8 +176,56 @@ pub trait RagSource: Send + Sync {
 ///
 /// `(opening, closing)`, without line breaks.
 pub fn context_frame(kind: &ContextKind, path: &str, candidate: bool) -> (String, String) {
-    let _ = (kind, path, candidate);
-    (String::new(), String::new())
+    let mark = if candidate { CANDIDATE_MARK } else { "" };
+    (
+        format!(
+            "{FRAME_OPEN}kind={} file={}{mark}{FRAME_CLOSE_MARK}",
+            escape_header(context_kind_name(kind)),
+            escape_header(path)
+        ),
+        FRAME_END.to_string(),
+    )
+}
+
+/// What opens a context item's header.
+const FRAME_OPEN: &str = "<<<context ";
+/// What closes a context item's header.
+const FRAME_CLOSE_MARK: &str = ">>>";
+/// The line that closes a context item.
+const FRAME_END: &str = "<<<end context>>>";
+/// The mark of a homonym definition in its header (RV07(2)).
+const CANDIDATE_MARK: &str = " candidate";
+/// How many of one bracket in a row the escaping lets through: a third would make a frame mark.
+const FENCE_RUN: usize = 2;
+
+/// The name a context kind is written under in a frame header: its serialized spelling.
+fn context_kind_name(kind: &ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Unit => "unit",
+        ContextKind::Definition => "definition",
+        ContextKind::Caller => "caller",
+        ContextKind::Documentation => "documentation",
+        ContextKind::History => "history",
+    }
+}
+
+/// `s` with a `\` written before each of `brackets` that would follow [`FENCE_RUN`] copies of
+/// itself. One pass over the characters, remembering the run of the last written one. O(n).
+fn escape_runs(s: &str, brackets: &[char]) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut run: (Option<char>, usize) = (None, 0);
+    for c in s.chars() {
+        if brackets.contains(&c) && run == (Some(c), FENCE_RUN) {
+            out.push('\\');
+            run = (Some('\\'), 1);
+        }
+        run = match run {
+            (Some(last), n) if last == c => (Some(c), n.saturating_add(1)),
+            _ => (Some(c), 1),
+        };
+        out.push(c);
+    }
+    out
 }
 
 /// `s` with a `\` written before every `<` that would make a run of three: the output never
@@ -191,14 +242,13 @@ pub fn context_frame(kind: &ContextKind, path: &str, candidate: bool) -> (String
 ///
 /// The escaped text.
 pub fn escape_fence(s: &str) -> String {
-    s.to_string()
+    escape_runs(s, &['<'])
 }
 
 /// [`escape_fence`] for a header field, with the same rule applied to `>` (`>>>` gives `>>\>`),
 /// so a file name never closes the `<<<context …>>>` header early. O(n).
-#[allow(dead_code)] // Red stub: removed in Green
 fn escape_header(s: &str) -> String {
-    s.to_string()
+    escape_runs(s, &['<', '>'])
 }
 
 /// Seconds elapsed since some fixed instant. Production: [`SystemReviewClock`].
@@ -364,12 +414,17 @@ struct Faces {
 /// 1. Resolve the input and its single content source, wrapped in [`CachedSource`] so every
 ///    stage reads the same bytes, once.
 /// 2. Filter what never leaves the process and what is not code.
-/// 3. Plan the batches against the pool window.
-/// 4. Build the lexical index; then, with an explicit `--timeout` or a caller's deadline, check
-///    the budget ([`pre_budget`]) before any trio call. The total is the `--timeout`, at most what
-///    is left of the deadline when the preparation ends. Steps 1-4 are the preparation, measured
-///    apart and never charged to the `--timeout`.
-/// 5. Run one `consult` per batch, in series. Without `--timeout` each batch runs on the normal
+/// 3. Build the lexical index and plan the batches against the pool window; with a context
+///    source (`deps.rag`), each item's containing unit is charged at planning, the source is
+///    bound to the review's index and content, and every batch's context is assembled, scanned
+///    for secrets and recorded in the summary.
+/// 4. With an explicit `--timeout` or a caller's deadline, check the budget ([`pre_budget`])
+///    before any trio call. The total is the `--timeout`, at most what is left of the deadline
+///    when the preparation ends. Steps 1-4 are the preparation, measured apart (plus the
+///    source's own indexing time, [`RagSource::index_ms`]) and never charged to the
+///    `--timeout`.
+/// 5. Run one `consult` per batch, in series, its context after its code under
+///    [`CONTEXT_HEADING`]. Without `--timeout` each batch runs on the normal
 ///    `consult` clock; with it, each gets what is left split over the pending batches, counted
 ///    from the first trio call. A batch whose wall clock ran out stops the review's batches
 ///    (the cut ones are declared); any other failure is declared and the next batch runs.
@@ -391,8 +446,8 @@ struct Faces {
 /// # Errors
 ///
 /// Any [`ReviewError`] of steps 1-4, all before the first trio call: those of the input, the
-/// filter and the batching, [`ReviewError::InputTooLarge`] from the cache and
-/// [`ReviewError::Budget`].
+/// filter and the batching, [`ReviewError::InputTooLarge`] from the cache, an error of the
+/// context source and [`ReviewError::Budget`].
 ///
 /// O(bytes reviewed) for the preparation, plus the consolidation's own bound.
 pub async fn run_review(
@@ -406,14 +461,20 @@ pub async fn run_review(
     let inner = content_source(resolved.source_kind, req.workspace, deps.git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(req.input, ReviewInput::File(_));
-    let (filtered, window, batches) = with_not_utf8(
-        filter_and_plan(
+    let Planned {
+        filtered,
+        window,
+        batches,
+        index,
+    } = with_not_utf8(
+        filter_and_plan_with(
             resolved.files,
             &source,
             explicit,
             deps.registry,
             deps.is_ignored,
             deps.pool,
+            deps.rag,
         ),
         &resolved.not_utf8,
     )?;
@@ -439,7 +500,10 @@ pub async fn run_review(
             return Err(ReviewError::ContentChanged);
         }
     }
-    let index = build_index(&filtered.kept, &source, deps.registry)?;
+    let index = match index {
+        Some(index) => index,
+        None => build_index(&filtered.kept, &source, deps.registry)?,
+    };
     summary.symbol_check_skipped = !index.is_complete();
     if summary.symbol_check_skipped {
         tracing::event!(
@@ -448,6 +512,16 @@ pub async fn run_review(
             "the lexical index hit its cap: the symbol check is off for this review"
         );
     }
+    // §5.0 stage 3, before the clock: every batch's context is assembled and scanned now, so the
+    // embedder's latency is never charged to the review's total (RV06).
+    let contexts = match deps.rag {
+        Some(rag) => {
+            let bound = bind(rag, &index, &source);
+            let rag = bound.as_deref().unwrap_or(rag);
+            prepare_contexts(rag, &batches, &mut summary).await?
+        }
+        None => vec![Vec::new(); batches.len()],
+    };
     let bound = review_total(req.timeout_secs, req.deadline);
     let total = bound.map(|(secs, _)| secs);
     if let Some((total, limit)) = bound {
@@ -455,14 +529,15 @@ pub async fn run_review(
             .map_err(|e| with_budget_limit(e, limit))?;
         summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
     }
-    summary.prep_ms = millis(prep.elapsed());
+    summary.prep_ms =
+        millis(prep.elapsed()).saturating_add(deps.rag.map_or(0, |rag| rag.index_ms()));
 
     let clock = ReviewTimer {
         clock: deps.clock,
         t0: deps.clock.elapsed_secs(),
         total,
     };
-    let finished = run_batches(&batches, deps.consult, &clock, &mut summary).await;
+    let finished = run_batches(&batches, &contexts, deps.consult, &clock, &mut summary).await;
 
     // MAGI FIX (S6 loop 4): `planned` is never 0 here: a plan without a batch already failed in
     // `filter_and_plan` with `NothingToReview` naming the files left out (RV20), before any spend.
@@ -481,7 +556,8 @@ pub async fn run_review(
     }
 
     let completed: BTreeSet<usize> = finished.iter().map(|f| f.batch).collect();
-    let reviewed = reviewed_of(&batches, &completed, &source);
+    let mut reviewed = reviewed_of(&batches, &completed, &source);
+    record_shown_context(&mut reviewed, &contexts, &completed);
     let workspace = without_verbatim_prefix(req.workspace);
     let old_paths = renamed_old_paths(&filtered.kept);
     let renames: HashMap<String, String> = old_paths
@@ -533,6 +609,9 @@ pub async fn run_review(
         );
     }
 
+    // A containing unit's lines are not a face of the gate: a context item does not say which
+    // side it was read from (a deletion's unit comes from the old side), so a finding there that
+    // no hunk holds reaches the gate as `no location` and is never filtered (the safe direction).
     let faces = faces_of(&batches, &completed);
     let mut verdicts = Vec::with_capacity(consolidated.findings.len());
     for finding in &consolidated.findings {
@@ -593,6 +672,8 @@ pub async fn run_review(
 /// * `is_ignored` - Whether `.gitignore` excludes a path.
 /// * `registry` - The language extractors.
 /// * `pool` - The pool, as `(model, measured window)`.
+/// * `rag` - The review's context source, the one [`run_review`] will get: with it the batches
+///   are planned with each item's containing unit counted, as the run plans them.
 ///
 /// # Returns
 ///
@@ -604,6 +685,9 @@ pub async fn run_review(
 /// the batching and [`ReviewError::InputTooLarge`].
 ///
 /// O(bytes reviewed).
+// Each argument is one dependency `run_review` takes through `ReviewDeps`; a struct for the one
+// planning call would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_review(
     input: &ReviewInput,
     workspace: &Path,
@@ -612,25 +696,27 @@ pub fn plan_review(
     is_ignored: &(dyn Fn(&str) -> bool + Sync),
     registry: &LanguageRegistry,
     pool: &[(String, Option<usize>)],
+    rag: Option<&dyn RagSource>,
 ) -> Result<PlanFingerprint, ReviewError> {
     let resolved = resolve_input(input, workspace, git, guard)?;
     let inner = content_source(resolved.source_kind, workspace, git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(input, ReviewInput::File(_));
-    let (filtered, _, batches) = with_not_utf8(
-        filter_and_plan(
+    let planned = with_not_utf8(
+        filter_and_plan_with(
             resolved.files,
             &source,
             explicit,
             registry,
             is_ignored,
             pool,
+            rag,
         ),
         &resolved.not_utf8,
     )?;
     Ok(PlanFingerprint {
-        batches: batches.len(),
-        digest: content_digest(&filtered.kept, &source)?,
+        batches: planned.batches.len(),
+        digest: content_digest(&planned.filtered.kept, &source)?,
     })
 }
 
@@ -693,6 +779,58 @@ fn with_not_utf8<T>(
 
 /// Steps 2-3 of §5.0 over the resolved files, shared by [`run_review`] and [`plan_review`]: the
 /// filter, the pool window and the batches. O(bytes reviewed).
+fn filter_and_plan_with(
+    files: Vec<ReviewFile>,
+    source: &dyn ContentSource,
+    explicit: bool,
+    registry: &LanguageRegistry,
+    is_ignored: &dyn Fn(&str) -> bool,
+    pool: &[(String, Option<usize>)],
+    rag: Option<&dyn RagSource>,
+) -> Result<Planned, ReviewError> {
+    let filtered = filter_files(files, source, registry, explicit, is_ignored)?;
+    let window = pool_window(pool);
+    let limit = batch_limit_tokens(&window);
+    // With RAG the lexical index is built first: binding the context source to the review needs
+    // it, and planning charges each item's containing unit (`companion`) against the limit less
+    // the context heading, so a batch is planned with its units already counted.
+    let (index, planned) = match rag {
+        Some(rag) => {
+            let index = build_index(&filtered.kept, source, registry)?;
+            let planned = {
+                let bound = bind(rag, &index, source);
+                let rag = bound.as_deref().unwrap_or(rag);
+                plan_batches_with(
+                    &filtered.kept,
+                    source,
+                    registry,
+                    limit.saturating_sub(estimate_tokens(CONTEXT_HEADING)),
+                    &|item| rag.companion(item),
+                )
+            };
+            (Some(index), planned)
+        }
+        None => (None, plan_batches(&filtered.kept, source, registry, limit)),
+    };
+    // MAGI FIX (S6 loop 4): when the kept files give no batch (all empty, or diffs without a
+    // hunk), the error names what the filter left out, as the filter's own error does.
+    let batches = planned.map_err(|e| match e {
+        ReviewError::NothingToReview { .. } => ReviewError::NothingToReview {
+            skipped: filtered.skipped.clone(),
+        },
+        other => other,
+    })?;
+    Ok(Planned {
+        filtered,
+        window,
+        batches,
+        index,
+    })
+}
+
+/// [`filter_and_plan_with`] without a context source, as the MS2 tests of the filter and the
+/// batching call it.
+#[cfg(test)]
 fn filter_and_plan(
     files: Vec<ReviewFile>,
     source: &dyn ContentSource,
@@ -701,23 +839,29 @@ fn filter_and_plan(
     is_ignored: &dyn Fn(&str) -> bool,
     pool: &[(String, Option<usize>)],
 ) -> Result<(Filtered, PoolWindow, Vec<ReviewBatch>), ReviewError> {
-    let filtered = filter_files(files, source, registry, explicit, is_ignored)?;
-    let window = pool_window(pool);
-    // MAGI FIX (S6 loop 4): when the kept files give no batch (all empty, or diffs without a
-    // hunk), the error names what the filter left out, as the filter's own error does.
-    let batches = plan_batches(
-        &filtered.kept,
-        source,
-        registry,
-        batch_limit_tokens(&window),
-    )
-    .map_err(|e| match e {
-        ReviewError::NothingToReview { .. } => ReviewError::NothingToReview {
-            skipped: filtered.skipped.clone(),
-        },
-        other => other,
-    })?;
-    Ok((filtered, window, batches))
+    filter_and_plan_with(files, source, explicit, registry, is_ignored, pool, None)
+        .map(|p| (p.filtered, p.window, p.batches))
+}
+
+/// What [`filter_and_plan_with`] produced.
+struct Planned {
+    /// The filter's result.
+    filtered: Filtered,
+    /// The pool window.
+    window: PoolWindow,
+    /// The batches.
+    batches: Vec<ReviewBatch>,
+    /// The lexical index, when planning needed it (with RAG).
+    index: Option<LexicalIndex>,
+}
+
+/// `rag` bound to one review's index and content source, or `None` when it serves as it is.
+fn bind<'r>(
+    rag: &'r dyn RagSource,
+    index: &'r LexicalIndex,
+    sources: &'r dyn ContentSource,
+) -> Option<Box<dyn RagSource + 'r>> {
+    rag.for_review(ReviewMaterial { index, sources })
 }
 
 /// The review's total in seconds, read when the preparation ends, with the bound that set it:
@@ -805,6 +949,7 @@ impl ReviewTimer<'_> {
 /// tokens: its report never arrived); a batch cut before it started spent nothing and has none.
 async fn run_batches(
     batches: &[ReviewBatch],
+    contexts: &[Vec<ContextItem>],
     consult: &dyn BatchConsult,
     clock: &ReviewTimer<'_>,
     summary: &mut ReviewSummary,
@@ -817,7 +962,11 @@ async fn run_batches(
             Duration::from_secs(batch_wall_clock_secs(left, pending))
         });
         let started = Instant::now();
-        match consult.consult(&prompt_of(batch), wall).await {
+        let mut prompt = prompt_of(batch);
+        if let Some(items) = contexts.get(batch.index) {
+            write_context(&mut prompt, items);
+        }
+        match consult.consult(&prompt, wall).await {
             Ok(report) => {
                 summary
                     .batches
@@ -897,6 +1046,140 @@ fn prompt_of(batch: &ReviewBatch) -> String {
         }
     }
     prompt
+}
+
+/// Writes a batch's retrieved context after its code: [`CONTEXT_HEADING`], then each item in
+/// its frame ([`context_frame`]), its text escaped with [`escape_fence`] (a fixed point, so a
+/// source that already escaped is unchanged). Nothing is written without items. O(bytes).
+fn write_context(prompt: &mut String, items: &[ContextItem]) {
+    if items.is_empty() {
+        return;
+    }
+    if !prompt.ends_with('\n') {
+        prompt.push('\n');
+    }
+    prompt.push('\n');
+    prompt.push_str(CONTEXT_HEADING);
+    prompt.push('\n');
+    for item in items {
+        let (open, close) = context_frame(&item.kind, &display_path(&item.file), item.candidate);
+        prompt.push_str(&open);
+        prompt.push('\n');
+        prompt.push_str(&escape_fence(&item.text));
+        if !item.text.ends_with('\n') {
+            prompt.push('\n');
+        }
+        prompt.push_str(&close);
+        prompt.push('\n');
+    }
+}
+
+/// Position of a context kind in the fixed priority (unit, definition, caller, documentation,
+/// history).
+fn kind_rank(kind: &ContextKind) -> u8 {
+    match kind {
+        ContextKind::Unit => 0,
+        ContextKind::Definition => 1,
+        ContextKind::Caller => 2,
+        ContextKind::Documentation => 3,
+        ContextKind::History => 4,
+    }
+}
+
+/// Whether the secret detector matches an item's text, path or label (RV22).
+fn holds_secret(item: &ContextItem) -> bool {
+    find_secret(&item.text).is_some()
+        || find_secret(&item.file).is_some()
+        || find_secret(&item.label).is_some()
+}
+
+/// Adds a [`SkipCause::Secret`] entry for `path` (as [`display_path`] shows it) unless one is
+/// already listed. O(skipped).
+fn skip_for_secret(summary: &mut ReviewSummary, path: &str) {
+    let shown = display_path(path);
+    if !summary
+        .skipped
+        .iter()
+        .any(|s| s.cause == SkipCause::Secret && s.path == shown)
+    {
+        summary.skipped.push(Skipped {
+            path: shown,
+            cause: SkipCause::Secret,
+        });
+    }
+}
+
+/// The context of every batch, assembled before the first trio call (§5.0 stage 3).
+///
+/// Each item is passed through the secret detector (text, path and label, whatever its kind):
+/// one that matches never reaches the prompt, counts in `context_withheld` and lists its file as
+/// skipped with cause `secret`. The source's declarations (trimmed items, a missing embedder,
+/// `--no-memory`, withheld counts) reach `summary` here, so a batch the clock later cuts still
+/// declares them; the documentation paths the source left out for a secret are listed as
+/// skipped once each. The kept items are sorted, stably, by the fixed priority.
+/// O(items + bytes of the items).
+///
+/// # Errors
+///
+/// The first error of `rag`, before any trio call.
+async fn prepare_contexts(
+    rag: &dyn RagSource,
+    batches: &[ReviewBatch],
+    summary: &mut ReviewSummary,
+) -> Result<Vec<Vec<ContextItem>>, ReviewError> {
+    let mut contexts = Vec::with_capacity(batches.len());
+    for batch in batches {
+        let assembled = rag.context_for(batch).await?;
+        summary.trimmed.extend(
+            assembled
+                .trimmed
+                .into_iter()
+                .map(|(kind, label)| TrimmedItem {
+                    kind,
+                    label: display_path(&label),
+                }),
+        );
+        summary.without_embedder |= assembled.without_embedder;
+        summary.without_memory |= assembled.without_memory;
+        summary.context_withheld = summary.context_withheld.saturating_add(assembled.withheld);
+        let mut kept = Vec::with_capacity(assembled.items.len());
+        for item in assembled.items {
+            if holds_secret(&item) {
+                summary.context_withheld = summary.context_withheld.saturating_add(1);
+                skip_for_secret(summary, &item.file);
+            } else {
+                kept.push(item);
+            }
+        }
+        kept.sort_by_key(|item| kind_rank(&item.kind));
+        contexts.push(kept);
+    }
+    for path in rag.skipped() {
+        skip_for_secret(summary, &path);
+    }
+    Ok(contexts)
+}
+
+/// What the completed batches showed as context (U24, RV09): a containing unit's lines count as
+/// reviewed, every other item's file as context only. O(items · log r).
+fn record_shown_context(
+    reviewed: &mut Reviewed,
+    contexts: &[Vec<ContextItem>],
+    completed: &BTreeSet<usize>,
+) {
+    for (batch, items) in contexts.iter().enumerate() {
+        if !completed.contains(&batch) {
+            continue;
+        }
+        for item in items {
+            match (&item.kind, item.lines) {
+                (ContextKind::Unit, Some((first, last))) => {
+                    reviewed.add_lines(&item.file, first, last);
+                }
+                _ => reviewed.add_context_file(&item.file),
+            }
+        }
+    }
 }
 
 /// The metrics of a completed batch: every completion record's tokens, summed over the seats.
@@ -1585,8 +1868,17 @@ mod tests {
         let registry = LanguageRegistry::new();
         let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
         let input = ReviewInput::Directory(dir.to_path_buf());
-        let plan =
-            plan_review(&input, dir, &git, &guard, &|_| false, &registry, &pool).expect("plans");
+        let plan = plan_review(
+            &input,
+            dir,
+            &git,
+            &guard,
+            &|_| false,
+            &registry,
+            &pool,
+            None,
+        )
+        .expect("plans");
         between();
         run_review(
             ReviewRequest {

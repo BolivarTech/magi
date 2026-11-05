@@ -455,6 +455,11 @@ class RunDefinition:
             fails every scenario that reads the run when there is one. It
             needs the review workspace, whose configuration is the one
             rewritten.
+        unreachable_embedder: Whether the review workspace's ``[embedding]``
+            is pointed at :data:`UNREACHABLE_EMBEDDER_URL` before the run
+            (:func:`point_embedding_at`), so documentation and history cannot
+            be retrieved while the trio still answers. It needs the review
+            workspace too.
     """
 
     run_id: str
@@ -468,6 +473,7 @@ class RunDefinition:
     rotates: bool = False
     files: tuple[tuple[str, bytes], ...] = ()
     forbids_model_calls: bool = False
+    unreachable_embedder: bool = False
 
     def __post_init__(self) -> None:
         """Refuse files, or a model-call ban, on a run without a review workspace.
@@ -490,6 +496,10 @@ class RunDefinition:
             raise HarnessError(
                 "run %s forbids model calls but has no %s whose endpoints "
                 "could be counted" % (self.run_id, REVIEW_WORKSPACE_TOKEN))
+        if self.unreachable_embedder and REVIEW_WORKSPACE_TOKEN not in self.argv:
+            raise HarnessError(
+                "run %s points its embedder away but has no %s whose "
+                "configuration could be rewritten" % (self.run_id, REVIEW_WORKSPACE_TOKEN))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -626,8 +636,11 @@ LARGE_CONSULT_CEILING_S = 20184
 #: window (16 384 tokens), so a review plans at least five batches. Five times
 #: R4's 283 s plus the gate is about 1 500 s. Replace it with R12's own wall
 #: clock at the first run against a real backend.
+#: R17's 300 s is provisional too, not a measurement: one batch over one small
+#: file (R10's 67 s consult), plus the trio per batch and the gate, rounded up.
+#: Replace it with R17's own wall clock at the first run against a real backend.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
-                                        "R10": 67, "R12": 1500}
+                                        "R10": 67, "R12": 1500, "R17": 300}
 
 #: The factor a trio run's ``timeout_s`` must reach over its measurement in
 #: :data:`TRIO_RUNS_MEASURED_S`: at least this many times it, equality
@@ -2094,6 +2107,91 @@ def review_skipped_files() -> tuple[tuple[str, bytes], ...]:
             (REVIEW_SKIPPED_DIR + "/leak.txt", _TOY_SECRET_FILE))
 
 
+#: Directory (workspace-relative) R17 reviews: one small source file, so the run
+#: costs one batch.
+REVIEW_CONTEXT_DIR = "ctx"
+
+#: The one file R17 reviews: a short, plain function, enough for one batch.
+_REVIEW_CONTEXT_FILE = (b"/// Adds two numbers.\n"
+                        b"fn add(a: i32, b: i32) -> i32 {\n"
+                        b"    a + b\n"
+                        b"}\n")
+
+#: Where R17's ``[embedding]`` points: TCP port 9 (discard) on loopback, which
+#: nothing listens on in the harness, so every embedding request is refused at
+#: once and the review must go on without documentation and history.
+UNREACHABLE_EMBEDDER_URL = "http://127.0.0.1:9/v1"
+
+#: The table whose endpoint :func:`point_embedding_at` rewrites.
+_EMBEDDING_TABLE = "[embedding]"
+
+
+def review_context_files() -> tuple[tuple[str, bytes], ...]:
+    """The file R17 reviews.
+
+    Returns:
+        tuple: One ``(path, content)`` pair: a small Rust function.
+    """
+    return ((REVIEW_CONTEXT_DIR + "/add.rs", _REVIEW_CONTEXT_FILE),)
+
+
+def point_embedding_at(config_path, url: str) -> None:
+    """Rewrite the ``magi.toml`` at *config_path* so ``[embedding]`` reaches *url*.
+
+    Every other line is kept: the trio and the gate still reach the real
+    backend. An active ``base_url`` inside ``[embedding]`` is replaced; without
+    one the line is added right after the table header; without the table, the
+    table is appended. Line-based like :func:`point_config_at`, and parsed back
+    by the product, which refuses a duplicate key.
+
+    Complexity: ``O(file bytes)``.
+
+    Args:
+        config_path: The configuration to rewrite in place.
+        url: The endpoint ``[embedding]`` must reach.
+
+    Raises:
+        HarnessError: When the file cannot be read or written.
+
+    Example:
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory() as tmp:
+        ...     path = pathlib.Path(tmp) / "magi.toml"
+        ...     _ = path.write_text('base_url = "r"\\n[embedding]\\nmodel = "m"\\n')
+        ...     point_embedding_at(path, "http://127.0.0.1:9/v1")
+        ...     path.read_text().splitlines()
+        ['base_url = "r"', '[embedding]', 'base_url = "http://127.0.0.1:9/v1"', 'model = "m"']
+    """
+    line = 'base_url = "%s"' % url
+    try:
+        text = pathlib.Path(config_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise HarnessError("could not read %s to point its embedder away: %s"
+                           % (config_path, exc)) from exc
+    lines, in_embedding, placed = [], False, False
+    for original in text.splitlines():
+        stripped = original.strip()
+        if stripped.startswith("["):
+            in_embedding = stripped == _EMBEDDING_TABLE
+            lines.append(original)
+            if in_embedding:
+                lines.append(line)
+                placed = True
+            continue
+        is_endpoint = (stripped.startswith("base_url")
+                       and stripped[len("base_url"):].lstrip().startswith("="))
+        if in_embedding and is_endpoint:
+            continue
+        lines.append(original)
+    if not placed:
+        lines.extend((_EMBEDDING_TABLE, line))
+    try:
+        pathlib.Path(config_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise HarnessError("could not point %s's embedder away: %s"
+                           % (config_path, exc)) from exc
+
+
 def _envelope(prompt: str, system: str) -> bytes:
     """Serialise a ``{prompt, system}`` request envelope.
 
@@ -3108,6 +3206,14 @@ DEFINITIONS: dict[str, RunDefinition] = {
         forbids_model_calls=True,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         files=review_skipped_files()),
+    # R17 feeds S52: a one-batch review against the real trio whose embedder is
+    # unreachable, so it must report without documentation and history.
+    "R17": RunDefinition(
+        run_id="R17",
+        argv=("code-review",) + REVIEW_FLAGS + (REVIEW_CONTEXT_DIR,),
+        stdin=b"",
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
+        files=review_context_files(), unreachable_embedder=True),
 }
 
 
@@ -3205,6 +3311,12 @@ class RunExecutor:
         """
         started = time.monotonic()
         workspace = self._prepare_review_workspace(definition)
+        if definition.unreachable_embedder:
+            if workspace is None:
+                raise HarnessError("run %s points its embedder away but has no review "
+                                   "workspace" % definition.run_id)
+            point_embedding_at(workspace.joinpath(*CONFIG_PATH_PARTS),
+                               UNREACHABLE_EMBEDDER_URL)
         # A second listing, after the run's files are written and before the
         # product starts: what the product's own enumeration will see.
         protected = () if workspace is None else protected_candidates(workspace)

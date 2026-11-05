@@ -2429,6 +2429,12 @@ impl App {
                     let failure = crate::agent::Agent::sanitize_text(&failure);
                     apply_response(self, AgentResponse::Error(failure));
                 }
+                // After the report is on screen: the history and the index clean-up. Its warning
+                // goes through the UI, never to stderr while the alternate screen is up.
+                if let Some(warning) = runner.after_report() {
+                    let warning = crate::agent::Agent::sanitize_text(&warning);
+                    apply_response(self, AgentResponse::Error(warning));
+                }
             }
             Err(e) => {
                 let text = magi_rs::redact::redact_foreign_text(&e.to_string()).to_string();

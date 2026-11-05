@@ -4,41 +4,93 @@
 
 //! The retrieved context of a `code-review` batch, from the encrypted stores and the embedder
 //! (REQ-RV07, RV08, RV19, RV21, RV22).
-#![allow(dead_code)] // Red stub: removed in Green
+//!
+//! Per review: [`prepare_docs`] lists the reviewed revision's documentation sources, indexes the
+//! ones the store lacks and degrades (documentation left out, declared once) when it cannot;
+//! [`StoreRag`] then gives each batch its containing units, definitions, callers, documentation
+//! and validated history, assembled to the batch budget; after the report, [`record_review`]
+//! reclassifies and records the history and [`collect_garbage`] drops the documentation nothing
+//! reaches any more.
+//!
+//! # Lock discipline
+//!
+//! The query is embedded before any store is touched, and every store call is a short
+//! synchronous one: no database lock is ever held across an `.await`.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rusqlite::Connection;
+use tokio::time::Instant;
+
 use magi_rs::review::batching::{BatchItem, Companion, ReviewBatch};
-use magi_rs::review::docs::{DocChunk, DocSource};
+use magi_rs::review::docs::{
+    bounded, chunk_source, doc_index_id, is_doc_source, live_doc_sources, revision_doc_sources,
+    without_secrets, worktree_key, DocChunk, DocSource,
+};
 use magi_rs::review::error::ReviewError;
-use magi_rs::review::history::HistoryEntry;
+use magi_rs::review::history::{reclassify_then_record, HistoryEntry, MAX_RECLASSIFY_PER_REVIEW};
 use magi_rs::review::index::LexicalIndex;
 use magi_rs::review::input::SourceKind;
 use magi_rs::review::languages::LanguageRegistry;
-use magi_rs::review::pipeline::RagSource;
-use magi_rs::review::rag::{Assembled, IndexDeclarations};
+use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
+use magi_rs::review::rag::{
+    assemble, callers_for, containing_unit, declare_index, definitions_for, doc_query, item_cost,
+    Assembled, ContextItem, ContextKind, IndexDeclarations, CONTEXT_ITEM_FRAME_TOKENS,
+    MAX_CALLERS_PER_NAME,
+};
+use magi_rs::review::secrets::{display_path, find_secret, outward_text};
 use magi_rs::review::source::{ContentSource, GitCommand};
+use magi_rs::review::window::estimate_tokens;
+use magi_rs::vault::MaskedDek;
 
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
-use crate::memory::review_docs::ReviewDocStore;
+use crate::memory::review_docs::{ReviewDocStore, EMBED_BATCH_ITEMS};
 use crate::memory::review_history::ReviewHistoryStore;
 
-/// Wall-clock bound on one reclassification pass of the review history.
+/// Wall-clock bound on one reclassification pass of the review history, checked between
+/// entries. Each entry's git calls carry MS2's own `GIT_CALL_TIMEOUT_SECS`, so a pass lasts at
+/// most this plus the calls of the entry in flight, instead of up to
+/// `MAX_RECLASSIFY_PER_REVIEW` hung calls.
 pub const RECLASSIFY_BUDGET_SECS: u64 = 60;
 
-/// Bound on embedding one batch's documentation query.
+/// Bound on embedding one batch's documentation query (one short text): a local embedder
+/// answers in well under a second, so 30 s only fires on a hung or unreachable one.
 pub const EMBED_QUERY_TIMEOUT_SECS: u64 = 30;
 
 /// Documentation chunks retrieved per batch before `assemble` trims to the budget.
 pub const DOC_SEARCH_K: usize = 8;
 
-/// Bound on the whole documentation preparation of one review.
+/// Bound on the whole documentation preparation of one review (listing, reads and every
+/// reindex), checked between steps and sources; it runs before the review clock (RV06).
 pub const REINDEX_TIMEOUT_SECS: u64 = 120;
 
+/// Run-log target of this module's entries.
+const LOG_TARGET: &str = "magi_rs::review";
+
+/// The `trimmed` label of a documentation or history source that is unavailable for the review.
+const INDEX_UNAVAILABLE: &str = "index unavailable";
+
+/// The fixed run-log line of a reindex that wiped an index of another identity.
+const REBUILT_LINE: &str = "documentation index rebuilt: embedding model or chunking changed";
+
+/// What [`ReviewRag::context_for`] answers: the source must be bound to a review first.
+const UNBOUND_SOURCE: &str = "the review context was read before it was bound to a review";
+
+/// The text embedded once to learn the dimension of an embedder that autodetects it.
+const DIMENSION_PROBE: &str = "dimension";
+
 /// The context source of one review, over the stores and the review's own content.
+///
+/// # Examples
+///
+/// ```ignore
+/// let rag = StoreRag { docs: Some(&docs), history: Some(&history), /* ... */ }.with_prep(prep);
+/// let assembled = rag.context_for(&batch).await?;
+/// ```
 pub struct StoreRag<'a> {
     /// The documentation index; `None` with `--no-memory`.
     pub docs: Option<&'a ReviewDocStore>,
@@ -52,25 +104,25 @@ pub struct StoreRag<'a> {
     pub registry: &'a LanguageRegistry,
     /// The `[embedding]` embedder, if any.
     pub embedder: Option<&'a dyn EmbeddingProvider>,
-    /// The batch limit in tokens.
+    /// The batch limit in tokens (the context heading is taken off it here).
     pub limit_tokens: usize,
-    /// What indexing left out.
+    /// What indexing left out, declared by the first batch.
     pub doc_index: IndexDeclarations,
     /// Whether the index declarations were already reported.
     pub declared: AtomicBool,
-    /// The documentation index could not be completed for this revision.
+    /// The documentation index could not be completed for this revision (it is not searched).
     pub docs_unavailable: bool,
-    /// The query embedder failed once.
+    /// The query embedder failed once: no later batch calls it.
     pub embedder_down: AtomicBool,
-    /// A documentation read failed once.
+    /// A documentation read failed once: no later batch searches.
     pub docs_failed: AtomicBool,
-    /// A history read failed once.
+    /// A history read failed once: no later batch reads it.
     pub history_failed: AtomicBool,
-    /// The reviewed revision's documentation sources.
+    /// The reviewed revision's documentation sources: `search` sees only these (RV21).
     pub doc_sources: BTreeSet<DocSource>,
-    /// Documentation paths left out for a secret, as `display_path`.
+    /// Documentation paths left out for a secret, as `display_path`, returned by `skipped`.
     pub withheld_sources: Vec<String>,
-    /// Milliseconds the documentation preparation took.
+    /// Milliseconds the documentation preparation took, returned by `index_ms`.
     pub index_ms: u64,
 }
 
@@ -79,53 +131,624 @@ pub struct StoreRag<'a> {
 pub struct DocPrep {
     /// The reviewed revision's documentation sources.
     pub doc_sources: BTreeSet<DocSource>,
-    /// What indexing left out.
+    /// What indexing left out: sources withheld for a secret, and whether it was cut.
     pub doc_index: IndexDeclarations,
-    /// The index could not be completed.
+    /// The index could not be completed: the review serves no documentation (B).
     pub docs_unavailable: bool,
     /// Milliseconds the preparation took.
     pub index_ms: u64,
-    /// Sources left out for a secret.
+    /// Sources left out for a secret, as `display_path`.
     pub withheld_sources: Vec<String>,
 }
 
 /// What one [`record_review`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordStats {
-    /// Due entries checked.
+    /// Due entries checked this review.
     pub reclassified: usize,
     /// New entries recorded.
     pub recorded: usize,
-    /// Due entries left for a later review.
+    /// Due entries left for a later review (the total minus those checked now).
     pub backlog: usize,
 }
 
-impl<'a> StoreRag<'a> {
-    /// Moves a preparation into the source.
-    pub fn with_prep(self, prep: DocPrep) -> Self {
-        let _ = prep;
+/// `item` with its text escaped for its frame, so what is charged is what is written.
+fn escaped(item: ContextItem) -> ContextItem {
+    ContextItem {
+        text: escape_fence(&item.text),
+        ..item
+    }
+}
+
+/// The file of a batch item.
+fn item_file(item: &BatchItem) -> &str {
+    match item {
+        BatchItem::Hunk { file, .. }
+        | BatchItem::Unit { file, .. }
+        | BatchItem::WholeFile { file, .. } => file,
+    }
+}
+
+/// The text of a batch item.
+fn item_text(item: &BatchItem) -> &str {
+    match item {
+        BatchItem::Hunk { text, .. }
+        | BatchItem::Unit { text, .. }
+        | BatchItem::WholeFile { text, .. } => text,
+    }
+}
+
+/// The batch's raw code, one item per line block. O(bytes of the batch).
+fn batch_text(batch: &ReviewBatch) -> String {
+    batch
+        .items
+        .iter()
+        .map(item_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The distinct files of a batch, in order.
+fn batch_files(batch: &ReviewBatch) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    batch
+        .items
+        .iter()
+        .map(item_file)
+        .filter(|f| seen.insert(*f))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The names of the changed units: each containing unit's, and each unit item's. A whole file
+/// names none (its callers would be every caller of the file).
+fn changed_names(batch: &ReviewBatch, units: &[ContextItem]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    units
+        .iter()
+        .map(|u| u.label.as_str())
+        .chain(batch.items.iter().filter_map(|i| match i {
+            BatchItem::Unit { name, .. } => Some(name.as_str()),
+            _ => None,
+        }))
+        .filter(|n| seen.insert(*n))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A documentation chunk as a context item, labelled by its section (its path without one).
+fn doc_item(chunk: DocChunk) -> ContextItem {
+    let label = if chunk.section.is_empty() {
+        chunk.path.clone()
+    } else {
+        chunk.section
+    };
+    ContextItem {
+        kind: ContextKind::Documentation,
+        file: chunk.path,
+        label,
+        text: escape_fence(&chunk.text),
+        candidate: false,
+        lines: None,
+    }
+}
+
+/// A validated history entry as a context item: its title, its status and its detail.
+fn history_item(e: HistoryEntry) -> ContextItem {
+    let text = format!("{} ({})\n{}", e.title, e.status.as_str(), e.detail);
+    ContextItem {
+        kind: ContextKind::History,
+        lines: e.line.map(|l| (l, l)),
+        label: e.title,
+        file: e.file,
+        text: escape_fence(&text),
+        candidate: false,
+    }
+}
+
+/// A duration in whole milliseconds, saturating.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+impl StoreRag<'_> {
+    /// Moves a preparation into the source: its sources, declarations, degradation, duration and
+    /// withheld paths.
+    ///
+    /// # Arguments
+    ///
+    /// * `prep` - What [`prepare_docs`] produced for this review.
+    ///
+    /// # Returns
+    ///
+    /// The source, ready for the review.
+    pub fn with_prep(mut self, prep: DocPrep) -> Self {
+        self.doc_sources = prep.doc_sources;
+        self.doc_index = prep.doc_index;
+        self.docs_unavailable = prep.docs_unavailable;
+        self.index_ms = prep.index_ms;
+        self.withheld_sources = prep.withheld_sources;
         self
+    }
+
+    /// The query's vector, embedded under [`EMBED_QUERY_TIMEOUT_SECS`]; `None` when the embedder
+    /// fails or does not answer, which marks it down for the rest of the review with one WARN.
+    async fn query_vector(&self, embedder: &dyn EmbeddingProvider, text: &str) -> Option<Vec<f32>> {
+        if self.embedder_down.load(Ordering::SeqCst) {
+            return None;
+        }
+        let query = format!("{}{}", embedder.query_prefix(), doc_query(text));
+        let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
+        let cause = match tokio::time::timeout(bound, embedder.embed(&[query])).await {
+            Ok(Ok(mut vectors)) => match vectors.pop() {
+                Some(v) if !v.is_empty() => return Some(v),
+                _ => "the embedder answered no vector".to_string(),
+            },
+            Ok(Err(e)) => outward_text(&e.to_string()),
+            Err(_) => format!("no answer within {EMBED_QUERY_TIMEOUT_SECS} s"),
+        };
+        if !self.embedder_down.swap(true, Ordering::SeqCst) {
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                error = cause.as_str(),
+                "the embedder did not answer: documentation and history are left out of this review"
+            );
+        }
+        None
+    }
+
+    /// The documentation chunks closest to `vector`, among the revision's own sources only.
+    /// A read error leaves documentation out for the rest of the review, declared once.
+    fn documentation(
+        &self,
+        vector: &[f32],
+        declared: &mut Vec<(ContextKind, String)>,
+    ) -> Vec<ContextItem> {
+        let Some(docs) = self.docs else {
+            return Vec::new();
+        };
+        if self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
+        match docs.search(vector, DOC_SEARCH_K, &self.doc_sources) {
+            Ok(hits) => hits.into_iter().map(|(chunk, _)| doc_item(chunk)).collect(),
+            Err(e) => {
+                if !self.docs_failed.swap(true, Ordering::SeqCst) {
+                    let error = outward_text(&e.to_string());
+                    tracing::event!(
+                        target: LOG_TARGET,
+                        tracing::Level::WARN,
+                        error = error.as_str(),
+                        "the documentation index could not be read: documentation is left out"
+                    );
+                    declared.push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// The validated history on `files`; an entry whose title or detail holds a secret counts in
+    /// `withheld` instead. A read error leaves history out for the rest of the review, declared
+    /// once.
+    fn history_items(
+        &self,
+        files: &[String],
+        declared: &mut Vec<(ContextKind, String)>,
+        withheld: &mut usize,
+    ) -> Vec<ContextItem> {
+        let Some(history) = self.history else {
+            return Vec::new();
+        };
+        if self.history_failed.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
+        match history.validated_on_files(files) {
+            Ok(entries) => entries
+                .into_iter()
+                .filter_map(|e| {
+                    if find_secret(&e.title).is_some() || find_secret(&e.detail).is_some() {
+                        *withheld = withheld.saturating_add(1);
+                        None
+                    } else {
+                        Some(history_item(e))
+                    }
+                })
+                .collect(),
+            Err(e) => {
+                if !self.history_failed.swap(true, Ordering::SeqCst) {
+                    let error = outward_text(&e.to_string());
+                    tracing::event!(
+                        target: LOG_TARGET,
+                        tracing::Level::WARN,
+                        error = error.as_str(),
+                        "the review history could not be read: history is left out"
+                    );
+                    declared.push((ContextKind::History, INDEX_UNAVAILABLE.to_string()));
+                }
+                Vec::new()
+            }
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl RagSource for StoreRag<'_> {
+    /// The batch's context: containing units, definitions and callers from the review's own
+    /// content, then documentation and history when there is a database and an embedder.
+    ///
+    /// The query is embedded only when something could still enter the budget, and before any
+    /// store is touched. A missing embedder is declared as `without_embedder`, a run without a
+    /// database as `without_memory`; a failing embedder or store degrades, never fails.
+    async fn context_for(&self, batch: &ReviewBatch) -> Result<Assembled, ReviewError> {
+        let text = batch_text(batch);
+        let mut units = Vec::new();
+        for item in &batch.items {
+            if let Some(unit) = containing_unit(item, self.sources, self.registry)? {
+                units.push(escaped(unit));
+            }
+        }
+        let mut code = definitions_for(&text, self.index, self.sources)?;
+        let names = changed_names(batch, &units);
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (callers, capped) = callers_for(&refs, self.index, self.sources, self.registry)?;
+        code.extend(callers);
+        let code: Vec<ContextItem> = code.into_iter().map(escaped).collect();
+        let limit = self
+            .limit_tokens
+            .saturating_sub(estimate_tokens(CONTEXT_HEADING));
+        let used = units
+            .iter()
+            .chain(&code)
+            .fold(batch.tokens, |acc, i| acc.saturating_add(item_cost(i)));
+        let room = limit.saturating_sub(used) >= CONTEXT_ITEM_FRAME_TOKENS;
+        let memory = self.docs.is_some() || self.history.is_some();
+        let mut declared = Vec::new();
+        let mut withheld = 0usize;
+        let (docs, history) = match (memory, self.embedder) {
+            (false, _) | (true, None) => (None, None),
+            (true, Some(_)) if !room => (Some(Vec::new()), Some(Vec::new())),
+            (true, Some(embedder)) => match self.query_vector(embedder, &text).await {
+                None => (None, None),
+                Some(vector) => (
+                    Some(self.documentation(&vector, &mut declared)),
+                    Some(self.history_items(&batch_files(batch), &mut declared, &mut withheld)),
+                ),
+            },
+        };
+        let mut a = assemble(batch.tokens, limit, units, code, docs, history)?;
+        if !memory {
+            a.without_memory = true;
+            a.without_embedder = false;
+        }
+        a.withheld = a.withheld.saturating_add(withheld);
+        a.trimmed.extend(capped.into_iter().map(|name| {
+            (
+                ContextKind::Caller,
+                format!("{name}: more than {MAX_CALLERS_PER_NAME} callers"),
+            )
+        }));
+        a.trimmed.extend(declared);
+        if !self.declared.swap(true, Ordering::SeqCst) {
+            declare_index(&mut a, &self.doc_index);
+            if memory && self.docs_unavailable {
+                a.trimmed
+                    .push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
+            }
+        }
+        Ok(a)
+    }
+
+    fn index_ms(&self) -> u64 {
+        self.index_ms
+    }
+
+    /// The item's containing unit, keyed `"<file>:<start>-<end>"` and charged at its escaped
+    /// cost, so planning counts exactly what `context_for` will add.
+    fn companion(&self, item: &BatchItem) -> Result<Option<Companion>, ReviewError> {
+        Ok(
+            containing_unit(item, self.sources, self.registry)?.map(|unit| {
+                let (first, last) = unit.lines.unwrap_or_default();
+                let unit = escaped(unit);
+                (format!("{}:{first}-{last}", unit.file), item_cost(&unit))
+            }),
+        )
+    }
+
+    fn skipped(&self) -> Vec<String> {
+        self.withheld_sources.clone()
+    }
+}
+
+/// The context source the review runner hands the pipeline: the stores, the embedder and the
+/// documentation preparation, bound to each review's own content by
+/// [`RagSource::for_review`] (the pipeline builds the index and the content source).
+pub struct ReviewRag<'a> {
+    /// The documentation index, when it could be opened for this review.
+    pub docs: Option<&'a ReviewDocStore>,
+    /// The review history; `None` without a database.
+    pub history: Option<&'a ReviewHistoryStore>,
+    /// The language extractors.
+    pub registry: &'a LanguageRegistry,
+    /// The `[embedding]` embedder, if any.
+    pub embedder: Option<&'a dyn EmbeddingProvider>,
+    /// The batch limit in tokens.
+    pub limit_tokens: usize,
+    /// What [`prepare_docs`] produced.
+    pub prep: DocPrep,
+}
+
+#[async_trait::async_trait]
+impl RagSource for ReviewRag<'_> {
+    /// Never answers: the pipeline binds the source to a review first.
+    ///
+    /// # Errors
+    ///
+    /// Always [`ReviewError::Io`], so a caller that skipped the binding fails loudly.
     async fn context_for(&self, _batch: &ReviewBatch) -> Result<Assembled, ReviewError> {
-        todo!()
+        Err(ReviewError::Io(UNBOUND_SOURCE.to_string()))
     }
 
-    fn companion(&self, _item: &BatchItem) -> Result<Option<Companion>, ReviewError> {
-        todo!()
+    fn index_ms(&self) -> u64 {
+        self.prep.index_ms
+    }
+
+    fn skipped(&self) -> Vec<String> {
+        self.prep.withheld_sources.clone()
+    }
+
+    fn for_review<'r>(&'r self, material: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
+        let rag = StoreRag {
+            docs: self.docs,
+            history: self.history,
+            index: material.index,
+            sources: material.sources,
+            registry: self.registry,
+            embedder: self.embedder,
+            limit_tokens: self.limit_tokens,
+            doc_index: IndexDeclarations::default(),
+            declared: AtomicBool::new(false),
+            docs_unavailable: false,
+            embedder_down: AtomicBool::new(false),
+            docs_failed: AtomicBool::new(false),
+            history_failed: AtomicBool::new(false),
+            doc_sources: BTreeSet::new(),
+            withheld_sources: Vec::new(),
+            index_ms: 0,
+        }
+        .with_prep(self.prep.clone());
+        Some(Box::new(rag))
     }
 }
 
-/// The revision whose documentation a review serves.
+/// The review stores over the open database: the history, opened once, and what a review needs
+/// to open its documentation index (whose identity depends on the embedder's dimension).
+pub struct ReviewMemory {
+    /// The connection shared with `EncryptedSqliteMemory`.
+    conn: Arc<Mutex<Connection>>,
+    /// A masked duplicate of the data key, duplicated again for each documentation store.
+    dek: Mutex<MaskedDek>,
+    /// The review history.
+    history: ReviewHistoryStore,
+}
+
+impl ReviewMemory {
+    /// Opens the history over `conn`.
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The connection shared with `EncryptedSqliteMemory`.
+    /// * `dek` - A masked duplicate of the data key.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::Crypto`] when the key cannot be duplicated, [`MemoryError::Storage`] when
+    /// the schema cannot be checked.
+    pub fn open(conn: Arc<Mutex<Connection>>, mut dek: MaskedDek) -> Result<Self, MemoryError> {
+        let history_key = dek
+            .duplicate()
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        let history = ReviewHistoryStore::new(Arc::clone(&conn), history_key)?;
+        Ok(Self {
+            conn,
+            dek: Mutex::new(dek),
+            history,
+        })
+    }
+
+    /// The review history.
+    pub fn history(&self) -> &ReviewHistoryStore {
+        &self.history
+    }
+
+    /// The documentation index of `embedder`'s identity. An embedder that autodetects its
+    /// dimension is asked once (under [`EMBED_QUERY_TIMEOUT_SECS`]) to learn it.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::Storage`] when the dimension is still unknown or the schema cannot be
+    /// checked, [`MemoryError::Crypto`] when the key cannot be duplicated.
+    pub async fn doc_store(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+    ) -> Result<ReviewDocStore, MemoryError> {
+        if embedder.dim() == 0 {
+            let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
+            let probe = vec![DIMENSION_PROBE.to_string()];
+            // Its answer is not used: a successful call sets the dimension; a failed one leaves
+            // it at 0, checked right below.
+            let _ = tokio::time::timeout(bound, embedder.embed(&probe)).await;
+        }
+        if embedder.dim() == 0 {
+            return Err(MemoryError::Storage(
+                "the embedder has no known dimension".to_string(),
+            ));
+        }
+        let key = self
+            .dek
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .duplicate()
+            .map_err(|e| MemoryError::Crypto(e.to_string()))?;
+        ReviewDocStore::new(
+            Arc::clone(&self.conn),
+            key,
+            doc_index_id(embedder.model_id(), embedder.dim()),
+        )
+    }
+}
+
+/// The revision whose documentation a review serves (RV21, U29): a revision review's new side,
+/// or `None` for the working tree.
+///
+/// # Arguments
+///
+/// * `kind` - The resolved input's content source.
+///
+/// # Returns
+///
+/// The new side's revision, or `None`.
 pub fn doc_revision(kind: &SourceKind) -> Option<&str> {
-    let _ = kind;
-    None
+    match kind {
+        SourceKind::Revision { new_rev, .. } => Some(new_rev.as_str()),
+        SourceKind::Worktree { .. } => None,
+    }
 }
 
-/// Indexes the review's documentation, degrading on any failure.
+/// Records `path` as withheld for a secret: one per source, by `display_path`.
+fn withhold(prep: &mut DocPrep, path: &str) {
+    prep.doc_index.withheld = prep.doc_index.withheld.saturating_add(1);
+    prep.withheld_sources.push(display_path(path));
+}
+
+/// Whether a read error is the size cap (the source is cut, declared) rather than a failure.
+fn is_size_cap(e: &ReviewError) -> bool {
+    matches!(
+        e,
+        ReviewError::TooLarge { .. } | ReviewError::InputTooLarge { .. }
+    )
+}
+
+/// `prep` degraded to no documentation (B), with one WARN naming why, its duration set.
+fn degraded(mut prep: DocPrep, cause: &str, started: Instant) -> DocPrep {
+    tracing::event!(
+        target: LOG_TARGET,
+        tracing::Level::WARN,
+        error = cause,
+        "the documentation index of the reviewed revision is unavailable: the review runs without documentation"
+    );
+    prep.docs_unavailable = true;
+    prep.index_ms = millis(started.elapsed());
+    prep
+}
+
+/// One listed source and, for the working tree, the bytes already read to key it.
+type Listed = (DocSource, Option<Vec<u8>>);
+
+/// The working tree's documentation sources: each path of `paths` that `wanted` accepts, read
+/// through `sources` and keyed by [`worktree_key`]; a path that quotes a secret is never read.
+///
+/// # Errors
+///
+/// A cause when a read fails (other than the size cap, which cuts the source) or the deadline
+/// passes.
+fn list_worktree(
+    sources: &dyn ContentSource,
+    paths: &[String],
+    wanted: &dyn Fn(&str) -> bool,
+    deadline: Instant,
+    prep: &mut DocPrep,
+) -> Result<Vec<Listed>, String> {
+    let mut listed = Vec::new();
+    for path in paths.iter().filter(|p| wanted(p)) {
+        if Instant::now() >= deadline {
+            return Err(format!("not listed within {REINDEX_TIMEOUT_SECS} s"));
+        }
+        if find_secret(path).is_some() {
+            listed.push((
+                DocSource {
+                    path: path.clone(),
+                    key: String::new(),
+                },
+                None,
+            ));
+            continue;
+        }
+        match sources.read(path) {
+            Ok(Some(bytes)) => listed.push((
+                DocSource {
+                    path: path.clone(),
+                    key: worktree_key(&bytes),
+                },
+                Some(bytes),
+            )),
+            Ok(None) => {}
+            Err(e) if is_size_cap(&e) => prep.doc_index.truncated = true,
+            Err(e) => return Err(outward_text(&e.to_string())),
+        }
+    }
+    Ok(listed)
+}
+
+/// Groups `sources`, in order, into reindex batches of at most [`EMBED_BATCH_ITEMS`] chunks; a
+/// larger source goes alone. O(sources).
+fn reindex_batches(
+    sources: Vec<(DocSource, Vec<DocChunk>)>,
+) -> Vec<Vec<(DocSource, Vec<DocChunk>)>> {
+    let mut batches = Vec::new();
+    let mut current: Vec<(DocSource, Vec<DocChunk>)> = Vec::new();
+    let mut chunks = 0usize;
+    for source in sources {
+        let n = source.1.len();
+        if !current.is_empty() && chunks.saturating_add(n) > EMBED_BATCH_ITEMS {
+            batches.push(std::mem::take(&mut current));
+            chunks = 0;
+        }
+        chunks = chunks.saturating_add(n);
+        current.push(source);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+/// Lists, indexes and, on any failure, degrades the documentation of the reviewed revision
+/// (RV07(3), RV19, RV21, U29).
+///
+/// 1. **List**: `rev` = the reviewed revision's new side, listed through `git` without reading
+///    any file; `None` = the working tree, each of `worktree_paths` read through `sources` and
+///    keyed by [`worktree_key`]. Only the paths `keep` accepts that are documentation sources
+///    or files with an extractor count; a path that quotes a secret is never read or stored (its
+///    path would sit in a clear column) and counts as withheld.
+/// 2. **Index what is missing**: each source the store lacks is read through `sources`, chunked
+///    with `chunk_source`, then passed through `without_secrets` (every chunk, before any
+///    embedding) and `bounded`, in that order. A source with any chunk withheld is withheld
+///    whole. The rest is indexed in batches of at most [`EMBED_BATCH_ITEMS`] chunks, one
+///    [`reindex_or_degrade`] each, given what is left of `timeout`; what a batch wrote stays.
+/// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails, and `timeout` itself,
+///    set `docs_unavailable` with a WARN; the first failing batch stops the rest. The size cap
+///    only cuts (declared as truncated), it never degrades.
+///
+/// Never fails. `timeout` bounds the whole preparation, checked between steps and sources (a git
+/// call or read in flight ends by its own bound). O(listed sources + bytes read).
+///
+/// # Arguments
+///
+/// * `docs` - The documentation index.
+/// * `git` - The review's git; `None` without a repository.
+/// * `rev` - The reviewed revision's new side, or `None` for the working tree.
+/// * `sources` - The revision's single content source (RV21).
+/// * `worktree_paths` - The working tree's files, for `rev = None`.
+/// * `keep` - The review's path filter (`.gitignore`, never-reviewed paths).
+/// * `registry` - The language extractors.
+/// * `embedder` - The `[embedding]` embedder.
+/// * `timeout` - The bound on the whole preparation.
+///
+/// # Returns
+///
+/// What the review's context source needs ([`StoreRag::with_prep`]).
 #[allow(clippy::too_many_arguments)]
 pub async fn prepare_docs(
     docs: &ReviewDocStore,
@@ -133,37 +756,168 @@ pub async fn prepare_docs(
     rev: Option<&str>,
     sources: &dyn ContentSource,
     worktree_paths: &[String],
-    keep: &dyn Fn(&str) -> bool,
+    keep: &(dyn Fn(&str) -> bool + Sync),
     registry: &LanguageRegistry,
     embedder: &dyn EmbeddingProvider,
     timeout: Duration,
 ) -> DocPrep {
-    let _ = (
-        docs,
-        git,
-        rev,
-        sources,
-        worktree_paths,
-        keep,
-        registry,
-        embedder,
-        timeout,
-    );
-    todo!()
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut prep = DocPrep::default();
+    let wanted = |p: &str| {
+        keep(p) && (find_secret(p).is_some() || is_doc_source(p) || registry.get(p).is_some())
+    };
+    let listed = match (rev, git) {
+        (Some(rev), Some(git)) => revision_doc_sources(git, rev, &wanted)
+            .map(|v| v.into_iter().map(|s| (s, None)).collect())
+            .map_err(|e| outward_text(&e.to_string())),
+        (Some(_), None) => Err("no repository to list the reviewed revision".to_string()),
+        (None, _) => list_worktree(sources, worktree_paths, &wanted, deadline, &mut prep),
+    };
+    let listed: Vec<Listed> = match listed {
+        Ok(listed) => listed,
+        Err(cause) => return degraded(prep, &cause, started),
+    };
+    let mut pairs: Vec<Listed> = Vec::with_capacity(listed.len());
+    for (source, bytes) in listed {
+        if find_secret(&source.path).is_some() {
+            withhold(&mut prep, &source.path);
+        } else {
+            prep.doc_sources.insert(source.clone());
+            pairs.push((source, bytes));
+        }
+    }
+    let wanted_sources: Vec<DocSource> = pairs.iter().map(|(s, _)| s.clone()).collect();
+    let missing: BTreeSet<DocSource> = match docs.missing(&wanted_sources) {
+        Ok(missing) => missing.into_iter().collect(),
+        Err(e) => return degraded(prep, &outward_text(&e.to_string()), started),
+    };
+    let mut chunked = Vec::new();
+    for (source, bytes) in pairs.into_iter().filter(|(s, _)| missing.contains(s)) {
+        if Instant::now() >= deadline {
+            let cause = format!("not indexed within {REINDEX_TIMEOUT_SECS} s");
+            return degraded(prep, &cause, started);
+        }
+        let bytes = match bytes {
+            Some(bytes) => bytes,
+            None => match sources.read(&source.path) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                Err(e) if is_size_cap(&e) => {
+                    prep.doc_index.truncated = true;
+                    continue;
+                }
+                Err(e) => return degraded(prep, &outward_text(&e.to_string()), started),
+            },
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        let (kept, dropped) = without_secrets(chunk_source(&source.path, &text, registry));
+        if dropped.is_empty() {
+            chunked.push((source, kept));
+        } else {
+            prep.doc_sources.remove(&source);
+            withhold(&mut prep, &source.path);
+        }
+    }
+    let (kept, truncated) = bounded(chunked);
+    prep.doc_index.truncated |= truncated;
+    for batch in reindex_batches(kept) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || !reindex_or_degrade(docs, &batch, embedder, left).await {
+            let cause = "a batch of documentation sources was not indexed";
+            return degraded(prep, cause, started);
+        }
+    }
+    prep.index_ms = millis(started.elapsed());
+    prep
 }
 
-/// One bounded reindex.
+/// One [`ReviewDocStore::reindex`] under `timeout`: `true` when it wrote, `false` (with a WARN)
+/// when it failed or did not finish. A reindex is all or nothing, so a timeout writes nothing
+/// and the next review tries the same sources again. Leaves an INFO with its duration, and the
+/// fixed rebuilt line when the index changed identity.
+///
+/// # Arguments
+///
+/// * `docs` - The documentation index.
+/// * `sources` - Whole sources with their chunks.
+/// * `embedder` - The `[embedding]` embedder.
+/// * `timeout` - The bound on this reindex.
+///
+/// # Returns
+///
+/// Whether the sources are indexed now.
 pub async fn reindex_or_degrade(
     docs: &ReviewDocStore,
     sources: &[(DocSource, Vec<DocChunk>)],
     embedder: &dyn EmbeddingProvider,
     timeout: Duration,
 ) -> bool {
-    let _ = (docs, sources, embedder, timeout);
-    todo!()
+    let started = Instant::now();
+    match tokio::time::timeout(timeout, docs.reindex(sources, embedder)).await {
+        Ok(Ok(stats)) => {
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::INFO,
+                ms = millis(started.elapsed()),
+                embedded = stats.embedded,
+                reused = stats.reused,
+                sources = stats.sources,
+                "documentation indexed"
+            );
+            if stats.rebuilt {
+                tracing::event!(target: LOG_TARGET, tracing::Level::INFO, "{REBUILT_LINE}");
+            }
+            true
+        }
+        Ok(Err(e)) => {
+            let error = outward_text(&e.to_string());
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                error = error.as_str(),
+                "the documentation index could not be updated"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                ms = millis(started.elapsed()),
+                "the documentation index was not updated in time"
+            );
+            false
+        }
+    }
 }
 
-/// Reclassifies, then records.
+/// Reclassifies the due entries, least recently checked first (`due`, then `touch` each one
+/// checked), then records `findings` (T3.4 `reclassify_then_record`: reclassify first, so a new
+/// entry is never classified against its own commit).
+///
+/// Stops reclassifying once `budget` is spent, checked between entries; an entry it did not
+/// reach is not touched, so it stays first for the next review. O(min(due,
+/// [`MAX_RECLASSIFY_PER_REVIEW`])) classifications.
+///
+/// # Arguments
+///
+/// * `history` - The review history.
+/// * `findings` - This review's entries (`entries_from_review`, anchored to the full SHA).
+/// * `head` - The revision to compare against (`HEAD`).
+/// * `git` - The workspace's git.
+/// * `now` - Unix seconds, stamped on each checked entry.
+/// * `budget` - The wall clock of the reclassification.
+///
+/// # Returns
+///
+/// What was reclassified, recorded and left over.
+///
+/// # Errors
+///
+/// [`MemoryError`] of the store, never swallowed.
 pub fn record_review(
     history: &ReviewHistoryStore,
     findings: &[HistoryEntry],
@@ -172,19 +926,68 @@ pub fn record_review(
     now: i64,
     budget: Duration,
 ) -> Result<RecordStats, MemoryError> {
-    let _ = (history, findings, head, git, now, budget);
-    todo!()
+    let started = std::time::Instant::now();
+    let (due, total) = history.due(MAX_RECLASSIFY_PER_REVIEW)?;
+    let mut checked = 0usize;
+    for entry in &due {
+        if started.elapsed() >= budget {
+            break;
+        }
+        let (updates, _) = reclassify_then_record(std::slice::from_ref(entry), &[], head, git);
+        for (id, status) in updates {
+            history.update_status(&id, status)?;
+        }
+        history.touch(std::slice::from_ref(&entry.id), now)?;
+        checked = checked.saturating_add(1);
+    }
+    let recorded = history.record(findings)?;
+    Ok(RecordStats {
+        reclassified: checked,
+        recorded,
+        backlog: total.saturating_sub(checked),
+    })
 }
 
-/// Deletes what nothing reaches.
+/// Deletes the documentation sources nothing reaches any more (RV-S39): with `git`, the live
+/// set is every local ref's sources plus `worktree` when the review listed the working tree;
+/// without git, `worktree` alone. A review that did not list the working tree keeps its
+/// working-tree sources for the next one that does. Without git and without a listed working
+/// tree nothing is known to be live, so nothing is deleted. O(refs x tree entries) git calls.
+///
+/// # Arguments
+///
+/// * `docs` - The documentation index.
+/// * `git` - The workspace's git, if there is a repository.
+/// * `keep` - The path filter the review listed with.
+/// * `worktree` - The working tree's sources, when the review listed them.
+///
+/// # Returns
+///
+/// The sources deleted, or `None` when the clean-up was skipped (past `MAX_GC_REFS`, a git that
+/// does not answer, or nothing known to be live).
+///
+/// # Errors
+///
+/// [`MemoryError::Storage`] with the cause redacted, for a git or store failure.
 pub fn collect_garbage(
     docs: &ReviewDocStore,
     git: Option<&dyn GitCommand>,
     keep: &dyn Fn(&str) -> bool,
     worktree: Option<&BTreeSet<DocSource>>,
 ) -> Result<Option<usize>, MemoryError> {
-    let _ = (docs, git, keep, worktree);
-    todo!()
+    let mut live = match git {
+        Some(git) => match live_doc_sources(git, keep) {
+            Ok(Some(live)) => live,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(MemoryError::Storage(outward_text(&e.to_string()))),
+        },
+        None if worktree.is_none() => return Ok(None),
+        None => BTreeSet::new(),
+    };
+    if let Some(worktree) = worktree {
+        live.extend(worktree.iter().cloned());
+    }
+    docs.gc(&live, worktree.is_none()).map(Some)
 }
 
 #[cfg(test)]

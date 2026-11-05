@@ -17,7 +17,7 @@ from smoke.outcome import Finding
 #: certificate renderer, which publishes "N of N scenarios evaluated", and by
 #: the test that asserts the registry actually holds that many. One constant
 #: with two readers is what keeps the headline and the registry from drifting.
-DECLARED_SCENARIO_COUNT = 51
+DECLARED_SCENARIO_COUNT = 52
 
 #: How many ASSERTIONS those scenarios promise between them, per section 8 of
 #: the spec. A separate constant because it answers a separate question, and
@@ -86,7 +86,11 @@ DECLARED_SCENARIO_COUNT = 51
 #: 153 on 2026-11-05: S49 adds "the toy secret reaches neither stdout, stderr
 #: nor the run log" (MAGI §6 loop 50: leaving the file out as secret said
 #: nothing about where its bytes went), v0.25.0.
-DECLARED_ASSERTION_COUNT = 153
+#:
+#: 155 on 2026-11-05: S52 adds 2 assertions (a review whose embedder is
+#: unreachable exits 0 and declares ``without_embedder``), v0.25.0. The
+#: scenario count goes 51 -> 52 with it.
+DECLARED_ASSERTION_COUNT = 155
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

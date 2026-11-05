@@ -251,7 +251,12 @@ fn check(
     finding.file.as_ref()?;
     let (file, line) = location;
     if !reviewed.has_file(file) {
-        return Some((DiscardCause::FileNotReviewed, None));
+        let cause = if reviewed.is_context_file(file) {
+            DiscardCause::ContextOnly
+        } else {
+            DiscardCause::FileNotReviewed
+        };
+        return Some((cause, None));
     }
     if line.is_some_and(|l| !reviewed.contains_line(file, l)) {
         return Some((DiscardCause::LineOutOfRange, None));

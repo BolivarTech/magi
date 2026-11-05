@@ -41,8 +41,6 @@ use magi_rs::vault::MaskedDek;
 
 /// Texts per `embed` request: thousands of chunks never go in one request (a 5 179-chunk
 /// repository was measured, and it would otherwise be a single request).
-// consumed by T3.6 (pipeline)
-#[allow(dead_code)]
 pub const EMBED_BATCH_ITEMS: usize = 64;
 
 /// `(path, key)` pairs per `search` query: two parameters each plus two fixed ones stay under
@@ -50,8 +48,6 @@ pub const EMBED_BATCH_ITEMS: usize = 64;
 const ALLOWED_PAIRS_PER_QUERY: usize = 400;
 
 /// What one [`ReviewDocStore::reindex`] did.
-// consumed by T3.6 (pipeline)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReindexStats {
     /// Chunks sent to the embedder (each distinct chunk hash once).
@@ -89,8 +85,6 @@ struct DocRow<'a> {
 /// Encrypted, per-source index of documentation chunks (RV19, RV21).
 ///
 /// Shares the connection and the masked data key with `EncryptedSqliteMemory`.
-// consumed by T3.6 (pipeline)
-#[allow(dead_code)]
 pub struct ReviewDocStore {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
@@ -104,8 +98,6 @@ fn db_err(e: rusqlite::Error) -> MemoryError {
     MemoryError::Storage(e.to_string())
 }
 
-// consumed by T3.6 (pipeline)
-#[allow(dead_code)]
 impl ReviewDocStore {
     /// The shared connection, for tests that read raw rows.
     #[cfg(test)]

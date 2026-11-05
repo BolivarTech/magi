@@ -446,6 +446,21 @@ the 32 768-token default window (16 384 tokens), so it plans at least five batch
 timeout is 3 000 s and `TRIO_RUNS_MEASURED_S["R12"]` carries 1 500 s provisionally: five of R4's
 283 s plus the gate. It has not been measured yet; the figure is written here when it is.
 
+### The review context scenario (v0.25.0)
+
+S52 adds two assertions. The harness now promises 52 scenarios and 155 assertions.
+
+| Id | Invariant | Without its environment |
+|---|---|---|
+| S52 | `code-review ctx` over one small file, with the review workspace's `[embedding]` pointed at `127.0.0.1:9` (nothing listens there), exits 0 and prints a JSON document whose `code_review.without_embedder` is `true`: the review runs without documentation and history and says so. A missing key or any value other than `true` is `FAIL` | `CANNOT_TEST` with no reachable backend; a timed-out R17 is `CANNOT_TEST` too |
+
+R17 rewrites only the `[embedding]` table of the copied `magi.toml` (`point_embedding_at`); the trio
+and the gate keep the real backend. A run that declares this rewrite without the review workspace in
+its argv is a harness error.
+
+**Cost.** R17 is one batch by the real trio plus the gate, over a four-line file. Its harness timeout
+is 900 s and `TRIO_RUNS_MEASURED_S["R17"]` carries 300 s provisionally; it has not been measured yet.
+
 ## Out of scope
 
 ```
@@ -497,6 +512,7 @@ assumes is the exact failure this harness exists to avoid.
 | S49 | a directory of only a binary and a secret has nothing to review |
 | S50 | a `--timeout` too short for the batches is refused naming the floor and a minimum |
 | S51 | reviewing the workspace root never takes `.magi/` or `.git/` for review |
+| S52 | a review whose embedder is unreachable still reports, and declares `without_embedder` |
 
 The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 

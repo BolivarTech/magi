@@ -53,8 +53,6 @@ struct RawRow {
 }
 
 /// Encrypted store of remembered findings, over the shared connection.
-// consumed by T3.6 (pipeline)
-#[allow(dead_code)]
 pub struct ReviewHistoryStore {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
@@ -73,8 +71,6 @@ fn now_secs() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-// consumed by T3.6 (pipeline)
-#[allow(dead_code)]
 impl ReviewHistoryStore {
     /// The shared connection, for tests that read raw rows.
     #[cfg(test)]

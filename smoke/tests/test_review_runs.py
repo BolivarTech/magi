@@ -136,9 +136,30 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         self.assertFalse(definition.needs_trio)
 
     def test_only_the_large_review_run_reaches_the_trio(self) -> None:
+        # R17 (S52) reaches the trio too: a one-batch review whose embedder is unreachable.
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()
                      if d.argv[0] == "code-review" and d.needs_trio}
-        self.assertEqual({"R12"}, reviewing)
+        self.assertEqual({"R12", "R17"}, reviewing)
+
+    def test_the_embedder_run_points_only_its_embedder_away(self) -> None:
+        # S52: the trio and the gate keep the real backend; only [embedding] reaches the closed port.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "magi.toml"
+            path.write_text('base_url = "http://real/v1"\n[magi]\nkind = "ollama"\n'
+                            '[embedding]\nbase_url = "http://emb/v1"\nmodel = "m"\n', encoding="utf-8")
+            runs.point_embedding_at(path, runs.UNREACHABLE_EMBEDDER_URL)
+            lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(['base_url = "http://real/v1"', "[magi]", 'kind = "ollama"', "[embedding]",
+                          'base_url = "%s"' % runs.UNREACHABLE_EMBEDDER_URL, 'model = "m"'], lines)
+        self.assertTrue(runs.DEFINITIONS["R17"].unreachable_embedder)
+
+    def test_a_config_without_an_embedding_table_gains_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "magi.toml"
+            path.write_text('base_url = "http://real/v1"\n', encoding="utf-8")
+            runs.point_embedding_at(path, runs.UNREACHABLE_EMBEDDER_URL)
+            lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(["[embedding]", 'base_url = "%s"' % runs.UNREACHABLE_EMBEDDER_URL], lines[-2:])
 
 
 class WriteFilesTests(unittest.TestCase):

@@ -64,6 +64,10 @@ pub(crate) struct CodeReviewBuild<'a> {
     /// Whether the surface already built this trio successfully; when it did not, the runner
     /// builds it once to report a trio that cannot be built before any review starts.
     pub trio_checked: bool,
+    /// The review stores over the open database; `None` without one.
+    pub memory: Option<Arc<crate::memory::review_rag::ReviewMemory>>,
+    /// The `[embedding]` embedder; `None` when it could not be built.
+    pub embedder: Option<Arc<dyn crate::memory::embedding::EmbeddingProvider>>,
 }
 
 /// The trio's credentials, copied from the section keys: both kinds take the `[magi]` key, as
@@ -405,6 +409,8 @@ pub(crate) fn build_code_review_runner(
         retry_disabled,
         agent_timeout_secs: configured_ceiling,
         structured: b.structured,
+        memory: b.memory,
+        embedder: b.embedder,
     })
     .map_err(|e| egress_text(&e.to_string()))?;
     Ok(Arc::new(runner))

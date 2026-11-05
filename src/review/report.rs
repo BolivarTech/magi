@@ -303,6 +303,32 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
             s.ungrouped_unlocated
         )?;
     }
+    if s.without_memory {
+        writeln!(
+            out,
+            "documentation and history were left out: the run opened no database"
+        )?;
+    } else if s.without_embedder {
+        writeln!(
+            out,
+            "documentation and history were left out: no embedder answered"
+        )?;
+    }
+    if s.context_withheld > 0 {
+        writeln!(
+            out,
+            "{} context items were withheld for a secret",
+            s.context_withheld
+        )?;
+    }
+    if !s.trimmed.is_empty() {
+        let trimmed: Vec<String> = s
+            .trimmed
+            .iter()
+            .map(|t| format!("{} {}", name(&t.kind), escape_controls(&t.label)))
+            .collect();
+        writeln!(out, "context left out: {}", trimmed.join("; "))?;
+    }
     if unshown > 0 {
         writeln!(
             out,

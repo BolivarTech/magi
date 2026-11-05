@@ -13,7 +13,7 @@
 //! `PathGuard` and runs git through the scrubbed runner; the trio and the gate client are
 //! handed to it already built.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -23,11 +23,13 @@ use magi_rs::decision::{DecisionClient, ModelSpec};
 use magi_rs::headless::output::truncate_result;
 use magi_rs::redact::redact_foreign_text;
 use magi_rs::review::clock::tui_worst_case_secs;
-use magi_rs::review::consolidate::Consolidated;
+use magi_rs::review::consolidate::{Consolidated, ConsolidatedFinding};
+use magi_rs::review::docs::DocSource;
 use magi_rs::review::error::ReviewError;
 use magi_rs::review::filter::ignored_paths;
-use magi_rs::review::gate::Gate;
-use magi_rs::review::input::{pin_refs, validate_ref, ReviewInput};
+use magi_rs::review::gate::{Gate, GateVerdict};
+use magi_rs::review::history::entries_from_review;
+use magi_rs::review::input::{pin_refs, resolve_input, validate_ref, ReviewInput};
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{
     plan_review, run_review, BatchConsult, ReviewDeps, ReviewOutcome, ReviewRequest,
@@ -37,9 +39,19 @@ use magi_rs::review::report::{
     failed_batch_lines, render_batch_reports, render_text, summary_json,
 };
 use magi_rs::review::secrets::mask_secrets;
+use magi_rs::review::source::{
+    is_never_reviewed, CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource,
+};
+use magi_rs::review::window::{batch_limit_tokens, pool_window};
 use serde_json::{json, Map, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::memory::embedding::EmbeddingProvider;
+use crate::memory::review_docs::ReviewDocStore;
+use crate::memory::review_rag::{
+    collect_garbage, doc_revision, prepare_docs, record_review, DocPrep, RecordStats, ReviewMemory,
+    ReviewRag, RECLASSIFY_BUDGET_SECS, REINDEX_TIMEOUT_SECS,
+};
 use crate::system::path_guard::PathGuard;
 use crate::system::review_git::{review_path_guard, ScrubbedGit};
 use crate::tools::{Tool, ToolError, ToolResult};
@@ -192,6 +204,17 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
         budget: ReviewBudget,
         cancel: &CancellationToken,
     ) -> Result<Rendered, ReviewError>;
+
+    /// What the last [`Self::run`] leaves for after its report is delivered: the review history
+    /// and the clean-up of the documentation index (RV08, RV-S39). A surface calls it once it
+    /// has printed or shown the report, so cutting the process here never loses the report.
+    ///
+    /// # Returns
+    /// A one-line warning (already redacted) when the history could not be updated, for the
+    /// surface to show on its own channel; `None` otherwise.
+    fn after_report(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Runs `fut` until it ends or `cancel` fires.
@@ -845,10 +868,16 @@ impl Tool for CodeReviewTool {
             .run(plan, budget, cancel)
             .await
             .map_err(|e| tool_error(&e))?;
-        let report = match &rendered.failure {
+        let mut report = match &rendered.failure {
             Some(failure) => format!("error: {failure}\n{}", rendered.text),
             None => rendered.text,
         };
+        // The tool's report is its result, so what follows it runs before the result is handed
+        // back; a history that could not be updated is said in it, never dropped.
+        if let Some(warning) = self.runner.after_report() {
+            report.push('\n');
+            report.push_str(&warning);
+        }
         Ok(bounded_result(
             redact_foreign_text(&report).as_str(),
             redacted_json(rendered.json),
@@ -905,7 +934,46 @@ pub(crate) struct ReviewRunnerParts {
     pub agent_timeout_secs: u64,
     /// Whether the `consult` object carries the consolidated agents.
     pub structured: bool,
+    /// The review stores over the open database; `None` without one (`--no-memory`, no DB).
+    pub memory: Option<Arc<ReviewMemory>>,
+    /// The `[embedding]` embedder; `None` when it could not be built.
+    pub embedder: Option<Arc<dyn EmbeddingProvider>>,
 }
+
+/// What one review leaves for [`CodeReviewRunner::after_report`].
+struct FollowUp {
+    /// The judged main list.
+    findings: Vec<(ConsolidatedFinding, GateVerdict)>,
+    /// The reviewed revision's new side; `None` for the working tree (no history then).
+    rev: Option<String>,
+    /// The working tree's documentation sources, when the review listed them.
+    worktree: Option<BTreeSet<DocSource>>,
+    /// The review's documentation index, if one was opened.
+    docs: Option<ReviewDocStore>,
+    /// The paths `.gitignore` excludes in the whole workspace.
+    ignored: HashSet<String>,
+}
+
+/// The documentation side of one review, prepared before its clock.
+#[derive(Default)]
+struct DocContext {
+    /// The documentation index, if one was opened.
+    docs: Option<ReviewDocStore>,
+    /// What [`prepare_docs`] produced (or the degradation that replaced it).
+    prep: DocPrep,
+    /// The reviewed revision's new side, or `None` for the working tree.
+    rev: Option<String>,
+    /// The working tree's documentation sources, when the review listed them.
+    worktree: Option<BTreeSet<DocSource>>,
+    /// The paths `.gitignore` excludes in the whole workspace.
+    ignored: HashSet<String>,
+}
+
+/// The run-log target of the runner's own entries.
+const REVIEW_LOG_TARGET: &str = "magi_rs::review";
+
+/// The prefix of the warning a surface shows when the review history was not updated.
+const HISTORY_NOT_UPDATED: &str = "warning: the review history was not updated";
 
 /// The production [`CodeReviewRunner`]: the workspace's `PathGuard` on every path, git through
 /// [`ScrubbedGit`], one new [`Gate`] per review (so a model that answered 400 is tried again by
@@ -921,6 +989,8 @@ pub(crate) struct ProductionReviewRunner {
     registry: LanguageRegistry,
     /// What it was built from.
     parts: ReviewRunnerParts,
+    /// What the last review left for after its report.
+    follow_up: Mutex<Option<FollowUp>>,
 }
 
 impl ProductionReviewRunner {
@@ -943,7 +1013,103 @@ impl ProductionReviewRunner {
             guard,
             registry: LanguageRegistry::new(),
             parts,
+            follow_up: Mutex::new(None),
         })
+    }
+
+    /// The batch limit the review plans and assembles against (RV04).
+    fn limit_tokens(&self) -> usize {
+        batch_limit_tokens(&pool_window(&self.parts.pool))
+    }
+
+    /// The review's context source over `docs` and `prep` (the stores, the embedder and the
+    /// documentation preparation); the pipeline binds it to the review's own content.
+    fn rag<'a>(&'a self, docs: Option<&'a ReviewDocStore>, prep: DocPrep) -> ReviewRag<'a> {
+        ReviewRag {
+            docs,
+            history: self.parts.memory.as_deref().map(ReviewMemory::history),
+            registry: &self.registry,
+            embedder: self.parts.embedder.as_deref(),
+            limit_tokens: self.limit_tokens(),
+            prep,
+        }
+    }
+
+    /// The documentation side of a review (RV07(3), RV21): lists the reviewed revision's sources
+    /// and indexes what the store lacks, before the review's clock. Without a database or an
+    /// embedder there is nothing to prepare; any failure on the way degrades to a review without
+    /// documentation (declared once by the context source), never a failed review.
+    async fn prepare_documentation(&self, input: &ReviewInput) -> DocContext {
+        let (Some(memory), Some(embedder)) =
+            (self.parts.memory.as_deref(), self.parts.embedder.as_deref())
+        else {
+            return DocContext::default();
+        };
+        let unavailable = |docs: Option<ReviewDocStore>, cause: &str| {
+            let cause = egress_text(cause);
+            tracing::event!(
+                target: REVIEW_LOG_TARGET,
+                tracing::Level::WARN,
+                error = cause.as_str(),
+                "the documentation of this review cannot be prepared: it runs without documentation"
+            );
+            DocContext {
+                docs,
+                prep: DocPrep {
+                    docs_unavailable: true,
+                    ..DocPrep::default()
+                },
+                ..DocContext::default()
+            }
+        };
+        let docs = match memory.doc_store(embedder).await {
+            Ok(docs) => docs,
+            Err(e) => return unavailable(None, &e.to_string()),
+        };
+        let guard = |p: &Path| self.guard(p);
+        let kind = match resolve_input(input, &self.workspace, &self.git, &guard) {
+            Ok(resolved) => resolved.source_kind,
+            Err(e) => return unavailable(Some(docs), &e.to_string()),
+        };
+        let whole = ReviewInput::Directory(PathBuf::from("."));
+        let ignored = match self.ignored(&whole) {
+            Ok(ignored) => ignored,
+            Err(e) => return unavailable(Some(docs), &e.to_string()),
+        };
+        let rev = doc_revision(&kind).map(str::to_string);
+        let paths: Vec<String> = match &rev {
+            Some(_) => Vec::new(),
+            None => match resolve_input(&whole, &self.workspace, &self.git, &guard) {
+                Ok(resolved) => resolved.files.into_iter().map(|f| f.path).collect(),
+                Err(e) => return unavailable(Some(docs), &e.to_string()),
+            },
+        };
+        let inner: Box<dyn ContentSource + '_> = match &rev {
+            Some(r) => Box::new(RevisionSource::new(&self.git, r.clone(), None)),
+            None => Box::new(WorktreeSource::new(self.workspace.clone())),
+        };
+        let source = CachedSource::new(inner.as_ref());
+        let keep = |p: &str| !is_never_reviewed(p) && !ignored.contains(p);
+        let prep = prepare_docs(
+            &docs,
+            Some(&self.git),
+            rev.as_deref(),
+            &source,
+            &paths,
+            &keep,
+            &self.registry,
+            embedder,
+            Duration::from_secs(REINDEX_TIMEOUT_SECS),
+        )
+        .await;
+        let worktree = rev.is_none().then(|| prep.doc_sources.clone());
+        DocContext {
+            docs: Some(docs),
+            prep,
+            rev,
+            worktree,
+            ignored,
+        }
     }
 
     /// The guard as the pipeline takes it.
@@ -989,6 +1155,9 @@ impl CodeReviewRunner for ProductionReviewRunner {
         let ignored = self.ignored(&input)?;
         let guard = |p: &Path| self.guard(p);
         let is_ignored = |p: &str| ignored.contains(p);
+        // The same context source the run gets, without its stores: planning only charges each
+        // item's containing unit, so the count approved is the count run.
+        let rag = self.rag(None, DocPrep::default());
         let planned = plan_review(
             &input,
             &self.workspace,
@@ -997,6 +1166,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
             &is_ignored,
             &self.registry,
             &self.parts.pool,
+            Some(&rag),
         )?;
         Ok(ReviewPlan {
             input,
@@ -1021,11 +1191,17 @@ impl CodeReviewRunner for ProductionReviewRunner {
             ReviewBudget::Total(t) => (Some(t.as_secs()), None),
             ReviewBudget::Until(d) => (None, Some(d)),
         };
-        // MAGI FIX (S6 loop 3): the preparation done here (git's ignored paths, the gate) is
-        // part of the review's `prep_ms`.
-        let prep_started = Instant::now();
         run_cancellable(cancel, async {
             let input = path_input(&self.workspace, plan.input);
+            // The documentation is prepared first, before the review clock; its duration is the
+            // context source's `index_ms`, which the pipeline adds once to `prep_ms`.
+            let docs_started = Instant::now();
+            let mut doc_context = self.prepare_documentation(&input).await;
+            doc_context.prep.index_ms =
+                u64::try_from(docs_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            // MAGI FIX (S6 loop 3): the preparation done here (git's ignored paths, the gate) is
+            // part of the review's `prep_ms`.
+            let prep_started = Instant::now();
             let ignored = self.ignored(&input)?;
             let guard = |p: &Path| self.guard(p);
             let is_ignored = |p: &str| ignored.contains(p);
@@ -1042,6 +1218,14 @@ impl CodeReviewRunner for ProductionReviewRunner {
             // `each_call_is_capped_by_what_is_left_and_running_out_mid_gate_is_timeout` and
             // `the_review_clock_is_re_read_before_each_call_of_the_chain`.
             let clock = SystemReviewClock::start();
+            let DocContext {
+                docs,
+                prep,
+                rev,
+                worktree,
+                ignored: workspace_ignored,
+            } = doc_context;
+            let rag = self.rag(docs.as_ref(), prep);
             let outcome = run_review(
                 ReviewRequest {
                     input,
@@ -1064,15 +1248,123 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     consult: self.parts.consult.as_ref(),
                     gate,
                     clock: &clock,
-                    rag: None,
+                    rag: Some(&rag),
                 },
             )
             .await?;
+            drop(rag);
+            *self
+                .follow_up
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(FollowUp {
+                findings: outcome.summary.findings.clone(),
+                rev,
+                worktree,
+                docs,
+                ignored: workspace_ignored,
+            });
             Ok(render_outcome(outcome, self.parts.structured))
         })
         .await
     }
+
+    /// Records the history of a revision review (anchored to the full SHA of its new side) and
+    /// cleans the documentation index, after the report. A working-tree review records no
+    /// history (RV08: there is no commit to anchor it). Every outcome is logged; a history that
+    /// could not be updated is also returned as a warning; the clean-up only logs.
+    fn after_report(&self) -> Option<String> {
+        let follow = self
+            .follow_up
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()?;
+        let memory = self.parts.memory.as_deref()?;
+        let mut warning = None;
+        if let Some(rev) = &follow.rev {
+            match self.record_history(memory, rev, &follow.findings) {
+                Ok(stats) => tracing::event!(
+                    target: REVIEW_LOG_TARGET,
+                    tracing::Level::INFO,
+                    reclassified = stats.reclassified,
+                    recorded = stats.recorded,
+                    backlog = stats.backlog,
+                    "review history updated"
+                ),
+                Err(cause) => {
+                    tracing::event!(
+                        target: REVIEW_LOG_TARGET,
+                        tracing::Level::WARN,
+                        error = cause.as_str(),
+                        "the review history was not updated"
+                    );
+                    warning = Some(format!("{HISTORY_NOT_UPDATED}: {cause}"));
+                }
+            }
+        }
+        if let Some(docs) = &follow.docs {
+            let keep = |p: &str| !is_never_reviewed(p) && !follow.ignored.contains(p);
+            match collect_garbage(docs, Some(&self.git), &keep, follow.worktree.as_ref()) {
+                Ok(Some(removed)) => tracing::event!(
+                    target: REVIEW_LOG_TARGET,
+                    tracing::Level::INFO,
+                    removed = removed,
+                    "documentation index cleaned"
+                ),
+                Ok(None) => tracing::event!(
+                    target: REVIEW_LOG_TARGET,
+                    tracing::Level::WARN,
+                    "the documentation index was not cleaned: too many local refs, or git did not answer"
+                ),
+                Err(e) => {
+                    let error = egress_text(&e.to_string());
+                    tracing::event!(
+                        target: REVIEW_LOG_TARGET,
+                        tracing::Level::WARN,
+                        error = error.as_str(),
+                        "the documentation index was not cleaned"
+                    );
+                }
+            }
+        }
+        warning
+    }
 }
+
+impl ProductionReviewRunner {
+    /// Reclassifies and records the history of a review of `rev`, anchored to its full SHA
+    /// (the reclassification compares it with `rev-parse` output).
+    ///
+    /// # Errors
+    /// The redacted cause, when the SHA cannot be resolved or the store fails.
+    fn record_history(
+        &self,
+        memory: &ReviewMemory,
+        rev: &str,
+        findings: &[(ConsolidatedFinding, GateVerdict)],
+    ) -> Result<RecordStats, String> {
+        let commit = format!("{rev}^{{commit}}");
+        let sha = self
+            .git
+            .run(&["rev-parse", "--verify", commit.as_str()])
+            .map_err(|e| egress_text(&e.to_string()))?;
+        let entries = entries_from_review(findings, sha.trim());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        record_review(
+            memory.history(),
+            &entries,
+            HISTORY_HEAD,
+            &self.git,
+            now,
+            Duration::from_secs(RECLASSIFY_BUDGET_SECS),
+        )
+        .map_err(|e| egress_text(&e.to_string()))
+    }
+}
+
+/// What the history is reclassified against: everything after the reviewed commit, up to now.
+const HISTORY_HEAD: &str = "HEAD";
 
 #[cfg(test)]
 mod tests {
@@ -1862,6 +2154,8 @@ mod tests {
             retry_disabled: false,
             agent_timeout_secs: 120,
             structured: false,
+            memory: None,
+            embedder: None,
         })
         .expect("runner")
     }

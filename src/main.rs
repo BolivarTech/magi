@@ -2339,6 +2339,13 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         (None, None) => {}
     }
 
+    // Before the store is handed to the agent: the review runner keeps its own handles.
+    let (tui_review_memory, tui_review_embedder) = review_context_of(
+        memory_store.as_ref(),
+        &magi_config,
+        secret_store.as_ref(),
+        section_keys.embedding(),
+    );
     match memory_store {
         Some(concrete_store) => {
             // Wire persistence + the tiered-memory subsystem (shared with the
@@ -2418,6 +2425,8 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         secret_store: secret_store.clone(),
         structured: false,
         trio_checked: consult_magi.is_some(),
+        memory: tui_review_memory,
+        embedder: tui_review_embedder,
     });
     match &tui_code_review {
         Ok(runner) => register_code_review_tool(
@@ -5237,6 +5246,13 @@ async fn run_code_review_subcommand(
         magi_config.headless(),
         magi_config.effective_tool_result_cap(),
     );
+    // `--no-memory` opens no review store either: no documentation, no history (RV07).
+    let (review_memory, review_embedder) = review_context_of(
+        memory.as_ref().filter(|_| !args.no_memory),
+        &magi_config,
+        secret_store.as_ref(),
+        section_keys.embedding(),
+    );
     let runner = match crate::code_review_runner::build_code_review_runner(
         crate::code_review_runner::CodeReviewBuild {
             workspace: workdir.clone(),
@@ -5251,6 +5267,8 @@ async fn run_code_review_subcommand(
             secret_store,
             structured: args.structured_verdicts,
             trio_checked: false,
+            memory: review_memory,
+            embedder: review_embedder,
         },
     ) {
         Ok(r) => r,
@@ -5340,7 +5358,77 @@ async fn run_code_review_subcommand(
     if let Some(line) = stderr_line {
         magi_rs::notices::eprint_audited(&line);
     }
+    // After the report is written (with `-o`, on disk already): the review history and the
+    // clean-up of the documentation index. A history that was not updated is a warning on
+    // stderr, always; the exit code stays the report's.
+    if let Some(warning) = runner.after_report() {
+        magi_rs::notices::eprint_audited(&warning);
+    }
     code
+}
+
+/// The review stores and the embedder a `code-review` surface hands its runner (RV07, RV19).
+///
+/// Without a database there are neither (the report declares `without_memory`); a database
+/// whose review stores cannot be opened is logged and treated the same way. The embedder is
+/// built only with stores, from `[embedding]` and its key; one that cannot be built is logged
+/// and the report declares `without_embedder`.
+///
+/// # Arguments
+/// * `store` - The open database, if any (`None` with `--no-memory`).
+/// * `magi_config` - The loaded configuration.
+/// * `secret_store` - The open vault, for the endpoint placeholders.
+/// * `embedding_key` - The `[embedding]` key chosen by origin.
+///
+/// # Returns
+/// The stores and the embedder, each `None` when unavailable.
+fn review_context_of(
+    store: Option<&EncryptedSqliteMemory>,
+    magi_config: &MagiConfig,
+    secret_store: Option<&SharedSecretStore>,
+    embedding_key: &SectionKey,
+) -> (
+    Option<Arc<crate::memory::review_rag::ReviewMemory>>,
+    Option<Arc<dyn crate::memory::embedding::EmbeddingProvider>>,
+) {
+    let Some(store) = store else {
+        return (None, None);
+    };
+    let opened = store
+        .data_key()
+        .map_err(|e| crate::memory::error::MemoryError::Crypto(e.to_string()))
+        .and_then(|dek| crate::memory::review_rag::ReviewMemory::open(store.shared_conn(), dek));
+    let memory = match opened {
+        Ok(memory) => Arc::new(memory),
+        Err(e) => {
+            let error = redact_foreign_text(&e.to_string()).to_string();
+            tracing::event!(
+                target: "magi_rs::review",
+                tracing::Level::WARN,
+                error = error.as_str(),
+                "the review stores could not be opened: reviews run without documentation and history"
+            );
+            return (None, None);
+        }
+    };
+    let embedder = match resolve_effective_embedding_endpoint(magi_config, secret_store)
+        .and_then(|url| build_embedder(magi_config, &url, embedding_key))
+    {
+        Ok(embedder) => {
+            Some(Arc::new(embedder) as Arc<dyn crate::memory::embedding::EmbeddingProvider>)
+        }
+        Err(e) => {
+            let error = redact_foreign_text(&e).to_string();
+            tracing::event!(
+                target: "magi_rs::review",
+                tracing::Level::WARN,
+                error = error.as_str(),
+                "the review embedder could not be built: reviews run without documentation and history"
+            );
+            None
+        }
+    };
+    (Some(memory), embedder)
 }
 
 /// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.
@@ -7087,6 +7175,13 @@ async fn prepare_headless(
     let magi_auth = trio_auth(&magi_config, provider_kind, &section_keys, &endpoints);
     // Only `query` offers the review as a tool; `consult` would build it for nothing.
     let code_review = if command == "query" {
+        // `--no-memory` opens no review store either: no documentation, no history (RV07).
+        let (review_memory, review_embedder) = review_context_of(
+            memory.as_ref().filter(|_| !h.no_memory),
+            &magi_config,
+            secret_store.as_ref(),
+            section_keys.embedding(),
+        );
         match optional_code_review_runner(crate::code_review_runner::CodeReviewBuild {
             workspace: workdir.clone(),
             cfg: magi_config.clone(),
@@ -7100,6 +7195,8 @@ async fn prepare_headless(
             secret_store: secret_store.clone(),
             structured: false,
             trio_checked: consult_magi.is_ok(),
+            memory: review_memory,
+            embedder: review_embedder,
         }) {
             Ok(runner) => Some(runner),
             Err(text) => {

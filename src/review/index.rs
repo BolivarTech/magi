@@ -98,7 +98,8 @@ pub struct LexicalIndex {
 }
 
 impl LexicalIndex {
-    /// Builds the index from `(path, text)` pairs (both sides of a diff may appear under one path).
+    /// Builds the index from `(path, text)` pairs, the new side of every file; the old side of a
+    /// diff goes to [`Self::build_with_old`], never under the same path here.
     ///
     /// Also records where each identifier occurs and where each named top-level unit is defined
     /// (the extractors run once over every file that has one).
@@ -361,6 +362,8 @@ impl LexicalIndex {
 #[derive(Default)]
 pub struct Reviewed {
     ranges: HashMap<String, BTreeMap<u32, u32>>,
+    /// Files a completed batch showed only as retrieved context (RV09's `context only`).
+    context: HashSet<String>,
 }
 
 impl Reviewed {
@@ -403,7 +406,12 @@ impl Reviewed {
     ///
     /// * `file` - The workspace-relative path of the context item.
     pub fn add_context_file(&mut self, file: &str) {
-        let _ = file;
+        self.context.insert(file.to_string());
+    }
+
+    /// Whether `file` was shown only as retrieved context. O(1) expected.
+    pub(crate) fn is_context_file(&self, file: &str) -> bool {
+        self.context.contains(file)
     }
 
     /// Whether `file` has at least one recorded line. O(1) expected.
