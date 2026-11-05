@@ -387,6 +387,19 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_between_definitions_is_not_a_definition() {
+        // The extractor names the gap between two functions after the lines it spans (measured:
+        // "lines 2-2" for the one blank line below); that label is not a definition.
+        let files = vec![(
+            "a.rs".to_string(),
+            "fn parse() {}\n\nfn only() {}\n".to_string(),
+        )];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        assert!(index.definitions("lines 2-2").is_empty());
+        assert_eq!(index.definitions("only"), &[("a.rs".to_string(), 3, 3)]);
+    }
+
+    #[test]
     fn occurrences_are_recorded_with_their_line() {
         let files = vec![(
             "b.rs".to_string(),
