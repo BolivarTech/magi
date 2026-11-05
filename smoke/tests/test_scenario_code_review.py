@@ -296,6 +296,20 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         r = _result("R16", 2, None, _with_id(_ROOT_STDERR), protected_visible=visible)
         self.assertEqual({Outcome.PASS}, set(_outcomes("S51", r).values()))
 
+    def test_s51_cannot_test_when_git_listed_only_sqlite_side_files(self) -> None:
+        # [MAGI §6 loop 49, F1a2-melchior/caspar] with every listed .magi/ file a side file that may vanish before
+        # the product enumerates, nothing stable was there to exclude: never a FAIL for a list that omits them.
+        side = (".magi/.magi-rs-memory.db-wal", ".magi/.magi-rs-memory.db-shm")
+        r = _result("R16", 2, None, _with_id(_ROOT_STDERR), protected_visible=side)
+        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]])
+
+    def test_s51_a_cut_list_need_not_name_a_vanished_side_file(self) -> None:
+        # [MAGI §6 loop 49] the cut-list completeness check uses the same stable set as the uncut one.
+        stderr = _ROOT_STDERR.replace(b"skipped/pixel.png (binary)", b"skipped/pixel.png (binary), and 3 more")
+        visible = _R16_PROTECTED + (".magi/.magi-rs-memory.db-wal",)
+        r = _result("R16", 2, None, _with_id(stderr), protected_visible=visible)
+        self.assertEqual(Outcome.PASS, _outcomes("S51", r)[code_review.S51_ASSERTIONS[2]])
+
     def test_s51_fails_on_a_wrong_exit(self) -> None:
         r = _result("R16", 0, None, _with_id(_ROOT_STDERR))
         self.assertEqual(Outcome.FAIL, _outcomes("S51", r)[code_review.S51_ASSERTIONS[0]])
@@ -710,13 +724,19 @@ class CodeReviewScenarioTests(unittest.TestCase):
         del doc["code_review"]["findings"]
         self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[4]])
 
-    def test_s47_records_a_missing_discarded_key_as_an_observation(self) -> None:
-        # [SMOKE #2 2026-11-05] the discard property became an observation (a real trio cannot be forced
-        # to invent a location); an absent key is still reported, as shape drift, never as "nothing discarded".
-        doc = _review(3)
-        del doc["code_review"]["discarded"]
-        detail = _details("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[1]]
-        self.assertIn("code_review.discarded", detail)
+    def test_s47_fails_without_the_discarded_list(self) -> None:
+        # [MAGI §6 loop 49, F1a2-melchior] what is discarded depends on the trio, but whether the product
+        # writes the list does not: an absent or non-list key is shape drift and a FAIL, never an observation.
+        for value in (None, "none", {}):
+            doc = _review(3)
+            if value is None:
+                del doc["code_review"]["discarded"]
+            else:
+                doc["code_review"]["discarded"] = value
+            finding = [f for f in _findings("S47", _result("R12", 0, doc))
+                       if f.assertion == code_review.S47_ASSERTIONS[1]][0]
+            self.assertEqual(Outcome.FAIL, finding.outcome, value)
+            self.assertIn("code_review.discarded", finding.detail, value)
 
     def test_s47_without_the_unmeasured_key_treats_the_pool_as_unmeasured(self) -> None:
         # [CP2 MS2 S2b loop 10] an absent key never softens the batch assertion to CANNOT_TEST.
@@ -733,6 +753,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
         # location, so the assertion left the verdict; the unit suite holds the cause property.
         self.assertEqual(5, len(code_review.S47_ASSERTIONS))
         self.assertNotIn("every discarded finding carries its cause", code_review.S47_ASSERTIONS)
+        self.assertEqual("stdout parses as JSON with a code_review.discarded list", code_review.S47_ASSERTIONS[1])
 
     def test_s47_records_a_discarded_finding_without_a_cause_as_an_observation(self) -> None:
         r = _result("R12", 0, _review(3, None, [{"cause": "line out of range"}, {"cause": ""}]))
