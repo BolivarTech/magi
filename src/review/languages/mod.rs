@@ -510,9 +510,10 @@ impl Default for LanguageRegistry {
 ///
 /// The narrowest unit holding `line`, or `None` when no unit does. O(n) for n units.
 pub fn enclosing_unit(units: &[SemanticUnit], line: u32) -> Option<&SemanticUnit> {
-    // Red stub: removed in Green
-    let _ = (units, line);
-    None
+    units
+        .iter()
+        .filter(|u| (u.start_line..=u.end_line).contains(&line))
+        .min_by_key(|u| u.end_line.saturating_sub(u.start_line))
 }
 
 /// The changed lines of `sorted` that fall in `start..=end`.

@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::languages::LanguageRegistry;
+use super::languages::{
+    ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, UnitKind,
+};
 
 /// Distinct identifiers the index holds before it stops growing (memory bound; a starting point,
 /// not a measurement). At the cap, roughly 100-150 MB of heap (an owned String plus a hash slot
@@ -64,7 +66,7 @@ fn extension_of(path: &str) -> Option<String> {
 /// normalization of the same name (NFC in the finding, NFD in the code) turns into the loss of
 /// a real finding. The `citations_the_validator_checks_are_whole_index_identifiers` test pins
 /// the pairing.
-fn identifier_runs(text: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn identifier_runs(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|run| run.chars().next().is_some_and(|c| !c.is_ascii_digit()))
 }
@@ -84,14 +86,23 @@ pub struct LexicalIndex {
     file_extensions: HashSet<String>,
     /// Last path component of every file given to `build` (`lib/this.ts` gives `this.ts`).
     file_names: HashSet<String>,
+    /// Name of each named top-level unit, with `(file, first_line, last_line)`.
+    definitions: HashMap<String, Vec<(String, u32, u32)>>,
+    /// `(file, line)` of each line an identifier appears on. Holds the identifiers of
+    /// `identifiers` only, so it grows with the occurrences of at most
+    /// [`MAX_INDEX_IDENTIFIERS`] names.
+    occurrences: HashMap<String, Vec<(String, u32)>>,
     complete: bool,
 }
 
 impl LexicalIndex {
     /// Builds the index from `(path, text)` pairs (both sides of a diff may appear under one path).
     ///
-    /// Complexity: O(total bytes of `files`) time; O(distinct identifiers), bounded by the cap,
-    /// space.
+    /// Also records where each identifier occurs and where each named top-level unit is defined
+    /// (the extractors run once over every file that has one).
+    ///
+    /// Complexity: O(total bytes of `files`) time; O(distinct identifiers, bounded by the cap,
+    /// plus occurrences) space.
     pub fn build(files: &[(String, String)], registry: &LanguageRegistry) -> Self {
         Self::build_with_limit(files, registry, MAX_INDEX_IDENTIFIERS)
     }
@@ -119,6 +130,8 @@ impl LexicalIndex {
                 .map(str::to_ascii_lowercase)
                 .collect(),
             file_names: HashSet::new(),
+            definitions: HashMap::new(),
+            occurrences: HashMap::new(),
             complete: true,
         };
         for (path, _) in files {
@@ -130,19 +143,70 @@ impl LexicalIndex {
                 index.extractor_files.insert(path.clone());
             }
         }
-        'files: for (_, text) in files {
-            for run in identifier_runs(text) {
-                if index.identifiers.contains(run) {
-                    continue;
+        'files: for (path, text) in files {
+            for (idx, line_text) in text.lines().enumerate() {
+                let line = u32::try_from(idx.saturating_add(1)).unwrap_or(u32::MAX);
+                for run in identifier_runs(line_text) {
+                    if !index.identifiers.contains(run) {
+                        if index.identifiers.len() >= cap {
+                            index.complete = false;
+                            break 'files;
+                        }
+                        index.identifiers.insert(run.to_string());
+                    }
+                    index.record_occurrence(run, path, line);
                 }
-                if index.identifiers.len() >= cap {
-                    index.complete = false;
-                    break 'files;
-                }
-                index.identifiers.insert(run.to_string());
+            }
+        }
+        for (path, text) in files {
+            if let Some(extractor) = registry.get(path) {
+                index.record_definitions(extractor, path, text);
             }
         }
         index
+    }
+
+    /// Records that `name` occurs at `line` of `file`; a second occurrence on the same line is
+    /// not recorded again. O(1) expected.
+    fn record_occurrence(&mut self, name: &str, file: &str, line: u32) {
+        let entry = (file.to_string(), line);
+        match self.occurrences.get_mut(name) {
+            Some(places) => {
+                if places.last() != Some(&entry) {
+                    places.push(entry);
+                }
+            }
+            None => {
+                self.occurrences.insert(name.to_string(), vec![entry]);
+            }
+        }
+    }
+
+    /// Records the named top-level units of `text` as definitions: a function, a method, a type
+    /// (class, struct, enum, trait) or a module. An impl block is not a definition of its type, and
+    /// the gap and declaration-group units an extractor emits carry a label, not a name.
+    /// O(bytes of `text`) for the extraction.
+    fn record_definitions(&mut self, extractor: &ExtractorKind, file: &str, text: &str) {
+        for unit in extractor.extract_units(text, file, ChangedLines::All) {
+            if !matches!(
+                unit.kind,
+                UnitKind::Function
+                    | UnitKind::Method
+                    | UnitKind::Class
+                    | UnitKind::Struct
+                    | UnitKind::Enum
+                    | UnitKind::Trait
+                    | UnitKind::Module
+            ) {
+                continue;
+            }
+            let place = (file.to_string(), unit.start_line, unit.end_line);
+            let places = self.definitions.entry(unit.name).or_default();
+            // Both sides of a diff may be given under one path: the same span is one definition.
+            if !places.contains(&place) {
+                places.push(place);
+            }
+        }
     }
 
     /// Whether `name` occurs in the reviewed code; a qualified citation (`Baz::qux`,
@@ -151,18 +215,35 @@ impl LexicalIndex {
         self.identifiers.contains(last_segment(name))
     }
 
-    /// Where `name` is defined, as `(file, first_line, last_line)`.
+    /// Where `name` is defined, as `(file, first_line, last_line)`, in the order the files were
+    /// given. Only named top-level units of files with an extractor are definitions; a name that
+    /// is defined more than once (homonyms) lists every place. O(1) expected.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The exact name of the unit.
+    ///
+    /// # Returns
+    ///
+    /// The places, empty when `name` has no definition.
     pub fn definitions(&self, name: &str) -> &[(String, u32, u32)] {
-        // Red stub: removed in Green
-        let _ = name;
-        &[]
+        self.definitions.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Where `name` occurs, as `(file, line)`.
+    /// Where the identifier `name` occurs, as `(file, line)`: one entry per line, in the order the
+    /// files were given and then line order. Comments and strings count, as in
+    /// [`Self::contains`]. Occurrences of an identifier that arrived after the index stopped at
+    /// the cap ([`Self::is_complete`]) are missing. O(1) expected.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The identifier.
+    ///
+    /// # Returns
+    ///
+    /// The places, empty when `name` does not occur.
     pub fn occurrences(&self, name: &str) -> &[(String, u32)] {
-        // Red stub: removed in Green
-        let _ = name;
-        &[]
+        self.occurrences.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Whether `file` was given to `build` and has a language extractor. O(1) expected.

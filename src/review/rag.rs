@@ -3,12 +3,27 @@
 // Date: 2026-10-22
 
 //! Review context assembled by a fixed priority (REQ-RV07, RV03).
+//!
+//! Each batch carries, besides its own code, what the trio needs to judge it: the unit that
+//! contains each change, the definitions of what the code uses, the units that call a changed
+//! one, project documentation and validated history. The priority is fixed (the order of
+//! [`ContextKind`]): the batch's code, its containing units, definitions and callers,
+//! documentation, history. What does not fit the batch budget is cut from the end and named; the
+//! containing unit is never cut, so a unit that cannot fit is a typed error.
+
+use std::collections::{HashMap, HashSet};
 
 use super::batching::BatchItem;
+use super::docs::MAX_DOC_CHUNKS;
 use super::error::ReviewError;
-use super::index::LexicalIndex;
-use super::languages::LanguageRegistry;
+use super::index::{identifier_runs, LexicalIndex};
+use super::languages::{
+    enclosing_unit, ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, SemanticUnit,
+    UnitKind,
+};
+use super::secrets::display_path;
 use super::source::ContentSource;
+use super::window::estimate_tokens;
 
 /// What a context item is. The declaration order is the priority order.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -76,14 +91,58 @@ pub const CONTEXT_ITEM_FRAME_TOKENS: usize = 18;
 /// Longest doc-search query, in bytes.
 pub const DOC_QUERY_MAX_BYTES: usize = 8_192;
 
-/// What `assemble` charges for one item.
+/// What `assemble` charges for one item: the tokens of what the prompt carries for it, its text,
+/// its path ([`display_path`]) and its fixed frame ([`CONTEXT_ITEM_FRAME_TOKENS`]).
+///
+/// # Arguments
+///
+/// * `item` - The context item.
+///
+/// # Returns
+///
+/// The item's cost in tokens. O(len of the item's text).
 pub fn item_cost(item: &ContextItem) -> usize {
-    // Red stub: removed in Green
-    let _ = item;
-    0
+    estimate_tokens(&item.text)
+        .saturating_add(estimate_tokens(&display_path(&item.file)))
+        .saturating_add(CONTEXT_ITEM_FRAME_TOKENS)
 }
 
-/// Adds the units, definitions, documentation and history that fit.
+/// Adds to the batch the context that fits, by the fixed priority: containing units (mandatory),
+/// then definitions and callers, documentation and history.
+///
+/// `batch_tokens` is `ReviewBatch::tokens`, which does not include the companions: the units are
+/// charged here, once, and nothing else charges them. What enters is a prefix of the optional
+/// list in priority order: the first item that does not fit and everything after it go to
+/// `trimmed`, in that order, even if a later one is smaller. A unit repeated by `(file, lines)`
+/// (two hunks of one function) is kept once and charged once; a definition or caller with the
+/// `(file, lines)` of a unit is not added, because the unit already carries it. An item without
+/// `lines` is never deduplicated.
+///
+/// `docs` and `history` are `None` when their source is not there; the result then reports
+/// `without_embedder`, a default the caller corrects: with a live embedder the caller always
+/// passes `Some` (empty when there is nothing or the source degraded), and `without_memory` is
+/// the caller's to set.
+///
+/// O(n) in items, with one key set.
+///
+/// # Arguments
+///
+/// * `batch_tokens` - Tokens of the batch's own code.
+/// * `limit_tokens` - The budget for the batch and its context.
+/// * `units` - The containing units of the batch's changes.
+/// * `definitions` - Definitions followed by callers, in that order.
+/// * `docs` - Documentation chunks, best first, or `None`.
+/// * `history` - Validated historical findings, best first, or `None`.
+///
+/// # Returns
+///
+/// The items that entered and the ones that did not.
+///
+/// # Errors
+///
+/// [`ReviewError::TooLargeForBatch`] when `batch_tokens` is over the limit, or a containing unit
+/// does not fit with the batch and the units before it; it names the unit, its tokens and the
+/// limit.
 pub fn assemble(
     batch_tokens: usize,
     limit_tokens: usize,
@@ -92,68 +151,372 @@ pub fn assemble(
     docs: Option<Vec<ContextItem>>,
     history: Option<Vec<ContextItem>>,
 ) -> Result<Assembled, ReviewError> {
-    // Red stub: removed in Green
-    let _ = (
-        batch_tokens,
-        limit_tokens,
-        units,
-        definitions,
-        docs,
-        history,
-    );
+    if batch_tokens > limit_tokens {
+        return Err(ReviewError::TooLargeForBatch {
+            what: "the batch".to_string(),
+            tokens: batch_tokens,
+            limit: limit_tokens,
+        });
+    }
+    let mut used = batch_tokens;
+    let mut seen: HashSet<(String, (u32, u32))> = HashSet::new();
+    let mut items = Vec::new();
+    for unit in units {
+        if let Some(lines) = unit.lines {
+            if !seen.insert((unit.file.clone(), lines)) {
+                continue;
+            }
+        }
+        let cost = item_cost(&unit);
+        used = used.saturating_add(cost);
+        if used > limit_tokens {
+            return Err(ReviewError::TooLargeForBatch {
+                what: format!(
+                    "containing unit {} of {}",
+                    unit.label,
+                    display_path(&unit.file)
+                ),
+                tokens: cost,
+                limit: limit_tokens,
+            });
+        }
+        items.push(unit);
+    }
+    let without_embedder = docs.is_none() || history.is_none();
+    let optional = definitions
+        .into_iter()
+        .chain(docs.into_iter().flatten())
+        .chain(history.into_iter().flatten());
+    let mut trimmed = Vec::new();
+    let mut full = false;
+    for item in optional {
+        if matches!(item.kind, ContextKind::Definition | ContextKind::Caller) {
+            if let Some(lines) = item.lines {
+                if !seen.insert((item.file.clone(), lines)) {
+                    continue;
+                }
+            }
+        }
+        if !full {
+            let cost = item_cost(&item);
+            if used.saturating_add(cost) <= limit_tokens {
+                used = used.saturating_add(cost);
+                items.push(item);
+                continue;
+            }
+            full = true;
+        }
+        trimmed.push((item.kind, item.label));
+    }
     Ok(Assembled {
-        items: Vec::new(),
-        trimmed: Vec::new(),
-        without_embedder: false,
+        items,
+        trimmed,
+        without_embedder,
         without_memory: false,
         withheld: 0,
     })
 }
 
-/// Adds what indexing left out to `a`.
+/// Adds what indexing left out to `a`: `withheld` is summed, and a truncation becomes a
+/// `Documentation` entry in `trimmed` that names [`MAX_DOC_CHUNKS`].
+///
+/// # Arguments
+///
+/// * `a` - The assembled context to declare on.
+/// * `d` - What indexing left out.
 pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
-    // Red stub: removed in Green
-    let _ = (a, d);
+    a.withheld = a.withheld.saturating_add(d.withheld);
+    if d.truncated {
+        a.trimmed.push((
+            ContextKind::Documentation,
+            format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})"),
+        ));
+    }
 }
 
-/// The definitions of the names the batch code uses.
+/// Reads one side of `file` as UTF-8 text; `None` when that side is gone.
+///
+/// # Errors
+///
+/// Any error of `sources`, unchanged, and [`ReviewError::NotReviewable`] for non-UTF-8 bytes.
+fn read_text(
+    sources: &dyn ContentSource,
+    file: &str,
+    old_side: bool,
+) -> Result<Option<String>, ReviewError> {
+    let bytes = if old_side {
+        sources.read_old(file)?
+    } else {
+        sources.read(file)?
+    };
+    bytes
+        .map(|b| {
+            String::from_utf8(b).map_err(|_| ReviewError::NotReviewable {
+                path: file.to_string(),
+                cause: "not utf-8",
+            })
+        })
+        .transpose()
+}
+
+/// Lines `first..=last` (1-based) of `text`, joined by `\n`. O(`last`).
+fn lines_text(text: &str, first: u32, last: u32) -> String {
+    let skip = first.saturating_sub(1) as usize;
+    let take = (last.saturating_add(1).saturating_sub(first)) as usize;
+    text.lines()
+        .skip(skip)
+        .take(take)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A unit as a context item of `kind`.
+fn unit_item(kind: ContextKind, unit: SemanticUnit) -> ContextItem {
+    ContextItem {
+        kind,
+        file: unit.file,
+        label: unit.name,
+        text: unit.content,
+        candidate: false,
+        lines: Some((unit.start_line, unit.end_line)),
+    }
+}
+
+/// The units of one file, to find the narrowest one around a line.
+struct FileUnits {
+    extractor: ExtractorKind,
+    units: Vec<SemanticUnit>,
+}
+
+impl FileUnits {
+    /// Extracts the units of `text`, leaving out the gap units an extractor emits between
+    /// constructs: a line outside every construct has no containing unit. O(bytes of `text`).
+    fn load(extractor: &ExtractorKind, file: &str, text: &str) -> Self {
+        let units = extractor
+            .extract_units(text, file, ChangedLines::All)
+            .into_iter()
+            .filter(|u| u.kind != UnitKind::TopLevel)
+            .collect();
+        Self {
+            extractor: extractor.clone(),
+            units,
+        }
+    }
+
+    /// The narrowest unit around `line`. A block (impl, class, trait, module) is cut one level
+    /// down by the extractor and the piece that holds the line wins, so a hunk in one method
+    /// of a large impl is not given the whole impl. O(units).
+    fn at(&self, line: u32) -> Option<SemanticUnit> {
+        let top = enclosing_unit(&self.units, line)?;
+        if matches!(
+            top.kind,
+            UnitKind::Impl | UnitKind::Class | UnitKind::Trait | UnitKind::Module
+        ) {
+            let pieces = self.extractor.split_block(top);
+            if let Some(piece) = enclosing_unit(&pieces, line) {
+                return Some(piece.clone());
+            }
+        }
+        Some(top.clone())
+    }
+}
+
+/// The definitions of the names the batch code uses, one item per definition.
+///
+/// The input is the batch's raw code: every identifier counts, quoted or not, in the order it
+/// first appears. A name with more than one definition (homonyms) marks each as a `candidate`;
+/// a name with none (a keyword, an outside symbol) adds nothing. Each file is read once. Needs a
+/// complete index to be exhaustive: when `index.is_complete()` is false some definitions may be
+/// missing.
+///
+/// O(bytes of `text` + bytes of the files read).
+///
+/// # Arguments
+///
+/// * `text` - The raw code of the batch.
+/// * `index` - The lexical index of the review.
+/// * `sources` - The content source of the review (the cached one).
+///
+/// # Returns
+///
+/// The `Definition` items.
+///
+/// # Errors
+///
+/// An error of `sources`, unchanged; a file that is gone (`Ok(None)`) is skipped.
 pub fn definitions_for(
     text: &str,
     index: &LexicalIndex,
     sources: &dyn ContentSource,
 ) -> Result<Vec<ContextItem>, ReviewError> {
-    // Red stub: removed in Green
-    let _ = (text, index, sources);
-    Ok(Vec::new())
+    let mut names = HashSet::new();
+    let mut files: HashMap<&str, Option<String>> = HashMap::new();
+    let mut items = Vec::new();
+    for name in identifier_runs(text) {
+        if !names.insert(name) {
+            continue;
+        }
+        let places = index.definitions(name);
+        for (file, first, last) in places {
+            if !files.contains_key(file.as_str()) {
+                files.insert(file, read_text(sources, file, false)?);
+            }
+            let Some(Some(body)) = files.get(file.as_str()) else {
+                continue;
+            };
+            items.push(ContextItem {
+                kind: ContextKind::Definition,
+                file: file.clone(),
+                label: name.to_string(),
+                text: lines_text(body, *first, *last),
+                candidate: places.len() > 1,
+                lines: Some((*first, *last)),
+            });
+        }
+    }
+    Ok(items)
 }
 
-/// The units that name any of `names`.
+/// The units that name any of `names` (the changed units), one item per `(file, unit)` and never
+/// the definition itself; at most [`MAX_CALLERS_PER_NAME`] per name, the first by `(file, line)`.
+///
+/// Each file is read and split once. A file without an extractor, or that is gone, gives no
+/// caller. A unit already given for an earlier name or occurrence is not repeated.
+///
+/// O(occurrences of `names` log occurrences + bytes of the files read).
+///
+/// # Arguments
+///
+/// * `names` - The names of the changed units.
+/// * `index` - The lexical index of the review.
+/// * `sources` - The content source of the review (the cached one).
+/// * `registry` - The language extractors.
+///
+/// # Returns
+///
+/// The `Caller` items (labelled with the caller unit's name), and the names whose callers the
+/// cap cut, in `names` order, for the caller to declare.
+///
+/// # Errors
+///
+/// An error of `sources`, unchanged.
 pub fn callers_for(
     names: &[&str],
     index: &LexicalIndex,
     sources: &dyn ContentSource,
     registry: &LanguageRegistry,
 ) -> Result<(Vec<ContextItem>, Vec<String>), ReviewError> {
-    // Red stub: removed in Green
-    let _ = (names, index, sources, registry);
-    Ok((Vec::new(), Vec::new()))
+    let mut items = Vec::new();
+    let mut capped = Vec::new();
+    let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
+    let mut files: HashMap<String, Option<FileUnits>> = HashMap::new();
+    for name in names {
+        let mut places: Vec<&(String, u32)> = index.occurrences(name).iter().collect();
+        places.sort_unstable();
+        let defined = index.definitions(name);
+        let mut kept = 0usize;
+        for (file, line) in places {
+            if defined
+                .iter()
+                .any(|(f, first, last)| f == file && (*first..=*last).contains(line))
+            {
+                continue;
+            }
+            if !files.contains_key(file) {
+                let loaded = match registry.get(file) {
+                    Some(extractor) => read_text(sources, file, false)?
+                        .map(|text| FileUnits::load(extractor, file, &text)),
+                    None => None,
+                };
+                files.insert(file.clone(), loaded);
+            }
+            let Some(Some(units)) = files.get(file) else {
+                continue;
+            };
+            let Some(unit) = units.at(*line) else {
+                continue;
+            };
+            let key = (file.clone(), unit.start_line, unit.end_line);
+            if seen.contains(&key) {
+                continue;
+            }
+            if kept >= MAX_CALLERS_PER_NAME {
+                capped.push((*name).to_string());
+                break;
+            }
+            seen.insert(key);
+            kept += 1;
+            items.push(unit_item(ContextKind::Caller, unit));
+        }
+    }
+    Ok((items, capped))
 }
 
-/// The containing unit of a batch item.
+/// The unit that contains a batch item's change, as a `Unit` item with its `lines` (RV07(1),
+/// RV21).
+///
+/// A hunk is looked up on the new side at its first line; a deletion-only hunk (empty new side)
+/// on the old side at its first old line, because the new file has no line for it. Planning's
+/// companion and the context both use this, so what was charged is what `assemble` adds.
+///
+/// # Arguments
+///
+/// * `item` - The batch item.
+/// * `sources` - The content source of the review (the cached one).
+/// * `registry` - The language extractors.
+///
+/// # Returns
+///
+/// `None` for a unit or a whole file (already a unit), a line outside every unit, a file without
+/// an extractor, or a side that is gone.
+///
+/// # Errors
+///
+/// An error of `sources`, unchanged; [`ReviewError::NotReviewable`] for non-UTF-8 content.
 pub fn containing_unit(
     item: &BatchItem,
     sources: &dyn ContentSource,
     registry: &LanguageRegistry,
 ) -> Result<Option<ContextItem>, ReviewError> {
-    // Red stub: removed in Green
-    let _ = (item, sources, registry);
-    Ok(None)
+    let BatchItem::Hunk {
+        file,
+        first_line,
+        last_line,
+        old_first_line,
+        ..
+    } = item
+    else {
+        return Ok(None);
+    };
+    let Some(extractor) = registry.get(file) else {
+        return Ok(None);
+    };
+    let deletion = first_line > last_line;
+    let (line, old_side) = if deletion {
+        (*old_first_line, true)
+    } else {
+        (*first_line, false)
+    };
+    Ok(read_text(sources, file, old_side)?
+        .and_then(|text| FileUnits::load(extractor, file, &text).at(line))
+        .map(|unit| unit_item(ContextKind::Unit, unit)))
 }
 
-/// The doc-search query cut from `text`.
+/// The doc-search query: `text` cut to at most [`DOC_QUERY_MAX_BYTES`] bytes, on a char boundary.
+///
+/// # Arguments
+///
+/// * `text` - The text to search with.
+///
+/// # Returns
+///
+/// A prefix of `text`. O(1) in the cut, never slices inside a character.
 pub fn doc_query(text: &str) -> &str {
-    // Red stub: removed in Green
-    text
+    let mut end = DOC_QUERY_MAX_BYTES.min(text.len());
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    text.get(..end).unwrap_or(text)
 }
 
 #[cfg(test)]
