@@ -2387,6 +2387,30 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_the_older_data_tables_is_never_reported_as_an_older_version() {
+        // An empty file fails on `vault_meta` before the older-version check runs, so the
+        // marker guard needs a file that gets past that read: the envelope table alone.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        {
+            let conn = rusqlite::Connection::open(tmp.path()).expect("open");
+            conn.execute_batch(
+                "CREATE TABLE vault_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
+            )
+            .expect("vault_meta");
+        }
+        let err = EncryptedSqliteMemory::open_with_state_machine(
+            tmp.path().to_path_buf(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .err()
+        .expect("no data tables");
+        assert!(
+            matches!(err, VaultError::DbCorrupt { ref detail, .. } if !detail.contains("0.24.x")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn the_documented_purge_empties_the_tables_and_the_database_still_opens() {
         // The purge is the README's SQL (no purge command exists); every table is seeded, so a
         // purge that forgets one of them stays red, and the reopen proves DELETE (never DROP)
