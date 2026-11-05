@@ -47,7 +47,7 @@ from smoke.registry import scenario
 #: The verbatim assertion texts of S47-S50.
 S47_ASSERTIONS = (
     "exit 0",
-    "stdout parses as JSON",
+    "stdout parses as JSON with a code_review.discarded list",
     "code_review.batches_planned is at least 3, batches_completed equals it "
     "and failed_batches is empty",
     "consult has one consensus",
@@ -659,7 +659,7 @@ def _line_inside(line, count):
     return isinstance(line, int) and not isinstance(line, bool) and 1 <= line <= count
 
 
-def _discard_observation(section):
+def _discard_observation(discarded):
     """Describe the discarded findings, without a verdict.
 
     Whether anything is discarded depends on the trio inventing a location,
@@ -670,32 +670,51 @@ def _discard_observation(section):
     ``findings_outside_what_was_reviewed_are_discarded_with_their_cause``, and
     ``src/review/pipeline.rs``,
     ``a_discarded_finding_names_its_batch_one_based_in_the_json``); the real
-    run's discards are still read and reported here, so a bare cause or a
-    missing list reaches the reader.
+    run's discards are still read and reported here, so a bare cause reaches
+    the reader. The list itself is not model-dependent: :func:`_parsed_finding`
+    fails a run that does not write it.
 
     Args:
-        section: The ``code_review`` object.
+        discarded: The ``code_review.discarded`` list, already read.
 
     Returns:
-        str: Empty when the list is present and empty; otherwise one sentence
-        naming the shape drift, or how many findings were discarded and how
-        many of them carry no cause.
+        str: Empty when the list is empty; otherwise how many findings were
+        discarded and how many of them carry no cause.
 
     Example:
-        >>> _discard_observation({"discarded": []})
+        >>> _discard_observation([])
         ''
-        >>> _discard_observation({"discarded": [{"cause": "context only"}]})
-        '1 discarded finding(s), 0 without a cause'
+        >>> _discard_observation([{"cause": "context only"}, {"cause": " "}])
+        '2 discarded finding(s), 1 without a cause'
     """
-    discarded, failure = _list_under(section, "discarded")
-    if discarded is None:
-        return failure
     if not discarded:
         return ""
     bare = [d for d in discarded
             if not (isinstance(d, dict) and isinstance(d.get("cause"), str)
                     and d["cause"].strip())]
     return "%d discarded finding(s), %d without a cause" % (len(discarded), len(bare))
+
+
+def _parsed_finding(section, run_id):
+    """Judge S47's second assertion on a document that parsed.
+
+    MAGI FIX (S6 loop 49): when the discard verdict became an observation, a
+    missing ``discarded`` list rode on this PASS as a note (F1a2-melchior).
+    Whether the product writes the list does not depend on the trio, so its
+    absence is shape drift and a ``FAIL``.
+
+    Args:
+        section: The ``code_review`` object.
+        run_id: The shared run.
+
+    Returns:
+        Finding: ``FAIL`` when ``code_review.discarded`` is missing or not a
+        list; otherwise ``PASS``, carrying :func:`_discard_observation`.
+    """
+    discarded, failure = _list_under(section, "discarded")
+    if discarded is None:
+        return _finding(S47_ASSERTIONS, 1, Outcome.FAIL, run_id, failure)
+    return _finding(S47_ASSERTIONS, 1, Outcome.PASS, run_id, _discard_observation(discarded))
 
 
 def _repeated_keys(stdout):
@@ -815,9 +834,9 @@ def a_large_review_yields_one_report(run):
         yield _finding(S47_ASSERTIONS, 0, Outcome.CANNOT_TEST, "R12", lost_detail)
     else:
         yield _verdict(S47_ASSERTIONS, 0, "R12", code == EXIT_OK, "exited %d" % code)
-    # The discard observation rides on the parse assertion, the one PASS that
-    # is certain here, so it never mixes into the cause of a red.
-    yield _finding(S47_ASSERTIONS, 1, Outcome.PASS, "R12", _discard_observation(section))
+    # The discard observation rides on the parse assertion, so it never mixes
+    # into the cause of another assertion's red.
+    yield _parsed_finding(section, "R12")
     yield _batches_finding(section, "R12")
     consult = document.get(CONSULT_KEY)
     # MAGI FIX (S6 loop 6): any truthy value passed, a list of two reports
@@ -1221,13 +1240,15 @@ def _exclusion_finding(run, stderr):
     Returns:
         Finding: ``FAIL`` when the omission list is unusable or names a
         protected path with a cause other than ``ignored``; ``CANNOT_TEST``
-        when git listed no ``.magi/`` file, so none was an enumeration
-        candidate, or when one of their names holds `` (<cause>), `` or ends
+        when git listed no ``.magi/`` file, or only SQLite side files
+        (:data:`SQLITE_SIDE_SUFFIXES`, which may vanish before the product
+        enumerates), so none was a stable enumeration candidate, or when one
+        of their names holds `` (<cause>), `` or ends
         in `` (<cause>)`` (:data:`AMBIGUOUS_PATH_PATTERN`), so the list
         cannot be split around it (a split that already reads as a protected
         path with another cause is the ``FAIL`` above); ``CANNOT_TEST`` too when the list was
         cut at the product's display cap (:data:`OMISSION_CUT_PATTERN`)
-        without naming every one of them as ``ignored``, so the rest may be in
+        without naming every stable one of them as ``ignored``, so the rest may be in
         the unnamed tail, read and classified;
         ``FAIL`` when git listed some and the uncut list names none of
         them, or not every one apart from SQLite side files
@@ -1267,7 +1288,20 @@ def _exclusion_finding(run, stderr):
     # MAGI FIX (S6 loop 14): only the omission list was read with "\\" as "/",
     # so a backslash-separated listing never matched (F1a2-c2).
     visible = {_slashed(path) for path in run.protected_visible}
-    found = bool(named & visible)
+    # MAGI FIX (S6 loop 49): the side-file exemption applied to the
+    # completeness check only, so a listing of only -wal/-shm files that
+    # vanished before the product enumerated read as a FAIL, and a cut list
+    # had to name a vanished side file to pass (F1a2-melchior, -caspar).
+    # Every check below reads the same stable set.
+    stable = {path for path in visible
+              if not path.endswith(SQLITE_SIDE_SUFFIXES)}
+    if not stable:
+        return _finding(
+            S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
+            "git lists only SQLite side files under .magi/ (%s), which come and "
+            "go with the store, so nothing stable was there to exclude"
+            % ", ".join(run.protected_visible))
+    found = bool(named & stable)
     # MAGI FIX (S6 loop 14): the product names at most MAX_OMISSIONS_SHOWN
     # entries, so with the list cut every listed .magi/ file could sit in the
     # unnamed rest and S51 read the environment's size as a FAIL (F1a1-m2).
@@ -1276,18 +1310,16 @@ def _exclusion_finding(run, stderr):
     # only when it names every listed .magi/ file as ignored.
     cut = OMISSION_CUT_PATTERN.search(
         OMISSION_LIST_PATTERN.search(stderr).group("list"))
-    if cut is not None and not visible <= named:
+    if cut is not None and not stable <= named:
         return _finding(
             S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
             "git lists %s, the refusal names %d of them as ignored and cut "
             "its list at %s more, so the rest may be among the unnamed"
-            % (", ".join(run.protected_visible), len(named & visible),
+            % (", ".join(run.protected_visible), len(named & stable),
                cut.group("more")))
     # MAGI FIX (F1a2-h): an uncut list names every entry the product left
     # out, so one visible .magi/ file absent from it was taken elsewhere; the
     # intersection alone passed a list naming one of three.
-    stable = {path for path in visible
-              if not path.endswith(SQLITE_SIDE_SUFFIXES)}
     missing = sorted(stable - named)
     return _verdict(S51_ASSERTIONS, 2, "R16", found and not missing,
                     "git lists %s, and stderr does not name %s as ignored"
