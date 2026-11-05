@@ -604,4 +604,34 @@ mod tests {
             HistoryStatus::Pending
         );
     }
+
+    /// Counts every git call and answers success with empty output.
+    struct CountingGit(std::sync::atomic::AtomicUsize);
+
+    impl GitCommand for CountingGit {
+        fn run_bytes(&self, _args: &[&str]) -> Result<Vec<u8>, crate::review::error::ReviewError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_reference_starting_with_a_dash_is_never_passed_to_git() {
+        // Security guardian: a stored commit or a head such as `--output=x` would be read by git as
+        // an option; classify must stay Pending and must not run git at all.
+        let calls = |e: &HistoryEntry, head: &str| {
+            let git = CountingGit(std::sync::atomic::AtomicUsize::new(0));
+            let status = classify(e, head, &git);
+            (status, git.0.load(std::sync::atomic::Ordering::SeqCst))
+        };
+        assert_eq!(
+            calls(&entry(Some(5)), "--output=x"),
+            (HistoryStatus::Pending, 0)
+        );
+        let dashed = HistoryEntry {
+            reviewed_commit: "--output=x".into(),
+            ..entry(Some(5))
+        };
+        assert_eq!(calls(&dashed, "HEAD"), (HistoryStatus::Pending, 0));
+    }
 }
