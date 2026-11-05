@@ -78,8 +78,8 @@ def _with_id(tail: bytes) -> bytes:
     return b"run: " + RUN_ID.encode() + _NL + tail
 
 
-def _outcomes(scenario_id: str, result, log=b"") -> dict[str, Outcome]:
-    """Outcomes of *scenario_id*; *log* is the run log captured on the result (``None``: no directory).
+def _findings(scenario_id: str, result, log=b"") -> list:
+    """The findings *scenario_id* yields; *log* is the run log captured on the result (``None``: no directory).
 
     [MAGI §6 MS2 loop 3, F4] the log rides on the ``RunResult`` the executor captured right after the
     run; the scratch area handed to ``runs`` stays empty, so a scenario that read the live directory
@@ -90,9 +90,19 @@ def _outcomes(scenario_id: str, result, log=b"") -> dict[str, Outcome]:
         scratch = pathlib.Path(tmp)
         runs.configure(None, types.SimpleNamespace(scratch_dir=scratch, prepare_scratch=lambda: None), None)
         try:
-            return {f.assertion: f.outcome for f in DEFAULT_REGISTRY.get(scenario_id).func(result)}
+            return list(DEFAULT_REGISTRY.get(scenario_id).func(result))
         finally:
             runs.reset_for_test()
+
+
+def _outcomes(scenario_id: str, result, log=b"") -> dict[str, Outcome]:
+    """Outcomes of *scenario_id*, keyed by assertion text (see :func:`_findings`)."""
+    return {f.assertion: f.outcome for f in _findings(scenario_id, result, log)}
+
+
+def _details(scenario_id: str, result, log=b"") -> dict[str, str]:
+    """Details of *scenario_id*'s findings, keyed by assertion text (see :func:`_findings`)."""
+    return {f.assertion: f.detail for f in _findings(scenario_id, result, log)}
 
 
 def _review(batches: int = 3, findings=None, discarded=None) -> dict:
@@ -700,11 +710,13 @@ class CodeReviewScenarioTests(unittest.TestCase):
         del doc["code_review"]["findings"]
         self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[4]])
 
-    def test_s47_without_the_discarded_key_fails(self) -> None:
-        # [CP2 MS2 S2b loop 10] symmetric to the findings key: an absent key is a shape drift, never "nothing discarded".
+    def test_s47_records_a_missing_discarded_key_as_an_observation(self) -> None:
+        # [SMOKE #2 2026-11-05] the discard property became an observation (a real trio cannot be forced
+        # to invent a location); an absent key is still reported, as shape drift, never as "nothing discarded".
         doc = _review(3)
         del doc["code_review"]["discarded"]
-        self.assertEqual(Outcome.FAIL, _outcomes("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[5]])
+        detail = _details("S47", _result("R12", 0, doc))[code_review.S47_ASSERTIONS[1]]
+        self.assertIn("code_review.discarded", detail)
 
     def test_s47_without_the_unmeasured_key_treats_the_pool_as_unmeasured(self) -> None:
         # [CP2 MS2 S2b loop 10] an absent key never softens the batch assertion to CANNOT_TEST.
@@ -716,13 +728,21 @@ class CodeReviewScenarioTests(unittest.TestCase):
         r = _result("R12", 0, _review(3, []))
         self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S47", r)[code_review.S47_ASSERTIONS[4]])
 
-    def test_s47_fails_when_a_discarded_finding_has_no_cause(self) -> None:
-        r = _result("R12", 0, _review(3, None, [{"cause": "line out of range"}, {"cause": ""}]))
-        self.assertEqual(Outcome.FAIL, _outcomes("S47", r)[code_review.S47_ASSERTIONS[5]])
+    def test_s47_declares_no_verdict_on_the_discarded_findings(self) -> None:
+        # [SMOKE #2 2026-11-05, user] whether anything is discarded depends on the trio inventing a
+        # location, so the assertion left the verdict; the unit suite holds the cause property.
+        self.assertEqual(5, len(code_review.S47_ASSERTIONS))
+        self.assertNotIn("every discarded finding carries its cause", code_review.S47_ASSERTIONS)
 
-    def test_s47_with_nothing_discarded_cannot_test_the_cause_property(self) -> None:
+    def test_s47_records_a_discarded_finding_without_a_cause_as_an_observation(self) -> None:
+        r = _result("R12", 0, _review(3, None, [{"cause": "line out of range"}, {"cause": ""}]))
+        parsed = code_review.S47_ASSERTIONS[1]
+        self.assertEqual(Outcome.PASS, _outcomes("S47", r)[parsed])
+        self.assertIn("2 discarded finding(s), 1 without a cause", _details("S47", r)[parsed])
+
+    def test_s47_with_nothing_discarded_records_no_observation(self) -> None:
         r = _result("R12", 0, _review(3, None, []))
-        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S47", r)[code_review.S47_ASSERTIONS[5]])
+        self.assertEqual("", _details("S47", r)[code_review.S47_ASSERTIONS[1]])
 
     def test_s47_fails_on_a_nonzero_exit_unparsed_stdout_or_no_consensus(self) -> None:
         # [CP2 MS2 S2b loop 7] the negative half of each guarded S47 property.

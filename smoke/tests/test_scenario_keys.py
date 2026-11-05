@@ -66,7 +66,7 @@ class KeysRegistrationTests(unittest.TestCase):
 
     def test_the_declared_totals_include_them(self):
         self.assertEqual(51, DECLARED_SCENARIO_COUNT)
-        self.assertEqual(153, DECLARED_ASSERTION_COUNT)
+        self.assertEqual(152, DECLARED_ASSERTION_COUNT)
 
     def test_the_assertion_texts_are_verbatim_in_the_module(self):
         source = _source()

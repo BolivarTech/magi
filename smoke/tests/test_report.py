@@ -102,6 +102,18 @@ class ReportRenderingTests(unittest.TestCase):
     def test_a_report_with_nothing_wrong_carries_no_causes_section(self) -> None:
         self.assertNotIn("causes:", Report([_finding("S1", "first")]).render())
 
+    def test_a_pass_that_carries_a_detail_is_listed_as_an_observation(self) -> None:
+        """A model-dependent property is recorded without a verdict on a PASS;
+        a report that dropped it would hide it from every reader."""
+        note = "2 discarded finding(s), 1 without a cause"
+        rendered = Report([_finding("S47", "located", Outcome.PASS, note, "R12")]).render()
+        self.assertIn("observations (no verdict):", rendered)
+        self.assertIn("R12: %s" % note, rendered)
+        self.assertNotIn("causes:", rendered)
+
+    def test_a_report_with_no_observation_carries_no_observations_section(self) -> None:
+        self.assertNotIn("observations", Report([_finding("S1", "first")]).render())
+
 
 class ReportCountingTests(unittest.TestCase):
     """The summary is the line most people read, so it counts exactly."""

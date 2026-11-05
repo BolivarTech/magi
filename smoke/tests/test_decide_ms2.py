@@ -43,7 +43,7 @@ class DecideMs2RegistryTests(unittest.TestCase):
 
     def test_the_declared_totals_include_them(self) -> None:
         self.assertEqual(51, DECLARED_SCENARIO_COUNT)
-        self.assertEqual(153, DECLARED_ASSERTION_COUNT)
+        self.assertEqual(152, DECLARED_ASSERTION_COUNT)
 
 
 class DecideMs2AssertionTextTests(unittest.TestCase):
