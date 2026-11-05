@@ -52,7 +52,6 @@ S47_ASSERTIONS = (
     "and failed_batches is empty",
     "consult has one consensus",
     "every main finding points inside the reviewed files",
-    "every discarded finding carries its cause",
 )
 S48_ASSERTIONS = ("exit 2", "stderr names the outside path")
 S49_ASSERTIONS = (
@@ -225,7 +224,8 @@ def _finding(texts, index, outcome, run_id, detail=""):
         index: Position in *texts*.
         outcome: What became of it.
         run_id: The shared run it came from.
-        detail: The cause when the outcome is not ``PASS``.
+        detail: The cause when the outcome is not ``PASS``; on ``PASS``, an
+            observation without a verdict, or empty.
 
     Returns:
         Finding: The finding.
@@ -659,28 +659,43 @@ def _line_inside(line, count):
     return isinstance(line, int) and not isinstance(line, bool) and 1 <= line <= count
 
 
-def _causes_finding(section, run_id):
-    """Judge that every discarded finding names why it was discarded.
+def _discard_observation(section):
+    """Describe the discarded findings, without a verdict.
+
+    Whether anything is discarded depends on the trio inventing a location,
+    which no input can force, so a verdict here was ``CANNOT_TEST`` on every
+    honest run and kept the certificate from ever being issued (SMOKE #2,
+    2026-11-05; user decision). That a discard names its cause is held by the
+    unit suite (``src/review/validate.rs``,
+    ``findings_outside_what_was_reviewed_are_discarded_with_their_cause``, and
+    ``src/review/pipeline.rs``,
+    ``a_discarded_finding_names_its_batch_one_based_in_the_json``); the real
+    run's discards are still read and reported here, so a bare cause or a
+    missing list reaches the reader.
 
     Args:
         section: The ``code_review`` object.
-        run_id: The shared run.
 
     Returns:
-        Finding: ``FAIL`` on a missing list or an empty cause;
-        ``CANNOT_TEST`` when nothing was discarded; otherwise ``PASS``.
+        str: Empty when the list is present and empty; otherwise one sentence
+        naming the shape drift, or how many findings were discarded and how
+        many of them carry no cause.
+
+    Example:
+        >>> _discard_observation({"discarded": []})
+        ''
+        >>> _discard_observation({"discarded": [{"cause": "context only"}]})
+        '1 discarded finding(s), 0 without a cause'
     """
     discarded, failure = _list_under(section, "discarded")
     if discarded is None:
-        return _finding(S47_ASSERTIONS, 5, Outcome.FAIL, run_id, failure)
+        return failure
     if not discarded:
-        return _finding(S47_ASSERTIONS, 5, Outcome.CANNOT_TEST, run_id,
-                        "nothing was discarded, so there is no cause to check")
+        return ""
     bare = [d for d in discarded
             if not (isinstance(d, dict) and isinstance(d.get("cause"), str)
                     and d["cause"].strip())]
-    return _verdict(S47_ASSERTIONS, 5, run_id, not bare,
-                    "%d discarded finding(s) carry no cause" % len(bare))
+    return "%d discarded finding(s), %d without a cause" % (len(discarded), len(bare))
 
 
 def _repeated_keys(stdout):
@@ -800,7 +815,9 @@ def a_large_review_yields_one_report(run):
         yield _finding(S47_ASSERTIONS, 0, Outcome.CANNOT_TEST, "R12", lost_detail)
     else:
         yield _verdict(S47_ASSERTIONS, 0, "R12", code == EXIT_OK, "exited %d" % code)
-    yield _finding(S47_ASSERTIONS, 1, Outcome.PASS, "R12")
+    # The discard observation rides on the parse assertion, the one PASS that
+    # is certain here, so it never mixes into the cause of a red.
+    yield _finding(S47_ASSERTIONS, 1, Outcome.PASS, "R12", _discard_observation(section))
     yield _batches_finding(section, "R12")
     consult = document.get(CONSULT_KEY)
     # MAGI FIX (S6 loop 6): any truthy value passed, a list of two reports
@@ -813,7 +830,6 @@ def a_large_review_yields_one_report(run):
                        _consensus_ok(consult, run.output.stdout),
                        "consult.consensus is not one consensus report object")
     yield _locations_finding(section, "R12")
-    yield _causes_finding(section, "R12")
 
 
 @scenario("S48", assertions=S48_ASSERTIONS, run="R13",

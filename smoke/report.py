@@ -32,6 +32,10 @@ RUN_SUFFIX = " run=%s"
 #: The heading the collected causes sit under.
 CAUSES_HEADING = "causes:"
 
+#: The heading over the details a ``PASS`` carries: what a scenario recorded
+#: about a model-dependent property without judging it (smoke doctrine).
+OBSERVATIONS_HEADING = "observations (no verdict):"
+
 #: How a cause is attributed when the finding declares no shared run.
 STANDALONE = "standalone"
 
@@ -161,14 +165,29 @@ class Report:
         return [(run_id, detail, seen[(run_id, detail)])
                 for run_id, detail in order]
 
+    def observations(self) -> list:
+        """The details recorded on a ``PASS``, which judge nothing.
+
+        A scenario writes one when the property it would assert depends on
+        what a model chose to do. :meth:`causes` skips every ``PASS``, so
+        without this list such a note reached no reader.
+
+        Complexity: ``O(findings)``.
+
+        Returns:
+            list: The ``PASS`` findings whose detail is not empty, in order.
+        """
+        return [one for one in self._findings
+                if one.outcome is Outcome.PASS and one.detail]
+
     def render(self) -> str:
         """Render the whole report.
 
         Complexity: ``O(findings)``.
 
         Returns:
-            str: One line per finding, the collected causes, the environment's
-            size when it was measured, and the summary.
+            str: One line per finding, the collected causes, the observations,
+            the environment's size when it was measured, and the summary.
         """
         lines = [render_finding(one) for one in self._findings]
         causes = self.causes()
@@ -180,6 +199,13 @@ class Report:
                 for member in members:
                     lines.append("    %s - %s"
                                  % (member.scenario, member.assertion))
+        observations = self.observations()
+        if observations:
+            lines.append("")
+            lines.append(OBSERVATIONS_HEADING)
+            for one in observations:
+                lines.append("  %s: %s" % (one.run_id or STANDALONE, one.detail))
+                lines.append("    %s - %s" % (one.scenario, one.assertion))
         environment = render_growth(self._growth)
         lines.append("")
         if environment:

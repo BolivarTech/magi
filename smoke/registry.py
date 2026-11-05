@@ -76,7 +76,13 @@ DECLARED_SCENARIO_COUNT = 51
 #: root never takes ``.magi`` or ``.git`` for review: exit 2, nothing to
 #: review, and every protected path named is left out as ignored), v0.25.0.
 #: The scenario count goes 50 -> 51 with it.
-DECLARED_ASSERTION_COUNT = 153
+#:
+#: 152 on 2026-11-05: S47 drops "every discarded finding carries its cause".
+#: Whether anything is discarded depends on the trio inventing a location, so
+#: it was CANNOT_TEST on every honest run; the discards are now an observation
+#: without a verdict and the cause property stays in the unit suite (user
+#: decision, SMOKE #2), v0.25.0.
+DECLARED_ASSERTION_COUNT = 152
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

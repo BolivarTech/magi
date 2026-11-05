@@ -46,7 +46,9 @@ class Finding:
         assertion: The English text of what was asserted. It reaches the
             certificate verbatim, so it is written once, here.
         outcome: What became of it.
-        detail: The cause when the outcome is not ``PASS``; empty on ``PASS``.
+        detail: The cause when the outcome is not ``PASS``. On ``PASS``,
+            empty or an observation that judges nothing, which the report
+            lists under its own heading.
         run_id: The shared run that produced it, or None when the scenario is
             standalone.
     """
