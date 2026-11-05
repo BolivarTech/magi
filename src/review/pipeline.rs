@@ -849,20 +849,22 @@ fn build_index(
     source: &dyn ContentSource,
     registry: &LanguageRegistry,
 ) -> Result<LexicalIndex, ReviewError> {
-    let mut texts = Vec::new();
+    let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned();
+    let mut new_texts = Vec::new();
+    let mut old_texts = Vec::new();
     for file in files {
-        let mut sides = vec![source.read(&file.path)?];
-        if file.diff.is_some() {
-            sides.push(source.read_old(&old_path(file))?);
+        if let Some(bytes) = source.read(&file.path)? {
+            new_texts.push((file.path.clone(), text(bytes)));
         }
-        for bytes in sides.into_iter().flatten() {
-            texts.push((
-                file.path.clone(),
-                String::from_utf8_lossy(&bytes).into_owned(),
-            ));
+        if file.diff.is_some() {
+            if let Some(bytes) = source.read_old(&old_path(file))? {
+                old_texts.push((file.path.clone(), text(bytes)));
+            }
         }
     }
-    Ok(LexicalIndex::build(&texts, registry))
+    Ok(LexicalIndex::build_with_old(
+        &new_texts, &old_texts, registry,
+    ))
 }
 
 /// One item a completed batch showed, as [`walk_completed`] hands it out.

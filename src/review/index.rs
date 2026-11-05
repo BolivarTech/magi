@@ -88,10 +88,12 @@ pub struct LexicalIndex {
     file_names: HashSet<String>,
     /// Name of each named top-level unit, with `(file, first_line, last_line)`.
     definitions: HashMap<String, Vec<(String, u32, u32)>>,
-    /// `(file, line)` of each line an identifier appears on. Holds the identifiers of
-    /// `identifiers` only, so it grows with the occurrences of at most
-    /// [`MAX_INDEX_IDENTIFIERS`] names.
-    occurrences: HashMap<String, Vec<(String, u32)>>,
+    /// Paths of the new-side files given to `build`; an occurrence names its file by position.
+    paths: Vec<String>,
+    /// `(file id, line)` of each new-side line an identifier appears on, 8 bytes each. The
+    /// number of names is bounded by [`MAX_INDEX_IDENTIFIERS`], but the places are not: they
+    /// grow with the lines of the reviewed files (at most one entry per name per line).
+    occurrences: HashMap<String, Vec<(u32, u32)>>,
     complete: bool,
 }
 
@@ -104,7 +106,21 @@ impl LexicalIndex {
     /// Complexity: O(total bytes of `files`) time; O(distinct identifiers, bounded by the cap,
     /// plus occurrences) space.
     pub fn build(files: &[(String, String)], registry: &LanguageRegistry) -> Self {
-        Self::build_with_limit(files, registry, MAX_INDEX_IDENTIFIERS)
+        Self::build_with_limit(files, &[], registry, MAX_INDEX_IDENTIFIERS)
+    }
+
+    /// Like [`Self::build`], for a diff: `files` is the new side of every reviewed file and
+    /// `old_files` the old side of the diffed ones.
+    ///
+    /// Definitions and occurrences are line-keyed, so they come from `files` only; the old side
+    /// adds its identifiers (and nothing else), so [`Self::contains`] answers for both sides, as
+    /// the validator needs. Same complexity as [`Self::build`].
+    pub fn build_with_old(
+        files: &[(String, String)],
+        old_files: &[(String, String)],
+        registry: &LanguageRegistry,
+    ) -> Self {
+        Self::build_with_limit(files, old_files, registry, MAX_INDEX_IDENTIFIERS)
     }
 
     #[cfg(test)]
@@ -113,11 +129,12 @@ impl LexicalIndex {
         registry: &LanguageRegistry,
         cap: usize,
     ) -> Self {
-        Self::build_with_limit(files, registry, cap)
+        Self::build_with_limit(files, &[], registry, cap)
     }
 
     fn build_with_limit(
         files: &[(String, String)],
+        old_files: &[(String, String)],
         registry: &LanguageRegistry,
         cap: usize,
     ) -> Self {
@@ -131,6 +148,7 @@ impl LexicalIndex {
                 .collect(),
             file_names: HashSet::new(),
             definitions: HashMap::new(),
+            paths: Vec::new(),
             occurrences: HashMap::new(),
             complete: true,
         };
@@ -143,19 +161,17 @@ impl LexicalIndex {
                 index.extractor_files.insert(path.clone());
             }
         }
-        'files: for (path, text) in files {
-            for (idx, line_text) in text.lines().enumerate() {
-                let line = u32::try_from(idx.saturating_add(1)).unwrap_or(u32::MAX);
-                for run in identifier_runs(line_text) {
-                    if !index.identifiers.contains(run) {
-                        if index.identifiers.len() >= cap {
-                            index.complete = false;
-                            break 'files;
-                        }
-                        index.identifiers.insert(run.to_string());
-                    }
-                    index.record_occurrence(run, path, line);
-                }
+        index.paths = files.iter().map(|(path, _)| path.clone()).collect();
+        // New side first, with occurrences; then the old side, identifiers only (the validator
+        // accepts a name from either side, but line numbers of the old side mean nothing here).
+        let scanned = files
+            .iter()
+            .enumerate()
+            .map(|(id, (_, text))| (Some(id), text))
+            .chain(old_files.iter().map(|(_, text)| (None, text)));
+        for (id, text) in scanned {
+            if !index.scan(text, id, cap) {
+                break;
             }
         }
         for (path, text) in files {
@@ -166,10 +182,33 @@ impl LexicalIndex {
         index
     }
 
-    /// Records that `name` occurs at `line` of `file`; a second occurrence on the same line is
-    /// not recorded again. O(1) expected.
-    fn record_occurrence(&mut self, name: &str, file: &str, line: u32) {
-        let entry = (file.to_string(), line);
+    /// Adds the identifiers of `text` and, for a new-side file (`file` is its id), where each
+    /// occurs. Returns false when the identifier cap stopped the scan. O(bytes of `text`).
+    fn scan(&mut self, text: &str, file: Option<usize>, cap: usize) -> bool {
+        let id = file.map(|f| u32::try_from(f).unwrap_or(u32::MAX));
+        for (idx, line_text) in text.lines().enumerate() {
+            let line = u32::try_from(idx.saturating_add(1)).unwrap_or(u32::MAX);
+            for run in identifier_runs(line_text) {
+                if !self.identifiers.contains(run) {
+                    if self.identifiers.len() >= cap {
+                        self.complete = false;
+                        return false;
+                    }
+                    self.identifiers.insert(run.to_string());
+                }
+                if let Some(id) = id {
+                    self.record_occurrence(run, id, line);
+                }
+            }
+        }
+        true
+    }
+
+    /// Records that `name` occurs at `line` of the file with id `file`; a second occurrence on
+    /// the same line is not recorded again. Allocates only when a place is really added (and, for
+    /// the first place of a name, the name). O(1) expected.
+    fn record_occurrence(&mut self, name: &str, file: u32, line: u32) {
+        let entry = (file, line);
         match self.occurrences.get_mut(name) {
             Some(places) => {
                 if places.last() != Some(&entry) {
@@ -202,7 +241,7 @@ impl LexicalIndex {
             }
             let place = (file.to_string(), unit.start_line, unit.end_line);
             let places = self.definitions.entry(unit.name).or_default();
-            // Both sides of a diff may be given under one path: the same span is one definition.
+            // The same span listed twice (a path given twice) is one definition.
             if !places.contains(&place) {
                 places.push(place);
             }
@@ -247,7 +286,11 @@ impl LexicalIndex {
             .get(name)
             .into_iter()
             .flatten()
-            .map(|(file, line)| (file.as_str(), *line))
+            .filter_map(|&(file, line)| {
+                self.paths
+                    .get(file as usize)
+                    .map(|path| (path.as_str(), line))
+            })
     }
 
     /// Whether `file` was given to `build` and has a language extractor. O(1) expected.
