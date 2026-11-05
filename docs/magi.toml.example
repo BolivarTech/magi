@@ -348,6 +348,11 @@ lineage = "mistral"
 model   = "gemma4:cloud"
 lineage = "google"
 
+# [embedding] — the embedder of the tiered memory and of `magi code-review`'s context
+# A review embeds the documentation of the reviewed revision (README.md, CLAUDE.md, docs/, adr/
+# and Rust and Python doc comments) once per new version, and each batch's code to find the
+# closest chunks. Without a working embedder a review runs without documentation and history and
+# says so (`without_embedder`). Changing `model` or `dim` rebuilds that index on the next review.
 [embedding]
 model = "nomic-embed-text-v2-moe:latest"
 dim   = 0
