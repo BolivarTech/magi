@@ -36,6 +36,7 @@ pub mod docs;
 pub mod error;
 pub mod filter;
 pub mod gate;
+pub mod history;
 pub mod hunk;
 pub mod index;
 pub mod input;

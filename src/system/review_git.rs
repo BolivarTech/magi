@@ -2935,4 +2935,137 @@ mod tests {
             );
         }
     }
+
+    use magi_rs::review::history::{classify, HistoryEntry, HistoryStatus};
+
+    #[test]
+    fn classify_follows_the_finding_line_in_the_reviewed_commit_with_real_git() {
+        let d = repo();
+        std::fs::write(d.path().join("f.rs"), "a\nb\nc\nd\ne\n").expect("write");
+        git(d.path(), &["add", "f.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let c1 = g
+            .run(&["rev-parse", "HEAD"])
+            .expect("sha")
+            .trim()
+            .to_string();
+        let at = |line| HistoryEntry {
+            id: "i".into(),
+            file: "f.rs".into(),
+            line: Some(line),
+            reviewed_commit: c1.clone(),
+            title: "t".into(),
+            detail: "d".into(),
+            status: HistoryStatus::Pending,
+        };
+        std::fs::write(d.path().join("f.rs"), "N1\nN2\na\nb\nc\nd\ne\n").expect("write");
+        git(d.path(), &["commit", "-q", "-am", "2"]);
+        let head = g
+            .run(&["rev-parse", "HEAD"])
+            .expect("sha")
+            .trim()
+            .to_string();
+        assert_eq!(
+            classify(&at(4), &head, &g),
+            HistoryStatus::WeakReject,
+            "lines inserted above; `d` is untouched"
+        );
+        std::fs::write(d.path().join("f.rs"), "N1\nN2\na\nb\nc\nD!\ne\n").expect("write");
+        git(d.path(), &["commit", "-q", "-am", "3"]);
+        let head = g
+            .run(&["rev-parse", "HEAD"])
+            .expect("sha")
+            .trim()
+            .to_string();
+        assert_eq!(
+            classify(&at(4), &head, &g),
+            HistoryStatus::Attended,
+            "`d` (line 4 of c1) changed"
+        );
+        git(d.path(), &["rm", "-q", "f.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "4"]);
+        let head = g
+            .run(&["rev-parse", "HEAD"])
+            .expect("sha")
+            .trim()
+            .to_string();
+        assert_eq!(
+            classify(&at(2), &head, &g),
+            HistoryStatus::Attended,
+            "a deleted file counts as attended"
+        );
+    }
+
+    /// One commit of `f.rs` with `body`; returns its SHA. [CP2 MS3 loop 6]
+    fn commit_f(d: &std::path::Path, g: &ScrubbedGit, body: &str, msg: &str) -> String {
+        std::fs::write(d.join("f.rs"), body).expect("write");
+        git(d, &["add", "f.rs"]);
+        git(d, &["commit", "-q", "-m", msg]);
+        g.run(&["rev-parse", "HEAD"])
+            .expect("sha")
+            .trim()
+            .to_string()
+    }
+
+    fn pending_at(commit: &str, line: u32) -> HistoryEntry {
+        HistoryEntry {
+            id: "i".into(),
+            file: "f.rs".into(),
+            line: Some(line),
+            reviewed_commit: commit.into(),
+            title: "t".into(),
+            detail: "d".into(),
+            status: HistoryStatus::Pending,
+        }
+    }
+
+    #[test]
+    fn a_reviewed_commit_off_the_head_line_stays_pending_with_real_git() {
+        // [CP2 MS3 loop 6] RV-S23: a review of another branch; HEAD never contained the reviewed commit.
+        let d = repo();
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        commit_f(d.path(), &g, "a\nb\n", "base");
+        git(d.path(), &["checkout", "-q", "-b", "side"]);
+        let side = commit_f(d.path(), &g, "a\nB\n", "side");
+        git(d.path(), &["checkout", "-q", "-"]);
+        let head = commit_f(d.path(), &g, "A\nb\n", "main");
+        assert_eq!(
+            classify(&pending_at(&side, 2), &head, &g),
+            HistoryStatus::Pending
+        );
+    }
+
+    #[test]
+    fn a_line_changed_and_reverted_before_the_reclassification_is_not_attended_with_real_git() {
+        // [CP2 MS3 loop 10] The declared net-state reading of RV08: the code is again the reviewed code.
+        let d = repo();
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let c1 = commit_f(d.path(), &g, "a\nb\n", "1");
+        commit_f(d.path(), &g, "a\nB\n", "2");
+        let head = commit_f(d.path(), &g, "a\nb\n", "3");
+        assert_eq!(
+            classify(&pending_at(&c1, 2), &head, &g),
+            HistoryStatus::WeakReject
+        );
+    }
+
+    #[test]
+    fn a_renamed_file_counts_as_attended_with_real_git() {
+        // [CP2 MS3 loop 6] The declared rule: the finding's path is gone after the reviewed commit.
+        let d = repo();
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let c1 = commit_f(d.path(), &g, "a\nb\n", "1");
+        git(d.path(), &["mv", "f.rs", "g.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "2"]);
+        let head = g
+            .run(&["rev-parse", "HEAD"])
+            .expect("sha")
+            .trim()
+            .to_string();
+        assert_eq!(
+            classify(&pending_at(&c1, 2), &head, &g),
+            HistoryStatus::Attended
+        );
+    }
 }
