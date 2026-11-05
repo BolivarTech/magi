@@ -1279,6 +1279,86 @@ mod tests {
             !vector.windows(clear.len()).any(|w| w == clear.as_slice()),
             "embedding stored in the clear"
         );
+        // The vector is serialized as JSON text before it is sealed: that text must not show
+        // either (a regression that skipped the seal would leave exactly this).
+        assert!(
+            !vector.windows(11).any(|w| w == b"0.5,0.5,0.5"),
+            "embedding JSON stored in the clear"
+        );
+        assert!(
+            !vector.windows(4).any(|w| w == b"[0.5"),
+            "embedding JSON stored in the clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_in_a_section_name_alone_is_refused_before_anything_is_embedded() {
+        // refuse_secrets checks the section as well as the text; here only the section matches.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let section = "KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let r = store
+            .reindex(
+                &[(
+                    src("leak.md", "k"),
+                    vec![chunk("leak.md", section, "harmless text")],
+                )],
+                &e,
+            )
+            .await;
+        assert!(
+            matches!(&r, Err(MemoryError::Storage(m)) if m.contains("leak.md") && !m.contains("sk-ant-")),
+            "{:?}",
+            r.as_ref().err()
+        );
+        assert_eq!(e.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_embedder_without_a_known_dimension_is_refused_even_with_nothing_to_embed() {
+        // dim() == 0 (autodetect, nothing answered yet) would record sources under `#0#`.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        let store = ReviewDocStore::new(
+            mem.shared_conn(),
+            mem.data_key().expect("dek"),
+            magi_rs::review::docs::doc_index_id("fake", 0),
+        )
+        .expect("store");
+        let r = store
+            .reindex(&[(src("src/m.rs", "k"), vec![])], &FakeEmbedder::new(0))
+            .await;
+        assert!(
+            matches!(&r, Err(MemoryError::Storage(m)) if m.contains("dimension")),
+            "{r:?}"
+        );
+        assert!(
+            store
+                .missing(&[src("src/m.rs", "k")])
+                .expect("missing")
+                .len()
+                == 1
+        );
+    }
+
+    #[tokio::test]
+    async fn search_with_no_allowed_sources_returns_nothing() {
+        let (store, _dir) = store_for_test();
+        store
+            .reindex(
+                &[(src("d.md", "k"), vec![chunk("d.md", "A", "x")])],
+                &FakeEmbedder::new(3),
+            )
+            .await
+            .expect("index");
+        assert!(store
+            .search(&[0.5, 0.5, 0.5], 5, &BTreeSet::new())
+            .expect("search")
+            .is_empty());
     }
 
     #[tokio::test]
