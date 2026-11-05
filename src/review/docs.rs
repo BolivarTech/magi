@@ -1118,6 +1118,70 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_straddling_the_part_cut_never_reaches_the_embedder() {
+        // One line longer than the bound with a secret across the cut: split into parts, neither
+        // would match the detector, so the section must stay whole for `without_secrets`.
+        let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let line = format!(
+            "{}{secret}{}",
+            "x".repeat(MAX_DOC_CHUNK_BYTES - 10),
+            "y".repeat(100)
+        );
+        let chunks = chunk_markdown("README.md", &format!("# A\n{line}\n# B\nfine\n"));
+        let (kept, dropped) = without_secrets(chunks);
+        assert_eq!(
+            kept.iter().map(|c| c.section.as_str()).collect::<Vec<_>>(),
+            vec!["B"]
+        );
+        assert_eq!(dropped, vec!["README.md".to_string()]);
+    }
+
+    #[test]
+    fn a_closing_hash_run_is_stripped_only_after_a_space() {
+        let section = |t: &str| chunk_markdown("d.md", t).first().map(|c| c.section.clone());
+        assert_eq!(section("# C#\nx\n"), Some("C#".to_string()));
+        assert_eq!(section("# A ##\nx\n"), Some("A".to_string()));
+    }
+
+    #[test]
+    fn a_revision_that_looks_like_an_option_is_refused() {
+        let git = TableGit(vec![("ls-tree -r -z --output=x", Vec::new())]);
+        assert!(matches!(
+            revision_doc_sources(&git, "--output=x", &|_: &str| true),
+            Err(ReviewError::Git(_))
+        ));
+    }
+
+    #[test]
+    fn ls_tree_entries_with_the_wrong_shape_are_errors() {
+        let keep = |_: &str| true;
+        // Too few fields, too many fields, and an object type that is neither blob nor commit.
+        for bad in [
+            &b"100644 blob\tREADME.md\0"[..],
+            &b"100644 blob aaaa extra\tREADME.md\0"[..],
+            &b"040000 tree aaaa\tdocs\0"[..],
+        ] {
+            assert!(
+                matches!(parse_ls_tree(bad, &keep), Err(ReviewError::Git(_))),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_item_line_is_looked_for_within_a_bounded_lookahead() {
+        let reg = LanguageRegistry::new();
+        let name = |blanks: usize| {
+            let src = format!("/// D.\n{}fn f() {{}}\n", "\n".repeat(blanks));
+            chunk_doc_comments("src/m.rs", &src, &reg)
+                .first()
+                .map(|c| c.section.clone())
+        };
+        assert_eq!(name(MAX_ITEM_LOOKAHEAD_LINES - 1), Some("f".to_string()));
+        assert_eq!(name(MAX_ITEM_LOOKAHEAD_LINES), Some(String::new()));
+    }
+
+    #[test]
     fn indexing_is_bounded_and_the_truncation_is_reported() {
         // [CP2 MS3 loop 6] Reverse order, so keeping the first by path needs the sort, not only the cut.
         // [RV21 D+B, 2026-10-20] One chunk per source here; whole sources are kept.
