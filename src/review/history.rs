@@ -589,4 +589,19 @@ mod tests {
         let git = FakeGit::from(&[]);
         assert_eq!(classify(&entry(None), "HEAD", &git), HistoryStatus::Pending);
     }
+
+    #[test]
+    fn an_unreadable_hunk_header_never_becomes_a_weak_reject() {
+        // Guardian: with a later commit scripted, reading `@@ garbage @@` as an empty hunk would
+        // reach the weak-reject branch; an unreadable diff must stay Pending.
+        let git = FakeGit::from(&[
+            ("merge-base --is-ancestor c1 HEAD", Ok("")),
+            (DIFF_C1_HEAD, Ok("@@ garbage @@\n")),
+            (HEAD_IS_C2, Ok("c2\n")),
+        ]);
+        assert_eq!(
+            classify(&entry(Some(5)), "HEAD", &git),
+            HistoryStatus::Pending
+        );
+    }
 }

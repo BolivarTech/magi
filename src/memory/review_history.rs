@@ -621,4 +621,27 @@ mod tests {
             "the first sighting wins, so classify keeps comparing from the first reviewed commit"
         );
     }
+
+    #[test]
+    fn validated_on_files_accepts_more_files_than_the_sqlite_variable_limit() {
+        // Guardian: the bundled SQLite allows 32 766 variables, so the brief's 1 200 files do not
+        // exercise the batching; 40 000 do.
+        let (store, _tmp) = store_for_test();
+        let a = HistoryEntry {
+            file: "src/f39999.rs".into(),
+            ..stored("a", Some(1), "c1")
+        };
+        store.record(&[a]).expect("record");
+        store
+            .update_status("a", HistoryStatus::Attended)
+            .expect("a");
+        let files: Vec<String> = (0..40_000).map(|i| format!("src/f{i}.rs")).collect();
+        let ids: Vec<String> = store
+            .validated_on_files(&files)
+            .expect("read")
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec!["a".to_string()]);
+    }
 }
