@@ -142,7 +142,14 @@ fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
     if text.trim().is_empty() {
         return Vec::new();
     }
-    let parts = split_bounded(text);
+    // A secret cut across two parts would match in neither: an unsplit match stays one (oversized)
+    // chunk for `without_secrets` to drop. An oversized chunk therefore only exists when it holds
+    // a secret, and no part of it is ever embedded.
+    let parts = if find_secret(section).is_some() || find_secret(text).is_some() {
+        vec![text.to_string()]
+    } else {
+        split_bounded(text)
+    };
     let numbered = parts.len() > 1;
     parts
         .into_iter()
@@ -222,7 +229,13 @@ fn atx_heading(line: &str) -> Option<(usize, &str)> {
         return None;
     }
     let title = rest.trim();
-    let title = title.trim_end_matches('#').trim_end();
+    // CommonMark: a closing run of `#` counts only when a space precedes it (`# C#` keeps its `#`).
+    let unclosed = title.trim_end_matches('#');
+    let title = if unclosed.is_empty() || unclosed.ends_with([' ', '\t']) {
+        unclosed.trim_end()
+    } else {
+        title
+    };
     Some((level, title))
 }
 
