@@ -161,7 +161,8 @@ pub trait RagSource: Send + Sync {
 /// The opening and closing lines of one context item's frame in the prompt.
 ///
 /// The opening names the item's kind and its path, and a homonym definition (RV07(2)) carries
-/// ` candidate` before the closing `>>>`; both fields are escaped with [`escape_header`], so no
+/// ` candidate` before the closing `>>>`; both fields are escaped like [`escape_fence`], with the
+/// same rule applied to `>` (a run of three becomes `>>\>`), so no
 /// file name ends the header early or opens another frame. The label and the lines are never
 /// written: [`super::rag::item_cost`] therefore covers everything variable that is written,
 /// and [`super::rag::CONTEXT_ITEM_FRAME_TOKENS`] the fixed rest.
