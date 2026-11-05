@@ -21,6 +21,7 @@ use super::consolidate::{Consolidated, ConsolidatedFinding};
 use super::error::MAX_OMISSIONS_SHOWN;
 use super::filter::Skipped;
 use super::gate::GateVerdict;
+use super::rag::ContextKind;
 use super::secrets::{escape_controls, mask_secrets};
 use super::validate::Discarded;
 use crate::redact::redact_foreign_text;
@@ -107,6 +108,25 @@ pub struct ReviewSummary {
     pub symbol_unverified: Vec<Discarded>,
     /// Unlocated findings grouped without the consensus engine.
     pub ungrouped_unlocated: usize,
+    /// Retrieved context left out of a batch, in priority order, each label as
+    /// [`crate::review::secrets::display_path`] shows it (REQ-RV07, REQ-RV13).
+    pub trimmed: Vec<TrimmedItem>,
+    /// Whether documentation and history were left out because no embedder answered.
+    pub without_embedder: bool,
+    /// Whether documentation and history were left out because the run opened no database
+    /// (`--no-memory`).
+    pub without_memory: bool,
+    /// Context items left out because the secret detector matched them (REQ-RV22).
+    pub context_withheld: usize,
+}
+
+/// One piece of retrieved context a batch left out, and what it was.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TrimmedItem {
+    /// What the item was.
+    pub kind: ContextKind,
+    /// Its label, as it may leave the process.
+    pub label: String,
 }
 
 // MAGI FIX (S6 loop 8, C2-c5): written out so `judged_fraction` starts at its documented 1.0
@@ -136,6 +156,10 @@ impl Default for ReviewSummary {
             symbol_check_skipped: false,
             symbol_unverified: Vec::new(),
             ungrouped_unlocated: 0,
+            trimmed: Vec::new(),
+            without_embedder: false,
+            without_memory: false,
+            context_withheld: 0,
         }
     }
 }

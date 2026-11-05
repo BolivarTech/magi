@@ -25,6 +25,7 @@ pub mod profile;
 pub mod retrieval;
 pub mod review_docs;
 pub mod review_history;
+pub mod review_rag;
 pub mod salience;
 pub mod store;
 pub mod tokens;

@@ -18,6 +18,7 @@ from smoke.registry import DEFAULT_REGISTRY, Registry
 from smoke.runner import Ambient, Runner
 from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
+from smoke.scenarios import review_context  # noqa: F401 - import registers it
 from smoke.scenarios import trio
 
 #: The ``.magi/`` files git lists in R16's workspace when the environment's ``.magi`` is copied in (the three
@@ -852,3 +853,15 @@ class CodeReviewScenarioTests(unittest.TestCase):
         for sid, run, asserts in (("S48", "R13", code_review.S48_ASSERTIONS), ("S49", "R14", code_review.S49_ASSERTIONS)):
             self.assertEqual(Outcome.FAIL, _outcomes(sid, _result(run, 0, None, b""))[asserts[0]], sid)
             self.assertEqual(Outcome.FAIL, _outcomes(sid, _result(run, 2, None, b"error: something else\n"))[asserts[1]], sid)
+
+
+class CodeReviewWithoutEmbedderTests(unittest.TestCase):
+    """S52 (R17): a review whose embedder is unreachable runs to its report and declares it."""
+
+    def test_s52_passes_when_the_review_runs_and_declares_the_missing_embedder(self) -> None:
+        doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": True}}
+        self.assertEqual({Outcome.PASS}, set(_outcomes("S52", _result("R17", 0, doc)).values()))
+
+    def test_s52_fails_when_the_report_hides_it(self) -> None:
+        doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": False}}
+        self.assertEqual(Outcome.FAIL, _outcomes("S52", _result("R17", 0, doc))[review_context.S52_ASSERTIONS[1]])

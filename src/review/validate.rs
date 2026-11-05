@@ -24,6 +24,9 @@ pub enum DiscardCause {
     /// The finding cites a symbol the reviewed code does not contain.
     #[serde(rename = "unknown symbol")]
     UnknownSymbol,
+    /// The finding's file was shown only as retrieved context, never as code under review.
+    #[serde(rename = "context only")]
+    ContextOnly,
 }
 
 /// A finding removed from (or flagged in) the main list, with the reason.
@@ -517,6 +520,75 @@ mod tests {
         .discarded;
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].cause, DiscardCause::FileNotReviewed); // c.rs was never reviewed
+    }
+
+    #[test]
+    fn a_context_only_file_is_discarded_as_context_only() {
+        let mut reviewed = Reviewed::default();
+        reviewed.add_whole_file("b.rs", 100);
+        reviewed.add_context_file("c.rs");
+        let index = LexicalIndex::build(&[], &LanguageRegistry::new());
+        let mut agents = vec![crate::review::test_support::out(
+            "melchior",
+            "approve",
+            0.9,
+            serde_json::json!([
+                {"severity":"info","title":"b","detail":"d","file":"b.rs","line":1},
+                {"severity":"info","title":"c","detail":"d","file":"c.rs","line":1}
+            ]),
+        )];
+        // [CP2 MS3 pre-loop] validate_batch returns Validation { discarded, symbol_unverified } (MS2 approved).
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        );
+        assert_eq!(v.discarded.len(), 1);
+        assert_eq!(v.discarded[0].cause, DiscardCause::ContextOnly);
+    }
+
+    #[test]
+    fn the_context_only_cause_serializes_with_the_spec_text() {
+        assert_eq!(
+            serde_json::to_string(&DiscardCause::ContextOnly).expect("serializes"),
+            "\"context only\""
+        );
+    }
+
+    #[test]
+    fn a_reviewed_file_that_also_carries_context_is_never_context_only() {
+        // [CP2 MS3 loop 7] A definition often lives next to the hunk: the reviewed lines still count.
+        let mut reviewed = Reviewed::default();
+        reviewed.add_whole_file("a.rs", 100);
+        reviewed.add_context_file("a.rs");
+        let index = LexicalIndex::build(&[], &LanguageRegistry::new());
+        let mut agents = vec![crate::review::test_support::out(
+            "melchior",
+            "approve",
+            0.9,
+            serde_json::json!([
+                {"severity":"info","title":"a","detail":"d","file":"a.rs","line":1}
+            ]),
+        )];
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        );
+        assert!(
+            v.discarded.is_empty(),
+            "{:?}",
+            v.discarded
+                .iter()
+                .map(|d| d.cause.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -1064,6 +1064,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     consult: self.parts.consult.as_ref(),
                     gate,
                     clock: &clock,
+                    rag: None,
                 },
             )
             .await?;

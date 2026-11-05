@@ -394,6 +394,18 @@ impl Reviewed {
         self.add_lines(file, 1, lines);
     }
 
+    /// Records that a completed batch showed `file` as retrieved context (a definition, a
+    /// caller, documentation or history), not as code under review. A file that also has
+    /// reviewed lines stays reviewed: the context mark only names why an unreviewed file is not
+    /// reviewed. O(1) expected.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The workspace-relative path of the context item.
+    pub fn add_context_file(&mut self, file: &str) {
+        let _ = file;
+    }
+
     /// Whether `file` has at least one recorded line. O(1) expected.
     pub(crate) fn has_file(&self, file: &str) -> bool {
         self.ranges.contains_key(file)
