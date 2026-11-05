@@ -42,6 +42,7 @@ pub mod index;
 pub mod input;
 pub mod languages;
 pub mod pipeline;
+pub mod rag;
 pub mod report;
 pub mod secrets;
 pub mod source;

@@ -151,6 +151,20 @@ impl LexicalIndex {
         self.identifiers.contains(last_segment(name))
     }
 
+    /// Where `name` is defined, as `(file, first_line, last_line)`.
+    pub fn definitions(&self, name: &str) -> &[(String, u32, u32)] {
+        // Red stub: removed in Green
+        let _ = name;
+        &[]
+    }
+
+    /// Where `name` occurs, as `(file, line)`.
+    pub fn occurrences(&self, name: &str) -> &[(String, u32)] {
+        // Red stub: removed in Green
+        let _ = name;
+        &[]
+    }
+
     /// Whether `file` was given to `build` and has a language extractor. O(1) expected.
     pub fn has_extractor(&self, file: &str) -> bool {
         self.extractor_files.contains(file)
@@ -275,6 +289,31 @@ mod tests {
             &[("a.rs".to_string(), text.to_string())],
             &LanguageRegistry::new(),
         )
+    }
+
+    #[test]
+    fn definitions_are_recorded_by_name_with_their_lines() {
+        let files = vec![(
+            "a.rs".to_string(),
+            "fn parse() {}\n\nfn only() {}\n".to_string(),
+        )];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        assert_eq!(index.definitions("parse"), &[("a.rs".to_string(), 1, 1)]);
+        assert!(index.definitions("missing").is_empty());
+        // [RED-DRYRUN 2026-10-18] measured: the extractor also yields a gap unit "lines 2-3"; it is
+        // not a definition.
+        assert!(index.definitions("lines 2-3").is_empty());
+    }
+
+    #[test]
+    fn occurrences_are_recorded_with_their_line() {
+        let files = vec![(
+            "b.rs".to_string(),
+            "fn use_it() {\n    parse();\n}\n".to_string(),
+        )];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        assert_eq!(index.occurrences("parse"), &[("b.rs".to_string(), 2)]);
+        assert!(index.occurrences("missing").is_empty());
     }
 
     #[test]

@@ -495,6 +495,26 @@ impl Default for LanguageRegistry {
     }
 }
 
+/// The narrowest unit of `units` that holds `line`.
+///
+/// Extractors give top-level units only, so a nested list is built by the caller (a block and
+/// the pieces [`LanguageExtractor::split_block`] cuts from it). Among the units that hold the
+/// line the one with the smallest span wins; on a tie the first in `units` does.
+///
+/// # Arguments
+///
+/// * `units` - The candidate units, in any order.
+/// * `line` - A 1-based line number.
+///
+/// # Returns
+///
+/// The narrowest unit holding `line`, or `None` when no unit does. O(n) for n units.
+pub fn enclosing_unit(units: &[SemanticUnit], line: u32) -> Option<&SemanticUnit> {
+    // Red stub: removed in Green
+    let _ = (units, line);
+    None
+}
+
 /// The changed lines of `sorted` that fall in `start..=end`.
 ///
 /// Extractors call it once per construct with the changed lines sorted once, so a whole file
@@ -1104,5 +1124,38 @@ mod tests {
                 ("X".to_string(), vec![4]),
             ]
         );
+    }
+
+    #[test]
+    fn enclosing_unit_picks_the_narrowest_unit_that_contains_the_line() {
+        // [RED-DRYRUN 2026-10-17, D4] Panoptico's extractor yields top-level units only (measured:
+        // `struct A; impl A { fn f }` is ONE unit "A" 1-6), so the nesting is built by hand.
+        let units = vec![span_unit("A", 1, 6), span_unit("f", 3, 5)];
+        let u = enclosing_unit(&units, 4).expect("line 4 is inside f");
+        assert_eq!(u.name, "f");
+        assert_eq!((u.start_line, u.end_line), (3, 5));
+    }
+
+    #[test]
+    fn enclosing_unit_is_none_outside_every_unit() {
+        // [RED-DRYRUN 2026-10-18] With an empty list no stub mutation could turn this red; one unit
+        // that does not contain the line makes `units.first()` a red mutation.
+        let units = vec![span_unit("A", 1, 6)];
+        assert!(enclosing_unit(&units, 10).is_none());
+        assert!(enclosing_unit(&[], 1).is_none());
+    }
+
+    /// A unit covering `start..=end` of `a.rs`. [CP2 MS3 pre-loop] MS2 approved does not port
+    /// Panoptico's `make_unit`.
+    fn span_unit(name: &str, start: u32, end: u32) -> SemanticUnit {
+        SemanticUnit {
+            kind: UnitKind::Function,
+            name: name.into(),
+            file: "a.rs".into(),
+            start_line: start,
+            end_line: end,
+            content: String::new(),
+            changed_lines: Vec::new(),
+        }
     }
 }
