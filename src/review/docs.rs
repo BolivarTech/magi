@@ -2,88 +2,854 @@
 // Version: 0.24.3
 // Date: 2026-10-22
 
-//! Project documentation as chunks for the `code-review` context (Red stubs).
+//! Project documentation as chunks for the `code-review` context.
+//!
+//! Three kinds of source feed the documentation index: Markdown files (one chunk per ATX heading),
+//! Rust and Python doc comments (one chunk per documented item) and nothing else: code is never
+//! documentation. Every chunk carries a SHA-256 over its path, section and text, so the index can
+//! store a chunk once however many revisions contain it.
+//!
+//! A documentation source is identified by [`DocSource`] (path plus the key of its content), which
+//! lets the index serve each reviewed revision exactly its own documentation.
+//!
+//! # No panics
+//!
+//! The module inherits the lints of [`crate::review`]: every read goes through `.get()` and
+//! `split_at_checked`.
 
+use std::collections::BTreeSet;
+
+use sha2::{Digest, Sha256};
+
+use crate::encoding::lower_hex;
 use crate::review::error::ReviewError;
 use crate::review::languages::LanguageRegistry;
+use crate::review::secrets::{display_path, find_secret};
 use crate::review::source::GitCommand;
 
-/// One documentation chunk.
+/// One documentation chunk: a Markdown section or the doc comment of one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocChunk {
+    /// Path of the source file, as the revision lists it.
     pub path: String,
+    /// Heading path (`A > B`), item name, or `""` for a preamble or a module-level comment.
     pub section: String,
+    /// The text embedded and shown to the reviewers.
     pub text: String,
+    /// SHA-256 hex of `path + "\n" + section + "\n" + text`; independent of any revision.
     pub hash: String,
 }
 
-/// One documentation source of a revision.
+/// One documentation source of the reviewed revision.
+///
+/// `key` is the git blob id in a revision, or [`worktree_key`] of the bytes in the working tree;
+/// the two forms never coincide, but their chunks (same hash) are shared.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocSource {
+    /// Path of the file, as the revision lists it.
     pub path: String,
+    /// Key of the file's content.
     pub key: String,
 }
 
+/// Documentation sources: `README.md` and `CLAUDE.md` only at the workspace root (exact path),
+/// `docs/` and `adr/` as prefixes from the root. A nested `sub/CLAUDE.md` is not a source.
 pub const DOC_SOURCES: &[&str] = &["README.md", "CLAUDE.md", "docs/", "adr/"];
+
+/// Bound on one chunk's text: 8 KiB, about 2 048 tokens at four bytes per token, the `num_ctx`
+/// Ollama gives an embedding model by default, so a long section never overflows
+/// `nomic-embed-text`.
 pub const MAX_DOC_CHUNK_BYTES: usize = 8_192;
+
+/// Bound on the chunks one review indexes (its missing sources): indexing runs before the clock,
+/// so it must be bounded itself.
+///
+/// About four times this repository (5 179 chunks measured on 2026-10-17: 172 Markdown sections
+/// and 5 007 doc-comment blocks), so a project of this size is indexed whole and only a much
+/// larger one is cut, with the cut reported.
 pub const MAX_DOC_CHUNKS: usize = 20_000;
+
+/// Version of the chunking rules: bump it whenever [`chunk_source`] would cut a source
+/// differently, so every stored chunk is indexed again instead of mixing two chunkers.
 pub const DOC_INDEX_VERSION: u32 = 1;
+
+/// Bound on the distinct commits [`live_doc_sources`] walks; past it the clean-up is skipped for
+/// that review.
 pub const MAX_GC_REFS: usize = 64;
 
-pub fn is_doc_source(_path: &str) -> bool {
-    false
+/// How far below a doc block the item line is looked for (attributes and plain comments between).
+const MAX_ITEM_LOOKAHEAD_LINES: usize = 16;
+
+/// Keywords whose following identifier names the documented item.
+const NAMED_ITEM_KEYWORDS: &[&str] = &[
+    "fn", "struct", "enum", "trait", "mod", "const", "static", "type",
+];
+
+/// Modifiers that may precede the item keyword and are skipped.
+const ITEM_MODIFIERS: &[&str] = &["pub", "async", "unsafe", "default", "extern"];
+
+/// Tokens after `const` that make it a modifier (`const fn`, `const unsafe fn`...).
+const CONST_MODIFIER_FOLLOWERS: &[&str] = &["fn", "unsafe", "async", "extern"];
+
+/// Separator of the nested heading names in a section path.
+const SECTION_SEPARATOR: &str = " > ";
+
+/// Prefix of a working-tree content key; git blob ids are plain hex, so the two never collide.
+const WORKTREE_KEY_PREFIX: &str = "wt:";
+
+/// Deepest ATX heading level (`######`).
+const MAX_HEADING_LEVEL: usize = 6;
+
+/// Leading spaces an ATX heading or a fence may carry.
+const MAX_BLOCK_INDENT: usize = 3;
+
+/// Shortest fence run (`` ``` `` or `~~~`).
+const MIN_FENCE_LEN: usize = 3;
+
+/// The three quote characters of a Python docstring opener.
+const PY_TRIPLE_QUOTES: [&str; 2] = ["\"\"\"", "'''"];
+
+/// Whether `path` is a documentation source by path: `README.md` or `CLAUDE.md` at the root, or
+/// anything under `docs/` or `adr/`.
+///
+/// O(`DOC_SOURCES`) per call.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::docs::is_doc_source;
+///
+/// assert!(is_doc_source("docs/guide.md"));
+/// assert!(!is_doc_source("sub/CLAUDE.md"));
+/// ```
+pub fn is_doc_source(path: &str) -> bool {
+    DOC_SOURCES.iter().any(|s| {
+        if s.ends_with('/') {
+            path.starts_with(s)
+        } else {
+            path == *s
+        }
+    })
 }
 
-pub fn chunk_markdown(_path: &str, _text: &str) -> Vec<DocChunk> {
-    Vec::new()
+/// Builds the chunk (or the bounded parts of it) for one section.
+///
+/// A text longer than [`MAX_DOC_CHUNK_BYTES`] is split at line boundaries (a single longer line
+/// at a character boundary) into parts named `<section> (1)`, `<section> (2)`... Blank text gives
+/// no chunk. O(n) in the text.
+fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
+    let text = text.trim_end();
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let parts = split_bounded(text);
+    let numbered = parts.len() > 1;
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            let section = if numbered {
+                format!("{section} ({})", i + 1).trim_start().to_string()
+            } else {
+                section.to_string()
+            };
+            let hash = lower_hex(&Sha256::digest(
+                format!("{path}\n{section}\n{part}").as_bytes(),
+            ));
+            DocChunk {
+                path: path.to_string(),
+                section,
+                text: part,
+                hash,
+            }
+        })
+        .collect()
 }
 
-pub fn chunk_doc_comments(_path: &str, _text: &str, _registry: &LanguageRegistry) -> Vec<DocChunk> {
-    Vec::new()
+/// Splits `text` into parts of at most [`MAX_DOC_CHUNK_BYTES`], at line boundaries.
+fn split_bounded(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    for line in text.split_inclusive('\n') {
+        for piece in split_long_line(line) {
+            if !current.is_empty() && current.len() + piece.len() > MAX_DOC_CHUNK_BYTES {
+                parts.push(std::mem::take(&mut current));
+            }
+            current.push_str(piece);
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
-pub fn chunk_source(_path: &str, _text: &str, _registry: &LanguageRegistry) -> Vec<DocChunk> {
-    Vec::new()
+/// Cuts a line longer than the bound at character boundaries; shorter lines come back whole.
+fn split_long_line(line: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut rest = line;
+    while rest.len() > MAX_DOC_CHUNK_BYTES {
+        let mut cut = MAX_DOC_CHUNK_BYTES;
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        match rest.split_at_checked(cut) {
+            Some((head, tail)) => {
+                pieces.push(head);
+                rest = tail;
+            }
+            None => break,
+        }
+    }
+    pieces.push(rest);
+    pieces
 }
 
-pub fn without_secrets(_chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
-    (Vec::new(), Vec::new())
+/// The ATX heading level and title of `line`, if it is one (`#`..`######`, up to three leading
+/// spaces, a space or the end after the hashes).
+fn atx_heading(line: &str) -> Option<(usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > MAX_BLOCK_INDENT {
+        return None;
+    }
+    let body = line.get(indent..)?;
+    let level = body.len() - body.trim_start_matches('#').len();
+    if level == 0 || level > MAX_HEADING_LEVEL {
+        return None;
+    }
+    let rest = body.get(level..)?;
+    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let title = rest.trim();
+    let title = title.trim_end_matches('#').trim_end();
+    Some((level, title))
 }
 
+/// The fence opened or closed by `line` as (character, run length), if it is one.
+fn fence_of(line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > MAX_BLOCK_INDENT {
+        return None;
+    }
+    let body = line.get(indent..)?;
+    let ch = body.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let run = body.chars().take_while(|c| *c == ch).count();
+    (run >= MIN_FENCE_LEN).then_some((ch, run))
+}
+
+/// Chunks a Markdown file by ATX heading; the section is the heading path (`A > B`).
+///
+/// Text before the first heading is a chunk with section `""`. A `#` line inside a `` ``` `` or
+/// `~~~` fence is text, not a heading; a fence left open runs to the end of the file (a malformed
+/// document indexes worse, it never fails). A section longer than [`MAX_DOC_CHUNK_BYTES`] is
+/// split into numbered parts. O(n) in the text.
+///
+/// # Arguments
+///
+/// * `path` - Path recorded in each chunk.
+/// * `text` - The file's content.
+///
+/// # Returns
+///
+/// The chunks in document order; empty for blank text.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::docs::chunk_markdown;
+///
+/// let c = chunk_markdown("README.md", "# A\nx\n## B\ny\n");
+/// assert_eq!(c[1].section, "A > B");
+/// ```
+pub fn chunk_markdown(path: &str, text: &str) -> Vec<DocChunk> {
+    let mut chunks = Vec::new();
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut section = String::new();
+    let mut body = String::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if let Some((ch, run)) = fence {
+            if fence_of(bare).is_some_and(|(c, r)| c == ch && r >= run) {
+                fence = None;
+            }
+        } else if let Some(opened) = fence_of(bare) {
+            fence = Some(opened);
+        } else if let Some((level, title)) = atx_heading(bare) {
+            chunks.extend(make_chunks(path, &section, &body));
+            body.clear();
+            while stack.last().is_some_and(|(l, _)| *l >= level) {
+                stack.pop();
+            }
+            stack.push((level, title.to_string()));
+            section = stack
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>()
+                .join(SECTION_SEPARATOR);
+        }
+        body.push_str(line);
+    }
+    chunks.extend(make_chunks(path, &section, &body));
+    chunks
+}
+
+/// Which side of an item a doc comment documents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocKind {
+    /// `///` or `/** */`: documents the item that follows.
+    Outer,
+    /// `//!` or `/*! */`: documents the enclosing module.
+    Inner,
+}
+
+/// The kind of a line doc comment (`///`, not `////`; `//!`).
+fn line_doc_kind(trimmed: &str) -> Option<DocKind> {
+    if trimmed.starts_with("////") {
+        None
+    } else if trimmed.starts_with("///") {
+        Some(DocKind::Outer)
+    } else if trimmed.starts_with("//!") {
+        Some(DocKind::Inner)
+    } else {
+        None
+    }
+}
+
+/// The kind and opener length of a block doc comment start (`/** `, `/*! `), not `/**/` or `/***`.
+fn block_doc_kind(trimmed: &str) -> Option<DocKind> {
+    if trimmed.starts_with("/**/") || trimmed.starts_with("/***") {
+        None
+    } else if trimmed.starts_with("/**") {
+        Some(DocKind::Outer)
+    } else if trimmed.starts_with("/*!") {
+        Some(DocKind::Inner)
+    } else {
+        None
+    }
+}
+
+/// Leading identifier characters of `s`.
+fn ident_prefix(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// The self type named by the text after `impl`: the type after `for` when present, else the
+/// first one (`impl<T> Display for Config<T>` gives `Config`).
+fn impl_self_type(after_impl: &str) -> String {
+    let mut s = after_impl.trim_start();
+    if s.starts_with('<') {
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in s.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        end = Some(i + c.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        s = end.and_then(|e| s.get(e..)).unwrap_or("");
+    }
+    let head = s.split('{').next().unwrap_or("");
+    let head = head.split(" where ").next().unwrap_or("");
+    let ty = head.split_once(" for ").map_or(head, |(_, after)| after);
+    let ty = ty
+        .trim()
+        .trim_start_matches('&')
+        .split_whitespace()
+        .find(|t| !t.starts_with('\'') && *t != "dyn" && *t != "mut")
+        .unwrap_or("");
+    let ty: String = ty
+        .chars()
+        .take_while(|c| *c != '<' && *c != '(' && !c.is_whitespace())
+        .collect();
+    ident_prefix(ty.rsplit("::").next().unwrap_or(""))
+}
+
+/// The name of the item declared on `line`, or `""` when it has no named keyword.
+///
+/// Skips `pub`, `pub(..)`, `async`, `unsafe`, `extern "..."` and a `const` that modifies `fn`.
+fn rust_item_name(line: &str) -> String {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let mut i = 0;
+    while let Some(&tok) = tokens.get(i) {
+        if tok.starts_with("pub(") {
+            while tokens.get(i).is_some_and(|t| !t.contains(')')) {
+                i += 1;
+            }
+        } else if ITEM_MODIFIERS.contains(&tok) || tok.starts_with('"') {
+            // modifier or the ABI string after `extern`
+        } else if tok == "const"
+            && tokens
+                .get(i + 1)
+                .is_some_and(|n| CONST_MODIFIER_FOLLOWERS.contains(n))
+        {
+            // `const fn`: the keyword after `const` names the item
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    let Some(&keyword) = tokens.get(i) else {
+        return String::new();
+    };
+    if keyword == "impl" || keyword.starts_with("impl<") {
+        return line
+            .split_once("impl")
+            .map_or_else(String::new, |(_, rest)| impl_self_type(rest));
+    }
+    let mut name_at = i + 1;
+    if keyword == "static" && tokens.get(name_at) == Some(&"mut") {
+        name_at += 1;
+    }
+    if NAMED_ITEM_KEYWORDS.contains(&keyword) || keyword == "macro_rules!" {
+        return tokens
+            .get(name_at)
+            .map_or_else(String::new, |t| ident_prefix(t));
+    }
+    String::new()
+}
+
+/// The name of the item whose doc block ended just before line `from`: attributes, blank lines
+/// and plain comments are skipped; `""` when there is no named item.
+fn item_name_after(lines: &[&str], from: usize) -> String {
+    for k in from..from.saturating_add(MAX_ITEM_LOOKAHEAD_LINES) {
+        let Some(line) = lines.get(k) else {
+            break;
+        };
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("#[") || t.starts_with("#![") || t.starts_with("//") {
+            continue;
+        }
+        return rust_item_name(t);
+    }
+    String::new()
+}
+
+/// Strips the `///` or `//!` opener and one following space.
+fn strip_line_doc(trimmed: &str) -> &str {
+    let rest = trimmed.get(3..).unwrap_or("");
+    rest.strip_prefix(' ').unwrap_or(rest)
+}
+
+/// Collects the block doc comment starting at line `start` (which holds the opener): the text
+/// and the index of the line after the comment.
+fn collect_block_doc(lines: &[&str], start: usize) -> (String, usize) {
+    let mut body = String::new();
+    let mut j = start;
+    while let Some(line) = lines.get(j) {
+        let mut t = line.trim_start();
+        if j == start {
+            t = t.get(3..).unwrap_or("");
+        } else {
+            t = t.strip_prefix('*').unwrap_or(t);
+            t = t.strip_prefix(' ').unwrap_or(t);
+        }
+        let (content, closed) = match t.find("*/") {
+            Some(e) => (t.get(..e).unwrap_or(t), true),
+            None => (t, false),
+        };
+        body.push_str(content.trim_end());
+        body.push('\n');
+        j += 1;
+        if closed {
+            break;
+        }
+    }
+    (body, j)
+}
+
+/// Rust doc comments of `lines`, in file order.
+fn rust_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
+    let mut chunks = Vec::new();
+    let mut i = 0;
+    while let Some(line) = lines.get(i) {
+        let t = line.trim_start();
+        if let Some(kind) = line_doc_kind(t) {
+            let mut body = String::new();
+            let mut j = i;
+            while let Some(l) = lines.get(j) {
+                let lt = l.trim_start();
+                if line_doc_kind(lt) != Some(kind) {
+                    break;
+                }
+                body.push_str(strip_line_doc(lt));
+                body.push('\n');
+                j += 1;
+            }
+            let name = if kind == DocKind::Outer {
+                item_name_after(lines, j)
+            } else {
+                String::new()
+            };
+            chunks.extend(make_chunks(path, &name, &body));
+            i = j;
+        } else if let Some(kind) = block_doc_kind(t) {
+            let (body, j) = collect_block_doc(lines, i);
+            let name = if kind == DocKind::Outer {
+                item_name_after(lines, j)
+            } else {
+                String::new()
+            };
+            chunks.extend(make_chunks(path, &name, &body));
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    chunks
+}
+
+/// Index of the first line at or after `from` that is neither blank nor a `#` comment.
+fn py_next_statement(lines: &[&str], from: usize) -> Option<usize> {
+    (from..lines.len()).find(|&k| {
+        lines
+            .get(k)
+            .is_some_and(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+    })
+}
+
+/// The docstring starting on line `at` (`"""` or `'''`, with an optional `r`/`u` prefix): its text
+/// and the index of the line after it.
+fn py_docstring_at(lines: &[&str], at: usize) -> Option<(String, usize)> {
+    let t = lines.get(at)?.trim_start();
+    let t = t.strip_prefix(['r', 'R', 'u', 'U']).unwrap_or(t);
+    let quote = PY_TRIPLE_QUOTES.iter().find(|q| t.starts_with(**q))?;
+    let rest = t.get(quote.len()..)?;
+    if let Some(end) = rest.find(quote) {
+        return Some((rest.get(..end)?.trim().to_string(), at + 1));
+    }
+    let mut body = vec![rest.trim().to_string()];
+    let mut j = at + 1;
+    while let Some(line) = lines.get(j) {
+        j += 1;
+        if let Some(end) = line.find(quote) {
+            body.push(line.get(..end).unwrap_or("").trim().to_string());
+            break;
+        }
+        body.push(line.trim().to_string());
+    }
+    Some((body.join("\n").trim().to_string(), j))
+}
+
+/// The name of the `def`/`class` on `line`, if it is one.
+fn py_def_name(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    let t = t.strip_prefix("async ").unwrap_or(t).trim_start();
+    let rest = t
+        .strip_prefix("def ")
+        .or_else(|| t.strip_prefix("class "))?;
+    Some(ident_prefix(rest.trim_start()))
+}
+
+/// Index of the last line of the header that starts at `at` (the first line where the
+/// parentheses balance).
+fn py_header_end(lines: &[&str], at: usize) -> usize {
+    let mut depth = 0i64;
+    for k in at..lines.len() {
+        let Some(line) = lines.get(k) else { break };
+        for c in line.chars() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth <= 0 {
+            return k;
+        }
+    }
+    lines.len().saturating_sub(1)
+}
+
+/// Python docstrings of `lines`: the module's, and the first statement of each `def`/`class`.
+fn py_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
+    let mut chunks = Vec::new();
+    let mut i = 0;
+    if let Some(first) = py_next_statement(lines, 0) {
+        if let Some((text, next)) = py_docstring_at(lines, first) {
+            chunks.extend(make_chunks(path, "", &text));
+            i = next;
+        }
+    }
+    while let Some(line) = lines.get(i) {
+        let Some(name) = py_def_name(line) else {
+            i += 1;
+            continue;
+        };
+        let end = py_header_end(lines, i);
+        i = end + 1;
+        if !lines.get(end).is_some_and(|l| l.trim_end().ends_with(':')) {
+            continue;
+        }
+        if let Some(body) = py_next_statement(lines, end + 1) {
+            if let Some((text, next)) = py_docstring_at(lines, body) {
+                chunks.extend(make_chunks(path, &name, &text));
+                i = next;
+            }
+        }
+    }
+    chunks
+}
+
+/// Chunks the doc comments of a Rust or Python file; code is never a chunk.
+///
+/// Rust: `///`, `//!`, `/** */` and `/*! */`; `//` comments are never docs. The section is the
+/// item's name: attribute lines are skipped, then `pub`, `pub(..)`, `async`, `unsafe`, `extern
+/// ".."`; `const fn x` names `x`; `impl` names its self type (the one after `for` when present);
+/// `macro_rules! m` names `m`; no named keyword, and every inner comment, gives `""`. Python: a
+/// string is a docstring only as the first statement of a module, `def` or `class` body;
+/// `x = """..."""` is data. Another language with an extractor gives no chunk. O(n) in the text.
+///
+/// # Arguments
+///
+/// * `path` - Path recorded in each chunk; its extension picks the language.
+/// * `text` - The file's content.
+/// * `registry` - Languages the review has extractors for; a file outside it gives nothing.
+///
+/// # Returns
+///
+/// The chunks in file order.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::docs::chunk_doc_comments;
+/// use magi_rs::review::languages::LanguageRegistry;
+///
+/// let c = chunk_doc_comments("a.rs", "/// Adds.\nfn add() {}\n", &LanguageRegistry::new());
+/// assert_eq!(c[0].section, "add");
+/// ```
+pub fn chunk_doc_comments(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<DocChunk> {
+    if registry.get(path).is_none() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some("rs") => rust_doc_chunks(path, &lines),
+        Some("py") => py_doc_chunks(path, &lines),
+        _ => Vec::new(),
+    }
+}
+
+/// The chunks of one file, by kind: the extension decides before the path.
+///
+/// A `.md` that [`is_doc_source`] accepts goes to [`chunk_markdown`]; a file with a language
+/// extractor goes to [`chunk_doc_comments`] (its doc comments, never its code, even under
+/// `docs/`); anything else gives nothing.
+///
+/// # Arguments
+///
+/// * `path` - Path of the file in the revision.
+/// * `text` - Its content.
+/// * `registry` - Languages the review has extractors for.
+///
+/// # Returns
+///
+/// The chunks, possibly none.
+pub fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<DocChunk> {
+    if path.ends_with(".md") {
+        if is_doc_source(path) {
+            chunk_markdown(path, text)
+        } else {
+            Vec::new()
+        }
+    } else {
+        chunk_doc_comments(path, text, registry)
+    }
+}
+
+/// Splits `chunks` into those safe to send and the sources of those holding a secret.
+///
+/// A chunk whose section or text matches [`find_secret`] is dropped (the section travels with
+/// the chunk). O(total text).
+///
+/// # Returns
+///
+/// The kept chunks, and the [`display_path`] of each dropped chunk's source, one per chunk in
+/// order (its length is the count).
+pub fn without_secrets(chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
+    let mut kept = Vec::with_capacity(chunks.len());
+    let mut dropped = Vec::new();
+    for chunk in chunks {
+        if find_secret(&chunk.section).is_some() || find_secret(&chunk.text).is_some() {
+            dropped.push(display_path(&chunk.path));
+        } else {
+            kept.push(chunk);
+        }
+    }
+    (kept, dropped)
+}
+
+/// Whole sources in path order while their chunks fit in [`MAX_DOC_CHUNKS`].
+///
+/// A source that does not fit is skipped and the next ones still enter (one big source never
+/// starves the rest); a source with more chunks than the bound is never indexed. A source left
+/// out is not indexed, so a later review indexes it. O(n log n) in the sources (sorted by path).
+///
+/// # Returns
+///
+/// The kept sources, and whether any was left out (to be reported).
 pub fn bounded(
-    _sources: Vec<(DocSource, Vec<DocChunk>)>,
+    mut sources: Vec<(DocSource, Vec<DocChunk>)>,
 ) -> (Vec<(DocSource, Vec<DocChunk>)>, bool) {
-    (Vec::new(), false)
+    sources.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut total = 0usize;
+    let mut truncated = false;
+    let mut kept = Vec::with_capacity(sources.len());
+    for (source, chunks) in sources {
+        if total.saturating_add(chunks.len()) > MAX_DOC_CHUNKS {
+            truncated = true;
+        } else {
+            total += chunks.len();
+            kept.push((source, chunks));
+        }
+    }
+    (kept, truncated)
 }
 
-pub fn worktree_key(_bytes: &[u8]) -> String {
-    String::new()
+/// The content key of a working-tree file: `wt:` plus the SHA-256 hex of its bytes.
+///
+/// Content-addressed, and never equal to a git blob id (hex without a prefix). O(n).
+pub fn worktree_key(bytes: &[u8]) -> String {
+    format!("{WORKTREE_KEY_PREFIX}{}", lower_hex(&Sha256::digest(bytes)))
 }
 
-pub fn doc_index_id(_model_id: &str, _dim: usize) -> String {
-    String::new()
+/// `<model_id>#<dim>#<DOC_INDEX_VERSION>`: the identity of the vectors an index holds.
+///
+/// The dimension is part of it, so a dimension change reads exactly like a model change.
+pub fn doc_index_id(model_id: &str, dim: usize) -> String {
+    format!("{model_id}#{dim}#{DOC_INDEX_VERSION}")
 }
 
+/// The blobs of `git ls-tree -r -z` output (`<mode> <type> <id>\t<path>\0`) whose path `keep`
+/// accepts, in listing order.
+///
+/// A submodule (`commit`) is skipped, and so is a path that is not UTF-8 (it cannot be a
+/// documentation source). Any other entry that does not parse is [`ReviewError::Git`], never
+/// skipped in silence. O(bytes).
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] for a malformed entry or an object type other than `blob`/`commit`.
 pub fn parse_ls_tree(
-    _out: &[u8],
-    _keep: &dyn Fn(&str) -> bool,
+    out: &[u8],
+    keep: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<DocSource>, ReviewError> {
-    Ok(Vec::new())
+    let malformed = || ReviewError::Git("malformed `git ls-tree` entry".to_string());
+    let mut sources = Vec::new();
+    for entry in out.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let tab = entry
+            .iter()
+            .position(|b| *b == b'\t')
+            .ok_or_else(malformed)?;
+        let (meta, path) = entry.split_at_checked(tab).ok_or_else(malformed)?;
+        let meta = std::str::from_utf8(meta).map_err(|_| malformed())?;
+        let mut fields = meta.split_whitespace();
+        let (Some(_mode), Some(kind), Some(id), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(malformed());
+        };
+        match kind {
+            "blob" => {}
+            "commit" => continue,
+            _ => return Err(malformed()),
+        }
+        let Ok(path) = std::str::from_utf8(path.get(1..).unwrap_or_default()) else {
+            continue;
+        };
+        if keep(path) {
+            sources.push(DocSource {
+                path: path.to_string(),
+                key: id.to_string(),
+            });
+        }
+    }
+    Ok(sources)
 }
 
+/// `git ls-tree -r -z <rev>` through `git`, parsed by [`parse_ls_tree`].
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] when `rev` starts with `-` (it would be read as an option), when git
+/// fails, or when an entry does not parse.
 pub fn revision_doc_sources(
-    _git: &dyn GitCommand,
-    _rev: &str,
-    _keep: &dyn Fn(&str) -> bool,
+    git: &dyn GitCommand,
+    rev: &str,
+    keep: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<DocSource>, ReviewError> {
-    Ok(Vec::new())
+    if rev.starts_with('-') {
+        return Err(ReviewError::Git(
+            "revision looks like an option".to_string(),
+        ));
+    }
+    parse_ls_tree(&git.run_bytes(&["ls-tree", "-r", "-z", rev])?, keep)
 }
 
+/// The sources every local ref still reaches: `HEAD` and each branch and tag tip.
+///
+/// "Reaches" is the tree at each ref's tip, not its history: a version that lives only in a
+/// branch's history is deleted and indexed again if a later review needs it (a cost, never a
+/// loss: the index is derived). An annotated tag's id is its tag object, which `ls-tree` peels
+/// to its tree, so it lists like a branch. An unborn HEAD is told apart from a broken git:
+/// `rev-parse` fails and no ref exists gives `Some(empty)`; `rev-parse` failing while refs
+/// exist, or `for-each-ref` failing, gives `Ok(None)`, because a git that does not answer never
+/// deletes anything. O(refs x tree entries) local git calls.
+///
+/// # Returns
+///
+/// `Ok(None)` when the clean-up must be skipped (more than [`MAX_GC_REFS`] distinct commits, or
+/// a git that does not answer); otherwise the union of every ref's sources.
+///
+/// # Errors
+///
+/// [`ReviewError::Git`] when a listed ref cannot be listed or parsed.
 pub fn live_doc_sources(
-    _git: &dyn GitCommand,
-    _keep: &dyn Fn(&str) -> bool,
-) -> Result<Option<std::collections::BTreeSet<DocSource>>, ReviewError> {
-    Ok(None)
+    git: &dyn GitCommand,
+    keep: &dyn Fn(&str) -> bool,
+) -> Result<Option<BTreeSet<DocSource>>, ReviewError> {
+    let head = git.run_bytes(&["rev-parse", "--verify", "HEAD^{commit}"]);
+    let Ok(refs) = git.run_bytes(&[
+        "for-each-ref",
+        "--format=%(objectname)",
+        "refs/heads",
+        "refs/tags",
+    ]) else {
+        return Ok(None);
+    };
+    let to_ids = |bytes: &[u8]| -> Result<Vec<String>, ReviewError> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| ReviewError::Git("git printed a non-UTF-8 object id".to_string()))?;
+        Ok(text.split_whitespace().map(str::to_string).collect())
+    };
+    let mut commits: BTreeSet<String> = to_ids(&refs)?.into_iter().collect();
+    match head {
+        Ok(bytes) => commits.extend(to_ids(&bytes)?),
+        Err(_) if commits.is_empty() => return Ok(Some(BTreeSet::new())),
+        Err(_) => return Ok(None),
+    }
+    if commits.len() > MAX_GC_REFS {
+        return Ok(None);
+    }
+    let mut live = BTreeSet::new();
+    for commit in &commits {
+        live.extend(revision_doc_sources(git, commit, keep)?);
+    }
+    Ok(Some(live))
 }
 
 #[cfg(test)]
