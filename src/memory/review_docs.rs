@@ -45,6 +45,10 @@ use magi_rs::vault::MaskedDek;
 #[allow(dead_code)]
 pub const EMBED_BATCH_ITEMS: usize = 64;
 
+/// `(path, key)` pairs per `search` query: two parameters each plus two fixed ones stay under
+/// the 999-parameter limit of older SQLite builds.
+const ALLOWED_PAIRS_PER_QUERY: usize = 400;
+
 /// What one [`ReviewDocStore::reindex`] did.
 // consumed by T3.6 (pipeline)
 #[allow(dead_code)]
@@ -245,6 +249,11 @@ impl ReviewDocStore {
         sources: &[(DocSource, Vec<DocChunk>)],
         embedder: &dyn EmbeddingProvider,
     ) -> Result<ReindexStats, MemoryError> {
+        if embedder.dim() == 0 {
+            return Err(MemoryError::Storage(
+                "the embedder has no known dimension yet; an index needs one".to_string(),
+            ));
+        }
         let embedder_id = doc_index_id(embedder.model_id(), embedder.dim());
         if embedder_id != self.index_id {
             return Err(MemoryError::Storage(format!(
@@ -439,41 +448,42 @@ impl ReviewDocStore {
     }
 
     /// `(key, chunk hash, encrypted vector)` of the allowed rows of this identity and `dim`.
+    ///
+    /// The `(path, key)` filter runs in SQL, in batches of [`ALLOWED_PAIRS_PER_QUERY`] pairs
+    /// (so no query passes SQLite's 999-parameter limit), so the blobs of other revisions are
+    /// never copied under the connection lock.
     fn allowed_vectors(
         &self,
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<Vec<(String, String, Vec<u8>)>, MemoryError> {
-        let c = self.locked_conn();
-        let mut stmt = c
-            .prepare_cached(
-                "SELECT path, key, chunk_hash, embedding_blob FROM code_review_docs \
-                 WHERE index_id = ?1 AND dim = ?2",
-            )
-            .map_err(db_err)?;
         let dim = i64::try_from(dim).unwrap_or(i64::MAX);
-        let rows = stmt
-            .query_map(params![self.index_id, dim], |r| {
-                Ok((
-                    DocSource {
-                        path: r.get(0)?,
-                        key: r.get(1)?,
-                    },
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Vec<u8>>(3)?,
-                ))
-            })
-            .map_err(db_err)?;
+        let pairs: Vec<&DocSource> = allowed.iter().collect();
+        let c = self.locked_conn();
         let mut out = Vec::new();
-        for row in rows {
-            let (source, hash, blob) = row.map_err(db_err)?;
-            if allowed.contains(&source) {
-                out.push((source.key, hash, blob));
+        for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
+            let values = vec!["(?, ?)"; batch.len()].join(", ");
+            let sql = format!(
+                "SELECT key, chunk_hash, embedding_blob FROM code_review_docs \
+                 WHERE index_id = ? AND dim = ? AND (path, key) IN (VALUES {values})"
+            );
+            let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.index_id, &dim];
+            for s in batch {
+                args.push(&s.path);
+                args.push(&s.key);
+            }
+            let mut stmt = c.prepare(&sql).map_err(db_err)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(args), |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .map_err(db_err)?;
+            for row in rows {
+                out.push(row.map_err(db_err)?);
             }
         }
         Ok(out)
     }
-
     /// Reads one chunk's row raw under the lock, then decrypts it off the lock.
     fn load_chunk(&self, key: &str, hash: String) -> Result<DocChunk, MemoryError> {
         let (path, section, text): (String, Vec<u8>, Vec<u8>) = self
