@@ -967,10 +967,13 @@ pub fn mask_secrets(text: &str) -> String {
 /// * `keep_lines` - Whether each line break a mask covers is written back after it.
 ///
 /// # Returns
-/// The masked text, and whether any mask covered a line break.
-fn mask_spans(text: &str, keep_lines: bool) -> (String, bool) {
+/// The masked text, and the lines each mask that covered a line break spans, as 1-based
+/// inclusive `(first, last)` pairs in text order.
+fn mask_spans(text: &str, keep_lines: bool) -> (String, Vec<(usize, usize)>) {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
-    let mut multi_line = false;
+    let mut blocks = Vec::new();
+    // The 0-based line `done` sits on, kept by counting each stretch of text once: O(n).
+    let mut line = 0usize;
     let lanes: Vec<(&SecretPattern, usize)> = SECRET_PATTERNS
         .iter()
         .flat_map(|p| (0..p.matcher.lanes()).map(move |lane| (p, lane)))
@@ -992,12 +995,12 @@ fn mask_spans(text: &str, keep_lines: bool) -> (String, bool) {
         out.push_str(name);
         out.push('>');
         let end = merged_end(span.end, next.iter().flatten());
-        let breaks = text
-            .get(span.start..end)
-            .unwrap_or_default()
-            .matches('\n')
-            .count();
-        multi_line |= breaks > 0;
+        let first = line + newlines(text.get(done..span.start));
+        let breaks = newlines(text.get(span.start..end));
+        if breaks > 0 {
+            blocks.push((first + 1, first + 1 + breaks));
+        }
+        line = first + breaks;
         if keep_lines {
             out.extend(std::iter::repeat_n('\n', breaks));
         }
@@ -1012,7 +1015,12 @@ fn mask_spans(text: &str, keep_lines: bool) -> (String, bool) {
         }
     }
     out.push_str(text.get(done..).unwrap_or_default());
-    (out, multi_line)
+    (out, blocks)
+}
+
+/// The line breaks in `text` (`None`: none). O(text).
+fn newlines(text: Option<&str>) -> usize {
+    text.map_or(0, |t| t.matches('\n').count())
 }
 
 /// What [`mask_secrets_keeping_lines`] gave for a text that held a secret.
@@ -1024,6 +1032,9 @@ pub struct LineMasked {
     pub pattern: &'static str,
     /// Whether a masked span crossed a line break (a key block, such as a PEM body).
     pub multi_line: bool,
+    /// The lines each such block spans, 1-based and inclusive (`(first, last)`), in order: what
+    /// the mask blanked, so a caller can tell a key's body line from a line no mask covered.
+    pub blocks: Vec<(usize, usize)>,
 }
 
 /// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
@@ -1037,11 +1048,12 @@ pub struct LineMasked {
 /// whether a span crossed a line.
 pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
     let pattern = find_secret(text)?;
-    let (text, multi_line) = mask_spans(text, true);
+    let (text, blocks) = mask_spans(text, true);
     Some(LineMasked {
         text,
         pattern,
-        multi_line,
+        multi_line: !blocks.is_empty(),
+        blocks,
     })
 }
 

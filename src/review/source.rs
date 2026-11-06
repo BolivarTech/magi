@@ -217,6 +217,22 @@ pub trait ContentSource: Send + Sync {
         let _ = (face, path);
         None
     }
+
+    /// The lines each multi-line mask of side `face` of `path` blanked (a key block), 1-based
+    /// and inclusive, in order. The default masks nothing and answers none.
+    ///
+    /// # Arguments
+    ///
+    /// * `face` - The side.
+    /// * `path` - The path it was read under.
+    ///
+    /// # Returns
+    ///
+    /// The `(first, last)` line pairs; empty when no mask crossed a line or the side was never read.
+    fn masked_blocks(&self, face: Face, path: &str) -> Vec<(usize, usize)> {
+        let _ = (face, path);
+        Vec::new()
+    }
 }
 
 /// What a source masked in one side of a file ([`ContentSource::masked`]).
@@ -723,6 +739,8 @@ struct Held {
     old: HashMap<String, Option<Vec<u8>>>,
     /// What was masked in each held side, by side and path (RV22).
     masks: HashMap<(Face, String), SideMask>,
+    /// The lines each multi-line mask of a held side blanked, by side and path (RV22).
+    blocks: HashMap<(Face, String), Vec<(usize, usize)>>,
     /// Bytes held across both sides.
     bytes: u64,
     /// The bytes held before, and the path of, the first read that passed the cap since the
@@ -825,8 +843,11 @@ impl<'a> CachedSource<'a> {
             held.over = Some((held.bytes, path.to_string()));
         }
         held.bytes = total;
-        if let Some(mask) = mask {
+        if let Some((mask, blocks)) = mask {
             held.masks.insert((face, path.to_string()), mask);
+            if !blocks.is_empty() {
+                held.blocks.insert((face, path.to_string()), blocks);
+            }
         }
         let side = match face {
             Face::New => &mut held.new,
@@ -840,8 +861,8 @@ impl<'a> CachedSource<'a> {
 /// A side as the cache holds it: a UTF-8 text with no NUL has each secret masked, its line
 /// breaks kept ([`mask_secrets_keeping_lines`]); anything else is held as read, since the filter
 /// leaves a binary or non-UTF-8 side out (masking could hide the NUL that makes it binary).
-/// O(bytes).
-fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
+/// The mask comes with the lines its key blocks blanked. O(bytes).
+fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<(SideMask, MaskedBlocks)>) {
     let masked = read
         .as_deref()
         .filter(|bytes| !bytes.contains(&0))
@@ -850,14 +871,20 @@ fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
     match masked {
         Some(m) => (
             Some(m.text.into_bytes()),
-            Some(SideMask {
-                pattern: m.pattern,
-                multi_line: m.multi_line,
-            }),
+            Some((
+                SideMask {
+                    pattern: m.pattern,
+                    multi_line: m.multi_line,
+                },
+                m.blocks,
+            )),
         ),
         None => (read, None),
     }
 }
+
+/// The lines each multi-line mask of a side blanked, 1-based and inclusive.
+type MaskedBlocks = Vec<(usize, usize)>;
 
 impl ContentSource for CachedSource<'_> {
     /// # Errors
@@ -880,6 +907,7 @@ impl ContentSource for CachedSource<'_> {
             Face::Old => held.old.remove(path),
         };
         held.masks.remove(&(face, path.to_string()));
+        held.blocks.remove(&(face, path.to_string()));
         let freed = removed
             .flatten()
             .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
@@ -911,6 +939,15 @@ impl ContentSource for CachedSource<'_> {
     fn masked(&self, face: Face, path: &str) -> Option<SideMask> {
         let held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         held.masks.get(&(face, path.to_string())).copied()
+    }
+
+    /// The lines the cache's key-block masks blanked in side `face` of `path`. O(blocks).
+    fn masked_blocks(&self, face: Face, path: &str) -> Vec<(usize, usize)> {
+        let held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        held.blocks
+            .get(&(face, path.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
