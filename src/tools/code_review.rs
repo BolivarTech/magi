@@ -29,7 +29,7 @@ use magi_rs::review::error::ReviewError;
 use magi_rs::review::filter::ignored_paths;
 use magi_rs::review::gate::{Gate, GateVerdict};
 use magi_rs::review::history::entries_from_review;
-use magi_rs::review::input::{pin_refs, resolve_input, validate_ref, ReviewInput};
+use magi_rs::review::input::{in_work_tree, pin_refs, resolve_input, validate_ref, ReviewInput};
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{
     plan_review, run_review, BatchConsult, ReviewDeps, ReviewOutcome, ReviewRequest,
@@ -952,6 +952,9 @@ struct FollowUp {
     docs: Option<ReviewDocStore>,
     /// The paths `.gitignore` excludes in the whole workspace.
     ignored: HashSet<String>,
+    /// Whether the workspace is inside a git work tree; without one the clean-up gets no git
+    /// and the working tree alone is live.
+    repository: bool,
 }
 
 /// The documentation side of one review, prepared before its clock.
@@ -967,6 +970,8 @@ struct DocContext {
     worktree: Option<BTreeSet<DocSource>>,
     /// The paths `.gitignore` excludes in the whole workspace.
     ignored: HashSet<String>,
+    /// Whether the workspace is inside a git work tree.
+    repository: bool,
 }
 
 /// The run-log target of the runner's own entries.
@@ -1045,6 +1050,13 @@ impl ProductionReviewRunner {
         else {
             return DocContext::default();
         };
+        // The same decision MS2's directory resolution makes: a git that fails where no `.git`
+        // exists is no repository; a git that fails inside one counts as one (the clean-up then
+        // skips, the safe direction).
+        let repository = !matches!(
+            in_work_tree(&self.git, &self.workspace, &self.workspace),
+            Ok(false)
+        );
         let unavailable = |docs: Option<ReviewDocStore>, cause: &str| {
             let cause = egress_text(cause);
             tracing::event!(
@@ -1059,6 +1071,7 @@ impl ProductionReviewRunner {
                     docs_unavailable: true,
                     ..DocPrep::default()
                 },
+                repository,
                 ..DocContext::default()
             }
         };
@@ -1092,7 +1105,7 @@ impl ProductionReviewRunner {
         let keep = |p: &str| !is_never_reviewed(p) && !ignored.contains(p);
         let prep = prepare_docs(
             &docs,
-            Some(&self.git),
+            repository.then_some(&self.git as &dyn GitCommand),
             rev.as_deref(),
             &source,
             &paths,
@@ -1109,6 +1122,7 @@ impl ProductionReviewRunner {
             rev,
             worktree,
             ignored,
+            repository,
         }
     }
 
@@ -1224,6 +1238,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 rev,
                 worktree,
                 ignored: workspace_ignored,
+                repository,
             } = doc_context;
             let rag = self.rag(docs.as_ref(), prep);
             let outcome = run_review(
@@ -1262,6 +1277,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 worktree,
                 docs,
                 ignored: workspace_ignored,
+                repository,
             });
             Ok(render_outcome(outcome, self.parts.structured))
         })
@@ -1318,7 +1334,12 @@ fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp)
     }
     if let Some(docs) = &follow.docs {
         let keep = |p: &str| !is_never_reviewed(p) && !follow.ignored.contains(p);
-        match collect_garbage(docs, Some(git), &keep, follow.worktree.as_ref()) {
+        match collect_garbage(
+            docs,
+            follow.repository.then_some(git),
+            &keep,
+            follow.worktree.as_ref(),
+        ) {
             Ok(Some(removed)) => tracing::event!(
                 target: REVIEW_LOG_TARGET,
                 tracing::Level::INFO,
