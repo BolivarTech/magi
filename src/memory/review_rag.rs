@@ -2292,6 +2292,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_documentation_source_that_is_not_utf8_is_left_out_of_the_revision() {
+        // §0: never a silent skip. It is not served, so it is not one of the revision's sources.
+        let f = RagFixture::new(&[("CLAUDE.md", "# B\ny\n")]).await;
+        std::fs::write(f._ws.path().join("README.md"), [0xff, 0xfe, b'#']).expect("write");
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &["CLAUDE.md".to_string(), "README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        let paths: Vec<&str> = prep.doc_sources.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, vec!["CLAUDE.md"]);
+        assert!(!prep.docs_unavailable);
+    }
+
+    #[tokio::test]
     async fn a_down_embedder_is_seen_even_when_the_index_is_unavailable() {
         // [CP2 MS3 loop 14 (pasada final)] docs_unavailable skips the search, never the query embed: S51's signal holds.
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
