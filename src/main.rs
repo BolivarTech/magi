@@ -12039,6 +12039,87 @@ mod tests {
         });
     }
 
+    /// A copy of the v0.22.0 fixture database (no v0.25.0 tables) and its passphrase.
+    fn older_database() -> (tempfile::TempDir, std::path::PathBuf, &'static str) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join(".magi-rs-memory.db");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/v0.22.0/magi-rs-memory.db"),
+            &db,
+        )
+        .expect("copy fixture");
+        (tmp, db, "correct horse battery staple")
+    }
+
+    #[test]
+    fn the_headless_open_refuses_an_older_database_naming_the_table_and_the_action() {
+        // [MS3 final review I1] RV19 on the `query`/`consult`/`code-review` open path.
+        let (_tmp, db, pass) = older_database();
+        let before = std::fs::read(&db).expect("bytes");
+        let err = match open_headless_memory(&db, Zeroizing::new(pass.to_string())) {
+            Err(e) => e,
+            Ok(_) => panic!("an older database must be refused"),
+        };
+        assert!(
+            matches!(
+                &err,
+                HeadlessError::Db(VaultError::DbCorrupt { detail, .. })
+                    if *detail == crate::system::database::pre_0_25_detail("code_review_docs")
+            ),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("missing table `code_review_docs`"), "{msg}");
+        assert!(msg.contains("delete .magi-rs-memory.db*"), "{msg}");
+        assert!(
+            !msg.contains(pass),
+            "the passphrase never reaches the message"
+        );
+        assert_eq!(std::fs::read(&db).expect("bytes"), before, "left intact");
+    }
+
+    #[test]
+    fn the_vault_cli_reports_an_older_database_as_corrupt_not_as_a_wrong_passphrase() {
+        // [MS3 final review I1] `vault` and `--logout` print `report_open_failure`'s line: the
+        // VaultError's own Display (path + detail) and exit 1, never the passphrase exit.
+        let (_tmp, db, pass) = older_database();
+        let err = EncryptedSqliteMemory::new(db, Zeroizing::new(pass.to_string()))
+            .err()
+            .expect("refused");
+        assert!(!is_wrong_passphrase(&err));
+        assert!(err.to_string().contains("0.24.x or earlier"), "{err}");
+        assert_eq!(report_open_failure(&err), 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_tui_shows_an_older_database_detail_instead_of_asking_the_passphrase_again() {
+        // [MS3 final review I1] The TUI degrades to no persistence with the detail on screen;
+        // an interactive prompt with no answers would fail the test if it were asked again.
+        with_var(PASSPHRASE_ENV, None, || {
+            let (_tmp, db, pass) = older_database();
+            let before = std::fs::read(&db).expect("bytes");
+            let mut prompt = FakePrompt::interactive(vec![]);
+            let mut notices = Vec::new();
+            let flag = Some(Zeroizing::new(pass.to_string()));
+            let attachment = open_tui_memory(&db, flag, &mut prompt, &mut notices);
+            assert!(matches!(attachment, MemoryAttachment::Ephemeral));
+            assert!(
+                notices
+                    .iter()
+                    .any(|n| n.text.contains("missing table `code_review_docs`")
+                        && n.text.contains("magi-rs vault set")),
+                "{:?}",
+                notices.iter().map(|n| n.text.as_str()).collect::<Vec<_>>()
+            );
+            assert!(notices
+                .iter()
+                .all(|n| !n.text.to_lowercase().contains("incorrect passphrase")));
+            assert_eq!(std::fs::read(&db).expect("bytes"), before, "left intact");
+        });
+    }
+
     /// C1: `run()` HANDS the startup notices to `run_tui_ext` and does not announce them
     /// itself — the announcement belongs in the one window where the sink is already attached
     /// and the alternate screen is not yet up.

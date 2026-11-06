@@ -2132,11 +2132,9 @@ mod tests {
         );
     }
 
-    /// REQ-D25: a database written by v0.22.0 opens with this build and keeps its records and vault entries.
-    /// Green on purpose (the schema does not change); its power is proven by mutation.
-    #[tokio::test]
-    async fn a_v0_22_0_database_opens_and_keeps_its_records_and_vault_entries() {
-        use magi_rs::vault::SecretStore;
+    /// The v0.22.0 fixture (envelope, records, a vault entry) copied to a temporary
+    /// `.magi-rs-memory.db`, with its passphrase.
+    fn v0_22_0_fixture() -> (tempfile::TempDir, PathBuf, Zeroizing<String>) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = tmp.path().join(".magi-rs-memory.db");
         std::fs::copy(
@@ -2145,28 +2143,69 @@ mod tests {
             &db,
         )
         .expect("copy fixture");
-        let store = EncryptedSqliteMemory::new(
+        (
+            tmp,
             db,
-            zeroize::Zeroizing::new("correct horse battery staple".into()),
+            Zeroizing::new("correct horse battery staple".into()),
         )
-        .expect("the v0.22.0 database opens");
-        let session_id: String = {
-            let conn = store.shared_conn();
-            let guard = conn.lock().unwrap_or_else(|p| p.into_inner());
-            guard
-                .query_row("SELECT id FROM sessions LIMIT 1", [], |r| r.get(0))
-                .expect("the fixture has a session")
-        };
-        let messages = store
-            .get_messages(&session_id)
-            .await
-            .expect("messages decrypt");
-        assert!(!messages.is_empty(), "the fixture's conversation survives");
-        let mut vault = magi_rs::vault::wire(store.shared_conn(), store.data_key().expect("dek"))
-            .expect("vault");
+    }
+
+    /// RV19 / RV-S17 (user decision on MS3 final review I1): a database written by v0.22.0
+    /// lacks the v0.25.0 tables, so `new` (the TUI, vault, logout and headless open) refuses it
+    /// naming the first missing table, and leaves the file byte for byte as it was. This test
+    /// replaced REQ-D25's "opens and keeps its records", which pinned the upgrade in place.
+    #[test]
+    fn a_v0_22_0_database_is_refused_naming_the_missing_table_and_left_intact() {
+        let (_tmp, db, pass) = v0_22_0_fixture();
+        let before = db_state(&db);
+        let err = EncryptedSqliteMemory::new(db.clone(), pass)
+            .err()
+            .expect("an older database is refused");
+        match err.downcast_ref::<VaultError>() {
+            Some(VaultError::DbCorrupt { detail, .. }) => {
+                assert_eq!(detail, &pre_0_25_detail("code_review_docs"))
+            }
+            other => panic!("{other:?}"),
+        }
         assert_eq!(
-            vault.get("TOY_SECRET").expect("entry").as_str(),
-            "toy-secret-value"
+            db_state(&db),
+            before,
+            "never-delete: no schema created, nothing written"
+        );
+    }
+
+    #[test]
+    fn new_refuses_a_0_24_shaped_database_with_an_envelope_and_leaves_it_intact() {
+        // The three v0.25.0 tables dropped from a real envelope DB: what 0.24.x wrote.
+        let (mem, tmp) = fresh_db();
+        mem.conn_for_test()
+            .lock()
+            .expect("lock")
+            .execute_batch(
+                "DROP TABLE code_review_docs; DROP TABLE code_review_doc_sources; \
+                 DROP TABLE code_review_history;",
+            )
+            .expect("drop");
+        drop(mem);
+        let path = tmp.path().to_path_buf();
+        let before = db_state(&path);
+        let err = EncryptedSqliteMemory::new(
+            path.clone(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .err()
+        .expect("an older database is refused");
+        assert!(
+            matches!(
+                err.downcast_ref::<VaultError>(),
+                Some(VaultError::DbCorrupt { detail, .. }) if *detail == pre_0_25_detail("code_review_docs")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            db_state(&path),
+            before,
+            "the file and its WAL must not change"
         );
     }
 
