@@ -464,6 +464,25 @@ its argv is a harness error.
 **Cost.** R17 is one batch by the real trio plus the gate, over a four-line file. Its harness timeout
 is 900 s and `TRIO_RUNS_MEASURED_S["R17"]` carries 300 s provisionally; it has not been measured yet.
 
+### The content-masking scenarios (v0.25.0, REQ-RV22)
+
+S53 and S54 add seven assertions (4 + 3). The harness now promises 54 scenarios and 162 assertions.
+S49 covers a secret in a file's NAME; these cover its CONTENT.
+
+| Id | Invariant | Without its environment |
+|---|---|---|
+| S53 | `code-review rv22keyed` over one Rust file whose content holds a single-line toy key exits 0 and prints JSON in which `code_review.masked` is exactly `[{path: rv22keyed/keyed.rs, cause: secret, pattern: anthropic-key}]` with `masked_unlisted` 0, `code_review.skipped` is empty with `skipped_unlisted` 0 (the file was reviewed, not left out), and the raw key appears in neither stdout, stderr nor the run log | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
+| S54 | `code-review rv22pem` over a directory holding only a toy PEM private-key block exits 2, stderr says nothing to review and its omission list is exactly `rv22pem/server.pem (secret)`, and no body line of the block appears in stdout, stderr or the run log | none: R19 reaches no model and a hang is a `FAIL` |
+
+The `<redacted: anthropic-key>` marker goes to the model only, so the harness reads the pattern name the
+product publishes instead. S54 reads the omission from stderr, not from a JSON `skipped` list, because a
+refusal prints no JSON document. The toy key and the block are assembled from pieces in `smoke/runs.py`
+so no scanner sees a key-shaped literal in the source.
+
+**Cost.** R18 is one batch by the real trio plus the gate over a four-line file, like R17: harness
+timeout 900 s, `TRIO_RUNS_MEASURED_S["R18"]` carries 300 s provisionally and has not been measured. R19
+never reaches a model.
+
 ## Out of scope
 
 ```
@@ -516,6 +535,8 @@ assumes is the exact failure this harness exists to avoid.
 | S50 | a `--timeout` too short for the batches is refused naming the floor and a minimum |
 | S51 | reviewing the workspace root never takes `.magi/` or `.git/` for review |
 | S52 | a review whose embedder is unreachable still reports, and declares `without_embedder` |
+| S53 | a key in a file's content is masked, declared under `masked`, the file reviewed, and the key never printed or logged |
+| S54 | a file holding a private-key block is left out as `secret` and none of its body is printed or logged |
 
 The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 

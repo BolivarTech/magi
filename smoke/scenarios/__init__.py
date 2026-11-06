@@ -34,3 +34,4 @@ from smoke.scenarios import keys  # noqa: F401
 from smoke.scenarios import system_field  # noqa: F401
 from smoke.scenarios import code_review  # noqa: F401
 from smoke.scenarios import review_context  # noqa: F401
+from smoke.scenarios import review_masking  # noqa: F401

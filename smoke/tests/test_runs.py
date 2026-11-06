@@ -301,7 +301,7 @@ class DefinitionTableTests(unittest.TestCase):
         all, and the table then names something that does not exist.
         """
         self.assertEqual(["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
-                          "R16", "R17"],
+                          "R16", "R17", "R18", "R19"],
                          list(runs.DEFINITIONS))
 
     def test_every_invocation_asks_for_json_and_names_the_workspace(self) -> None:
@@ -335,7 +335,7 @@ class DefinitionTableTests(unittest.TestCase):
 
     def test_only_the_consulting_runs_declare_the_trio(self) -> None:
         self.assertEqual(
-            {"R4", "R5", "R8", "R10", "R12", "R17"},
+            {"R4", "R5", "R8", "R10", "R12", "R17", "R18"},
             {run_id for run_id, item in runs.DEFINITIONS.items()
              if item.needs_trio})
 

@@ -142,7 +142,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         # R17 (S52) reaches the trio too: a one-batch review whose embedder is unreachable.
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()
                      if d.argv[0] == "code-review" and d.needs_trio}
-        self.assertEqual({"R12", "R17"}, reviewing)
+        self.assertEqual({"R12", "R17", "R18"}, reviewing)
 
     def test_the_embedder_run_points_only_its_embedder_away(self) -> None:
         # S52: the trio and the gate keep the real backend; only [embedding] reaches the closed port.
@@ -1519,7 +1519,7 @@ class RefusalRunModelCallTests(unittest.TestCase):
     def test_the_refusal_runs_and_only_they_forbid_model_calls(self) -> None:
         forbidding = {run_id for run_id, definition in runs.DEFINITIONS.items()
                       if definition.forbids_model_calls}
-        self.assertEqual({"R13", "R14", "R15", "R16"}, forbidding)
+        self.assertEqual({"R13", "R14", "R15", "R16", "R19"}, forbidding)
 
     def test_forbidding_model_calls_without_a_review_workspace_is_refused(self) -> None:
         with self.assertRaises(HarnessError):

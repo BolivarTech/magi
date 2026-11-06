@@ -639,8 +639,11 @@ LARGE_CONSULT_CEILING_S = 20184
 #: R17's 300 s is provisional too, not a measurement: one batch over one small
 #: file (R10's 67 s consult), plus the trio per batch and the gate, rounded up.
 #: Replace it with R17's own wall clock at the first run against a real backend.
+#: R18's 300 s is the same provisional figure as R17's: one batch over one
+#: four-line file and the gate.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
-                                        "R10": 67, "R12": 1500, "R17": 300}
+                                        "R10": 67, "R12": 1500, "R17": 300,
+                                        "R18": 300}
 
 #: The factor a trio run's ``timeout_s`` must reach over its measurement in
 #: :data:`TRIO_RUNS_MEASURED_S`: at least this many times it, equality
@@ -2118,6 +2121,55 @@ def review_skipped_files() -> tuple[tuple[str, bytes], ...]:
             (REVIEW_SKIPPED_DIR + "/" + _TOY_SECRET_NAME, _TOY_SECRET_FILE))
 
 
+#: Directory (workspace-relative) R18 reviews (S53, REQ-RV22): one small source
+#: file whose CONTENT holds a single-line toy key and whose name does not.
+REVIEW_MASKED_DIR = "rv22keyed"
+REVIEW_MASKED_FILE = REVIEW_MASKED_DIR + "/keyed.rs"
+
+#: The toy key inside that file. Built from two pieces so the source holds no
+#: key-shaped literal; it matches the product's ``anthropic-key`` pattern.
+_TOY_MASKED_PREFIX = "sk-ant-api03-"  # allow-secret-scan
+REVIEW_MASKED_KEY = (_TOY_MASKED_PREFIX + "M" * 28).encode("ascii")
+
+#: The pattern the product reports for it (``name`` in ``src/review/secrets.rs``).
+REVIEW_MASKED_PATTERN = "anthropic-key"
+
+#: Directory R19 reviews (S54): only a file holding a multi-line private-key
+#: block, which the product leaves out whole as ``secret``.
+REVIEW_KEYBLOCK_DIR = "rv22pem"
+REVIEW_KEYBLOCK_FILE = REVIEW_KEYBLOCK_DIR + "/server.pem"
+
+#: The body lines of the toy block, each unique and none carrying a header.
+#: S54 looks for each in every output: a body has no pattern of its own, so the
+#: only protection is leaving the whole file out.
+REVIEW_KEYBLOCK_BODY_LINES = (b"TOYBODYLINEONE" + b"Q" * 40, b"TOYBODYLINETWO" + b"R" * 40)
+
+
+def review_masked_files() -> tuple[tuple[str, bytes], ...]:
+    """The file R18 reviews: valid Rust holding one single-line toy key.
+
+    Returns:
+        tuple: One ``(path, content)`` pair, :data:`REVIEW_MASKED_FILE`.
+    """
+    body = (b"/// Returns the token of the toy service.\n"
+            b"pub fn token() -> &'static str {\n"
+            b'    "' + REVIEW_MASKED_KEY + b'"\n'
+            b"}\n")
+    return ((REVIEW_MASKED_FILE, body),)
+
+
+def review_keyblock_files() -> tuple[tuple[str, bytes], ...]:
+    """The file R19 reviews: a toy PEM private-key block, header to footer.
+
+    Returns:
+        tuple: One ``(path, content)`` pair, :data:`REVIEW_KEYBLOCK_FILE`.
+    """
+    header = "-----BEGIN " + "RSA PRIVATE KEY-----"  # allow-secret-scan
+    footer = "-----END " + "RSA PRIVATE KEY-----"  # allow-secret-scan
+    lines = [header.encode("ascii"), *REVIEW_KEYBLOCK_BODY_LINES, footer.encode("ascii")]
+    return ((REVIEW_KEYBLOCK_FILE, b"\n".join(lines) + b"\n"),)
+
+
 #: Directory (workspace-relative) R17 reviews: one small source file, so the run
 #: costs one batch.
 REVIEW_CONTEXT_DIR = "ctx"
@@ -3225,6 +3277,22 @@ DEFINITIONS: dict[str, RunDefinition] = {
         stdin=b"",
         needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
         files=review_context_files(), unreachable_embedder=True),
+    # R18 feeds S53: a one-batch review by the real trio of a file whose content
+    # holds a toy key, which the product must mask and review. R19 feeds S54:
+    # a directory of only a private-key block, refused before any model.
+    "R18": RunDefinition(
+        run_id="R18",
+        argv=("code-review",) + REVIEW_FLAGS + (REVIEW_MASKED_DIR,),
+        stdin=b"",
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
+        files=review_masked_files()),
+    "R19": RunDefinition(
+        run_id="R19",
+        argv=("code-review",) + REVIEW_FLAGS + (REVIEW_KEYBLOCK_DIR,),
+        stdin=b"",
+        forbids_model_calls=True,
+        needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
+        files=review_keyblock_files()),
 }
 
 
