@@ -1388,15 +1388,17 @@ mod tests {
             let old = text(src.read_old(&kept.path).expect("read"));
             assert!(!old.contains("BODY"), "{}: {old}", kept.path);
         }
-        assert!(
-            f.kept.iter().any(|k| k.path == "key.rs")
-                || f.skipped
-                    == vec![Skipped {
-                        path: "key.rs".into(),
-                        cause: SkipCause::Secret
-                    }],
+        // [T3.7 fix round 3] RV22's exception: a file any side of which holds a multi-line
+        // private-key block is left out as `secret`, never reviewed masked.
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "key.rs".into(),
+                cause: SkipCause::Secret
+            }],
             "{f:?}"
         );
+        assert!(f.masked.is_empty(), "{:?}", f.masked);
     }
 
     /// A PEM block around one body line, its armor split so the source holds no header.
@@ -1501,28 +1503,15 @@ mod tests {
     }
 
     #[test]
-    fn a_key_added_whole_beside_an_unchanged_key_is_reviewed_masked() {
-        // [T3.7 fix round 1] the line-precise guard keeps what is safe: every line of both blocks
-        // is masked on each side that shows it, so the file is reviewed, its bodies masked.
+    fn a_key_added_whole_beside_an_unchanged_key_is_left_out() {
+        // [T3.7 fix round 1] the line-precise guard kept this file, its bodies masked.
+        // [T3.7 fix round 3] RV22's exception: any private-key block leaves the file out.
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
         let end = concat!("-----", "END ", "PRIVATE KEY-----");
         let old = format!("{begin}\nBODYONE\n{end}\nfn b() {{}}\n");
         let new = format!("{begin}\nBODYONE\n{end}\nfn b() {{}}\n{begin}\nBODYTWO\n{end}\n");
         let diff = format!("@@ -4,0 +5,3 @@\n+{begin}\n+BODYTWO\n+{end}\n");
-        let inner = MapSource::new(&[("key.rs", new.as_str())], &[("key.rs", old.as_str())]);
-        let src = CachedSource::new(&inner);
-        let files = vec![ReviewFile {
-            path: "key.rs".into(),
-            diff: Some(diff),
-        }];
-        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-            .expect("key.rs kept");
-        assert_eq!(f.masked, vec![masked("key.rs", "pem-private-key")]);
-        let diff = f.kept.first().and_then(|k| k.diff.as_deref()).unwrap_or("");
-        assert_eq!(
-            diff,
-            "@@ -4,0 +5,3 @@\n+<redacted: pem-private-key>\n+\n+\n"
-        );
+        assert_no_key_body_leaves(Some(&diff), &new, Some(&old));
     }
 
     #[test]
@@ -1554,10 +1543,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pem_key_whose_header_is_outside_the_hunk_is_masked_in_its_diff_too() {
+    fn a_pem_key_whose_header_is_outside_the_hunk_still_skips_the_file() {
         // [CP2 MS2 S1b loop 11] the hunk touches only the key body; both whole sides are scanned, so `BEGIN` is seen.
-        // [T3.7] RV22 amended: both sides hold the block, so both are masked and the diff is
-        // rebuilt from them: its body lines, which no pattern names, never leave in the clear.
+        // [T3.7 fix round 3] RV22's exception: a private-key block leaves the file out, as before
+        // the amendment.
         // Split so tests/no_hardcoded_secrets.rs (which flags the literal `-----BEGIN`) does not read a header here.
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
         let new = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\nAAAA\n-----END PRIVATE KEY-----\n");
@@ -1578,15 +1567,16 @@ mod tests {
         );
         let src = CachedSource::new(&inner);
         let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-            .expect("both kept");
-        assert_eq!(f.skipped, vec![]);
-        assert_eq!(f.masked, vec![masked("key.rs", "pem-private-key")]);
-        let diff = f
-            .kept
-            .first()
-            .and_then(|k| k.diff.as_deref())
-            .expect("key.rs kept with its diff");
-        assert_eq!(diff, "@@ -3,1 +3,1 @@\n-\n+\n");
+            .expect("a.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "key.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+        assert!(f.masked.is_empty(), "{:?}", f.masked);
+        assert!(f.kept.iter().all(|k| k.path != "key.rs"), "{f:?}");
     }
 
     #[test]
@@ -1643,8 +1633,8 @@ mod tests {
     }
 
     #[test]
-    fn an_armored_pgp_private_key_is_masked_and_logged_by_its_pattern_name_only() {
-        // [T3.7] RV22 amended: reviewed with the block masked, declared, never omitted.
+    fn an_armored_pgp_private_key_skips_the_file_and_logs_only_its_pattern_name() {
+        // [T3.7 fix round 3] RV22's exception: a private-key block leaves the file out.
         // Split so tests/no_hardcoded_secrets.rs (which flags the literal `-----BEGIN`) reads no
         // header here; the body is obviously fake.
         let begin = concat!("-----", "BEGIN PGP PRIVATE KEY BLOCK-----");
@@ -1678,9 +1668,15 @@ mod tests {
         let src = CachedSource::new(&inner);
         let line = crate::logging::testutil::capture(|| {
             let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-                .expect("all kept");
-            assert_eq!(f.skipped, vec![]);
-            assert_eq!(f.masked, vec![masked("key.rs", "pgp-private-key")]);
+                .expect("a.rs kept");
+            assert_eq!(
+                f.skipped,
+                vec![Skipped {
+                    path: "key.rs".into(),
+                    cause: SkipCause::Secret
+                }]
+            );
+            assert!(f.masked.is_empty(), "{:?}", f.masked);
             // A public key is not a secret.
             assert!(f.kept.iter().any(|k| k.path == "pub.asc"), "{f:?}");
         });

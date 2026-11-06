@@ -2379,17 +2379,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_masked_key_block_keeps_every_later_line_at_its_number() {
-        // [T3.7] a PEM block masked to one line would move every line after it: the finding on
-        // line 7 would fall outside the file and be discarded, and the gate would show other code.
+    async fn a_file_holding_a_private_key_block_is_left_out_and_no_byte_of_it_is_sent() {
+        // [T3.7 fix round 3] RV22's exception: a key block's body has no pattern of its own, so
+        // masking cannot promise that no byte of it leaves; the file is left out as `secret`.
+        // (Was `a_masked_key_block_keeps_every_later_line_at_its_number`, which reviewed it masked.)
         let dir = tempfile::tempdir().expect("tempdir");
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
         let end = concat!("-----", "END ", "PRIVATE KEY-----");
         let text = format!(
             "fn a() {{}}\nconst K: &str = \"{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\nQQQQ\n{end}\";\nfn b() {{\n    danger();\n}}\n"
         );
+        std::fs::write(dir.path().join("key.rs"), text).expect("write");
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").expect("write");
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review(
+            dir.path(),
+            None,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("b.rs is reviewed");
+        let prompts = consult.prompts.lock().expect("lock").clone();
+        assert!(
+            prompts
+                .iter()
+                .all(|p| !p.contains("MIIB") && !p.contains("QQQQ") && !p.contains("key.rs")),
+            "{prompts:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&out.summary.skipped).expect("json"),
+            serde_json::json!([{"path": "key.rs", "cause": "secret"}])
+        );
+        assert!(out.summary.masked.is_empty(), "{:?}", out.summary.masked);
+    }
+
+    #[tokio::test]
+    async fn a_masked_one_line_secret_keeps_every_line_at_its_number() {
+        // [T3.7 fix round 3] the masking that stays: a one-line secret is replaced in its line,
+        // so the finding on line 5 is validated and the gate shows line 5 as it is.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text = format!(
+            "fn a() {{}}\nlet u = \"postgres://svc:{TOY_PASSWORD}@db/app\";\nfn b() {{\n    let x = 1;\n    danger();\n}}\n"
+        );
         std::fs::write(dir.path().join("a.rs"), text).expect("write");
-        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":7}]);
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":5}]);
         let consult =
             FakeConsult::new(vec![Ok(
                 real_report([f.clone(), f, serde_json::json!([])]).await
@@ -2399,9 +2434,11 @@ mod tests {
             .expect_decide()
             .times(1)
             .withf(|r| {
-                r.state()["code"]
-                    .as_str()
-                    .is_some_and(|c| c.contains("7:     danger();") && !c.contains("MIIB"))
+                r.state()["code"].as_str().is_some_and(|c| {
+                    c.contains("5:     danger();")
+                        && c.contains("2: let u = \"postgres://<redacted: url-credential>db/app\";")
+                        && !c.contains(TOY_PASSWORD)
+                })
             })
             .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.95));
         let out = review(dir.path(), None, &consult, &client, &FakeClock::default())
@@ -2409,9 +2446,7 @@ mod tests {
             .expect("the file is reviewed");
         let prompts = consult.prompts.lock().expect("lock").clone();
         assert!(
-            prompts
-                .iter()
-                .all(|p| !p.contains("MIIB") && !p.contains("QQQQ")),
+            prompts.iter().all(|p| !p.contains(TOY_PASSWORD)),
             "{prompts:?}"
         );
         assert!(
@@ -2425,7 +2460,7 @@ mod tests {
                 .iter()
                 .map(|(f, _)| f.line)
                 .collect::<Vec<_>>(),
-            vec![Some(7)]
+            vec![Some(5)]
         );
     }
 
@@ -2538,6 +2573,40 @@ mod tests {
         );
         assert!(
             matches!(plan, Ok(PlanFingerprint { batches: 1, .. })),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_named_explicitly_that_holds_a_private_key_block_is_refused() {
+        // [T3.7 fix round 3] RV22's exception: a key block is the typed error a named file with
+        // a secret always was; a one-line secret is reviewed masked (the test above).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let text = format!("const K: &str = \"{begin}\nMIIBVQIBADAN\n{end}\";\n");
+        std::fs::write(dir.path().join("a.rs"), text).expect("write");
+        let git = FakeGit::from(&[]);
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let plan = plan_review(
+            &ReviewInput::File(PathBuf::from("a.rs")),
+            dir.path(),
+            &git,
+            &guard,
+            &|_| false,
+            &LanguageRegistry::new(),
+            &pool,
+            None,
+        );
+        assert!(
+            matches!(
+                plan,
+                Err(ReviewError::NotReviewable {
+                    cause: "secret",
+                    ..
+                })
+            ),
             "{plan:?}"
         );
     }
