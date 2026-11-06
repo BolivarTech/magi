@@ -26,6 +26,7 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -92,6 +93,8 @@ pub struct ReviewDocStore {
     dek: Mutex<MaskedDek>,
     /// `doc_index_id(model, dim)` of the vectors this store serves.
     index_id: String,
+    /// Stored vectors decrypted so far: the seam that shows a review decrypts each once.
+    vector_decrypts: AtomicUsize,
 }
 
 fn db_err(e: rusqlite::Error) -> MemoryError {
@@ -129,7 +132,14 @@ impl ReviewDocStore {
             vault: CryptoVault::default(),
             dek: Mutex::new(dek),
             index_id,
+            vector_decrypts: AtomicUsize::new(0),
         })
+    }
+
+    /// How many stored vectors this store has decrypted, for tests that count them.
+    #[cfg(test)]
+    pub(crate) fn vector_decrypts(&self) -> usize {
+        self.vector_decrypts.load(Ordering::SeqCst)
     }
 
     fn locked_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -160,6 +170,7 @@ impl ReviewDocStore {
     }
 
     fn unseal_vector(&self, blob: &[u8]) -> Result<Vec<f32>, MemoryError> {
+        self.vector_decrypts.fetch_add(1, Ordering::SeqCst);
         let json = self.unseal(blob)?;
         serde_json::from_str(json.as_str())
             .map_err(|e| MemoryError::Storage(format!("embedding deserialization: {e}")))

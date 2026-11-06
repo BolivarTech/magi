@@ -1162,6 +1162,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_multi_batch_review_decrypts_the_allowed_vectors_once() {
+        // [MS3 final review I3] The allowed vectors are decrypted once per review, never once per
+        // batch, and every batch is served the same documentation.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        f.docs
+            .reindex(
+                &[(
+                    src("README.md", "k"),
+                    vec![
+                        chunk("README.md", "Usage", "how a works"),
+                        chunk("README.md", "More", "and more"),
+                    ],
+                )],
+                &f.embedder,
+            )
+            .await
+            .expect("index");
+        let mut rag = f.rag(true);
+        rag.doc_sources = BTreeSet::from([src("README.md", "k")]);
+        let before = f.docs.vector_decrypts();
+        let mut served = Vec::new();
+        for _ in 0..3 {
+            let a = rag
+                .context_for(&batch_on("a.rs", "fn a() {}"))
+                .await
+                .expect("context");
+            let docs: Vec<String> = a
+                .items
+                .iter()
+                .filter(|i| i.kind == ContextKind::Documentation)
+                .map(|i| i.text.clone())
+                .collect();
+            served.push(docs);
+        }
+        assert_eq!(
+            f.docs.vector_decrypts() - before,
+            2,
+            "each allowed row once"
+        );
+        assert_eq!(served[0].len(), 2, "{served:?}");
+        assert!(served.iter().all(|d| *d == served[0]), "{served:?}");
+    }
+
+    #[tokio::test]
     async fn without_an_embedder_documentation_and_history_are_left_out_and_declared() {
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
         f.history.record(&[attended("h1", "fine")]).expect("record");
