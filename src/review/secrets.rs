@@ -1058,7 +1058,8 @@ const FINGERPRINT_STRIPPED: &[char] = &['"', '\'', '`', '\\', '+', ',', ';', '('
 const ESCAPED_BREAKS: [&str; 2] = ["\\n", "\\r"];
 
 /// A fingerprint of `line` for telling a key line repeated elsewhere: the line with its escaped
-/// line breaks and [`FINGERPRINT_STRIPPED`] characters dropped, trimmed, then hashed. Only a hash
+/// line breaks and the characters a string literal adds (quotes, `\`, `+`, `,`, `;`, parentheses)
+/// dropped, trimmed, then hashed. Only a hash
 /// is kept, never the text. `None` for a line under [`MIN_FINGERPRINT_CHARS`] once normalized.
 /// O(line).
 ///
