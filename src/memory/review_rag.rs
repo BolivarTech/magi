@@ -557,6 +557,12 @@ impl ReviewMemory {
         })
     }
 
+    /// The shared connection, for tests that read raw rows.
+    #[cfg(test)]
+    pub(crate) fn connection_for_test(&self) -> &Arc<Mutex<Connection>> {
+        &self.conn
+    }
+
     /// The review history.
     pub fn history(&self) -> &ReviewHistoryStore {
         &self.history

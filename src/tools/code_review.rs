@@ -2171,6 +2171,94 @@ mod tests {
         .expect("runner")
     }
 
+    /// A temporary encrypted database and the review stores over it; keep the first two alive.
+    fn review_memory() -> (
+        tempfile::NamedTempFile,
+        crate::system::database::EncryptedSqliteMemory,
+        Arc<ReviewMemory>,
+    ) {
+        let db = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            db.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        let memory = ReviewMemory::open(mem.shared_conn(), mem.data_key().expect("dek"))
+            .expect("review stores");
+        (db, mem, Arc::new(memory))
+    }
+
+    /// [`production_runner_with`] with review stores and an embedder.
+    fn production_runner_with_memory(
+        ws: &Path,
+        memory: Option<Arc<ReviewMemory>>,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> ProductionReviewRunner {
+        ProductionReviewRunner::new(ReviewRunnerParts {
+            workspace: ws.to_path_buf(),
+            pool: vec![("m".into(), None)],
+            consult: Arc::new(RecordingConsult::default()),
+            gate_client: Arc::new(NoDecision),
+            gate_chain: vec![ModelSpec {
+                model: "g".into(),
+                min_confidence: None,
+            }],
+            max_state_bytes: 61_000,
+            call_timeout: Duration::from_secs(1),
+            max_rotations: 0,
+            retry_disabled: false,
+            agent_timeout_secs: 120,
+            structured: false,
+            memory,
+            embedder,
+        })
+        .expect("runner")
+    }
+
+    /// Plans and runs one review of `input`, then the work it leaves for after its report.
+    async fn review_and_follow_up(
+        runner: &ProductionReviewRunner,
+        input: ReviewInput,
+    ) -> (Rendered, Option<String>) {
+        let plan = runner.plan(&input).expect("plans");
+        let rendered = runner
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
+            .await
+            .expect("the review runs");
+        let warning = runner.after_report();
+        (rendered, warning)
+    }
+
+    #[tokio::test]
+    async fn a_working_tree_without_a_repository_drops_its_older_documentation() {
+        // RV-S39 without git: the working tree alone is live, so the version it replaced goes.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        std::fs::write(ws.join("src").join("a.rs"), "fn a() {}\n").expect("a.rs");
+        let (_db, _mem, memory) = review_memory();
+        let embedder: Arc<dyn EmbeddingProvider> =
+            Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let runner = production_runner_with_memory(&ws, Some(Arc::clone(&memory)), Some(embedder));
+        for text in ["# A\nv1\n", "# A\nv2\n"] {
+            std::fs::write(ws.join("README.md"), text).expect("README");
+            let (_, warning) = review_and_follow_up(&runner, ReviewInput::File("src".into())).await;
+            assert!(warning.is_none(), "{warning:?}");
+        }
+        let keys: Vec<String> = {
+            let c = memory.connection_for_test().lock().expect("lock");
+            let mut stmt = c
+                .prepare("SELECT key FROM code_review_doc_sources WHERE path = 'README.md'")
+                .expect("query");
+            let rows = stmt.query_map([], |r| r.get(0)).expect("rows");
+            rows.collect::<Result<_, _>>().expect("keys")
+        };
+        assert_eq!(
+            keys,
+            vec![magi_rs::review::docs::worktree_key(b"# A\nv2\n")]
+        );
+    }
+
     #[tokio::test]
     async fn the_production_runner_refuses_an_escaping_path_before_any_model_call() {
         // RV-S10 through the production guard (PathGuard), never a test double's.
