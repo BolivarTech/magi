@@ -1119,25 +1119,17 @@ mod tests {
     #[tokio::test]
     async fn test_legacy_db_without_salt_is_dbcorrupt_and_never_wiped() {
         // Step 8c rewrite of the former `test_legacy_db_without_salt_is_reset_on_open`.
-        // A pre-envelope DB (rows present, no `vault_meta` envelope) is now
-        // CORRUPTION, not a fresh-start: opening returns `DbCorrupt` and the data
-        // is left completely intact (never-delete absolute, REQ-H20 / D-H10 / SC-H21).
+        // A DB with rows but no `vault_meta` envelope is CORRUPTION, not a fresh start:
+        // opening it through `new` returns `DbCorrupt` ("data present without envelope")
+        // and the data is left completely intact (never-delete absolute, REQ-H20 / D-H10 /
+        // SC-H21). [MS3 re-review N1] Seeded with the whole current schema: a seed of only
+        // the older tables is now refused earlier as a pre-v0.25.0 database (RV19), which
+        // would never reach this branch.
         let tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute(
-                "CREATE TABLE sessions (id TEXT PRIMARY KEY, project_name TEXT NOT NULL, \
-                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, \
-                 role TEXT NOT NULL, content_blob TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
-                [],
-            )
-            .unwrap();
+            init_schema(&conn).unwrap();
             conn.execute(
                 "INSERT INTO sessions (id, project_name) VALUES ('old', 'legacy')",
                 [],
@@ -1150,17 +1142,18 @@ mod tests {
             .unwrap();
         }
 
-        // `new` runs `init_schema` (adding the missing tables) then the state
-        // machine: no envelope + data present ⇒ DbCorrupt (never wiped).
+        // `new` passes the older-version check (every table exists), `init_schema` is a
+        // no-op, then the state machine: no envelope + data present ⇒ DbCorrupt with its
+        // own detail (never wiped).
         let err = EncryptedSqliteMemory::new(path.clone(), Zeroizing::new("pw".to_string()))
             .err()
             .expect("data without an envelope must fail to open, not be wiped");
         assert!(
             matches!(
                 err.downcast_ref::<VaultError>(),
-                Some(VaultError::DbCorrupt { .. })
+                Some(VaultError::DbCorrupt { detail, .. }) if detail == DETAIL_DATA_WITHOUT_ENVELOPE
             ),
-            "expected DbCorrupt, got {err:?}"
+            "expected DbCorrupt (data present without envelope), got {err:?}"
         );
 
         // The legacy rows survive untouched — never-delete absolute.
