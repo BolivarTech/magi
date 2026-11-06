@@ -188,11 +188,14 @@ struct Kept {
 /// path → `ignored`; a path that holds a
 /// secret → `secret`, without reading it; a file that does not exist → an error, never a skip;
 /// over the byte cap → `too large`; a NUL anywhere in a side → `binary`; not UTF-8 →
-/// `not utf-8`. A secret in the content no longer leaves the file out (RV22 as amended in T3.7):
-/// the source masks it in each side it holds ([`ContentSource::masked`]), the diff is rebuilt
-/// from the masked sides, and the file is kept and declared in [`Filtered::masked`] (see
-/// `kept_verdict` for the cases that still leave it out as `secret`). A side that still holds a
-/// secret, which only a source that does not mask hands over, leaves the file out as `secret`.
+/// `not utf-8`. A one-line secret in the content no longer leaves the file out (RV22 as amended
+/// in T3.7): the source masks it in each side it holds ([`ContentSource::masked`]), the diff is
+/// rebuilt from the masked sides, and the file is kept and declared in [`Filtered::masked`] (see
+/// `kept_verdict` for the cases that still leave it out as `secret`). The exception is a
+/// multi-line private-key block: the source holds such a side unmasked (a key body has no
+/// pattern of its own), and this filter leaves the file out as `secret` when either side still
+/// holds one, so no later stage reads the file. A side that still holds a secret of any kind,
+/// which only a source that does not mask hands over, leaves the file out the same way.
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker
 /// ([`is_binary_section`]) is judged by its bytes the same way, and when both sides are text it
 /// is kept with no diff, reviewed whole from its new side; a side that cannot be read is left
@@ -408,8 +411,9 @@ fn classify(
         new: new.as_deref(),
         old: old.as_deref(),
     };
-    // MAGI FIX (T3.7): a secret in the content no longer leaves the file out; it is masked and
-    // the file reviewed (RV22 amended, user decision 2026-11-06).
+    // MAGI FIX (T3.7): a one-line secret in the content no longer leaves the file out; it is
+    // masked and the file reviewed (RV22 amended, user decision 2026-11-06). A key-block side is
+    // held unmasked by the cache, so `content_verdict` above already left that file out.
     Ok(kept_verdict(&read, source, file.diff.clone(), true))
 }
 

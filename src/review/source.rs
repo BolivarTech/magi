@@ -692,9 +692,11 @@ impl ContentSource for RevisionSource<'_> {
 ///
 /// Every stage of a review (the filter, the batches, the index and the gate) reads through one
 /// cache, so a file is read once per side and every stage sees the bytes the filter scanned,
-/// even if the file changes on disk meanwhile. A text side is held with each secret masked, line
-/// breaks kept, so no stage ever reads a secret's bytes (RV22; [`ContentSource::masked`] says
-/// what was masked). An `Err` is never kept, and the filter releases
+/// even if the file changes on disk meanwhile. A text side is held with each one-line secret
+/// masked, line breaks kept (RV22; [`ContentSource::masked`] says what was masked). The exception
+/// is a side that holds a multi-line private-key block: it is held unmasked, and safety comes from
+/// the filter leaving its file out, so every later stage (index, units, definitions, callers, the
+/// gate) must read only files the filter kept. An `Err` is never kept, and the filter releases
 /// every side of a file it leaves out that no kept file was scanned with
 /// ([`ContentSource::release`]), so the cap and the memory count only
 /// what is reviewed and no skipped secret stays held. The bytes held are
@@ -803,8 +805,9 @@ impl<'a> CachedSource<'a> {
             Face::New => self.inner.read(path)?,
             Face::Old => self.inner.read_old(path)?,
         };
-        // MAGI FIX (T3.7): RV22 masks a secret instead of leaving its file out; every stage reads
-        // through this cache, so masking here is the one place it happens.
+        // MAGI FIX (T3.7): RV22 masks a one-line secret instead of leaving its file out; every
+        // stage reads through this cache, so masking here is the one place it happens. A side with
+        // a key block is not masked (see `masked_side`): the filter leaves that file out.
         let (read, mask) = masked_side(raw);
         let len = read
             .as_ref()

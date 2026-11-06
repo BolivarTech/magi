@@ -514,6 +514,8 @@ pub async fn run_review(
             "the lexical index hit its cap: the symbol check is off for this review"
         );
     }
+    // Invariant (R3-3): the index above came from `filtered.kept` only, so units, definitions and
+    // callers never name a skipped file, whose key-block sides the cache holds unmasked.
     // §5.0 stage 3, before the clock: every batch's context is assembled and scanned now, so the
     // embedder's latency is never charged to the review's total (RV06).
     let contexts = match deps.rag {
@@ -791,6 +793,7 @@ fn filter_and_plan_with(
     let filtered = filter_files(files, source, registry, explicit, is_ignored)?;
     let window = pool_window(pool);
     let limit = batch_limit_tokens(&window);
+    // The index takes `filtered.kept` only (R3-3): skipped files may hold key-block sides raw.
     // With RAG the lexical index is built first: binding the context source to the review needs
     // it, and planning charges each item's containing unit (`companion`) against the limit less
     // the context heading, so a batch is planned with its units already counted.
@@ -1307,6 +1310,12 @@ fn renamed_old_paths(files: &[ReviewFile]) -> HashMap<String, String> {
 }
 
 /// The lexical index over both sides of every reviewed file. O(bytes reviewed).
+///
+/// `files` must be the files the filter kept. The review's cache holds a side that carries a
+/// multi-line private-key block unmasked (RV22's exception), and the filter leaves that file out;
+/// indexing a skipped file would hand its bytes to every stage that resolves units, definitions
+/// or callers through the index. Pinned by
+/// `a_skipped_key_block_file_never_reaches_a_prompt_as_a_definition`.
 ///
 /// `read_old` cannot panic here: it is a required method of [`ContentSource`] with no default
 /// body, and every implementation returns `Ok(None)` when the source has no old side (the
