@@ -1021,7 +1021,7 @@ mod tests {
         f.details = (0..n).map(|i| format!("d{i}")).collect();
         let mut c = MockDecisionClient::new();
         c.expect_decide()
-            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.70));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(
@@ -1030,6 +1030,28 @@ mod tests {
                 GateState::LowConfidence,
                 Some("critical never filtered"),
                 vec!["critical never filtered", "not every claim judged"]
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confident_critical_with_unasked_claims_is_still_never_filtered() {
+        // [T3.7-fix1] above the critical threshold the other guard still rules: unasked claims.
+        let mut f = finding(Severity::Critical, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING + 2;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.99));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("not every claim judged"),
+                vec!["not every claim judged"]
             )
         );
     }
@@ -1064,7 +1086,7 @@ mod tests {
         let mut c = MockDecisionClient::new();
         c.expect_decide()
             .times(1)
-            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.70));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(v.causes, vec!["critical never filtered"]);
@@ -1076,7 +1098,7 @@ mod tests {
         let mut c = MockDecisionClient::new();
         c.expect_decide()
             .times(1)
-            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.70));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(v.cause, Some("critical never filtered"));
@@ -1235,7 +1257,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_critical_is_never_filtered() {
+    async fn a_critical_with_a_confident_false_positive_is_filtered() {
+        // [T3.7-fix1] formerly `a_critical_is_never_filtered` (0.99 stayed in the main list).
         let mut c = MockDecisionClient::new();
         c.expect_decide()
             .returning(|_| answer("clef:cloud", "false_positive", 0.99));
@@ -1247,9 +1270,61 @@ mod tests {
                 None,
             )
             .await;
+        assert_eq!((v.state, v.cause), (GateState::Filtered, None));
+    }
+
+    #[tokio::test]
+    async fn a_critical_below_the_critical_threshold_is_never_filtered() {
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.74));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g
+            .judge(
+                &finding(Severity::Critical, Some(3)),
+                Some("x\nx\nx\n"),
+                None,
+            )
+            .await;
         assert_eq!(
             (v.state, v.cause),
             (GateState::LowConfidence, Some("critical never filtered"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_critical_exactly_at_the_critical_threshold_is_filtered() {
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.75));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g
+            .judge(
+                &finding(Severity::Critical, Some(3)),
+                Some("x\nx\nx\n"),
+                None,
+            )
+            .await;
+        assert_eq!((v.state, v.cause), (GateState::Filtered, None));
+    }
+
+    #[tokio::test]
+    async fn a_confident_critical_on_an_ambiguous_side_is_not_filtered() {
+        // [T3.7-fix1] above the critical threshold the other guard still rules, and names itself.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.99));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g
+            .judge_ambiguous_side(&finding(Severity::Critical, Some(3)), "x\nx\nx\n", None)
+            .await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("ambiguous diff side"),
+                vec!["ambiguous diff side"]
+            )
         );
     }
 
@@ -1990,7 +2065,7 @@ mod tests {
         // though `causes` lists every cause that applies.
         let mut c = MockDecisionClient::new();
         c.expect_decide()
-            .returning(|_| answer("clef:cloud", "false_positive", 0.99));
+            .returning(|_| answer("clef:cloud", "false_positive", 0.70));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g
             .judge_ambiguous_side(&finding(Severity::Critical, Some(3)), "x\nx\nx\n", None)

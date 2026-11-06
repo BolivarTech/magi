@@ -2855,7 +2855,7 @@ mod tests {
         client
             .expect_decide()
             .times(1)
-            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.95));
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.70));
         let out = review(dir.path(), None, &consult, &client, &FakeClock::default())
             .await
             .expect("runs");
