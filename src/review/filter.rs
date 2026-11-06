@@ -19,9 +19,7 @@ use super::input::{
 };
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
-use super::source::{
-    is_never_reviewed, ContentSource, Face, GitCommand, SideMask, HARD_LINK_CAUSE,
-};
+use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LINK_CAUSE};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
 pub(crate) const MISSING: &str = "missing";
@@ -455,6 +453,28 @@ fn kept_verdict(
     diff: Option<String>,
     with_old: bool,
 ) -> Verdict {
+    // MAGI FIX (T3.7 fix round 2, re-review R1, security): a key body moved or copied to the
+    // other side matches no pattern; the source masks every line that repeats a key line of
+    // either side, and the sides are read again so everything below sees that text.
+    let reread = read.new.is_some() && read.old.is_some();
+    if reread {
+        source.mask_alike(read.path, read.old_path);
+    }
+    let (new_now, old_now) = if reread {
+        match (source.read(read.path), source.read_old(read.old_path)) {
+            (Ok(new), Ok(old)) => (new, old),
+            // Held sides read from the cache; a failure here leaves the file out, never sends it.
+            _ => return Verdict::Skip(SkipCause::Unreadable),
+        }
+    } else {
+        (None, None)
+    };
+    let read = &SidesRead {
+        path: read.path,
+        old_path: read.old_path,
+        new: if reread { new_now.as_deref() } else { read.new },
+        old: if reread { old_now.as_deref() } else { read.old },
+    };
     let new_mask = read.new.and(source.masked(Face::New, read.path));
     let old_mask = read.old.and(source.masked(Face::Old, read.old_path));
     let pattern = new_mask
@@ -468,17 +488,14 @@ fn kept_verdict(
             masked: None,
         });
     };
-    let block = |m: Option<SideMask>| m.is_some_and(|m| m.multi_line);
     // MAGI FIX (T3.7 fix round 1, review F1, security): a flag per side let a key body through
     // when both sides held a block at different lines; the check is now line by line.
-    if let (Some(new), Some(old)) = (read.new, read.old) {
-        if block(new_mask) || block(old_mask) {
-            let blocks = SideBlocks {
-                old: source.masked_blocks(Face::Old, read.old_path),
-                new: source.masked_blocks(Face::New, read.path),
-                old_len: line_count(old),
-                new_len: line_count(new),
-            };
+    if reread {
+        let blocks = SideBlocks {
+            old: source.masked_blocks(Face::Old, read.old_path),
+            new: source.masked_blocks(Face::New, read.path),
+        };
+        if !blocks.old.is_empty() || !blocks.new.is_empty() {
             let agree = match diff.as_deref() {
                 Some(d) => blocks.agree_through(d),
                 None => blocks.old == blocks.new,
@@ -585,22 +602,13 @@ fn hunk_header(line: &str) -> Option<(&str, HunkSide, HunkSide)> {
     Some((header, old, new))
 }
 
-/// The lines of a file text (a last line without `\n` counts). O(text).
-fn line_count(side: &[u8]) -> usize {
-    std::str::from_utf8(side).map_or(0, |t| t.lines().count())
-}
-
-/// The lines each side's key-block masks blanked ([`ContentSource::masked_blocks`]), and how
-/// many lines each side has: what tells a key's body line from a line no mask covered.
+/// The lines each side's key-block masks blanked ([`ContentSource::masked_blocks`]), repeats
+/// masked by fingerprint included: what tells a masked key line from a line no mask covered.
 struct SideBlocks {
     /// The old side's blanked lines, 1-based inclusive `(first, last)`.
     old: Vec<(usize, usize)>,
     /// The new side's blanked lines, 1-based inclusive `(first, last)`.
     new: Vec<(usize, usize)>,
-    /// The old side's line count.
-    old_len: usize,
-    /// The new side's line count.
-    new_len: usize,
 }
 
 /// What a hunk changed, by whether each changed line lies inside a key block of its side.
@@ -634,20 +642,15 @@ impl SideBlocks {
             .any(|&(first, last)| first <= line && line <= last)
     }
 
-    /// Whether old line `old` and new line `new`, the same line on both sides, agree on being
-    /// inside a key block. O(blocks).
-    fn same(&self, old: usize, new: usize) -> bool {
-        Self::inside(&self.old, old) == Self::inside(&self.new, new)
-    }
-
-    /// Whether `diff` keeps every key body masked: each line both sides share (a context line
-    /// or one outside every hunk) is inside a block on both sides or on neither, and no hunk
-    /// [`HunkBlocks::crosses`]. `false` when the diff does not fit the sides (a hunk header that
-    /// does not parse, a body line with no marker, unchanged stretches of different lengths).
+    /// Whether `diff` keeps every key body masked: no hunk [`HunkBlocks::crosses`]. `false` when
+    /// a hunk header does not parse or a body line has no marker.
     ///
-    /// A key body matches no pattern without its `BEGIN` line, so a line masked on one side and
-    /// not on the other is a key line that would leave in the clear, from the diff or from the
-    /// side the batches, units and gate read. O(diff + sides × blocks).
+    /// The lines the two sides share need no check of their own: a shared line that a block
+    /// blanks on one side is masked on the other by its fingerprint
+    /// ([`ContentSource::mask_alike`]), so it reads as blanked on both. What a fingerprint cannot
+    /// match is an edited body line: a hunk that drops a key's armor and edits its body shows
+    /// block lines deleted and plain lines added, which is what `crosses` refuses.
+    /// O(diff × blocks).
     fn agree_through(&self, diff: &str) -> bool {
         let (mut old, mut new) = (0usize, 0usize);
         let mut hunk: Option<HunkBlocks> = None;
@@ -656,26 +659,11 @@ impl SideBlocks {
                 if hunk.as_ref().is_some_and(HunkBlocks::crosses) {
                     return false;
                 }
-                let Some((_, (old_start, old_count), (new_start, new_count))) = hunk_header(line)
-                else {
+                let Some((_, (old_start, _), (new_start, _))) = hunk_header(line) else {
                     return false;
                 };
-                // A side with no lines names the line before the change; one with lines, its first.
-                let before = |start: usize, count: usize| {
-                    if count == 0 {
-                        start
-                    } else {
-                        start.saturating_sub(1)
-                    }
-                };
-                if !self.unchanged_to(
-                    &mut old,
-                    &mut new,
-                    before(old_start, old_count),
-                    before(new_start, new_count),
-                ) {
-                    return false;
-                }
+                old = old_start.saturating_sub(1);
+                new = new_start.saturating_sub(1);
                 hunk = Some(HunkBlocks::default());
                 continue;
             }
@@ -686,9 +674,6 @@ impl SideBlocks {
                 Some(' ') => {
                     old = old.saturating_add(1);
                     new = new.saturating_add(1);
-                    if !self.same(old, new) {
-                        return false;
-                    }
                 }
                 Some('-') => {
                     old = old.saturating_add(1);
@@ -710,28 +695,7 @@ impl SideBlocks {
                 _ => return false,
             }
         }
-        if hunk.as_ref().is_some_and(HunkBlocks::crosses) {
-            return false;
-        }
-        self.unchanged_to(&mut old, &mut new, self.old_len, self.new_len)
-    }
-
-    /// Walks the stretch both sides share up to old line `old_to` and new line `new_to`, from the
-    /// lines last consumed (`old`, `new`, advanced), checking each pair with [`Self::same`].
-    /// `false` when the stretches differ in length or a pair disagrees. O(stretch × blocks).
-    fn unchanged_to(&self, old: &mut usize, new: &mut usize, old_to: usize, new_to: usize) -> bool {
-        match (old_to.checked_sub(*old), new_to.checked_sub(*new)) {
-            (Some(a), Some(b)) if a == b => {}
-            _ => return false,
-        }
-        while *old < old_to {
-            *old += 1;
-            *new += 1;
-            if !self.same(*old, *new) {
-                return false;
-            }
-        }
-        true
+        !hunk.as_ref().is_some_and(HunkBlocks::crosses)
     }
 }
 
@@ -1469,8 +1433,10 @@ mod tests {
         // also added, bare, below: a positional check sees only a plain added line.
         let body = "BODYONEMIIBVQIBADANBgkqhkiG9w0B";
         let old = format!("fn a() {{}}\n{}\nfn b() {{}}\n", pem_block(body));
-        let new = format!("{old}const COPY: &str = \"{body}\";\n");
-        let diff = format!("@@ -5,0 +6 @@\n+const COPY: &str = \"{body}\";\n");
+        // A copy on a line of its own, as in an array of key lines; a body embedded in other code
+        // on the same line is outside what a line fingerprint matches (declared in the README).
+        let new = format!("{old}    \"{body}\",\n");
+        let diff = format!("@@ -5,0 +6 @@\n+    \"{body}\",\n");
         assert_no_key_body_leaves(Some(&diff), &new, Some(&old));
     }
 
@@ -1479,7 +1445,7 @@ mod tests {
         // [T3.7 fix round 2, re-review R1, security] one text, no diff: the block is masked and
         // its body line, copied raw elsewhere in the same file, matches no pattern on its own.
         let body = "BODYONEMIIBVQIBADANBgkqhkiG9w0B";
-        let new = format!("{}\nfn b() {{}}\nlet copy = \"{body}\";\n", pem_block(body));
+        let new = format!("{}\nfn b() {{}}\n    \"{body}\\n\" +\n", pem_block(body));
         assert_no_key_body_leaves(None, &new, None);
     }
 

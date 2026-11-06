@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
-use super::secrets::mask_secrets_keeping_lines;
+use super::secrets::{line_fingerprint, mask_secrets_keeping_lines, mask_whole_lines};
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
 pub const MAX_REVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -233,6 +233,31 @@ pub trait ContentSource: Send + Sync {
         let _ = (face, path);
         Vec::new()
     }
+
+    /// Masks, in the new side of `new_path` and the old side of `old_path` (one file's two
+    /// sides, a rename's old path for the old one), every line that repeats a line a key-block
+    /// mask of either side blanked (`line_fingerprint` in `review::secrets`), keeping its line
+    /// break: a key's body matches no pattern on its own, so a body line moved or copied to the
+    /// other side would leave in the clear. A side read later than this call is not covered, so
+    /// the caller reads both sides first. The default holds nothing and does nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_path` - The new side's path.
+    /// * `old_path` - The old side's path.
+    fn mask_alike(&self, new_path: &str, old_path: &str) {
+        let _ = (new_path, old_path);
+    }
+}
+
+/// The fingerprints a held text side carries ([`ContentSource::mask_alike`]): hashes only,
+/// never the text.
+#[derive(Debug, Clone, Default)]
+struct SidePrints {
+    /// Each raw line a key-block mask blanked (after the block's first), with its pattern.
+    block: Vec<(u64, &'static str)>,
+    /// Each raw line's fingerprint, by 0-based line (`None`: too short to fingerprint).
+    lines: Vec<Option<u64>>,
 }
 
 /// What a source masked in one side of a file ([`ContentSource::masked`]).
@@ -741,6 +766,8 @@ struct Held {
     masks: HashMap<(Face, String), SideMask>,
     /// The lines each multi-line mask of a held side blanked, by side and path (RV22).
     blocks: HashMap<(Face, String), Vec<(usize, usize)>>,
+    /// The fingerprints of each held text side, by side and path (RV22).
+    prints: HashMap<(Face, String), SidePrints>,
     /// Bytes held across both sides.
     bytes: u64,
     /// The bytes held before, and the path of, the first read that passed the cap since the
@@ -823,7 +850,7 @@ impl<'a> CachedSource<'a> {
         };
         // MAGI FIX (T3.7): RV22 masks a secret instead of leaving its file out; every stage reads
         // through this cache, so masking here is the one place it happens.
-        let (read, mask) = masked_side(raw);
+        let (read, mask, prints) = masked_side(raw);
         let len = read
             .as_ref()
             .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX));
@@ -849,6 +876,9 @@ impl<'a> CachedSource<'a> {
                 held.blocks.insert((face, path.to_string()), blocks);
             }
         }
+        if let Some(prints) = prints {
+            held.prints.insert((face, path.to_string()), prints);
+        }
         let side = match face {
             Face::New => &mut held.new,
             Face::Old => &mut held.old,
@@ -861,27 +891,49 @@ impl<'a> CachedSource<'a> {
 /// A side as the cache holds it: a UTF-8 text with no NUL has each secret masked, its line
 /// breaks kept ([`mask_secrets_keeping_lines`]); anything else is held as read, since the filter
 /// leaves a binary or non-UTF-8 side out (masking could hide the NUL that makes it binary).
-/// The mask comes with the lines its key blocks blanked. O(bytes).
-fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<(SideMask, MaskedBlocks)>) {
-    let masked = read
+/// The mask comes with the lines its key blocks blanked, and every text side with its
+/// fingerprints ([`SidePrints`]). O(bytes).
+fn masked_side(read: Option<Vec<u8>>) -> MaskedSide {
+    let Some(text) = read
         .as_deref()
         .filter(|bytes| !bytes.contains(&0))
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(mask_secrets_keeping_lines);
-    match masked {
-        Some(m) => (
-            Some(m.text.into_bytes()),
-            Some((
-                SideMask {
-                    pattern: m.pattern,
-                    multi_line: m.multi_line,
-                },
-                m.blocks,
-            )),
-        ),
-        None => (read, None),
+    else {
+        return (read, None, None);
+    };
+    let lines = text.split('\n').map(line_fingerprint).collect();
+    match mask_secrets_keeping_lines(text) {
+        Some(m) => {
+            let prints = SidePrints {
+                block: m.prints,
+                lines,
+            };
+            let mask = SideMask {
+                pattern: m.pattern,
+                multi_line: m.multi_line,
+            };
+            (
+                Some(m.text.into_bytes()),
+                Some((mask, m.blocks)),
+                Some(prints),
+            )
+        }
+        None => {
+            let prints = SidePrints {
+                block: Vec::new(),
+                lines,
+            };
+            (read, None, Some(prints))
+        }
     }
 }
+
+/// A side as [`masked_side`] gives it: the bytes held, what was masked, and its fingerprints.
+type MaskedSide = (
+    Option<Vec<u8>>,
+    Option<(SideMask, MaskedBlocks)>,
+    Option<SidePrints>,
+);
 
 /// The lines each multi-line mask of a side blanked, 1-based and inclusive.
 type MaskedBlocks = Vec<(usize, usize)>;
@@ -908,6 +960,7 @@ impl ContentSource for CachedSource<'_> {
         };
         held.masks.remove(&(face, path.to_string()));
         held.blocks.remove(&(face, path.to_string()));
+        held.prints.remove(&(face, path.to_string()));
         let freed = removed
             .flatten()
             .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
@@ -948,6 +1001,70 @@ impl ContentSource for CachedSource<'_> {
             .get(&(face, path.to_string()))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Masks the repeats of either side's key lines in both held sides, adjusting the bytes
+    /// held. O(lines of both sides).
+    fn mask_alike(&self, new_path: &str, old_path: &str) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let keys = [
+            (Face::New, new_path.to_string()),
+            (Face::Old, old_path.to_string()),
+        ];
+        let known: HashMap<u64, &'static str> = keys
+            .iter()
+            .filter_map(|k| held.prints.get(k))
+            .flat_map(|p| p.block.iter().copied())
+            .collect();
+        if known.is_empty() {
+            return;
+        }
+        for key in keys {
+            let own = held.blocks.get(&key).cloned().unwrap_or_default();
+            let repeats: Vec<(usize, &'static str)> = held
+                .prints
+                .get(&key)
+                .map(|p| {
+                    p.lines
+                        .iter()
+                        .enumerate()
+                        .map(|(i, print)| (i + 1, print))
+                        .filter(|(line, _)| !own.iter().any(|&(f, l)| f <= *line && *line <= l))
+                        .filter_map(|(line, print)| Some((line, *known.get(&(*print)?)?)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let Some(name) = repeats.first().map(|&(_, name)| name) else {
+                continue;
+            };
+            let side = match key.0 {
+                Face::New => &held.new,
+                Face::Old => &held.old,
+            };
+            let Some(text) = side
+                .get(&key.1)
+                .and_then(|b| b.as_deref())
+                .and_then(|b| std::str::from_utf8(b).ok())
+            else {
+                continue;
+            };
+            let before = u64::try_from(text.len()).unwrap_or(u64::MAX);
+            let masked = mask_whole_lines(text, &repeats).into_bytes();
+            let after = u64::try_from(masked.len()).unwrap_or(u64::MAX);
+            held.bytes = held.bytes.saturating_sub(before).saturating_add(after);
+            let side = match key.0 {
+                Face::New => &mut held.new,
+                Face::Old => &mut held.old,
+            };
+            side.insert(key.1.clone(), Some(masked));
+            let blocks = held.blocks.entry(key.clone()).or_default();
+            blocks.extend(repeats.iter().map(|&(line, _)| (line, line)));
+            blocks.sort_unstable();
+            held.masks.entry(key).or_insert(SideMask {
+                pattern: name,
+                multi_line: false,
+            });
+        }
     }
 }
 

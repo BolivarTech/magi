@@ -968,8 +968,8 @@ pub fn mask_secrets(text: &str) -> String {
 ///
 /// # Returns
 /// The masked text, and the lines each mask that covered a line break spans, as 1-based
-/// inclusive `(first, last)` pairs in text order.
-fn mask_spans(text: &str, keep_lines: bool) -> (String, Vec<(usize, usize)>) {
+/// inclusive `(first, last)` pairs in text order, each with its pattern's name.
+fn mask_spans(text: &str, keep_lines: bool) -> (String, Vec<(usize, usize, &'static str)>) {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
     let mut blocks = Vec::new();
     // The 0-based line `done` sits on, kept by counting each stretch of text once: O(n).
@@ -998,7 +998,7 @@ fn mask_spans(text: &str, keep_lines: bool) -> (String, Vec<(usize, usize)>) {
         let first = line + newlines(text.get(done..span.start));
         let breaks = newlines(text.get(span.start..end));
         if breaks > 0 {
-            blocks.push((first + 1, first + 1 + breaks));
+            blocks.push((first + 1, first + 1 + breaks, name));
         }
         line = first + breaks;
         if keep_lines {
@@ -1033,12 +1033,102 @@ pub struct LineMasked {
     /// Whether a masked span crossed a line break (a key block, such as a PEM body).
     pub multi_line: bool,
     /// The lines each such block spans, 1-based and inclusive (`(first, last)`), in order: what
-    /// the mask blanked, so a caller can tell a key's body line from a line no mask covered.
+    /// the mask blanked, so a caller can tell a key's body line from a line no mask covered. A
+    /// line masked because it repeats a block line ([`line_fingerprint`]) is a one-line range.
     pub blocks: Vec<(usize, usize)>,
+    /// The fingerprint of each raw line a block blanked after its first (the body and the `END`
+    /// line), with the block's pattern: what masks the same line elsewhere. Never the text.
+    pub prints: Vec<(u64, &'static str)>,
+}
+
+/// The fewest characters a normalized line needs to be fingerprinted ([`line_fingerprint`]).
+///
+/// Base64 is written in 4-character quanta, so every non-empty body line of a PEM, OpenPGP or
+/// SSH2 private key holds at least 4 characters (64 per line, RFC 7468, the last one shorter).
+/// A shorter line inside a block is armor or code (a closing quote, a brace, `";`), not key
+/// bytes, and fingerprinting it would mask every such line of the file. A false match only masks
+/// more, the safe direction.
+pub const MIN_FINGERPRINT_CHARS: usize = 4;
+
+/// What a string literal adds around a key line and is dropped before fingerprinting: quotes,
+/// the escape and concatenation characters, so `"MIIB…\n" +` and a bare `MIIB…` match.
+const FINGERPRINT_STRIPPED: &[char] = &['"', '\'', '`', '\\', '+', ',', ';', '(', ')'];
+
+/// The escaped line breaks a string literal writes inside a key (`\n`, `\r`), dropped first.
+const ESCAPED_BREAKS: [&str; 2] = ["\\n", "\\r"];
+
+/// A fingerprint of `line` for telling a key line repeated elsewhere: the line with its escaped
+/// line breaks and [`FINGERPRINT_STRIPPED`] characters dropped, trimmed, then hashed. Only a hash
+/// is kept, never the text. `None` for a line under [`MIN_FINGERPRINT_CHARS`] once normalized.
+/// O(line).
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::line_fingerprint;
+///
+/// assert_eq!(line_fingerprint("  \"QUJDRA==\\n\" +"), line_fingerprint("QUJDRA=="));
+/// assert_eq!(line_fingerprint("\";"), None);
+/// ```
+pub fn line_fingerprint(line: &str) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut text = line.to_string();
+    for escaped in ESCAPED_BREAKS {
+        text = text.replace(escaped, "");
+    }
+    let normalized: String = text
+        .chars()
+        .filter(|c| !FINGERPRINT_STRIPPED.contains(c))
+        .collect();
+    let normalized = normalized.trim();
+    if normalized.chars().count() < MIN_FINGERPRINT_CHARS {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// `text` with each line of `lines` (1-based, with the pattern to name) replaced by
+/// `<redacted: <pattern>>`, its line terminator (`\n` or `\r\n`) kept, so no line moves.
+/// O(text + lines).
+///
+/// # Arguments
+/// * `text` - A masked text.
+/// * `lines` - The lines to replace, with their pattern's name.
+///
+/// # Returns
+/// The text with those lines masked whole.
+pub fn mask_whole_lines(text: &str, lines: &[(usize, &'static str)]) -> String {
+    let by_line: std::collections::HashMap<usize, &str> = lines.iter().copied().collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, raw) in text.split_inclusive('\n').enumerate() {
+        match by_line.get(&(i + 1)) {
+            Some(name) => {
+                let ending = if raw.ends_with("\r\n") {
+                    "\r\n"
+                } else if raw.ends_with('\n') {
+                    "\n"
+                } else {
+                    ""
+                };
+                out.push_str(REDACTED_OPEN);
+                out.push_str(name);
+                out.push('>');
+                out.push_str(ending);
+            }
+            None => out.push_str(raw),
+        }
+    }
+    out
 }
 
 /// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
 /// written back right after its `<redacted: …>`, so each line after a secret keeps its number.
+/// A line elsewhere in `text` that repeats a line a key block blanked ([`line_fingerprint`]) is
+/// masked whole as well: a key's body matches no pattern on its own, so a raw copy of it would
+/// otherwise stay. O(n · s · (k + 1)) for the masking (see [`mask_secrets`]) plus O(n) for the
+/// fingerprints.
 ///
 /// # Arguments
 /// * `text` - A file's content.
@@ -1048,12 +1138,44 @@ pub struct LineMasked {
 /// whether a span crossed a line.
 pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
     let pattern = find_secret(text)?;
-    let (text, blocks) = mask_spans(text, true);
+    let (masked, spans) = mask_spans(text, true);
+    let raw: Vec<&str> = text.split('\n').collect();
+    // MAGI FIX (T3.7 fix round 2, re-review R1, security): a key body line copied raw elsewhere in
+    // the same text matches no pattern; it is masked by its fingerprint.
+    let mut prints = Vec::new();
+    for &(first, last, name) in &spans {
+        for line in first.saturating_add(1)..=last {
+            if let Some(p) = raw
+                .get(line.saturating_sub(1))
+                .and_then(|l| line_fingerprint(l))
+            {
+                prints.push((p, name));
+            }
+        }
+    }
+    let mut blocks: Vec<(usize, usize)> = spans.iter().map(|&(f, l, _)| (f, l)).collect();
+    let known: std::collections::HashMap<u64, &'static str> = prints.iter().copied().collect();
+    let inside = |line: usize| blocks.iter().any(|&(f, l)| f <= line && line <= l);
+    let repeats: Vec<(usize, &'static str)> = raw
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l))
+        .filter(|(line, _)| !inside(*line))
+        .filter_map(|(line, l)| Some((line, *known.get(&line_fingerprint(l)?)?)))
+        .collect();
+    let text = if repeats.is_empty() {
+        masked
+    } else {
+        mask_whole_lines(&masked, &repeats)
+    };
+    blocks.extend(repeats.iter().map(|&(line, _)| (line, line)));
+    blocks.sort_unstable();
     Some(LineMasked {
         text,
         pattern,
-        multi_line: !blocks.is_empty(),
+        multi_line: !spans.is_empty(),
         blocks,
+        prints,
     })
 }
 
