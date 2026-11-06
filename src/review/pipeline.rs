@@ -3975,6 +3975,54 @@ mod tests {
         );
     }
 
+    /// Reviews `f0.rs` (hunk at lines 1..=3) with its containing unit (lines 1..=26) as context,
+    /// a mage reporting `f0.rs:20`, and a gate that always answers `choice`.
+    async fn unit_line_finding_through_the_gate(choice: &'static str) -> ReviewOutcome {
+        let dir = workspace(1);
+        let rag = FakeRag(Assembled {
+            items: vec![ctx(ContextKind::Unit, "f0.rs", "f0", Some((1, 26)))],
+            trimmed: vec![],
+            without_embedder: false,
+            without_memory: false,
+            withheld: 0,
+        });
+        let in_unit = serde_json::json!({"severity":"warning","title":"u","detail":"d","file":"f0.rs","line":20});
+        let consult = FakeConsult::new(vec![Ok(real_report([
+            serde_json::json!([in_unit]),
+            serde_json::json!([]),
+            serde_json::json!([]),
+        ])
+        .await)]);
+        review_with_rag(dir.path(), &rag, &consult, &gate_always(choice))
+            .await
+            .expect("runs")
+    }
+
+    #[tokio::test]
+    async fn a_finding_on_a_containing_unit_line_reaches_the_gate_and_is_kept() {
+        // RV10: the unit was shown to the trio, so its lines are code the gate can be shown.
+        let out = unit_line_finding_through_the_gate("real_defect").await;
+        let states: Vec<_> = out
+            .summary
+            .findings
+            .iter()
+            .map(|(f, v)| (f.line, v.state))
+            .collect();
+        assert_eq!(states, vec![(Some(20), GateState::Kept)]);
+    }
+
+    #[tokio::test]
+    async fn a_finding_on_a_containing_unit_line_can_be_filtered_by_the_gate() {
+        let out = unit_line_finding_through_the_gate("false_positive").await;
+        let filtered: Vec<_> = out
+            .summary
+            .filtered
+            .iter()
+            .map(|(f, v)| (f.line, v.state))
+            .collect();
+        assert_eq!(filtered, vec![(Some(20), GateState::Filtered)]);
+    }
+
     #[tokio::test]
     async fn trimmed_context_and_a_missing_embedder_reach_the_summary() {
         let dir = workspace(1);
