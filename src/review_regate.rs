@@ -42,7 +42,24 @@ struct Criterion2 {
 /// The two percentages and whether both thresholds hold. A class with no item gives a NaN
 /// percentage, which never passes. O(rows).
 fn criterion_2(rows: &[(&str, &str)]) -> Criterion2 {
-    todo!("criterion 2 verdict over {} rows", rows.len())
+    /// The only gate state that removes a finding from the report.
+    const STATE_FILTERED: &str = "filtered";
+    let filtered_pct = |class: &str| {
+        let (total, filtered) = rows
+            .iter()
+            .filter(|(c, _)| *c == class)
+            .fold((0usize, 0usize), |(t, f), (_, s)| {
+                (t + 1, f + usize::from(*s == STATE_FILTERED))
+            });
+        100.0 * filtered as f64 / total as f64
+    };
+    let fp_removed_pct = filtered_pct(CLASS_FALSE_POSITIVE);
+    let real_dropped_pct = filtered_pct(CLASS_REAL_DEFECT);
+    Criterion2 {
+        fp_removed_pct,
+        real_dropped_pct,
+        pass: fp_removed_pct >= FP_REMOVED_MIN_PCT && real_dropped_pct <= REAL_DROPPED_MAX_PCT,
+    }
 }
 
 // The tests and the measurement's adapter live in their own module, after the subject, like
