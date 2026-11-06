@@ -657,8 +657,11 @@ fn bootstrap_fresh_envelope(
 /// # Errors
 /// Returns the underlying [`rusqlite::Error`] if any `CREATE` statement fails.
 pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sessions (
+    conn.execute_batch(SCHEMA_DDL)
+}
+
+/// The DDL [`init_schema`] runs, statement by statement, in this order.
+const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             project_name TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -736,9 +739,7 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS code_review_history_due
             ON code_review_history (status, checked_at, created_at, id);
         CREATE INDEX IF NOT EXISTS code_review_history_by_file
-            ON code_review_history (file, status);",
-    )
-}
+            ON code_review_history (file, status);";
 
 #[async_trait]
 impl MemoryStore for EncryptedSqliteMemory {
@@ -2162,6 +2163,26 @@ mod tests {
             before,
             "never-delete: no schema created, nothing written"
         );
+    }
+
+    #[test]
+    fn init_schema_creates_every_v0_25_table_before_the_older_version_marker() {
+        // [MS3 re-review N2] `init_schema` runs its statements one by one, without a
+        // transaction. Creating the v0.25.0 tables before the marker (`messages`) means a
+        // second opener racing on a brand-new file never sees the marker without them, so
+        // it never refuses a fresh database as an older one.
+        let at = |table: &str| {
+            SCHEMA_DDL
+                .find(&format!("CREATE TABLE IF NOT EXISTS {table} ("))
+                .unwrap_or_else(|| panic!("{table} is not created by init_schema"))
+        };
+        let marker = at(PRE_0_25_MARKER_TABLE);
+        for table in PRE_0_25_MISSING_TABLES {
+            assert!(
+                at(table) < marker,
+                "{table} must be created before {PRE_0_25_MARKER_TABLE}"
+            );
+        }
     }
 
     #[test]
