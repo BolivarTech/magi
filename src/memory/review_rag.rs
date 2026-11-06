@@ -1881,6 +1881,64 @@ mod tests {
         assert_eq!(f.embedder.calls(), 0, "no section of it was embedded");
     }
 
+    /// README.md reads; every other path fails the way MS2 skips a listed file. [MS3 final review I2]
+    struct SomeUnreadable;
+    impl ContentSource for SomeUnreadable {
+        fn read(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+            match p {
+                "README.md" => Ok(Some(b"# Usage\nok\n".to_vec())),
+                "docs/linked.md" => Err(ReviewError::NotReviewable {
+                    path: p.into(),
+                    cause: magi_rs::review::source::HARD_LINK_CAUSE,
+                }),
+                "docs/escape.md" => Err(ReviewError::OutsideWorkspace(p.into())),
+                "docs/dir.md" => Err(ReviewError::NotRegularFile(p.into())),
+                _ => Err(ReviewError::Io(format!(
+                    "{p}: held open by another process"
+                ))),
+            }
+        }
+        fn read_old(&self, _p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_working_tree_file_is_skipped_and_the_rest_is_indexed() {
+        // [MS3 final review I2] One hard link, escaping link, directory link or locked file never
+        // costs the whole working tree its documentation.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let paths: Vec<String> = [
+            "README.md",
+            "docs/linked.md",
+            "docs/escape.md",
+            "docs/dir.md",
+            "docs/locked.md",
+        ]
+        .map(String::from)
+        .to_vec();
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &SomeUnreadable,
+            &paths,
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert!(!prep.docs_unavailable);
+        assert_eq!(
+            prep.doc_sources,
+            BTreeSet::from([src(
+                "README.md",
+                &magi_rs::review::docs::worktree_key(b"# Usage\nok\n")
+            )])
+        );
+    }
+
     /// Answers the first embed request and fails every later one. [CP2 MS3 loop 13]
     struct FailsAfterFirst(std::sync::atomic::AtomicUsize);
     #[async_trait::async_trait]

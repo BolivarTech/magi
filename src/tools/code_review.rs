@@ -2615,6 +2615,69 @@ mod tests {
         );
     }
 
+    /// The keys of README.md's indexed sources, ordered.
+    fn readme_keys(memory: &ReviewMemory) -> Vec<String> {
+        let c = memory.connection_for_test().lock().expect("lock");
+        let mut stmt = c
+            .prepare(
+                "SELECT key FROM code_review_doc_sources WHERE path = 'README.md' ORDER BY key",
+            )
+            .expect("query");
+        let rows = stmt.query_map([], |r| r.get(0)).expect("rows");
+        rows.collect::<Result<_, _>>().expect("keys")
+    }
+
+    /// Reviews `src` of `ws` once with a working embedder (README at v1), then, with README at
+    /// v2, once with an embedder that fails while indexing, and returns README's keys after.
+    async fn degraded_second_review_keys(ws: &Path) -> (String, Vec<String>) {
+        let (_db, _mem, memory) = review_memory();
+        let fake: Arc<dyn EmbeddingProvider> =
+            Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let runner = production_runner_with_memory(ws, Some(Arc::clone(&memory)), Some(fake));
+        let _ = review_and_follow_up(&runner, ReviewInput::File("src".into())).await;
+        let v1 = magi_rs::review::docs::worktree_key(b"# A\nv1\n");
+        assert_eq!(
+            readme_keys(&memory),
+            vec![v1.clone()],
+            "the first review indexed v1"
+        );
+        std::fs::write(ws.join("README.md"), "# A\nv2\n").expect("README v2");
+        let down: Arc<dyn EmbeddingProvider> =
+            Arc::new(crate::memory::review_docs::test_embedder::FailingEmbedder);
+        let runner = production_runner_with_memory(ws, Some(Arc::clone(&memory)), Some(down));
+        let _ = review_and_follow_up(&runner, ReviewInput::File("src".into())).await;
+        (v1, readme_keys(&memory))
+    }
+
+    #[tokio::test]
+    async fn a_degraded_preparation_without_a_repository_deletes_no_working_tree_row() {
+        // [MS3 final review I2] RV19: the clean-up never deletes from a listing the preparation
+        // did not complete.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        std::fs::write(ws.join("src").join("a.rs"), "fn a() {}\n").expect("a.rs");
+        std::fs::write(ws.join("README.md"), "# A\nv1\n").expect("README v1");
+        let (v1, keys) = degraded_second_review_keys(&ws).await;
+        assert_eq!(keys, vec![v1]);
+    }
+
+    #[tokio::test]
+    async fn a_degraded_preparation_in_a_repository_deletes_no_working_tree_row() {
+        // [MS3 final review I2] With git, a degraded review keeps the working-tree keys like a
+        // review that never listed the working tree.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        std::fs::write(ws.join("src").join("a.rs"), "fn a() {}\n").expect("a.rs");
+        std::fs::write(ws.join("README.md"), "# A\nv1\n").expect("README v1");
+        git_in(&ws, &["init", "-q"]);
+        git_in(&ws, &["add", "-A"]);
+        git_in(&ws, &["commit", "-q", "-m", "v1"]);
+        let (v1, keys) = degraded_second_review_keys(&ws).await;
+        assert_eq!(keys, vec![v1]);
+    }
+
     #[tokio::test]
     async fn the_production_runner_refuses_an_escaping_path_before_any_model_call() {
         // RV-S10 through the production guard (PathGuard), never a test double's.
