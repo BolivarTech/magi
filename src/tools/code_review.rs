@@ -1202,7 +1202,9 @@ impl ProductionReviewRunner {
             Duration::from_secs(REINDEX_TIMEOUT_SECS),
         )
         .await;
-        let worktree = rev.is_none().then(|| prep.doc_sources.clone());
+        // A degraded preparation did not complete its listing: the clean-up then keeps every
+        // working-tree key, as after a review that never listed the working tree (RV19).
+        let worktree = (rev.is_none() && !prep.docs_unavailable).then(|| prep.doc_sources.clone());
         DocContext {
             docs: Some(docs),
             prep,

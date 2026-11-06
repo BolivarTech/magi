@@ -655,10 +655,14 @@ type Listed = (DocSource, Option<Vec<u8>>);
 /// The working tree's documentation sources: each path of `paths` that `wanted` accepts, read
 /// through `sources` and keyed by [`worktree_key`]; a path that quotes a secret is never read.
 ///
+/// A file that cannot be read (a hard link, a link that escapes the workspace or names a
+/// directory, a file another process holds open) is left out with one WARN naming it, as MS2
+/// leaves a listed file out of a review: one such file never costs the rest their documentation.
+/// The size cap cuts the source (declared as truncated).
+///
 /// # Errors
 ///
-/// A cause when a read fails (other than the size cap, which cuts the source) or the deadline
-/// passes.
+/// A cause when the deadline passes.
 fn list_worktree(
     sources: &dyn ContentSource,
     paths: &[String],
@@ -691,7 +695,16 @@ fn list_worktree(
             )),
             Ok(None) => {}
             Err(e) if is_size_cap(&e) => prep.doc_index.truncated = true,
-            Err(e) => return Err(outward_text(&e.to_string())),
+            Err(e) => {
+                let (shown, error) = (display_path(path), outward_text(&e.to_string()));
+                tracing::event!(
+                    target: LOG_TARGET,
+                    tracing::Level::WARN,
+                    path = shown.as_str(),
+                    error = error.as_str(),
+                    "a documentation source could not be read and was left out"
+                );
+            }
         }
     }
     Ok(listed)
