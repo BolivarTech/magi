@@ -619,6 +619,66 @@ mod tests {
     }
 
     #[test]
+    fn a_new_finding_on_the_line_of_an_attended_one_replaces_it() {
+        // [MS3 final review m1] The attended finding's code is gone: a later finding on the same
+        // file:line is a new one, never dropped while the old text keeps being served.
+        let (store, _tmp) = store_for_test();
+        store.record(&[stored("i1", Some(7), "c1")]).expect("first");
+        store
+            .update_status("i1", HistoryStatus::Attended)
+            .expect("attended");
+        store.touch(&["i1".to_string()], 100).expect("touch");
+        let mut later = stored("i1", Some(7), "c9");
+        later.title = "a new defect".into();
+        later.detail = "found later".into();
+        assert_eq!(
+            store.record(std::slice::from_ref(&later)).expect("second"),
+            1
+        );
+        assert_eq!(store.all().expect("all"), vec![later]);
+        assert!(
+            store
+                .validated_on_files(&["src/a.rs".to_string()])
+                .expect("read")
+                .is_empty(),
+            "the old attended text is no longer served"
+        );
+        let checked: i64 = store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT checked_at FROM code_review_history WHERE id = 'i1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(checked, 0, "a new entry is due first");
+    }
+
+    #[test]
+    fn a_new_finding_on_the_line_of_a_weak_reject_keeps_the_first_sighting() {
+        // [MS3 final review m1] A weak reject's code is still there: the same line is the same
+        // finding, and its clock keeps running from the first reviewed commit.
+        let (store, _tmp) = store_for_test();
+        store.record(&[stored("i1", Some(7), "c1")]).expect("first");
+        store
+            .update_status("i1", HistoryStatus::WeakReject)
+            .expect("weak");
+        assert_eq!(
+            store
+                .record(&[stored("i1", Some(7), "c9")])
+                .expect("second"),
+            0
+        );
+        let all = store.all().expect("all");
+        assert_eq!(
+            (all[0].reviewed_commit.as_str(), all[0].status),
+            ("c1", HistoryStatus::WeakReject)
+        );
+    }
+
+    #[test]
     fn validated_on_files_accepts_more_files_than_the_sqlite_variable_limit() {
         // Guardian: the bundled SQLite allows 32 766 variables, so the brief's 1 200 files do not
         // exercise the batching; 40 000 do.
