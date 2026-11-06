@@ -1219,6 +1219,104 @@ mod tests {
         );
     }
 
+    /// Filters `key.rs` (its diff, its new and old sides) beside a clean `a.rs`, through the
+    /// masking cache, and asserts that no byte of a key body (`BODY`) leaves in a kept file: in its
+    /// diff, or in the new side the batches, units and gate read.
+    fn assert_no_key_body_leaves(diff: &str, new: &str, old: &str) {
+        let inner = MapSource::new(
+            &[("key.rs", new), ("a.rs", "fn f() {}\n")],
+            &[("key.rs", old)],
+        );
+        let src = CachedSource::new(&inner);
+        let files = vec![
+            ReviewFile {
+                path: "key.rs".into(),
+                diff: Some(diff.into()),
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("a.rs kept");
+        for kept in &f.kept {
+            let diff = kept.diff.as_deref().unwrap_or("");
+            assert!(!diff.contains("BODY"), "{}: {diff}", kept.path);
+            let side = String::from_utf8(src.read(&kept.path).expect("read").unwrap_or_default())
+                .expect("utf-8");
+            assert!(!side.contains("BODY"), "{}: {side}", kept.path);
+        }
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "key.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+    }
+
+    #[test]
+    fn a_key_whose_begin_line_was_deleted_beside_another_added_key_never_leaves_its_body() {
+        // [T3.7 fix round 1, review F1, security] both sides hold a key block, at different
+        // lines: the old block lost its `BEGIN` line (its body is a context line now, masked on
+        // the old side only) while another block was added below. A per-side flag passed it and
+        // the body left raw from the new side.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let old = format!("fn a() {{}}\n{begin}\nBODYONE\n{end}\nfn b() {{}}\n");
+        let new = format!(
+            "fn a() {{}}\nBODYONE\n{end}\nfn b() {{}}\nconst B: &str = \"{begin}\nQQQQ\n{end}\";\n"
+        );
+        let diff = format!(
+            "@@ -1,5 +1,7 @@\n fn a() {{}}\n-{begin}\n BODYONE\n {end}\n fn b() {{}}\n\
+             +const B: &str = \"{begin}\n+QQQQ\n+{end}\";\n"
+        );
+        assert_no_key_body_leaves(&diff, &new, &old);
+    }
+
+    #[test]
+    fn a_key_whose_end_line_moved_up_never_leaves_the_body_lines_below_it() {
+        // [T3.7 fix round 1, review F1, security] both sides hold one block, but the new side's
+        // END line moved up: the body lines below it are context, masked on the old side only.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let old =
+            format!("fn a() {{}}\n{begin}\nBODYONE\nBODYTWO\nBODYTHREE\n{end}\nfn b() {{}}\n");
+        let new =
+            format!("fn a() {{}}\n{begin}\nBODYONE\n{end}\nBODYTWO\nBODYTHREE\nfn b() {{}}\n");
+        let diff = format!(
+            "@@ -1,7 +1,7 @@\n fn a() {{}}\n {begin}\n BODYONE\n+{end}\n BODYTWO\n BODYTHREE\n\
+             -{end}\n fn b() {{}}\n"
+        );
+        assert_no_key_body_leaves(&diff, &new, &old);
+    }
+
+    #[test]
+    fn a_key_added_whole_beside_an_unchanged_key_is_reviewed_masked() {
+        // [T3.7 fix round 1] the line-precise guard keeps what is safe: every line of both blocks
+        // is masked on each side that shows it, so the file is reviewed, its bodies masked.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let old = format!("{begin}\nBODYONE\n{end}\nfn b() {{}}\n");
+        let new = format!("{begin}\nBODYONE\n{end}\nfn b() {{}}\n{begin}\nBODYTWO\n{end}\n");
+        let diff = format!("@@ -4,0 +5,3 @@\n+{begin}\n+BODYTWO\n+{end}\n");
+        let inner = MapSource::new(&[("key.rs", new.as_str())], &[("key.rs", old.as_str())]);
+        let src = CachedSource::new(&inner);
+        let files = vec![ReviewFile {
+            path: "key.rs".into(),
+            diff: Some(diff),
+        }];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("key.rs kept");
+        assert_eq!(f.masked, vec![masked("key.rs", "pem-private-key")]);
+        let diff = f.kept.first().and_then(|k| k.diff.as_deref()).unwrap_or("");
+        assert_eq!(
+            diff,
+            "@@ -4,0 +5,3 @@\n+<redacted: pem-private-key>\n+\n+\n"
+        );
+    }
+
     #[test]
     fn skip_causes_serialize_with_the_spec_texts() {
         let got: Vec<String> = [
