@@ -481,14 +481,20 @@ impl RagSource for StoreRag<'_> {
         self.index_ms
     }
 
-    /// The item's containing unit, keyed `"<file>:<start>-<end>"` and charged at its escaped
-    /// cost, so planning counts exactly what `context_for` will add.
+    /// The item's containing unit, keyed `"<file>:<start>-<end>"` (`"<file>:old:<start>-<end>"`
+    /// for an old-side unit, which `assemble` keeps apart from a new-side one with the same
+    /// numbers) and charged at its escaped cost, so planning counts exactly what `context_for`
+    /// will add.
     fn companion(&self, item: &BatchItem) -> Result<Option<Companion>, ReviewError> {
         Ok(
             containing_unit(item, self.sources, self.registry)?.map(|unit| {
                 let (first, last) = unit.lines.unwrap_or_default();
+                let side = if unit.old_side { "old:" } else { "" };
                 let unit = escaped(unit);
-                (format!("{}:{first}-{last}", unit.file), item_cost(&unit))
+                (
+                    format!("{}:{side}{first}-{last}", unit.file),
+                    item_cost(&unit),
+                )
             }),
         )
     }

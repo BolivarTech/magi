@@ -1181,13 +1181,17 @@ fn record_shown_context(
     }
 }
 
-/// The side a containing unit was read from, as `rag::containing_unit` derives it: the new side
-/// for a hunk with one, the old side for a deletion-only hunk. It is the side of a hunk of the
-/// unit's file in `batch` whose looked-up line lies in the unit's range, the new side winning
-/// when both do; `None` when no hunk of the batch explains the unit. O(items).
-fn unit_side(batch: &ReviewBatch, file: &str, (first, last): (u32, u32)) -> Option<Side> {
-    let mut side = None;
-    for item in &batch.items {
+/// Whether a hunk of `file` in `batch` explains a containing unit read from the side `old_side`
+/// names (`ContextItem::old_side`, recorded by `rag::containing_unit`): a deletion-only hunk whose
+/// first old line lies in `range` for the old side, a hunk with a new side whose first line does
+/// for the new side. O(items).
+fn explains_unit(
+    batch: &ReviewBatch,
+    file: &str,
+    (first, last): (u32, u32),
+    old_side: bool,
+) -> bool {
+    batch.items.iter().any(|item| {
         let BatchItem::Hunk {
             file: hunk_file,
             first_line,
@@ -1196,40 +1200,22 @@ fn unit_side(batch: &ReviewBatch, file: &str, (first, last): (u32, u32)) -> Opti
             ..
         } = item
         else {
-            continue;
+            return false;
         };
-        if hunk_file != file {
-            continue;
-        }
         let deletion = first_line > last_line;
         let line = if deletion {
             *old_first_line
         } else {
             *first_line
         };
-        if (first..=last).contains(&line) {
-            if !deletion {
-                return Some(Side::New);
-            }
-            side = Some(Side::Old);
-        }
-    }
-    side
-}
-
-/// Which side of a file a range was read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Side {
-    /// The new side (the reviewed revision, or the working tree).
-    New,
-    /// The old side (what a deletion removed).
-    Old,
+        hunk_file == file && deletion == old_side && (first..=last).contains(&line)
+    })
 }
 
 /// Adds each completed batch's containing units to the faces the gate reads, on the side each
-/// was read from ([`unit_side`]), so a finding on a unit line the trio was shown reaches the gate
-/// with that code (RV10). A unit no hunk of its batch explains adds no face. O(items²) per batch,
-/// bounded by the batch size.
+/// was read from (`ContextItem::old_side`), so a finding on a unit line the trio was shown
+/// reaches the gate with that code (RV10). A unit no hunk of its batch explains on that side
+/// ([`explains_unit`]) adds no face. O(items²) per batch, bounded by the batch size.
 fn add_unit_faces<'b>(
     faces: &mut HashMap<&'b str, Faces>,
     batches: &[ReviewBatch],
@@ -1244,10 +1230,14 @@ fn add_unit_faces<'b>(
             let (ContextKind::Unit, Some(range)) = (&item.kind, item.lines) else {
                 continue;
             };
-            match unit_side(batch, &item.file, range) {
-                Some(Side::New) => faces.entry(item.file.as_str()).or_default().new.push(range),
-                Some(Side::Old) => faces.entry(item.file.as_str()).or_default().old.push(range),
-                None => {}
+            if !explains_unit(batch, &item.file, range, item.old_side) {
+                continue;
+            }
+            let face = faces.entry(item.file.as_str()).or_default();
+            if item.old_side {
+                face.old.push(range);
+            } else {
+                face.new.push(range);
             }
         }
     }

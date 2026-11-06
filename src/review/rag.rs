@@ -117,10 +117,11 @@ pub fn item_cost(item: &ContextItem) -> usize {
 /// `batch_tokens` is `ReviewBatch::tokens`, which does not include the companions: the units are
 /// charged here, once, and nothing else charges them. What enters is a prefix of the optional
 /// list in priority order: the first item that does not fit and everything after it go to
-/// `trimmed`, in that order, even if a later one is smaller. A unit repeated by `(file, lines)`
-/// (two hunks of one function) is kept once and charged once; a definition or caller with the
-/// `(file, lines)` of a unit is not added, because the unit already carries it. An item without
-/// `lines` is never deduplicated.
+/// `trimmed`, in that order, even if a later one is smaller. A unit repeated by `(file, lines,
+/// side)` (two hunks of one function) is kept once and charged once; a definition or caller with
+/// the `(file, lines)` of a new-side unit is not added, because the unit already carries it. An
+/// old-side unit and a new-side one with the same numbers are different code and both enter. An
+/// item without `lines` is never deduplicated.
 ///
 /// `docs` and `history` are `None` when their source is not there; the result then reports
 /// `without_embedder`, a default the caller corrects: with a live embedder the caller always
@@ -163,11 +164,11 @@ pub fn assemble(
         });
     }
     let mut used = batch_tokens;
-    let mut seen: HashSet<(String, (u32, u32))> = HashSet::new();
+    let mut seen: HashSet<(String, (u32, u32), bool)> = HashSet::new();
     let mut items = Vec::new();
     for unit in units {
         if let Some(lines) = unit.lines {
-            if !seen.insert((unit.file.clone(), lines)) {
+            if !seen.insert((unit.file.clone(), lines, unit.old_side)) {
                 continue;
             }
         }
@@ -196,7 +197,7 @@ pub fn assemble(
     for item in optional {
         if matches!(item.kind, ContextKind::Definition | ContextKind::Caller) {
             if let Some(lines) = item.lines {
-                if !seen.insert((item.file.clone(), lines)) {
+                if !seen.insert((item.file.clone(), lines, item.old_side)) {
                     continue;
                 }
             }
@@ -462,7 +463,8 @@ pub fn callers_for(
 /// RV21).
 ///
 /// A hunk is looked up on the new side at its first line; a deletion-only hunk (empty new side)
-/// on the old side at its first old line, because the new file has no line for it. Planning's
+/// on the old side at its first old line, because the new file has no line for it. The side is
+/// recorded in [`ContextItem::old_side`], so no later stage infers it from the hunks. Planning's
 /// companion and the context both use this, so what was charged is what `assemble` adds.
 ///
 /// # Arguments
@@ -505,7 +507,10 @@ pub fn containing_unit(
     };
     Ok(read_text(sources, file, old_side)?
         .and_then(|text| FileUnits::load(extractor, file, &text).at(line))
-        .map(|unit| unit_item(ContextKind::Unit, unit)))
+        .map(|unit| ContextItem {
+            old_side,
+            ..unit_item(ContextKind::Unit, unit)
+        }))
 }
 
 /// The doc-search query: `text` cut to at most [`DOC_QUERY_MAX_BYTES`] bytes, on a char boundary.
