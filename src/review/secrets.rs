@@ -957,7 +957,7 @@ pub fn display_path(path: &str) -> String {
 /// rescanning loop (`one_pass_masking_equals_the_rescanning_loop_…`) is what catches a mismatch.
 // MAGI FIX (S6 loop 4): each turn rescanned the rest for every pattern, O(k · n · p).
 pub fn mask_secrets(text: &str) -> String {
-    mask_spans(text, false).0
+    mask_spans(text, false)
 }
 
 /// The masking loop of [`mask_secrets`] and [`mask_secrets_keeping_lines`].
@@ -967,13 +967,9 @@ pub fn mask_secrets(text: &str) -> String {
 /// * `keep_lines` - Whether each line break a mask covers is written back after it.
 ///
 /// # Returns
-/// The masked text, and the lines each mask that covered a line break spans, as 1-based
-/// inclusive `(first, last)` pairs in text order, each with its pattern's name.
-fn mask_spans(text: &str, keep_lines: bool) -> (String, Vec<(usize, usize, &'static str)>) {
+/// The masked text.
+fn mask_spans(text: &str, keep_lines: bool) -> String {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
-    let mut blocks = Vec::new();
-    // The 0-based line `done` sits on, kept by counting each stretch of text once: O(n).
-    let mut line = 0usize;
     let lanes: Vec<(&SecretPattern, usize)> = SECRET_PATTERNS
         .iter()
         .flat_map(|p| (0..p.matcher.lanes()).map(move |lane| (p, lane)))
@@ -995,13 +991,10 @@ fn mask_spans(text: &str, keep_lines: bool) -> (String, Vec<(usize, usize, &'sta
         out.push_str(name);
         out.push('>');
         let end = merged_end(span.end, next.iter().flatten());
-        let first = line + newlines(text.get(done..span.start));
-        let breaks = newlines(text.get(span.start..end));
-        if breaks > 0 {
-            blocks.push((first + 1, first + 1 + breaks, name));
-        }
-        line = first + breaks;
         if keep_lines {
+            let breaks = text
+                .get(span.start..end)
+                .map_or(0, |t| t.matches('\n').count());
             out.extend(std::iter::repeat_n('\n', breaks));
         }
         done = end;
@@ -1015,12 +1008,7 @@ fn mask_spans(text: &str, keep_lines: bool) -> (String, Vec<(usize, usize, &'sta
         }
     }
     out.push_str(text.get(done..).unwrap_or_default());
-    (out, blocks)
-}
-
-/// The line breaks in `text` (`None`: none). O(text).
-fn newlines(text: Option<&str>) -> usize {
-    text.map_or(0, |t| t.matches('\n').count())
+    out
 }
 
 /// What [`mask_secrets_keeping_lines`] gave for a text that held a secret.
@@ -1030,153 +1018,44 @@ pub struct LineMasked {
     pub text: String,
     /// The name of the first pattern [`find_secret`] finds in the original (table order).
     pub pattern: &'static str,
-    /// Whether a masked span crossed a line break (a key block, such as a PEM body).
-    pub multi_line: bool,
-    /// The lines each such block spans, 1-based and inclusive (`(first, last)`), in order: what
-    /// the mask blanked, so a caller can tell a key's body line from a line no mask covered. A
-    /// line masked because it repeats a block line ([`line_fingerprint`]) is a one-line range.
-    pub blocks: Vec<(usize, usize)>,
-    /// The fingerprint of each raw line a block blanked after its first (the body and the `END`
-    /// line), with the block's pattern: what masks the same line elsewhere. Never the text.
-    pub prints: Vec<(u64, &'static str)>,
 }
 
-/// The fewest characters a normalized line needs to be fingerprinted ([`line_fingerprint`]).
+/// Whether `text` holds a multi-line private-key block: a PEM `BEGIN … PRIVATE KEY` header, an
+/// armored OpenPGP private key or an SSH2 private key.
 ///
-/// Base64 is written in 4-character quanta, so every non-empty body line of a PEM, OpenPGP or
-/// SSH2 private key holds at least 4 characters (64 per line, RFC 7468, the last one shorter).
-/// A shorter line inside a block is armor or code (a closing quote, a brace, `";`), not key
-/// bytes, and fingerprinting it would mask every such line of the file. A false match only masks
-/// more, the safe direction.
-pub const MIN_FINGERPRINT_CHARS: usize = 4;
-
-/// What a string literal adds around a key line and is dropped before fingerprinting: quotes,
-/// the escape and concatenation characters, so `"MIIB…\n" +` and a bare `MIIB…` match.
-const FINGERPRINT_STRIPPED: &[char] = &['"', '\'', '`', '\\', '+', ',', ';', '(', ')'];
-
-/// The escaped line breaks a string literal writes inside a key (`\n`, `\r`), dropped first.
-const ESCAPED_BREAKS: [&str; 2] = ["\\n", "\\r"];
-
-/// A fingerprint of `line` for telling a key line repeated elsewhere: the line with its escaped
-/// line breaks and the characters a string literal adds (quotes, `\`, `+`, `,`, `;`, parentheses)
-/// dropped, trimmed, then hashed. Only a hash
-/// is kept, never the text. `None` for a line under [`MIN_FINGERPRINT_CHARS`] once normalized.
-/// O(line).
+/// Such a block's body matches no pattern of its own, so a body line copied, moved or edited
+/// outside the block cannot be recognized and masking cannot promise that none of it leaves;
+/// a review leaves a file holding one out (REQ-RV22, its exception). O(n · p).
 ///
 /// # Examples
 ///
 /// ```
-/// use magi_rs::review::secrets::line_fingerprint;
+/// use magi_rs::review::secrets::holds_key_block;
 ///
-/// assert_eq!(line_fingerprint("  \"QUJDRA==\\n\" +"), line_fingerprint("QUJDRA=="));
-/// assert_eq!(line_fingerprint("\";"), None);
+/// assert!(!holds_key_block("let u = \"postgres://svc:pw@db\";"));
 /// ```
-pub fn line_fingerprint(line: &str) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    let mut text = line.to_string();
-    for escaped in ESCAPED_BREAKS {
-        text = text.replace(escaped, "");
-    }
-    let normalized: String = text
-        .chars()
-        .filter(|c| !FINGERPRINT_STRIPPED.contains(c))
-        .collect();
-    let normalized = normalized.trim();
-    if normalized.chars().count() < MIN_FINGERPRINT_CHARS {
-        return None;
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    normalized.hash(&mut hasher);
-    Some(hasher.finish())
-}
-
-/// `text` with each line of `lines` (1-based, with the pattern to name) replaced by
-/// `<redacted: <pattern>>`, its line terminator (`\n` or `\r\n`) kept, so no line moves.
-/// O(text + lines).
-///
-/// # Arguments
-/// * `text` - A masked text.
-/// * `lines` - The lines to replace, with their pattern's name.
-///
-/// # Returns
-/// The text with those lines masked whole.
-pub fn mask_whole_lines(text: &str, lines: &[(usize, &'static str)]) -> String {
-    let by_line: std::collections::HashMap<usize, &str> = lines.iter().copied().collect();
-    let mut out = String::with_capacity(text.len());
-    for (i, raw) in text.split_inclusive('\n').enumerate() {
-        match by_line.get(&(i + 1)) {
-            Some(name) => {
-                let ending = if raw.ends_with("\r\n") {
-                    "\r\n"
-                } else if raw.ends_with('\n') {
-                    "\n"
-                } else {
-                    ""
-                };
-                out.push_str(REDACTED_OPEN);
-                out.push_str(name);
-                out.push('>');
-                out.push_str(ending);
-            }
-            None => out.push_str(raw),
-        }
-    }
-    out
+pub fn holds_key_block(text: &str) -> bool {
+    SECRET_PATTERNS
+        .iter()
+        .filter(|p| matches!(p.matcher, Matcher::PemPrivateKey | Matcher::Header(_)))
+        .any(|p| p.matcher.matches(text))
 }
 
 /// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
-/// written back right after its `<redacted: …>`, so each line after a secret keeps its number.
-/// A line elsewhere in `text` that repeats a line a key block blanked ([`line_fingerprint`]) is
-/// masked whole as well: a key's body matches no pattern on its own, so a raw copy of it would
-/// otherwise stay. O(n · s · (k + 1)) for the masking (see [`mask_secrets`]) plus O(n) for the
-/// fingerprints.
+/// written back right after its `<redacted: …>`, so each line after a secret keeps its number
+/// (an AWS secret key continued on the next line, say). O(n · s · (k + 1)), see
+/// [`mask_secrets`].
 ///
 /// # Arguments
 /// * `text` - A file's content.
 ///
 /// # Returns
-/// `None` when `text` holds no secret; otherwise the masked text, the first pattern's name and
-/// whether a span crossed a line.
+/// `None` when `text` holds no secret; otherwise the masked text and the first pattern's name.
 pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
     let pattern = find_secret(text)?;
-    let (masked, spans) = mask_spans(text, true);
-    let raw: Vec<&str> = text.split('\n').collect();
-    // MAGI FIX (T3.7 fix round 2, re-review R1, security): a key body line copied raw elsewhere in
-    // the same text matches no pattern; it is masked by its fingerprint.
-    let mut prints = Vec::new();
-    for &(first, last, name) in &spans {
-        for line in first.saturating_add(1)..=last {
-            if let Some(p) = raw
-                .get(line.saturating_sub(1))
-                .and_then(|l| line_fingerprint(l))
-            {
-                prints.push((p, name));
-            }
-        }
-    }
-    let mut blocks: Vec<(usize, usize)> = spans.iter().map(|&(f, l, _)| (f, l)).collect();
-    let known: std::collections::HashMap<u64, &'static str> = prints.iter().copied().collect();
-    let inside = |line: usize| blocks.iter().any(|&(f, l)| f <= line && line <= l);
-    let repeats: Vec<(usize, &'static str)> = raw
-        .iter()
-        .enumerate()
-        .map(|(i, l)| (i + 1, l))
-        .filter(|(line, _)| !inside(*line))
-        .filter_map(|(line, l)| Some((line, *known.get(&line_fingerprint(l)?)?)))
-        .collect();
-    let text = if repeats.is_empty() {
-        masked
-    } else {
-        mask_whole_lines(&masked, &repeats)
-    };
-    blocks.extend(repeats.iter().map(|&(line, _)| (line, line)));
-    blocks.sort_unstable();
     Some(LineMasked {
-        text,
+        text: mask_spans(text, true),
         pattern,
-        multi_line: !spans.is_empty(),
-        blocks,
-        prints,
     })
 }
 
@@ -1605,7 +1484,6 @@ mod tests {
         );
         let m = mask_secrets_keeping_lines(&text).expect("a key block");
         assert_eq!(m.pattern, "pem-private-key");
-        assert!(m.multi_line);
         assert_eq!(m.text.lines().count(), text.lines().count(), "{:?}", m.text);
         assert_eq!(m.text.lines().nth(5), Some("fn b() {}"), "{:?}", m.text);
         assert!(
@@ -1626,10 +1504,30 @@ mod tests {
         let text = "let u = \"postgres://svc:S3cr3t@db/app\";\nfn f() {}\n";
         let m = mask_secrets_keeping_lines(text).expect("a url credential");
         assert_eq!(m.pattern, "url-credential");
-        assert!(!m.multi_line);
         assert_eq!(m.text, mask_secrets(text));
         assert!(!m.text.contains("S3cr3t"));
         assert_eq!(mask_secrets_keeping_lines("fn f() {}\n"), None);
+    }
+
+    #[test]
+    fn a_key_block_is_told_from_a_one_line_secret() {
+        // [T3.7 fix round 3] RV22's exception keys on this: PEM, SSH2 and OpenPGP private-key
+        // blocks are blocks; a URL password, a token or an AWS key is not.
+        let end = concat!("-----", "END RSA PRIVATE KEY-----");
+        let pem = format!("x {PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\nMIIBOgIBAAJBAK\n{end}\n");
+        let ssh2 = format!("a {SSH2_PLAIN_PRIVATE_KEY}\nAAAAB3NzaC1yc2E\n");
+        let pgp = format!("x {PGP_PRIVATE_KEY}\nbody\n");
+        for text in [&pem, &ssh2, &pgp] {
+            assert!(holds_key_block(text), "{text}");
+        }
+        for text in [
+            "let u = \"postgres://svc:S3cr3t@db/app\";",
+            "token ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", // allow-secret-scan
+            "aws_secret_access_key = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", // allow-secret-scan
+            "fn f() {}",
+        ] {
+            assert!(!holds_key_block(text), "{text}");
+        }
     }
 
     #[test]

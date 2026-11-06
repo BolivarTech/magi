@@ -427,15 +427,13 @@ struct SidesRead<'a> {
 
 /// The verdict on a file whose content may be reviewed, with any secret masked (RV22).
 ///
-/// The sides come masked from the source ([`ContentSource::masked`] says what it masked); a
-/// secret in `diff` alone is gone once the diff is rebuilt. When anything was masked, the diff is
-/// rebuilt from the masked sides ([`rebuilt_diff`]), so a key's body lines that git shows without
-/// their `BEGIN` line never leave in the clear; the file is declared with the first pattern found.
-/// The file is left out as `secret` instead, the safe direction, when both sides exist, one holds
-/// a masked key block, and the two sides disagree on which lines a block covers
-/// ([`SideBlocks::agree_through`]: a key's body lines match no pattern on their own, so a line
-/// masked on one side and not on the other is a key no mask covers), when the diff cannot be
-/// rebuilt from the sides, or when the rebuilt diff still holds a secret. O(diff + sides).
+/// The sides come masked from the source ([`ContentSource::masked`] says what it masked; a side
+/// holding a private-key block is never masked and never reaches here, [`content_verdict`]
+/// leaves it out); a secret in `diff` alone is gone once the diff is rebuilt. When anything was
+/// masked, the diff is rebuilt from the masked sides ([`rebuilt_diff`]) and the file is declared
+/// with the first pattern found. The file is left out as `secret` instead, the safe direction,
+/// when the diff cannot be rebuilt from the sides or the rebuilt diff still holds a secret.
+/// O(diff + sides).
 ///
 /// # Arguments
 ///
@@ -453,28 +451,6 @@ fn kept_verdict(
     diff: Option<String>,
     with_old: bool,
 ) -> Verdict {
-    // MAGI FIX (T3.7 fix round 2, re-review R1, security): a key body moved or copied to the
-    // other side matches no pattern; the source masks every line that repeats a key line of
-    // either side, and the sides are read again so everything below sees that text.
-    let reread = read.new.is_some() && read.old.is_some();
-    if reread {
-        source.mask_alike(read.path, read.old_path);
-    }
-    let (new_now, old_now) = if reread {
-        match (source.read(read.path), source.read_old(read.old_path)) {
-            (Ok(new), Ok(old)) => (new, old),
-            // Held sides read from the cache; a failure here leaves the file out, never sends it.
-            _ => return Verdict::Skip(SkipCause::Unreadable),
-        }
-    } else {
-        (None, None)
-    };
-    let read = &SidesRead {
-        path: read.path,
-        old_path: read.old_path,
-        new: if reread { new_now.as_deref() } else { read.new },
-        old: if reread { old_now.as_deref() } else { read.old },
-    };
     let new_mask = read.new.and(source.masked(Face::New, read.path));
     let old_mask = read.old.and(source.masked(Face::Old, read.old_path));
     let pattern = new_mask
@@ -488,23 +464,6 @@ fn kept_verdict(
             masked: None,
         });
     };
-    // MAGI FIX (T3.7 fix round 1, review F1, security): a flag per side let a key body through
-    // when both sides held a block at different lines; the check is now line by line.
-    if reread {
-        let blocks = SideBlocks {
-            old: source.masked_blocks(Face::Old, read.old_path),
-            new: source.masked_blocks(Face::New, read.path),
-        };
-        if !blocks.old.is_empty() || !blocks.new.is_empty() {
-            let agree = match diff.as_deref() {
-                Some(d) => blocks.agree_through(d),
-                None => blocks.old == blocks.new,
-            };
-            if !agree {
-                return secret(read.path, pattern);
-            }
-        }
-    }
     let diff = match diff {
         Some(d) => match rebuilt_diff(&d, read.new, read.old) {
             Some(r) if find_secret(&r).is_none() => Some(r),
@@ -537,7 +496,7 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<St
             None => (raw, ""),
         };
         if line.starts_with(HUNK_START) {
-            let (header, (old_start, _), (new_start, _)) = hunk_header(line)?;
+            let (header, old_start, new_start) = hunk_header(line)?;
             out.push_str(header);
             next_old = old_start.saturating_sub(1);
             next_new = new_start.saturating_sub(1);
@@ -578,131 +537,28 @@ fn take<'a>(lines: &[&'a str], next: &mut usize) -> Option<&'a str> {
     Some(line)
 }
 
-/// One side of a hunk header, `(start, count)`.
-type HunkSide = (usize, usize);
-
 /// A hunk header `@@ -a[,b] +c[,d] @@[ context]`: the header up to its closing `@@`, and the
-/// old and new `(start, count)` (an omitted count is 1). `None` when it does not parse. O(line).
-fn hunk_header(line: &str) -> Option<(&str, HunkSide, HunkSide)> {
+/// first old and new line numbers. `None` when it does not parse. O(line).
+fn hunk_header(line: &str) -> Option<(&str, usize, usize)> {
     let rest = line.get(HUNK_START.len()..)?;
     let close = rest.find(HUNK_START)?;
     let header = line.get(..HUNK_START.len() + close + HUNK_START.len())?;
     let mut parts = rest.get(..close)?.split_whitespace();
-    let side = |part: Option<&str>, sign: char| -> Option<(usize, usize)> {
-        let mut nums = part?.strip_prefix(sign)?.split(',');
-        let start = nums.next()?.parse().ok()?;
-        let count = match nums.next() {
-            Some(n) => n.parse().ok()?,
-            None => 1,
-        };
-        Some((start, count))
+    let start = |part: Option<&str>, sign: char| -> Option<usize> {
+        let side = part?.strip_prefix(sign)?;
+        side.split(',').next()?.parse().ok()
     };
-    let old = side(parts.next(), '-')?;
-    let new = side(parts.next(), '+')?;
+    let old = start(parts.next(), '-')?;
+    let new = start(parts.next(), '+')?;
     Some((header, old, new))
-}
-
-/// The lines each side's key-block masks blanked ([`ContentSource::masked_blocks`]), repeats
-/// masked by fingerprint included: what tells a masked key line from a line no mask covered.
-struct SideBlocks {
-    /// The old side's blanked lines, 1-based inclusive `(first, last)`.
-    old: Vec<(usize, usize)>,
-    /// The new side's blanked lines, 1-based inclusive `(first, last)`.
-    new: Vec<(usize, usize)>,
-}
-
-/// What a hunk changed, by whether each changed line lies inside a key block of its side.
-#[derive(Default)]
-struct HunkBlocks {
-    /// A deleted line inside an old-side block.
-    deleted_in: bool,
-    /// A deleted line outside every old-side block.
-    deleted_out: bool,
-    /// An added line inside a new-side block.
-    added_in: bool,
-    /// An added line outside every new-side block.
-    added_out: bool,
-}
-
-impl HunkBlocks {
-    /// Whether the hunk could have turned a key's body into lines no mask covers: lines of a
-    /// block deleted while lines outside any block were added, or the other way round (a key
-    /// whose `BEGIN` line was dropped and whose body was edited, say). Conservative: a block
-    /// replaced by plain code is refused too.
-    fn crosses(&self) -> bool {
-        (self.deleted_in && self.added_out) || (self.added_in && self.deleted_out)
-    }
-}
-
-impl SideBlocks {
-    /// Whether `line` lies inside one of `blocks`. O(blocks).
-    fn inside(blocks: &[(usize, usize)], line: usize) -> bool {
-        blocks
-            .iter()
-            .any(|&(first, last)| first <= line && line <= last)
-    }
-
-    /// Whether `diff` keeps every key body masked: no hunk [`HunkBlocks::crosses`]. `false` when
-    /// a hunk header does not parse or a body line has no marker.
-    ///
-    /// The lines the two sides share need no check of their own: a shared line that a block
-    /// blanks on one side is masked on the other by its fingerprint
-    /// ([`ContentSource::mask_alike`]), so it reads as blanked on both. What a fingerprint cannot
-    /// match is an edited body line: a hunk that drops a key's armor and edits its body shows
-    /// block lines deleted and plain lines added, which is what `crosses` refuses.
-    /// O(diff × blocks).
-    fn agree_through(&self, diff: &str) -> bool {
-        let (mut old, mut new) = (0usize, 0usize);
-        let mut hunk: Option<HunkBlocks> = None;
-        for line in diff.lines() {
-            if line.starts_with(HUNK_START) {
-                if hunk.as_ref().is_some_and(HunkBlocks::crosses) {
-                    return false;
-                }
-                let Some((_, (old_start, _), (new_start, _))) = hunk_header(line) else {
-                    return false;
-                };
-                old = old_start.saturating_sub(1);
-                new = new_start.saturating_sub(1);
-                hunk = Some(HunkBlocks::default());
-                continue;
-            }
-            let Some(h) = hunk.as_mut() else {
-                continue;
-            };
-            match line.chars().next() {
-                Some(' ') => {
-                    old = old.saturating_add(1);
-                    new = new.saturating_add(1);
-                }
-                Some('-') => {
-                    old = old.saturating_add(1);
-                    if Self::inside(&self.old, old) {
-                        h.deleted_in = true;
-                    } else {
-                        h.deleted_out = true;
-                    }
-                }
-                Some('+') => {
-                    new = new.saturating_add(1);
-                    if Self::inside(&self.new, new) {
-                        h.added_in = true;
-                    } else {
-                        h.added_out = true;
-                    }
-                }
-                Some('\\') => {}
-                _ => return false,
-            }
-        }
-        !hunk.as_ref().is_some_and(HunkBlocks::crosses)
-    }
 }
 
 /// The skip the content of a file calls for, or `None` when it may be reviewed: a NUL in a side
 /// gives `binary`, a side that is not UTF-8 `not utf-8`, a secret still in a side `secret`, in
-/// that order. A side holds a secret here only when the source does not mask
-/// ([`ContentSource::masked`]): then the file is left out, as before masking existed. O(bytes).
+/// that order. A side still holds a secret here when it holds a multi-line private-key block,
+/// which the source never masks (REQ-RV22's exception), or when the source does not mask at
+/// all ([`ContentSource::masked`]): either way the file is left out, as before masking existed.
+/// O(bytes).
 ///
 /// # Arguments
 ///
