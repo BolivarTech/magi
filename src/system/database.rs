@@ -248,19 +248,13 @@ impl EncryptedSqliteMemory {
         // An older (0.24.x) database is refused BEFORE `init_schema`, which would otherwise
         // create the v0.25.0 tables and upgrade it in place (RV19, RV-S17): read-only, so the
         // refused file stays byte for byte as it was. A fresh or empty file has no marker
-        // table and goes on to be initialized. The check and the schema creation share one
-        // `BEGIN IMMEDIATE` transaction: `init_schema` is several statements, and a second
-        // opener racing on a brand-new file would otherwise see `messages` already created
-        // and a v0.25.0 table not yet, and refuse a fresh database as an older one.
-        {
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(|e| map_open_err(VaultError::Storage(e.to_string())))?;
-            check_pre_0_25_tables(&tx, &path).map_err(map_open_err)?;
-            // Create every table of the schema (single source of truth — `init_schema`).
-            init_schema(&tx)?;
-            tx.commit()?;
-        }
+        // table and goes on to be initialized. No write lock is taken: `init_schema` creates
+        // the v0.25.0 tables before the marker (`SCHEMA_DDL`), so a second opener racing on
+        // a brand-new file never sees the marker without them.
+        check_pre_0_25_tables(&conn, &path).map_err(map_open_err)?;
+
+        // Create every table of the schema (single source of truth — `init_schema`).
+        init_schema(&conn)?;
 
         // Already `Zeroizing<String>` (MS2: the passphrase never exists as a bare
         // `String`, closing the transient-copy window — REQ-V41).
@@ -660,8 +654,48 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_DDL)
 }
 
-/// The DDL [`init_schema`] runs, statement by statement, in this order.
-const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS sessions (
+/// The DDL [`init_schema`] runs, statement by statement (autocommit, no transaction), in
+/// this order.
+///
+/// **The v0.25.0 tables ([`PRE_0_25_MISSING_TABLES`]) come first, before the marker
+/// [`PRE_0_25_MARKER_TABLE`].** A second opener racing on a brand-new file reads the schema
+/// while the first is still creating it; with this order it can never see the marker
+/// without every v0.25.0 table, so it never refuses a fresh database as an older one, and no
+/// open needs a write lock for the check (RV19).
+const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
+            key TEXT NOT NULL,
+            chunk_hash TEXT NOT NULL,
+            path TEXT NOT NULL,
+            section_blob BLOB NOT NULL,
+            text_blob BLOB NOT NULL,
+            embedding_blob BLOB NOT NULL,
+            dim INTEGER NOT NULL,
+            index_id TEXT NOT NULL,
+            PRIMARY KEY (key, chunk_hash)
+        );
+        CREATE INDEX IF NOT EXISTS code_review_docs_by_chunk
+            ON code_review_docs (chunk_hash, index_id);
+        CREATE TABLE IF NOT EXISTS code_review_doc_sources (
+            path TEXT NOT NULL,
+            key TEXT NOT NULL,
+            index_id TEXT NOT NULL,
+            PRIMARY KEY (path, key)
+        );
+        CREATE TABLE IF NOT EXISTS code_review_history (
+            id TEXT PRIMARY KEY,
+            file TEXT NOT NULL,
+            line INTEGER,
+            reviewed_commit TEXT NOT NULL,
+            finding_blob BLOB NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            checked_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS code_review_history_due
+            ON code_review_history (status, checked_at, created_at, id);
+        CREATE INDEX IF NOT EXISTS code_review_history_by_file
+            ON code_review_history (file, status);
+        CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             project_name TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -706,40 +740,7 @@ const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS sessions (
             scope TEXT NOT NULL DEFAULT 'root',
             distilled_at INTEGER
         );
-        CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
-        CREATE TABLE IF NOT EXISTS code_review_docs (
-            key TEXT NOT NULL,
-            chunk_hash TEXT NOT NULL,
-            path TEXT NOT NULL,
-            section_blob BLOB NOT NULL,
-            text_blob BLOB NOT NULL,
-            embedding_blob BLOB NOT NULL,
-            dim INTEGER NOT NULL,
-            index_id TEXT NOT NULL,
-            PRIMARY KEY (key, chunk_hash)
-        );
-        CREATE INDEX IF NOT EXISTS code_review_docs_by_chunk
-            ON code_review_docs (chunk_hash, index_id);
-        CREATE TABLE IF NOT EXISTS code_review_doc_sources (
-            path TEXT NOT NULL,
-            key TEXT NOT NULL,
-            index_id TEXT NOT NULL,
-            PRIMARY KEY (path, key)
-        );
-        CREATE TABLE IF NOT EXISTS code_review_history (
-            id TEXT PRIMARY KEY,
-            file TEXT NOT NULL,
-            line INTEGER,
-            reviewed_commit TEXT NOT NULL,
-            finding_blob BLOB NOT NULL,
-            status TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            checked_at INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS code_review_history_due
-            ON code_review_history (status, checked_at, created_at, id);
-        CREATE INDEX IF NOT EXISTS code_review_history_by_file
-            ON code_review_history (file, status);";
+        CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);";
 
 #[async_trait]
 impl MemoryStore for EncryptedSqliteMemory {
