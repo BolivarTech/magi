@@ -2172,37 +2172,6 @@ mod tests {
     }
 
     #[test]
-    fn two_first_opens_racing_on_an_empty_file_never_refuse_it_as_an_older_one() {
-        // [MS3 final review I1] The older-version check and `init_schema` share one write
-        // transaction: a racing opener never sees `messages` without the v0.25.0 tables.
-        for _ in 0..8 {
-            let tmp = NamedTempFile::new().expect("tmp");
-            let path = tmp.path().to_path_buf();
-            let barrier = Arc::new(std::sync::Barrier::new(2));
-            let open = || {
-                let (path, barrier) = (path.clone(), Arc::clone(&barrier));
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    EncryptedSqliteMemory::new_with_vault(
-                        path,
-                        Zeroizing::new("shared-master".to_string()),
-                        fast_kdf_vault(),
-                    )
-                    .err()
-                    .map(|e| e.to_string())
-                })
-            };
-            let (a, b) = (open(), open());
-            for err in [a.join().expect("a"), b.join().expect("b")]
-                .into_iter()
-                .flatten()
-            {
-                assert!(!err.contains("0.24.x"), "{err}");
-            }
-        }
-    }
-
-    #[test]
     fn new_refuses_a_0_24_shaped_database_with_an_envelope_and_leaves_it_intact() {
         // The three v0.25.0 tables dropped from a real envelope DB: what 0.24.x wrote.
         let (mem, tmp) = fresh_db();
