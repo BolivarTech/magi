@@ -86,7 +86,8 @@ fn table_exists(conn: &Connection, table: &str) -> std::result::Result<bool, Vau
 }
 
 /// Refuses a database written by 0.24.x or earlier, naming the first v0.25.0 table it lacks
-/// ([`PRE_0_25_MISSING_TABLES`]). Read-only: it runs before any write on both open paths, so
+/// ([`PRE_0_25_MISSING_TABLES`]). Read-only: it runs before any write on every open path
+/// (`new_with_vault` before `init_schema`, and both envelope branches of the state machine), so
 /// the refused file stays byte for byte as it was. A file without the older data tables
 /// ([`PRE_0_25_MARKER_TABLE`]) is not an older database and passes, to get the open's own
 /// answer.
@@ -228,7 +229,10 @@ impl EncryptedSqliteMemory {
     /// point at a not-yet-initialized file. Derives the data key **once** from the
     /// per-DB salt and caches it (masked).
     ///
-    /// Because [`init_schema`] guarantees every table exists, the "missing table"
+    /// A database written by 0.24.x or earlier (it has the older data tables but lacks a
+    /// v0.25.0 one) is refused first, before [`init_schema`] could create what it lacks:
+    /// [`VaultError::DbCorrupt`] with [`pre_0_25_detail`], nothing written. Because
+    /// [`init_schema`] then guarantees every table exists, the generic "missing table"
     /// corruption arm of the state machine is unreachable from here; a
     /// data-without-envelope DB still surfaces as [`VaultError::DbCorrupt`] and is
     /// **never** wiped (never-delete absolute, REQ-H20 / D-H10). Use
@@ -241,8 +245,22 @@ impl EncryptedSqliteMemory {
     ) -> Result<Self> {
         let mut conn = open_connection(&path).map_err(map_open_err)?;
 
-        // Create every table of the schema (single source of truth — `init_schema`).
-        init_schema(&conn)?;
+        // An older (0.24.x) database is refused BEFORE `init_schema`, which would otherwise
+        // create the v0.25.0 tables and upgrade it in place (RV19, RV-S17): read-only, so the
+        // refused file stays byte for byte as it was. A fresh or empty file has no marker
+        // table and goes on to be initialized. The check and the schema creation share one
+        // `BEGIN IMMEDIATE` transaction: `init_schema` is several statements, and a second
+        // opener racing on a brand-new file would otherwise see `messages` already created
+        // and a v0.25.0 table not yet, and refuse a fresh database as an older one.
+        {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| map_open_err(VaultError::Storage(e.to_string())))?;
+            check_pre_0_25_tables(&tx, &path).map_err(map_open_err)?;
+            // Create every table of the schema (single source of truth — `init_schema`).
+            init_schema(&tx)?;
+            tx.commit()?;
+        }
 
         // Already `Zeroizing<String>` (MS2: the passphrase never exists as a bare
         // `String`, closing the transient-copy window — REQ-V41).
@@ -1882,31 +1900,10 @@ mod tests {
             let _: String = seed
                 .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
                 .unwrap();
-            seed.execute_batch(
-                "CREATE TABLE IF NOT EXISTS sessions (
-                    id TEXT PRIMARY KEY,
-                    project_name TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content_blob TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(session_id) REFERENCES sessions(id)
-                );
-                CREATE TABLE IF NOT EXISTS knowledge (
-                    key TEXT PRIMARY KEY,
-                    value_blob TEXT NOT NULL,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS vault_meta (
-                    key TEXT PRIMARY KEY,
-                    value BLOB NOT NULL
-                );",
-            )
-            .unwrap();
+            // [MS3 final review I1] The whole current schema (`init_schema`): the four
+            // hand-written tables this seed used to create are a pre-v0.25.0 layout, which
+            // every open now refuses (RV19) before the race under test is reached.
+            init_schema(&seed).unwrap();
         }
 
         let barrier = Arc::new(Barrier::new(2));
@@ -2172,6 +2169,37 @@ mod tests {
             before,
             "never-delete: no schema created, nothing written"
         );
+    }
+
+    #[test]
+    fn two_first_opens_racing_on_an_empty_file_never_refuse_it_as_an_older_one() {
+        // [MS3 final review I1] The older-version check and `init_schema` share one write
+        // transaction: a racing opener never sees `messages` without the v0.25.0 tables.
+        for _ in 0..8 {
+            let tmp = NamedTempFile::new().expect("tmp");
+            let path = tmp.path().to_path_buf();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let open = || {
+                let (path, barrier) = (path.clone(), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    EncryptedSqliteMemory::new_with_vault(
+                        path,
+                        Zeroizing::new("shared-master".to_string()),
+                        fast_kdf_vault(),
+                    )
+                    .err()
+                    .map(|e| e.to_string())
+                })
+            };
+            let (a, b) = (open(), open());
+            for err in [a.join().expect("a"), b.join().expect("b")]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!err.contains("0.24.x"), "{err}");
+            }
+        }
     }
 
     #[test]
