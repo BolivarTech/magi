@@ -32,6 +32,10 @@ const GATE_KEY: &str = "gate";
 const SKIPPED_KEY: &str = "skipped";
 /// The JSON key that declares how many skipped files are not listed.
 const SKIPPED_UNLISTED_KEY: &str = "skipped_unlisted";
+/// The JSON key of the files reviewed with their secrets masked ([`ReviewSummary::masked`]).
+const MASKED_KEY: &str = "masked";
+/// The JSON key that declares how many of those files are not listed.
+const MASKED_UNLISTED_KEY: &str = "masked_unlisted";
 /// The JSON key of the files reviewed without an extractor ([`ReviewSummary::no_extractor`]).
 const NO_EXTRACTOR_KEY: &str = "no_extractor";
 /// The JSON key that declares how many of those files are not listed.
@@ -371,6 +375,19 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
         }
         write_unlisted(out, &s.skipped)?;
     }
+    if !s.masked.is_empty() {
+        writeln!(out, "\n## Reviewed with secrets masked")?;
+        for m in s.masked.iter().take(MAX_OMISSIONS_SHOWN) {
+            writeln!(
+                out,
+                "- {} ({}: {})",
+                escape_controls(&m.path),
+                name(&m.cause),
+                m.pattern
+            )?;
+        }
+        write_unlisted(out, &s.masked)?;
+    }
     if !s.no_extractor.is_empty() {
         writeln!(out, "\n## Reviewed without language context")?;
         for path in s.no_extractor.iter().take(MAX_OMISSIONS_SHOWN) {
@@ -512,6 +529,7 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
         // capped like the error path's, the rest declared.
         for (list, rest, len) in [
             (SKIPPED_KEY, SKIPPED_UNLISTED_KEY, s.skipped.len()),
+            (MASKED_KEY, MASKED_UNLISTED_KEY, s.masked.len()),
             (
                 NO_EXTRACTOR_KEY,
                 NO_EXTRACTOR_UNLISTED_KEY,

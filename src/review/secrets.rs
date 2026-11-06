@@ -946,8 +946,9 @@ pub fn display_path(path: &str) -> String {
 /// O(n · s · (k + 1)) for a text of n bytes, s searches (one per token prefix, one per other
 /// pattern) and k masks: each search keeps its next span and runs again, from the mask's end,
 /// only when a mask passed its start, so a search whose spans are masked one by one rescans what
-/// follows each of them; the others check only whether a token opens at the mask's end. The
-/// texts it masks are small (paths, one-line errors, report fields), where k stays small.
+/// follows each of them; the others check only whether a token opens at the mask's end. Most
+/// texts it masks are small (paths, one-line errors, report fields); a reviewed file is masked
+/// once, through [`mask_secrets_keeping_lines`], and k is the number of secrets it holds.
 // MAGI FIX (S6 loop 13, A2-b6): the bound omitted the k factor of a search rerun after each mask.
 ///
 /// Maintenance: the cached spans are correct only while every boundary a search over the whole
@@ -956,7 +957,20 @@ pub fn display_path(path: &str) -> String {
 /// rescanning loop (`one_pass_masking_equals_the_rescanning_loop_…`) is what catches a mismatch.
 // MAGI FIX (S6 loop 4): each turn rescanned the rest for every pattern, O(k · n · p).
 pub fn mask_secrets(text: &str) -> String {
+    mask_spans(text, false).0
+}
+
+/// The masking loop of [`mask_secrets`] and [`mask_secrets_keeping_lines`].
+///
+/// # Arguments
+/// * `text` - The text to mask.
+/// * `keep_lines` - Whether each line break a mask covers is written back after it.
+///
+/// # Returns
+/// The masked text, and whether any mask covered a line break.
+fn mask_spans(text: &str, keep_lines: bool) -> (String, bool) {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
+    let mut multi_line = false;
     let lanes: Vec<(&SecretPattern, usize)> = SECRET_PATTERNS
         .iter()
         .flat_map(|p| (0..p.matcher.lanes()).map(move |lane| (p, lane)))
@@ -977,7 +991,17 @@ pub fn mask_secrets(text: &str) -> String {
         out.push_str(REDACTED_OPEN);
         out.push_str(name);
         out.push('>');
-        done = merged_end(span.end, next.iter().flatten());
+        let end = merged_end(span.end, next.iter().flatten());
+        let breaks = text
+            .get(span.start..end)
+            .unwrap_or_default()
+            .matches('\n')
+            .count();
+        multi_line |= breaks > 0;
+        if keep_lines {
+            out.extend(std::iter::repeat_n('\n', breaks));
+        }
+        done = end;
         let rest = text.get(done..).unwrap_or_default();
         for (slot, (p, lane)) in next.iter_mut().zip(&lanes) {
             if slot.as_ref().is_some_and(|s| s.start < done) {
@@ -988,7 +1012,7 @@ pub fn mask_secrets(text: &str) -> String {
         }
     }
     out.push_str(text.get(done..).unwrap_or_default());
-    out
+    (out, multi_line)
 }
 
 /// What [`mask_secrets_keeping_lines`] gave for a text that held a secret.
@@ -1012,8 +1036,13 @@ pub struct LineMasked {
 /// `None` when `text` holds no secret; otherwise the masked text, the first pattern's name and
 /// whether a span crossed a line.
 pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
-    let _ = text;
-    None
+    let pattern = find_secret(text)?;
+    let (text, multi_line) = mask_spans(text, true);
+    Some(LineMasked {
+        text,
+        pattern,
+        multi_line,
+    })
 }
 
 /// The end of a mask that ends at `end`, grown over every span of `spans` that opens inside it

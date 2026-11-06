@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
+use super::secrets::mask_secrets_keeping_lines;
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
 pub const MAX_REVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -691,7 +692,9 @@ impl ContentSource for RevisionSource<'_> {
 ///
 /// Every stage of a review (the filter, the batches, the index and the gate) reads through one
 /// cache, so a file is read once per side and every stage sees the bytes the filter scanned,
-/// even if the file changes on disk meanwhile. An `Err` is never kept, and the filter releases
+/// even if the file changes on disk meanwhile. A text side is held with each secret masked, line
+/// breaks kept, so no stage ever reads a secret's bytes (RV22; [`ContentSource::masked`] says
+/// what was masked). An `Err` is never kept, and the filter releases
 /// every side of a file it leaves out that no kept file was scanned with
 /// ([`ContentSource::release`]), so the cap and the memory count only
 /// what is reviewed and no skipped secret stays held. The bytes held are
@@ -718,6 +721,8 @@ struct Held {
     new: HashMap<String, Option<Vec<u8>>>,
     /// Old-side reads by path.
     old: HashMap<String, Option<Vec<u8>>>,
+    /// What was masked in each held side, by side and path (RV22).
+    masks: HashMap<(Face, String), SideMask>,
     /// Bytes held across both sides.
     bytes: u64,
     /// The bytes held before, and the path of, the first read that passed the cap since the
@@ -794,10 +799,13 @@ impl<'a> CachedSource<'a> {
         if let Some(bytes) = side.get(path) {
             return Ok(bytes.clone());
         }
-        let read = match face {
+        let raw = match face {
             Face::New => self.inner.read(path)?,
             Face::Old => self.inner.read_old(path)?,
         };
+        // MAGI FIX (T3.7): RV22 masks a secret instead of leaving its file out; every stage reads
+        // through this cache, so masking here is the one place it happens.
+        let (read, mask) = masked_side(raw);
         let len = read
             .as_ref()
             .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX));
@@ -817,12 +825,37 @@ impl<'a> CachedSource<'a> {
             held.over = Some((held.bytes, path.to_string()));
         }
         held.bytes = total;
+        if let Some(mask) = mask {
+            held.masks.insert((face, path.to_string()), mask);
+        }
         let side = match face {
             Face::New => &mut held.new,
             Face::Old => &mut held.old,
         };
         side.insert(path.to_string(), read.clone());
         Ok(read)
+    }
+}
+
+/// A side as the cache holds it: a UTF-8 text with no NUL has each secret masked, its line
+/// breaks kept ([`mask_secrets_keeping_lines`]); anything else is held as read, since the filter
+/// leaves a binary or non-UTF-8 side out (masking could hide the NUL that makes it binary).
+/// O(bytes).
+fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
+    let masked = read
+        .as_deref()
+        .filter(|bytes| !bytes.contains(&0))
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(mask_secrets_keeping_lines);
+    match masked {
+        Some(m) => (
+            Some(m.text.into_bytes()),
+            Some(SideMask {
+                pattern: m.pattern,
+                multi_line: m.multi_line,
+            }),
+        ),
+        None => (read, None),
     }
 }
 
@@ -846,6 +879,7 @@ impl ContentSource for CachedSource<'_> {
             Face::New => held.new.remove(path),
             Face::Old => held.old.remove(path),
         };
+        held.masks.remove(&(face, path.to_string()));
         let freed = removed
             .flatten()
             .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
@@ -871,6 +905,12 @@ impl ContentSource for CachedSource<'_> {
             held: before,
             path,
         })
+    }
+
+    /// What the cache masked when it read side `face` of `path`. O(1) expected.
+    fn masked(&self, face: Face, path: &str) -> Option<SideMask> {
+        let held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        held.masks.get(&(face, path.to_string())).copied()
     }
 }
 

@@ -19,7 +19,9 @@ use super::input::{
 };
 use super::languages::LanguageRegistry;
 use super::secrets::{display_path, find_secret};
-use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LINK_CAUSE};
+use super::source::{
+    is_never_reviewed, ContentSource, Face, GitCommand, SideMask, HARD_LINK_CAUSE,
+};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
 pub(crate) const MISSING: &str = "missing";
@@ -161,15 +163,23 @@ pub struct Masked {
 
 /// What classifying one file decided.
 enum Verdict {
-    /// Reviewed.
-    Keep,
-    /// Reviewed whole, from its new side: a text file whose diff git printed as binary.
-    KeepWhole,
-    /// Reviewed through the diff given, which replaces the file's own: a deleted text file whose
-    /// diff git printed as binary.
-    KeepDiff(String),
+    /// Reviewed, as [`Kept`] says.
+    Keep(Kept),
     /// Left out, with its cause.
     Skip(SkipCause),
+}
+
+/// How a kept file is reviewed.
+struct Kept {
+    /// The diff it is reviewed through (`None`: reviewed whole), which replaces the file's own:
+    /// rebuilt from the masked sides when a secret was masked, or built from the old side for a
+    /// deleted text file whose diff git printed as binary.
+    diff: Option<String>,
+    /// Whether its old side stays held (`false`: reviewed whole from its new side, a text file
+    /// whose diff git printed as binary).
+    with_old: bool,
+    /// The pattern of the first secret masked in it, if any.
+    masked: Option<&'static str>,
 }
 
 /// Splits the files of a review into what is reviewed and what is left out.
@@ -180,7 +190,11 @@ enum Verdict {
 /// path → `ignored`; a path that holds a
 /// secret → `secret`, without reading it; a file that does not exist → an error, never a skip;
 /// over the byte cap → `too large`; a NUL anywhere in a side → `binary`; not UTF-8 →
-/// `not utf-8`; a secret anywhere in the new side, the old side or the diff text → `secret`.
+/// `not utf-8`. A secret in the content no longer leaves the file out (RV22 as amended in T3.7):
+/// the source masks it in each side it holds ([`ContentSource::masked`]), the diff is rebuilt
+/// from the masked sides, and the file is kept and declared in [`Filtered::masked`] (see
+/// `kept_verdict` for the cases that still leave it out as `secret`). A side that still holds a
+/// secret, which only a source that does not mask hands over, leaves the file out as `secret`.
 /// A diff section whose header lines (before the first `@@`) carry git's binary marker
 /// ([`is_binary_section`]) is judged by its bytes the same way, and when both sides are text it
 /// is kept with no diff, reviewed whole from its new side; a side that cannot be read is left
@@ -202,9 +216,10 @@ enum Verdict {
 ///
 /// # Returns
 ///
-/// The kept files, the skipped ones and the kept ones with no extractor. Every path that
-/// leaves the process goes through [`display_path`]. Each `secret` skip writes one INFO entry
-/// with the shown path and the pattern's name, never the value.
+/// The kept files, the skipped ones, the kept ones with no extractor and the kept ones with a
+/// secret masked. Every path that leaves the process goes through [`display_path`]. Each
+/// `secret` skip and each masked file writes one INFO entry with the shown path and the
+/// pattern's name, never the value.
 ///
 /// # Errors
 ///
@@ -232,37 +247,26 @@ pub fn filter_files(
     let mut kept_sides: HashSet<(Face, String)> = HashSet::new();
     for file in files {
         match classify(&file, source, is_ignored, explicit)? {
-            Verdict::Keep => {
+            Verdict::Keep(kept) => {
                 if registry.get(&file.path).is_none() {
                     filtered.no_extractor.push(display_path(&file.path));
                 }
-                kept_sides.extend(sides_of(&file));
-                filtered.kept.push(file);
-            }
-            Verdict::KeepWhole => {
-                if registry.get(&file.path).is_none() {
-                    filtered.no_extractor.push(display_path(&file.path));
-                }
-                // MAGI FIX (S6 loop 17, A2-2): only the new side is reviewed; the old side read
-                // to judge the file stayed cached and was charged against the review total.
                 let mut sides = sides_of(&file).into_iter();
-                kept_sides.extend(sides.next());
-                release_unkept(source, &kept_sides, sides);
-                filtered.kept.push(ReviewFile {
-                    path: file.path,
-                    diff: None,
-                });
-            }
-            Verdict::KeepDiff(diff) => {
-                if registry.get(&file.path).is_none() {
-                    filtered.no_extractor.push(display_path(&file.path));
+                if kept.with_old {
+                    // Both sides stay: the deleted lines are read from the old side.
+                    kept_sides.extend(sides);
+                } else {
+                    // MAGI FIX (S6 loop 17, A2-2): only the new side is reviewed; the old side read
+                    // to judge the file stayed cached and was charged against the review total.
+                    kept_sides.extend(sides.next());
+                    release_unkept(source, &kept_sides, sides);
                 }
-                // Both sides stay: the deleted lines are read from the old side, as for any
-                // deletion.
-                kept_sides.extend(sides_of(&file));
+                if let Some(pattern) = kept.masked {
+                    filtered.masked.push(masked_file(&file.path, pattern));
+                }
                 filtered.kept.push(ReviewFile {
                     path: file.path,
-                    diff: Some(diff),
+                    diff: kept.diff,
                 });
             }
             Verdict::Skip(cause) if explicit => {
@@ -396,21 +400,175 @@ fn classify(
         // and the whole review died.
         return Ok(Verdict::Skip(SkipCause::Disappeared));
     }
-    Ok(
-        content_verdict(path, [new.as_deref(), old.as_deref()], file.diff.as_deref())
-            .unwrap_or(Verdict::Keep),
-    )
+    let sides = [new.as_deref(), old.as_deref()];
+    if let Some(skip) = content_verdict(path, sides) {
+        return Ok(skip);
+    }
+    let read = SidesRead {
+        path,
+        old_path: old_side,
+        new: new.as_deref(),
+        old: old.as_deref(),
+    };
+    // MAGI FIX (T3.7): a secret in the content no longer leaves the file out; it is masked and
+    // the file reviewed (RV22 amended, user decision 2026-11-06).
+    Ok(kept_verdict(&read, source, file.diff.clone(), true))
+}
+
+/// The two sides [`classify`] read for a kept file, with the paths they were read under.
+struct SidesRead<'a> {
+    /// The new side's path.
+    path: &'a str,
+    /// The old side's path (a rename's old path).
+    old_path: &'a str,
+    /// The new side, if it exists.
+    new: Option<&'a [u8]>,
+    /// The old side, if it was read and exists.
+    old: Option<&'a [u8]>,
+}
+
+/// The verdict on a file whose content may be reviewed, with any secret masked (RV22).
+///
+/// The sides come masked from the source ([`ContentSource::masked`] says what it masked); a
+/// secret in `diff` alone is gone once the diff is rebuilt. When anything was masked, the diff is
+/// rebuilt from the masked sides ([`rebuilt_diff`]), so a key's body lines that git shows without
+/// their `BEGIN` line never leave in the clear; the file is declared with the first pattern found.
+/// The file is left out as `secret` instead, the safe direction, when only one of its two sides
+/// holds a masked key block (the other side's body lines would be a key no pattern names), when
+/// the diff cannot be rebuilt from the sides, or when the rebuilt diff still holds a secret.
+/// O(diff + sides).
+///
+/// # Arguments
+///
+/// * `read` - The sides the filter read.
+/// * `source` - The review's content source.
+/// * `diff` - The diff the file would be reviewed through, if any.
+/// * `with_old` - Whether its old side stays held.
+///
+/// # Returns
+///
+/// [`Verdict::Keep`], or a `secret` skip.
+fn kept_verdict(
+    read: &SidesRead<'_>,
+    source: &dyn ContentSource,
+    diff: Option<String>,
+    with_old: bool,
+) -> Verdict {
+    let new_mask = read.new.and(source.masked(Face::New, read.path));
+    let old_mask = read.old.and(source.masked(Face::Old, read.old_path));
+    let pattern = new_mask
+        .or(old_mask)
+        .map(|m| m.pattern)
+        .or_else(|| diff.as_deref().and_then(find_secret));
+    let Some(pattern) = pattern else {
+        return Verdict::Keep(Kept {
+            diff,
+            with_old,
+            masked: None,
+        });
+    };
+    let block = |m: Option<SideMask>| m.is_some_and(|m| m.multi_line);
+    if read.new.is_some() && read.old.is_some() && block(new_mask) != block(old_mask) {
+        return secret(read.path, pattern);
+    }
+    let diff = match diff {
+        Some(d) => match rebuilt_diff(&d, read.new, read.old) {
+            Some(r) if find_secret(&r).is_none() => Some(r),
+            _ => return secret(read.path, pattern),
+        },
+        None => None,
+    };
+    log_masked(read.path, pattern);
+    Verdict::Keep(Kept {
+        diff,
+        with_old,
+        masked: Some(pattern),
+    })
+}
+
+/// `diff` with every content line taken from the (masked) side it shows: a context or added line
+/// from `new`, a deleted line from `old`, each at the line number its hunk header gives. Header
+/// lines and `\ No newline` markers are kept; a hunk header keeps its ranges and loses its
+/// function context (a line of the file, possibly inside a masked block). `None` when a line
+/// names a side line that does not exist, a hunk header does not parse, or a body line has no
+/// marker: the diff and the sides disagree. O(diff + sides).
+fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<String> {
+    let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
+    let (mut next_new, mut next_old) = (0usize, 0usize);
+    let mut in_hunk = false;
+    let mut out = String::with_capacity(diff.len());
+    for raw in diff.split_inclusive('\n') {
+        let (line, eol) = match raw.strip_suffix('\n') {
+            Some(line) => (line, "\n"),
+            None => (raw, ""),
+        };
+        if line.starts_with(HUNK_START) {
+            let (header, old_start, new_start) = hunk_header(line)?;
+            out.push_str(header);
+            next_old = old_start.saturating_sub(1);
+            next_new = new_start.saturating_sub(1);
+            in_hunk = true;
+        } else if !in_hunk || line.starts_with('\\') {
+            out.push_str(line);
+        } else {
+            let (marker, text) = match line.chars().next()? {
+                ' ' => {
+                    next_old = next_old.saturating_add(1);
+                    (' ', take(&new_lines, &mut next_new)?)
+                }
+                '+' => ('+', take(&new_lines, &mut next_new)?),
+                '-' => ('-', take(&old_lines, &mut next_old)?),
+                _ => return None,
+            };
+            out.push(marker);
+            out.push_str(text);
+        }
+        out.push_str(eol);
+    }
+    Some(out)
+}
+
+/// The lines of a side, each without its `\n` (a `\r` stays, as git shows it); none for an
+/// absent side; `None` when the side is not UTF-8. O(side).
+fn side_lines(side: Option<&[u8]>) -> Option<Vec<&str>> {
+    match side {
+        Some(bytes) => Some(std::str::from_utf8(bytes).ok()?.split('\n').collect()),
+        None => Some(Vec::new()),
+    }
+}
+
+/// The line at `*next` of `lines`, advancing `*next`. O(1).
+fn take<'a>(lines: &[&'a str], next: &mut usize) -> Option<&'a str> {
+    let line = lines.get(*next).copied()?;
+    *next = next.saturating_add(1);
+    Some(line)
+}
+
+/// A hunk header `@@ -a[,b] +c[,d] @@[ context]`: the header up to its closing `@@`, and the
+/// first old and new line numbers. `None` when it does not parse. O(line).
+fn hunk_header(line: &str) -> Option<(&str, usize, usize)> {
+    let rest = line.get(HUNK_START.len()..)?;
+    let close = rest.find(HUNK_START)?;
+    let header = line.get(..HUNK_START.len() + close + HUNK_START.len())?;
+    let mut parts = rest.get(..close)?.split_whitespace();
+    let start = |part: Option<&str>, sign: char| -> Option<usize> {
+        let side = part?.strip_prefix(sign)?;
+        side.split(',').next()?.parse().ok()
+    };
+    let old = start(parts.next(), '-')?;
+    let new = start(parts.next(), '+')?;
+    Some((header, old, new))
 }
 
 /// The skip the content of a file calls for, or `None` when it may be reviewed: a NUL in a side
-/// gives `binary`, a side that is not UTF-8 `not utf-8`, a secret in a side or in `diff`
-/// `secret`, in that order. O(bytes).
+/// gives `binary`, a side that is not UTF-8 `not utf-8`, a secret still in a side `secret`, in
+/// that order. A side holds a secret here only when the source does not mask
+/// ([`ContentSource::masked`]): then the file is left out, as before masking existed. O(bytes).
 ///
 /// # Arguments
 ///
 /// * `path` - The file's path, for the `secret` log entry.
 /// * `sides` - The new and old sides that exist.
-/// * `diff` - The file's diff section, if any.
 ///
 /// # Returns
 ///
@@ -420,7 +578,7 @@ fn classify(
 // MAGI FIX (S6 loop 7): the whole side, not git's first 8 000 bytes: a text prefix hid a
 // binary payload, which is valid UTF-8 (NUL is a code point). One pass over bytes already
 // read and capped (MAX_REVIEW_FILE_BYTES), so the cost stays O(file).
-fn content_verdict(path: &str, sides: [Option<&[u8]>; 2], diff: Option<&str>) -> Option<Verdict> {
+fn content_verdict(path: &str, sides: [Option<&[u8]>; 2]) -> Option<Verdict> {
     if sides.iter().flatten().any(|side| side.contains(&0)) {
         return Some(Verdict::Skip(SkipCause::Binary));
     }
@@ -433,7 +591,6 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2], diff: Option<&str>) ->
             Err(_) => return Some(Verdict::Skip(SkipCause::NotUtf8)),
         }
     }
-    faces.extend(diff);
     faces
         .into_iter()
         .find_map(find_secret)
@@ -488,15 +645,23 @@ fn suppressed_diff(
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
     };
     let sides = [new.as_deref(), old.as_deref()];
-    if let Some(skip) = content_verdict(path, sides, file.diff.as_deref()) {
+    if let Some(skip) = content_verdict(path, sides) {
         return Ok(skip);
     }
+    let read = SidesRead {
+        path,
+        old_path: old_side,
+        new: new.as_deref(),
+        old: old.as_deref(),
+    };
     // MAGI FIX (review residual A2-b): a deleted text file marked `-diff` was left out as
     // `binary`, a false cause; its deletion is rebuilt from the old side, already scanned above.
     if new.is_none() {
         return Ok(
             match (old.as_deref().map(std::str::from_utf8), &file.diff) {
-                (Some(Ok(old)), Some(section)) => Verdict::KeepDiff(deletion_diff(section, old)),
+                (Some(Ok(text)), Some(section)) => {
+                    kept_verdict(&read, source, Some(deletion_diff(section, text)), true)
+                }
                 _ => Verdict::Skip(SkipCause::Binary),
             },
         );
@@ -508,7 +673,7 @@ fn suppressed_diff(
         path = shown.as_str(),
         "git printed a text file's diff as binary; it is reviewed whole"
     );
-    Ok(Verdict::KeepWhole)
+    Ok(kept_verdict(&read, source, None, false))
 }
 
 /// The unified diff of the deletion of a file whose old side is `old`, built on the header lines
@@ -557,6 +722,29 @@ fn secret(path: &str, pattern: &'static str) -> Verdict {
         "a file was left out of the review because it holds a secret"
     );
     Verdict::Skip(SkipCause::Secret)
+}
+
+/// Logs, at INFO with the shown path and the pattern's name (never the value), that a file is
+/// reviewed with its secrets masked.
+fn log_masked(path: &str, pattern: &'static str) {
+    let shown = display_path(path);
+    tracing::event!(
+        target: LOG_TARGET,
+        tracing::Level::INFO,
+        path = shown.as_str(),
+        pattern = pattern,
+        "a file holds a secret; it is reviewed with the secret masked"
+    );
+}
+
+/// The declaration of a file reviewed with its secrets masked, its path as it may leave the
+/// process.
+fn masked_file(path: &str, pattern: &'static str) -> Masked {
+    Masked {
+        path: display_path(path),
+        cause: SkipCause::Secret,
+        pattern,
+    }
 }
 
 /// What reading one side gave.

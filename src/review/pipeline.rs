@@ -486,6 +486,7 @@ pub async fn run_review(
             path: display_path(path),
             cause: SkipCause::NotUtf8,
         }));
+    summary.masked = filtered.masked;
     summary.no_extractor = filtered.no_extractor;
     summary.unmeasured_models = window.unmeasured;
     let planned = batches.len();
@@ -2502,7 +2503,7 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert!(!prompts[0].contains(TOY_PASSWORD), "{}", prompts[0]);
         assert!(
-            prompts[0].contains("-let u = \"<redacted: url-credential>"),
+            prompts[0].contains("-let u = \"postgres://<redacted: url-credential>db\";"),
             "{}",
             prompts[0]
         );
