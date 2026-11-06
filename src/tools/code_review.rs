@@ -2250,6 +2250,167 @@ mod tests {
         (rendered, warning)
     }
 
+    /// The SHA [`ShaGit`] resolves every revision to.
+    const FULL_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// Resolves any `rev-parse --verify <rev>^{commit}` to [`FULL_SHA`]; every other call fails.
+    struct ShaGit;
+    impl GitCommand for ShaGit {
+        fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+            match args {
+                ["rev-parse", "--verify", _] => Ok(format!("{FULL_SHA}\n").into_bytes()),
+                other => Err(ReviewError::Git(other.join(" "))),
+            }
+        }
+    }
+
+    /// One `kept` finding on `a.rs:1`.
+    fn kept_finding() -> Vec<(ConsolidatedFinding, GateVerdict)> {
+        use magi_core::schema::{AgentName, Category, Severity};
+        vec![(
+            ConsolidatedFinding {
+                file: Some("a.rs".into()),
+                line: Some(1),
+                severity: Severity::Warning,
+                reported_severity: Severity::Warning,
+                titles: vec!["t".into()],
+                details: vec!["d".into()],
+                categories: vec![Category::Other],
+                sources: vec![AgentName::Melchior, AgentName::Caspar],
+                marks: vec![],
+                batches: vec![0],
+            },
+            GateVerdict {
+                state: magi_rs::review::gate::GateState::Kept,
+                cause: None,
+                causes: vec![],
+                model: Some("g".into()),
+                lean: None,
+                confidence: None,
+                skipped: vec![],
+                status: None,
+            },
+        )]
+    }
+
+    /// What a review of `rev` (or of the working tree) leaves, with no documentation index.
+    fn follow_up(rev: Option<&str>) -> FollowUp {
+        FollowUp {
+            findings: kept_finding(),
+            rev: rev.map(str::to_string),
+            worktree: None,
+            docs: None,
+            ignored: HashSet::new(),
+            repository: true,
+        }
+    }
+
+    #[test]
+    fn the_history_is_anchored_to_the_full_sha_of_the_reviewed_revision() {
+        // Ruling 3: the reclassification compares the anchor with `rev-parse` output, so a short
+        // or symbolic ref stored as given would never match.
+        let (_db, _mem, memory) = review_memory();
+        assert!(follow_up_work(&memory, &ShaGit, follow_up(Some("HEAD"))).is_none());
+        let stored: Vec<String> = memory
+            .history()
+            .all()
+            .expect("all")
+            .into_iter()
+            .map(|e| e.reviewed_commit)
+            .collect();
+        assert_eq!(stored, vec![FULL_SHA.to_string()]);
+    }
+
+    #[test]
+    fn a_working_tree_review_records_no_history() {
+        // RV08: there is no commit to anchor it to.
+        let (_db, _mem, memory) = review_memory();
+        assert!(follow_up_work(&memory, &ShaGit, follow_up(None)).is_none());
+        assert!(memory.history().all().expect("all").is_empty());
+    }
+
+    #[test]
+    fn a_history_that_cannot_be_updated_is_a_warning_line() {
+        let (_db, _mem, memory) = review_memory();
+        memory
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute_batch("DROP TABLE code_review_history;")
+            .expect("drop");
+        let warning = follow_up_work(&memory, &ShaGit, follow_up(Some("HEAD")));
+        assert!(
+            warning
+                .as_deref()
+                .is_some_and(|w| w.starts_with("warning: the review history was not updated: ")),
+            "{warning:?}"
+        );
+    }
+
+    /// An embedder whose dimension never becomes known: `dim()` stays 0 after any answer.
+    struct ZeroDimEmbedder;
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for ZeroDimEmbedder {
+        async fn embed(
+            &self,
+            texts: &[String],
+        ) -> Result<Vec<Vec<f32>>, crate::memory::error::EmbeddingError> {
+            Ok(texts.iter().map(|_| vec![0.5; 3]).collect())
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            0
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    /// `src/a.rs` and a README in a temporary workspace (no repository).
+    fn workspace_with_readme() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        std::fs::write(ws.join("src").join("a.rs"), "fn a() {}\n").expect("a.rs");
+        std::fs::write(ws.join("README.md"), "# A\ntext\n").expect("README");
+        (tmp, ws)
+    }
+
+    #[tokio::test]
+    async fn an_embedder_without_a_dimension_degrades_to_index_unavailable_once() {
+        // Ruling 4: the review runs; the documentation index is declared unavailable, once.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let runner =
+            production_runner_with_memory(&ws, Some(memory), Some(Arc::new(ZeroDimEmbedder)));
+        let (rendered, _) = review_and_follow_up(&runner, ReviewInput::File("src".into())).await;
+        let unavailable =
+            serde_json::json!({"kind": "documentation", "label": "index unavailable"});
+        let hits = rendered.json["trimmed"]
+            .as_array()
+            .map_or(0, |t| t.iter().filter(|i| **i == unavailable).count());
+        assert_eq!(hits, 1, "{}", rendered.json["trimmed"]);
+    }
+
+    #[tokio::test]
+    async fn without_a_database_the_report_says_without_memory() {
+        // `--no-memory` opens no review store: its own cause, never a missing embedder.
+        let (_tmp, ws) = workspace_with_readme();
+        let embedder: Arc<dyn EmbeddingProvider> =
+            Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let runner = production_runner_with_memory(&ws, None, Some(embedder));
+        let (rendered, warning) =
+            review_and_follow_up(&runner, ReviewInput::File("src".into())).await;
+        assert_eq!(rendered.json["without_memory"], true);
+        assert_eq!(rendered.json["without_embedder"], false);
+        assert!(warning.is_none());
+    }
+
     #[tokio::test]
     async fn a_working_tree_without_a_repository_drops_its_older_documentation() {
         // RV-S39 without git: the working tree alone is live, so the version it replaced goes.
