@@ -4551,6 +4551,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_skipped_key_block_file_never_reaches_a_prompt_as_a_definition() {
+        // [T3.7-fix2 round 4, R3-3] The cache holds a key-block side raw, so safety rests on the
+        // index (and with it every definition, caller and unit) coming from kept files only. Here
+        // the reviewed file calls a symbol that only the skipped key-block file defines; a context
+        // source that resolves definitions through the review's index and content must not find it.
+        struct IndexRag;
+        struct BoundRag<'r> {
+            index: &'r LexicalIndex,
+            sources: &'r dyn ContentSource,
+        }
+        #[async_trait::async_trait]
+        impl RagSource for IndexRag {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Err(ReviewError::Io("unbound".into()))
+            }
+            fn for_review<'r>(
+                &'r self,
+                material: ReviewMaterial<'r>,
+            ) -> Option<Box<dyn RagSource + 'r>> {
+                Some(Box::new(BoundRag {
+                    index: material.index,
+                    sources: material.sources,
+                }))
+            }
+        }
+        #[async_trait::async_trait]
+        impl RagSource for BoundRag<'_> {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                let mut items = Vec::new();
+                for name in ["helper", "ok_helper"] {
+                    for (path, _, _) in self.index.definitions(name) {
+                        let bytes = self.sources.read(path)?.unwrap_or_default();
+                        items.push(ContextItem {
+                            kind: ContextKind::Definition,
+                            file: path.clone(),
+                            label: name.into(),
+                            text: String::from_utf8_lossy(&bytes).into_owned(),
+                            candidate: false,
+                            lines: None,
+                            old_side: false,
+                        });
+                    }
+                }
+                Ok(Assembled {
+                    items,
+                    trimmed: vec![],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let key = format!(
+            "fn helper() {{\n    let k = \"{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\nQQQQ\n{end}\";\n}}\n"
+        );
+        std::fs::write(dir.path().join("key.rs"), key).expect("write");
+        std::fs::write(
+            dir.path().join("ok.rs"),
+            "fn ok_helper() {\n    let z = 7;\n}\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.path().join("b.rs"),
+            "fn b() {\n    helper();\n    ok_helper();\n}\n",
+        )
+        .expect("write");
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review_dir_with_rag(dir.path(), &IndexRag, &consult, &gate_always("real_defect"))
+            .await
+            .expect("b.rs and ok.rs are reviewed");
+        let prompts = consult.prompts.lock().expect("lock").clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("let z = 7;")),
+            "control: a kept file's definition is shown: {prompts:?}"
+        );
+        assert!(
+            prompts.iter().all(|p| !p.contains("MIIB")
+                && !p.contains("QQQQ")
+                && !p.contains("key.rs")
+                && !p.contains("fn helper")),
+            "{prompts:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&out.summary.skipped).expect("json"),
+            serde_json::json!([{"path": "key.rs", "cause": "secret"}])
+        );
+    }
+
+    #[tokio::test]
     async fn a_finding_on_a_documentation_file_shown_as_context_is_context_only() {
         // [CP2 MS3 loop 1] RV09: every non-unit item registers its file, not only definitions and callers.
         let dir = workspace(1);

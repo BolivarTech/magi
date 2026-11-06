@@ -2051,6 +2051,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_documentation_file_holding_a_key_block_is_withheld_whole_through_the_cache() {
+        // [T3.7-fix2 round 4, R3-4] The cache holds a key-block side raw (RV22's exception), so the
+        // documentation path must be the one that withholds it: the whole source, the clean
+        // sections included, and the embedder never sees a byte of it.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let readme = format!(
+            "# Keys\n{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\nQQQQ\n{end}\n# Other\nCLEAN-SECTION\n"
+        );
+        let f = RagFixture::new(&[("README.md", readme.as_str())]).await;
+        let cached = magi_rs::review::source::CachedSource::new(&f.source);
+        let embedder = Recording(std::sync::Mutex::new(Vec::new()));
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &cached,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.doc_sources.is_empty(), "{:?}", prep.doc_sources);
+        assert_eq!(prep.withheld_sources, vec!["README.md".to_string()]);
+        let sent = embedder
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            sent.iter().all(|t| !t.contains("MIIB")
+                && !t.contains("QQQQ")
+                && !t.contains("PRIVATE KEY")
+                && !t.contains("CLEAN-SECTION")),
+            "{sent:?}"
+        );
+    }
+
     /// README.md reads; every other path fails the way MS2 skips a listed file. [MS3 final review I2]
     struct SomeUnreadable;
     impl ContentSource for SomeUnreadable {
