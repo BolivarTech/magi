@@ -1124,6 +1124,13 @@ impl ProductionReviewRunner {
     /// and indexes what the store lacks, before the review's clock. Without a database or an
     /// embedder there is nothing to prepare; any failure on the way degrades to a review without
     /// documentation (declared once by the context source), never a failed review.
+    ///
+    /// It runs before `run_review` re-checks the approved plan and digest, and so before a
+    /// review that changed since its approval is refused: the documentation is part of the
+    /// preparation, which must end before the review's clock starts, and that check lives inside
+    /// `run_review`. The cost of a refused review is bounded by [`REINDEX_TIMEOUT_SECS`], nothing
+    /// is sent to the trio, every chunk has passed the secret detector before any embedding, and
+    /// what was indexed is reused by the next review of the same revision.
     async fn prepare_documentation(&self, input: &ReviewInput) -> DocContext {
         let (Some(memory), Some(embedder)) =
             (self.parts.memory.as_deref(), self.parts.embedder.as_deref())
