@@ -302,7 +302,7 @@ fn review_pool(
 ///
 /// # Errors
 /// When the client cannot be built.
-fn gate_client(
+pub(crate) fn gate_client(
     base_url: &str,
     api_key: Option<zeroize::Zeroizing<String>>,
     chain: &[ModelSpec],

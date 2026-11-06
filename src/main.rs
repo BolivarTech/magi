@@ -23140,3 +23140,8 @@ mod code_review_surface_tests {
         assert_eq!(production.matches(none.as_str()).count(), 1, "decide only");
     }
 }
+
+// After every test module on purpose: the source guards end a file's production code at its
+// first `#[cfg(test)]` module (`FIRST_TEST_MODULE`).
+#[cfg(test)]
+mod review_regate;
