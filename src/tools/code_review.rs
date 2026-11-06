@@ -223,12 +223,10 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
 pub(crate) type PostReport = Box<dyn FnOnce() -> Option<String> + Send>;
 
 /// What the tool's result says when the run had no time left for the post-report work.
-#[allow(dead_code)] // Red stub: removed in Green
 const POST_REPORT_SKIPPED: &str =
     "note: the review history and the documentation index clean-up were skipped: the run's time is spent";
 
 /// What a surface says when the post-report work did not finish before the run ended.
-#[allow(dead_code)] // Red stub: removed in Green
 const POST_REPORT_CUT: &str =
     "note: the review history and the documentation index clean-up did not finish before the run ended";
 
@@ -251,9 +249,48 @@ pub(crate) async fn finish_after_report(
     limit: Option<Duration>,
     cancel: Option<&CancellationToken>,
 ) -> Option<String> {
-    let _ = (limit, cancel);
     let work = runner.after_report()?;
-    work()
+    if limit.is_some_and(|l| l.is_zero()) {
+        tracing::event!(
+            target: REVIEW_LOG_TARGET,
+            tracing::Level::WARN,
+            "{POST_REPORT_SKIPPED}"
+        );
+        return Some(POST_REPORT_SKIPPED.to_string());
+    }
+    let task = tokio::task::spawn_blocking(work);
+    let bounded = async {
+        match limit {
+            Some(limit) => tokio::time::timeout(limit, task).await.ok(),
+            None => Some(task.await),
+        }
+    };
+    let cancelled = async {
+        match cancel {
+            Some(cancel) => cancel.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    let finished = tokio::select! {
+        biased;
+        finished = bounded => finished,
+        () = cancelled => None,
+    };
+    match finished {
+        Some(Ok(warning)) => warning,
+        Some(Err(join)) => {
+            let cause = egress_text(&join.to_string());
+            Some(format!("{HISTORY_NOT_UPDATED}: {cause}"))
+        }
+        None => {
+            tracing::event!(
+                target: REVIEW_LOG_TARGET,
+                tracing::Level::WARN,
+                "{POST_REPORT_CUT}"
+            );
+            Some(POST_REPORT_CUT.to_string())
+        }
+    }
 }
 
 /// Runs `fut` until it ends or `cancel` fires.
