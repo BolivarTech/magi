@@ -817,6 +817,15 @@ pub async fn prepare_docs(
             },
         };
         let Ok(text) = String::from_utf8(bytes) else {
+            // Not text, so not documentation: it is no source of the revision, and it is said.
+            let path = display_path(&source.path);
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::INFO,
+                path = path.as_str(),
+                "a documentation source is not UTF-8 and is left out"
+            );
+            prep.doc_sources.remove(&source);
             continue;
         };
         let (kept, dropped) = without_secrets(chunk_source(&source.path, &text, registry));
