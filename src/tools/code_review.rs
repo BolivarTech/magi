@@ -1269,9 +1269,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
     }
 
     /// Records the history of a revision review (anchored to the full SHA of its new side) and
-    /// cleans the documentation index, after the report. A working-tree review records no
-    /// history (RV08: there is no commit to anchor it). Every outcome is logged; a history that
-    /// could not be updated is also returned as a warning; the clean-up only logs.
+    /// cleans the documentation index, after the report ([`follow_up_work`]).
     fn after_report(&self) -> Option<String> {
         let follow = self
             .follow_up
@@ -1279,88 +1277,101 @@ impl CodeReviewRunner for ProductionReviewRunner {
             .unwrap_or_else(PoisonError::into_inner)
             .take()?;
         let memory = self.parts.memory.as_deref()?;
-        let mut warning = None;
-        if let Some(rev) = &follow.rev {
-            match self.record_history(memory, rev, &follow.findings) {
-                Ok(stats) => tracing::event!(
-                    target: REVIEW_LOG_TARGET,
-                    tracing::Level::INFO,
-                    reclassified = stats.reclassified,
-                    recorded = stats.recorded,
-                    backlog = stats.backlog,
-                    "review history updated"
-                ),
-                Err(cause) => {
-                    tracing::event!(
-                        target: REVIEW_LOG_TARGET,
-                        tracing::Level::WARN,
-                        error = cause.as_str(),
-                        "the review history was not updated"
-                    );
-                    warning = Some(format!("{HISTORY_NOT_UPDATED}: {cause}"));
-                }
-            }
-        }
-        if let Some(docs) = &follow.docs {
-            let keep = |p: &str| !is_never_reviewed(p) && !follow.ignored.contains(p);
-            match collect_garbage(docs, Some(&self.git), &keep, follow.worktree.as_ref()) {
-                Ok(Some(removed)) => tracing::event!(
-                    target: REVIEW_LOG_TARGET,
-                    tracing::Level::INFO,
-                    removed = removed,
-                    "documentation index cleaned"
-                ),
-                Ok(None) => tracing::event!(
-                    target: REVIEW_LOG_TARGET,
-                    tracing::Level::WARN,
-                    "the documentation index was not cleaned: too many local refs, or git did not answer"
-                ),
-                Err(e) => {
-                    let error = egress_text(&e.to_string());
-                    tracing::event!(
-                        target: REVIEW_LOG_TARGET,
-                        tracing::Level::WARN,
-                        error = error.as_str(),
-                        "the documentation index was not cleaned"
-                    );
-                }
-            }
-        }
-        warning
+        follow_up_work(memory, &self.git, follow)
     }
 }
 
-impl ProductionReviewRunner {
-    /// Reclassifies and records the history of a review of `rev`, anchored to its full SHA
-    /// (the reclassification compares it with `rev-parse` output).
-    ///
-    /// # Errors
-    /// The redacted cause, when the SHA cannot be resolved or the store fails.
-    fn record_history(
-        &self,
-        memory: &ReviewMemory,
-        rev: &str,
-        findings: &[(ConsolidatedFinding, GateVerdict)],
-    ) -> Result<RecordStats, String> {
-        let commit = format!("{rev}^{{commit}}");
-        let sha = self
-            .git
-            .run(&["rev-parse", "--verify", commit.as_str()])
-            .map_err(|e| egress_text(&e.to_string()))?;
-        let entries = entries_from_review(findings, sha.trim());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-        record_review(
-            memory.history(),
-            &entries,
-            HISTORY_HEAD,
-            &self.git,
-            now,
-            Duration::from_secs(RECLASSIFY_BUDGET_SECS),
-        )
-        .map_err(|e| egress_text(&e.to_string()))
+/// What a review leaves for after its report: the history of a revision review (anchored to
+/// the full SHA of its new side) and the clean-up of the documentation index. A working-tree
+/// review records no history (RV08: there is no commit to anchor it). Every outcome is logged;
+/// a history that could not be updated is also returned as a warning; the clean-up only logs.
+///
+/// # Arguments
+/// * `memory` - The review stores.
+/// * `git` - The workspace's git.
+/// * `follow` - What the review left.
+///
+/// # Returns
+/// The `warning: the review history was not updated: <cause>` line, or `None`.
+fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp) -> Option<String> {
+    let mut warning = None;
+    if let Some(rev) = &follow.rev {
+        match record_history(memory, git, rev, &follow.findings) {
+            Ok(stats) => tracing::event!(
+                target: REVIEW_LOG_TARGET,
+                tracing::Level::INFO,
+                reclassified = stats.reclassified,
+                recorded = stats.recorded,
+                backlog = stats.backlog,
+                "review history updated"
+            ),
+            Err(cause) => {
+                tracing::event!(
+                    target: REVIEW_LOG_TARGET,
+                    tracing::Level::WARN,
+                    error = cause.as_str(),
+                    "the review history was not updated"
+                );
+                warning = Some(format!("{HISTORY_NOT_UPDATED}: {cause}"));
+            }
+        }
     }
+    if let Some(docs) = &follow.docs {
+        let keep = |p: &str| !is_never_reviewed(p) && !follow.ignored.contains(p);
+        match collect_garbage(docs, Some(git), &keep, follow.worktree.as_ref()) {
+            Ok(Some(removed)) => tracing::event!(
+                target: REVIEW_LOG_TARGET,
+                tracing::Level::INFO,
+                removed = removed,
+                "documentation index cleaned"
+            ),
+            Ok(None) => tracing::event!(
+                target: REVIEW_LOG_TARGET,
+                tracing::Level::WARN,
+                "the documentation index was not cleaned: too many local refs, or git did not answer"
+            ),
+            Err(e) => {
+                let error = egress_text(&e.to_string());
+                tracing::event!(
+                    target: REVIEW_LOG_TARGET,
+                    tracing::Level::WARN,
+                    error = error.as_str(),
+                    "the documentation index was not cleaned"
+                );
+            }
+        }
+    }
+    warning
+}
+
+/// Reclassifies and records the history of a review of `rev`, anchored to its full SHA (the
+/// reclassification compares it with `rev-parse` output).
+///
+/// # Errors
+/// The redacted cause, when the SHA cannot be resolved or the store fails.
+fn record_history(
+    memory: &ReviewMemory,
+    git: &dyn GitCommand,
+    rev: &str,
+    findings: &[(ConsolidatedFinding, GateVerdict)],
+) -> Result<RecordStats, String> {
+    let commit = format!("{rev}^{{commit}}");
+    let sha = git
+        .run(&["rev-parse", "--verify", commit.as_str()])
+        .map_err(|e| egress_text(&e.to_string()))?;
+    let entries = entries_from_review(findings, sha.trim());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    record_review(
+        memory.history(),
+        &entries,
+        HISTORY_HEAD,
+        git,
+        now,
+        Duration::from_secs(RECLASSIFY_BUDGET_SECS),
+    )
+    .map_err(|e| egress_text(&e.to_string()))
 }
 
 /// What the history is reclassified against: everything after the reviewed commit, up to now.
