@@ -206,15 +206,54 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     ) -> Result<Rendered, ReviewError>;
 
     /// What the last [`Self::run`] leaves for after its report is delivered: the review history
-    /// and the clean-up of the documentation index (RV08, RV-S39). A surface calls it once it
-    /// has printed or shown the report, so cutting the process here never loses the report.
+    /// and the clean-up of the documentation index (RV08, RV-S39), as blocking work for
+    /// [`finish_after_report`]. A surface runs it once it has printed or shown the report, so
+    /// cutting the process there never loses the report.
     ///
     /// # Returns
-    /// A one-line warning (already redacted) when the history could not be updated, for the
-    /// surface to show on its own channel; `None` otherwise.
-    fn after_report(&self) -> Option<String> {
+    /// The work, or `None` when the review left nothing to do. The work returns a one-line
+    /// warning (already redacted) when the history could not be updated.
+    fn after_report(&self) -> Option<PostReport> {
         None
     }
+}
+
+/// Blocking work a review leaves for after its report: git and SQLite calls, never awaited on
+/// the async runtime.
+pub(crate) type PostReport = Box<dyn FnOnce() -> Option<String> + Send>;
+
+/// What the tool's result says when the run had no time left for the post-report work.
+#[allow(dead_code)] // Red stub: removed in Green
+const POST_REPORT_SKIPPED: &str =
+    "note: the review history and the documentation index clean-up were skipped: the run's time is spent";
+
+/// What a surface says when the post-report work did not finish before the run ended.
+#[allow(dead_code)] // Red stub: removed in Green
+const POST_REPORT_CUT: &str =
+    "note: the review history and the documentation index clean-up did not finish before the run ended";
+
+/// Runs the work [`CodeReviewRunner::after_report`] leaves, off the async runtime
+/// (`spawn_blocking`), bounded by `limit` and `cancel` when given.
+///
+/// When `limit` is zero the work is skipped; when `limit` passes or `cancel` fires first, the
+/// surface goes on and the work is left to finish on its blocking thread (each git call inside
+/// has its own bound). Both are logged and returned as a note.
+///
+/// # Arguments
+/// * `runner` - The runner whose last review left work.
+/// * `limit` - What is left of the calling run, if it has a deadline.
+/// * `cancel` - The calling run's cancellation, if any.
+///
+/// # Returns
+/// The work's warning, a note that it was skipped or cut, or `None`.
+pub(crate) async fn finish_after_report(
+    runner: &dyn CodeReviewRunner,
+    limit: Option<Duration>,
+    cancel: Option<&CancellationToken>,
+) -> Option<String> {
+    let _ = (limit, cancel);
+    let work = runner.after_report()?;
+    work()
 }
 
 /// Runs `fut` until it ends or `cancel` fires.
@@ -874,7 +913,11 @@ impl Tool for CodeReviewTool {
         };
         // The tool's report is its result, so what follows it runs before the result is handed
         // back; a history that could not be updated is said in it, never dropped.
-        if let Some(warning) = self.runner.after_report() {
+        let limit = self
+            .deadline
+            .map(|d| d.saturating_duration_since(Instant::now()));
+        if let Some(warning) = finish_after_report(self.runner.as_ref(), limit, Some(cancel)).await
+        {
             report.push('\n');
             report.push_str(&warning);
         }
@@ -1285,15 +1328,19 @@ impl CodeReviewRunner for ProductionReviewRunner {
     }
 
     /// Records the history of a revision review (anchored to the full SHA of its new side) and
-    /// cleans the documentation index, after the report ([`follow_up_work`]).
-    fn after_report(&self) -> Option<String> {
+    /// cleans the documentation index, after the report ([`follow_up_work`]), as owned work
+    /// over its own git runner, so it can run on a blocking thread.
+    fn after_report(&self) -> Option<PostReport> {
         let follow = self
             .follow_up
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()?;
-        let memory = self.parts.memory.as_deref()?;
-        follow_up_work(memory, &self.git, follow)
+        let memory = Arc::clone(self.parts.memory.as_ref()?);
+        let workspace = self.workspace.clone();
+        Some(Box::new(move || {
+            follow_up_work(&memory, &ScrubbedGit::new(workspace), follow)
+        }))
     }
 }
 
@@ -2246,8 +2293,91 @@ mod tests {
             .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
             .await
             .expect("the review runs");
-        let warning = runner.after_report();
+        let warning = finish_after_report(runner, None, None).await;
         (rendered, warning)
+    }
+
+    /// A runner whose review succeeds at once and whose post-report work blocks on a channel,
+    /// as a hung git would, until the sender is dropped or 60 s pass.
+    struct HangingFollowUpRunner {
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        started: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl CodeReviewRunner for HangingFollowUpRunner {
+        fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+            Ok(ReviewPlan {
+                input: input.clone(),
+                batches: 1,
+                digest: None,
+                worst_case_secs: 1,
+            })
+        }
+        async fn run(
+            &self,
+            _plan: ReviewPlan,
+            _budget: ReviewBudget,
+            _cancel: &CancellationToken,
+        ) -> Result<Rendered, ReviewError> {
+            Ok(Rendered {
+                text: "report".into(),
+                json: serde_json::json!({}),
+                consult: Value::Null,
+                failure: None,
+            })
+        }
+        fn after_report(&self) -> Option<PostReport> {
+            let rx = self.release.lock().expect("lock").take()?;
+            let started = Arc::clone(&self.started);
+            Some(Box::new(move || {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = rx.recv_timeout(Duration::from_secs(60));
+                None
+            }))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hung_post_report_step_never_holds_the_tool_past_its_cancelled_run() {
+        // REQ-H36: the history and clean-up run off the runtime and give way to the run's token.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let runner = Arc::new(HangingFollowUpRunner {
+            release: std::sync::Mutex::new(Some(rx)),
+            started: Arc::default(),
+        });
+        let tool = CodeReviewTool::new(runner, true);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let started = Instant::now();
+        let out = tool
+            .execute(serde_json::json!({"path": "src"}), &cancel)
+            .await
+            .expect("the review reported");
+        let took = started.elapsed();
+        drop(tx);
+        assert!(took < Duration::from_secs(30), "{took:?}");
+        assert!(
+            out["report"]
+                .as_str()
+                .is_some_and(|r| r.contains(POST_REPORT_CUT)),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_no_time_left_the_post_report_step_is_skipped_and_said() {
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let runner = HangingFollowUpRunner {
+            release: std::sync::Mutex::new(Some(rx)),
+            started: Arc::clone(&started),
+        };
+        let note = finish_after_report(&runner, Some(Duration::ZERO), None).await;
+        assert_eq!(note.as_deref(), Some(POST_REPORT_SKIPPED));
+        assert!(
+            !started.load(std::sync::atomic::Ordering::SeqCst),
+            "the work never ran"
+        );
     }
 
     /// The SHA [`ShaGit`] resolves every revision to.

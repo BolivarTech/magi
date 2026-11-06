@@ -2431,7 +2431,10 @@ impl App {
                 }
                 // After the report is on screen: the history and the index clean-up. Its warning
                 // goes through the UI, never to stderr while the alternate screen is up.
-                if let Some(warning) = runner.after_report() {
+                if let Some(warning) =
+                    crate::tools::code_review::finish_after_report(runner.as_ref(), None, None)
+                        .await
+                {
                     let warning = crate::agent::Agent::sanitize_text(&warning);
                     apply_response(self, AgentResponse::Error(warning));
                 }
