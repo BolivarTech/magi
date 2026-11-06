@@ -64,7 +64,16 @@ const CAUSE_TRANSPORT: &str = "transport";
 const CAUSE_UNAUTHORIZED: &str = "unauthorized";
 /// Cause of a chain that ended without a usable answer.
 const CAUSE_CHAIN_EXHAUSTED: &str = "chain exhausted";
-/// Cause of a critical finding judged a false positive: it stays in the main list.
+/// Confidence at or above which a `false_positive` answer filters even a `critical` finding
+/// (RV10 amendment, user decision 2026-11-06, T3.7 criterion 2). Below it the finding stays in the
+/// main list as `low_confidence` (`critical never filtered`).
+///
+/// A round number declared post hoc: without a bound the rule protected 6 `critical` false
+/// positives and the gate removed 16/42 (38.1 %, criterion 2 asks 40 %). The risk to real
+/// `critical` defects was not measured: neither `tune` nor `verify` holds a real `critical`
+/// judged `false_positive`.
+pub const CRITICAL_MIN_CONFIDENCE: f64 = 0.75;
+/// Cause of a critical finding judged a false positive with low confidence: it stays in the main list.
 const CAUSE_CRITICAL_NEVER_FILTERED: &str = "critical never filtered";
 /// Cause of a finding whose asked pairs were all judged false positives while pairs past
 /// [`MAX_GATE_QUESTIONS_PER_FINDING`] went unasked: what was never judged is never filtered.
@@ -671,17 +680,13 @@ impl<'a> Gate<'a> {
         if let (true, Some(cause)) = (states.is_empty(), withheld) {
             return Outcome::unfiltered(cause);
         }
-        let never_filter = if finding.reported_severity == Severity::Critical {
-            Some(CAUSE_CRITICAL_NEVER_FILTERED)
-        } else {
-            guard
-        };
+        let critical = finding.reported_severity == Severity::Critical;
         let mut outcome = Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
         let mut put = 0;
         for state in states {
             self.questions += 1;
             put += 1;
-            outcome = self.ask(state, never_filter, deadline, skipped).await;
+            outcome = self.ask(state, guard, critical, deadline, skipped).await;
             if outcome.state != GateState::Filtered {
                 break;
             }
@@ -714,12 +719,15 @@ impl<'a> Gate<'a> {
         }
     }
 
-    /// Asks one state down the chain; a confident `false_positive` is `low_confidence` with
-    /// `never_filter` as its cause when one is given, else `filtered`.
+    /// Asks one state down the chain. A confident `false_positive` is `low_confidence` when the
+    /// finding is `critical` and the confidence is under [`CRITICAL_MIN_CONFIDENCE`] (cause
+    /// `critical never filtered`), or when `guard` names another protection (that cause);
+    /// otherwise it is `filtered`.
     async fn ask(
         &mut self,
         state: Value,
-        never_filter: Option<&'static str>,
+        guard: Option<&'static str>,
+        critical: bool,
         deadline: Option<Instant>,
         skipped: &mut Vec<String>,
     ) -> Outcome {
@@ -771,7 +779,13 @@ impl<'a> Gate<'a> {
                         ));
                         continue;
                     }
-                    let (state, cause) = match (choice, never_filter) {
+                    // T3.7-fix1: the critical rule yields to a confident answer; `guard` does not.
+                    let protected = if critical && confidence < CRITICAL_MIN_CONFIDENCE {
+                        Some(CAUSE_CRITICAL_NEVER_FILTERED)
+                    } else {
+                        guard
+                    };
+                    let (state, cause) = match (choice, protected) {
                         (FALSE_POSITIVE, Some(cause)) => (GateState::LowConfidence, Some(cause)),
                         (FALSE_POSITIVE, None) => (GateState::Filtered, None),
                         _ => (GateState::Kept, None),

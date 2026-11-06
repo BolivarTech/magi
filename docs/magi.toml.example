@@ -122,7 +122,7 @@ min_confidence = 0.75
 model           = "clef:cloud"
 # A false_positive answer filters a finding only at or above this confidence. The values come
 # from the maintainer's calibration of the gate's question and may not fit your code. A finding
-# the trio reported as critical is never filtered, whatever the confidence. Required on every
+# the trio reported as critical is filtered only at a confidence of 0.75 or more. Required on every
 # model, here and in each fallback: a model without one is a load error.
 min_confidence  = 0.40
 # HTTP timeout of each gate call, in seconds. Optional, default 120. With --timeout, a call
