@@ -56,6 +56,10 @@ pub struct ContextItem {
     pub candidate: bool,
     /// The lines of `file` the text covers, when it is a span of a file.
     pub lines: Option<(u32, u32)>,
+    /// Whether the text was read from the old side of `file`: the containing unit of a
+    /// deletion-only hunk (RV21). `lines` are then old-side coordinates; `false` for every
+    /// other item.
+    pub old_side: bool,
 }
 
 /// The context that fits a batch, and what was left out.
@@ -279,6 +283,7 @@ fn unit_item(kind: ContextKind, unit: SemanticUnit) -> ContextItem {
         text: unit.content,
         candidate: false,
         lines: Some((unit.start_line, unit.end_line)),
+        old_side: false,
     }
 }
 
@@ -371,6 +376,7 @@ pub fn definitions_for(
                 text: lines_text(body, *first, *last),
                 candidate: places.len() > 1,
                 lines: Some((*first, *last)),
+                old_side: false,
             });
         }
     }
@@ -538,6 +544,7 @@ mod tests {
             text: "x".repeat(text_tokens * 4),
             candidate: false,
             lines: None,
+            old_side: false,
         }
     }
 
@@ -552,6 +559,7 @@ mod tests {
             text: "x".repeat(40),
             candidate: false,
             lines: None,
+            old_side: false,
         };
         let cost = 10 + 1 + CONTEXT_ITEM_FRAME_TOKENS; // text, path, frame [CP2 MS3 loop 12: symbolic]
         assert_eq!(item_cost(&def()), cost);
@@ -578,6 +586,77 @@ mod tests {
             over.items.is_empty() && over.trimmed.len() == 1,
             "one token over: trimmed"
         );
+    }
+
+    #[test]
+    fn an_old_side_unit_and_a_new_side_unit_on_the_same_lines_both_enter() {
+        // [MS3 final review m2] Same numbers, different sides: two units, and a definition with
+        // the old unit's range is still added (the old unit does not carry it).
+        let unit = |old_side: bool, label: &str| {
+            let mut u = item(ContextKind::Unit, label, 30);
+            u.lines = Some((1, 3));
+            u.old_side = old_side;
+            u
+        };
+        let mut def = item(ContextKind::Definition, "d", 30);
+        def.lines = Some((1, 3));
+        let a = assemble(
+            0,
+            1_000,
+            vec![unit(true, "gone"), unit(false, "kept")],
+            vec![def],
+            Some(vec![]),
+            Some(vec![]),
+        )
+        .expect("fits");
+        let labels: Vec<&str> = a.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["gone", "kept"],
+            "the definition is the new unit's"
+        );
+        let a = assemble(
+            0,
+            1_000,
+            vec![unit(true, "gone")],
+            vec![{
+                let mut d = item(ContextKind::Definition, "d", 30);
+                d.lines = Some((1, 3));
+                d
+            }],
+            Some(vec![]),
+            Some(vec![]),
+        )
+        .expect("fits");
+        let labels: Vec<&str> = a.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["gone", "d"]);
+    }
+
+    #[test]
+    fn a_containing_unit_records_the_side_it_was_read_from() {
+        // [MS3 final review m2] Recorded where it is derived, never inferred from the hunks later.
+        use crate::review::test_support::MapSource;
+        let sources = MapSource::new(
+            &[("a.rs", "fn kept() {\n    y();\n}\n")],
+            &[("a.rs", "fn gone() {\n    x();\n}\n")],
+        );
+        let registry = LanguageRegistry::new();
+        let hunk = |first_line, last_line| BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "x".into(),
+            first_line,
+            last_line,
+            old_first_line: 2,
+            old_last_line: 2,
+        };
+        let deletion = containing_unit(&hunk(2, 1), &sources, &registry)
+            .expect("ok")
+            .expect("unit");
+        assert!(deletion.old_side && deletion.text.contains("fn gone()"));
+        let change = containing_unit(&hunk(2, 2), &sources, &registry)
+            .expect("ok")
+            .expect("unit");
+        assert!(!change.old_side && change.text.contains("fn kept()"));
     }
 
     #[test]

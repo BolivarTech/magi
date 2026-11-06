@@ -233,6 +233,7 @@ fn doc_item(chunk: DocChunk) -> ContextItem {
         text: escape_fence(&chunk.text),
         candidate: false,
         lines: None,
+        old_side: false,
     }
 }
 
@@ -246,6 +247,7 @@ fn history_item(e: HistoryEntry) -> ContextItem {
         file: e.file,
         text: escape_fence(&text),
         candidate: false,
+        old_side: false,
     }
 }
 
@@ -2173,6 +2175,29 @@ mod tests {
             .map(|i| i.text.as_str())
             .collect();
         assert!(units.iter().any(|t| t.contains("fn gone()")), "{units:?}");
+    }
+
+    #[tokio::test]
+    async fn an_old_side_and_a_new_side_unit_on_the_same_lines_are_two_companions() {
+        // [MS3 final review m2] Planning charges what assemble adds: both units, never one.
+        let f = RagFixture::new(&[("a.rs", "fn worktree() {}\n")]).await;
+        let two = TwoSides {
+            new: vec![("a.rs", "fn kept() {\n    y();\n}\n")],
+            old: vec![("a.rs", "fn gone() {\n    x();\n}\n")],
+        };
+        let mut rag = f.rag(false);
+        rag.sources = &two;
+        let hunk = |first_line, last_line| BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "x".into(),
+            first_line,
+            last_line,
+            old_first_line: 2,
+            old_last_line: 2,
+        };
+        let old = rag.companion(&hunk(2, 1)).expect("ok").expect("unit");
+        let new = rag.companion(&hunk(2, 2)).expect("ok").expect("unit");
+        assert_ne!(old.0, new.0, "{old:?} {new:?}");
     }
 
     #[tokio::test]
