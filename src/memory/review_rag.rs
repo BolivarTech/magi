@@ -48,7 +48,7 @@ use magi_rs::vault::MaskedDek;
 
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
-use crate::memory::review_docs::{ReviewDocStore, EMBED_BATCH_ITEMS};
+use crate::memory::review_docs::{DocVectors, ReviewDocStore, EMBED_BATCH_ITEMS};
 use crate::memory::review_history::ReviewHistoryStore;
 
 /// Wall-clock bound on one reclassification pass of the review history, checked between
@@ -124,6 +124,9 @@ pub struct StoreRag<'a> {
     pub withheld_sources: Vec<String>,
     /// Milliseconds the documentation preparation took, returned by `index_ms`.
     pub index_ms: u64,
+    /// The decrypted vectors of `doc_sources`, loaded by the first batch that searches and
+    /// scored by every later one: a review decrypts each allowed vector once.
+    pub doc_vectors: Mutex<Option<Arc<DocVectors>>>,
 }
 
 /// What the documentation preparation of one review produced.
@@ -311,7 +314,7 @@ impl StoreRag<'_> {
         if self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst) {
             return Vec::new();
         }
-        match docs.search(vector, DOC_SEARCH_K, &self.doc_sources) {
+        match self.search_docs(docs, vector) {
             Ok(hits) => hits.into_iter().map(|(chunk, _)| doc_item(chunk)).collect(),
             Err(e) => {
                 if !self.docs_failed.swap(true, Ordering::SeqCst) {
@@ -327,6 +330,38 @@ impl StoreRag<'_> {
                 Vec::new()
             }
         }
+    }
+
+    /// The [`DOC_SEARCH_K`] chunks of the revision's sources closest to `query`, scored against
+    /// [`Self::doc_vectors`]: the first call loads and decrypts them (the connection lock is held
+    /// only for the raw read), every later call of the review reuses them. The cache lock is
+    /// released before any store call.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError`] of the store.
+    fn search_docs(
+        &self,
+        docs: &ReviewDocStore,
+        query: &[f32],
+    ) -> Result<Vec<(DocChunk, f32)>, MemoryError> {
+        let cached = self
+            .doc_vectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let vectors = match cached {
+            Some(vectors) if vectors.dim() == query.len() => vectors,
+            _ => {
+                let loaded = Arc::new(docs.load_vectors(query.len(), &self.doc_sources)?);
+                *self
+                    .doc_vectors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&loaded));
+                loaded
+            }
+        };
+        docs.search_loaded(&vectors, query, DOC_SEARCH_K)
     }
 
     /// The validated history on `files`; an entry whose title or detail holds a secret counts in
@@ -516,6 +551,7 @@ impl RagSource for ReviewRag<'_> {
             doc_sources: BTreeSet::new(),
             withheld_sources: Vec::new(),
             index_ms: 0,
+            doc_vectors: Mutex::new(None),
         }
         .with_prep(self.prep.clone());
         Some(Box::new(rag))
@@ -1095,6 +1131,7 @@ mod tests {
                 doc_sources: BTreeSet::new(),
                 withheld_sources: Vec::new(),
                 index_ms: 0,
+                doc_vectors: Mutex::new(None),
             }
         }
     }

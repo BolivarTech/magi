@@ -22,7 +22,8 @@
 //! let todo = store.missing(&wanted)?;
 //! // ... read and chunk only `todo`, then:
 //! store.reindex(&chunked, &e).await?;
-//! let hits = store.search(&query_vector, 5, &allowed)?;
+//! let vectors = store.load_vectors(query_vector.len(), &allowed)?; // once per review
+//! let hits = store.search_loaded(&vectors, &query_vector, 5)?; // once per batch
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,6 +82,23 @@ struct DocRow<'a> {
     text_blob: Vec<u8>,
     embedding_blob: Vec<u8>,
     dim: i64,
+}
+
+/// The decrypted vectors of one review's allowed documentation rows, from
+/// [`ReviewDocStore::load_vectors`]: `(source key, chunk hash, vector)` of the given dimension.
+#[derive(Debug, Clone, Default)]
+pub struct DocVectors {
+    /// The dimension every vector has.
+    dim: usize,
+    /// `(source key, chunk hash, vector)` per allowed row.
+    rows: Vec<(String, String, Vec<f32>)>,
+}
+
+impl DocVectors {
+    /// The dimension the vectors were loaded for.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
 }
 
 /// Encrypted, per-source index of documentation chunks (RV19, RV21).
@@ -418,12 +436,14 @@ impl ReviewDocStore {
     /// the vectors of allowed rows are decrypted, and the section and text only for the `k`
     /// returned. Rows are read raw under the lock and decrypted after it is released.
     ///
-    /// Complexity: O(rows * d) to score plus O(r log r) to order the `r` allowed rows; one call
-    /// per batch.
+    /// Complexity: O(r) decryptions, O(r * d) to score plus O(r log r) to order the `r` allowed
+    /// rows. Test-only: a review loads once with [`Self::load_vectors`] and scores each batch
+    /// with [`Self::search_loaded`] instead.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if a query fails; [`MemoryError::Crypto`] if decryption fails.
-    pub fn search(
+    #[cfg(test)]
+    pub(crate) fn search(
         &self,
         query: &[f32],
         k: usize,
@@ -432,20 +452,62 @@ impl ReviewDocStore {
         if k == 0 || query.is_empty() {
             return Ok(Vec::new());
         }
-        let candidates = self.allowed_vectors(query.len(), allowed)?;
-        let mut scored = Vec::with_capacity(candidates.len());
+        let vectors = self.load_vectors(query.len(), allowed)?;
+        self.search_loaded(&vectors, query, k)
+    }
+
+    /// The decrypted vectors of the rows whose `(path, key)` is in `allowed`, of this identity
+    /// and `dim`: what [`Self::search_loaded`] scores against, loaded once and searched by every
+    /// batch of a review. Rows are read raw under the connection lock and decrypted after it is
+    /// released (R-V08).
+    ///
+    /// Complexity: O(r) decryptions for the `r` allowed rows.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] if a query fails; [`MemoryError::Crypto`] if decryption fails.
+    pub fn load_vectors(
+        &self,
+        dim: usize,
+        allowed: &BTreeSet<DocSource>,
+    ) -> Result<DocVectors, MemoryError> {
+        let candidates = self.allowed_vectors(dim, allowed)?;
+        let mut rows = Vec::with_capacity(candidates.len());
         for (key, hash, blob) in candidates {
             let vector = self.unseal_vector(&blob)?;
-            if vector.len() == query.len() {
-                scored.push((cosine(query, &vector), key, hash));
+            if vector.len() == dim {
+                rows.push((key, hash, vector));
             }
         }
+        Ok(DocVectors { dim, rows })
+    }
+
+    /// The `k` chunks of `vectors` most similar to `query`, best first; only their section and
+    /// text are read and decrypted. A `query` of another dimension than `vectors` matches nothing.
+    ///
+    /// Complexity: O(r * d) to score plus O(r log r) to order the `r` loaded rows.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] if a query fails; [`MemoryError::Crypto`] if decryption fails.
+    pub fn search_loaded(
+        &self,
+        vectors: &DocVectors,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(DocChunk, f32)>, MemoryError> {
+        if k == 0 || query.len() != vectors.dim {
+            return Ok(Vec::new());
+        }
+        let mut scored: Vec<(f32, &str, &str)> = vectors
+            .rows
+            .iter()
+            .map(|(key, hash, v)| (cosine(query, v), key.as_str(), hash.as_str()))
+            .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.truncate(k);
         scored
             .into_iter()
             .map(|(score, key, hash)| -> Result<_, MemoryError> {
-                Ok((self.load_chunk(&key, hash)?, score))
+                Ok((self.load_chunk(key, hash.to_string())?, score))
             })
             .collect()
     }
