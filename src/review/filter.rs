@@ -1396,17 +1396,17 @@ mod tests {
 
     /// Filters `key.rs` (its diff, its new and old sides) beside a clean `a.rs`, through the
     /// masking cache, and asserts that no byte of a key body (`BODY`) leaves in a kept file: in its
-    /// diff, or in the new side the batches, units and gate read.
-    fn assert_no_key_body_leaves(diff: &str, new: &str, old: &str) {
-        let inner = MapSource::new(
-            &[("key.rs", new), ("a.rs", "fn f() {}\n")],
-            &[("key.rs", old)],
-        );
+    /// diff, or in either side the batches, units and gate read. Whether `key.rs` is kept (masked)
+    /// or left out as `secret` is the guard's choice; either is safe.
+    // [T3.7 fix round 2] no longer requires the omission: the content check masks what it can.
+    fn assert_no_key_body_leaves(diff: Option<&str>, new: &str, old: Option<&str>) {
+        let olds: Vec<(&str, &str)> = old.map(|o| ("key.rs", o)).into_iter().collect();
+        let inner = MapSource::new(&[("key.rs", new), ("a.rs", "fn f() {}\n")], &olds);
         let src = CachedSource::new(&inner);
         let files = vec![
             ReviewFile {
                 path: "key.rs".into(),
-                diff: Some(diff.into()),
+                diff: diff.map(str::to_string),
             },
             ReviewFile {
                 path: "a.rs".into(),
@@ -1415,20 +1415,87 @@ mod tests {
         ];
         let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
             .expect("a.rs kept");
+        let text = |b: Option<Vec<u8>>| String::from_utf8(b.unwrap_or_default()).expect("utf-8");
         for kept in &f.kept {
             let diff = kept.diff.as_deref().unwrap_or("");
             assert!(!diff.contains("BODY"), "{}: {diff}", kept.path);
-            let side = String::from_utf8(src.read(&kept.path).expect("read").unwrap_or_default())
-                .expect("utf-8");
-            assert!(!side.contains("BODY"), "{}: {side}", kept.path);
+            let new = text(src.read(&kept.path).expect("read"));
+            assert!(!new.contains("BODY"), "{}: {new}", kept.path);
+            let old = text(src.read_old(&kept.path).expect("read"));
+            assert!(!old.contains("BODY"), "{}: {old}", kept.path);
         }
-        assert_eq!(
-            f.skipped,
-            vec![Skipped {
-                path: "key.rs".into(),
-                cause: SkipCause::Secret
-            }]
+        assert!(
+            f.kept.iter().any(|k| k.path == "key.rs")
+                || f.skipped
+                    == vec![Skipped {
+                        path: "key.rs".into(),
+                        cause: SkipCause::Secret
+                    }],
+            "{f:?}"
         );
+    }
+
+    /// A PEM block around one body line, its armor split so the source holds no header.
+    fn pem_block(body: &str) -> String {
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        format!("{begin}\n{body}\n{end}")
+    }
+
+    /// `n` numbered plain lines, `fn p<i>() {}`.
+    fn plain_lines(n: usize) -> String {
+        (1..=n).map(|i| format!("fn p{i}() {{}}\n")).collect()
+    }
+
+    #[test]
+    fn a_key_body_moved_bare_to_another_hunk_never_leaves() {
+        // [T3.7 fix round 2, re-review R1, security] the block is deleted in one hunk and its
+        // body re-added bare twenty lines away, in a second hunk: no hunk crosses on its own.
+        let body = "BODYONEMIIBVQIBADANBgkqhkiG9w0B";
+        let plain = plain_lines(20);
+        let old = format!("fn a() {{}}\n{}\n{plain}fn z() {{}}\n", pem_block(body));
+        let new = format!("fn a() {{}}\n{plain}fn z() {{}}\n{body}\n");
+        let deleted: String = pem_block(body).lines().map(|l| format!("-{l}\n")).collect();
+        let diff = format!(
+            "@@ -1,5 +1,2 @@\n fn a() {{}}\n{deleted} fn p1() {{}}\n\
+             @@ -24,2 +21,3 @@\n fn p20() {{}}\n fn z() {{}}\n+{body}\n"
+        );
+        assert_no_key_body_leaves(Some(&diff), &new, Some(&old));
+    }
+
+    #[test]
+    fn a_key_body_copied_elsewhere_beside_its_unchanged_block_never_leaves() {
+        // [T3.7 fix round 2, re-review R1, security] the block is unchanged and its body line is
+        // also added, bare, below: a positional check sees only a plain added line.
+        let body = "BODYONEMIIBVQIBADANBgkqhkiG9w0B";
+        let old = format!("fn a() {{}}\n{}\nfn b() {{}}\n", pem_block(body));
+        let new = format!("{old}const COPY: &str = \"{body}\";\n");
+        let diff = format!("@@ -5,0 +6 @@\n+const COPY: &str = \"{body}\";\n");
+        assert_no_key_body_leaves(Some(&diff), &new, Some(&old));
+    }
+
+    #[test]
+    fn a_whole_file_with_a_key_block_and_a_bare_copy_of_its_body_never_leaves_it() {
+        // [T3.7 fix round 2, re-review R1, security] one text, no diff: the block is masked and
+        // its body line, copied raw elsewhere in the same file, matches no pattern on its own.
+        let body = "BODYONEMIIBVQIBADANBgkqhkiG9w0B";
+        let new = format!("{}\nfn b() {{}}\nlet copy = \"{body}\";\n", pem_block(body));
+        assert_no_key_body_leaves(None, &new, None);
+    }
+
+    #[test]
+    fn a_text_file_git_marks_binary_whose_old_key_block_lost_its_begin_line_is_left_out() {
+        // [T3.7 fix round 2, re-review R2] the branch reviewed whole from its new side: the old
+        // side holds the block, the new side the block's edited body without its armor, which no
+        // fingerprint can match. The block sets of the two sides must be equal, else `secret`.
+        let section = "diff --git a/key.rs b/key.rs\nindex 1111111..2222222 100644\n\
+                       Binary files a/key.rs and b/key.rs differ\n";
+        let old = format!(
+            "{}\nfn b() {{}}\n",
+            pem_block("BODYOLDMIIBVQIBADANBgkqhkiG9w0B")
+        );
+        let new = "BODYEDITEDVQIBADANBgkqhkiG9w0B\nfn b() {}\n".to_string();
+        assert_no_key_body_leaves(Some(section), &new, Some(&old));
     }
 
     #[test]
@@ -1447,7 +1514,7 @@ mod tests {
             "@@ -1,5 +1,7 @@\n fn a() {{}}\n-{begin}\n BODYONE\n {end}\n fn b() {{}}\n\
              +const B: &str = \"{begin}\n+QQQQ\n+{end}\";\n"
         );
-        assert_no_key_body_leaves(&diff, &new, &old);
+        assert_no_key_body_leaves(Some(&diff), &new, Some(&old));
     }
 
     #[test]
@@ -1464,7 +1531,7 @@ mod tests {
             "@@ -1,7 +1,7 @@\n fn a() {{}}\n {begin}\n BODYONE\n+{end}\n BODYTWO\n BODYTHREE\n\
              -{end}\n fn b() {{}}\n"
         );
-        assert_no_key_body_leaves(&diff, &new, &old);
+        assert_no_key_body_leaves(Some(&diff), &new, Some(&old));
     }
 
     #[test]
