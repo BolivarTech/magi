@@ -1983,6 +1983,74 @@ mod tests {
         assert_eq!(f.embedder.calls(), 0, "no section of it was embedded");
     }
 
+    /// Records every text it is asked to embed. [T3.7]
+    struct Recording(std::sync::Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for Recording {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(texts.iter().cloned());
+            Ok(texts.iter().map(|_| vec![0.5; 3]).collect())
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn a_documentation_chunk_read_through_the_review_cache_is_embedded_masked() {
+        // [T3.7] RV22 amended: the review's cache masks every secret it holds, so a README with
+        // a key is indexed with the key masked, never withheld, and no byte of the key reaches
+        // the embedder.
+        let password = "S3cr3t";
+        let readme =
+            format!("# Setup\nDATABASE_URL=postgres://svc:{password}@db/app\n# Other\nfine\n");
+        let f = RagFixture::new(&[("README.md", readme.as_str())]).await;
+        let cached = magi_rs::review::source::CachedSource::new(&f.source);
+        let embedder = Recording(std::sync::Mutex::new(Vec::new()));
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &cached,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &embedder,
+            BOUND,
+        )
+        .await;
+        assert!(
+            prep.withheld_sources.is_empty(),
+            "{:?}",
+            prep.withheld_sources
+        );
+        assert_eq!(prep.doc_sources.len(), 1, "{:?}", prep.doc_sources);
+        let sent = embedder
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(!sent.is_empty());
+        assert!(sent.iter().all(|t| !t.contains(password)), "{sent:?}");
+        assert!(
+            sent.iter()
+                .any(|t| t.contains("<redacted: url-credential>")),
+            "{sent:?}"
+        );
+    }
+
     /// README.md reads; every other path fails the way MS2 skips a listed file. [MS3 final review I2]
     struct SomeUnreadable;
     impl ContentSource for SomeUnreadable {

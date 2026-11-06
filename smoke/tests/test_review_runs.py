@@ -88,7 +88,10 @@ class ReviewInputTests(unittest.TestCase):
     def test_the_skipped_files_hold_a_binary_and_a_key_shaped_secret(self) -> None:
         files = dict(runs.review_skipped_files())
         self.assertIn(b"\x00", files["skipped/pixel.png"])
-        self.assertIn(b"sk-ant-", files["skipped/leak.txt"])  # allow-secret-scan
+        # [T3.7] a key in the content is masked, so the key must be in the path to be left out.
+        (name, content), = ((p, c) for p, c in files.items() if p != "skipped/pixel.png")
+        self.assertTrue(name.startswith("skipped/sk-ant-"), name)  # allow-secret-scan
+        self.assertIn(b"sk-ant-", content)  # allow-secret-scan
 
 
 class ReviewRunDefinitionTests(unittest.TestCase):

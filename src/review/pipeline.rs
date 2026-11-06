@@ -2329,6 +2329,218 @@ mod tests {
         assert_eq!(v.state, GateState::Kept);
     }
 
+    /// The toy password of the T3.7 masking tests (a URL credential, the pattern that left the
+    /// file of the defect out in 5 of 14 seeds of the criterion-1 certification).
+    const TOY_PASSWORD: &str = "S3cr3t";
+
+    #[tokio::test]
+    async fn a_file_with_a_secret_is_reviewed_with_it_masked_in_the_prompt_and_the_gate() {
+        // [T3.7] RV22 amended: masked, not omitted. The trio and the gate see the file, the
+        // secret replaced by `<redacted: url-credential>`, and the report declares it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text =
+            format!("fn f() {{\n    let u = \"postgres://svc:{TOY_PASSWORD}@db/app\";\n}}\n");
+        std::fs::write(dir.path().join("a.rs"), text).expect("write");
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":2}]);
+        let consult =
+            FakeConsult::new(vec![Ok(
+                real_report([f.clone(), f, serde_json::json!([])]).await
+            )]);
+        let mut client = MockDecisionClient::new();
+        client
+            .expect_decide()
+            .times(1)
+            .withf(|r| {
+                r.state()["code"].as_str().is_some_and(|c| {
+                    c.contains("2: ")
+                        && c.contains("<redacted: url-credential>")
+                        && !c.contains(TOY_PASSWORD)
+                })
+            })
+            .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.95));
+        let out = review(dir.path(), None, &consult, &client, &FakeClock::default())
+            .await
+            .expect("the file is reviewed");
+        let prompts = consult.prompts.lock().expect("lock").clone();
+        assert_eq!(prompts.len(), 1);
+        assert!(!prompts[0].contains(TOY_PASSWORD), "{}", prompts[0]);
+        assert!(
+            prompts[0].contains("<redacted: url-credential>"),
+            "{}",
+            prompts[0]
+        );
+        assert!(out.summary.skipped.is_empty(), "{:?}", out.summary.skipped);
+        assert_eq!(
+            serde_json::to_value(&out.summary.masked).expect("json"),
+            serde_json::json!([{"path": "a.rs", "cause": "secret", "pattern": "url-credential"}])
+        );
+        assert_eq!(out.summary.findings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_masked_key_block_keeps_every_later_line_at_its_number() {
+        // [T3.7] a PEM block masked to one line would move every line after it: the finding on
+        // line 7 would fall outside the file and be discarded, and the gate would show other code.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let text = format!(
+            "fn a() {{}}\nconst K: &str = \"{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\nQQQQ\n{end}\";\nfn b() {{\n    danger();\n}}\n"
+        );
+        std::fs::write(dir.path().join("a.rs"), text).expect("write");
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":7}]);
+        let consult =
+            FakeConsult::new(vec![Ok(
+                real_report([f.clone(), f, serde_json::json!([])]).await
+            )]);
+        let mut client = MockDecisionClient::new();
+        client
+            .expect_decide()
+            .times(1)
+            .withf(|r| {
+                r.state()["code"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("7:     danger();") && !c.contains("MIIB"))
+            })
+            .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.95));
+        let out = review(dir.path(), None, &consult, &client, &FakeClock::default())
+            .await
+            .expect("the file is reviewed");
+        let prompts = consult.prompts.lock().expect("lock").clone();
+        assert!(
+            prompts
+                .iter()
+                .all(|p| !p.contains("MIIB") && !p.contains("QQQQ")),
+            "{prompts:?}"
+        );
+        assert!(
+            out.summary.discarded.is_empty(),
+            "{:?}",
+            out.summary.discarded
+        );
+        assert_eq!(
+            out.summary
+                .findings
+                .iter()
+                .map(|(f, _)| f.line)
+                .collect::<Vec<_>>(),
+            vec![Some(7)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_on_a_deleted_line_is_masked_in_the_batch_and_the_gate() {
+        // [T3.7] RV-S30 under the amended RV22: the deleted file is reviewed, its key masked on
+        // the old side the diff and the gate show.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = format!("fn f() {{}}\nlet u = \"postgres://svc:{TOY_PASSWORD}@db\";\n");
+        let removed = format!("-fn f() {{}}\n-let u = \"postgres://svc:{TOY_PASSWORD}@db\";\n");
+        let diff = format!("diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n{removed}");
+        let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --relative abc",
+                Ok(diff.as_str()),
+            ),
+            ("ls-files --others --exclude-standard -z", Ok("")),
+            (
+                "ls-tree -z --end-of-options abc -- gone.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\tgone.rs\0"),
+            ),
+            (
+                "show --no-ext-diff --no-textconv --end-of-options abc:./gone.rs",
+                Ok(old.as_str()),
+            ),
+        ]);
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"gone.rs","line":2}]);
+        let consult =
+            FakeConsult::new(vec![Ok(
+                real_report([f.clone(), f, serde_json::json!([])]).await
+            )]);
+        let mut client = MockDecisionClient::new();
+        client
+            .expect_decide()
+            .times(1)
+            .withf(|r| {
+                r.state()["code"].as_str().is_some_and(|c| {
+                    c.contains("<redacted: url-credential>") && !c.contains(TOY_PASSWORD)
+                })
+            })
+            .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.95));
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let out = run_review(
+            ReviewRequest {
+                input: ReviewInput::Uncommitted,
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                approved_digest: None,
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+                rag: None,
+            },
+        )
+        .await
+        .expect("the deletion is reviewed");
+        let prompts = consult.prompts.lock().expect("lock").clone();
+        assert_eq!(prompts.len(), 1);
+        assert!(!prompts[0].contains(TOY_PASSWORD), "{}", prompts[0]);
+        assert!(
+            prompts[0].contains("-let u = \"<redacted: url-credential>"),
+            "{}",
+            prompts[0]
+        );
+        assert_eq!(
+            out.summary
+                .masked
+                .iter()
+                .map(|m| (m.path.as_str(), m.pattern))
+                .collect::<Vec<_>>(),
+            vec![("gone.rs", "url-credential")]
+        );
+    }
+
+    #[test]
+    fn a_file_named_explicitly_that_holds_a_secret_is_planned_not_refused() {
+        // [T3.7] RV22 amended: an explicit file with a secret is reviewed masked, no longer an error.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text = format!("let u = \"postgres://svc:{TOY_PASSWORD}@db\";\n");
+        std::fs::write(dir.path().join("a.rs"), text).expect("write");
+        let git = FakeGit::from(&[]);
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let plan = plan_review(
+            &ReviewInput::File(PathBuf::from("a.rs")),
+            dir.path(),
+            &git,
+            &guard,
+            &|_| false,
+            &LanguageRegistry::new(),
+            &pool,
+            None,
+        );
+        assert!(
+            matches!(plan, Ok(PlanFingerprint { batches: 1, .. })),
+            "{plan:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_line_the_hunk_deleted_whose_number_is_live_is_never_filtered() {
         // [MAGI S6 loop 7, D-b3/D-c3] line 5 was replaced: its number names the deleted old line

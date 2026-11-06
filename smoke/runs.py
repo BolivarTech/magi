@@ -837,6 +837,16 @@ REVIEW_ROOT_PATH = "."
 _TOY_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 _TOY_SECRET_FILE = b"token = sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"  # allow-secret-scan
 
+#: The name of R14's secret file: the toy key itself. Since T3.7 (RV22 amended)
+#: a secret in a file's CONTENT is masked and the file reviewed, which would
+#: reach a model; a secret in its PATH still leaves the file out unread, since
+#: the path is the file's identity and cannot be masked.
+_TOY_SECRET_NAME = _TOY_SECRET_FILE.split(b"=", 1)[1].strip().decode("ascii") + ".txt"
+
+#: How the product names that file in an omission list (``display_path`` in
+#: ``src/review/secrets.rs``): the whole path redacted, by its pattern.
+REVIEW_SECRET_PATH_SHOWN = "<path redacted: anthropic-key>"
+
 
 def review_input_files() -> tuple[tuple[str, bytes], ...]:
     """The deterministic source files R12 and R15 review.
@@ -2101,10 +2111,11 @@ def review_skipped_files() -> tuple[tuple[str, bytes], ...]:
     """The files R14 reviews, every one of which the product must skip.
 
     Returns:
-        tuple: ``(path, content)`` pairs: a binary and a file with a secret.
+        tuple: ``(path, content)`` pairs: a binary and a file whose name is
+        a key (its content holds the same key).
     """
     return ((REVIEW_SKIPPED_DIR + "/pixel.png", _TOY_PNG),
-            (REVIEW_SKIPPED_DIR + "/leak.txt", _TOY_SECRET_FILE))
+            (REVIEW_SKIPPED_DIR + "/" + _TOY_SECRET_NAME, _TOY_SECRET_FILE))
 
 
 #: Directory (workspace-relative) R17 reviews: one small source file, so the run

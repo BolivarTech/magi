@@ -126,14 +126,14 @@ def _review(batches: int = 3, findings=None, discarded=None) -> dict:
 _ROOT_STDERR = (
     b"error: nothing to review: no reviewable file in the input; left out: "
     b".magi/.magi-rs-memory.db (ignored), .magi/logs/magi-2026-10-29.log (ignored), "
-    b".magi/magi.toml (ignored), skipped/leak.txt (secret), skipped/pixel.png (binary) "
+    b".magi/magi.toml (ignored), <path redacted: anthropic-key> (secret), skipped/pixel.png (binary) "
     b"review.error=nothing_to_review" + _NL)
 
 
 #: R14's stderr: the ``skipped`` directory's binary and secret, each left out with its cause.
 _SKIPPED_STDERR = (
     b"error: nothing to review: no reviewable file in the input; left out: "
-    b"skipped/leak.txt (secret), skipped/pixel.png (binary) review.error=nothing_to_review" + _NL)
+    b"<path redacted: anthropic-key> (secret), skipped/pixel.png (binary) review.error=nothing_to_review" + _NL)
 
 
 class WorkspaceRootScenarioTests(unittest.TestCase):
@@ -153,7 +153,7 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         # third assertion vacuous. Git listed .magi/ files, so the product must name them as ignored.
         r = _result("R16", 2, None, _with_id(
             b"error: nothing to review: no reviewable file in the input; left out: "
-            b"skipped/leak.txt (secret), skipped/pixel.png (binary)" + _NL))
+            b"<path redacted: anthropic-key> (secret), skipped/pixel.png (binary)" + _NL))
         outcomes = _outcomes("S51", r)
         self.assertEqual(Outcome.PASS, outcomes[code_review.S51_ASSERTIONS[1]])
         self.assertEqual(Outcome.FAIL, outcomes[code_review.S51_ASSERTIONS[2]])
@@ -263,7 +263,7 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         # the list and none of the .magi/ files git listed is among those shown, they may be in the cut tail,
         # so "names none of them" is the environment's size, never a product FAIL.
         stderr = (b"error: nothing to review: no reviewable file in the input; left out: "
-                  b"skipped/leak.txt (secret), skipped/pixel.png (binary), and 3 more" + _NL)
+                  b"<path redacted: anthropic-key> (secret), skipped/pixel.png (binary), and 3 more" + _NL)
         r = _result("R16", 2, None, _with_id(stderr))
         outcome = [f for f in DEFAULT_REGISTRY.get("S51").func(r)][2]
         self.assertEqual(Outcome.CANNOT_TEST, outcome.outcome)
@@ -274,7 +274,7 @@ class WorkspaceRootScenarioTests(unittest.TestCase):
         # could sit in the unnamed tail read and classified by its content: only a cut list naming every
         # listed .magi/ file can pass.
         stderr = (b"error: nothing to review: no reviewable file in the input; left out: "
-                  b".magi/magi.toml (ignored), skipped/leak.txt (secret), skipped/pixel.png (binary), "
+                  b".magi/magi.toml (ignored), <path redacted: anthropic-key> (secret), skipped/pixel.png (binary), "
                   b"and 2 more" + _NL)
         r = _result("R16", 2, None, _with_id(stderr))
         outcome = [f for f in DEFAULT_REGISTRY.get("S51").func(r)][2]

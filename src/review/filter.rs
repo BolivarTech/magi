@@ -144,6 +144,19 @@ pub struct Filtered {
     pub skipped: Vec<Skipped>,
     /// Kept files with no language extractor, as [`display_path`] shows them.
     pub no_extractor: Vec<String>,
+    /// Kept files that held a secret, reviewed with each secret masked, in input order.
+    pub masked: Vec<Masked>,
+}
+
+/// A file reviewed with its secrets masked (RV22): reviewed, never left out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Masked {
+    /// The path, as it may leave the process ([`display_path`]).
+    pub path: String,
+    /// Why it is declared: always [`SkipCause::Secret`].
+    pub cause: SkipCause,
+    /// The name of the first secret pattern found in it.
+    pub pattern: &'static str,
 }
 
 /// What classifying one file decided.
@@ -213,6 +226,7 @@ pub fn filter_files(
         kept: Vec::new(),
         skipped: Vec::new(),
         no_extractor: Vec::new(),
+        masked: Vec::new(),
     };
     // The sides a kept file was scanned with: never released, whoever else names their path.
     let mut kept_sides: HashSet<(Face, String)> = HashSet::new();
@@ -691,10 +705,55 @@ pub fn ignored_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::source::CachedSource;
     use crate::review::test_support::MapSource;
 
+    /// The declaration of a file reviewed with its secrets masked.
+    fn masked(path: &str, pattern: &'static str) -> Masked {
+        Masked {
+            path: path.into(),
+            cause: SkipCause::Secret,
+            pattern,
+        }
+    }
+
     #[test]
-    fn a_secret_in_a_whole_file_skips_it_and_an_explicit_one_is_an_error() {
+    fn a_secret_in_a_whole_file_is_reviewed_masked_and_an_explicit_one_too() {
+        // [T3.7] RV22 amended: the file is reviewed with the secret masked, never left out, and
+        // a file named explicitly is no error. The cache (production's single access) masks.
+        let text = "const K: &str = \"ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";\n"; // allow-secret-scan
+        let inner = MapSource::new(&[("config.rs", text), ("a.rs", "fn f() {}\n")], &[]);
+        let src = CachedSource::new(&inner);
+        let files = vec![
+            ReviewFile {
+                path: "config.rs".into(),
+                diff: None,
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("both kept");
+        assert_eq!(f.skipped, vec![]);
+        assert_eq!(f.masked, vec![masked("config.rs", "github-token")]);
+        let kept: Vec<&str> = f.kept.iter().map(|k| k.path.as_str()).collect();
+        assert_eq!(kept, ["config.rs", "a.rs"]);
+        let one = vec![ReviewFile {
+            path: "config.rs".into(),
+            diff: None,
+        }];
+        let f = filter_files(one, &src, &LanguageRegistry::new(), true, &|_| false)
+            .expect("an explicit file with a secret is reviewed");
+        assert_eq!(f.masked, vec![masked("config.rs", "github-token")]);
+    }
+
+    #[test]
+    fn a_source_that_does_not_mask_still_never_lets_a_secret_through() {
+        // [T3.7] the fallback: a source with no mask (no production path builds one) hands the
+        // filter raw content, so a file that holds a secret is left out as before, and an
+        // explicit one is an error.
         let text = "const K: &str = \"ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";\n"; // allow-secret-scan
         let src = MapSource::new(&[("config.rs", text), ("a.rs", "fn f() {}\n")], &[]);
         let files = vec![
@@ -785,15 +844,17 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_only_in_the_old_side_skips_the_file() {
+    fn a_secret_only_in_the_old_side_is_masked_and_the_file_reviewed() {
         // The diff and the new side are clean; only the revision before the change holds the key.
         // [CP2 MS2 S1b loop 15] a kept sibling makes the skip and its `secret` cause observable (RV-S30, second clause).
-        let diff = "@@ -10,1 +10,1 @@\n-fn g() {}\n+fn h() {}\n";
+        // [T3.7] RV22 amended: masked, not omitted; the diff is unchanged, it quotes no secret.
+        let diff = "@@ -2,1 +1,1 @@\n-fn g() {}\n+fn h() {}\n";
         let old = "const K: &str = \"AKIAABCDEFGHIJKLMNOP\";\nfn g() {}\n"; // allow-secret-scan
-        let src = MapSource::new(
+        let inner = MapSource::new(
             &[("a.rs", "fn h() {}\n"), ("b.rs", "fn b() {}\n")],
             &[("a.rs", old)],
         );
+        let src = CachedSource::new(&inner);
         let files = vec![
             ReviewFile {
                 path: "a.rs".into(),
@@ -805,14 +866,17 @@ mod tests {
             },
         ];
         let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-            .expect("b.rs kept");
+            .expect("both kept");
+        assert_eq!(f.skipped, vec![]);
+        assert_eq!(f.masked, vec![masked("a.rs", "aws-access-key")]);
         assert_eq!(
-            f.skipped,
-            vec![Skipped {
-                path: "a.rs".into(),
-                cause: SkipCause::Secret
-            }]
+            f.kept.first().and_then(|k| k.diff.as_deref()),
+            Some(diff),
+            "{f:?}"
         );
+        let old = String::from_utf8(src.read_old("a.rs").expect("read").expect("old side"))
+            .expect("utf-8");
+        assert!(!old.contains("AKIA"), "{old}");
     }
 
     #[test]
@@ -900,9 +964,12 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_on_the_old_side_of_a_renamed_file_skips_it() {
+    fn a_renamed_file_is_masked_from_its_old_path_and_a_lone_key_header_keeps_it_out() {
         // [MAGI §6 MS2 A loop 1] a rename's old side lives under its old path: read by the new path it was empty,
         // and a key on a removed line or outside the hunk reached a model.
+        // [T3.7] RV22 amended: new.rs is reviewed, its diff rebuilt from the masked sides (the key
+        // the removed line quoted is gone). k_new.rs stays out: only its old side has the key's
+        // `BEGIN` line, so its new side's body lines are a key no pattern names and cannot be masked.
         let removed = concat!("-", "sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
         let moved = format!(
             "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\n\
@@ -915,7 +982,7 @@ mod tests {
                          rename to k_new.rs\n--- a/k_old.rs\n+++ b/k_new.rs\n@@ -3,1 +3,1 @@\n-BBBB\n+AAAA\n";
         // The new side of k_new.rs has no header either: only its old side holds the `BEGIN` line.
         let new_body = new_key.replace(begin, "");
-        let src = MapSource::new(
+        let inner = MapSource::new(
             &[
                 ("new.rs", "fn f() {}\n"),
                 ("k_new.rs", new_body.as_str()),
@@ -940,20 +1007,27 @@ mod tests {
                 diff: None,
             },
         ];
+        let src = CachedSource::new(&inner);
         let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
             .expect("a.rs kept");
         assert_eq!(
             f.skipped,
-            vec![
-                Skipped {
-                    path: "new.rs".into(),
-                    cause: SkipCause::Secret
-                },
-                Skipped {
-                    path: "k_new.rs".into(),
-                    cause: SkipCause::Secret
-                }
-            ]
+            vec![Skipped {
+                path: "k_new.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+        assert_eq!(f.masked, vec![masked("new.rs", "openai-key")]);
+        let diff = f
+            .kept
+            .iter()
+            .find(|k| k.path == "new.rs")
+            .and_then(|k| k.diff.as_deref())
+            .expect("new.rs kept with its diff");
+        assert!(!diff.contains("AAAAAAAAAAAA"), "{diff}");
+        assert!(
+            diff.ends_with("@@ -1,2 +1,1 @@\n fn f() {}\n-fn g() {}\n"),
+            "{diff}"
         );
     }
 
@@ -986,8 +1060,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pem_key_whose_header_is_outside_the_hunk_still_skips_the_file() {
+    fn a_pem_key_whose_header_is_outside_the_hunk_is_masked_in_its_diff_too() {
         // [CP2 MS2 S1b loop 11] the hunk touches only the key body; both whole sides are scanned, so `BEGIN` is seen.
+        // [T3.7] RV22 amended: both sides hold the block, so both are masked and the diff is
+        // rebuilt from them: its body lines, which no pattern names, never leave in the clear.
         // Split so tests/no_hardcoded_secrets.rs (which flags the literal `-----BEGIN`) does not read a header here.
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
         let new = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\nAAAA\n-----END PRIVATE KEY-----\n");
@@ -1002,19 +1078,21 @@ mod tests {
                 diff: None,
             },
         ];
-        let src = MapSource::new(
+        let inner = MapSource::new(
             &[("key.rs", new.as_str()), ("a.rs", "fn f() {}\n")],
             &[("key.rs", old.as_str())],
         );
+        let src = CachedSource::new(&inner);
         let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-            .expect("a.rs kept");
-        assert_eq!(
-            f.skipped,
-            vec![Skipped {
-                path: "key.rs".into(),
-                cause: SkipCause::Secret
-            }]
-        );
+            .expect("both kept");
+        assert_eq!(f.skipped, vec![]);
+        assert_eq!(f.masked, vec![masked("key.rs", "pem-private-key")]);
+        let diff = f
+            .kept
+            .first()
+            .and_then(|k| k.diff.as_deref())
+            .expect("key.rs kept with its diff");
+        assert_eq!(diff, "@@ -3,1 +3,1 @@\n-\n+\n");
     }
 
     #[test]
@@ -1071,7 +1149,8 @@ mod tests {
     }
 
     #[test]
-    fn an_armored_pgp_private_key_skips_the_file_and_logs_only_its_pattern_name() {
+    fn an_armored_pgp_private_key_is_masked_and_logged_by_its_pattern_name_only() {
+        // [T3.7] RV22 amended: reviewed with the block masked, declared, never omitted.
         // Split so tests/no_hardcoded_secrets.rs (which flags the literal `-----BEGIN`) reads no
         // header here; the body is obviously fake.
         let begin = concat!("-----", "BEGIN PGP PRIVATE KEY BLOCK-----");
@@ -1080,7 +1159,7 @@ mod tests {
         let text = format!("const K: &str = r\"\n{begin}\n\n{body}\n=FAKE\n{end}\n\";\n");
         let public = concat!("-----", "BEGIN PGP PUBLIC KEY BLOCK-----");
         let pubtext = format!("{public}\n\n{body}\n");
-        let src = MapSource::new(
+        let inner = MapSource::new(
             &[
                 ("key.rs", text.as_str()),
                 ("pub.asc", pubtext.as_str()),
@@ -1102,16 +1181,12 @@ mod tests {
                 diff: None,
             },
         ];
+        let src = CachedSource::new(&inner);
         let line = crate::logging::testutil::capture(|| {
             let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-                .expect("a.rs kept");
-            assert_eq!(
-                f.skipped,
-                vec![Skipped {
-                    path: "key.rs".into(),
-                    cause: SkipCause::Secret
-                }]
-            );
+                .expect("all kept");
+            assert_eq!(f.skipped, vec![]);
+            assert_eq!(f.masked, vec![masked("key.rs", "pgp-private-key")]);
             // A public key is not a secret.
             assert!(f.kept.iter().any(|k| k.path == "pub.asc"), "{f:?}");
         });
@@ -1123,11 +1198,12 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_omission_logs_the_path_and_the_pattern_name_never_the_value() {
+    fn a_masked_secret_logs_the_path_and_the_pattern_name_never_the_value() {
         // [CP2 MS2 S1b loop 9] the consumer of SecretPattern.name (loop 8), pinned.
+        // [T3.7] the entry now says the file was reviewed with the secret masked.
         let key = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
         let text = format!("const K: &str = \"{key}\";\n");
-        let src = MapSource::new(
+        let inner = MapSource::new(
             &[("config.rs", text.as_str()), ("a.rs", "fn f() {}\n")],
             &[],
         );
@@ -1141,12 +1217,13 @@ mod tests {
                 diff: None,
             },
         ];
+        let src = CachedSource::new(&inner);
         let line = crate::logging::testutil::capture(|| {
             filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
                 .expect("a.rs kept");
         });
         assert!(
-            line.contains("config.rs") && line.contains("github-token"),
+            line.contains("config.rs") && line.contains("github-token") && line.contains("masked"),
             "{line}"
         );
         assert!(!line.contains(key), "{line}");
@@ -1253,29 +1330,34 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_in_a_removed_line_skips_the_file() {
+    fn a_secret_in_a_removed_line_is_masked_in_the_diff_and_the_file_reviewed() {
         // [CP2 MS2 S1b loop 15] with a kept sibling, so the skip and its `secret` cause are asserted, not inferred.
-        let diff =
-            "@@ -1,2 +1,1 @@\n-const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";\n fn f() {}\n"; // allow-secret-scan
+        // [T3.7] RV22 amended (RV-S30): the deleted line is shown, its key masked.
+        let removed = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
+        let diff = format!("@@ -1,2 +1,1 @@\n-{removed}\n fn f() {{}}\n");
+        let old = format!("{removed}\nfn f() {{}}\n");
         let files = vec![
             ReviewFile {
                 path: "a.rs".into(),
-                diff: Some(diff.into()),
+                diff: Some(diff),
             },
             ReviewFile {
                 path: "b.rs".into(),
                 diff: None,
             },
         ];
-        let src = MapSource::new(&[("a.rs", "fn f() {}\n"), ("b.rs", "fn b() {}\n")], &[]);
+        let inner = MapSource::new(
+            &[("a.rs", "fn f() {}\n"), ("b.rs", "fn b() {}\n")],
+            &[("a.rs", old.as_str())],
+        );
+        let src = CachedSource::new(&inner);
         let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-            .expect("b.rs kept");
+            .expect("both kept");
+        assert_eq!(f.skipped, vec![]);
+        assert_eq!(f.masked, vec![masked("a.rs", "openai-key")]);
         assert_eq!(
-            f.skipped,
-            vec![Skipped {
-                path: "a.rs".into(),
-                cause: SkipCause::Secret
-            }]
+            f.kept.first().and_then(|k| k.diff.as_deref()),
+            Some("@@ -1,2 +1,1 @@\n-const K: &str = \"<redacted: openai-key>\";\n fn f() {}\n")
         );
     }
 
@@ -1581,10 +1663,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("a.dat", true), ("a.rs", true), ("evil.rs", true)]
         );
-        // A secret on the old side still keeps the file out, as for any diff.
+        // [T3.7] A secret on the old side is masked, as for any diff; reviewed whole from its new side.
         let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
         let old_key = format!("const K: &str = \"{key}\";\n");
-        let leaky = MapSource::new(
+        let leaky_inner = MapSource::new(
             &[
                 ("evil.rs", "fn f() { danger() }\n"),
                 ("a.rs", "fn f() {}\n"),
@@ -1598,13 +1680,15 @@ mod tests {
                 diff: None,
             },
         ];
-        let f = filter_files(files, &leaky, &reg, false, &|_| false).expect("a.rs kept");
-        assert_eq!(
-            f.skipped,
-            vec![Skipped {
-                path: "evil.rs".into(),
-                cause: SkipCause::Secret
-            }]
+        let leaky = CachedSource::new(&leaky_inner);
+        let f = filter_files(files, &leaky, &reg, false, &|_| false).expect("both kept");
+        assert_eq!(f.skipped, vec![]);
+        assert_eq!(f.masked, vec![masked("evil.rs", "openai-key")]);
+        assert!(
+            f.kept
+                .iter()
+                .any(|k| k.path == "evil.rs" && k.diff.is_none()),
+            "{f:?}"
         );
     }
 
@@ -1652,10 +1736,12 @@ mod tests {
             })
             .collect();
         assert_eq!(hunks, vec![(1, 2)]);
-        // A secret on the old side keeps it out, as for any deletion (RV22).
+        // [T3.7] A secret on the old side is masked in the rebuilt deletion, as for any deletion (RV22).
         let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
         let old_key = format!("const K: &str = \"{key}\";\n");
-        let leaky = MapSource::new(&[("a.rs", "fn f() {}\n")], &[("gone.rs", old_key.as_str())]);
+        let leaky_inner =
+            MapSource::new(&[("a.rs", "fn f() {}\n")], &[("gone.rs", old_key.as_str())]);
+        let leaky = CachedSource::new(&leaky_inner);
         let files = vec![
             deleted(),
             ReviewFile {
@@ -1663,13 +1749,13 @@ mod tests {
                 diff: None,
             },
         ];
-        let f = filter_files(files, &leaky, &reg, false, &|_| false).expect("a.rs kept");
-        assert_eq!(
-            f.skipped,
-            vec![Skipped {
-                path: "gone.rs".into(),
-                cause: SkipCause::Secret
-            }]
+        let f = filter_files(files, &leaky, &reg, false, &|_| false).expect("both kept");
+        assert_eq!(f.skipped, vec![]);
+        assert_eq!(f.masked, vec![masked("gone.rs", "openai-key")]);
+        let diff = f.kept.first().and_then(|k| k.diff.as_deref()).unwrap_or("");
+        assert!(
+            diff.ends_with("@@ -1,1 +0,0 @@\n-const K: &str = \"<redacted: openai-key>\";\n"),
+            "{diff:?}"
         );
     }
 
@@ -2059,18 +2145,16 @@ mod tests {
         // [MAGI S6 loop 15, A2-3] the cache checked the total before the filter judged the file:
         // with the kept files near the cap, reading a file that was then left out (a secret, a
         // binary) failed the whole review with `InputTooLarge`.
+        // [T3.7] a secret no longer leaves a file out (it is masked), so the file left out after
+        // its read is one that is not UTF-8.
         let kept = "fn f() {}\n";
         let other = "fn b() {}\n";
-        let key = "const K: &str = \"AKIAABCDEFGHIJKLMNOP\";\n"; // allow-secret-scan
-        let inner = MapSource::new(
-            &[
-                ("a.rs", kept),
-                ("key.rs", key),
-                ("big.dat", "\0abcdefghijklmnopqrstuvwxyz"),
-                ("b.rs", other),
-            ],
-            &[],
-        );
+        let inner = MapSource::with_bytes(&[
+            ("a.rs", kept.as_bytes()),
+            ("key.rs", b"// caf\xe9\n"),
+            ("big.dat", b"\0abcdefghijklmnopqrstuvwxyz"),
+            ("b.rs", other.as_bytes()),
+        ]);
         let cap = u64::try_from(kept.len() + other.len()).expect("fits");
         let cache = crate::review::source::CachedSource::with_total_cap(&inner, cap);
         let files = |names: &[&str]| -> Vec<ReviewFile> {
@@ -2097,7 +2181,7 @@ mod tests {
             vec![
                 Skipped {
                     path: "key.rs".into(),
-                    cause: SkipCause::Secret
+                    cause: SkipCause::NotUtf8
                 },
                 Skipped {
                     path: "big.dat".into(),
@@ -2135,6 +2219,7 @@ mod tests {
     #[test]
     fn a_non_empty_input_where_every_file_is_omitted_is_nothing_to_review() {
         // [CP2 MS2 S1b1 loop 16] RV20: the emptiness that counts is the kept list's, after every file was classified.
+        // [T3.7] MapSource masks nothing, so the secret files take the fallback and stay out.
         let key = "const K: &str = \"AKIAABCDEFGHIJKLMNOP\";\n"; // allow-secret-scan
         let src = MapSource::new(&[(".env", "X=1\n"), ("a.rs", key), ("b.rs", key)], &[]);
         let ignored = vec![ReviewFile {
@@ -2165,6 +2250,7 @@ mod tests {
     #[test]
     fn an_all_omitted_input_keeps_every_omission_and_its_cause_in_the_error() {
         // [MAGI S6 loop 3, A2] RV20/RV22: with nothing kept, the omissions are still reported.
+        // [T3.7] MapSource masks nothing, so the secret file takes the fallback and stays out.
         let key = "const K: &str = \"AKIAABCDEFGHIJKLMNOP\";
 "; // allow-secret-scan
         let src = MapSource::new(
@@ -2455,8 +2541,8 @@ mod tests {
                 self.inner.read_old(path)
             }
         }
-        let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
-        let leaked = format!("const K: &str = \"{key}\";\n");
+        // [T3.7] a secret is now masked and its file kept, so the rename is left out as binary.
+        let leaked = "x\0\n".to_string();
         let counting = Counting {
             inner: MapSource::new(
                 &[("a.rs", "fn a() { 1 }\n"), ("b.rs", leaked.as_str())],
@@ -2485,7 +2571,7 @@ mod tests {
             f.skipped,
             vec![Skipped {
                 path: "b.rs".into(),
-                cause: SkipCause::Secret
+                cause: SkipCause::Binary
             }]
         );
         cache.read("a.rs").expect("read");

@@ -197,6 +197,34 @@ pub trait ContentSource: Send + Sync {
     fn settle(&self) -> Result<(), ReviewError> {
         Ok(())
     }
+
+    /// What this source masked in side `face` of `path` (RV22): the secrets of a held text side
+    /// are replaced by `<redacted: …>`, line breaks kept, before any stage reads it.
+    ///
+    /// The default masks nothing and answers `None`; the filter then leaves out any file whose
+    /// content still holds a secret, as it did before masking existed.
+    ///
+    /// # Arguments
+    ///
+    /// * `face` - The side.
+    /// * `path` - The path it was read under.
+    ///
+    /// # Returns
+    ///
+    /// The mask, or `None` when the side held no secret or was never read.
+    fn masked(&self, face: Face, path: &str) -> Option<SideMask> {
+        let _ = (face, path);
+        None
+    }
+}
+
+/// What a source masked in one side of a file ([`ContentSource::masked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SideMask {
+    /// The name of the first secret pattern found in the side (table order).
+    pub pattern: &'static str,
+    /// Whether a masked span crossed a line break (a key block).
+    pub multi_line: bool,
 }
 
 /// Reads all of `reader`, but never more than `cap + 1` bytes.
@@ -929,6 +957,49 @@ mod tests {
             assert_eq!(cached.read_old("a.rs").expect("read_old"), None);
         }
         assert_eq!(inner.0.load(SeqCst), 2);
+    }
+
+    #[test]
+    fn a_cached_source_masks_each_secret_it_holds_and_says_which() {
+        // [T3.7] RV22 masks instead of omitting: every stage reads through the cache, so the
+        // cache is where a secret is masked, once, with its lines kept.
+        let secret = "let u = \"postgres://svc:S3cr3t@db/app\";\nfn f() {}\n";
+        let inner = crate::review::test_support::MapSource::new(
+            &[("a.rs", secret), ("b.rs", "fn b() {}\n")],
+            &[("a.rs", secret)],
+        );
+        let cached = CachedSource::new(&inner);
+        for read in [cached.read("a.rs"), cached.read_old("a.rs")] {
+            let text = String::from_utf8(read.expect("read").expect("present")).expect("utf-8");
+            assert!(!text.contains("S3cr3t"), "{text}");
+            assert!(text.contains("<redacted: url-credential>"), "{text}");
+            assert_eq!(text.lines().count(), 2);
+        }
+        let mask = SideMask {
+            pattern: "url-credential",
+            multi_line: false,
+        };
+        assert_eq!(cached.masked(Face::New, "a.rs"), Some(mask));
+        assert_eq!(cached.masked(Face::Old, "a.rs"), Some(mask));
+        assert_eq!(
+            cached.read("b.rs").expect("read"),
+            Some(b"fn b() {}\n".to_vec())
+        );
+        assert_eq!(cached.masked(Face::New, "b.rs"), None);
+        cached.release(Face::New, "a.rs");
+        assert_eq!(cached.masked(Face::New, "a.rs"), None);
+        assert_eq!(cached.masked(Face::Old, "a.rs"), Some(mask));
+        // A binary side is held as read: masking could hide the NUL that makes it binary.
+        let bin = crate::review::test_support::MapSource::with_bytes(&[(
+            "k.bin",
+            b"\0postgres://svc:S3cr3t@db\n",
+        )]);
+        let cached = CachedSource::new(&bin);
+        assert_eq!(
+            cached.read("k.bin").expect("read"),
+            Some(b"\0postgres://svc:S3cr3t@db\n".to_vec())
+        );
+        assert_eq!(cached.masked(Face::New, "k.bin"), None);
     }
 
     #[test]

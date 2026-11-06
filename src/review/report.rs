@@ -19,7 +19,7 @@ use serde_json::{json, Map, Value};
 
 use super::consolidate::{Consolidated, ConsolidatedFinding};
 use super::error::MAX_OMISSIONS_SHOWN;
-use super::filter::Skipped;
+use super::filter::{Masked, Skipped};
 use super::gate::GateVerdict;
 use super::rag::ContextKind;
 use super::secrets::{escape_controls, mask_secrets};
@@ -77,6 +77,8 @@ pub struct ReviewSummary {
     /// Files left out of the review, with their cause (both forms list at most
     /// [`MAX_OMISSIONS_SHOWN`] and declare the rest).
     pub skipped: Vec<Skipped>,
+    /// Files reviewed with their secrets masked (REQ-RV22), listed like `skipped`; never in it.
+    pub masked: Vec<Masked>,
     /// Reviewed files with no language extractor (listed like `skipped`).
     pub no_extractor: Vec<String>,
     /// Pool models whose window was not measured.
@@ -142,6 +144,7 @@ impl Default for ReviewSummary {
             judged_fraction: 1.0,
             discarded: Vec::new(),
             skipped: Vec::new(),
+            masked: Vec::new(),
             no_extractor: Vec::new(),
             unmeasured_models: Vec::new(),
             prep_ms: 0,
@@ -1012,6 +1015,8 @@ mod tests {
             "judged_fraction",
             "discarded",
             "skipped",
+            "masked",
+            "masked_unlisted",
             "no_extractor",
             "unmeasured_models",
             "prep_ms",
@@ -1031,6 +1036,32 @@ mod tests {
         ] {
             assert!(v.get(k).is_some(), "missing {k}: {v}");
         }
+    }
+
+    #[test]
+    fn a_masked_file_is_declared_in_both_forms_and_never_as_skipped() {
+        // [T3.7] RV22 amended: a file reviewed with its secret masked is declared with the cause
+        // `secret` and its pattern, apart from the files left out.
+        let mut s = ReviewSummary::default();
+        s.masked.push(Masked {
+            path: "a.rs".into(),
+            cause: crate::review::filter::SkipCause::Secret,
+            pattern: "url-credential",
+        });
+        let v = summary_json(&s);
+        assert_eq!(
+            v["masked"],
+            json!([{"path": "a.rs", "cause": "secret", "pattern": "url-credential"}])
+        );
+        assert_eq!(v["masked_unlisted"], 0);
+        assert_eq!(v["skipped"], json!([]));
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(
+            out.contains("\n## Reviewed with secrets masked\n- a.rs (secret: url-credential)\n"),
+            "{out}"
+        );
+        assert!(!out.contains("## Skipped"), "{out}");
     }
 
     #[test]

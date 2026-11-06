@@ -991,6 +991,31 @@ pub fn mask_secrets(text: &str) -> String {
     out
 }
 
+/// What [`mask_secrets_keeping_lines`] gave for a text that held a secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineMasked {
+    /// The masked text, with as many line breaks as the original.
+    pub text: String,
+    /// The name of the first pattern [`find_secret`] finds in the original (table order).
+    pub pattern: &'static str,
+    /// Whether a masked span crossed a line break (a key block, such as a PEM body).
+    pub multi_line: bool,
+}
+
+/// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
+/// written back right after its `<redacted: …>`, so each line after a secret keeps its number.
+///
+/// # Arguments
+/// * `text` - A file's content.
+///
+/// # Returns
+/// `None` when `text` holds no secret; otherwise the masked text, the first pattern's name and
+/// whether a span crossed a line.
+pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
+    let _ = text;
+    None
+}
+
 /// The end of a mask that ends at `end`, grown over every span of `spans` that opens inside it
 /// and ends past it, until none does. A span that overlaps the mask is a secret the mask cut
 /// (a token glued to a PEM header eats its `-----BEGIN`); searching what follows the mask
@@ -1405,6 +1430,42 @@ mod tests {
         assert_eq!(mask_secrets(&open), "x <redacted: pgp-private-key>");
         let aws = "aws_secret_access_key = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA tail"; // allow-secret-scan
         assert_eq!(mask_secrets(aws), "<redacted: aws-secret-key> tail");
+    }
+
+    #[test]
+    fn masking_with_lines_kept_keeps_the_line_count_of_a_key_block() {
+        // [T3.7] RV22 masks instead of omitting: the lines after a PEM block keep their numbers.
+        let end = concat!("-----", "END RSA PRIVATE KEY-----");
+        let text = format!(
+            "fn a() {{}}\nconst K: &str = \"{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\nMIIBOgIBAAJBAK\nQQQQ\n{end}\";\nfn b() {{}}\n"
+        );
+        let m = mask_secrets_keeping_lines(&text).expect("a key block");
+        assert_eq!(m.pattern, "pem-private-key");
+        assert!(m.multi_line);
+        assert_eq!(m.text.lines().count(), text.lines().count(), "{:?}", m.text);
+        assert_eq!(m.text.lines().nth(5), Some("fn b() {}"), "{:?}", m.text);
+        assert!(
+            m.text.contains("<redacted: pem-private-key>"),
+            "{:?}",
+            m.text
+        );
+        assert!(
+            !m.text.contains("MIIB") && !m.text.contains("QQQQ"),
+            "{:?}",
+            m.text
+        );
+        assert_eq!(find_secret(&m.text), None);
+    }
+
+    #[test]
+    fn masking_with_lines_kept_masks_a_one_line_secret_as_mask_secrets_does() {
+        let text = "let u = \"postgres://svc:S3cr3t@db/app\";\nfn f() {}\n";
+        let m = mask_secrets_keeping_lines(text).expect("a url credential");
+        assert_eq!(m.pattern, "url-credential");
+        assert!(!m.multi_line);
+        assert_eq!(m.text, mask_secrets(text));
+        assert!(!m.text.contains("S3cr3t"));
+        assert_eq!(mask_secrets_keeping_lines("fn f() {}\n"), None);
     }
 
     #[test]

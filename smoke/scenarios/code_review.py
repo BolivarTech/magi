@@ -15,9 +15,10 @@ and refusing the inputs it must refuse before a model is paid for.
   real trio cannot be forced to hallucinate a location or to have something
   discarded.
 * **S48** (R13): a path outside the workspace is refused with exit 2.
-* **S49** (R14): a directory holding only a binary and a file with a secret has
-  nothing to review: exit 2, and the omission list names each file with its
-  cause, ``binary`` and ``secret``, and nothing else.
+* **S49** (R14): a directory holding only a binary and a file named after a
+  key has nothing to review: exit 2, and the omission list names each file with
+  its cause, ``binary`` and ``secret`` (the latter under its redacted name),
+  and nothing else.
 * **S50** (R15): ``--timeout 20`` over the S47 tree is refused before any model
   call, naming the batches (at least :data:`MIN_REFUSED_BATCHES`), the floor
   and the ``--timeout`` that would do.
@@ -101,10 +102,14 @@ CONSENSUS_TEXT_KEYS = ("consensus", "consensus_verdict")
 S47_FILES = runs.REVIEW_GEN_PATHS
 
 #: What R14's refusal must leave out: its binary as ``binary`` and its
-#: key-shaped file as ``secret`` (``runs.review_skipped_files``, in that order).
-S49_EXPECTED_OMISSIONS = tuple(
-    (path, cause) for (path, _), cause
-    in zip(runs.review_skipped_files(), ("binary", "secret")))
+#: key-named file as ``secret``, under its redacted name
+#: (``runs.review_skipped_files``, in that order). A key in a file's content is
+#: masked and the file reviewed (RV22 as amended in T3.7), so only a key in its
+#: path leaves a file out before any model call.
+S49_EXPECTED_OMISSIONS = (
+    (runs.review_skipped_files()[0][0], "binary"),
+    (runs.REVIEW_SECRET_PATH_SHOWN, "secret"),
+)
 
 #: The key-shaped value inside R14's secret file (``token = <value>``), read
 #: from the file the run writes so the two cannot drift. S49 looks for it in
