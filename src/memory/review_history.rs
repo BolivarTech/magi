@@ -157,10 +157,15 @@ impl ReviewHistoryStore {
     /// its `reviewed_commit` stays the one `classify` compares from. Replacing it would restart
     /// the clock on every review, and a finding nobody attends would never become a weak reject.
     ///
+    /// The one exception is an `attended` entry: the code it pointed at has changed, so a new
+    /// finding on the same `file:line` (the same id) is a new finding. It replaces the old row
+    /// whole (text, commit, status) and is due first; otherwise it would be dropped while the
+    /// old text kept being served as validated context.
+    ///
     /// Complexity: O(entries), one transaction.
     ///
     /// # Returns
-    /// The rows actually inserted.
+    /// The rows actually inserted or replaced.
     ///
     /// # Errors
     /// [`MemoryError::Crypto`] if encryption fails, [`MemoryError::Storage`] if a statement
@@ -179,9 +184,14 @@ impl ReviewHistoryStore {
         {
             let mut stmt = tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO code_review_history \
+                    "INSERT INTO code_review_history \
                      (id, file, line, reviewed_commit, finding_blob, status, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     ON CONFLICT(id) DO UPDATE SET file = excluded.file, \
+                     line = excluded.line, reviewed_commit = excluded.reviewed_commit, \
+                     finding_blob = excluded.finding_blob, status = excluded.status, \
+                     created_at = excluded.created_at, checked_at = 0 \
+                     WHERE code_review_history.status = 'attended'",
                 )
                 .map_err(db_err)?;
             for (e, blob) in entries.iter().zip(&sealed) {
