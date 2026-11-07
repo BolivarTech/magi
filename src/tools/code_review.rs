@@ -2760,7 +2760,8 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// Forty short functions: about 500 bytes, one file per batch under a 400-token window.
+    /// Forty short functions: about 500 bytes, one file per batch under a 700-token window (400 before T3.7 numbered the
+    /// lines).
     fn forty_functions(prefix: &str) -> String {
         (0..40)
             .map(|i| format!("fn {prefix}{i:02}() {{}}\n"))
@@ -2799,7 +2800,8 @@ mod tests {
         let (_tmp, ws) = guarded_workspace();
         std::fs::write(ws.join("src").join("a.rs"), forty_functions("a")).expect("a.rs");
         let consult = Arc::new(CountingConsult::default());
-        let runner = production_runner_with(&ws, consult.clone(), vec![("m".into(), Some(400))]);
+        // T3.7: 400 before the lines were numbered; the numbers and the legend need more room.
+        let runner = production_runner_with(&ws, consult.clone(), vec![("m".into(), Some(700))]);
         let plan = runner
             .plan(&ReviewInput::File("src".into()))
             .expect("plans");

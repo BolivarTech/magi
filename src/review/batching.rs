@@ -78,7 +78,8 @@ pub struct ReviewBatch {
     pub index: usize,
     /// What the batch reviews, in input order.
     pub items: Vec<BatchItem>,
-    /// Estimated tokens of the items plus one [`file_header`] per distinct file of the batch.
+    /// Estimated tokens of the items as rendered ([`BatchItem::rendered`], line numbers
+    /// included) plus one [`file_header`] per distinct file of the batch.
     /// Companions ([`plan_batches_with`]) are not included: they are in `companion_tokens`, and
     /// whoever adds their text scans it for secrets.
     pub tokens: usize,
@@ -150,9 +151,34 @@ impl BatchItem {
     }
 
     /// The text the trio receives for the item: [`BatchItem::text`] with each reviewed line
-    /// preceded by its absolute line number.
+    /// preceded by its absolute line number (`{number:>6}|`, see [`LINE_NUMBER_WIDTH`]).
+    ///
+    /// * A hunk numbers its body lines in the coordinates RV09 validates against: the new-side
+    ///   line for context and added lines, the old-side line for removed ones, counted from the
+    ///   `@@ -a,b +c,d @@` header. The header, the diff's file header lines and a `\ No newline`
+    ///   marker carry a blank prefix of the same width, so the diff marker (`+`, `-`, space)
+    ///   stays right after the `|`.
+    /// * A unit is numbered from its first line, a whole file from 1.
+    ///
+    /// Masking keeps lines (REQ-RV22), so the numbers still match the file. The prefix is not
+    /// a secret and adds no line. O(bytes).
+    ///
+    /// # Returns
+    ///
+    /// The numbered text, in the same line structure as the item's text.
     pub fn rendered(&self) -> String {
-        self.text().to_string()
+        match self {
+            Self::Hunk { text, .. } => number_hunk(text),
+            Self::Unit {
+                text, first_line, ..
+            } => number_lines(text, *first_line),
+            Self::WholeFile { text, .. } => number_lines(text, 1),
+        }
+    }
+
+    /// Tokens of [`BatchItem::rendered`], the text that actually leaves the process.
+    fn rendered_tokens(&self) -> usize {
+        estimate_tokens(&self.rendered())
     }
 
     /// How a [`ReviewError::TooLargeForBatch`] names the item: the path for a whole file,
@@ -190,6 +216,65 @@ impl BatchItem {
             Self::WholeFile { file, .. } => display_path(file),
         }
     }
+}
+
+/// The prefix of a reviewed line: its number right-aligned in [`LINE_NUMBER_WIDTH`] columns, or
+/// as many blanks for a line that has none, then [`LINE_NUMBER_SEPARATOR`].
+fn line_prefix(number: Option<u32>) -> String {
+    let shown = number.map_or_else(String::new, |n| n.to_string());
+    format!("{shown:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}")
+}
+
+/// `text` with its lines numbered consecutively from `first`; a last line without `'\n'` stays
+/// without it. O(bytes).
+// MAGI FIX (T3.7): the trio counted lines by hand from the `@@` header and reported wrong ones.
+fn number_lines(text: &str, first: u32) -> String {
+    let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
+    let mut number = first;
+    for line in text.split_inclusive('\n') {
+        out.push_str(&line_prefix(Some(number)));
+        out.push_str(line);
+        number = number.saturating_add(1);
+    }
+    out
+}
+
+/// A hunk's text with its body lines numbered by side (see [`BatchItem::rendered`]). The two
+/// counters start at the `@@` header's first lines ([`hunk_ranges`], the same parse the reviewed
+/// range uses) and a line moves the counters of the sides it belongs to: context both, `+` the
+/// new one, `-` the old one. Lines outside a hunk body carry a blank prefix. O(bytes).
+fn number_hunk(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
+    let mut counters: Option<(u32, u32)> = None; // (old, new): the number of the next line
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        let number = if body.starts_with(HUNK_MARKER) && !body.starts_with(COMBINED_HUNK_MARKER) {
+            counters = hunk_ranges(body).map(|((old, _), (new, _))| (old, new));
+            None
+        } else {
+            match (counters.as_mut(), body.chars().next()) {
+                (Some((old, _)), Some('-')) => Some(take(old)),
+                (Some((_, new)), Some('+')) => Some(take(new)),
+                (Some((old, new)), Some(' ') | None) => {
+                    let shown = *new;
+                    *old = old.saturating_add(1);
+                    *new = new.saturating_add(1);
+                    Some(shown)
+                }
+                _ => None,
+            }
+        };
+        out.push_str(&line_prefix(number));
+        out.push_str(line);
+    }
+    out
+}
+
+/// Returns the counter and advances it. Saturating, like every line count here.
+fn take(counter: &mut u32) -> u32 {
+    let shown = *counter;
+    *counter = counter.saturating_add(1);
+    shown
 }
 
 /// What [`BatchItem::describe`] appends to a pure deletion's old-side range, so the range is
@@ -483,7 +568,8 @@ impl Fit<'_> {
     /// The companion's error, unchanged.
     fn alone(&self, item: &BatchItem) -> Result<usize, ReviewError> {
         let companion = (self.companion)(item)?.map_or(0, |(_, tokens)| tokens);
-        Ok(estimate_tokens(item.text())
+        Ok(item
+            .rendered_tokens()
             .saturating_add(self.header_tokens)
             .saturating_add(companion))
     }
@@ -603,7 +689,8 @@ impl<'c> Packer<'c> {
     /// [`ReviewError::EgressSecret`], [`ReviewError::TooLargeForBatch`], or the companion's.
     fn add(&mut self, item: BatchItem, header_tokens: usize) -> Result<(), ReviewError> {
         scan(item.file(), item.text())?;
-        let item_tokens = estimate_tokens(item.text());
+        // MAGI FIX (T3.7): the limit measures the numbered text, which is what the trio receives.
+        let item_tokens = item.rendered_tokens();
         let companion = (self.companion)(&item)?;
         let companion_tokens = companion.as_ref().map_or(0, |(_, t)| *t);
         let alone = item_tokens
@@ -832,11 +919,8 @@ mod tests {
         let items: usize = b[0]
             .items
             .iter()
-            .map(|i| match i {
-                BatchItem::Hunk { text, .. }
-                | BatchItem::Unit { text, .. }
-                | BatchItem::WholeFile { text, .. } => estimate_tokens(text),
-            })
+            // T3.7: the batch counts the numbered text the trio receives.
+            .map(|i| estimate_tokens(&i.rendered()))
             .sum();
         assert_eq!(b[0].tokens, items + estimate_tokens(&file_header("a.rs")));
         assert_eq!(file_header("src/a.rs"), "### src/a.rs (rust)\n");

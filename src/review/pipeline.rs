@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use super::batching::{
     file_header, plan_batches, plan_batches_with, BatchItem, Companion, ReviewBatch,
+    LINE_NUMBER_LEGEND,
 };
 use super::clock::{batch_wall_clock_secs, pre_budget};
 use super::consolidate::{
@@ -792,7 +793,8 @@ fn filter_and_plan_with(
 ) -> Result<Planned, ReviewError> {
     let filtered = filter_files(files, source, registry, explicit, is_ignored)?;
     let window = pool_window(pool);
-    let limit = batch_limit_tokens(&window);
+    // MAGI FIX (T3.7): the legend every prompt opens with is charged once, off the top.
+    let limit = batch_limit_tokens(&window).saturating_sub(estimate_tokens(LINE_NUMBER_LEGEND));
     // The index takes `filtered.kept` only (R3-3): skipped files may hold key-block sides raw.
     // With RAG the lexical index is built first: binding the context source to the review needs
     // it, and planning charges each item's containing unit (`companion`) against the limit less
@@ -1031,19 +1033,22 @@ fn record_verdicts(
 /// The prompt of a batch: its items in order, each file's first item preceded by its header.
 /// The mode is an argument of the trio call, never part of this text.
 fn prompt_of(batch: &ReviewBatch) -> String {
-    let mut prompt = String::new();
+    // MAGI FIX (T3.7): the prompt opens with the legend and every reviewed line carries its
+    // absolute number, so the trio never counts lines by hand.
+    let mut prompt = String::from(LINE_NUMBER_LEGEND);
     let mut previous: Option<&str> = None;
     for item in &batch.items {
-        let (file, text) = match item {
-            BatchItem::Hunk { file, text, .. }
-            | BatchItem::Unit { file, text, .. }
-            | BatchItem::WholeFile { file, text, .. } => (file.as_str(), text.as_str()),
+        let file = match item {
+            BatchItem::Hunk { file, .. }
+            | BatchItem::Unit { file, .. }
+            | BatchItem::WholeFile { file, .. } => file.as_str(),
         };
+        let text = item.rendered();
         if previous != Some(file) {
             prompt.push_str(&file_header(file));
             previous = Some(file);
         }
-        prompt.push_str(text);
+        prompt.push_str(&text);
         if !text.ends_with('\n') {
             prompt.push('\n');
         }
@@ -1661,9 +1666,11 @@ mod tests {
     use crate::review::validate::DiscardCause;
     use crate::review::window::BATCH_WINDOW_FRACTION_PERCENT;
 
-    /// The pool window whose batch limit is 120 tokens: one `workspace` file (104 tokens with its
-    /// header) per batch. Derived from the fraction so the fixture follows it (200 at 60 %).
-    const POOL_WINDOW: usize = 120 * 100 / BATCH_WINDOW_FRACTION_PERCENT;
+    /// The pool window whose batch limit is 280 tokens, of which the line-number legend takes
+    /// ~70 and leaves ~210: one `workspace` file (~148 tokens with its header and its line
+    /// numbers) per batch, two never together. Derived from the fraction so the fixture follows
+    /// it. (T3.7: it was 120 tokens before the lines were numbered.)
+    const POOL_WINDOW: usize = 280 * 100 / BATCH_WINDOW_FRACTION_PERCENT;
 
     #[test]
     fn the_index_takes_definitions_and_occurrences_from_the_new_side_only() {
@@ -2288,20 +2295,20 @@ mod tests {
         assert!(kept.summary.discarded.is_empty());
         let (_, out) = review_a_file_with_a_finding_at(Some(99)).await;
         assert!(out.summary.findings.is_empty());
+        // Two mages reported it, so two discards (the third reported nothing).
         assert_eq!(
             out.summary
                 .discarded
                 .iter()
                 .map(|x| x.cause.clone())
                 .collect::<Vec<_>>(),
-            vec![DiscardCause::LineOutOfRange]
+            vec![DiscardCause::LineOutOfRange; 2]
         );
     }
 
     #[tokio::test]
     async fn the_prompt_explains_the_line_numbers_once_before_the_code() {
         // [T3.7-fix3] the legend is batch text, never the mage's system prompt.
-        use crate::review::batching::LINE_NUMBER_LEGEND;
         let (prompt, _) = review_a_file_with_a_finding_at(None).await;
         assert_eq!(prompt.matches(LINE_NUMBER_LEGEND).count(), 1, "{prompt}");
         assert!(prompt.starts_with(LINE_NUMBER_LEGEND), "{prompt}");
@@ -4552,7 +4559,8 @@ mod tests {
         )]);
         let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
         let registry = LanguageRegistry::new();
-        let pool = vec![("m".to_string(), Some(400usize))];
+        // T3.7: 400 before the lines were numbered and the legend took its share of the limit.
+        let pool = vec![("m".to_string(), Some(560usize))];
         run_review(
             ReviewRequest {
                 input: ReviewInput::Directory(dir.to_path_buf()),
