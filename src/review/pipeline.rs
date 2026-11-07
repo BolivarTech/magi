@@ -4623,6 +4623,17 @@ mod tests {
         consult: &FakeConsult,
         client: &MockDecisionClient,
     ) -> Result<ReviewOutcome, ReviewError> {
+        review_dir_with_rag_timeout(dir, rag, consult, client, None).await
+    }
+
+    /// [`review_dir_with_rag`] under an explicit `--timeout`.
+    async fn review_dir_with_rag_timeout(
+        dir: &Path,
+        rag: &dyn RagSource,
+        consult: &FakeConsult,
+        client: &MockDecisionClient,
+        timeout_secs: Option<u64>,
+    ) -> Result<ReviewOutcome, ReviewError> {
         // MS2 T2.3 pins this listing for a directory input; without it FakeGit answers `unexpected`.
         let git = FakeGit::from(&[(
             "ls-files --others --ignored --exclude-standard --directory -z -- .",
@@ -4636,7 +4647,7 @@ mod tests {
             ReviewRequest {
                 input: ReviewInput::Directory(dir.to_path_buf()),
                 workspace: dir,
-                timeout_secs: None,
+                timeout_secs,
                 deadline: None,
                 max_rotations: 2,
                 retry_disabled: false,
@@ -4658,6 +4669,48 @@ mod tests {
             },
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn a_refused_budget_assembles_no_context_and_calls_no_one() {
+        // [SMOKE1 S50] §5.0 stage 4 comes before every step that calls a model or an endpoint:
+        // assembling a batch's context embeds its query, so a review refused for its budget must
+        // never reach `context_for`.
+        struct CountingRag(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl RagSource for CountingRag {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Assembled {
+                    items: vec![],
+                    trimmed: vec![],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+        }
+        let dir = workspace(3);
+        let consult = FakeConsult::new(Vec::new());
+        let rag = CountingRag(std::sync::atomic::AtomicUsize::new(0));
+        let r = review_dir_with_rag_timeout(
+            dir.path(),
+            &rag,
+            &consult,
+            &gate_always("real_defect"),
+            Some(1),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ReviewError::Budget { .. })),
+            "a Budget error was expected"
+        );
+        assert_eq!(
+            rag.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no context assembled"
+        );
+        assert_eq!(consult.calls(), 0);
     }
 
     #[tokio::test]

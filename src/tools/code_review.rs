@@ -2589,6 +2589,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_review_refused_for_its_budget_sends_nothing_to_the_embedder() {
+        // [SMOKE1 S50] §5.0 stage 4: the budget check precedes the documentation indexing, so a
+        // refused review sends no byte out of the process. The pool's unmeasured window gives
+        // one batch for `src/a.rs`, and 1 s cannot hold it.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        let run = runner
+            .run(
+                plan,
+                ReviewBudget::Total(Duration::from_secs(1)),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            matches!(run, Err(ReviewError::Budget { .. })),
+            "{:?}",
+            run.err()
+        );
+        assert_eq!(fake.calls(), 0, "the embedder was never called");
+    }
+
+    #[tokio::test]
+    async fn a_review_with_enough_budget_still_indexes_the_documentation() {
+        // [SMOKE1 S50] The RAG is intact when the budget holds: the embedder is called and the
+        // review runs (its trio double answers none, so the report is empty but delivered).
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        let run = runner
+            .run(
+                plan,
+                ReviewBudget::Total(Duration::from_secs(100_000)),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(run.is_ok(), "{:?}", run.err());
+        assert!(fake.calls() > 0, "the documentation was embedded");
+    }
+
+    #[tokio::test]
     async fn a_working_tree_without_a_repository_drops_its_older_documentation() {
         // RV-S39 without git: the working tree alone is live, so the version it replaced goes.
         let tmp = tempfile::tempdir().expect("tempdir");
