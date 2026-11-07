@@ -226,6 +226,13 @@ impl LexicalIndex {
     /// (class, struct, enum, trait) or a module. An impl block is not a definition of its type, and
     /// the gap and declaration-group units an extractor emits carry a label, not a name.
     /// O(bytes of `text`) for the extraction.
+    ///
+    /// Known limitation: the extractor yields top-level units only, so the methods inside an
+    /// `impl`, `class` or `trait` block are never definitions, and a call to one finds no
+    /// definition in RV07(2) (in Rust or Java, most called names). Splitting each block one
+    /// level down (`LanguageExtractor::split_block`, as the containing-unit lookup already does)
+    /// would cover them; it is not done in v0.25.0.
+    // MAGI FIX (Loop1 r1, M5): the limitation is declared where it lives.
     fn record_definitions(&mut self, extractor: &ExtractorKind, file: &str, text: &str) {
         for unit in extractor.extract_units(text, file, ChangedLines::All) {
             if !matches!(
@@ -256,8 +263,9 @@ impl LexicalIndex {
     }
 
     /// Where `name` is defined, as `(file, first_line, last_line)`, in the order the files were
-    /// given. Only named top-level units of files with an extractor are definitions; a name that
-    /// is defined more than once (homonyms) lists every place. O(1) expected.
+    /// given. Only named top-level units of files with an extractor are definitions (a method
+    /// inside an `impl` or `class` block is not one; see `record_definitions`); a name that is
+    /// defined more than once (homonyms) lists every place. O(1) expected.
     ///
     /// # Arguments
     ///
