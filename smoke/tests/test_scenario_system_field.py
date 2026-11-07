@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.3
-# Date: 2026-10-22
+# Version: 0.25.0
+# Date: 2026-11-08
 """Unit tests for S44-S46 (envelope system field, REQ-SY02/SY03/SY06)."""
 
 import dataclasses

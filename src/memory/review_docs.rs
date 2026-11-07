@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.3
-// Date: 2026-11-05
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Encrypted index of project documentation for the `code-review` context (RV07, RV19, RV21).
 //!

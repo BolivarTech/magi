@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.3
-# Date: 2026-11-05
+# Version: 0.25.0
+# Date: 2026-11-08
 """S52 -- ``code-review`` declares the documentation and history it could not retrieve.
 
 * **S52** (R17, the real trio): the review workspace's ``[embedding]`` points at

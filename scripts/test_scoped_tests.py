@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.25.0
+# Date: 2026-11-08
 """Tests for the scoped-test selector's path classification.
 
 The property under test is not "which filter comes out" but "which paths are

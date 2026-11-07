@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.25.0
+# Date: 2026-11-08
 """The harness's command line, orchestration and exit codes.
 
 Exit code 3 exists so a bug in the harness is never read as a defect in

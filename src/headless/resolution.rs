@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-07-18
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Resolution of parameters for a headless run: per-field precedence and the operator cost
 //! clamp (REQ-H12/H12b).

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.3
-// Date: 2026-10-18
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Headless runner: wires the existing [`Agent`] tool loop to the non-interactive
 //! path with per-tier auto-approval and a deterministic `stop_reason`

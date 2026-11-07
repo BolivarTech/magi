@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.0
-# Date: 2026-10-13
+# Version: 0.25.0
+# Date: 2026-11-08
 """Imports every scenario module so the decorator registers them.
 
 The imports are EXPLICIT and ORDERED. Never ``pkgutil``, never ``glob``:

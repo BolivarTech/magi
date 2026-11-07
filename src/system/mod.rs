@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! This module provides abstractions for system-level operations.
 pub mod cached_probe;

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.25.0
+# Date: 2026-11-08
 """Scenario invocation, id stamping, and the reconciliation that closes the
 two ways a scenario can vanish."""
 

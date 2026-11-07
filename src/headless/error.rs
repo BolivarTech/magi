@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.17.0
-// Date: 2026-08-27
+// Version: 0.25.0
+// Date: 2026-11-08
 //!
 //! Follows the pattern of [`crate::vault::VaultError`]: foreign types are
 //! **stringified** instead of being wrapped, except for the vault error

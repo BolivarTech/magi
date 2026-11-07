@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.23.0
-// Date: 2026-10-11
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Error, attempt trace and usage types of a decision (REQ-D08..D10).
 

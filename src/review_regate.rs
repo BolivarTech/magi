@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.3
-// Date: 2026-11-06
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Criterion 2 of the v0.25.0 certification (spec §3): the `verify` half of the gate calibration,
 //! re-judged by the review's real gate.

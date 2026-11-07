@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.3
-# Date: 2026-10-25
+# Version: 0.25.0
+# Date: 2026-11-08
 """Unit tests for S47-S51 (code-review against the release binary)."""
 
 import dataclasses

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.25.0
+# Date: 2026-11-08
 """S10 -- no credential leaks.
 
 Protects ``src/redact.rs`` and the five sites of the v0.12.0 gate, which were

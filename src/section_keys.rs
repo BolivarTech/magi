@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.0
-// Date: 2026-10-13
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Per-section API key sources: the one env > vault precedence every section shares (REQ-K03).
 #![deny(missing_docs)]

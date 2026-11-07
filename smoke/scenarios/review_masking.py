@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.3
-# Date: 2026-11-06
+# Version: 0.25.0
+# Date: 2026-11-08
 """S53-S54 -- ``code-review`` never lets a secret in a file's CONTENT leave the process (REQ-RV22).
 
 S49 covers a secret in a file's NAME. These two cover its content, which the

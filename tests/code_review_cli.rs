@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.3
-// Date: 2026-10-24
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! `magi code-review` end to end (REQ-RV01, RV02, RV13; RV-S1, RV-S10; D24 `--structured-verdicts`) against one
 //! mockito stand-in for the trio (`/api/chat`) and the gate (`/v1/systemone`): these tests pin the product's own

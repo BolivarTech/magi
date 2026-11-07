@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.18.1
-# Date: 2026-09-02
+# Version: 0.25.0
+# Date: 2026-11-08
 """Unit tests for S9: the derivation, and what a missing field must do."""
 
 import json

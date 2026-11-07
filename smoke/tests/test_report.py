@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-26
+# Version: 0.25.0
+# Date: 2026-11-08
 """Tests for the report: every finding, and every cause, reaches the reader."""
 
 import unittest

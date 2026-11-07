@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.0
-// Date: 2026-10-13
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! REQ-K03: one origin comparison, one key selection and one env > vault precedence in `src/`.
 

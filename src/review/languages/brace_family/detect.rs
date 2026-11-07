@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.3
-// Date: 2026-10-22
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Construct detection for [`BraceFamilyExtractor`]: the line-by-line passes that find
 //! functions, types and declaration groups, their member passes, and the attribute and

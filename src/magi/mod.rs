@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.21.0
-// Date: 2026-09-28
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! MAGI subsystem of magi-rs: mode resolution, complexity gate, and probe.
 

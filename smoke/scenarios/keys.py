@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.0
-# Date: 2026-10-13
+# Version: 0.25.0
+# Date: 2026-11-08
 """K1-K3 -- per-section API keys (``MAGI_API_KEY``) against the release binary.
 
 The unit suite proves which key each section picks; what it cannot see is the

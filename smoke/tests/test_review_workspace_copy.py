@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.3
-# Date: 2026-11-02
+# Version: 0.25.0
+# Date: 2026-11-08
 """Unit tests for how the review workspace copies the environment's ``.magi``.
 
 The copy is the step that puts bytes in front of the product, so a link or a

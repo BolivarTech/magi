@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.25.0
+# Date: 2026-11-08
 """Doubles the scenario tests share, so no two of them build their own.
 
 A scenario reaches the product only through :mod:`smoke.runs`, which is exactly

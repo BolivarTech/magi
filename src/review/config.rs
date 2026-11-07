@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.3
-// Date: 2026-10-24
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Configuration types of the `[code_review]` section: the endpoint and the model chain of the
 //! false-positive gate.

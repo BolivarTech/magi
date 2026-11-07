@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.24.3
-// Date: 2026-10-22
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Consolidation of the batch reports of one review into a single report (REQ-RV12), and the
 //! agreement weight applied after the gate (REQ-RV11).

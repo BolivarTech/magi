@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-26
+# Version: 0.25.0
+# Date: 2026-11-08
 """What the run concluded, rendered for somebody who has to act on it.
 
 The findings themselves are produced by the runner; this module decides how

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 1.0.0
-# Date: 2026-08-25
+# Version: 0.25.0
+# Date: 2026-11-08
 """Locating, rebuilding, hashing and invoking the release binary.
 
 The harness runs ``target/release/magi-rs`` and never ``cargo run`` (REQ-S07):
