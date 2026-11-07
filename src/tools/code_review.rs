@@ -2542,6 +2542,36 @@ mod tests {
     }
 
     #[test]
+    fn a_finding_on_a_removed_line_never_reaches_the_review_history() {
+        // [Loop1 r2, Minor 2] RV08: the follow-up a review leaves keeps only the findings on a
+        // line of the reviewed revision, so the history store never gets the removed one.
+        let mut summary = magi_rs::review::report::ReviewSummary::default();
+        let live = kept_finding().remove(0);
+        let mut removed = live.clone();
+        removed.0.line = Some(9);
+        summary.findings = vec![live, removed];
+        summary.off_revision.insert(("a.rs".to_string(), 9));
+        let follow = FollowUp::of_review(
+            &summary,
+            Some("HEAD".into()),
+            None,
+            None,
+            HashSet::new(),
+            true,
+        );
+        let (_db, _mem, memory) = review_memory();
+        assert!(follow_up_work(&memory, &ShaGit, follow).is_none());
+        let lines: Vec<Option<u32>> = memory
+            .history()
+            .all()
+            .expect("all")
+            .into_iter()
+            .map(|e| e.line)
+            .collect();
+        assert_eq!(lines, vec![Some(1)]);
+    }
+
+    #[test]
     fn the_history_is_anchored_to_the_full_sha_of_the_reviewed_revision() {
         // Ruling 3: the reclassification compares the anchor with `rev-parse` output, so a short
         // or symbolic ref stored as given would never match.
