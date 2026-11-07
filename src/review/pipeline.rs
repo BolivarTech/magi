@@ -2962,16 +2962,17 @@ mod tests {
     #[tokio::test]
     async fn history_gets_only_the_findings_that_name_a_line_of_the_reviewed_revision() {
         // [Loop1 r1, M2] RV08 anchors history to the reviewed revision's lines. Line 9 was
-        // deleted (old side only) and line 3 replaced (its number is both a deleted and a live
-        // line): neither names a line of the revision for sure, so neither is anchored. Line 5
-        // is a live context line and is.
+        // deleted (old side only): it names no line of the revision and is not anchored.
+        // [Loop1 r2, I-1] Line 3 was edited in place (its number is both the deleted and the
+        // live line): it is anchored on the new side, the side the gate reads. Line 5 is a live
+        // context line and is anchored. The diff is verbatim `git diff` output.
         let dir = tempfile::tempdir().expect("tempdir");
         let new = "old1\nold2\nnew3\nold4\nold5\nold6\nold7\n";
         std::fs::write(dir.path().join("a.rs"), new).expect("write");
         let old: String = (1..=10).map(|i| format!("old{i}\n")).collect();
-        let diff =
-            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,10 +1,7 @@\n old1\n old2\n\
-                    -old3\n+new3\n old4\n old5\n old6\n old7\n-old8\n-old9\n-old10\n";
+        let diff = "diff --git a/a.rs b/a.rs\nindex 1e86d47..8db3065 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -1,10 +1,7 @@\n old1\n old2\n-old3\n+new3\n old4\n old5\n old6\n old7\n-old8\n\
+                    -old9\n-old10\n";
         let git = FakeGit::from(&[
             ("rev-parse --is-inside-work-tree", Ok("true\n")),
             ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
@@ -3037,13 +3038,14 @@ mod tests {
             .collect();
         judged.sort_unstable();
         assert_eq!(judged, vec![3, 5, 9], "all three reach the main list");
-        let anchored: Vec<u32> = out
+        let mut anchored: Vec<u32> = out
             .summary
             .anchored_findings()
             .iter()
             .filter_map(|(f, _)| f.line)
             .collect();
-        assert_eq!(anchored, vec![5]);
+        anchored.sort_unstable();
+        assert_eq!(anchored, vec![3, 5], "only the removed line 9 is left out");
     }
 
     #[tokio::test]
