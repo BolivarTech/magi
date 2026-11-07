@@ -424,7 +424,9 @@ struct Faces {
 ///    before any trio call. The total is the `--timeout`, at most what is left of the deadline
 ///    when the preparation ends. Steps 1-4 are the preparation, measured apart (plus the
 ///    source's own indexing time, [`RagSource::index_ms`]) and never charged to the
-///    `--timeout`.
+///    `--timeout`. The check itself ([`precheck_budget`]) needs only the number of batches, so it
+///    runs right after the local preparation (the plan and the lexical index) and before any
+///    context is assembled; a refused review calls no model and no endpoint.
 /// 5. Run one `consult` per batch, in series, its context after its code under
 ///    [`CONTEXT_HEADING`]. Without `--timeout` each batch runs on the normal
 ///    `consult` clock; with it, each gets what is left split over the pending batches, counted
@@ -519,6 +521,15 @@ pub async fn run_review(
     // callers never name a skipped file, whose key-block sides the cache holds unmasked.
     // §5.0 stage 3, before the clock: every batch's context is assembled and scanned now, so the
     // embedder's latency is never charged to the review's total (RV06).
+    // MAGI FIX (SMOKE1): the budget check precedes assembling any context, which embeds each
+    // batch's query: a review refused for its budget sends no byte out of the process.
+    precheck_budget(
+        req.timeout_secs,
+        req.deadline,
+        planned,
+        req.max_rotations,
+        req.retry_disabled,
+    )?;
     let contexts = match deps.rag {
         Some(rag) => {
             let bound = bind(rag, &index, &source);
@@ -527,11 +538,17 @@ pub async fn run_review(
         }
         None => vec![Vec::new(); batches.len()],
     };
-    let bound = review_total(req.timeout_secs, req.deadline);
-    let total = bound.map(|(secs, _)| secs);
-    if let Some((total, limit)) = bound {
-        let ceiling = pre_budget(total, planned, req.max_rotations, req.retry_disabled)
-            .map_err(|e| with_budget_limit(e, limit))?;
+    // Read again: the preparation spent part of a caller's deadline, and the total is what is
+    // left when it ends.
+    let budget = precheck_budget(
+        req.timeout_secs,
+        req.deadline,
+        planned,
+        req.max_rotations,
+        req.retry_disabled,
+    )?;
+    let total = budget.map(|(total, _)| total);
+    if let Some((_, ceiling)) = budget {
         summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
     }
     summary.prep_ms =
@@ -886,6 +903,46 @@ fn review_total(
         (Some(t), _) => Some((t, BudgetLimit::Timeout)),
         (None, l) => l.map(|l| (l, BudgetLimit::RunDeadline)),
     }
+}
+
+/// The RV06 budget pre-check (§5.0 stage 4): with an explicit `--timeout` or a caller's
+/// deadline, whether `batches` fit the review's total ([`pre_budget`]).
+///
+/// It needs only the number of batches, which does not depend on the RAG, so a caller runs it
+/// before any step of the preparation that calls a model or an endpoint (the documentation
+/// indexing and its embedder, the history, a batch's context); a refused review then sends no
+/// byte out of the process. The duration of the preparation (`prep_ms`) keeps counting all of
+/// it, whichever side of the check it ran on.
+///
+/// # Arguments
+///
+/// * `timeout_secs` - The explicit `--timeout`, if any.
+/// * `deadline` - The calling run's deadline, if any.
+/// * `batches` - The batches the review was planned into.
+/// * `max_rotations` - `[magi].max_rotations`, resolved.
+/// * `retry_disabled` - Whether schema retries are off.
+///
+/// # Returns
+///
+/// `None` without a bound (no pre-check, the normal `consult` clock); otherwise the review's
+/// total in seconds, read now, and the ceiling per batch it allows.
+///
+/// # Errors
+///
+/// [`ReviewError::Budget`] naming the bound that set the total, when the batches do not fit.
+pub fn precheck_budget(
+    timeout_secs: Option<u64>,
+    deadline: Option<Instant>,
+    batches: usize,
+    max_rotations: u32,
+    retry_disabled: bool,
+) -> Result<Option<(u64, u64)>, ReviewError> {
+    let Some((total, limit)) = review_total(timeout_secs, deadline) else {
+        return Ok(None);
+    };
+    pre_budget(total, batches, max_rotations, retry_disabled)
+        .map(|ceiling| Some((total, ceiling)))
+        .map_err(|e| with_budget_limit(e, limit))
 }
 
 /// `e` with its budget bound set to `limit` (any other error unchanged), so the message names the

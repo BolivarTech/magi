@@ -33,8 +33,8 @@ use magi_rs::review::history::entries_from_review;
 use magi_rs::review::input::{in_work_tree, pin_refs, resolve_input, validate_ref, ReviewInput};
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{
-    plan_review, run_review, BatchConsult, ReviewDeps, ReviewOutcome, ReviewRequest,
-    SystemReviewClock,
+    plan_review, precheck_budget, run_review, BatchConsult, ReviewDeps, ReviewOutcome,
+    ReviewRequest, SystemReviewClock,
 };
 use magi_rs::review::report::{
     failed_batch_lines, render_batch_reports, render_text, summary_json,
@@ -1132,6 +1132,10 @@ impl ProductionReviewRunner {
     /// `run_review`. The cost of a refused review is bounded by [`REINDEX_TIMEOUT_SECS`], nothing
     /// is sent to the trio, every chunk has passed the secret detector before any embedding, and
     /// what was indexed is reused by the next review of the same revision.
+    ///
+    /// [`CodeReviewRunner::run`] checks the budget ([`precheck_budget`]) before calling this, so
+    /// a review refused for its `--timeout` never reaches the embedder; this duration is still
+    /// part of `prep_ms`.
     async fn prepare_documentation(&self, input: &ReviewInput) -> DocContext {
         let (Some(memory), Some(embedder)) =
             (self.parts.memory.as_deref(), self.parts.embedder.as_deref())
@@ -1296,6 +1300,19 @@ impl CodeReviewRunner for ProductionReviewRunner {
             ReviewBudget::Until(d) => (None, Some(d)),
         };
         run_cancellable(cancel, async {
+            // MAGI FIX (SMOKE1): §5.0 stage 4 before the documentation indexing, which calls the
+            // embedder: a review refused for its budget sends no byte out of the process. The
+            // count is the approved plan's (`run_review` refuses a plan that changed, and checks
+            // again with its own); a plan that was never made (0 batches) has nothing to check.
+            if plan.batches > 0 {
+                precheck_budget(
+                    timeout_secs,
+                    deadline,
+                    plan.batches,
+                    self.parts.max_rotations,
+                    self.parts.retry_disabled,
+                )?;
+            }
             let input = path_input(&self.workspace, plan.input);
             // The documentation is prepared first, before the review clock; its duration is the
             // context source's `index_ms`, which the pipeline adds once to `prep_ms`.
