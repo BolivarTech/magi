@@ -594,6 +594,31 @@ mod tests {
     }
 
     #[test]
+    fn the_unit_of_a_deletion_only_hunk_is_numbered_on_the_old_side() {
+        // [T3.7-fix3 round 2] its `lines` are old-side coordinates, and so are its numbers.
+        use crate::review::test_support::MapSource;
+        let old = "fn a() {}\n\nfn gone() {\n    y();\n}\n";
+        let src = MapSource::new(&[("a.rs", "fn a() {}\n")], &[("a.rs", old)]);
+        let deleted = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "-    y();".into(),
+            first_line: 4,
+            last_line: 3,
+            old_first_line: 4,
+            old_last_line: 4,
+        };
+        let u = containing_unit(&deleted, &src, &LanguageRegistry::new())
+            .expect("reads")
+            .expect("old side");
+        assert!(u.old_side);
+        assert_eq!(u.lines, Some((3, 5)));
+        assert_eq!(
+            u.rendered(),
+            "     3|fn gone() {\n     4|    y();\n     5|}"
+        );
+    }
+
+    #[test]
     fn other_context_stays_unnumbered_and_a_unit_without_lines_too() {
         // [T3.7-fix3] definitions, callers, docs and history are reference only (`context only`).
         for kind in [

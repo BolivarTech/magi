@@ -2419,6 +2419,49 @@ mod tests {
             .find(|(f, _)| f.file.as_deref() == Some("gone.rs"))
             .expect("reached the gate");
         assert_eq!(v.state, GateState::Kept);
+        // [T3.7-fix3 round 2] the removed line shows its OLD-file number, the one RV09 accepted
+        // for the finding at line 5.
+        let prompts = consult.prompts.lock().expect("lock").clone();
+        assert!(prompts[0].contains("     5|-old5\n"), "{}", prompts[0]);
+    }
+
+    #[test]
+    fn the_planner_leaves_room_for_the_legend() {
+        // [T3.7-fix3 round 2] two files fit one batch against the raw limit, but not once the
+        // legend every prompt opens with is charged: they must be planned apart.
+        use crate::review::test_support::MapSource;
+        let text = "let _x = 1;\n".repeat(40);
+        let mk = |p: &str| ReviewFile {
+            path: p.into(),
+            diff: None,
+        };
+        let source = MapSource::new(&[("a.rs", text.as_str()), ("b.rs", text.as_str())], &[]);
+        let registry = LanguageRegistry::new();
+        let big = [("m".to_string(), Some(100_000))];
+        let one = filter_and_plan(
+            vec![mk("a.rs")],
+            &source,
+            false,
+            &registry,
+            &|_| false,
+            &big,
+        )
+        .expect("plans");
+        let both_fit_raw = 2 * one.2[0].tokens + 10;
+        let tight = [(
+            "m".to_string(),
+            Some(both_fit_raw * 100 / BATCH_WINDOW_FRACTION_PERCENT),
+        )];
+        let planned = filter_and_plan(
+            vec![mk("a.rs"), mk("b.rs")],
+            &source,
+            false,
+            &registry,
+            &|_| false,
+            &tight,
+        )
+        .expect("plans");
+        assert_eq!(planned.2.len(), 2);
     }
 
     /// The toy password of the T3.7 masking tests (a URL credential, the pattern that left the

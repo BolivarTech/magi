@@ -41,7 +41,7 @@ use crate::review::input::ReviewFile;
 use crate::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry, SemanticUnit};
 use crate::review::secrets::{display_path, find_secret};
 use crate::review::source::ContentSource;
-use crate::review::window::estimate_tokens;
+use crate::review::window::{batch_limit_tokens, estimate_tokens, PoolWindow};
 
 /// The language name [`detect_language`] gives a file it does not recognise.
 const UNKNOWN_LANGUAGE: &str = "unknown";
@@ -70,6 +70,11 @@ pub const LINE_NUMBER_LEGEND: &str = "Each line of the code below starts with it
 line number, right-aligned, then `|`. In a diff, a removed line (`-`) shows its number in the \
 old file and every other line shows its number in the new file. Report each finding at these \
 numbers; do not count lines yourself.\n";
+
+/// The batch limit that applies to the code and context of a prompt.
+pub fn prompt_limit_tokens(window: &PoolWindow) -> usize {
+    batch_limit_tokens(window)
+}
 
 /// One batch: what one `consult code-review` receives.
 #[derive(Debug)]
@@ -1455,6 +1460,67 @@ mod tests {
             }
         }
         assert!(units >= 2, "the file must split into units");
+    }
+
+    #[test]
+    fn the_prompt_limit_is_the_batch_limit_less_the_legend() {
+        // [T3.7-fix3 round 2] one subtraction, shared by the planner and the RAG budget.
+        use crate::review::window::pool_window;
+        let window = pool_window(&[("m".to_string(), Some(4_000))]);
+        assert_eq!(
+            prompt_limit_tokens(&window),
+            batch_limit_tokens(&window) - estimate_tokens(LINE_NUMBER_LEGEND)
+        );
+    }
+
+    #[test]
+    fn the_legend_says_a_deletion_only_unit_shows_old_file_numbers() {
+        // [T3.7-fix3 round 2] the context unit of a deleted hunk is numbered on the old side.
+        assert!(LINE_NUMBER_LEGEND.contains("only deletes lines"));
+        assert!(LINE_NUMBER_LEGEND.contains("old file"));
+    }
+
+    #[test]
+    fn a_hunk_with_an_empty_side_numbers_the_side_that_has_lines() {
+        // [T3.7-fix3 round 2] git writes the line BEFORE the change for an empty side (`-5,0`).
+        let one = |diff: &str| {
+            let files = vec![ReviewFile {
+                path: "a.rs".into(),
+                diff: Some(diff.into()),
+            }];
+            let src = MapSource::new(&[("a.rs", "x\n")], &[("a.rs", "x\n")]);
+            let b = plan_batches(&files, &src, &LanguageRegistry::new(), 1_000).expect("plans");
+            b[0].items[0].rendered()
+        };
+        let added = one("@@ -5,0 +6,2 @@\n+a\n+b\n");
+        assert!(added.contains(&prefixed(6, "+a")) && added.contains(&prefixed(7, "+b")));
+        let removed = one("@@ -3,2 +2,0 @@\n-a\n-b\n");
+        assert!(removed.contains(&prefixed(3, "-a")) && removed.contains(&prefixed(4, "-b")));
+    }
+
+    #[test]
+    fn crlf_lines_are_numbered_once_each_and_keep_their_carriage_return() {
+        // [T3.7-fix3 round 2] the split is on `\n` only: the `\r` stays with its line.
+        let files = vec![
+            ReviewFile {
+                path: "w.rs".into(),
+                diff: None,
+            },
+            ReviewFile {
+                path: "d.rs".into(),
+                diff: Some("@@ -1,2 +1,2 @@\r\n x\r\n-y\r\n+z\r\n".into()),
+            },
+        ];
+        let src = MapSource::new(&[("w.rs", "a\r\nb\r\n"), ("d.rs", "x\r\nz\r\n")], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 1_000).expect("plans");
+        assert_eq!(
+            b[0].items[0].rendered(),
+            format!("{}{}", prefixed(1, "a\r\n"), prefixed(2, "b\r\n"))
+        );
+        let hunk = b[0].items[1].rendered();
+        for expected in [prefixed(1, " x"), prefixed(2, "-y"), prefixed(2, "+z")] {
+            assert!(hunk.contains(&expected), "{expected:?} in {hunk:?}");
+        }
     }
 
     #[test]

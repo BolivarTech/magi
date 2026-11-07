@@ -2794,6 +2794,21 @@ mod tests {
         assert!(!prompts.contains("moved_sentinel"), "{prompts}");
     }
 
+    #[test]
+    fn the_rag_budget_leaves_room_for_the_legend_the_planner_leaves() {
+        // [T3.7-fix3 round 2] the context is assembled against `batch.tokens`, which excludes the
+        // legend every prompt opens with, so its limit must already be less the legend.
+        let (_tmp, ws) = guarded_workspace();
+        let runner = production_runner_with(
+            &ws,
+            Arc::new(CountingConsult::default()),
+            vec![("m".into(), Some(4_000))],
+        );
+        let legend =
+            magi_rs::review::window::estimate_tokens(magi_rs::review::batching::LINE_NUMBER_LEGEND);
+        assert_eq!(runner.limit_tokens(), 4_000 * 50 / 100 - legend);
+    }
+
     #[tokio::test]
     async fn a_working_tree_that_changed_since_approval_fails_before_any_batch() {
         // The tree cannot be pinned: a run that now splits otherwise is a typed error, no call.
