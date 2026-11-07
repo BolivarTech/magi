@@ -1471,6 +1471,41 @@ mod tests {
     }
 
     #[test]
+    fn an_old_line_moves_across_a_hunk_by_its_side() {
+        // [Loop1 r3, Minor 2] Verbatim `git diff`: old 1..=6 becomes new 1..=2, then old 7.. after it.
+        let text =
+            "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n@@ -3,6 +3,2 @@\n def f(a):\n\
+                    -    return 1\n-\n-\n-def f(a, b):\n-    return 2\n+    return 11\n";
+        let hunk = BatchItem::Hunk {
+            file: "m.py".into(),
+            text: text.into(),
+            first_line: 3,
+            last_line: 4,
+            old_first_line: 3,
+            old_last_line: 8,
+        };
+        assert_eq!(hunk.new_line_of_old(1), Some(1), "before the hunk");
+        assert_eq!(hunk.new_line_of_old(3), Some(3), "a context line");
+        assert_eq!(hunk.new_line_of_old(4), None, "a removed line");
+        assert_eq!(
+            hunk.new_line_of_old(7),
+            None,
+            "the removed signature of the homonym"
+        );
+        assert_eq!(
+            hunk.new_line_of_old(9),
+            Some(5),
+            "after the hunk, moved by its net growth"
+        );
+        let whole = BatchItem::WholeFile {
+            file: "m.py".into(),
+            text: "x\n".into(),
+            lines: 1,
+        };
+        assert_eq!(whole.new_line_of_old(1), None);
+    }
+
+    #[test]
     fn each_batch_records_the_tokens_of_the_companions_it_charged() {
         // [MAGI S6 loop 5, B1-c3] the companions' tokens were dropped after packing, so the
         // per-batch token totals REQ-RV13 reports could not include the retrieved context.
