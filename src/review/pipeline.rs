@@ -4585,6 +4585,38 @@ mod tests {
     }
 
     #[test]
+    fn a_hunk_that_edits_and_deletes_gives_the_gate_both_sides_units() {
+        // [Loop1 r2, Minor 3] Verbatim `git diff`: `f` edited (new side 5-8) and `g` deleted
+        // (old side 10-12) in one hunk; both units were shown, so both faces reach the gate.
+        let text = "diff --git a/a.rs b/a.rs\nindex 31d2d81..409fd04 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -4,9 +4,5 @@ fn e() {\n \n fn f() {\n     b();\n-    c();\n-}\n-\n-fn g() {\n\
+                    -    d();\n+    cc();\n }\n";
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![BatchItem::Hunk {
+                file: "a.rs".into(),
+                text: text.into(),
+                first_line: 4,
+                last_line: 8,
+                old_first_line: 4,
+                old_last_line: 12,
+            }],
+        };
+        let mut g = ctx(ContextKind::Unit, "a.rs", "g", Some((10, 12)));
+        g.old_side = true;
+        let contexts = vec![vec![ctx(ContextKind::Unit, "a.rs", "f", Some((5, 8))), g]];
+        let mut faces = HashMap::new();
+        add_unit_faces(&mut faces, &[batch], &contexts, &BTreeSet::from([0]));
+        let f = faces.get("a.rs").expect("faces");
+        assert_eq!(
+            (f.new.clone(), f.old.clone()),
+            (vec![(5, 8)], vec![(10, 12)])
+        );
+    }
+
+    #[test]
     fn a_real_hunk_with_leading_context_gives_the_gate_the_function_it_changed() {
         // [Loop1 r1, I1] From a real `git diff` (-U3): the hunk opens on line 3, the closing brace
         // of `e`; the change is line 6, in `f` (5-8). The unit of `f` is the one the trio was

@@ -1069,6 +1069,25 @@ mod tests {
     }
 
     #[test]
+    fn a_hunk_that_edits_one_function_and_deletes_another_brings_both_units() {
+        // [Loop1 r2, Minor 3] Verbatim `git diff`: `f` is edited and `g` deleted in one hunk.
+        // The edited `f` comes from the new side; the deleted `g` exists only on the old side
+        // and comes from there. The old `f` is not brought again: the new one is its unit.
+        let new = "fn e() {\n    a();\n}\n\nfn f() {\n    b();\n    cc();\n}\n";
+        let text = "diff --git a/a.rs b/a.rs\nindex 31d2d81..409fd04 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -4,9 +4,5 @@ fn e() {\n \n fn f() {\n     b();\n-    c();\n-}\n-\n-fn g() {\n\
+                    -    d();\n+    cc();\n }\n";
+        let hunk = real_hunk(text, (4, 8), (4, 12));
+        assert_eq!(
+            units_of(&hunk, new, THREE_FNS),
+            vec![
+                ("f".to_string(), Some((5, 8)), false),
+                ("g".to_string(), Some((10, 12)), true)
+            ]
+        );
+    }
+
+    #[test]
     fn a_deletion_in_a_renamed_file_reads_its_unit_under_the_old_path() {
         // [Loop1 r1, M1] From a real `git diff -M`: the old side of a rename lives under its
         // `rename from` path (RV21), as the filter and the lexical index read it. The unit keeps
