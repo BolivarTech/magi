@@ -658,8 +658,8 @@ pub async fn run_review(
             &old_paths,
             &source,
         );
-        // MAGI FIX (Loop1 r1, M2): a removed or ambiguous line is no line of the reviewed
-        // revision, so history would check it against an unrelated one.
+        // MAGI FIX (Loop1 r1, M2; r2, I-1): a removed line is no line of the reviewed revision,
+        // so history would check it against an unrelated one.
         if let (Some(c), Some(file), Some(line)) = (&code, &finding.file, finding.line) {
             if !c.names_a_revision_line() {
                 summary.off_revision.insert((file.clone(), line));
@@ -1662,10 +1662,14 @@ struct GateCode {
 }
 
 impl GateCode {
-    /// Whether the finding's line surely names a line of the reviewed revision (its new side),
-    /// so the review history may anchor it there (RV08).
+    /// Whether the finding's line is a line of the reviewed revision (its new side), so the
+    /// review history may anchor it there (RV08). Only a removed line, which exists only
+    /// before the change, is not; an ambiguous one (an in-place edit, the common case) is
+    /// anchored on the new side, the side the gate reads.
+    // MAGI FIX (Loop1 r2, I-1): ambiguous lines were dropped too, which emptied history for
+    // most findings on modified lines.
     fn names_a_revision_line(&self) -> bool {
-        !self.old_side && !self.ambiguous
+        !self.old_side
     }
 }
 

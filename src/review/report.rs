@@ -124,17 +124,17 @@ pub struct ReviewSummary {
     pub without_memory: bool,
     /// Context items left out because the secret detector matched them (REQ-RV22).
     pub context_withheld: usize,
-    /// `(file, line)` of the findings whose line names no line of the reviewed revision for
-    /// sure: one read on the old side (a removed line), or one whose number is both a removed
-    /// and a live line. The review history does not record them (RV08). Internal: never
-    /// serialized.
+    /// `(file, line)` of the findings whose line names no line of the reviewed revision: one
+    /// read on the old side only (a removed line). A number that is both a removed and a live
+    /// line (an in-place edit) is not here: it is anchored on the new side, as the gate reads
+    /// it. The review history does not record these (RV08). Internal: never serialized.
     #[serde(skip)]
     pub off_revision: BTreeSet<(String, u32)>,
 }
 
 impl ReviewSummary {
     /// The main list's findings the review history may record (RV08): every one except those
-    /// in [`Self::off_revision`], whose line is a removed line or may be one. History anchors an
+    /// in [`Self::off_revision`], whose line is a removed line. History anchors an
     /// entry to the reviewed revision's line numbers, so such a finding would be checked against
     /// an unrelated line. Whether a finding is recorded at all is still decided by
     /// `history::entries_from_review` (its gate state, its location).
