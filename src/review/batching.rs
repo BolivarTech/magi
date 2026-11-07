@@ -150,7 +150,7 @@ impl BatchItem {
         }
     }
 
-    /// The text the trio receives for the item: [`BatchItem::text`] with each reviewed line
+    /// The text the trio receives for the item: the item's own text with each reviewed line
     /// preceded by its absolute line number (`{number:>6}|`, see [`LINE_NUMBER_WIDTH`]).
     ///
     /// * A hunk numbers its body lines in the coordinates RV09 validates against: the new-side
