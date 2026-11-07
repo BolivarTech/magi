@@ -2234,6 +2234,79 @@ mod tests {
         );
     }
 
+    /// Runs one review of `a.rs` (a needle on its line 3) with the trio reporting `line` there;
+    /// returns the prompt the trio saw and the outcome.
+    async fn review_a_file_with_a_finding_at(line: Option<u64>) -> (String, ReviewOutcome) {
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn f() {\n    let a = 1;\n    let needle = 2;\n    let b = 3;\n}\n",
+        )
+        .expect("write");
+        let reported = match line {
+            Some(l) => {
+                serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":l}])
+            }
+            None => serde_json::json!([]),
+        };
+        let consult = FakeConsult::new(vec![Ok(real_report([
+            reported.clone(),
+            reported,
+            serde_json::json!([]),
+        ])
+        .await)]);
+        let out = review(
+            d.path(),
+            None,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("reports");
+        let prompt = consult.prompts.lock().expect("lock")[0].clone();
+        (prompt, out)
+    }
+
+    #[tokio::test]
+    async fn a_finding_at_the_number_the_prompt_shows_passes_and_one_outside_it_is_discarded() {
+        // [T3.7-fix3] certification seed c60264f28c97: three mages counted a 250-line hunk by hand
+        // and reported lines 214, 222 and 229 for a defect on 433-480; RV09 discarded it.
+        let (prompt, _) = review_a_file_with_a_finding_at(None).await;
+        let shown = prompt
+            .lines()
+            .find(|l| l.contains("let needle"))
+            .and_then(|l| l.split_once('|'))
+            .map(|(n, _)| n.trim().parse::<u64>());
+        assert_eq!(
+            shown,
+            Some(Ok(3)),
+            "the prompt must number its lines: {prompt}"
+        );
+        let (_, kept) = review_a_file_with_a_finding_at(Some(3)).await;
+        assert_eq!(kept.summary.findings.len(), 1);
+        assert!(kept.summary.discarded.is_empty());
+        let (_, out) = review_a_file_with_a_finding_at(Some(99)).await;
+        assert!(out.summary.findings.is_empty());
+        assert_eq!(
+            out.summary
+                .discarded
+                .iter()
+                .map(|x| x.cause.clone())
+                .collect::<Vec<_>>(),
+            vec![DiscardCause::LineOutOfRange]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_prompt_explains_the_line_numbers_once_before_the_code() {
+        // [T3.7-fix3] the legend is batch text, never the mage's system prompt.
+        use crate::review::batching::LINE_NUMBER_LEGEND;
+        let (prompt, _) = review_a_file_with_a_finding_at(None).await;
+        assert_eq!(prompt.matches(LINE_NUMBER_LEGEND).count(), 1, "{prompt}");
+        assert!(prompt.starts_with(LINE_NUMBER_LEGEND), "{prompt}");
+    }
+
     #[tokio::test]
     async fn without_a_timeout_every_batch_runs_on_the_normal_consult_clock() {
         let dir = workspace(4);

@@ -59,6 +59,18 @@ const LINE_SEPARATOR: char = '\u{2028}';
 /// The Unicode paragraph separator, which a model may read as a line break.
 const PARAGRAPH_SEPARATOR: char = '\u{2029}';
 
+/// Digits of the line-number prefix of a reviewed line (right-aligned).
+pub const LINE_NUMBER_WIDTH: usize = 6;
+
+/// The character that closes the line-number prefix.
+pub const LINE_NUMBER_SEPARATOR: char = '|';
+
+/// The line that explains the prefix, written once at the top of a batch prompt.
+pub const LINE_NUMBER_LEGEND: &str = "Each line of the code below starts with its absolute \
+line number, right-aligned, then `|`. In a diff, a removed line (`-`) shows its number in the \
+old file and every other line shows its number in the new file. Report each finding at these \
+numbers; do not count lines yourself.\n";
+
 /// One batch: what one `consult code-review` receives.
 #[derive(Debug)]
 pub struct ReviewBatch {
@@ -135,6 +147,12 @@ impl BatchItem {
                 text
             }
         }
+    }
+
+    /// The text the trio receives for the item: [`BatchItem::text`] with each reviewed line
+    /// preceded by its absolute line number.
+    pub fn rendered(&self) -> String {
+        self.text().to_string()
     }
 
     /// How a [`ReviewError::TooLargeForBatch`] names the item: the path for a whole file,
@@ -1273,5 +1291,119 @@ mod tests {
             }
             other => panic!("expected TooLargeForBatch, got {other:?}"),
         }
+    }
+
+    /// The prefix a reviewed line carries, written by hand (never by the code under test).
+    fn prefixed(n: u32, line: &str) -> String {
+        format!("{n:>6}|{line}")
+    }
+
+    #[test]
+    fn a_hunk_numbers_each_line_on_the_side_it_lives_on() {
+        // [T3.7-fix3] the mages computed line numbers from the `@@` header and got them wrong:
+        // new side for context and added lines, old side for removed ones.
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some("--- a/a.rs\n+++ b/a.rs\n@@ -10,3 +12,3 @@\n x\n-y\n+w\n z\n".into()),
+        }];
+        let src = MapSource::new(&[("a.rs", "x\nw\nz\n")], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 1_000).expect("plans");
+        let rendered = b[0].items[0].rendered();
+        let lines: Vec<&str> = rendered.lines().collect();
+        for expected in [
+            "      |@@ -10,3 +12,3 @@".to_string(),
+            prefixed(12, " x"),
+            prefixed(11, "-y"),
+            prefixed(13, "+w"),
+            prefixed(14, " z"),
+        ] {
+            assert!(
+                lines.contains(&expected.as_str()),
+                "{expected:?} in {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_whole_file_is_numbered_from_one_and_keeps_a_last_line_without_a_newline() {
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: None,
+        }];
+        let src = MapSource::new(&[("a.rs", "a\nb\nc")], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 1_000).expect("plans");
+        assert_eq!(
+            b[0].items[0].rendered(),
+            format!(
+                "{}\n{}\n{}",
+                prefixed(1, "a"),
+                prefixed(2, "b"),
+                prefixed(3, "c")
+            )
+        );
+    }
+
+    #[test]
+    fn a_unit_is_numbered_with_its_line_in_the_file() {
+        // The unit's number must be the file's: the extractor's start line is what RV09 accepts.
+        let body = "    let _x = 1;\n".repeat(20);
+        let text = format!("fn a() {{\n{body}}}\n// gap\n\nfn b() {{\n{body}}}\n");
+        let files = vec![ReviewFile {
+            path: "big.rs".into(),
+            diff: None,
+        }];
+        let src = MapSource::new(&[("big.rs", text.as_str())], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 150).expect("plans");
+        let file_lines: Vec<&str> = text.lines().collect();
+        let mut units = 0;
+        for item in b.iter().flat_map(|b| &b.items) {
+            let BatchItem::Unit {
+                first_line, text, ..
+            } = item
+            else {
+                panic!("expected units, got {item:?}");
+            };
+            units += 1;
+            for (i, line) in item.rendered().lines().enumerate() {
+                let n = *first_line + u32::try_from(i).expect("small");
+                let original = file_lines[usize::try_from(n).expect("small") - 1];
+                assert_eq!(line, prefixed(n, original), "unit text: {text:?}");
+            }
+        }
+        assert!(units >= 2, "the file must split into units");
+    }
+
+    #[test]
+    fn a_batch_counts_the_tokens_of_the_numbered_text() {
+        // [T3.7-fix3] what leaves the process is the numbered text; the batch limit measures it.
+        let text = "let _x = 1;\n".repeat(10);
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: None,
+        }];
+        let src = MapSource::new(&[("a.rs", text.as_str())], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 1_000).expect("plans");
+        let numbered: String = (1..=10).map(|n| prefixed(n, "let _x = 1;\n")).collect();
+        assert_eq!(
+            b[0].tokens,
+            estimate_tokens(&numbered) + estimate_tokens(&file_header("a.rs"))
+        );
+    }
+
+    #[test]
+    fn content_that_fits_only_without_numbers_splits_instead_of_being_cut() {
+        // [T3.7-fix3] two files of 34 tokens each fit in 80 raw (68) but not numbered (104).
+        let text = "let _x = 1;\n".repeat(10);
+        let files: Vec<ReviewFile> = ["a.rs", "b.rs"]
+            .iter()
+            .map(|p| ReviewFile {
+                path: p.to_string(),
+                diff: None,
+            })
+            .collect();
+        let src = MapSource::new(&[("a.rs", text.as_str()), ("b.rs", text.as_str())], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 80).expect("plans");
+        assert_eq!(b.len(), 2);
+        assert!(b.iter().all(|x| x.tokens <= 80));
     }
 }
