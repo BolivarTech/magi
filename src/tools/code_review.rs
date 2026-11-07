@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use magi_rs::decision::{DecisionClient, ModelSpec};
 use magi_rs::headless::output::truncate_result;
 use magi_rs::redact::redact_foreign_text;
+use magi_rs::review::batching::prompt_limit_tokens;
 use magi_rs::review::clock::tui_worst_case_secs;
 use magi_rs::review::consolidate::{Consolidated, ConsolidatedFinding};
 use magi_rs::review::docs::DocSource;
@@ -42,7 +43,7 @@ use magi_rs::review::secrets::mask_secrets;
 use magi_rs::review::source::{
     is_never_reviewed, CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource,
 };
-use magi_rs::review::window::{batch_limit_tokens, pool_window};
+use magi_rs::review::window::pool_window;
 use serde_json::{json, Map, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -1104,7 +1105,7 @@ impl ProductionReviewRunner {
 
     /// The batch limit the review plans and assembles against (RV04).
     fn limit_tokens(&self) -> usize {
-        batch_limit_tokens(&pool_window(&self.parts.pool))
+        prompt_limit_tokens(&pool_window(&self.parts.pool))
     }
 
     /// The review's context source over `docs` and `prep` (the stores, the embedder and the

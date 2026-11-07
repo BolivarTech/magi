@@ -19,8 +19,8 @@ use magi_core::reporting::MagiReport;
 use sha2::{Digest, Sha256};
 
 use super::batching::{
-    file_header, plan_batches, plan_batches_with, BatchItem, Companion, ReviewBatch,
-    LINE_NUMBER_LEGEND,
+    file_header, plan_batches, plan_batches_with, prompt_limit_tokens, BatchItem, Companion,
+    ReviewBatch, LINE_NUMBER_LEGEND,
 };
 use super::clock::{batch_wall_clock_secs, pre_budget};
 use super::consolidate::{
@@ -38,7 +38,7 @@ use super::secrets::{display_path, find_secret};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
 use super::window::estimate_tokens;
-use super::window::{batch_limit_tokens, pool_window, PoolWindow};
+use super::window::{pool_window, PoolWindow};
 use crate::redact::redact_foreign_text;
 
 /// Run-log target of the pipeline's WARN entries.
@@ -794,7 +794,7 @@ fn filter_and_plan_with(
     let filtered = filter_files(files, source, registry, explicit, is_ignored)?;
     let window = pool_window(pool);
     // MAGI FIX (T3.7): the legend every prompt opens with is charged once, off the top.
-    let limit = batch_limit_tokens(&window).saturating_sub(estimate_tokens(LINE_NUMBER_LEGEND));
+    let limit = prompt_limit_tokens(&window);
     // The index takes `filtered.kept` only (R3-3): skipped files may hold key-block sides raw.
     // With RAG the lexical index is built first: binding the context source to the review needs
     // it, and planning charges each item's containing unit (`companion`) against the limit less

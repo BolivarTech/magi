@@ -60,20 +60,33 @@ const LINE_SEPARATOR: char = '\u{2028}';
 const PARAGRAPH_SEPARATOR: char = '\u{2029}';
 
 /// Digits of the line-number prefix of a reviewed line (right-aligned).
-pub const LINE_NUMBER_WIDTH: usize = 6;
+const LINE_NUMBER_WIDTH: usize = 6;
 
 /// The character that closes the line-number prefix.
-pub const LINE_NUMBER_SEPARATOR: char = '|';
+const LINE_NUMBER_SEPARATOR: char = '|';
 
 /// The line that explains the prefix, written once at the top of a batch prompt.
 pub const LINE_NUMBER_LEGEND: &str = "Each line of the code below starts with its absolute \
 line number, right-aligned, then `|`. In a diff, a removed line (`-`) shows its number in the \
-old file and every other line shows its number in the new file. Report each finding at these \
-numbers; do not count lines yourself.\n";
+old file and every other line shows its number in the new file. The containing unit of a change \
+that only deletes lines is numbered in the old file. Report each finding at these numbers; do \
+not count lines yourself.\n";
 
-/// The batch limit that applies to the code and context of a prompt.
+/// The tokens of a prompt that code and context may take: the batch limit (RV04) less
+/// [`LINE_NUMBER_LEGEND`], which every prompt opens with and `ReviewBatch::tokens` does not
+/// count. The one place the legend is subtracted: the planner and the context budget both read
+/// it, so a batch planned at the edge and filled with context still fits the limit.
+///
+/// # Arguments
+///
+/// * `window` - The pool's binding window.
+///
+/// # Returns
+///
+/// The limit in tokens; 0 when the legend alone exceeds the batch limit.
+// MAGI FIX (T3.7): the RAG budget used the raw limit and could overshoot it by the legend.
 pub fn prompt_limit_tokens(window: &PoolWindow) -> usize {
-    batch_limit_tokens(window)
+    batch_limit_tokens(window).saturating_sub(estimate_tokens(LINE_NUMBER_LEGEND))
 }
 
 /// One batch: what one `consult code-review` receives.
@@ -156,7 +169,7 @@ impl BatchItem {
     }
 
     /// The text the trio receives for the item: the item's own text with each reviewed line
-    /// preceded by its absolute line number (`{number:>6}|`, see [`LINE_NUMBER_WIDTH`]).
+    /// preceded by its absolute line number (`{number:>6}|`: six columns, then a pipe).
     ///
     /// * A hunk numbers its body lines in the coordinates RV09 validates against: the new-side
     ///   line for context and added lines, the old-side line for removed ones, counted from the
