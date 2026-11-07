@@ -194,6 +194,75 @@ impl BatchItem {
         }
     }
 
+    /// The lines a hunk changes, on the side its containing units are read from (RV07(1)).
+    ///
+    /// git writes three context lines around a change by default, so the hunk's first line is
+    /// usually context, not the change. The anchors are therefore the changed lines themselves:
+    /// every added (`+`) line on the new side; for a hunk that only deletes, every removed (`-`)
+    /// line on the old side. They are counted exactly as [`BatchItem::rendered`] numbers them,
+    /// from the `@@` header (or from the item's own first lines when the text has none). A hunk
+    /// with no changed line at all, which git never writes, is anchored at its first line: the
+    /// old one when its new side is empty.
+    ///
+    /// # Returns
+    ///
+    /// `None` for a unit or a whole file (already a unit); otherwise the lines, ascending, and
+    /// their side. O(bytes of the hunk).
+    // MAGI FIX (Loop1 r1, I1): the unit was looked up at the hunk's first line, git's leading
+    // context, which named the function above the change.
+    pub fn hunk_change(&self) -> Option<HunkChange> {
+        let Self::Hunk {
+            text,
+            first_line,
+            last_line,
+            old_first_line,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let headed = text.lines().any(|l| l.starts_with(HUNK_MARKER));
+        let mut counters = (*old_first_line, *first_line);
+        let mut in_body = !headed;
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        for line in text.lines() {
+            if line.starts_with(HUNK_MARKER) {
+                if let Some(((old, _), (new, _))) = hunk_ranges(line) {
+                    counters = (old, new);
+                }
+                in_body = true;
+                continue;
+            }
+            if !in_body {
+                continue;
+            }
+            match step_body_line(&mut counters, line) {
+                BodyLine::Added(n) => added.push(n),
+                BodyLine::Removed(n) => removed.push(n),
+                BodyLine::Context(_) | BodyLine::Other => {}
+            }
+        }
+        let change = match (added.is_empty(), removed.is_empty()) {
+            (false, _) => HunkChange {
+                lines: added,
+                old_side: false,
+            },
+            (true, false) => HunkChange {
+                lines: removed,
+                old_side: true,
+            },
+            (true, true) if first_line > last_line => HunkChange {
+                lines: vec![*old_first_line],
+                old_side: true,
+            },
+            (true, true) => HunkChange {
+                lines: vec![*first_line],
+                old_side: false,
+            },
+        };
+        Some(change)
+    }
+
     /// Tokens of [`BatchItem::rendered`], the text that actually leaves the process.
     fn rendered_tokens(&self) -> usize {
         estimate_tokens(&self.rendered())
@@ -270,22 +339,53 @@ fn number_hunk(text: &str) -> String {
             counters = hunk_ranges(body).map(|((old, _), (new, _))| (old, new));
             None
         } else {
-            match (counters.as_mut(), body.chars().next()) {
-                (Some((old, _)), Some('-')) => Some(take(old)),
-                (Some((_, new)), Some('+')) => Some(take(new)),
-                (Some((old, new)), Some(' ') | None) => {
-                    let shown = *new;
-                    *old = old.saturating_add(1);
-                    *new = new.saturating_add(1);
-                    Some(shown)
-                }
-                _ => None,
+            match counters.as_mut().map(|c| step_body_line(c, body)) {
+                Some(BodyLine::Removed(n) | BodyLine::Added(n) | BodyLine::Context(n)) => Some(n),
+                Some(BodyLine::Other) | None => None,
             }
         };
         out.push_str(&line_prefix(number));
         out.push_str(line);
     }
     out
+}
+
+/// The lines a hunk changes and the side they are numbered on ([`BatchItem::hunk_change`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HunkChange {
+    /// The changed lines, ascending, never empty.
+    pub lines: Vec<u32>,
+    /// Whether `lines` are old-side numbers (a hunk that only deletes).
+    pub old_side: bool,
+}
+
+/// What one body line of a hunk is, with its number on the side it belongs to.
+enum BodyLine {
+    /// A removed (`-`) line, numbered on the old side.
+    Removed(u32),
+    /// An added (`+`) line, numbered on the new side.
+    Added(u32),
+    /// A context line (` `, or an empty line some tools leave for one), numbered on the new side.
+    Context(u32),
+    /// Anything else (a `\ No newline` marker): no number, no counter moves.
+    Other,
+}
+
+/// Classifies one hunk body line and advances `(old, new)`, the numbers of the next line, on
+/// the sides it belongs to: context both, `+` the new one, `-` the old one.
+fn step_body_line(counters: &mut (u32, u32), body: &str) -> BodyLine {
+    let (old, new) = counters;
+    match body.chars().next() {
+        Some('-') => BodyLine::Removed(take(old)),
+        Some('+') => BodyLine::Added(take(new)),
+        Some(' ') | None => {
+            let shown = *new;
+            *old = old.saturating_add(1);
+            *new = new.saturating_add(1);
+            BodyLine::Context(shown)
+        }
+        _ => BodyLine::Other,
+    }
 }
 
 /// Returns the counter and advances it. Saturating, like every line count here.
@@ -355,7 +455,7 @@ fn header_path(path: &str) -> String {
 
 /// Packs `files` into batches of at most `limit_tokens`, with no companion.
 ///
-/// Equivalent to [`plan_batches_with`] with a companion that is always `None`.
+/// Equivalent to [`plan_batches_with`] with a companion closure that always answers none.
 ///
 /// # Arguments
 ///
@@ -402,7 +502,7 @@ pub fn plan_batches(
     registry: &LanguageRegistry,
     limit_tokens: usize,
 ) -> Result<Vec<ReviewBatch>, ReviewError> {
-    plan_batches_with(files, source, registry, limit_tokens, &|_| Ok(None))
+    plan_batches_with(files, source, registry, limit_tokens, &|_| Ok(Vec::new()))
 }
 
 /// Packs `files` into batches of at most `limit_tokens`, charging each item's companion once
@@ -412,8 +512,10 @@ pub fn plan_batches(
 /// whole gives one item, or, when it does not fit in an empty batch, one item per non-blank
 /// unit its language extractor finds. An item fits when the batch's tokens, plus the companions
 /// already charged, plus the item, plus its file's header (if the file is new to the batch),
-/// plus its companion (if its key is new to the batch) stay within `limit_tokens`; otherwise a
-/// new batch starts. The invariant is `tokens + Σ distinct companions ≤ limit_tokens`.
+/// plus each of its companions whose key is new to the batch stay within `limit_tokens`;
+/// otherwise a new batch starts. The invariant is `tokens + Σ distinct companions ≤
+/// limit_tokens`. An item may drag several companions (a hunk that changes two units); one key
+/// repeated in the same answer is charged once.
 ///
 /// Every item text and every file header is passed through the secret detector before it joins
 /// a batch. That scan repeats the filter's on purpose: it is the egress net of the review, it
@@ -431,7 +533,7 @@ pub fn plan_batches(
 /// * `source` - The single content source of the review (the one the filters read).
 /// * `registry` - The language extractors, to split a whole file that does not fit.
 /// * `limit_tokens` - The per-batch limit in tokens.
-/// * `companion` - What an item drags into its batch, as `(key, tokens)`, or `None`.
+/// * `companion` - What an item drags into its batch, as `(key, tokens)` pairs, possibly none.
 ///
 /// # Returns
 ///
@@ -440,7 +542,7 @@ pub fn plan_batches(
 /// # Errors
 ///
 /// * [`ReviewError::EgressSecret`] when an item or a header holds a secret.
-/// * [`ReviewError::TooLargeForBatch`] when an item, its header and its companion do not fit
+/// * [`ReviewError::TooLargeForBatch`] when an item, its header and its companions do not fit
 ///   in an empty batch, or a whole file without an extractor (or without units) does not.
 /// * [`ReviewError::Io`] when a file reviewed whole has disappeared from the source
 ///   ([`ContentSource::read`] gives `Ok(None)` only for an absent path; a read over the size cap
@@ -456,7 +558,7 @@ pub fn plan_batches_with(
     source: &dyn ContentSource,
     registry: &LanguageRegistry,
     limit_tokens: usize,
-    companion: &dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
+    companion: &dyn Fn(&BatchItem) -> Result<Vec<Companion>, ReviewError>,
 ) -> Result<Vec<ReviewBatch>, ReviewError> {
     let mut packer = Packer::new(limit_tokens, companion);
     for file in files {
@@ -574,7 +676,7 @@ fn side_range(side: &str) -> Option<(u32, u32)> {
 struct Fit<'c> {
     limit_tokens: usize,
     header_tokens: usize,
-    companion: &'c dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
+    companion: &'c dyn Fn(&BatchItem) -> Result<Vec<Companion>, ReviewError>,
 }
 
 impl Fit<'_> {
@@ -585,12 +687,22 @@ impl Fit<'_> {
     ///
     /// The companion's error, unchanged.
     fn alone(&self, item: &BatchItem) -> Result<usize, ReviewError> {
-        let companion = (self.companion)(item)?.map_or(0, |(_, tokens)| tokens);
+        let companion = new_companion_tokens(&(self.companion)(item)?, &HashSet::new());
         Ok(item
             .rendered_tokens()
             .saturating_add(self.header_tokens)
             .saturating_add(companion))
     }
+}
+
+/// The tokens of the companions whose key is not in `charged`, each distinct key once.
+/// O(companions), with a set as large as the answer.
+fn new_companion_tokens(companions: &[Companion], charged: &HashSet<String>) -> usize {
+    let mut seen: HashSet<&str> = HashSet::new();
+    companions
+        .iter()
+        .filter(|(key, _)| !charged.contains(key) && seen.insert(key.as_str()))
+        .fold(0, |sum, (_, tokens)| sum.saturating_add(*tokens))
 }
 
 /// The items of a file reviewed whole: none when empty, the whole file when it fits in an empty
@@ -673,7 +785,7 @@ fn whole_file_items(
 /// The greedy packer: the open batch, the finished ones, and what the open batch already holds.
 struct Packer<'c> {
     limit: usize,
-    companion: &'c dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
+    companion: &'c dyn Fn(&BatchItem) -> Result<Vec<Companion>, ReviewError>,
     done: Vec<ReviewBatch>,
     items: Vec<BatchItem>,
     tokens: usize,
@@ -686,7 +798,7 @@ impl<'c> Packer<'c> {
     /// An empty packer for batches of at most `limit` tokens.
     fn new(
         limit: usize,
-        companion: &'c dyn Fn(&BatchItem) -> Result<Option<Companion>, ReviewError>,
+        companion: &'c dyn Fn(&BatchItem) -> Result<Vec<Companion>, ReviewError>,
     ) -> Self {
         Self {
             limit,
@@ -709,11 +821,10 @@ impl<'c> Packer<'c> {
         scan(item.file(), item.text())?;
         // MAGI FIX (T3.7): the limit measures the numbered text, which is what the trio receives.
         let item_tokens = item.rendered_tokens();
-        let companion = (self.companion)(&item)?;
-        let companion_tokens = companion.as_ref().map_or(0, |(_, t)| *t);
+        let companions = (self.companion)(&item)?;
         let alone = item_tokens
             .saturating_add(header_tokens)
-            .saturating_add(companion_tokens);
+            .saturating_add(new_companion_tokens(&companions, &HashSet::new()));
         if alone > self.limit {
             return Err(ReviewError::TooLargeForBatch {
                 what: item.describe(),
@@ -722,12 +833,9 @@ impl<'c> Packer<'c> {
             });
         }
         let new_file = !self.files.contains(item.file());
-        let new_key = companion
-            .as_ref()
-            .is_some_and(|(k, _)| !self.keys.contains(k));
         let need = item_tokens
             .saturating_add(if new_file { header_tokens } else { 0 })
-            .saturating_add(if new_key { companion_tokens } else { 0 });
+            .saturating_add(new_companion_tokens(&companions, &self.keys));
         let used = self.tokens.saturating_add(self.companion_tokens);
         if used.saturating_add(need) > self.limit {
             self.close();
@@ -735,7 +843,7 @@ impl<'c> Packer<'c> {
         if self.files.insert(item.file().to_string()) {
             self.tokens = self.tokens.saturating_add(header_tokens);
         }
-        if let Some((key, tokens)) = companion {
+        for (key, tokens) in companions {
             if self.keys.insert(key) {
                 self.companion_tokens = self.companion_tokens.saturating_add(tokens);
             }
@@ -1297,8 +1405,8 @@ mod tests {
         let whole = estimate_tokens(&code);
         let companion_tokens = 40;
         let limit = hdr + whole + companion_tokens / 2;
-        let companion = |i: &BatchItem| -> Result<Option<Companion>, ReviewError> {
-            Ok(Some((format!("ctx:{}", i.describe()), companion_tokens)))
+        let companion = |i: &BatchItem| -> Result<Vec<Companion>, ReviewError> {
+            Ok(vec![(format!("ctx:{}", i.describe()), companion_tokens)])
         };
         assert!(
             hdr + whole <= limit && hdr + whole + companion_tokens > limit,
@@ -1327,14 +1435,16 @@ mod tests {
         }];
         let src = MapSource::new(&[("a.rs", "x\n")], &[]);
         let reg = LanguageRegistry::new();
-        let by_unit = |i: &BatchItem| -> Result<Option<Companion>, ReviewError> {
+        let by_unit = |i: &BatchItem| -> Result<Vec<Companion>, ReviewError> {
             Ok(match i {
                 BatchItem::Hunk { first_line, .. } if *first_line < 10 => {
                     Some(("a.rs:1-9".to_string(), 50))
                 }
                 BatchItem::Hunk { .. } => Some(("a.rs:30-39".to_string(), 30)),
                 _ => None,
-            })
+            }
+            .into_iter()
+            .collect())
         };
         let b = plan_batches_with(&files, &src, &reg, 10_000, &by_unit).expect("plans");
         assert_eq!(b.len(), 1);
@@ -1360,14 +1470,16 @@ mod tests {
         let reg = LanguageRegistry::new();
         let hdr = estimate_tokens(&file_header("a.rs"));
         let item = plan_batches(&one, &src, &reg, 10_000).expect("plans")[0].tokens - hdr;
-        let unit = |i: &BatchItem| -> Result<Option<Companion>, ReviewError> {
+        let unit = |i: &BatchItem| -> Result<Vec<Companion>, ReviewError> {
             Ok(match i {
                 BatchItem::Hunk { first_line, .. } if *first_line < 10 => {
                     Some(("a.rs:1-9".to_string(), 50))
                 }
                 BatchItem::Hunk { .. } => Some(("a.rs:30-39".to_string(), 50)),
                 _ => None,
-            })
+            }
+            .into_iter()
+            .collect())
         };
         let limit = hdr + 2 * item + 50; // two hunks and ONE copy of their shared companion
         let b = plan_batches_with(&files, &src, &reg, limit, &unit).expect("plans");

@@ -136,15 +136,15 @@ pub trait RagSource: Send + Sync {
         0
     }
 
-    /// What an item drags into its batch at planning: its containing unit, as
-    /// `(key, tokens)`, so a batch is planned with the unit already counted.
+    /// What an item drags into its batch at planning: its containing units, each as
+    /// `(key, tokens)`, so a batch is planned with the units already counted.
     ///
     /// # Errors
     ///
     /// A read error of the review's content.
-    fn companion(&self, item: &BatchItem) -> Result<Option<Companion>, ReviewError> {
+    fn companion(&self, item: &BatchItem) -> Result<Vec<Companion>, ReviewError> {
         let _ = item;
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// Documentation paths left out for a secret, to list as skipped (RV22).
@@ -1250,9 +1250,10 @@ fn record_shown_context(
 }
 
 /// Whether a hunk of `file` in `batch` explains a containing unit read from the side `old_side`
-/// names (`ContextItem::old_side`, recorded by `rag::containing_unit`): a deletion-only hunk whose
-/// first old line lies in `range` for the old side, a hunk with a new side whose first line does
-/// for the new side. O(items).
+/// names (`ContextItem::old_side`, recorded by `rag::containing_units`): one of the hunk's
+/// changed lines ([`BatchItem::hunk_change`], the anchors `containing_units` used) lies in
+/// `range`, on that side. O(changed lines) per hunk.
+// MAGI FIX (Loop1 r1, I1): the hunk's first line, git's leading context, is not its change.
 fn explains_unit(
     batch: &ReviewBatch,
     file: &str,
@@ -1260,23 +1261,18 @@ fn explains_unit(
     old_side: bool,
 ) -> bool {
     batch.items.iter().any(|item| {
-        let BatchItem::Hunk {
-            file: hunk_file,
-            first_line,
-            last_line,
-            old_first_line,
-            ..
-        } = item
+        let (
+            BatchItem::Hunk {
+                file: hunk_file, ..
+            },
+            Some(change),
+        ) = (item, item.hunk_change())
         else {
             return false;
         };
-        let deletion = first_line > last_line;
-        let line = if deletion {
-            *old_first_line
-        } else {
-            *first_line
-        };
-        hunk_file == file && deletion == old_side && (first..=last).contains(&line)
+        hunk_file == file
+            && change.old_side == old_side
+            && change.lines.iter().any(|l| (first..=last).contains(l))
     })
 }
 
@@ -5420,8 +5416,8 @@ mod tests {
                     withheld: 0,
                 })
             }
-            fn companion(&self, _i: &BatchItem) -> Result<Option<Companion>, ReviewError> {
-                Ok(Some(("f0.rs:1-26".into(), 1_000_000)))
+            fn companion(&self, _i: &BatchItem) -> Result<Vec<Companion>, ReviewError> {
+                Ok(vec![("f0.rs:1-26".into(), 1_000_000)])
             }
         }
         let dir = workspace(1);

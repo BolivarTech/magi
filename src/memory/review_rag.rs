@@ -37,7 +37,7 @@ use magi_rs::review::input::SourceKind;
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
-    assemble, callers_for, containing_unit, declare_index, definitions_for, doc_query, item_cost,
+    assemble, callers_for, containing_units, declare_index, definitions_for, doc_query, item_cost,
     Assembled, ContextItem, ContextKind, IndexDeclarations, CONTEXT_ITEM_FRAME_TOKENS,
     MAX_CALLERS_PER_NAME,
 };
@@ -422,9 +422,11 @@ impl RagSource for StoreRag<'_> {
         let text = batch_text(batch);
         let mut units = Vec::new();
         for item in &batch.items {
-            if let Some(unit) = containing_unit(item, self.sources, self.registry)? {
-                units.push(escaped(unit));
-            }
+            units.extend(
+                containing_units(item, self.sources, self.registry)?
+                    .into_iter()
+                    .map(escaped),
+            );
         }
         let mut code = definitions_for(&text, self.index, self.sources)?;
         let names = changed_names(batch, &units);
@@ -481,13 +483,14 @@ impl RagSource for StoreRag<'_> {
         self.index_ms
     }
 
-    /// The item's containing unit, keyed `"<file>:<start>-<end>"` (`"<file>:old:<start>-<end>"`
-    /// for an old-side unit, which `assemble` keeps apart from a new-side one with the same
-    /// numbers) and charged at its escaped cost, so planning counts exactly what `context_for`
-    /// will add.
-    fn companion(&self, item: &BatchItem) -> Result<Option<Companion>, ReviewError> {
-        Ok(
-            containing_unit(item, self.sources, self.registry)?.map(|unit| {
+    /// The item's containing units, each keyed `"<file>:<start>-<end>"`
+    /// (`"<file>:old:<start>-<end>"` for an old-side unit, which `assemble` keeps apart from a
+    /// new-side one with the same numbers) and charged at its escaped cost, so planning counts
+    /// exactly what `context_for` will add.
+    fn companion(&self, item: &BatchItem) -> Result<Vec<Companion>, ReviewError> {
+        Ok(containing_units(item, self.sources, self.registry)?
+            .into_iter()
+            .map(|unit| {
                 let (first, last) = unit.lines.unwrap_or_default();
                 let side = if unit.old_side { "old:" } else { "" };
                 let unit = escaped(unit);
@@ -495,8 +498,8 @@ impl RagSource for StoreRag<'_> {
                     format!("{}:{side}{first}-{last}", unit.file),
                     item_cost(&unit),
                 )
-            }),
-        )
+            })
+            .collect())
     }
 
     fn skipped(&self) -> Vec<String> {
@@ -2357,8 +2360,18 @@ mod tests {
             old_first_line: 2,
             old_last_line: 2,
         };
-        let old = rag.companion(&hunk(2, 1)).expect("ok").expect("unit");
-        let new = rag.companion(&hunk(2, 2)).expect("ok").expect("unit");
+        let old = rag
+            .companion(&hunk(2, 1))
+            .expect("ok")
+            .into_iter()
+            .next()
+            .expect("unit");
+        let new = rag
+            .companion(&hunk(2, 2))
+            .expect("ok")
+            .into_iter()
+            .next()
+            .expect("unit");
         assert_ne!(old.0, new.0, "{old:?} {new:?}");
     }
 

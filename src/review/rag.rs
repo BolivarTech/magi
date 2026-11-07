@@ -56,8 +56,8 @@ pub struct ContextItem {
     pub candidate: bool,
     /// The lines of `file` the text covers, when it is a span of a file.
     pub lines: Option<(u32, u32)>,
-    /// Whether the text was read from the old side of `file`: the containing unit of a
-    /// deletion-only hunk (RV21). `lines` are then old-side coordinates; `false` for every
+    /// Whether the text was read from the old side of `file`: a containing unit of a hunk
+    /// that only deletes lines (RV21, [`BatchItem::hunk_change`]). `lines` are then old-side coordinates; `false` for every
     /// other item.
     pub old_side: bool,
 }
@@ -480,13 +480,16 @@ pub fn callers_for(
     Ok((items, capped))
 }
 
-/// The unit that contains a batch item's change, as a `Unit` item with its `lines` (RV07(1),
-/// RV21).
+/// The units that contain a batch item's changed lines, as `Unit` items with their `lines`
+/// (RV07(1): "the containing unit of each change"; RV21).
 ///
-/// A hunk is looked up on the new side at its first line; a deletion-only hunk (empty new side)
-/// on the old side at its first old line, because the new file has no line for it. The side is
-/// recorded in [`ContextItem::old_side`], so no later stage infers it from the hunks. Planning's
-/// companion and the context both use this, so what was charged is what `assemble` adds.
+/// The anchors are [`BatchItem::hunk_change`]'s: the added lines, looked up on the new side, or,
+/// for a hunk that only deletes, the removed lines on the old side, because the new file has no
+/// line for them. git's context lines are never anchors, so a change at the top of a function
+/// gets that function, not the one above it. Each distinct unit the changed lines touch is
+/// returned once, in line order: a hunk that spans two units brings both. The side is recorded
+/// in [`ContextItem::old_side`], so no later stage infers it from the hunks. Planning's
+/// companions and the context both use this, so what was charged is what `assemble` adds.
 ///
 /// # Arguments
 ///
@@ -496,58 +499,46 @@ pub fn callers_for(
 ///
 /// # Returns
 ///
-/// `None` for a unit or a whole file (already a unit), a line outside every unit, a file without
-/// an extractor, or a side that is gone.
+/// The units, possibly none: a unit or a whole file (already a unit), changed lines outside
+/// every unit, a file without an extractor, or a side that is gone give none. O(changed lines ·
+/// units) plus one read and one extraction of the side.
 ///
 /// # Errors
 ///
 /// An error of `sources`, unchanged; [`ReviewError::NotReviewable`] for non-UTF-8 content.
-pub fn containing_unit(
-    item: &BatchItem,
-    sources: &dyn ContentSource,
-    registry: &LanguageRegistry,
-) -> Result<Option<ContextItem>, ReviewError> {
-    let BatchItem::Hunk {
-        file,
-        first_line,
-        last_line,
-        old_first_line,
-        ..
-    } = item
-    else {
-        return Ok(None);
-    };
-    let Some(extractor) = registry.get(file) else {
-        return Ok(None);
-    };
-    let deletion = first_line > last_line;
-    let (line, old_side) = if deletion {
-        (*old_first_line, true)
-    } else {
-        (*first_line, false)
-    };
-    Ok(read_text(sources, file, old_side)?
-        .and_then(|text| FileUnits::load(extractor, file, &text).at(line))
-        .map(|unit| ContextItem {
-            old_side,
-            ..unit_item(ContextKind::Unit, unit)
-        }))
-}
-
-/// The units that contain a batch item's changed lines (RV07(1)). Red stub: the single unit of
-/// [`containing_unit`].
-///
-/// # Errors
-///
-/// As [`containing_unit`].
+// MAGI FIX (Loop1 r1, I1): one unit at the hunk's first line (git's leading context) became
+// every unit of the changed lines.
 pub fn containing_units(
     item: &BatchItem,
     sources: &dyn ContentSource,
     registry: &LanguageRegistry,
 ) -> Result<Vec<ContextItem>, ReviewError> {
-    Ok(containing_unit(item, sources, registry)?
-        .into_iter()
-        .collect())
+    let (BatchItem::Hunk { file, .. }, Some(change)) = (item, item.hunk_change()) else {
+        return Ok(Vec::new());
+    };
+    let Some(extractor) = registry.get(file) else {
+        return Ok(Vec::new());
+    };
+    let Some(text) = read_text(sources, file, change.old_side)? else {
+        return Ok(Vec::new());
+    };
+    let units = FileUnits::load(extractor, file, &text);
+    let mut found: Vec<ContextItem> = Vec::new();
+    for line in change.lines {
+        let covered = found
+            .iter()
+            .any(|u| u.lines.is_some_and(|(a, b)| a <= line && line <= b));
+        if covered {
+            continue;
+        }
+        if let Some(unit) = units.at(line) {
+            found.push(ContextItem {
+                old_side: change.old_side,
+                ..unit_item(ContextKind::Unit, unit)
+            });
+        }
+    }
+    Ok(found)
 }
 
 /// The doc-search query: `text` cut to at most [`DOC_QUERY_MAX_BYTES`] bytes, on a char boundary.
@@ -623,8 +614,10 @@ mod tests {
             old_first_line: 4,
             old_last_line: 4,
         };
-        let u = containing_unit(&deleted, &src, &LanguageRegistry::new())
+        let u = containing_units(&deleted, &src, &LanguageRegistry::new())
             .expect("reads")
+            .into_iter()
+            .next()
             .expect("old side");
         assert!(u.old_side);
         assert_eq!(u.lines, Some((3, 5)));
@@ -762,12 +755,16 @@ mod tests {
             old_first_line: 2,
             old_last_line: 2,
         };
-        let deletion = containing_unit(&hunk(2, 1), &sources, &registry)
+        let deletion = containing_units(&hunk(2, 1), &sources, &registry)
             .expect("ok")
+            .into_iter()
+            .next()
             .expect("unit");
         assert!(deletion.old_side && deletion.text.contains("fn gone()"));
-        let change = containing_unit(&hunk(2, 2), &sources, &registry)
+        let change = containing_units(&hunk(2, 2), &sources, &registry)
             .expect("ok")
+            .into_iter()
+            .next()
             .expect("unit");
         assert!(!change.old_side && change.text.contains("fn kept()"));
     }
@@ -936,8 +933,10 @@ mod tests {
             old_first_line: 2,
             old_last_line: 2,
         };
-        let u = containing_unit(&hunk, &src, &reg)
+        let u = containing_units(&hunk, &src, &reg)
             .expect("reads")
+            .into_iter()
+            .next()
             .expect("inside f");
         assert_eq!(
             (u.kind.clone(), u.label.as_str(), u.lines),
@@ -959,8 +958,10 @@ mod tests {
             old_last_line: 2,
         };
         assert_eq!(
-            containing_unit(&deleted, &src, &reg)
+            containing_units(&deleted, &src, &reg)
                 .expect("reads")
+                .into_iter()
+                .next()
                 .expect("old side")
                 .label,
             "gone"
@@ -971,9 +972,9 @@ mod tests {
             lines: 3,
         };
         assert!(
-            containing_unit(&whole, &src, &reg)
+            containing_units(&whole, &src, &reg)
                 .expect("reads")
-                .is_none(),
+                .is_empty(),
             "a whole file is its own unit"
         );
     }
@@ -1072,8 +1073,10 @@ mod tests {
             old_first_line: 7,
             old_last_line: 7,
         };
-        let u = containing_unit(&hunk, &src, &LanguageRegistry::new())
+        let u = containing_units(&hunk, &src, &LanguageRegistry::new())
             .expect("reads")
+            .into_iter()
+            .next()
             .expect("inside two");
         assert_eq!((u.label.as_str(), u.lines), ("two", Some((6, 8))));
         assert!(!u.text.contains("one"), "{}", u.text);
