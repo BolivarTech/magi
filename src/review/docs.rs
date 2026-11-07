@@ -643,17 +643,71 @@ fn py_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
 /// assert_eq!(c[0].section, "add");
 /// ```
 pub fn chunk_doc_comments(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<DocChunk> {
-    if registry.get(path).is_none() {
+    let Some(language) = doc_comment_language(path, registry) else {
         return Vec::new();
-    }
+    };
     let lines: Vec<&str> = text.lines().collect();
+    match language {
+        DocCommentLanguage::Rust => rust_doc_chunks(path, &lines),
+        DocCommentLanguage::Python => py_doc_chunks(path, &lines),
+    }
+}
+
+/// A language whose doc comments [`chunk_doc_comments`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocCommentLanguage {
+    /// `///`, `//!` and `/** */` comments of a `.rs` file.
+    Rust,
+    /// Docstrings of a `.py` file.
+    Python,
+}
+
+/// The doc-comment language of `path`: the one place that names the languages whose doc
+/// comments are chunked, so the chunker and [`yields_doc_chunks`] cannot drift. `None` for a
+/// file without an extractor in `registry` or of another language. O(len of the path).
+fn doc_comment_language(path: &str, registry: &LanguageRegistry) -> Option<DocCommentLanguage> {
+    registry.get(path)?;
     match std::path::Path::new(path)
         .extension()
         .and_then(std::ffi::OsStr::to_str)
     {
-        Some("rs") => rust_doc_chunks(path, &lines),
-        Some("py") => py_doc_chunks(path, &lines),
-        _ => Vec::new(),
+        Some("rs") => Some(DocCommentLanguage::Rust),
+        Some("py") => Some(DocCommentLanguage::Python),
+        _ => None,
+    }
+}
+
+/// Whether [`chunk_source`] can give `path` any chunk: a Markdown file that [`is_doc_source`]
+/// accepts, or a file whose doc comments [`chunk_doc_comments`] reads. A file for which this is
+/// `false` never yields documentation, so a review neither reads nor keys it for the index.
+///
+/// # Arguments
+///
+/// * `path` - Path of the file.
+/// * `registry` - Languages the review has extractors for.
+///
+/// # Returns
+///
+/// `true` when the file may yield chunks. O(len of the path).
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::docs::yields_doc_chunks;
+/// use magi_rs::review::languages::LanguageRegistry;
+///
+/// let reg = LanguageRegistry::new();
+/// assert!(yields_doc_chunks("README.md", &reg));
+/// assert!(yields_doc_chunks("src/a.rs", &reg));
+/// assert!(!yields_doc_chunks("src/B.java", &reg));
+/// ```
+// MAGI FIX (Loop1 r2, Minor 1): every file with an extractor was read to key the index,
+// though only Rust and Python give doc-comment chunks.
+pub fn yields_doc_chunks(path: &str, registry: &LanguageRegistry) -> bool {
+    if path.ends_with(".md") {
+        is_doc_source(path)
+    } else {
+        doc_comment_language(path, registry).is_some()
     }
 }
 

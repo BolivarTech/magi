@@ -27,8 +27,8 @@ use tokio::time::Instant;
 
 use magi_rs::review::batching::{BatchItem, Companion, ReviewBatch};
 use magi_rs::review::docs::{
-    bounded, chunk_source, doc_index_id, is_doc_source, live_doc_sources, revision_doc_sources,
-    without_secrets, worktree_key, DocChunk, DocSource,
+    bounded, chunk_source, doc_index_id, live_doc_sources, revision_doc_sources, without_secrets,
+    worktree_key, yields_doc_chunks, DocChunk, DocSource,
 };
 use magi_rs::review::error::ReviewError;
 use magi_rs::review::history::{reclassify_then_record, HistoryEntry, MAX_RECLASSIFY_PER_REVIEW};
@@ -825,8 +825,9 @@ fn reindex_batches(
 ///
 /// 1. **List**: `rev` = the reviewed revision's new side, listed through `git` without reading
 ///    any file; `None` = the working tree, each of `worktree_paths` read through `sources` and
-///    keyed by [`worktree_key`]. Only the paths `keep` accepts that are documentation sources
-///    or files with an extractor count; a path that quotes a secret is never read or stored (its
+///    keyed by [`worktree_key`]. Only the paths `keep` accepts that can yield a chunk
+///    ([`yields_doc_chunks`]: a Markdown doc source, or a file whose doc comments are chunked)
+///    count; a path that quotes a secret is never read or stored (its
 ///    path would sit in a clear column) and counts as withheld.
 /// 2. **Index what is missing**: each source the store lacks is read through `sources`, chunked
 ///    with `chunk_source`, then passed through `without_secrets` (every chunk, before any
@@ -870,9 +871,8 @@ pub async fn prepare_docs(
     let started = Instant::now();
     let deadline = started + timeout;
     let mut prep = DocPrep::default();
-    let wanted = |p: &str| {
-        keep(p) && (find_secret(p).is_some() || is_doc_source(p) || registry.get(p).is_some())
-    };
+    // MAGI FIX (Loop1 r2, Minor 1): only a file that can yield chunks is listed and keyed.
+    let wanted = |p: &str| keep(p) && (find_secret(p).is_some() || yields_doc_chunks(p, registry));
     let listed = match (rev, git) {
         (Some(rev), Some(git)) => revision_doc_sources(git, rev, &wanted)
             .map(|v| v.into_iter().map(|s| (s, None)).collect())
