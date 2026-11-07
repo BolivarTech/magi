@@ -254,6 +254,61 @@ impl BatchItem {
         Some(HunkChange { added, removed })
     }
 
+    /// The new-side number of old line `old` across this hunk: a line before the hunk keeps its
+    /// distance to the hunk's start, a context line of the hunk has both numbers, a line after
+    /// the hunk moves by the hunk's net growth; a line the hunk removed has none. Counted with
+    /// the same stepper as [`BatchItem::rendered`].
+    ///
+    /// # Arguments
+    ///
+    /// * `old` - A line number on the old side.
+    ///
+    /// # Returns
+    ///
+    /// `None` for a unit or a whole file, a removed line, or a number out of range; otherwise
+    /// the line's number on the new side. O(bytes of the hunk).
+    // MAGI FIX (Loop1 r3, Minor 2): an old-side unit is told from the edited one by position.
+    pub fn new_line_of_old(&self, old: u32) -> Option<u32> {
+        let Self::Hunk {
+            text,
+            first_line,
+            old_first_line,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let headed = text.lines().any(|l| l.starts_with(HUNK_MARKER));
+        let mut counters = (*old_first_line, *first_line);
+        if old < counters.0 {
+            return counters.1.checked_sub(counters.0 - old);
+        }
+        let mut in_body = !headed;
+        for line in text.lines() {
+            if line.starts_with(HUNK_MARKER) {
+                if let Some(((o, _), (n, _))) = hunk_ranges(line) {
+                    counters = (o, n);
+                    if old < o {
+                        return n.checked_sub(o - old);
+                    }
+                }
+                in_body = true;
+                continue;
+            }
+            if !in_body {
+                continue;
+            }
+            match step_body_line(&mut counters, line) {
+                BodyLine::Removed(n) if n == old => return None,
+                BodyLine::Context(n) if counters.0 == old.saturating_add(1) => return Some(n),
+                _ => {}
+            }
+        }
+        let (next_old, next_new) = counters;
+        let after = old.checked_sub(next_old)?;
+        next_new.checked_add(after)
+    }
+
     /// Tokens of [`BatchItem::rendered`], the text that actually leaves the process.
     fn rendered_tokens(&self) -> usize {
         estimate_tokens(&self.rendered())

@@ -492,8 +492,11 @@ pub fn callers_for(
 /// change at the top of a function gets that function, not the one above it. Each distinct unit
 /// is returned once, new side first, each side in line order: a hunk that spans two units brings
 /// both, and a hunk that edits `f` and deletes `g` brings the new `f` and the old `g`. An
-/// old-side unit whose name is already among the new side's (the edited function itself) is not
-/// brought again: its removed lines are in the hunk, and the new version is its unit. The side
+/// old-side unit that is the edited unit itself, the same name starting on the line its start
+/// moves to across the hunk ([`BatchItem::new_line_of_old`]), is not brought again: its removed
+/// lines are in the hunk, and the new version is its unit. A deleted homonym or overload starts
+/// on a removed line, so it keeps its old-side unit; so does a unit whose first line was edited
+/// (more context, never less). The side
 /// is recorded in [`ContextItem::old_side`], so no later stage infers it from the hunks.
 /// Planning's companions and the context both use this, so what was charged is what `assemble`
 /// adds.
@@ -533,8 +536,18 @@ pub fn containing_units(
         // as the filter and the lexical index read it; the hunk's diff header names it.
         let old_path = renamed_from(text).unwrap_or_else(|| file.clone());
         let old = side_units(&change.removed, true, file, &old_path, sources, extractor)?;
-        let new_names: HashSet<String> = found.iter().map(|u| u.label.clone()).collect();
-        found.extend(old.into_iter().filter(|u| !new_names.contains(&u.label)));
+        // MAGI FIX (Loop1 r3, Minor 2): the same unit by position, never by name alone, so a
+        // deleted homonym or overload keeps its old-side unit.
+        let new_units: Vec<(String, Option<u32>)> = found
+            .iter()
+            .map(|u| (u.label.clone(), u.lines.map(|(a, _)| a)))
+            .collect();
+        found.extend(old.into_iter().filter(|u| {
+            let moved = u.lines.and_then(|(a, _)| item.new_line_of_old(a));
+            !new_units
+                .iter()
+                .any(|(name, start)| *name == u.label && moved.is_some() && *start == moved)
+        }));
     }
     Ok(found)
 }
