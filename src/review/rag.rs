@@ -1059,6 +1059,38 @@ mod tests {
     }
 
     #[test]
+    fn a_deletion_in_a_renamed_file_reads_its_unit_under_the_old_path() {
+        // [Loop1 r1, M1] From a real `git diff -M`: the old side of a rename lives under its
+        // `rename from` path (RV21), as the filter and the lexical index read it. The unit keeps
+        // the reviewed (new) path, the one RV09 and the gate key it by.
+        use crate::review::test_support::MapSource;
+        let new = "fn e() {\n    a();\n}\n\nfn f() {\n    c();\n}\n\nfn g() {\n    d();\n}\n";
+        let src = MapSource::new(&[("b.rs", new)], &[("a.rs", THREE_FNS)]);
+        let text =
+            "diff --git a/a.rs b/b.rs\nsimilarity index 87%\nrename from a.rs\nrename to b.rs\n\
+                    index 31d2d81..7b5f4c7 100644\n--- a/a.rs\n+++ b/b.rs\n\
+                    @@ -3,7 +3,6 @@ fn e() {\n }\n \n fn f() {\n-    b();\n     c();\n }\n";
+        let hunk = BatchItem::Hunk {
+            file: "b.rs".into(),
+            text: text.into(),
+            first_line: 3,
+            last_line: 8,
+            old_first_line: 3,
+            old_last_line: 9,
+        };
+        let units: Vec<(String, UnitView)> =
+            containing_units(&hunk, &src, &LanguageRegistry::new())
+                .expect("reads")
+                .into_iter()
+                .map(|u| (u.file, (u.label, u.lines, u.old_side)))
+                .collect();
+        assert_eq!(
+            units,
+            vec![("b.rs".to_string(), ("f".to_string(), Some((5, 8)), true))]
+        );
+    }
+
+    #[test]
     fn a_hunk_in_one_method_of_a_large_impl_gets_that_method_not_the_whole_impl() {
         // The extractor yields an impl as one top-level unit; narrowing by `split_block` keeps a
         // hunk from dragging every method of the impl into the context.
