@@ -658,10 +658,18 @@ pub async fn run_review(
             &old_paths,
             &source,
         );
+        // MAGI FIX (Loop1 r1, M2): a removed or ambiguous line is no line of the reviewed
+        // revision, so history would check it against an unrelated one.
+        if let (Some(c), Some(file), Some(line)) = (&code, &finding.file, finding.line) {
+            if !c.names_a_revision_line() {
+                summary.off_revision.insert((file.clone(), line));
+            }
+        }
         let verdict = match code {
             Some(GateCode {
                 text,
                 ambiguous: true,
+                ..
             }) => {
                 deps.gate
                     .judge_ambiguous_side(finding, &text, clock.remaining())
@@ -1649,6 +1657,16 @@ struct GateCode {
     text: String,
     /// The line's number names a live new-side line and an old-side line its hunk deleted.
     ambiguous: bool,
+    /// The text is the old side: the line exists only before the change (a removed line).
+    old_side: bool,
+}
+
+impl GateCode {
+    /// Whether the finding's line surely names a line of the reviewed revision (its new side),
+    /// so the review history may anchor it there (RV08).
+    fn names_a_revision_line(&self) -> bool {
+        !self.old_side && !self.ambiguous
+    }
 }
 
 /// The code the gate sees for a finding (RV10 + RV21): the new side when the line lies in a new
@@ -1682,7 +1700,8 @@ fn gate_code(
     let face = faces.get(file)?;
     let holds = |ranges: &[(u32, u32)]| ranges.iter().any(|&(a, b)| a <= line && line <= b);
     let ambiguous = !face.whole && holds(&face.new) && holds(&face.deleted);
-    let read = if face.whole || holds(&face.new) {
+    let old_side = !(face.whole || holds(&face.new));
+    let read = if !old_side {
         source.read(file)
     } else if holds(&face.old) {
         source.read_old(old_paths.get(file).map_or(file, String::as_str))
@@ -1693,6 +1712,7 @@ fn gate_code(
         Ok(bytes) => bytes.map(|b| GateCode {
             text: String::from_utf8_lossy(&b).into_owned(),
             ambiguous,
+            old_side,
         }),
         Err(e) => {
             let error = redact_foreign_text(&e.to_string());

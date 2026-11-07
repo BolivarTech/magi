@@ -241,7 +241,9 @@ pub fn reclassify_then_record(
 /// gate's own judgment, and an `unfiltered` one was never judged (timeout, exhausted chain,
 /// unauthorized), so recording either would serve it back later as validated context. A finding
 /// without a file or a line is not recorded either: [`classify`] needs both and could never take
-/// it out of `Pending`. The `id` is magi-core's `generate_finding_id` over file, line and the
+/// it out of `Pending`. The caller passes only findings whose line is a line of the reviewed
+/// revision (`ReviewSummary::anchored_findings`): a removed line's number belongs to the old
+/// file, and [`classify`] would check it against an unrelated new-side line. The `id` is magi-core's `generate_finding_id` over file, line and the
 /// neutral category consolidation uses, so it is stable across reviews while file and line do
 /// not change; a failure that moves to another line is another id. It depends on magi-core's
 /// algorithm (pinned `=4.2.0`): a bump that changes it leaves old rows with ids no new review

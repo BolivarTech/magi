@@ -133,13 +133,25 @@ pub struct ReviewSummary {
 }
 
 impl ReviewSummary {
-    /// The main list's findings the review history may record (RV08). Red stub: all of them.
+    /// The main list's findings the review history may record (RV08): every one except those
+    /// in [`Self::off_revision`], whose line is a removed line or may be one. History anchors an
+    /// entry to the reviewed revision's line numbers, so such a finding would be checked against
+    /// an unrelated line. Whether a finding is recorded at all is still decided by
+    /// `history::entries_from_review` (its gate state, its location).
     ///
     /// # Returns
     ///
-    /// A copy of the findings.
+    /// A copy of those findings, in order. O(findings · log off_revision).
+    // MAGI FIX (Loop1 r1, M2): removed-line findings were anchored with their old-file number.
     pub fn anchored_findings(&self) -> Vec<(ConsolidatedFinding, GateVerdict)> {
-        self.findings.clone()
+        self.findings
+            .iter()
+            .filter(|(f, _)| match (&f.file, f.line) {
+                (Some(file), Some(line)) => !self.off_revision.contains(&(file.clone(), line)),
+                _ => true,
+            })
+            .cloned()
+            .collect()
     }
 }
 

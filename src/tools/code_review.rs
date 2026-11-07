@@ -1023,7 +1023,8 @@ pub(crate) struct ReviewRunnerParts {
 
 /// What one review leaves for [`CodeReviewRunner::after_report`].
 struct FollowUp {
-    /// The judged main list.
+    /// The judged main list, less the findings that name no line of the reviewed revision
+    /// (`ReviewSummary::anchored_findings`).
     findings: Vec<(ConsolidatedFinding, GateVerdict)>,
     /// The reviewed revision's new side; `None` for the working tree (no history then).
     rev: Option<String>,
@@ -1383,7 +1384,8 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 .follow_up
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = Some(FollowUp {
-                findings: outcome.summary.findings.clone(),
+                // MAGI FIX (Loop1 r1, M2): only findings on a line of the reviewed revision.
+                findings: outcome.summary.anchored_findings(),
                 rev,
                 worktree,
                 docs,
