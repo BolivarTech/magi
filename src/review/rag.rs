@@ -98,7 +98,7 @@ pub const DOC_QUERY_MAX_BYTES: usize = 8_192;
 impl ContextItem {
     /// The text the prompt carries for the item (before fence escaping): a containing unit
     /// with known `lines` has each line prefixed with its absolute number, as the reviewed code
-    /// is ([`number_lines`]); every other item is reference text and stays as it is.
+    /// is (`number_lines`); every other item is reference text and stays as it is.
     ///
     /// RV09 counts the containing unit as reviewed, so a finding on one of its lines must be
     /// locatable by the number shown. `lines` are old-side coordinates when `old_side`, and the
