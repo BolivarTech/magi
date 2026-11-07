@@ -147,8 +147,13 @@ pub trait RagSource: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// The longest the source's outbound preparation of `batches` batches can take, in seconds
-    /// (Red stub: 0).
+    /// The longest the source's outbound preparation of `batches` batches (the calls
+    /// [`Self::context_for`] makes to an endpoint, such as embedding each batch's query) can
+    /// take, in seconds; 0 for a source that calls no one.
+    ///
+    /// Under a calling run's deadline the preparation spends the same clock as the batches, so
+    /// the budget check that precedes it reserves this much ([`precheck_budget`]): a review it
+    /// lets through cannot be refused for its budget after those calls were made.
     fn outbound_reserve_secs(&self, batches: usize) -> u64 {
         let _ = batches;
         0
@@ -530,12 +535,14 @@ pub async fn run_review(
     // embedder's latency is never charged to the review's total (RV06).
     // MAGI FIX (SMOKE1): the budget check precedes assembling any context, which embeds each
     // batch's query: a review refused for its budget sends no byte out of the process.
+    // MAGI FIX (Loop1 r1, M6): a run deadline keeps room for the context preparation below.
     precheck_budget(
         req.timeout_secs,
         req.deadline,
         planned,
         req.max_rotations,
         req.retry_disabled,
+        deps.rag.map_or(0, |rag| rag.outbound_reserve_secs(planned)),
     )?;
     let contexts = match deps.rag {
         Some(rag) => {
@@ -546,13 +553,15 @@ pub async fn run_review(
         None => vec![Vec::new(); batches.len()],
     };
     // Read again: the preparation spent part of a caller's deadline, and the total is what is
-    // left when it ends.
+    // left when it ends. The check above reserved the preparation's bound, so this one refuses
+    // only if the preparation overran it.
     let budget = precheck_budget(
         req.timeout_secs,
         req.deadline,
         planned,
         req.max_rotations,
         req.retry_disabled,
+        0,
     )?;
     let total = budget.map(|(total, _)| total);
     if let Some((_, ceiling)) = budget {
@@ -894,8 +903,8 @@ fn bind<'r>(
 }
 
 /// The review's total in seconds, read when the preparation ends, with the bound that set it:
-/// the explicit `--timeout`, at most what is left of the caller's deadline; `None` when there is
-/// neither.
+/// the explicit `--timeout`, at most what is left of the caller's deadline less `reserve_secs`
+/// (the preparation still to run on that clock); `None` when there is neither.
 ///
 /// The deadline is an absolute [`Instant`] of the calling run, so what is left of it is read on
 /// the real clock; the injected [`ReviewClock`] only measures the batches' progress from this
@@ -903,8 +912,13 @@ fn bind<'r>(
 fn review_total(
     timeout_secs: Option<u64>,
     deadline: Option<Instant>,
+    reserve_secs: u64,
 ) -> Option<(u64, BudgetLimit)> {
-    let left = deadline.map(|d| d.saturating_duration_since(Instant::now()).as_secs());
+    let left = deadline.map(|d| {
+        d.saturating_duration_since(Instant::now())
+            .as_secs()
+            .saturating_sub(reserve_secs)
+    });
     match (timeout_secs, left) {
         (Some(t), Some(l)) if l < t => Some((l, BudgetLimit::RunDeadline)),
         (Some(t), _) => Some((t, BudgetLimit::Timeout)),
@@ -921,6 +935,13 @@ fn review_total(
 /// byte out of the process. The duration of the preparation (`prep_ms`) keeps counting all of
 /// it, whichever side of the check it ran on.
 ///
+/// An explicit `--timeout` is counted from the first trio call, so the preparation never spends
+/// it. A calling run's deadline is wall clock and the preparation does spend it: the caller
+/// passes in `reserve_secs` the bound of the outbound preparation still to run (the
+/// documentation indexing, each batch's query), and the check holds that much of the deadline
+/// back, so a later check cannot refuse the review after those calls were made. The reserve
+/// then counts in the minimum the error names.
+///
 /// # Arguments
 ///
 /// * `timeout_secs` - The explicit `--timeout`, if any.
@@ -928,6 +949,8 @@ fn review_total(
 /// * `batches` - The batches the review was planned into.
 /// * `max_rotations` - `[magi].max_rotations`, resolved.
 /// * `retry_disabled` - Whether schema retries are off.
+/// * `reserve_secs` - What the deadline must keep for the outbound preparation still to run; 0
+///   once it ran.
 ///
 /// # Returns
 ///
@@ -937,19 +960,33 @@ fn review_total(
 /// # Errors
 ///
 /// [`ReviewError::Budget`] naming the bound that set the total, when the batches do not fit.
+// MAGI FIX (Loop1 r1, M6): the deadline was read whole, so the preparation could spend it and
+// the check after it refused once the embedder had already been called.
 pub fn precheck_budget(
     timeout_secs: Option<u64>,
     deadline: Option<Instant>,
     batches: usize,
     max_rotations: u32,
     retry_disabled: bool,
+    reserve_secs: u64,
 ) -> Result<Option<(u64, u64)>, ReviewError> {
-    let Some((total, limit)) = review_total(timeout_secs, deadline) else {
+    let Some((total, limit)) = review_total(timeout_secs, deadline, reserve_secs) else {
         return Ok(None);
     };
     pre_budget(total, batches, max_rotations, retry_disabled)
         .map(|ceiling| Some((total, ceiling)))
         .map_err(|e| with_budget_limit(e, limit))
+        .map_err(|mut e| {
+            if let ReviewError::Budget {
+                limit: BudgetLimit::RunDeadline,
+                min_timeout_secs,
+                ..
+            } = &mut e
+            {
+                *min_timeout_secs = min_timeout_secs.saturating_add(reserve_secs);
+            }
+            e
+        })
 }
 
 /// `e` with its budget bound set to `limit` (any other error unchanged), so the message names the

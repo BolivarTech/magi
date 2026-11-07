@@ -507,6 +507,34 @@ impl RagSource for StoreRag<'_> {
     }
 }
 
+/// The bound on embedding the documentation queries of `batches` batches: one query per batch,
+/// each under [`EMBED_QUERY_TIMEOUT_SECS`]. O(1).
+fn query_reserve_secs(batches: usize) -> u64 {
+    u64::try_from(batches)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(EMBED_QUERY_TIMEOUT_SECS)
+}
+
+/// The bound on a review's whole outbound preparation under a run deadline (§5.0 stage 4, RV06):
+/// the documentation indexing ([`REINDEX_TIMEOUT_SECS`]) and one query embedding per batch.
+/// A review with no store or no embedder calls no one and reserves nothing.
+///
+/// # Arguments
+///
+/// * `batches` - The batches the review was planned into.
+/// * `calls_embedder` - Whether the review has review stores and an embedder.
+///
+/// # Returns
+///
+/// The seconds the budget check holds back from a run deadline. O(1).
+pub fn outbound_prep_reserve_secs(batches: usize, calls_embedder: bool) -> u64 {
+    if calls_embedder {
+        REINDEX_TIMEOUT_SECS.saturating_add(query_reserve_secs(batches))
+    } else {
+        0
+    }
+}
+
 /// The context source the review runner hands the pipeline: the stores, the embedder and the
 /// documentation preparation, bound to each review's own content by
 /// [`RagSource::for_review`] (the pipeline builds the index and the content source).
@@ -538,6 +566,18 @@ impl RagSource for ReviewRag<'_> {
 
     fn index_ms(&self) -> u64 {
         self.prep.index_ms
+    }
+
+    /// One query embedding per batch, each bounded by [`EMBED_QUERY_TIMEOUT_SECS`], when the
+    /// bound source will call the embedder (a store and an embedder); 0 otherwise.
+    // MAGI FIX (Loop1 r1, M6): the run deadline keeps room for these calls.
+    fn outbound_reserve_secs(&self, batches: usize) -> u64 {
+        let calls = self.embedder.is_some() && (self.docs.is_some() || self.history.is_some());
+        if calls {
+            query_reserve_secs(batches)
+        } else {
+            0
+        }
     }
 
     fn skipped(&self) -> Vec<String> {

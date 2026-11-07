@@ -50,8 +50,8 @@ use tokio_util::sync::CancellationToken;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::review_docs::ReviewDocStore;
 use crate::memory::review_rag::{
-    collect_garbage, doc_revision, prepare_docs, record_review, DocPrep, RecordStats, ReviewMemory,
-    ReviewRag, RECLASSIFY_BUDGET_SECS, REINDEX_TIMEOUT_SECS,
+    collect_garbage, doc_revision, outbound_prep_reserve_secs, prepare_docs, record_review,
+    DocPrep, RecordStats, ReviewMemory, ReviewRag, RECLASSIFY_BUDGET_SECS, REINDEX_TIMEOUT_SECS,
 };
 use crate::system::path_guard::PathGuard;
 use crate::system::review_git::{review_path_guard, ScrubbedGit};
@@ -1304,13 +1304,17 @@ impl CodeReviewRunner for ProductionReviewRunner {
             // embedder: a review refused for its budget sends no byte out of the process. The
             // count is the approved plan's (`run_review` refuses a plan that changed, and checks
             // again with its own); a plan that was never made (0 batches) has nothing to check.
+            // MAGI FIX (Loop1 r1, M6): a run deadline keeps room for the documentation indexing
+            // and the query embeddings that follow, so no later check refuses after them.
             if plan.batches > 0 {
+                let calls_embedder = self.parts.memory.is_some() && self.parts.embedder.is_some();
                 precheck_budget(
                     timeout_secs,
                     deadline,
                     plan.batches,
                     self.parts.max_rotations,
                     self.parts.retry_disabled,
+                    outbound_prep_reserve_secs(plan.batches, calls_embedder),
                 )?;
             }
             let input = path_input(&self.workspace, plan.input);
