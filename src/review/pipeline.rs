@@ -2940,6 +2940,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_gets_only_the_findings_that_name_a_line_of_the_reviewed_revision() {
+        // [Loop1 r1, M2] RV08 anchors history to the reviewed revision's lines. Line 9 was
+        // deleted (old side only) and line 3 replaced (its number is both a deleted and a live
+        // line): neither names a line of the revision for sure, so neither is anchored. Line 5
+        // is a live context line and is.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let new = "old1\nold2\nnew3\nold4\nold5\nold6\nold7\n";
+        std::fs::write(dir.path().join("a.rs"), new).expect("write");
+        let old: String = (1..=10).map(|i| format!("old{i}\n")).collect();
+        let diff =
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,10 +1,7 @@\n old1\n old2\n\
+                    -old3\n+new3\n old4\n old5\n old6\n old7\n-old8\n-old9\n-old10\n";
+        let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --relative abc",
+                Ok(diff),
+            ),
+            ("ls-files --others --exclude-standard -z", Ok("")),
+            (
+                "ls-tree -z --end-of-options abc -- a.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
+            ),
+            (
+                "show --no-ext-diff --no-textconv --end-of-options abc:./a.rs",
+                Ok(old.as_str()),
+            ),
+        ]);
+        let f = serde_json::json!([
+            {"severity":"warning","title":"t9","detail":"d","file":"a.rs","line":9},
+            {"severity":"warning","title":"t3","detail":"d","file":"a.rs","line":3},
+            {"severity":"warning","title":"t5","detail":"d","file":"a.rs","line":5}
+        ]);
+        let consult =
+            FakeConsult::new(vec![Ok(
+                real_report([f.clone(), f, serde_json::json!([])]).await
+            )]);
+        let client = gate_always("real_defect");
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let out = run_review(
+            ReviewRequest {
+                input: ReviewInput::Uncommitted,
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                approved_digest: None,
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+                rag: None,
+            },
+        )
+        .await
+        .expect("runs");
+        let mut judged: Vec<u32> = out
+            .summary
+            .findings
+            .iter()
+            .filter_map(|(f, _)| f.line)
+            .collect();
+        judged.sort_unstable();
+        assert_eq!(judged, vec![3, 5, 9], "all three reach the main list");
+        let anchored: Vec<u32> = out
+            .summary
+            .anchored_findings()
+            .iter()
+            .filter_map(|(f, _)| f.line)
+            .collect();
+        assert_eq!(anchored, vec![5]);
+    }
+
+    #[tokio::test]
     async fn each_side_of_each_file_is_read_from_git_once_per_review() {
         // [CP2 MS2 S2a loop 6] run_review wraps its source in CachedSource: the filter, the index and the gate all read the
         // old side of gone.rs, and git answers it once.

@@ -9,7 +9,7 @@
 //! failure messages) and this is the last point before it leaves the process, so the redaction
 //! here is a backstop over the one consolidation already applied.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use magi_core::consensus::{ConsensusResult, DedupFinding};
@@ -124,6 +124,23 @@ pub struct ReviewSummary {
     pub without_memory: bool,
     /// Context items left out because the secret detector matched them (REQ-RV22).
     pub context_withheld: usize,
+    /// `(file, line)` of the findings whose line names no line of the reviewed revision for
+    /// sure: one read on the old side (a removed line), or one whose number is both a removed
+    /// and a live line. The review history does not record them (RV08). Internal: never
+    /// serialized.
+    #[serde(skip)]
+    pub off_revision: BTreeSet<(String, u32)>,
+}
+
+impl ReviewSummary {
+    /// The main list's findings the review history may record (RV08). Red stub: all of them.
+    ///
+    /// # Returns
+    ///
+    /// A copy of the findings.
+    pub fn anchored_findings(&self) -> Vec<(ConsolidatedFinding, GateVerdict)> {
+        self.findings.clone()
+    }
 }
 
 /// One piece of retrieved context a batch left out, and what it was.
@@ -167,6 +184,7 @@ impl Default for ReviewSummary {
             without_embedder: false,
             without_memory: false,
             context_withheld: 0,
+            off_revision: BTreeSet::new(),
         }
     }
 }
