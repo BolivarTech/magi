@@ -1924,6 +1924,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_working_tree_review_reads_only_the_files_that_can_hold_documentation() {
+        // [Loop1 r2, Minor 1] Only Markdown doc sources and the languages whose doc comments are
+        // chunked (`.rs`, `.py`) can yield a chunk: a Java file has an extractor but no doc
+        // chunker, so it is neither read nor keyed for the documentation index.
+        struct Counting<'a>(&'a TwoSides, Mutex<Vec<String>>);
+        impl ContentSource for Counting<'_> {
+            fn read(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.1.lock().expect("lock").push(p.to_string());
+                self.0.read(p)
+            }
+            fn read_old(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.0.read_old(p)
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let tree = TwoSides {
+            new: vec![
+                ("README.md", "# Usage\nDOC\n"),
+                ("a.rs", "/// A.\nfn a() {}\n"),
+                ("m.py", "\"\"\"M.\"\"\"\n"),
+                ("B.java", "/** B. */\nclass B {}\n"),
+            ],
+            old: vec![],
+        };
+        let source = Counting(&tree, Mutex::new(Vec::new()));
+        let paths: Vec<String> = ["README.md", "a.rs", "m.py", "B.java"]
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &source,
+            &paths,
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        let listed: Vec<String> = prep.doc_sources.iter().map(|s| s.path.clone()).collect();
+        assert_eq!(listed, vec!["README.md", "a.rs", "m.py"]);
+        let reads = source.1.lock().expect("lock").clone();
+        assert!(!reads.iter().any(|p| p == "B.java"), "{reads:?}");
+    }
+
     #[test]
     fn the_documentation_revision_is_the_reviewed_new_side() {
         // [CP2 MS3 loop 11] main.rs takes `rev` from the resolved input: a revision review lists its new side; every
