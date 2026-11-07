@@ -4431,6 +4431,33 @@ mod tests {
         assert_eq!((f.new.clone(), f.old.clone()), (vec![(1, 3)], vec![(1, 3)]));
     }
 
+    #[test]
+    fn a_real_hunk_with_leading_context_gives_the_gate_the_function_it_changed() {
+        // [Loop1 r1, I1] From a real `git diff` (-U3): the hunk opens on line 3, the closing brace
+        // of `e`; the change is line 6, in `f` (5-8). The unit of `f` is the one the trio was
+        // shown, so its face reaches the gate.
+        let text = "diff --git a/a.rs b/a.rs\nindex 31d2d81..9c46387 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -3,7 +3,7 @@ fn e() {\n }\n \n fn f() {\n-    b();\n+    bb();\n     c();\n }\n \n";
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![BatchItem::Hunk {
+                file: "a.rs".into(),
+                text: text.into(),
+                first_line: 3,
+                last_line: 9,
+                old_first_line: 3,
+                old_last_line: 9,
+            }],
+        };
+        let contexts = vec![vec![ctx(ContextKind::Unit, "a.rs", "f", Some((5, 8)))]];
+        let mut faces = HashMap::new();
+        add_unit_faces(&mut faces, &[batch], &contexts, &BTreeSet::from([0]));
+        let new = faces.get("a.rs").map(|f| f.new.clone()).unwrap_or_default();
+        assert_eq!(new, vec![(5, 8)]);
+    }
+
     /// The T2.9 fixture with a RAG source over an uncommitted diff of one hunk at f0.rs lines 1..=3.
     // [RED-DRYRUN 2026-10-20, CP2 MS3 loop 1] `&dyn RagSource`: the order test passes its own source.
     async fn review_with_rag(

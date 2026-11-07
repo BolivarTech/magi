@@ -534,6 +534,22 @@ pub fn containing_unit(
         }))
 }
 
+/// The units that contain a batch item's changed lines (RV07(1)). Red stub: the single unit of
+/// [`containing_unit`].
+///
+/// # Errors
+///
+/// As [`containing_unit`].
+pub fn containing_units(
+    item: &BatchItem,
+    sources: &dyn ContentSource,
+    registry: &LanguageRegistry,
+) -> Result<Vec<ContextItem>, ReviewError> {
+    Ok(containing_unit(item, sources, registry)?
+        .into_iter()
+        .collect())
+}
+
 /// The doc-search query: `text` cut to at most [`DOC_QUERY_MAX_BYTES`] bytes, on a char boundary.
 ///
 /// # Arguments
@@ -959,6 +975,85 @@ mod tests {
                 .expect("reads")
                 .is_none(),
             "a whole file is its own unit"
+        );
+    }
+
+    /// `a.rs` before the change: `e` (lines 1-3), `f` (5-8), `g` (10-12).
+    const THREE_FNS: &str =
+        "fn e() {\n    a();\n}\n\nfn f() {\n    b();\n    c();\n}\n\nfn g() {\n    d();\n}\n";
+
+    /// A hunk of `a.rs` with its real `git diff` text (default `-U3` context).
+    fn real_hunk(text: &str, new: (u32, u32), old: (u32, u32)) -> BatchItem {
+        BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: text.into(),
+            first_line: new.0,
+            last_line: new.1,
+            old_first_line: old.0,
+            old_last_line: old.1,
+        }
+    }
+
+    /// A containing unit as the tests compare it: `(label, lines, old_side)`.
+    type UnitView = (String, Option<(u32, u32)>, bool);
+
+    /// The [`UnitView`] of each containing unit of `item` over `new` and `old`.
+    fn units_of(item: &BatchItem, new: &str, old: &str) -> Vec<UnitView> {
+        use crate::review::test_support::MapSource;
+        let src = MapSource::new(&[("a.rs", new)], &[("a.rs", old)]);
+        containing_units(item, &src, &LanguageRegistry::new())
+            .expect("reads")
+            .into_iter()
+            .map(|u| (u.label, u.lines, u.old_side))
+            .collect()
+    }
+
+    #[test]
+    fn a_change_at_the_top_of_a_function_gets_that_function_not_the_one_above() {
+        // [Loop1 r1, I1] Taken from a real `git diff`: the hunk opens three context lines above
+        // the change, on the closing brace of `e`; the change is the first body line of `f`.
+        let new =
+            "fn e() {\n    a();\n}\n\nfn f() {\n    bb();\n    c();\n}\n\nfn g() {\n    d();\n}\n";
+        let text = "diff --git a/a.rs b/a.rs\nindex 31d2d81..9c46387 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -3,7 +3,7 @@ fn e() {\n }\n \n fn f() {\n-    b();\n+    bb();\n     c();\n }\n \n";
+        let hunk = real_hunk(text, (3, 9), (3, 9));
+        assert_eq!(
+            units_of(&hunk, new, THREE_FNS),
+            vec![("f".to_string(), Some((5, 8)), false)]
+        );
+    }
+
+    #[test]
+    fn a_deletion_inside_git_context_takes_the_old_side_unit_of_the_removed_line() {
+        // [Loop1 r1, I1] With context the new side is not empty, yet the change only deletes:
+        // its unit is the one that held the removed line, on the old side.
+        let new = "fn e() {\n    a();\n}\n\nfn f() {\n    c();\n}\n\nfn g() {\n    d();\n}\n";
+        let text =
+            "diff --git a/a.rs b/a.rs\nindex 31d2d81..7b5f4c7 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -3,7 +3,6 @@ fn e() {\n }\n \n fn f() {\n-    b();\n     c();\n }\n \n";
+        let hunk = real_hunk(text, (3, 8), (3, 9));
+        assert_eq!(
+            units_of(&hunk, new, THREE_FNS),
+            vec![("f".to_string(), Some((5, 8)), true)]
+        );
+    }
+
+    #[test]
+    fn a_hunk_that_changes_two_functions_brings_both_units() {
+        // [Loop1 r1, I1] git merged two nearby changes into one hunk that opens on a blank line
+        // between units: each changed function is a containing unit, once.
+        let new =
+            "fn e() {\n    a();\n}\n\nfn f() {\n    b();\n    cc();\n}\n\nfn g() {\n    dd();\n}\n";
+        let text = "diff --git a/a.rs b/a.rs\nindex 31d2d81..eec0b67 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -4,9 +4,9 @@ fn e() {\n \n fn f() {\n     b();\n-    c();\n+    cc();\n }\n \n fn g() {\n\
+                    -    d();\n+    dd();\n }\n";
+        let hunk = real_hunk(text, (4, 12), (4, 12));
+        assert_eq!(
+            units_of(&hunk, new, THREE_FNS),
+            vec![
+                ("f".to_string(), Some((5, 8)), false),
+                ("g".to_string(), Some((10, 12)), false)
+            ]
         );
     }
 

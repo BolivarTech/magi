@@ -2293,6 +2293,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_hunk_that_changes_two_functions_is_planned_and_served_with_both_units() {
+        // [Loop1 r1, I1] A real `git diff` hunk (-U3) that opens on a blank line between units
+        // and changes `f` and `g`: the context carries both units, and planning charged exactly
+        // what the context adds.
+        let f = RagFixture::new(&[("a.rs", "fn worktree() {}\n")]).await;
+        let two = TwoSides {
+            new: vec![(
+                "a.rs",
+                "fn e() {\n    a();\n}\n\nfn f() {\n    b();\n    cc();\n}\n\nfn g() {\n    dd();\n}\n",
+            )],
+            old: vec![(
+                "a.rs",
+                "fn e() {\n    a();\n}\n\nfn f() {\n    b();\n    c();\n}\n\nfn g() {\n    d();\n}\n",
+            )],
+        };
+        let mut rag = f.rag(false);
+        rag.sources = &two;
+        let diff = "diff --git a/a.rs b/a.rs\nindex 31d2d81..eec0b67 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -4,9 +4,9 @@ fn e() {\n \n fn f() {\n     b();\n-    c();\n+    cc();\n }\n \n fn g() {\n\
+                    -    d();\n+    dd();\n }\n";
+        let files = vec![magi_rs::review::input::ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff.into()),
+        }];
+        let batches = magi_rs::review::batching::plan_batches_with(
+            &files,
+            &two,
+            &f.registry,
+            100_000,
+            &|i| rag.companion(i),
+        )
+        .expect("plans");
+        let a = rag.context_for(&batches[0]).await.expect("context");
+        let units: Vec<&ContextItem> = a
+            .items
+            .iter()
+            .filter(|i| i.kind == ContextKind::Unit)
+            .collect();
+        assert_eq!(
+            units.iter().map(|u| u.label.as_str()).collect::<Vec<_>>(),
+            vec!["f", "g"]
+        );
+        let charged: usize = units.iter().map(|u| item_cost(u)).sum();
+        assert_eq!(batches[0].companion_tokens, charged);
+    }
+
+    #[tokio::test]
     async fn an_old_side_and_a_new_side_unit_on_the_same_lines_are_two_companions() {
         // [MS3 final review m2] Planning charges what assemble adds: both units, never one.
         let f = RagFixture::new(&[("a.rs", "fn worktree() {}\n")]).await;
