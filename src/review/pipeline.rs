@@ -1073,8 +1073,10 @@ fn write_context(prompt: &mut String, items: &[ContextItem]) {
         let (open, close) = context_frame(&item.kind, &display_path(&item.file), item.candidate);
         prompt.push_str(&open);
         prompt.push('\n');
-        prompt.push_str(&escape_fence(&item.text));
-        if !item.text.ends_with('\n') {
+        // MAGI FIX (T3.7): a containing unit is numbered like the code under review.
+        let text = item.rendered();
+        prompt.push_str(&escape_fence(&text));
+        if !text.ends_with('\n') {
             prompt.push('\n');
         }
         prompt.push_str(&close);

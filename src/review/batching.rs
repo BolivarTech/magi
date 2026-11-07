@@ -228,7 +228,7 @@ fn line_prefix(number: Option<u32>) -> String {
 /// `text` with its lines numbered consecutively from `first`; a last line without `'\n'` stays
 /// without it. O(bytes).
 // MAGI FIX (T3.7): the trio counted lines by hand from the `@@` header and reported wrong ones.
-fn number_lines(text: &str, first: u32) -> String {
+pub(crate) fn number_lines(text: &str, first: u32) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
     let mut number = first;
     for line in text.split_inclusive('\n') {

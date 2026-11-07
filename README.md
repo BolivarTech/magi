@@ -577,7 +577,7 @@ A rejected `low_confidence` answer appears only inside `chain`, never in the top
 
 `magi-rs code-review` reviews code with the MAGI trio and prints one report. The three mages judge the code in `code-review` mode; around them the command splits large inputs into batches, drops findings that point outside what was reviewed, asks a decision model whether each remaining finding is a false positive, and merges every batch into a single magi-core report. The same review runs from the TUI as `/code-review` and from the agent as the `code-review` tool.
 
-Every reviewed line reaches the mages prefixed with its absolute line number (new-file numbers for a diff's context and added lines, old-file numbers for removed lines), so a finding's location is read off the prompt instead of being counted by hand. Retrieved context is not numbered.
+Every reviewed line reaches the mages prefixed with its absolute line number (new-file numbers for a diff's context and added lines, old-file numbers for removed lines), so a finding's location is read off the prompt instead of being counted by hand. The containing unit of a change is numbered too; other retrieved context is not.
 
 ```bash
 magi-rs code-review                                   # the last commit against its parent

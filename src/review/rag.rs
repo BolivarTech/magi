@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::batching::BatchItem;
+use super::batching::{number_lines, BatchItem};
 use super::docs::MAX_DOC_CHUNKS;
 use super::error::ReviewError;
 use super::index::{identifier_runs, LexicalIndex};
@@ -96,9 +96,23 @@ pub const CONTEXT_ITEM_FRAME_TOKENS: usize = 18;
 pub const DOC_QUERY_MAX_BYTES: usize = 8_192;
 
 impl ContextItem {
-    /// The text the prompt carries for the item.
+    /// The text the prompt carries for the item (before fence escaping): a containing unit
+    /// with known `lines` has each line prefixed with its absolute number, as the reviewed code
+    /// is ([`number_lines`]); every other item is reference text and stays as it is.
+    ///
+    /// RV09 counts the containing unit as reviewed, so a finding on one of its lines must be
+    /// locatable by the number shown. `lines` are old-side coordinates when `old_side`, and the
+    /// prefix then shows old-side numbers, the ones the validator accepts for that unit.
+    ///
+    /// # Returns
+    ///
+    /// The text to write into the prompt and to charge to the budget. O(bytes).
+    // MAGI FIX (T3.7): an unnumbered reviewed line broke "the number shown is the one RV09 accepts".
     pub fn rendered(&self) -> String {
-        self.text.clone()
+        match (&self.kind, self.lines) {
+            (ContextKind::Unit, Some((first, _))) => number_lines(&self.text, first),
+            _ => self.text.clone(),
+        }
     }
 }
 
@@ -113,7 +127,7 @@ impl ContextItem {
 ///
 /// The item's cost in tokens. O(len of the item's text).
 pub fn item_cost(item: &ContextItem) -> usize {
-    estimate_tokens(&item.text)
+    estimate_tokens(&item.rendered())
         .saturating_add(estimate_tokens(&display_path(&item.file)))
         .saturating_add(CONTEXT_ITEM_FRAME_TOKENS)
 }
@@ -890,7 +904,8 @@ mod tests {
         );
         assert_eq!(
             item_cost(&u),
-            estimate_tokens(&u.text)
+            // T3.7: the unit is charged as numbered, what the prompt carries.
+            estimate_tokens(&u.rendered())
                 + estimate_tokens(&display_path(&u.file))
                 + CONTEXT_ITEM_FRAME_TOKENS
         );
