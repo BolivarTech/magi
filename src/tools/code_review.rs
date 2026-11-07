@@ -2542,6 +2542,26 @@ mod tests {
     }
 
     #[test]
+    fn the_runner_builds_its_follow_up_only_through_the_filtering_constructor() {
+        // [Loop1 r3, Minor 3] The production code of this file builds a `FollowUp` in one place,
+        // `FollowUp::of_review`, which keeps removed-line findings out of the history (RV08); a
+        // struct literal elsewhere would skip that filter. Source-grep guard: `\r` stripped, the
+        // test module cut off, and each needle built so it cannot match itself.
+        let source = include_str!("code_review.rs").replace('\r', "");
+        let cut = ["#[cfg(", "test)]\nmod tests"].concat();
+        let production = source.split(cut.as_str()).next().unwrap_or_default();
+        let literal = ["Follow", "Up {"].concat();
+        let constructor = ["Follow", "Up::of_review("].concat();
+        let literals: Vec<&str> = production
+            .lines()
+            .filter(|l| l.contains(literal.as_str()))
+            .map(str::trim)
+            .collect();
+        assert_eq!(literals, vec!["struct FollowUp {", "impl FollowUp {"]);
+        assert_eq!(production.matches(constructor.as_str()).count(), 1);
+    }
+
+    #[test]
     fn a_finding_on_a_removed_line_never_reaches_the_review_history() {
         // [Loop1 r2, Minor 2] RV08: the follow-up a review leaves keeps only the findings on a
         // line of the reviewed revision, so the history store never gets the removed one.
