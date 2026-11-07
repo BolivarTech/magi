@@ -17,6 +17,7 @@ use super::batching::{number_lines, BatchItem};
 use super::docs::MAX_DOC_CHUNKS;
 use super::error::ReviewError;
 use super::index::{identifier_runs, LexicalIndex};
+use super::input::renamed_from;
 use super::languages::{
     enclosing_unit, ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, SemanticUnit,
     UnitKind,
@@ -485,7 +486,9 @@ pub fn callers_for(
 ///
 /// The anchors are [`BatchItem::hunk_change`]'s: the added lines, looked up on the new side, or,
 /// for a hunk that only deletes, the removed lines on the old side, because the new file has no
-/// line for them. git's context lines are never anchors, so a change at the top of a function
+/// line for them; the old side of a renamed (or copied) file is read under the `rename from`
+/// path its diff header names, while the unit keeps the reviewed path. git's context lines are
+/// never anchors, so a change at the top of a function
 /// gets that function, not the one above it. Each distinct unit the changed lines touch is
 /// returned once, in line order: a hunk that spans two units brings both. The side is recorded
 /// in [`ContextItem::old_side`], so no later stage infers it from the hunks. Planning's
@@ -513,13 +516,20 @@ pub fn containing_units(
     sources: &dyn ContentSource,
     registry: &LanguageRegistry,
 ) -> Result<Vec<ContextItem>, ReviewError> {
-    let (BatchItem::Hunk { file, .. }, Some(change)) = (item, item.hunk_change()) else {
+    let (BatchItem::Hunk { file, text, .. }, Some(change)) = (item, item.hunk_change()) else {
         return Ok(Vec::new());
     };
     let Some(extractor) = registry.get(file) else {
         return Ok(Vec::new());
     };
-    let Some(text) = read_text(sources, file, change.old_side)? else {
+    // MAGI FIX (Loop1 r1, M1): the old side of a rename lives under its `rename from` path, as
+    // the filter and the lexical index read it; the hunk's diff header names it.
+    let read_path = if change.old_side {
+        renamed_from(text).unwrap_or_else(|| file.clone())
+    } else {
+        file.clone()
+    };
+    let Some(text) = read_text(sources, &read_path, change.old_side)? else {
         return Ok(Vec::new());
     };
     let units = FileUnits::load(extractor, file, &text);
