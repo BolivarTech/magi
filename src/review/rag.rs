@@ -57,9 +57,10 @@ pub struct ContextItem {
     pub candidate: bool,
     /// The lines of `file` the text covers, when it is a span of a file.
     pub lines: Option<(u32, u32)>,
-    /// Whether the text was read from the old side of `file`: a containing unit of a hunk
-    /// that only deletes lines (RV21, [`BatchItem::hunk_change`]). `lines` are then old-side coordinates; `false` for every
-    /// other item.
+    /// Whether the text was read from the old side of `file`: a containing unit of lines a
+    /// hunk removed (RV21, [`BatchItem::hunk_change`]). `lines` are then old-side coordinates;
+    /// `false` for every other item.
+    // MAGI FIX (Loop1 r2, Minor 4): wrapped to the line limit.
     pub old_side: bool,
 }
 

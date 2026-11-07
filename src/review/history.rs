@@ -246,8 +246,9 @@ pub fn reclassify_then_record(
 /// because its number belongs to the old file and [`classify`] would check it against an
 /// unrelated new-side line. A line edited in place (its number is both the removed and the live
 /// line) is recorded on the new side, the side the gate judged. The `id` is magi-core's
-/// `generate_finding_id` over file, line and the neutral category consolidation uses, so it is stable across reviews while file and line do
-/// not change; a failure that moves to another line is another id. It depends on magi-core's
+/// `generate_finding_id` over file, line and the neutral category consolidation uses, so it is
+/// stable across reviews while file and line do not change; a failure that moves to another
+/// line is another id. It depends on magi-core's
 /// algorithm (pinned `=4.2.0`): a bump that changes it leaves old rows with ids no new review
 /// repeats, and must re-verify this.
 ///
