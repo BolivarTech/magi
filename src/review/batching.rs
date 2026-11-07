@@ -194,20 +194,20 @@ impl BatchItem {
         }
     }
 
-    /// The lines a hunk changes, on the side its containing units are read from (RV07(1)).
+    /// The lines a hunk changes, by side: where its containing units are read from (RV07(1)).
     ///
     /// git writes three context lines around a change by default, so the hunk's first line is
     /// usually context, not the change. The anchors are therefore the changed lines themselves:
-    /// every added (`+`) line on the new side; for a hunk that only deletes, every removed (`-`)
-    /// line on the old side. They are counted exactly as [`BatchItem::rendered`] numbers them,
-    /// from the `@@` header (or from the item's own first lines when the text has none). A hunk
-    /// with no changed line at all, which git never writes, is anchored at its first line: the
-    /// old one when its new side is empty.
+    /// every added (`+`) line, numbered on the new side, and every removed (`-`) line, numbered
+    /// on the old side. They are counted exactly as [`BatchItem::rendered`] numbers them, from
+    /// the `@@` header (or from the item's own first lines when the text has none). A hunk with
+    /// no changed line at all, which git never writes, is anchored at its first line: the old
+    /// one when its new side is empty.
     ///
     /// # Returns
     ///
-    /// `None` for a unit or a whole file (already a unit); otherwise the lines, ascending, and
-    /// their side. O(bytes of the hunk).
+    /// `None` for a unit or a whole file (already a unit); otherwise the lines of each side,
+    /// ascending. O(bytes of the hunk).
     // MAGI FIX (Loop1 r1, I1): the unit was looked up at the hunk's first line, git's leading
     // context, which named the function above the change.
     pub fn hunk_change(&self) -> Option<HunkChange> {
@@ -242,25 +242,16 @@ impl BatchItem {
                 BodyLine::Context(_) | BodyLine::Other => {}
             }
         }
-        let change = match (added.is_empty(), removed.is_empty()) {
-            (false, _) => HunkChange {
-                lines: added,
-                old_side: false,
-            },
-            (true, false) => HunkChange {
-                lines: removed,
-                old_side: true,
-            },
-            (true, true) if first_line > last_line => HunkChange {
-                lines: vec![*old_first_line],
-                old_side: true,
-            },
-            (true, true) => HunkChange {
-                lines: vec![*first_line],
-                old_side: false,
-            },
-        };
-        Some(change)
+        // MAGI FIX (Loop1 r2, Minor 3): removed lines count even when the hunk also adds, so a
+        // function deleted next to an edit keeps its old-side unit.
+        if added.is_empty() && removed.is_empty() {
+            if first_line > last_line {
+                removed.push(*old_first_line);
+            } else {
+                added.push(*first_line);
+            }
+        }
+        Some(HunkChange { added, removed })
     }
 
     /// Tokens of [`BatchItem::rendered`], the text that actually leaves the process.
@@ -350,13 +341,13 @@ fn number_hunk(text: &str) -> String {
     out
 }
 
-/// The lines a hunk changes and the side they are numbered on ([`BatchItem::hunk_change`]).
+/// The lines a hunk changes, by side ([`BatchItem::hunk_change`]); at least one is non-empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HunkChange {
-    /// The changed lines, ascending, never empty.
-    pub lines: Vec<u32>,
-    /// Whether `lines` are old-side numbers (a hunk that only deletes).
-    pub old_side: bool,
+    /// The added lines, ascending, numbered on the new side.
+    pub added: Vec<u32>,
+    /// The removed lines, ascending, numbered on the old side.
+    pub removed: Vec<u32>,
 }
 
 /// What one body line of a hunk is, with its number on the side it belongs to.

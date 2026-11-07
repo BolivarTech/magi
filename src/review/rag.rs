@@ -484,15 +484,18 @@ pub fn callers_for(
 /// The units that contain a batch item's changed lines, as `Unit` items with their `lines`
 /// (RV07(1): "the containing unit of each change"; RV21).
 ///
-/// The anchors are [`BatchItem::hunk_change`]'s: the added lines, looked up on the new side, or,
-/// for a hunk that only deletes, the removed lines on the old side, because the new file has no
-/// line for them; the old side of a renamed (or copied) file is read under the `rename from`
-/// path its diff header names, while the unit keeps the reviewed path. git's context lines are
-/// never anchors, so a change at the top of a function
-/// gets that function, not the one above it. Each distinct unit the changed lines touch is
-/// returned once, in line order: a hunk that spans two units brings both. The side is recorded
-/// in [`ContextItem::old_side`], so no later stage infers it from the hunks. Planning's
-/// companions and the context both use this, so what was charged is what `assemble` adds.
+/// The anchors are [`BatchItem::hunk_change`]'s: the added lines, looked up on the new side, and
+/// the removed lines, looked up on the old side, because the new file has no line for them. The
+/// old side of a renamed (or copied) file is read under the `rename from` path its diff header
+/// names, while the unit keeps the reviewed path. git's context lines are never anchors, so a
+/// change at the top of a function gets that function, not the one above it. Each distinct unit
+/// is returned once, new side first, each side in line order: a hunk that spans two units brings
+/// both, and a hunk that edits `f` and deletes `g` brings the new `f` and the old `g`. An
+/// old-side unit whose name is already among the new side's (the edited function itself) is not
+/// brought again: its removed lines are in the hunk, and the new version is its unit. The side
+/// is recorded in [`ContextItem::old_side`], so no later stage infers it from the hunks.
+/// Planning's companions and the context both use this, so what was charged is what `assemble`
+/// adds.
 ///
 /// # Arguments
 ///
@@ -504,13 +507,14 @@ pub fn callers_for(
 ///
 /// The units, possibly none: a unit or a whole file (already a unit), changed lines outside
 /// every unit, a file without an extractor, or a side that is gone give none. O(changed lines ·
-/// units) plus one read and one extraction of the side.
+/// units) plus one read and one extraction of each side with changed lines.
 ///
 /// # Errors
 ///
 /// An error of `sources`, unchanged; [`ReviewError::NotReviewable`] for non-UTF-8 content.
 // MAGI FIX (Loop1 r1, I1): one unit at the hunk's first line (git's leading context) became
 // every unit of the changed lines.
+// MAGI FIX (Loop1 r2, Minor 3): the removed lines of a hunk that also adds bring their units.
 pub fn containing_units(
     item: &BatchItem,
     sources: &dyn ContentSource,
@@ -522,19 +526,42 @@ pub fn containing_units(
     let Some(extractor) = registry.get(file) else {
         return Ok(Vec::new());
     };
-    // MAGI FIX (Loop1 r1, M1): the old side of a rename lives under its `rename from` path, as
-    // the filter and the lexical index read it; the hunk's diff header names it.
-    let read_path = if change.old_side {
-        renamed_from(text).unwrap_or_else(|| file.clone())
-    } else {
-        file.clone()
-    };
-    let Some(text) = read_text(sources, &read_path, change.old_side)? else {
+    let mut found = side_units(&change.added, false, file, file, sources, extractor)?;
+    if !change.removed.is_empty() {
+        // MAGI FIX (Loop1 r1, M1): the old side of a rename lives under its `rename from` path,
+        // as the filter and the lexical index read it; the hunk's diff header names it.
+        let old_path = renamed_from(text).unwrap_or_else(|| file.clone());
+        let old = side_units(&change.removed, true, file, &old_path, sources, extractor)?;
+        let new_names: HashSet<String> = found.iter().map(|u| u.label.clone()).collect();
+        found.extend(old.into_iter().filter(|u| !new_names.contains(&u.label)));
+    }
+    Ok(found)
+}
+
+/// The distinct units around `lines` on one side of `file`, read under `read_path`, as `Unit`
+/// items marked with that side; none when `lines` is empty or the side is gone. O(lines ·
+/// units) plus one read and one extraction.
+///
+/// # Errors
+///
+/// An error of `sources`, unchanged; [`ReviewError::NotReviewable`] for non-UTF-8 content.
+fn side_units(
+    lines: &[u32],
+    old_side: bool,
+    file: &str,
+    read_path: &str,
+    sources: &dyn ContentSource,
+    extractor: &ExtractorKind,
+) -> Result<Vec<ContextItem>, ReviewError> {
+    if lines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(text) = read_text(sources, read_path, old_side)? else {
         return Ok(Vec::new());
     };
     let units = FileUnits::load(extractor, file, &text);
     let mut found: Vec<ContextItem> = Vec::new();
-    for line in change.lines {
+    for &line in lines {
         let covered = found
             .iter()
             .any(|u| u.lines.is_some_and(|(a, b)| a <= line && line <= b));
@@ -543,14 +570,13 @@ pub fn containing_units(
         }
         if let Some(unit) = units.at(line) {
             found.push(ContextItem {
-                old_side: change.old_side,
+                old_side,
                 ..unit_item(ContextKind::Unit, unit)
             });
         }
     }
     Ok(found)
 }
-
 /// The doc-search query: `text` cut to at most [`DOC_QUERY_MAX_BYTES`] bytes, on a char boundary.
 ///
 /// # Arguments

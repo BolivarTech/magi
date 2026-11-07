@@ -1322,9 +1322,13 @@ fn explains_unit(
         else {
             return false;
         };
-        hunk_file == file
-            && change.old_side == old_side
-            && change.lines.iter().any(|l| (first..=last).contains(l))
+        // MAGI FIX (Loop1 r2, Minor 3): each side's changed lines explain that side's units.
+        let lines = if old_side {
+            &change.removed
+        } else {
+            &change.added
+        };
+        hunk_file == file && lines.iter().any(|l| (first..=last).contains(l))
     })
 }
 
