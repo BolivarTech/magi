@@ -95,6 +95,13 @@ pub const CONTEXT_ITEM_FRAME_TOKENS: usize = 18;
 /// Longest doc-search query, in bytes.
 pub const DOC_QUERY_MAX_BYTES: usize = 8_192;
 
+impl ContextItem {
+    /// The text the prompt carries for the item.
+    pub fn rendered(&self) -> String {
+        self.text.clone()
+    }
+}
+
 /// What `assemble` charges for one item: the tokens of what the prompt carries for it, its text,
 /// its path ([`display_path`]) and its fixed frame ([`CONTEXT_ITEM_FRAME_TOKENS`]).
 ///
@@ -551,6 +558,52 @@ mod tests {
             lines: None,
             old_side: false,
         }
+    }
+
+    fn spanning(kind: ContextKind, lines: Option<(u32, u32)>) -> ContextItem {
+        ContextItem {
+            kind,
+            file: "a.rs".into(),
+            label: "f".into(),
+            text: "alpha\nbeta\ngamma".into(),
+            candidate: false,
+            lines,
+            old_side: false,
+        }
+    }
+
+    #[test]
+    fn a_containing_unit_is_rendered_with_its_absolute_line_numbers() {
+        // [T3.7-fix3] RV09 counts the unit as reviewed, so its lines carry the numbers it accepts.
+        let u = spanning(ContextKind::Unit, Some((5, 7)));
+        assert_eq!(u.rendered(), "     5|alpha\n     6|beta\n     7|gamma");
+    }
+
+    #[test]
+    fn other_context_stays_unnumbered_and_a_unit_without_lines_too() {
+        // [T3.7-fix3] definitions, callers, docs and history are reference only (`context only`).
+        for kind in [
+            ContextKind::Definition,
+            ContextKind::Caller,
+            ContextKind::Documentation,
+            ContextKind::History,
+        ] {
+            let item = spanning(kind, Some((5, 7)));
+            assert_eq!(item.rendered(), item.text);
+        }
+        let unit = spanning(ContextKind::Unit, None);
+        assert_eq!(unit.rendered(), unit.text);
+    }
+
+    #[test]
+    fn a_unit_costs_the_tokens_of_its_numbered_text() {
+        // [T3.7-fix3] the budget counts what the prompt carries.
+        let u = spanning(ContextKind::Unit, Some((5, 7)));
+        let numbered = "     5|alpha\n     6|beta\n     7|gamma";
+        assert_eq!(
+            item_cost(&u),
+            estimate_tokens(numbered) + estimate_tokens("a.rs") + CONTEXT_ITEM_FRAME_TOKENS
+        );
     }
 
     #[test]

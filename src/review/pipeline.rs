@@ -4460,6 +4460,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_prompt_numbers_the_containing_unit_but_not_the_other_context() {
+        // [T3.7-fix3] ruling: the unit counts as reviewed (RV09), so it shows absolute numbers;
+        // definitions stay reference text.
+        let dir = workspace(1);
+        let mut unit = ctx(ContextKind::Unit, "f0.rs", "f0", Some((10, 12)));
+        unit.text = "alpha\nbeta\ngamma".into();
+        let rag = FakeRag(Assembled {
+            items: vec![
+                unit,
+                ctx(ContextKind::Definition, "c.rs", "helper", Some((1, 5))),
+            ],
+            trimmed: vec![],
+            without_embedder: false,
+            without_memory: false,
+            withheld: 0,
+        });
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect"))
+            .await
+            .expect("runs");
+        let prompt = consult.prompts.lock().expect("lock")[0].clone();
+        assert!(prompt.contains("\n    11|beta\n"), "{prompt}");
+        assert!(prompt.contains("\nhelper body\n"), "{prompt}");
+    }
+
+    #[tokio::test]
     async fn a_finding_on_a_containing_unit_line_reaches_the_gate_and_is_kept() {
         // RV10: the unit was shown to the trio, so its lines are code the gate can be shown.
         let out = unit_line_finding_through_the_gate("real_defect").await;
