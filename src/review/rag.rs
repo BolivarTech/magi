@@ -1115,6 +1115,40 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_homonym_keeps_its_old_side_unit_next_to_the_edited_one() {
+        // [Loop1 r3, Minor 2] Verbatim `git diff`: the first `f` is edited, the second `f` (same
+        // name) is deleted. Only the edited `f` is the same unit on both sides; the deleted one
+        // keeps its old-side unit.
+        use crate::review::test_support::MapSource;
+        let old = "def f(a):\n    return 1\n\n\ndef f(a, b):\n    return 2\n";
+        let new = "def f(a):\n    return 11\n";
+        let src = MapSource::new(&[("m.py", new)], &[("m.py", old)]);
+        let text = "diff --git a/m.py b/m.py\nindex 26c5b48..d0065db 100644\n--- a/m.py\n+++ b/m.py\n\
+                    @@ -1,6 +1,2 @@\n def f(a):\n-    return 1\n-\n-\n-def f(a, b):\n-    return 2\n\
+                    +    return 11\n";
+        let hunk = BatchItem::Hunk {
+            file: "m.py".into(),
+            text: text.into(),
+            first_line: 1,
+            last_line: 2,
+            old_first_line: 1,
+            old_last_line: 6,
+        };
+        let units: Vec<UnitView> = containing_units(&hunk, &src, &LanguageRegistry::new())
+            .expect("reads")
+            .into_iter()
+            .map(|u| (u.label, u.lines, u.old_side))
+            .collect();
+        assert_eq!(
+            units,
+            vec![
+                ("f".to_string(), Some((1, 2)), false),
+                ("f".to_string(), Some((5, 6)), true)
+            ]
+        );
+    }
+
+    #[test]
     fn a_deletion_in_a_renamed_file_reads_its_unit_under_the_old_path() {
         // [Loop1 r1, M1] From a real `git diff -M`: the old side of a rename lives under its
         // `rename from` path (RV21), as the filter and the lexical index read it. The unit keeps
