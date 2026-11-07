@@ -1039,6 +1039,43 @@ struct FollowUp {
     repository: bool,
 }
 
+impl FollowUp {
+    /// The work a finished review leaves for after its report.
+    ///
+    /// # Arguments
+    ///
+    /// * `summary` - The review's summary; only its findings on a line of the reviewed
+    ///   revision are kept for the history (`ReviewSummary::anchored_findings`, RV08).
+    /// * `rev` - The reviewed revision's new side; `None` for the working tree.
+    /// * `worktree` - The working tree's documentation sources, when the review listed them.
+    /// * `docs` - The review's documentation index, if one was opened.
+    /// * `ignored` - The paths `.gitignore` excludes in the whole workspace.
+    /// * `repository` - Whether the workspace is inside a git work tree.
+    ///
+    /// # Returns
+    ///
+    /// The follow-up. O(findings).
+    // MAGI FIX (Loop1 r2, Minor 2): one constructor, so the history filter has a test.
+    fn of_review(
+        summary: &magi_rs::review::report::ReviewSummary,
+        rev: Option<String>,
+        worktree: Option<BTreeSet<DocSource>>,
+        docs: Option<ReviewDocStore>,
+        ignored: HashSet<String>,
+        repository: bool,
+    ) -> Self {
+        Self {
+            // MAGI FIX (Loop1 r1, M2): only findings on a line of the reviewed revision.
+            findings: summary.anchored_findings(),
+            rev,
+            worktree,
+            docs,
+            ignored,
+            repository,
+        }
+    }
+}
+
 /// The documentation side of one review, prepared before its clock.
 #[derive(Default)]
 struct DocContext {
@@ -1383,15 +1420,14 @@ impl CodeReviewRunner for ProductionReviewRunner {
             *self
                 .follow_up
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(FollowUp {
-                // MAGI FIX (Loop1 r1, M2): only findings on a line of the reviewed revision.
-                findings: outcome.summary.anchored_findings(),
+                .unwrap_or_else(PoisonError::into_inner) = Some(FollowUp::of_review(
+                &outcome.summary,
                 rev,
                 worktree,
                 docs,
-                ignored: workspace_ignored,
+                workspace_ignored,
                 repository,
-            });
+            ));
             Ok(render_outcome(outcome, self.parts.structured))
         })
         .await
