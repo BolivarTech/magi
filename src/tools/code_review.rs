@@ -2634,6 +2634,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_deadline_that_only_fits_the_batches_without_the_preparation_calls_no_one() {
+        // [Loop1 r1, M6] Under a calling run's deadline the preparation spends the same clock as
+        // the batches: a deadline that holds the one batch but not the bounded documentation and
+        // query embedding before it is refused before the embedder is called, so a refused review
+        // sends no byte out (§5.0 stage 4).
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        assert_eq!(plan.batches, 1, "precondition: one batch");
+        let one_batch = magi_rs::magi::headless_consult_timeout_secs(
+            magi_rs::magi::AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+            0,
+            false,
+        );
+        let deadline = Instant::now() + Duration::from_secs(one_batch + 5);
+        let run = runner
+            .run(
+                plan,
+                ReviewBudget::Until(deadline),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            matches!(run, Err(ReviewError::Budget { .. })),
+            "{:?}",
+            run.err()
+        );
+        assert_eq!(fake.calls(), 0, "the embedder was never called");
+    }
+
+    #[tokio::test]
     async fn a_review_with_enough_budget_still_indexes_the_documentation() {
         // [SMOKE1 S50] The RAG is intact when the budget holds: the embedder is called and the
         // review runs (its trio double answers none, so the report is empty but delivered).

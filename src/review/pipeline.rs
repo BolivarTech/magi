@@ -147,6 +147,13 @@ pub trait RagSource: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The longest the source's outbound preparation of `batches` batches can take, in seconds
+    /// (Red stub: 0).
+    fn outbound_reserve_secs(&self, batches: usize) -> u64 {
+        let _ = batches;
+        0
+    }
+
     /// Documentation paths left out for a secret, to list as skipped (RV22).
     fn skipped(&self) -> Vec<String> {
         Vec::new()
@@ -4714,6 +4721,18 @@ mod tests {
         client: &MockDecisionClient,
         timeout_secs: Option<u64>,
     ) -> Result<ReviewOutcome, ReviewError> {
+        review_dir_with_rag_budget(dir, rag, consult, client, timeout_secs, None).await
+    }
+
+    /// [`review_dir_with_rag`] under an explicit `--timeout` and a calling run's deadline.
+    async fn review_dir_with_rag_budget(
+        dir: &Path,
+        rag: &dyn RagSource,
+        consult: &FakeConsult,
+        client: &MockDecisionClient,
+        timeout_secs: Option<u64>,
+        deadline: Option<Instant>,
+    ) -> Result<ReviewOutcome, ReviewError> {
         // MS2 T2.3 pins this listing for a directory input; without it FakeGit answers `unexpected`.
         let git = FakeGit::from(&[(
             "ls-files --others --ignored --exclude-standard --directory -z -- .",
@@ -4728,7 +4747,7 @@ mod tests {
                 input: ReviewInput::Directory(dir.to_path_buf()),
                 workspace: dir,
                 timeout_secs,
-                deadline: None,
+                deadline,
                 max_rotations: 2,
                 retry_disabled: false,
                 agent_timeout_secs: 2_335,
@@ -4749,6 +4768,54 @@ mod tests {
             },
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn a_deadline_without_room_for_the_context_preparation_assembles_none() {
+        // [Loop1 r1, M6] Under a calling run's deadline the context preparation spends the same
+        // clock as the batches. A deadline that holds the batches but not the bound the source
+        // declares for its outbound preparation is refused before any context is assembled, so
+        // the later check can never refuse after the embedder was called.
+        struct SlowRag(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl RagSource for SlowRag {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Assembled {
+                    items: vec![],
+                    trimmed: vec![],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+            fn outbound_reserve_secs(&self, _batches: usize) -> u64 {
+                1_000_000
+            }
+        }
+        let dir = workspace(3);
+        let consult = FakeConsult::new(Vec::new());
+        let rag = SlowRag(std::sync::atomic::AtomicUsize::new(0));
+        let r = review_dir_with_rag_budget(
+            dir.path(),
+            &rag,
+            &consult,
+            &gate_always("real_defect"),
+            None,
+            Some(Instant::now() + Duration::from_secs(100_000)),
+        )
+        .await;
+        assert!(
+            matches!(r, Err(ReviewError::Budget { .. })),
+            "{:?}",
+            r.as_ref().err()
+        );
+        assert_eq!(
+            rag.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no context assembled"
+        );
+        assert_eq!(consult.calls(), 0);
     }
 
     #[tokio::test]
