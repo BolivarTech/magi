@@ -889,6 +889,15 @@ class CodeReviewWithEmbedderTests(unittest.TestCase):
         doc = self._doc(trimmed=[{"kind": "history", "label": "no room left in the batch"}])
         self.assertEqual(Outcome.PASS, self._outcomes(doc)[review_context.S55_ASSERTIONS[1]])
 
+    def test_s55_fails_when_a_trimmed_entry_has_no_string_label(self) -> None:
+        # [MAGI S6 MS3 loop3, R7a Caspar] an entry without a string label was skipped, so a
+        # malformed report passed the degraded-label check by absence.
+        for entry in ({"kind": "history"}, {"kind": "documentation", "label": None},
+                      {"kind": "documentation", "label": 3}):
+            with self.subTest(entry=entry):
+                doc = self._doc(trimmed=[entry])
+                self.assertEqual(Outcome.FAIL, self._outcomes(doc)[review_context.S55_ASSERTIONS[1]])
+
     def test_s55_fails_when_a_declaration_is_missing_or_ill_typed(self) -> None:
         for summary in ({"trimmed": []}, {"without_embedder": False}, {"without_embedder": 0, "trimmed": []}):
             with self.subTest(summary=summary):
