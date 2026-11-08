@@ -295,16 +295,29 @@ pub(crate) async fn finish_after_report(
     }
 }
 
+/// Bound on the post-report work of a surface that has no run deadline and no cancellation of
+/// its own (the subcommand, the TUI), so a stuck git never pins it after the report was
+/// delivered. The reclassification stops at [`RECLASSIFY_BUDGET_SECS`] plus the git call in
+/// flight; the clean-up of the documentation index gets as much again.
+pub(crate) const POST_REPORT_LIMIT_SECS: u64 = 2 * RECLASSIFY_BUDGET_SECS;
+
 /// [`finish_after_report`] for a surface whose report is delivered and that has no run deadline
-/// or cancellation of its own.
+/// or cancellation of its own: bounded by [`POST_REPORT_LIMIT_SECS`]. Past it the surface goes
+/// on, says so, and leaves the work to finish on its blocking thread.
 ///
 /// # Arguments
 /// * `runner` - The runner whose reviews left work.
 ///
 /// # Returns
 /// The work's warning, a note that it was cut, or `None`.
+// MAGI FIX (MS3 §6 loop3): the subcommand and the TUI waited for it with no bound.
 pub(crate) async fn finish_after_delivered_report(runner: &dyn CodeReviewRunner) -> Option<String> {
-    finish_after_report(runner, None, None).await
+    finish_after_report(
+        runner,
+        Some(Duration::from_secs(POST_REPORT_LIMIT_SECS)),
+        None,
+    )
+    .await
 }
 
 /// Runs `fut` until it ends or `cancel` fires.
