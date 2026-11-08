@@ -456,7 +456,7 @@ class RunDefinition:
             needs the review workspace, whose configuration is the one
             rewritten.
         unreachable_embedder: Whether the review workspace's ``[embedding]``
-            is pointed at :data:`UNREACHABLE_EMBEDDER_URL` before the run
+            is pointed at :func:`unreachable_embedder_url` before the run
             (:func:`point_embedding_at`), so documentation and history cannot
             be retrieved while the trio still answers. It needs the review
             workspace too.
@@ -2180,10 +2180,34 @@ _REVIEW_CONTEXT_FILE = (b"/// Adds two numbers.\n"
                         b"    a + b\n"
                         b"}\n")
 
-#: Where R17's ``[embedding]`` points: TCP port 9 (discard) on loopback, which
-#: nothing listens on in the harness, so every embedding request is refused at
-#: once and the review must go on without documentation and history.
-UNREACHABLE_EMBEDDER_URL = "http://127.0.0.1:9/v1"
+#: The loopback host whose freed port R17's ``[embedding]`` reaches.
+_UNREACHABLE_HOST = "127.0.0.1"
+
+
+def unreachable_embedder_url() -> str:
+    """Where R17's ``[embedding]`` points: a loopback port nothing listens on.
+
+    The port is one the system just handed out and the harness closed again,
+    taken at run time: a fixed port could hold a service (port 9 is the discard
+    service where it is enabled, which accepts a request and swallows it, a hang
+    instead of a refusal). So every embedding request is refused at once and the
+    review must go on without documentation and history.
+
+    Returns:
+        str: ``http://127.0.0.1:<port>/v1``.
+
+    Raises:
+        HarnessError: When no port can be bound on loopback.
+    """
+    # MAGI FIX (S6 MS3 loop2): port 9 was fixed and may run the discard service.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind((_UNREACHABLE_HOST, 0))
+            port = probe.getsockname()[1]
+    except OSError as exc:
+        raise HarnessError("could not take a free loopback port for the embedder: %s"
+                           % exc) from exc
+    return "http://%s:%d/v1" % (_UNREACHABLE_HOST, port)
 
 #: The table whose endpoint :func:`point_embedding_at` rewrites.
 _EMBEDDING_TABLE = "[embedding]"
@@ -3423,7 +3447,7 @@ class RunExecutor:
                 raise HarnessError("run %s points its embedder away but has no review "
                                    "workspace" % definition.run_id)
             point_embedding_at(workspace.joinpath(*CONFIG_PATH_PARTS),
-                               UNREACHABLE_EMBEDDER_URL)
+                               unreachable_embedder_url())
         # A second listing, after the run's files are written and before the
         # product starts: what the product's own enumeration will see.
         protected = () if workspace is None else protected_candidates(workspace)

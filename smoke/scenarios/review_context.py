@@ -4,7 +4,7 @@
 """S52 -- ``code-review`` declares the documentation and history it could not retrieve.
 
 * **S52** (R17, the real trio): the review workspace's ``[embedding]`` points at
-  a closed port (``runs.UNREACHABLE_EMBEDDER_URL``), so documentation and history
+  a closed port (``runs.unreachable_embedder_url()``), so documentation and history
   cannot be retrieved. The review must still run to its report, exit 0, and say
   so: ``code_review.without_embedder`` is ``true``.
 

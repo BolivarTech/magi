@@ -147,14 +147,15 @@ class ReviewRunDefinitionTests(unittest.TestCase):
 
     def test_the_embedder_run_points_only_its_embedder_away(self) -> None:
         # S52: the trio and the gate keep the real backend; only [embedding] reaches the closed port.
+        url = runs.unreachable_embedder_url()
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "magi.toml"
             path.write_text('base_url = "http://real/v1"\n[magi]\nkind = "ollama"\n'
                             '[embedding]\nbase_url = "http://emb/v1"\nmodel = "m"\n', encoding="utf-8")
-            runs.point_embedding_at(path, runs.UNREACHABLE_EMBEDDER_URL)
+            runs.point_embedding_at(path, url)
             lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(['base_url = "http://real/v1"', "[magi]", 'kind = "ollama"', "[embedding]",
-                          'base_url = "%s"' % runs.UNREACHABLE_EMBEDDER_URL, 'model = "m"'], lines)
+                          'base_url = "%s"' % url, 'model = "m"'], lines)
         self.assertTrue(runs.DEFINITIONS["R17"].unreachable_embedder)
 
     def test_the_unreachable_embedder_refuses_at_once_on_a_port_no_service_holds(self) -> None:
@@ -182,12 +183,13 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                 self.assertEqual([header, 'base_url = "http://127.0.0.1:1/v1"', 'model = "m"'], lines)
 
     def test_a_config_without_an_embedding_table_gains_one(self) -> None:
+        url = runs.unreachable_embedder_url()
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "magi.toml"
             path.write_text('base_url = "http://real/v1"\n', encoding="utf-8")
-            runs.point_embedding_at(path, runs.UNREACHABLE_EMBEDDER_URL)
+            runs.point_embedding_at(path, url)
             lines = path.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(["[embedding]", 'base_url = "%s"' % runs.UNREACHABLE_EMBEDDER_URL], lines[-2:])
+        self.assertEqual(["[embedding]", 'base_url = "%s"' % url], lines[-2:])
 
 
 class WriteFilesTests(unittest.TestCase):
