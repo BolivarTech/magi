@@ -564,6 +564,40 @@ mod tests {
     }
 
     #[test]
+    fn context_from_a_reviewed_file_adds_none_of_its_lines_to_what_was_reviewed() {
+        // [MAGI S6 MS3 loop2, R6b Melchior] a definition shown from a reviewed file is context:
+        // a finding on its lines, outside the hunk's, is out of range, never reviewed by proxy.
+        let mut reviewed = Reviewed::default();
+        reviewed.add_lines("a.rs", 1, 3);
+        reviewed.add_context_file("a.rs");
+        let index = LexicalIndex::build(&[], &LanguageRegistry::new());
+        let mut agents = vec![crate::review::test_support::out(
+            "melchior",
+            "approve",
+            0.9,
+            serde_json::json!([
+                {"severity":"info","title":"in","detail":"d","file":"a.rs","line":2},
+                {"severity":"info","title":"out","detail":"d","file":"a.rs","line":40}
+            ]),
+        )];
+        let v = validate_batch(
+            &mut agents,
+            0,
+            &reviewed,
+            &HashMap::new(),
+            &index,
+            Path::new("/w"),
+        );
+        assert_eq!(
+            v.discarded
+                .iter()
+                .map(|d| (d.finding.title.as_str(), d.cause.clone()))
+                .collect::<Vec<_>>(),
+            vec![("out", DiscardCause::LineOutOfRange)]
+        );
+    }
+
+    #[test]
     fn a_reviewed_file_that_also_carries_context_is_never_context_only() {
         // [CP2 MS3 loop 7] A definition often lives next to the hunk: the reviewed lines still count.
         let mut reviewed = Reviewed::default();
