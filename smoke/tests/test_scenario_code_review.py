@@ -855,6 +855,47 @@ class CodeReviewScenarioTests(unittest.TestCase):
             self.assertEqual(Outcome.FAIL, _outcomes(sid, _result(run, 2, None, b"error: something else\n"))[asserts[1]], sid)
 
 
+class CodeReviewWithEmbedderTests(unittest.TestCase):
+    """S55 (R18): with the environment's embedder up, the review's RAG is not degraded."""
+
+    def setUp(self) -> None:
+        from smoke.registry import DEFAULT_REGISTRY
+        self.assertIn("S55", DEFAULT_REGISTRY.registered_ids())
+        self.assertEqual("R18", DEFAULT_REGISTRY.get("S55").run)
+
+    @staticmethod
+    def _doc(without_embedder=False, trimmed=()) -> dict:
+        return {"consult": {"consensus": {}},
+                "code_review": {"without_embedder": without_embedder, "trimmed": list(trimmed)}}
+
+    def _outcomes(self, doc) -> dict:
+        return _outcomes("S55", _result("R18", 0, doc))
+
+    def test_s55_passes_when_the_embedder_answered_and_nothing_degraded(self) -> None:
+        self.assertEqual({Outcome.PASS}, set(self._outcomes(self._doc()).values()))
+
+    def test_s55_fails_when_the_review_ran_without_its_embedder(self) -> None:
+        outcome = self._outcomes(self._doc(without_embedder=True))[review_context.S55_ASSERTIONS[0]]
+        self.assertEqual(Outcome.FAIL, outcome)
+
+    def test_s55_fails_on_a_degraded_index_or_an_unanswered_embedder(self) -> None:
+        for label in ("index unavailable", "the embedder did not answer"):
+            with self.subTest(label=label):
+                doc = self._doc(trimmed=[{"kind": "documentation", "label": label}])
+                self.assertEqual(Outcome.FAIL, self._outcomes(doc)[review_context.S55_ASSERTIONS[1]])
+
+    def test_s55_passes_over_a_trim_for_room(self) -> None:
+        # Lack of room is the budget at work, not a degraded RAG.
+        doc = self._doc(trimmed=[{"kind": "history", "label": "no room left in the batch"}])
+        self.assertEqual(Outcome.PASS, self._outcomes(doc)[review_context.S55_ASSERTIONS[1]])
+
+    def test_s55_fails_when_a_declaration_is_missing_or_ill_typed(self) -> None:
+        for summary in ({"trimmed": []}, {"without_embedder": False}, {"without_embedder": 0, "trimmed": []}):
+            with self.subTest(summary=summary):
+                doc = {"consult": {"consensus": {}}, "code_review": summary}
+                self.assertIn(Outcome.FAIL, set(self._outcomes(doc).values()))
+
+
 class CodeReviewWithoutEmbedderTests(unittest.TestCase):
     """S52 (R17): a review whose embedder is unreachable runs to its report and declares it."""
 
