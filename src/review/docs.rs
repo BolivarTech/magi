@@ -994,6 +994,18 @@ mod tests {
     }
 
     #[test]
+    fn a_fence_line_with_an_info_string_never_closes_a_fence() {
+        // [MAGI S6 MS3 loop2, R1 Caspar] CommonMark: a closing fence carries no info string, so
+        // "```rust" inside a "```" fence is text; it closed the fence and "# x" became a heading.
+        let c = chunk_markdown("README.md", "# A\n```\n```rust\n# x\n```\n# B\nb\n");
+        assert_eq!(
+            c.iter().map(|x| x.section.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B"],
+            "{c:?}"
+        );
+    }
+
+    #[test]
     fn a_markdown_file_without_headings_is_one_chunk() {
         let c = chunk_markdown("README.md", "just text\nmore\n");
         assert_eq!(c.len(), 1);
