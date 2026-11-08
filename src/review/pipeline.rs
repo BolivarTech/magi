@@ -132,6 +132,11 @@ pub trait RagSource: Send + Sync {
 
     /// Milliseconds the source spent indexing before [`run_review`] was called; added once to
     /// the review's `prep_ms` (RV06).
+    ///
+    /// That indexing calls the embedder before `run_review` exists for the review, so its
+    /// budget check is the caller's: run [`precheck_budget`] before it, as the production runner
+    /// does (pinned there by `a_review_refused_for_its_budget_sends_nothing_to_the_embedder` and
+    /// `a_review_refused_for_its_budget_never_probes_the_embedder_dimension`).
     fn index_ms(&self) -> u64 {
         0
     }
@@ -445,7 +450,8 @@ struct Faces {
 /// 4. With an explicit `--timeout` or a caller's deadline, check the budget
 ///    ([`precheck_budget`], over [`pre_budget`]): it needs only the number of batches, so it
 ///    runs here, before any context is assembled, and a refused review calls no model and no
-///    endpoint. Then, with a context source, the source is bound to the review's index and
+///    endpoint from here on; the source's own indexing ran before this function and is covered
+///    by the caller's check ([`RagSource::index_ms`]). Then, with a context source, the source is bound to the review's index and
 ///    content and every batch's context is assembled (its query embedded), scanned for secrets
 ///    and recorded in the summary; the budget is read again after it, and a preparation that
 ///    overran its declared reserve runs on what is left instead of being refused, since its
@@ -569,7 +575,9 @@ pub async fn run_review(
     // Read again: the preparation spent part of a caller's deadline, and the total is what is
     // left when it ends. The check above reserved the preparation's bound; a preparation that
     // overran it has already made its outbound calls, so a refusal now would come after bytes
-    // left the process (§5.0 stage 4). Without outbound calls this check may still refuse.
+    // left the process (§5.0 stage 4). `sent_out` is the declared reserve, not the egress seen:
+    // a source that reserved for calls may have sent them, so it runs on what is left; only a
+    // review whose source declared no outbound call (no reserve) may still be refused here.
     // MAGI FIX (MS3 §6 loop2): it refused after the embedder was called; now the review runs on
     // what is left, its ceiling declared below the configured one, and the clock cuts and
     // declares the batches that do not fit (RV06, M-5).
@@ -794,7 +802,12 @@ pub fn plan_review(
 /// length-prefixed so no two different reviews hash alike by moving bytes between parts.
 ///
 /// The content comes from `source`, the same cached reads the batches are built from, so the
-/// digest covers exactly what the review would send. O(bytes reviewed).
+/// digest covers the reviewed code the prompt is built from: the legend, the context heading and
+/// the frames are fixed text added deterministically to it. The retrieved context
+/// (documentation and history, RV07(3)-(4)) is not covered: it is reference text chosen per
+/// batch after the approval, from the reviewed revision (RV21), never code under review, so a
+/// documentation edit between the approval and the run does not refuse the review.
+/// O(bytes reviewed).
 ///
 /// # Errors
 ///
