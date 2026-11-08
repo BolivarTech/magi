@@ -139,8 +139,8 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 /// deleted or renamed file is covered whole. Otherwise the line is untouched, and it is a
 /// [`HistoryStatus::WeakReject`] only once `head` is a commit after the reviewed one.
 ///
-/// Anything that is not a signal is [`HistoryStatus::Pending`]: no line, a reference that
-/// starts with `-`, a commit that is not an ancestor of `head` (another branch, or gone), a git
+/// Anything that is not a signal is [`HistoryStatus::Pending`]: no line, no file (an empty
+/// pathspec would be the whole tree), a reference that starts with `-`, a commit that is not an ancestor of `head` (another branch, or gone), a git
 /// failure, a hunk header that cannot be read, or `head` still at the reviewed commit.
 ///
 /// Complexity: three git calls at most, O(size of the diff of one file).
@@ -157,7 +157,8 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
     let Some(line) = entry.line else {
         return HistoryStatus::Pending;
     };
-    if commit.starts_with('-') || head.starts_with('-') {
+    // MAGI FIX (MS3 §6 loop3): an empty file would be an empty pathspec, the whole tree.
+    if commit.starts_with('-') || head.starts_with('-') || entry.file.is_empty() {
         return HistoryStatus::Pending;
     }
     if git
