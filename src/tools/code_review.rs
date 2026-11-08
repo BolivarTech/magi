@@ -1716,6 +1716,54 @@ mod tests {
         assert_eq!(out["code_review"]["gate_states"]["kept"], 50);
     }
 
+    /// [`FakeRunner`] whose post-report work fails to update the history.
+    struct HistoryFailingRunner(FakeRunner);
+    #[async_trait::async_trait]
+    impl CodeReviewRunner for HistoryFailingRunner {
+        fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+            self.0.plan(input)
+        }
+        async fn run(
+            &self,
+            plan: ReviewPlan,
+            budget: ReviewBudget,
+            cancel: &CancellationToken,
+        ) -> Result<Rendered, ReviewError> {
+            self.0.run(plan, budget, cancel).await
+        }
+        fn after_report(&self) -> Option<PostReport> {
+            Some(Box::new(|| {
+                Some(format!("{HISTORY_NOT_UPDATED}: the store is locked"))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_history_warning_survives_the_output_cap() {
+        // [MAGI S6 MS3 loop2, R5 Caspar] the warning was appended to the report, and the cap cuts
+        // the report from its end: a large review dropped the one line saying history failed.
+        const CAP: usize = 4_096;
+        let runner = Arc::new(HistoryFailingRunner(FakeRunner {
+            text: "finding line\n".repeat(5_000),
+            ..FakeRunner::default()
+        }));
+        let t = CodeReviewTool::new(runner, true).with_output_cap(CAP);
+        let out = t
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("runs");
+        assert!(
+            out["report"]
+                .as_str()
+                .is_some_and(|r| r.contains(HISTORY_NOT_UPDATED)),
+            "{}",
+            out["report"].as_str().unwrap_or_default().len()
+        );
+    }
+
     #[test]
     fn the_serialized_result_never_passes_the_output_cap() {
         // [MAGI §6 MS2 D loop 3] the agent reads the serialized object: JSON escaping and a
