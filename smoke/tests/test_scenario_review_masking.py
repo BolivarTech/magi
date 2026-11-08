@@ -159,6 +159,17 @@ class S54Tests(unittest.TestCase):
         r = _result("R19", 0, None, b"", timed_out=True)
         self.assertEqual({Outcome.FAIL}, set(_outcomes("S54", r).values()))
 
+    def test_every_one_of_the_three_assertions_is_judged_on_a_hang_or_no_capture(self) -> None:
+        # [MAGI S6 MS3 loop3, R7a Melchior; pinned] `_refusal`, written for S48/S49's two texts,
+        # loops over all of the texts it is given on these paths, so S54's third is never lost.
+        from smoke.scenarios.code_review import _refusal
+        hung = _result("R19", 0, None, b"", timed_out=True)
+        for run, outcome in ((None, Outcome.CANNOT_TEST), (hung, Outcome.FAIL)):
+            with self.subTest(outcome=outcome):
+                findings = list(_refusal(rm.S54_ASSERTIONS, "R19", run, lambda _t: True, ""))
+                self.assertEqual(list(rm.S54_ASSERTIONS), [f.assertion for f in findings])
+                self.assertEqual({outcome}, {f.outcome for f in findings})
+
 
 if __name__ == "__main__":
     unittest.main()
