@@ -1189,6 +1189,20 @@ mod tests {
     }
 
     #[test]
+    fn brackets_in_a_header_string_or_comment_never_hide_the_docstrings_below() {
+        // [MAGI S6 MS3 loop2, R1 Melchior] The header's brackets were counted in strings and
+        // comments, so the header never ended and every later docstring of the file was lost.
+        let reg = LanguageRegistry::new();
+        let src = "def f(p=\"(\"):\n    \"\"\"Doc f.\"\"\"\n\ndef g():  # (todo\n    \"\"\"Doc g.\"\"\"\n\ndef h():\n    \"\"\"Doc h.\"\"\"\n";
+        let c = chunk_doc_comments("m.py", src, &reg);
+        assert_eq!(
+            c.iter().map(|x| x.section.as_str()).collect::<Vec<_>>(),
+            vec!["f", "g", "h"],
+            "{c:?}"
+        );
+    }
+
+    #[test]
     fn plain_comments_and_string_data_are_not_documentation() {
         // [CP2 MS3 loop 13] The false-positive side of the doc-comment rules.
         let reg = LanguageRegistry::new();
