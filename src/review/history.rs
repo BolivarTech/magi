@@ -190,9 +190,14 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
 /// [`HistoryStatus::WeakReject`] when `head` resolves to a commit other than `commit`;
 /// otherwise [`HistoryStatus::Pending`]: with no commit after the reviewed one there is no
 /// signal yet, and a failing `rev-parse` is no signal either.
+///
+/// `commit` is the SHA recorded at review time (`record_history` resolves it with `rev-parse`);
+/// an abbreviation of the SHA `head` resolves to is the same commit, so it is compared as a
+/// prefix. A symbolic name is never recorded.
+// MAGI FIX (MS3 §6 loop3): an abbreviated SHA of HEAD itself read as a later commit.
 fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> HistoryStatus {
     match git.run(&["rev-parse", "--verify", &format!("{head}^{{commit}}")]) {
-        Ok(resolved) if resolved.trim() != commit => HistoryStatus::WeakReject,
+        Ok(resolved) if !resolved.trim().starts_with(commit) => HistoryStatus::WeakReject,
         _ => HistoryStatus::Pending,
     }
 }
