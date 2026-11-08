@@ -5439,9 +5439,11 @@ fn review_context_of(
 /// * `cause` - The error's text.
 ///
 /// # Returns
-/// The text as it may leave the process.
+/// The text as it may leave the process: credentials redacted and every RV22 pattern masked,
+/// as on every other error path of the tool.
+// MAGI FIX (MS3 §6 loop2): these two logged with the URL redaction alone.
 fn review_setup_cause(cause: &str) -> String {
-    redact_foreign_text(cause).to_string()
+    crate::tools::code_review::egress_text(cause)
 }
 
 /// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.
