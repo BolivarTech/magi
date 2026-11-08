@@ -2003,5 +2003,28 @@ class CountedKindTests(unittest.TestCase):
                        "src/defaults.rs")
 
 
+class RagDeclarationSyncTests(unittest.TestCase):
+    """S55's copies of the product's degraded-RAG labels and of the key that carries them.
+
+    [MAGI S6 MS3 loop3, R7a Melchior] S55's second assertion is a negative check: a label that drifted
+    on either side would make it pass by never matching. Both labels and the ``label`` field are read
+    from the product here, so a drift fails at the harness's own gate.
+    """
+
+    def test_the_degraded_labels_are_the_products(self) -> None:
+        from smoke.scenarios import review_context
+        text = _source("src/memory/review_rag.rs")
+        found = tuple(one_definition(text, r'const %s: &str = "([^"]+)";' % name,
+                                     "src/memory/review_rag.rs").group(1)
+                      for name in ("INDEX_UNAVAILABLE", "EMBEDDER_DOWN"))
+        self.assertEqual(found, review_context.DEGRADED_LABELS)
+
+    def test_the_trimmed_entry_carries_its_cause_under_the_label_key(self) -> None:
+        from smoke.scenarios import review_context
+        text = _source("src/review/report.rs")
+        one_definition(text, r"pub struct TrimmedItem \{[^}]*\bpub %s: String,"
+                       % re.escape(review_context.TRIMMED_LABEL_KEY), "src/review/report.rs", re.S)
+
+
 if __name__ == "__main__":
     unittest.main()
