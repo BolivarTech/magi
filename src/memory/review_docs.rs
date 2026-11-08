@@ -639,10 +639,26 @@ fn optional<T>(r: rusqlite::Result<T>) -> Result<Option<T>, MemoryError> {
     }
 }
 
-/// Defense in depth (RV22): a chunk whose section or text matches a secret pattern is refused
-/// before anything is embedded. The message names the path, never the secret.
+/// Defense in depth (RV22): a source whose path, or a chunk whose path, section or text, matches
+/// a secret pattern is refused before anything is embedded or written. The message names the
+/// path as [`display_path`] shows it, never the secret.
 fn refuse_secrets(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
+    // MAGI FIX (MS3 §6 loop3): a source path is stored in clear and travels with each chunk.
+    if let Some((source, _)) = sources.iter().find(|s| find_secret(&s.0.path).is_some()) {
+        return Err(MemoryError::Storage(format!(
+            "documentation source `{}` has a path that matches a secret pattern and was not \
+             indexed",
+            display_path(&source.path)
+        )));
+    }
     for chunk in sources.iter().flat_map(|entry| entry.1.iter()) {
+        if find_secret(&chunk.path).is_some() {
+            return Err(MemoryError::Storage(format!(
+                "documentation chunk of `{}` has a path that matches a secret pattern and was not \
+                 embedded",
+                display_path(&chunk.path)
+            )));
+        }
         if find_secret(&chunk.text).is_some() || find_secret(&chunk.section).is_some() {
             return Err(MemoryError::Storage(format!(
                 "documentation chunk of `{}` matches a secret pattern and was not embedded",

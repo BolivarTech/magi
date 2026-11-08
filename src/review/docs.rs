@@ -854,7 +854,11 @@ pub fn without_secrets(chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
     let mut kept = Vec::with_capacity(chunks.len());
     let mut dropped = Vec::new();
     for chunk in chunks {
-        if find_secret(&chunk.section).is_some() || find_secret(&chunk.text).is_some() {
+        // MAGI FIX (MS3 §6 loop3): the path travels with the chunk; RV22's tie-break omits it.
+        if find_secret(&chunk.path).is_some()
+            || find_secret(&chunk.section).is_some()
+            || find_secret(&chunk.text).is_some()
+        {
             dropped.push(display_path(&chunk.path));
         } else {
             kept.push(chunk);
