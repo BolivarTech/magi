@@ -5403,7 +5403,7 @@ fn review_context_of(
     let memory = match opened {
         Ok(memory) => Arc::new(memory),
         Err(e) => {
-            let error = redact_foreign_text(&e.to_string()).to_string();
+            let error = review_setup_cause(&e.to_string());
             tracing::event!(
                 target: "magi_rs::review",
                 tracing::Level::WARN,
@@ -5420,7 +5420,7 @@ fn review_context_of(
             Some(Arc::new(embedder) as Arc<dyn crate::memory::embedding::EmbeddingProvider>)
         }
         Err(e) => {
-            let error = redact_foreign_text(&e).to_string();
+            let error = review_setup_cause(&e);
             tracing::event!(
                 target: "magi_rs::review",
                 tracing::Level::WARN,
@@ -5431,6 +5431,17 @@ fn review_context_of(
         }
     };
     (Some(memory), embedder)
+}
+
+/// The cause of a failed review-store or embedder setup as the run log may hold it.
+///
+/// # Arguments
+/// * `cause` - The error's text.
+///
+/// # Returns
+/// The text as it may leave the process.
+fn review_setup_cause(cause: &str) -> String {
+    redact_foreign_text(cause).to_string()
 }
 
 /// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.
@@ -8810,6 +8821,17 @@ mod envelope_audit_guard {
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn a_review_setup_failure_reaches_the_log_with_its_secrets_masked() {
+        // [MAGI S6 MS3 loop2, R5 Caspar/Balthasar] Every other error path of the tool masks the
+        // RV22 patterns, not only URL credentials; these two logged with the URL redaction alone.
+        let key = concat!("sk-ant-", "api03-", "EEEEEEEEEEEEEEEEEEEE"); // allow-secret-scan
+        let logged = super::review_setup_cause(&format!(
+            "embedder at https://u:p@host/v1 refused key {key}"
+        ));
+        assert!(!logged.contains("sk-ant-"), "{logged}");
+        assert!(!logged.contains("u:p@"), "{logged}");
+    }
     /// Prefixes of the development identifiers that must never reach a user (requirements,
     /// scenarios, decisions, premortem gaps, review findings).
     const DEV_ID_PREFIXES: [&str; 7] = ["REQ", "SC", "D", "PM", "R", "RF", "F"];
