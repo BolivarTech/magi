@@ -1345,36 +1345,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_history_entry_quoting_a_secret_never_reaches_the_context() {
+    async fn a_history_entry_quoting_a_secret_reaches_the_context_masked() {
+        // [MAGI S6 MS3 loop1, R2 all three] RV22 amended lists history among the egress points
+        // that mask, not omit: each entry stays, its one-line secret masked in title and detail.
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
         let leaked = "key sk-ant-api03-AAAAAAAAAAAAAAAAAAAA is hardcoded"; // allow-secret-scan
                                                                            // [CP2 MS3 loop 11] Title and detail are each scanned: one entry per field.
         let mut by_title = attended("h2", "fine");
         by_title.title = leaked.into();
+        // RV22's exception: a private-key block is never masked, its entry is withheld.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let keyed = attended(
+            "h3",
+            &format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w"),
+        );
         f.history
-            .record(&[attended("h1", leaked), by_title])
+            .record(&[attended("h1", leaked), by_title, keyed])
             .expect("record");
-        f.history
-            .update_status("h1", HistoryStatus::Attended)
-            .expect("status");
-        f.history
-            .update_status("h2", HistoryStatus::Attended)
-            .expect("status");
+        for id in ["h1", "h2", "h3"] {
+            f.history
+                .update_status(id, HistoryStatus::Attended)
+                .expect("status");
+        }
         let a = f
             .rag(true)
             .context_for(&batch_on("a.rs", "fn a() {}"))
             .await
             .expect("context");
         assert!(
-            a.items
-                .iter()
-                .all(|i| !i.text.contains("sk-ant-") && !i.label.contains("sk-ant-")),
+            a.items.iter().all(|i| !i.text.contains("sk-ant-")
+                && !i.label.contains("sk-ant-")
+                && !i.text.contains("MIIB")),
             "a secret left the process"
         );
-        assert_eq!(
-            a.withheld, 2,
-            "a title-only and a detail-only secret, each withheld"
+        let history: Vec<&ContextItem> = a
+            .items
+            .iter()
+            .filter(|i| i.kind == ContextKind::History)
+            .collect();
+        assert_eq!(history.len(), 2, "{history:?}");
+        assert!(
+            history
+                .iter()
+                .all(|i| i.text.contains("<redacted: anthropic-key>")),
+            "{history:?}"
         );
+        assert!(
+            history
+                .iter()
+                .any(|i| i.label.contains("<redacted: anthropic-key>")),
+            "the title is the label, masked too: {history:?}"
+        );
+        assert_eq!(a.withheld, 1, "only the key-block entry is withheld");
     }
 
     use crate::memory::error::EmbeddingError;
