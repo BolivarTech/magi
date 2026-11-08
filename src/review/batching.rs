@@ -948,6 +948,37 @@ mod tests {
     use crate::review::test_support::MapSource;
 
     #[test]
+    fn an_empty_crlf_context_line_is_numbered_as_hunk_change_counts_it() {
+        // [MAGI S6 MS3 loop3, R4 Melchior, Balthasar] `number_hunk` split lines on '\n' alone, so
+        // an empty context line of a CRLF hunk ("\r") was no line and moved no counter, while
+        // `hunk_change` (and the validator's ranges) read it as context: the number shown to the
+        // trio was not the one the anchors and RV09 used.
+        let item = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "@@ -1,3 +1,3 @@\n a\n\r\n-b\n+c\n".into(),
+            first_line: 1,
+            last_line: 3,
+            old_first_line: 1,
+            old_last_line: 3,
+        };
+        let change = item.hunk_change().expect("a hunk");
+        assert_eq!((change.removed, change.added), (vec![3], vec![3]));
+        let rendered = item.rendered();
+        let shown = |marker: &str| {
+            rendered.lines().find(|l| l.ends_with(marker)).map(|l| {
+                l.trim_start()
+                    .split(LINE_NUMBER_SEPARATOR)
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+        };
+        assert_eq!(shown("-b").as_deref(), Some("3"), "{rendered}");
+        assert_eq!(shown("+c").as_deref(), Some("3"), "{rendered}");
+    }
+
+    #[test]
     fn hunks_are_packed_greedily_and_a_new_batch_starts_when_the_next_does_not_fit() {
         // Each hunk is ~170 bytes (~43 tokens): two fit in 100 tokens, three do not.
         let hunk = || format!("@@ -1,1 +1,1 @@\n+{}\n", "x".repeat(150));
