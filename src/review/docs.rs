@@ -80,6 +80,15 @@ pub const MAX_GC_REFS: usize = 64;
 /// How far below a doc block the item line is looked for (attributes and plain comments between).
 const MAX_ITEM_LOOKAHEAD_LINES: usize = 16;
 
+/// Bytes of a block doc comment opener (`/**` or `/*!`).
+const BLOCK_DOC_OPENER_LEN: usize = 3;
+
+/// Opener of a block comment.
+const BLOCK_COMMENT_OPENER: &str = "/*";
+
+/// Closer of a block comment.
+const BLOCK_COMMENT_CLOSER: &str = "*/";
+
 /// Keywords whose following identifier names the documented item.
 const NAMED_ITEM_KEYWORDS: &[&str] = &[
     "fn", "struct", "enum", "trait", "mod", "const", "static", "type",
@@ -433,13 +442,30 @@ fn rust_item_name(line: &str) -> String {
 }
 
 /// The name of the item whose doc block ended just before line `from`: attributes, blank lines
-/// and plain comments are skipped; `""` when there is no named item.
+/// and plain comments (`//` and `/* */`, on one line or several) are skipped; `""` when there is
+/// no named item.
+// MAGI FIX (MS3 §6 loop1): a plain `/* */` comment before the item was read as the item line.
 fn item_name_after(lines: &[&str], from: usize) -> String {
+    let mut in_comment = false;
     for k in from..from.saturating_add(MAX_ITEM_LOOKAHEAD_LINES) {
         let Some(line) = lines.get(k) else {
             break;
         };
         let t = line.trim();
+        if in_comment {
+            in_comment = !t.contains(BLOCK_COMMENT_CLOSER);
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix(BLOCK_COMMENT_OPENER) {
+            match rest.split_once(BLOCK_COMMENT_CLOSER) {
+                Some((_, after)) if !after.trim().is_empty() => {
+                    return rust_item_name(after.trim())
+                }
+                Some(_) => {}
+                None => in_comment = true,
+            }
+            continue;
+        }
         if t.is_empty() || t.starts_with("#[") || t.starts_with("#![") || t.starts_with("//") {
             continue;
         }
@@ -456,20 +482,28 @@ fn strip_line_doc(trimmed: &str) -> &str {
 
 /// Collects the block doc comment starting at line `start` (which holds the opener): the text
 /// and the index of the line after the comment.
+///
+/// The closer `*/` is looked for before a continuation line loses its leading `*`, so the usual
+/// ` */` line closes the comment.
+// MAGI FIX (MS3 §6 loop1): the leading `*` was stripped first, so a ` */` line closed nothing and
+// the code below was swallowed into the chunk.
 fn collect_block_doc(lines: &[&str], start: usize) -> (String, usize) {
     let mut body = String::new();
     let mut j = start;
     while let Some(line) = lines.get(j) {
         let mut t = line.trim_start();
         if j == start {
-            t = t.get(3..).unwrap_or("");
-        } else {
-            t = t.strip_prefix('*').unwrap_or(t);
-            t = t.strip_prefix(' ').unwrap_or(t);
+            t = t.get(BLOCK_DOC_OPENER_LEN..).unwrap_or("");
         }
-        let (content, closed) = match t.find("*/") {
+        let (content, closed) = match t.find(BLOCK_COMMENT_CLOSER) {
             Some(e) => (t.get(..e).unwrap_or(t), true),
             None => (t, false),
+        };
+        let content = if j == start {
+            content
+        } else {
+            let c = content.strip_prefix('*').unwrap_or(content);
+            c.strip_prefix(' ').unwrap_or(c)
         };
         body.push_str(content.trim_end());
         body.push('\n');
