@@ -960,6 +960,19 @@ pub fn mask_secrets(text: &str) -> String {
     mask_spans(text, false)
 }
 
+/// The name of the first pattern (in table order) whose mask, `<redacted: <name>>`, appears in
+/// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
+///
+/// # Arguments
+/// * `text` - A text that may have been masked.
+///
+/// # Returns
+/// The pattern's name, or `None` when `text` holds no mask.
+pub fn masked_pattern(text: &str) -> Option<&'static str> {
+    let _ = text;
+    None
+}
+
 /// The masking loop of [`mask_secrets`] and [`mask_secrets_keeping_lines`].
 ///
 /// # Arguments
@@ -1461,6 +1474,20 @@ mod tests {
         let want = "a=<redacted: aws-access-key> b=<redacted: github-token>!";
         assert_eq!(mask_secrets(two), want);
         assert_eq!(mask_secrets("let x = 1;"), "let x = 1;");
+    }
+
+    #[test]
+    fn a_masked_text_names_the_pattern_it_masked() {
+        // [MAGI S6 MS3 loop1] Documentation and history are masked before they are stored or
+        // sent; the report declares them from the mask itself.
+        let line = "token sk-abcdefghijklmnopqrstuvwxyz0123 here"; // allow-secret-scan
+        assert_eq!(masked_pattern(&mask_secrets(line)), Some("openai-key"));
+        assert_eq!(masked_pattern("let x = 1;"), None);
+        assert_eq!(
+            masked_pattern("each match becomes `<redacted: <pattern>>`"),
+            None,
+            "the documented placeholder names no pattern"
+        );
     }
 
     #[test]

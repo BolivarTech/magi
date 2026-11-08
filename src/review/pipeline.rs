@@ -164,6 +164,12 @@ pub trait RagSource: Send + Sync {
         Vec::new()
     }
 
+    /// Documentation paths indexed with a secret masked, each with the first pattern masked, as
+    /// [`display_path`] shows them, to declare as masked (RV22 amended).
+    fn masked(&self) -> Vec<(String, &'static str)> {
+        Vec::new()
+    }
+
     /// This source bound to one review's material, or `None` when it serves as it is.
     fn for_review<'r>(&'r self, material: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
         let _ = material;
@@ -5630,6 +5636,81 @@ mod tests {
             .map(|s| s.path.as_str())
             .collect();
         assert_eq!(secret, vec!["README.md"]);
+    }
+
+    #[tokio::test]
+    async fn masked_documentation_and_history_are_declared_as_masked() {
+        // [MAGI S6 MS3 loop1] RV22 amended: a file sent with its secrets masked is declared with
+        // the cause `secret` and its pattern, the documentation sources included: those the source
+        // indexed masked, and those a batch's context carries masked (a chunk indexed earlier).
+        struct Masking(Assembled);
+        #[async_trait::async_trait]
+        impl RagSource for Masking {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(self.0.clone())
+            }
+            fn masked(&self) -> Vec<(String, &'static str)> {
+                vec![
+                    ("docs/a.md".into(), "openai-key"),
+                    ("docs/a.md".into(), "openai-key"),
+                ]
+            }
+        }
+        let doc = ContextItem {
+            kind: ContextKind::Documentation,
+            file: "README.md".into(),
+            label: "Setup".into(),
+            text: "export KEY=<redacted: anthropic-key>".into(),
+            candidate: false,
+            lines: None,
+            old_side: false,
+        };
+        let history = ContextItem {
+            kind: ContextKind::History,
+            file: "f0.rs".into(),
+            label: "leak".into(),
+            text: "url <redacted: url-credential> (open)\nd".into(),
+            ..doc.clone()
+        };
+        let plain = ContextItem {
+            kind: ContextKind::Definition,
+            file: "c.rs".into(),
+            label: "MASK".into(),
+            text: "const MASK: &str = \"<redacted: openai-key>\";".into(),
+            ..doc.clone()
+        };
+        let dir = workspace(1);
+        let rag = Masking(Assembled {
+            items: vec![doc, history, plain],
+            trimmed: vec![],
+            without_embedder: false,
+            without_memory: false,
+            withheld: 0,
+        });
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect"))
+            .await
+            .expect("runs");
+        let masked: Vec<(&str, &str)> = out
+            .summary
+            .masked
+            .iter()
+            .map(|m| (m.path.as_str(), m.pattern))
+            .collect();
+        assert_eq!(
+            masked,
+            vec![
+                ("README.md", "anthropic-key"),
+                ("f0.rs", "url-credential"),
+                ("docs/a.md", "openai-key"),
+            ],
+            "code context comes from reviewed files, which the filter declares itself"
+        );
+        assert!(out
+            .summary
+            .masked
+            .iter()
+            .all(|m| m.cause == SkipCause::Secret));
     }
 
     #[tokio::test]

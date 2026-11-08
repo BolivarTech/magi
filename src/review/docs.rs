@@ -1203,26 +1203,46 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_with_a_secret_is_left_out() {
+    fn a_chunk_with_a_one_line_secret_is_kept_with_the_secret_masked() {
+        // [MAGI S6 MS3 loop1, R1 all three] RV22 amended: mask, do not omit, the documentation
+        // chunks included. The hash is over what is sent, never over the secret.
         // [RED-DRYRUN 2026-10-17, E3] One-line let: rustfmt splits the call and moves the allow marker off the
         // literal's line, and tests/no_hardcoded_secrets.rs goes red (measured).
         let text = "# Setup\nexport KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n# Other\nfine\n"; // allow-secret-scan
-        let c = chunk_markdown("README.md", text);
-        let (kept, dropped) = without_secrets(c);
+        let (kept, dropped) = without_secrets(chunk_markdown("README.md", text));
+        assert!(dropped.is_empty(), "{dropped:?}");
         assert_eq!(
-            dropped,
-            vec!["README.md".to_string()],
-            "[CP2 MS3 loop 12] named, for RV22's skipped list"
+            kept.iter().map(|x| x.section.as_str()).collect::<Vec<_>>(),
+            vec!["Setup", "Other"]
         );
+        assert!(
+            kept[0].text.contains("<redacted: anthropic-key>") && !kept[0].text.contains("sk-ant-"),
+            "{kept:?}"
+        );
+        let expected = lower_hex(&Sha256::digest(
+            format!("README.md\nSetup\n{}", kept[0].text).as_bytes(),
+        ));
+        assert_eq!(kept[0].hash, expected, "hashed over the masked text");
+        // [CP2 MS3 loop 13] A secret in a heading is a secret too (the section is sent with the chunk).
+        let heading = "# sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\nfine\n"; // allow-secret-scan
+        let (kept, dropped) = without_secrets(chunk_markdown("README.md", heading));
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(kept[0].section, "<redacted: anthropic-key>", "{kept:?}");
+        assert!(!kept[0].text.contains("sk-ant-"), "{kept:?}");
+    }
+
+    #[test]
+    fn a_chunk_holding_a_private_key_block_is_left_out() {
+        // [MAGI S6 MS3 loop1] RV22's exception: a key block is never masked, its chunk is dropped.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let text =
+            format!("# Keys\n{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n# Other\nfine\n");
+        let (kept, dropped) = without_secrets(chunk_markdown("README.md", &text));
+        assert_eq!(dropped, vec!["README.md".to_string()]);
         assert_eq!(
             kept.iter().map(|x| x.section.as_str()).collect::<Vec<_>>(),
             vec!["Other"]
         );
-        // [CP2 MS3 loop 13] A secret in a heading is a secret too (the section is sent with the chunk).
-        let heading = "# sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\nfine\n"; // allow-secret-scan
-        assert!(without_secrets(chunk_markdown("README.md", heading))
-            .0
-            .is_empty());
     }
 
     #[test]
@@ -1243,8 +1263,9 @@ mod tests {
 
     #[test]
     fn a_secret_straddling_the_part_cut_never_reaches_the_embedder() {
-        // One line longer than the bound with a secret across the cut: split into parts, neither
-        // would match the detector, so the section must stay whole for `without_secrets`.
+        // One line longer than the bound with a secret across the cut: the text is masked before
+        // it is split, so no part holds a byte of the secret, and every part stays bounded.
+        // [MAGI S6 MS3 loop1] Masked, not dropped (RV22 amended).
         let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
         let line = format!(
             "{}{secret}{}",
@@ -1253,11 +1274,14 @@ mod tests {
         );
         let chunks = chunk_markdown("README.md", &format!("# A\n{line}\n# B\nfine\n"));
         let (kept, dropped) = without_secrets(chunks);
-        assert_eq!(
-            kept.iter().map(|c| c.section.as_str()).collect::<Vec<_>>(),
-            vec!["B"]
-        );
-        assert_eq!(dropped, vec!["README.md".to_string()]);
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert!(kept.iter().all(|c| !c.text.contains("sk-ant-")
+            && !c.text.contains("AAAAAAAAAAAAAAAAAAAA")
+            && c.text.len() <= MAX_DOC_CHUNK_BYTES));
+        assert!(kept
+            .iter()
+            .any(|c| c.text.contains("<redacted: anthropic-key>")));
+        assert_eq!(kept.last().map(|c| c.section.as_str()), Some("B"));
     }
 
     #[test]

@@ -122,6 +122,9 @@ pub struct StoreRag<'a> {
     pub doc_sources: BTreeSet<DocSource>,
     /// Documentation paths left out for a secret, as `display_path`, returned by `skipped`.
     pub withheld_sources: Vec<String>,
+    /// Documentation paths indexed with a secret masked, with the first pattern masked in each,
+    /// returned by `masked`.
+    pub masked_sources: Vec<(String, &'static str)>,
     /// Milliseconds the documentation preparation took, returned by `index_ms`.
     pub index_ms: u64,
     /// The decrypted vectors of `doc_sources`, loaded by the first batch that searches and
@@ -142,6 +145,9 @@ pub struct DocPrep {
     pub index_ms: u64,
     /// Sources left out for a secret, as `display_path`.
     pub withheld_sources: Vec<String>,
+    /// Sources indexed with a secret masked, as `display_path`, each with the first pattern
+    /// masked in it.
+    pub masked_sources: Vec<(String, &'static str)>,
 }
 
 /// What one [`record_review`] did.
@@ -273,6 +279,7 @@ impl StoreRag<'_> {
         self.docs_unavailable = prep.docs_unavailable;
         self.index_ms = prep.index_ms;
         self.withheld_sources = prep.withheld_sources;
+        self.masked_sources = prep.masked_sources;
         self
     }
 
@@ -505,6 +512,10 @@ impl RagSource for StoreRag<'_> {
     fn skipped(&self) -> Vec<String> {
         self.withheld_sources.clone()
     }
+
+    fn masked(&self) -> Vec<(String, &'static str)> {
+        self.masked_sources.clone()
+    }
 }
 
 /// The bound on embedding the documentation queries of `batches` batches: one query per batch,
@@ -584,6 +595,10 @@ impl RagSource for ReviewRag<'_> {
         self.prep.withheld_sources.clone()
     }
 
+    fn masked(&self) -> Vec<(String, &'static str)> {
+        self.prep.masked_sources.clone()
+    }
+
     fn for_review<'r>(&'r self, material: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
         let rag = StoreRag {
             docs: self.docs,
@@ -601,6 +616,7 @@ impl RagSource for ReviewRag<'_> {
             history_failed: AtomicBool::new(false),
             doc_sources: BTreeSet::new(),
             withheld_sources: Vec::new(),
+            masked_sources: Vec::new(),
             index_ms: 0,
             doc_vectors: Mutex::new(None),
         }
@@ -1181,6 +1197,7 @@ mod tests {
                 history_failed: Default::default(),
                 doc_sources: BTreeSet::new(),
                 withheld_sources: Vec::new(),
+                masked_sources: Vec::new(),
                 index_ms: 0,
                 doc_vectors: Mutex::new(None),
             }
@@ -2053,10 +2070,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_source_with_one_secret_section_is_withheld_whole() {
-        // [CP2 MS3 loop 13] skipped's `secret` entry means nothing of the file left: its clean sections are not indexed either.
+    async fn a_source_with_a_one_line_secret_is_indexed_masked_even_read_raw() {
+        // [MAGI S6 MS3 loop1, R1 all three] RV22 amended: the documentation chunks are masked,
+        // not withheld, whatever the source they were read through (here one that masks nothing),
+        // no byte of the key reaches the embedder, and the file is declared as masked.
         let readme = "# Setup\nexport KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n# Other\nfine\n"; // allow-secret-scan
         let f = RagFixture::new(&[("README.md", readme)]).await;
+        let embedder = Recording(std::sync::Mutex::new(Vec::new()));
         let prep = prepare_docs(
             &f.docs,
             None,
@@ -2065,13 +2085,55 @@ mod tests {
             &["README.md".to_string()],
             &|_: &str| true,
             &f.registry,
+            &embedder,
+            BOUND,
+        )
+        .await;
+        assert!(
+            prep.withheld_sources.is_empty(),
+            "{:?}",
+            prep.withheld_sources
+        );
+        assert_eq!(prep.doc_sources.len(), 1, "{:?}", prep.doc_sources);
+        assert_eq!(
+            prep.masked_sources,
+            vec![("README.md".to_string(), "anthropic-key")]
+        );
+        let sent = embedder
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(sent.iter().all(|t| !t.contains("sk-ant-")), "{sent:?}");
+        assert!(
+            sent.iter().any(|t| t.contains("<redacted: anthropic-key>")),
+            "{sent:?}"
+        );
+        assert!(sent.iter().any(|t| t.contains("fine")), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn a_source_whose_code_holds_a_key_block_is_withheld_whole() {
+        // [MAGI S6 MS3 loop1] RV22's exception covers the file, not the chunk: a key block in a
+        // Rust file's code (never a chunk itself) still keeps its doc comments out.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let code = format!("/// Loads it.\nfn load() {{}}\nconst K: &str = \"{begin}\\nQQQQ\";\n");
+        let f = RagFixture::new(&[("a.rs", code.as_str())]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &["a.rs".to_string()],
+            &|_: &str| true,
+            &f.registry,
             &f.embedder,
             BOUND,
         )
         .await;
         assert!(prep.doc_sources.is_empty(), "{:?}", prep.doc_sources);
-        assert_eq!(prep.withheld_sources, vec!["README.md".to_string()]);
-        assert_eq!(f.embedder.calls(), 0, "no section of it was embedded");
+        assert_eq!(prep.withheld_sources, vec!["a.rs".to_string()]);
+        assert_eq!(f.embedder.calls(), 0, "no chunk of it was embedded");
     }
 
     /// Records every text it is asked to embed. [T3.7]
@@ -2128,6 +2190,11 @@ mod tests {
             prep.withheld_sources
         );
         assert_eq!(prep.doc_sources.len(), 1, "{:?}", prep.doc_sources);
+        // [MAGI S6 MS3 loop1] Masked by the cache, declared all the same.
+        assert_eq!(
+            prep.masked_sources,
+            vec![("README.md".to_string(), "url-credential")]
+        );
         let sent = embedder
             .0
             .lock()
@@ -2333,8 +2400,13 @@ mod tests {
             docs_unavailable: true,
             index_ms: 7,
             withheld_sources: vec!["x.md".into()],
+            masked_sources: vec![("y.md".into(), "openai-key")],
         };
         let rag = f.rag(true).with_prep(prep);
+        assert_eq!(
+            magi_rs::review::pipeline::RagSource::masked(&rag),
+            vec![("y.md".to_string(), "openai-key")]
+        );
         assert_eq!(rag.doc_sources, BTreeSet::from([src("README.md", "k")]));
         assert_eq!(
             rag.doc_index,
