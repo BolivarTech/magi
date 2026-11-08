@@ -2633,6 +2633,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_revision_review_keeps_its_history_anchor_without_documentation() {
+        // [MAGI S6 MS3 loop2, R5 Melchior/Caspar] RV08 leaves history out of a working-tree
+        // review only: a revision review without an embedder, or whose documentation degraded,
+        // still records its history, so its anchor survives the documentation's degradation.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        git_in(&ws, &["init", "-q"]);
+        std::fs::write(ws.join("a.rs"), "fn a() {}\n").expect("a.rs");
+        git_in(&ws, &["add", "a.rs"]);
+        git_in(&ws, &["commit", "-q", "-m", "one"]);
+        let head = git_in(&ws, &["rev-parse", "HEAD"]);
+        let input = ReviewInput::Commit(Some(head.clone()));
+        let (_db, _mem, memory) = review_memory();
+        let without = production_runner_with_memory(&ws, Some(Arc::clone(&memory)), None);
+        let degraded: Arc<dyn EmbeddingProvider> = Arc::new(ZeroDimEmbedder);
+        let down = production_runner_with_memory(&ws, Some(memory), Some(degraded));
+        for runner in [&without, &down] {
+            let doc = runner.prepare_documentation(&input).await;
+            assert!(doc.docs.is_none(), "no documentation index");
+            assert_eq!(doc.rev.as_deref(), Some(head.as_str()));
+        }
+    }
+
     /// An embedder whose dimension never becomes known: `dim()` stays 0 after any answer.
     struct ZeroDimEmbedder;
     #[async_trait::async_trait]
