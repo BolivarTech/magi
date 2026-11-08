@@ -909,8 +909,23 @@ class CodeReviewWithoutEmbedderTests(unittest.TestCase):
     """S52 (R17): a review whose embedder is unreachable runs to its report and declares it."""
 
     def test_s52_passes_when_the_review_runs_and_declares_the_missing_embedder(self) -> None:
-        doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": True}}
-        self.assertEqual({Outcome.PASS}, set(_outcomes("S52", _result("R17", 0, doc)).values()))
+        for label in review_context.DEGRADED_LABELS:
+            with self.subTest(label=label):
+                doc = {"consult": {"consensus": {}},
+                       "code_review": {"without_embedder": True,
+                                       "trimmed": [{"kind": "documentation", "label": label}]}}
+                self.assertEqual({Outcome.PASS}, set(_outcomes("S52", _result("R17", 0, doc)).values()))
+
+    def test_s52_fails_when_trimmed_names_no_degraded_cause(self) -> None:
+        # [MAGI S6 MS3 loop3, R7a Caspar] RV07 declares what was left out: the boolean alone
+        # could be set while `trimmed` said nothing, or something else, and S52 passed.
+        for trimmed in ([], [{"kind": "history", "label": "no room left in the batch"}], None):
+            with self.subTest(trimmed=trimmed):
+                summary = {"without_embedder": True}
+                if trimmed is not None:
+                    summary["trimmed"] = trimmed
+                doc = {"consult": {"consensus": {}}, "code_review": summary}
+                self.assertIn(Outcome.FAIL, set(_outcomes("S52", _result("R17", 0, doc)).values()))
 
     def test_s52_fails_when_the_declaration_is_missing(self) -> None:
         # [MAGI S6 MS3 loop2, R7b Melchior] a missing key is shape drift, never a pass by absence.
