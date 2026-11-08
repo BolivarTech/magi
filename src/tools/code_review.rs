@@ -1372,7 +1372,13 @@ impl CodeReviewRunner for ProductionReviewRunner {
             // The documentation is prepared first, before the review clock; its duration is the
             // context source's `index_ms`, which the pipeline adds once to `prep_ms`.
             let docs_started = Instant::now();
-            let mut doc_context = self.prepare_documentation(&input).await;
+            // MAGI FIX (MS3 §6 loop2): a plan of no batch skips the budget check above, so it
+            // calls no endpoint either; `run_review` then refuses it before any trio call.
+            let mut doc_context = if plan.batches > 0 {
+                self.prepare_documentation(&input).await
+            } else {
+                DocContext::default()
+            };
             doc_context.prep.index_ms =
                 u64::try_from(docs_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             // MAGI FIX (S6 loop 3): the preparation done here (git's ignored paths, the gate) is
