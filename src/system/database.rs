@@ -97,18 +97,34 @@ fn table_exists(conn: &Connection, table: &str) -> std::result::Result<bool, Vau
 /// - [`VaultError::DbCorrupt`] with [`pre_0_25_detail`] for the first missing table.
 /// - [`VaultError::Storage`] if `sqlite_master` cannot be read.
 fn check_pre_0_25_tables(conn: &Connection, db_path: &Path) -> std::result::Result<(), VaultError> {
+    match pre_0_25_missing_table(conn)? {
+        Some(table) => Err(VaultError::DbCorrupt {
+            db_path: db_path.to_path_buf(),
+            detail: pre_0_25_detail(table),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The first v0.25.0 table ([`PRE_0_25_MISSING_TABLES`]) missing from a database that has the
+/// older data tables ([`PRE_0_25_MARKER_TABLE`]); `None` for a current or an empty one.
+/// Read-only.
+///
+/// # Errors
+///
+/// [`VaultError::Storage`] if `sqlite_master` cannot be read.
+fn pre_0_25_missing_table(
+    conn: &Connection,
+) -> std::result::Result<Option<&'static str>, VaultError> {
     if !table_exists(conn, PRE_0_25_MARKER_TABLE)? {
-        return Ok(());
+        return Ok(None);
     }
     for table in PRE_0_25_MISSING_TABLES {
         if !table_exists(conn, table)? {
-            return Err(VaultError::DbCorrupt {
-                db_path: db_path.to_path_buf(),
-                detail: pre_0_25_detail(table),
-            });
+            return Ok(Some(table));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// A master passphrase that clears the strength floor (`check_strength`), shared by every
@@ -654,12 +670,20 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_DDL)
 }
 
-/// [`init_schema`] for a store handed a connection (`ReviewDocStore`, `ReviewHistoryStore`).
+/// [`init_schema`] for a store handed a connection (`ReviewDocStore`, `ReviewHistoryStore`),
+/// which first refuses, read-only, a database written before v0.25.0, as every open path does
+/// (RV19): the stores never rely on their caller's open to keep an older file from being
+/// upgraded in place by `CREATE ... IF NOT EXISTS`.
 ///
 /// # Errors
 ///
-/// The cause, as text, when the schema cannot be created.
+/// [`pre_0_25_detail`] naming the first missing v0.25.0 table, or the cause, as text, when the
+/// schema cannot be read or created.
+// MAGI FIX (MS3 §6 loop3): the refusal rested on the caller's open.
 pub(crate) fn init_store_schema(conn: &Connection) -> std::result::Result<(), String> {
+    if let Some(table) = pre_0_25_missing_table(conn).map_err(|e| e.to_string())? {
+        return Err(pre_0_25_detail(table));
+    }
     init_schema(conn).map_err(|e| e.to_string())
 }
 

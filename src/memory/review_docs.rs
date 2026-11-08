@@ -128,6 +128,10 @@ impl ReviewDocStore {
 
     /// Opens the store over `conn`, making sure the schema exists.
     ///
+    /// A database written before v0.25.0 is refused here too, read-only and with the message
+    /// that names the missing table (RV19, never a migration), whatever open produced `conn`:
+    /// the schema call is `CREATE ... IF NOT EXISTS` and would otherwise upgrade it in place.
+    ///
     /// # Arguments
     /// * `conn` - the connection shared with `EncryptedSqliteMemory`.
     /// * `dek` - a masked duplicate of the data key.
@@ -135,7 +139,7 @@ impl ReviewDocStore {
     ///   [`Self::reindex`]: the identity of the vectors this store serves.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if the schema DDL fails.
+    /// [`MemoryError::Storage`] for a database older than v0.25.0, or if the schema DDL fails.
     pub fn new(
         conn: Arc<Mutex<Connection>>,
         dek: MaskedDek,

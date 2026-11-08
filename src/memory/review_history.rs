@@ -80,18 +80,16 @@ impl ReviewHistoryStore {
 
     /// Opens the store over `conn`, making sure the schema exists.
     ///
-    /// Precondition: `conn` is the connection of an `EncryptedSqliteMemory` that opened the
-    /// database, whose open refuses one written before v0.25.0 with the typed error naming the
-    /// missing table (RV19, never a migration). The schema call here is `CREATE ... IF NOT
-    /// EXISTS`, so on a connection that skipped that open it would create the v0.25.0 tables in
-    /// an older database instead of refusing it.
+    /// A database written before v0.25.0 is refused here too, read-only and with the message
+    /// that names the missing table (RV19, never a migration), whatever open produced `conn`:
+    /// the schema call is `CREATE ... IF NOT EXISTS` and would otherwise upgrade it in place.
     ///
     /// # Arguments
     /// * `conn` - the connection shared with `EncryptedSqliteMemory`.
     /// * `dek` - a masked duplicate of the data key.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if the schema DDL fails.
+    /// [`MemoryError::Storage`] for a database older than v0.25.0, or if the schema DDL fails.
     pub fn new(conn: Arc<Mutex<Connection>>, dek: MaskedDek) -> Result<Self, MemoryError> {
         {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
