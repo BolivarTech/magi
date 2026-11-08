@@ -5335,8 +5335,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_context_item_quoting_a_secret_is_withheld_whatever_its_kind() {
+    async fn a_context_item_quoting_a_one_line_secret_reaches_the_prompt_masked() {
         // [CP2 MS3 loop 2] MS2's egress scan runs in plan_batches, before any RAG context exists.
+        // [MAGI S6 MS3 loop2, R4 Balthasar/Caspar] RV22 amended masks a one-line secret at every
+        // egress point, context included: a text or label holding one is masked and sent, and
+        // its file declared as masked. A key-shaped path or a private-key block still withholds
+        // the item (a path cannot be masked and still name the file; a key body has no pattern).
         let dir = workspace(1);
         let leaked = "let k = \"sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
         let def = ContextItem {
@@ -5358,15 +5362,23 @@ mod tests {
         // [CP2 MS3 loop 13] The label too, and a trimmed label goes to the report through display_path.
         let secret_label = "sk-ant-api03-CCCCCCCCCCCCCCCCCCCC"; // allow-secret-scan
         let by_label = ContextItem {
+            file: "d.rs".into(),
             label: secret_label.into(),
             text: "fn ok2() {}".into(),
+            ..def.clone()
+        };
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let key_block = ContextItem {
+            file: "e.rs".into(),
+            text: format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\n{end}\n"),
             ..def.clone()
         };
         // [RED-DRYRUN 2026-10-20, loop 13] One-line let: rustfmt splits the vec! and moves the marker off the literal's line.
         let leaked_label = "sk-ant-api03-DDDDDDDDDDDDDDDDDDDD"; // allow-secret-scan
         let trimmed = vec![(ContextKind::History, leaked_label.to_string())];
         let rag = FakeRag(Assembled {
-            items: vec![def, by_path, by_label],
+            items: vec![def, by_path, by_label, key_block],
             trimmed,
             without_embedder: false,
             without_memory: false,
@@ -5378,7 +5390,20 @@ mod tests {
             .expect("runs");
         let prompts = consult.prompts.lock().expect("lock");
         assert!(!prompts[0].contains("sk-ant-"), "a secret left the process");
-        assert_eq!(out.summary.context_withheld, 3);
+        assert!(
+            !prompts[0].contains("MIIBVQIBADANBgkqhkiG9w0"),
+            "a key body left"
+        );
+        assert_eq!(
+            prompts[0].matches("<redacted: anthropic-key>").count(),
+            2,
+            "the text and the label were sent masked: {}",
+            prompts[0]
+        );
+        assert_eq!(
+            out.summary.context_withheld, 2,
+            "the path and the key block"
+        );
         assert!(
             out.summary
                 .trimmed
@@ -5395,28 +5420,32 @@ mod tests {
             .map(|s| s.path.as_str())
             .collect();
         assert_eq!(
-            secret.iter().filter(|p| **p == "c.rs").count(),
-            1,
-            "{secret:?}"
-        );
-        assert_eq!(
             secret.len(),
             2,
-            "c.rs and the redacted keys/ path: {secret:?}"
+            "e.rs and the redacted keys/ path: {secret:?}"
         );
+        assert!(secret.contains(&"e.rs"), "{secret:?}");
         assert!(secret.iter().all(|p| !p.contains("sk-ant-")), "{secret:?}");
+        let masked: Vec<&str> = out.summary.masked.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(
+            masked,
+            vec!["c.rs", "d.rs"],
+            "each masked item's file, once"
+        );
     }
 
     #[tokio::test]
-    async fn a_containing_unit_withheld_for_a_secret_adds_no_reviewed_lines() {
+    async fn a_containing_unit_withheld_for_a_key_block_adds_no_reviewed_lines() {
         // [CP2 MS3 loop 11] RV09 counts what the batch showed: a withheld unit was never shown, so line 20 is out of range.
+        // [MAGI S6 MS3 loop2] Only a private-key block withholds a unit now; a one-line secret is masked and shown.
         let dir = workspace(1); // f0.rs, 26 lines; the hunk shows lines 1..=3
-        let leaked = "let k = \"sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
         let unit = ContextItem {
             kind: ContextKind::Unit,
             file: "f0.rs".into(),
             label: "f0".into(),
-            text: leaked.into(),
+            text: format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\n{end}\n"),
             candidate: false,
             lines: Some((1, 26)),
             old_side: false,
@@ -5448,7 +5477,6 @@ mod tests {
             vec![DiscardCause::LineOutOfRange]
         );
     }
-
     #[tokio::test]
     async fn the_documentation_indexing_time_counts_in_the_preparation_duration() {
         // [CP2 MS3 loop 10] RV06: embeddings are preparation, reported apart from the clock; main.rs indexes them first.
