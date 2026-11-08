@@ -2350,6 +2350,27 @@ mod tests {
         assert_eq!(ran.input, ReviewInput::Commit(Some("sha-2".into())));
     }
 
+    #[tokio::test]
+    async fn an_approval_shown_for_other_arguments_is_refused_never_replanned() {
+        // [MAGI S6 MS3 loop3, R5 Caspar] An approval cached for other arguments was dropped and a
+        // fresh plan run in its place, so `run_review` compared that plan with itself and nothing
+        // the user approved was checked.
+        let runner = Arc::new(PlanCounter::default());
+        let t = CodeReviewTool::new(runner.clone(), false);
+        assert!(t
+            .approval_detail(&serde_json::json!({"commit": "a"}))
+            .is_some());
+        let r = t
+            .execute(
+                serde_json::json!({"commit": "b"}),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(r.is_err(), "{r:?}");
+        assert!(runner.ran.lock().expect("lock").is_none(), "nothing ran");
+        assert_eq!(runner.plans.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     /// A trio double that counts the batches it is asked to review.
     #[derive(Default)]
     struct CountingConsult(std::sync::atomic::AtomicUsize);
