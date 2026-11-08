@@ -333,7 +333,7 @@ class DefinitionTableTests(unittest.TestCase):
             with self.subTest(run=run_id):
                 self.assertGreater(definition.timeout_s, 0)
 
-    def test_only_the_consulting_runs_declare_the_trio(self) -> None:
+    def test_only_the_runs_that_reach_the_trio_declare_it(self) -> None:
         self.assertEqual(
             {"R4", "R5", "R8", "R10", "R12", "R17", "R18"},
             {run_id for run_id, item in runs.DEFINITIONS.items()
