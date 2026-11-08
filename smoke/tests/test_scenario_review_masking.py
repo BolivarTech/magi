@@ -59,6 +59,30 @@ class S53Tests(unittest.TestCase):
         del doc["code_review"]["masked"]
         self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, doc)))
 
+    def test_the_expected_entry_is_the_documented_one_not_the_scenarios_own_value(self) -> None:
+        # [MAGI S6 MS3 loop2, R7b Caspar] the pass test defaults to rm.S53_EXPECTED_MASKED, so a
+        # wrong expectation would pass itself; pinned here against the README's pattern name.
+        self.assertEqual([{"path": runs.REVIEW_MASKED_FILE, "cause": "secret", "pattern": "anthropic-key"}],
+                         rm.S53_EXPECTED_MASKED)
+
+    def test_a_wrong_masked_path_fails_the_masked_assertion(self) -> None:
+        # [MAGI S6 MS3 loop2, R7b Balthasar] the path is part of the exact entry.
+        bad = [dict(rm.S53_EXPECTED_MASKED[0], path="elsewhere.rs")]
+        self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, _doc(masked=bad))))
+
+    def test_an_unlisted_skipped_count_fails_the_reviewed_assertion(self) -> None:
+        # [MAGI S6 MS3 loop2, R7b Melchior/Balthasar] the README says skipped_unlisted must be 0.
+        self.assertEqual(Outcome.FAIL, self._judge(2, _result("R18", 0, _doc(skipped_unlisted=1))))
+
+    def test_a_timed_out_review_never_reaches_the_body(self) -> None:
+        # [MAGI S6 MS3 loop2, R7b Melchior] S53 reaches the trio, so a hang is the backend's: it
+        # does not declare inspects_timeouts, and the runner reports such a run CANNOT_TEST
+        # (test_runner's timed-out tests pin that branch for every scenario).
+        from smoke.registry import DEFAULT_REGISTRY
+        entry = DEFAULT_REGISTRY.get("S53")
+        self.assertFalse(entry.inspects_timeouts)
+        self.assertTrue(entry.needs_backend)
+
     def test_a_skipped_keyed_file_fails_the_reviewed_assertion(self) -> None:
         doc = _doc(skipped=[{"path": runs.REVIEW_MASKED_FILE, "cause": "secret"}])
         self.assertEqual(Outcome.FAIL, self._judge(2, _result("R18", 0, doc)))

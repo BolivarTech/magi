@@ -1527,6 +1527,14 @@ class RefusalRunModelCallTests(unittest.TestCase):
                                payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
                                forbids_model_calls=True)
 
+    def test_pointing_the_embedder_away_without_a_review_workspace_is_refused(self) -> None:
+        # [MAGI S6 MS3 loop2, R7b Melchior] the README's documented harness error, pinned like the
+        # forbids_model_calls guard above.
+        with self.assertRaises(HarnessError):
+            runs.RunDefinition(run_id="Rx", argv=("query",), stdin=b"", needs_trio=False,
+                               payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
+                               unreachable_embedder=True)
+
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_that_reaches_a_model_records_the_request(self) -> None:
         for run_id in ("R13", "R14", "R15", "R16"):

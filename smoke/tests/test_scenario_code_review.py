@@ -862,6 +862,11 @@ class CodeReviewWithoutEmbedderTests(unittest.TestCase):
         doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": True}}
         self.assertEqual({Outcome.PASS}, set(_outcomes("S52", _result("R17", 0, doc)).values()))
 
+    def test_s52_fails_when_the_declaration_is_missing(self) -> None:
+        # [MAGI S6 MS3 loop2, R7b Melchior] a missing key is shape drift, never a pass by absence.
+        doc = {"consult": {"consensus": {}}, "code_review": {}}
+        self.assertEqual(Outcome.FAIL, _outcomes("S52", _result("R17", 0, doc))[review_context.S52_ASSERTIONS[1]])
+
     def test_s52_fails_on_valid_json_that_is_not_an_object(self) -> None:
         # [MAGI S6 MS3 loop2, R7a Melchior/Caspar] `.get` on a list escaped the scenario.
         try:
