@@ -2432,6 +2432,32 @@ mod tests {
         assert_eq!(f.embedder.calls(), 0);
     }
 
+    #[tokio::test]
+    async fn documentation_and_history_left_out_for_lack_of_room_are_declared() {
+        // [MAGI S6 MS3 loop1, R2 Melchior and Balthasar] RV07: the report declares what was cut,
+        // also when nothing of (3) and (4) could enter and their query was never embedded.
+        let f = RagFixture::new(&[("notes.txt", "plain\n")]).await;
+        let mut rag = f.rag(true);
+        let b = batch_on("notes.txt", "plain");
+        rag.limit_tokens = b.tokens
+            + magi_rs::review::window::estimate_tokens(magi_rs::review::pipeline::CONTEXT_HEADING);
+        let a = rag.context_for(&b).await.expect("context");
+        const NO_ROOM: &str = "no room left in the batch";
+        let cut: Vec<&(ContextKind, String)> = a
+            .trimmed
+            .iter()
+            .filter(|(_, label)| label == NO_ROOM)
+            .collect();
+        assert_eq!(
+            cut,
+            vec![
+                &(ContextKind::Documentation, NO_ROOM.to_string()),
+                &(ContextKind::History, NO_ROOM.to_string())
+            ]
+        );
+        assert!(!a.without_embedder && !a.without_memory);
+    }
+
     #[test]
     fn with_prep_moves_every_field_of_the_preparation() {
         // [CP2 MS3 loop 13] The DocPrep -> StoreRag copy main.rs does; docs_unavailable is the one RV-S38 depends on.
