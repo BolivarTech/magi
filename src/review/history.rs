@@ -36,6 +36,12 @@ const MERGED_TEXT_SEPARATOR: &str = "\n";
 /// The only hunk-header prefix read from a diff.
 const HUNK_PREFIX: &str = "@@";
 
+/// Start of the line git writes, instead of hunks, for a file whose change is binary.
+const BINARY_PREFIX: &str = "Binary files ";
+
+/// End of that line.
+const BINARY_SUFFIX: &str = " differ";
+
 /// What became of a remembered finding, judged from git alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,12 +122,20 @@ fn parse_hunk_header(line: &str) -> Option<(u64, u64)> {
     (parts.next()? == HUNK_PREFIX).then_some(old)
 }
 
-/// Whether the diff `text` changes `line` of the old side: `Some(true)` if a hunk covers it,
-/// `Some(false)` if none does, `None` if a hunk header cannot be read (never decide on a format
-/// that is not understood).
+/// Whether the diff `text` changes `line` of the old side: `Some(true)` if a hunk covers it or
+/// the change is binary (git writes no hunk then, and the line is gone with the text), `Some(false)`
+/// if none does, `None` if a hunk header cannot be read (never decide on a format that is not
+/// understood).
 ///
 /// Complexity: O(lines of the diff).
+// MAGI FIX (MS3 §6 loop3): a binary change has no hunk; it read as untouched.
 fn diff_covers(text: &str, line: u32) -> Option<bool> {
+    if text
+        .lines()
+        .any(|l| l.starts_with(BINARY_PREFIX) && l.ends_with(BINARY_SUFFIX))
+    {
+        return Some(true);
+    }
     let line = u64::from(line);
     let mut covered = false;
     for header in text.lines().filter(|l| l.starts_with(HUNK_PREFIX)) {
