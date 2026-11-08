@@ -417,7 +417,12 @@ fn rust_item_name(line: &str) -> String {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let mut i = 0;
     while let Some(&tok) = tokens.get(i) {
-        if tok.starts_with("pub(") {
+        // MAGI FIX (MS3 §6 loop2): `pub (crate)`, with a space, is a visibility too.
+        let spaced = tok == "pub" && tokens.get(i + 1).is_some_and(|n| n.starts_with('('));
+        if tok.starts_with("pub(") || spaced {
+            if spaced {
+                i += 1;
+            }
             while tokens.get(i).is_some_and(|t| !t.contains(')')) {
                 i += 1;
             }
