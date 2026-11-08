@@ -5974,6 +5974,38 @@ mod tests {
     }
 
     #[test]
+    fn a_mask_never_reads_as_a_secret_so_masking_never_turns_into_withholding() {
+        // [MAGI S6 MS3 loop3, R4 Balthasar, Caspar; pinned] `context_egress` masks, then scans the
+        // masked text and withholds the item on a match. Were a redaction tag `<redacted: NAME>`
+        // to match a pattern itself, "mask, do not omit" (RV22 amended) would silently become
+        // omission for that pattern. No tag matches, alone or where its secret stood.
+        use crate::review::secrets::{find_secret, mask_secrets, SECRET_PATTERNS};
+        for p in SECRET_PATTERNS {
+            let tag = format!("<redacted: {}>", p.name);
+            assert!(find_secret(&tag).is_none(), "{tag}");
+        }
+        let samples = [
+            concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"), // allow-secret-scan
+            concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), // allow-secret-scan
+            concat!("AKIA", "ABCDEFGHIJKLMNOP"),                  // allow-secret-scan
+            "postgres://svc:S3cr3t@db/app",
+        ];
+        for sample in samples {
+            let line = format!("let k = \"{sample}\";");
+            assert!(find_secret(&line).is_some(), "precondition: {line}");
+            let masked = mask_secrets(&line);
+            assert!(masked.contains("<redacted: "), "{masked}");
+            assert!(find_secret(&masked).is_none(), "{masked}");
+        }
+        let aws = concat!(
+            "aws_secret_access_key = ",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        ); // allow-secret-scan
+        assert!(find_secret(aws).is_some(), "precondition: {aws}");
+        assert!(find_secret(&mask_secrets(aws)).is_none(), "{aws}");
+    }
+
+    #[test]
     fn a_path_ending_in_angle_brackets_never_closes_the_header_early() {
         // [MAGI S6 MS3 loop3, R4 Caspar] A run of two `>` passed the escaping, so `foo>>` next to
         // the closing `>>>` wrote `>>>>>`, whose first `>>>` falls inside the path.
