@@ -25,7 +25,9 @@ declare ``inspects_timeouts``, so the runner reports it as ``CANNOT_TEST``.
   answer. Without it the suite could not tell a working RAG from one that
   degrades on every run: S52 even expects the degradation. Whether a chunk was
   relevant is the model side and is never asserted; a trim for room is the
-  budget at work and passes. A history the review would retrieve needs a chain
+  budget at work and passes. R18 does call the embedder: the file it reviews
+  carries a ``///`` doc comment, a documentation source of its own, so the
+  documentation index is built and each batch's query embedded. A history the review would retrieve needs a chain
   of revision reviews, which no smoke run makes, so it stays in the unit suite.
 """
 

@@ -22,6 +22,14 @@ product treats in two ways:
 Both measure what the product does with the bytes, never what a model answers.
 S54 needs no backend and declares ``inspects_timeouts``; S53 reaches the trio,
 so a timed-out R18 is reported as ``CANNOT_TEST`` by the runner.
+
+What S53 cannot see is the request a model endpoint receives: R18 talks to a
+real backend, which keeps no record the harness can read, so its leak check
+covers the process's own outputs (stdout, stderr, the run log). The bytes sent
+to the trio and to the embedder are pinned in the unit suite by recording
+doubles (``no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio``,
+``units_and_definitions_holding_a_one_line_secret_reach_the_trio_masked``,
+``a_batch_quoting_a_one_line_secret_sends_its_documentation_query_masked``).
 """
 
 from smoke import runs

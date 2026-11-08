@@ -640,7 +640,9 @@ LARGE_CONSULT_CEILING_S = 20184
 #: file (R10's 67 s consult), plus the trio per batch and the gate, rounded up.
 #: Replace it with R17's own wall clock at the first run against a real backend.
 #: R18's 300 s is the same provisional figure as R17's: one batch over one
-#: four-line file and the gate.
+#: four-line file and the gate, plus what R17 does not do: indexing that file's
+#: one doc comment and embedding the batch's query with the environment's
+#: embedder, seconds on a local one. Replace it at the first real run too.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
                                         "R10": 67, "R12": 1500, "R17": 300,
                                         "R18": 300}
