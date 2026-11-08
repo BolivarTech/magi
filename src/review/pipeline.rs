@@ -5967,4 +5967,18 @@ mod tests {
             .0
             .contains("candidate"));
     }
+
+    #[test]
+    fn a_path_ending_in_angle_brackets_never_closes_the_header_early() {
+        // [MAGI S6 MS3 loop3, R4 Caspar] A run of two `>` passed the escaping, so `foo>>` next to
+        // the closing `>>>` wrote `>>>>>`, whose first `>>>` falls inside the path.
+        for path in ["foo>", "foo>>", "a>>b>>"] {
+            let (open, _) = context_frame(&ContextKind::Definition, path, false);
+            assert_eq!(
+                open.find(FRAME_CLOSE_MARK),
+                Some(open.len() - FRAME_CLOSE_MARK.len()),
+                "{open}"
+            );
+        }
+    }
 }
