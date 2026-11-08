@@ -380,7 +380,11 @@ fn number_hunk(text: &str) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
     let mut counters: Option<(u32, u32)> = None; // (old, new): the number of the next line
     for line in text.split_inclusive('\n') {
-        let body = line.trim_end_matches('\n');
+        // MAGI FIX (MS3 §6 loop3): the line ending as `str::lines` takes it, so a CRLF line is
+        // classified as `hunk_change` classifies it.
+        let body = line
+            .strip_suffix('\n')
+            .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
         let number = if is_hunk_header(body) {
             counters = hunk_ranges(body).map(|((old, _), (new, _))| (old, new));
             None
