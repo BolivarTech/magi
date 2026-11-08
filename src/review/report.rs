@@ -424,7 +424,8 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
                 "- {} ({}: {})",
                 escape_controls(&m.path),
                 name(&m.cause),
-                m.pattern
+                // MAGI FIX (MS3 §6 loop2): line-safe like the path beside it.
+                escape_controls(m.pattern)
             )?;
         }
         write_unlisted(out, &s.masked)?;
