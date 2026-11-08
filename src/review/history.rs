@@ -198,9 +198,11 @@ fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> Histo
 
 /// Reclassifies the existing entries, then hands back the new ones untouched.
 ///
-/// The order matters: an entry reviewed at `head` would classify as a weak reject if it were
-/// reclassified after being recorded (`head..head` is empty), so the new entries are only
-/// returned, as `Pending`, for the caller to record.
+/// The order matters: a new entry is never classified against its own commit. Anchored to the
+/// full SHA `head` resolves to, it would only read as `Pending` (no commit after the reviewed
+/// one yet, as `classify` reads it), and anchored to any other spelling of `head` as a false
+/// weak reject; so the new entries are only returned, untouched and `Pending`, for the caller to
+/// record after the existing ones were reclassified.
 ///
 /// Existing entries of every status are reclassified (a weak reject is provisional, and an
 /// attended entry whose change was reverted goes back to a weak reject, RV08 by net state), but
