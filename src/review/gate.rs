@@ -274,18 +274,24 @@ fn holds_line(code: &str, line: u32) -> bool {
         .is_some_and(|i| code.lines().nth(i).is_some())
 }
 
-/// Whether `holds` is true of any string of `value`. O(bytes) times the cost of `holds`.
+/// Whether `holds` is true of any string of `value`, an object's keys included. O(bytes) times
+/// the cost of `holds`.
+// MAGI FIX (MS3 §6 loop3): the keys were not read, so the residual check after masking (which
+// masks values only) could not see a key holding a secret.
 fn any_string(value: &Value, holds: &dyn Fn(&str) -> bool) -> bool {
     match value {
         Value::String(text) => holds(text),
         Value::Array(items) => items.iter().any(|item| any_string(item, holds)),
-        Value::Object(fields) => fields.values().any(|item| any_string(item, holds)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, item)| holds(key) || any_string(item, holds)),
         Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
-/// `value` with every string passed through [`mask_secrets`] (a state's keys are the gate's own
-/// field names, never foreign text). O(bytes).
+/// `value` with every string value passed through [`mask_secrets`]. Keys are left as they are:
+/// a state's keys are the gate's own field names, never foreign text, and should one ever hold a
+/// secret, [`any_string`], which reads the keys, withholds the state after masking. O(bytes).
 fn masked_strings(value: Value) -> Value {
     match value {
         Value::String(text) => Value::String(mask_secrets(&text)),
