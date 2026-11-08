@@ -475,7 +475,9 @@ impl RagSource for StoreRag<'_> {
             (false, _) | (true, None) => (None, None),
             (true, Some(_)) if !room => {
                 // MAGI FIX (MS3 §6 loop1): RV07 declares what was cut, this case included.
-                if self.docs.is_some() {
+                // MAGI FIX (MS3 §6 loop2): an unavailable index has its own cause, never room.
+                let docs_down = self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst);
+                if self.docs.is_some() && !docs_down {
                     declared.push((ContextKind::Documentation, NO_ROOM.to_string()));
                 }
                 if self.history.is_some() {
