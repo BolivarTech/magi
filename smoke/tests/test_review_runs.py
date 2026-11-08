@@ -9,6 +9,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import types
 import unittest
 from unittest import mock
@@ -147,7 +148,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
 
     def test_the_embedder_run_points_only_its_embedder_away(self) -> None:
         # S52: the trio and the gate keep the real backend; only [embedding] reaches the closed port.
-        url = runs.unreachable_embedder_url()
+        url = "http://127.0.0.1:1/v1"
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "magi.toml"
             path.write_text('base_url = "http://real/v1"\n[magi]\nkind = "ollama"\n'
@@ -158,18 +159,22 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                           'base_url = "%s"' % url, 'model = "m"'], lines)
         self.assertTrue(runs.DEFINITIONS["R17"].unreachable_embedder)
 
-    def test_the_unreachable_embedder_refuses_at_once_on_a_port_no_service_holds(self) -> None:
-        # [MAGI S6 MS3 loop2, R7a Caspar] port 9 is the discard service where it is enabled: a
-        # listener there accepts and swallows the request, a hang instead of a refusal.
-        import socket
-        import urllib.parse
-        url_of = getattr(runs, "unreachable_embedder_url", None)
-        self.assertIsNotNone(url_of, "the URL must be taken at run time, from a port just freed")
-        port = urllib.parse.urlsplit(url_of()).port
-        self.assertGreaterEqual(port, 1024, "a well-known port may hold a service")
-        with self.assertRaises(ConnectionRefusedError):
-            socket.create_connection(("127.0.0.1", port), timeout=5).close()
-
+    def test_the_embedder_is_pointed_at_an_endpoint_that_answers_an_error_at_once(self) -> None:
+        # [MAGI S6 MS3 loop2, R7a Caspar] port 9 is the discard service where it runs (Windows ships
+        # it, measured live for R6), and a freed port can be dropped instead of refused: either way a
+        # hang, never the refusal S52 needs. A served error answers at once on every machine.
+        import urllib.error
+        import urllib.request
+        pointed = getattr(runs, "embedder_pointed_away", None)
+        self.assertIsNotNone(pointed, "the embedder must reach a served error, not a guessed port")
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "magi.toml"
+            config.write_text('[embedding]\nbase_url = "http://emb/v1"\n', encoding="utf-8")
+            with pointed(config):
+                url = tomllib.loads(config.read_text(encoding="utf-8"))["embedding"]["base_url"]
+                with self.assertRaises(urllib.error.HTTPError):
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    opener.open(url + "/embeddings", timeout=5)
     def test_a_spaced_or_commented_embedding_header_is_still_the_embedding_table(self) -> None:
         # [MAGI S6 MS3 loop2, R7a Caspar] `[ embedding ]` or a comment after the header was not
         # recognized, so a second `[embedding]` table was appended and the product refused it.
@@ -183,7 +188,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                 self.assertEqual([header, 'base_url = "http://127.0.0.1:1/v1"', 'model = "m"'], lines)
 
     def test_a_config_without_an_embedding_table_gains_one(self) -> None:
-        url = runs.unreachable_embedder_url()
+        url = "http://127.0.0.1:1/v1"
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "magi.toml"
             path.write_text('base_url = "http://real/v1"\n', encoding="utf-8")
