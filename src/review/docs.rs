@@ -633,19 +633,47 @@ fn py_def_name(line: &str) -> Option<String> {
     Some(ident_prefix(rest.trim_start()))
 }
 
+/// The code of a Python line, without its `#` comment, and the change in bracket depth it makes.
+/// A `#` or a bracket inside a one-line string literal (`'…'`, `"…"`, with `\` escapes) is text.
+/// O(line).
+fn py_code(line: &str) -> (&str, i64) {
+    let mut depth = 0i64;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => quote = Some(c),
+            '#' => return (line.get(..i).unwrap_or(line), depth),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    (line, depth)
+}
+
 /// Index of the last line of the header that starts at `at` (the first line where the
 /// parentheses balance).
+///
+/// Brackets inside a one-line string literal (`'…'`, `"…"`, with `\` escapes) and after a `#`
+/// comment do not count.
+// MAGI FIX (MS3 §6 loop2): `def f(p="("):` or a `# (todo` comment left the depth open, the
+// header ran to the end of the file and every later docstring was lost.
 fn py_header_end(lines: &[&str], at: usize) -> usize {
     let mut depth = 0i64;
     for k in at..lines.len() {
         let Some(line) = lines.get(k) else { break };
-        for c in line.chars() {
-            match c {
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth -= 1,
-                _ => {}
-            }
-        }
+        depth += py_code(line).1;
         if depth <= 0 {
             return k;
         }
@@ -670,7 +698,10 @@ fn py_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
         };
         let end = py_header_end(lines, i);
         i = end + 1;
-        if !lines.get(end).is_some_and(|l| l.trim_end().ends_with(':')) {
+        if !lines
+            .get(end)
+            .is_some_and(|l| py_code(l).0.trim_end().ends_with(':'))
+        {
             continue;
         }
         if let Some(body) = py_next_statement(lines, end + 1) {
