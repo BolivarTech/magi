@@ -2790,6 +2790,16 @@ mod tests {
         assert_eq!(fake.calls(), 0, "the embedder was never called");
     }
 
+    #[test]
+    fn the_terminal_text_drops_format_characters_that_reorder_or_hide_it() {
+        // [MAGI S6 MS3 loop2, R5 Melchior] a bidi override or a zero-width character from a model
+        // reached the headless terminal: only C0/C1 controls were dropped.
+        assert_eq!(
+            terminal_safe("a\u{202e}b\u{200b}c\u{feff}d\u{2066}e\n\tf\u{1b}[2J"),
+            "abcde\n\tf[2J"
+        );
+    }
+
     #[tokio::test]
     async fn a_plan_with_no_batch_never_reaches_the_embedder() {
         // [MAGI S6 MS3 loop2, R5 Melchior] the budget check is skipped for a plan of no batch
