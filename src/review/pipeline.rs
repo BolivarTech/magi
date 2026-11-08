@@ -435,16 +435,19 @@ struct Faces {
 ///    stage reads the same bytes, once.
 /// 2. Filter what never leaves the process and what is not code.
 /// 3. Build the lexical index and plan the batches against the pool window; with a context
-///    source (`deps.rag`), each item's containing unit is charged at planning, the source is
-///    bound to the review's index and content, and every batch's context is assembled, scanned
-///    for secrets and recorded in the summary.
-/// 4. With an explicit `--timeout` or a caller's deadline, check the budget ([`pre_budget`])
-///    before any trio call. The total is the `--timeout`, at most what is left of the deadline
-///    when the preparation ends. Steps 1-4 are the preparation, measured apart (plus the
-///    source's own indexing time, [`RagSource::index_ms`]) and never charged to the
-///    `--timeout`. The check itself ([`precheck_budget`]) needs only the number of batches, so it
-///    runs right after the local preparation (the plan and the lexical index) and before any
-///    context is assembled; a refused review calls no model and no endpoint.
+///    source (`deps.rag`), each item's containing unit is charged at planning. All of it is
+///    local: no model and no endpoint is called.
+/// 4. With an explicit `--timeout` or a caller's deadline, check the budget
+///    ([`precheck_budget`], over [`pre_budget`]): it needs only the number of batches, so it
+///    runs here, before any context is assembled, and a refused review calls no model and no
+///    endpoint. Then, with a context source, the source is bound to the review's index and
+///    content and every batch's context is assembled (its query embedded), scanned for secrets
+///    and recorded in the summary; the budget is read again after it, and a preparation that
+///    overran its declared reserve runs on what is left instead of being refused, since its
+///    outbound calls were made. The total is the `--timeout`, at most what is left of the
+///    deadline when the preparation ends. Steps 1-4 are the preparation, measured apart (plus
+///    the source's own indexing time, [`RagSource::index_ms`]) and never charged to the
+///    `--timeout`.
 /// 5. Run one `consult` per batch, in series, its context after its code under
 ///    [`CONTEXT_HEADING`]. Without `--timeout` each batch runs on the normal
 ///    `consult` clock; with it, each gets what is left split over the pending batches, counted
