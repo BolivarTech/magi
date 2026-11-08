@@ -221,12 +221,12 @@ impl BatchItem {
         else {
             return None;
         };
-        let headed = text.lines().any(|l| l.starts_with(HUNK_MARKER));
+        let headed = text.lines().any(is_hunk_header);
         let mut counters = (*old_first_line, *first_line);
         let mut in_body = !headed;
         let (mut added, mut removed) = (Vec::new(), Vec::new());
         for line in text.lines() {
-            if line.starts_with(HUNK_MARKER) {
+            if is_hunk_header(line) {
                 if let Some(((old, _), (new, _))) = hunk_ranges(line) {
                     counters = (old, new);
                 }
@@ -278,14 +278,14 @@ impl BatchItem {
         else {
             return None;
         };
-        let headed = text.lines().any(|l| l.starts_with(HUNK_MARKER));
+        let headed = text.lines().any(is_hunk_header);
         let mut counters = (*old_first_line, *first_line);
         if old < counters.0 {
             return counters.1.checked_sub(counters.0 - old);
         }
         let mut in_body = !headed;
         for line in text.lines() {
-            if line.starts_with(HUNK_MARKER) {
+            if is_hunk_header(line) {
                 if let Some(((o, _), (n, _))) = hunk_ranges(line) {
                     counters = (o, n);
                     if old < o {
@@ -381,7 +381,7 @@ fn number_hunk(text: &str) -> String {
     let mut counters: Option<(u32, u32)> = None; // (old, new): the number of the next line
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
-        let number = if body.starts_with(HUNK_MARKER) && !body.starts_with(COMBINED_HUNK_MARKER) {
+        let number = if is_hunk_header(body) {
             counters = hunk_ranges(body).map(|((old, _), (new, _))| (old, new));
             None
         } else {
@@ -394,6 +394,14 @@ fn number_hunk(text: &str) -> String {
         out.push_str(line);
     }
     out
+}
+
+/// Whether `line` is a hunk header of a two-sided diff (`@@`), never a combined diff's (`@@@`).
+/// The one test [`number_hunk`] and [`BatchItem::hunk_change`] share, so the two never number a
+/// body differently. O(1).
+// MAGI FIX (MS3 §6 loop2): `hunk_change` tested `@@` alone, `number_hunk` excluded `@@@`.
+fn is_hunk_header(line: &str) -> bool {
+    line.starts_with(HUNK_MARKER) && !line.starts_with(COMBINED_HUNK_MARKER)
 }
 
 /// The lines a hunk changes, by side ([`BatchItem::hunk_change`]); at least one is non-empty.
