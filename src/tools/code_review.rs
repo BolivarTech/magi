@@ -2762,6 +2762,33 @@ mod tests {
         assert_eq!(stored, vec![FULL_SHA.to_string()]);
     }
 
+    /// Counts every git call and answers success with empty output.
+    struct CountingGit(std::sync::atomic::AtomicUsize);
+    impl GitCommand for CountingGit {
+        fn run_bytes(&self, _args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_revision_starting_with_a_dash_never_reaches_git() {
+        // [MAGI S6 MS3 loop3, R5 Balthasar] `rev-parse --verify <rev>^{commit}` took the revision
+        // with no guard of its own: one starting with `-` would be read as an option. The
+        // history is then not updated, said, and git is never run.
+        let (_db, _mem, memory) = review_memory();
+        let git = CountingGit(std::sync::atomic::AtomicUsize::new(0));
+        let warning = follow_up_work(&memory, &git, follow_up(Some("--output=x")));
+        assert!(
+            warning
+                .as_deref()
+                .is_some_and(|w| w.starts_with(HISTORY_NOT_UPDATED)),
+            "{warning:?}"
+        );
+        assert_eq!(git.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(memory.history().all().expect("all").is_empty());
+    }
+
     #[test]
     fn a_working_tree_review_records_no_history() {
         // RV08: there is no commit to anchor it to.
