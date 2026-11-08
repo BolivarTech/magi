@@ -1118,6 +1118,63 @@ mod tests {
     }
 
     #[test]
+    fn only_findings_on_a_line_of_the_reviewed_revision_are_anchored() {
+        // [MAGI S6 MS3 loop2, R6b Caspar/Balthasar/Melchior] RV08: a removed-line finding never
+        // reaches the history; an unlocated one and one on the same number of another file do.
+        let at = |file: Option<&str>, line: Option<u32>| {
+            (
+                ConsolidatedFinding {
+                    file: file.map(str::to_string),
+                    line,
+                    severity: Severity::Warning,
+                    reported_severity: Severity::Warning,
+                    titles: vec!["t".into()],
+                    details: vec![],
+                    categories: vec![Category::Other],
+                    sources: vec![AgentName::Melchior],
+                    marks: vec![],
+                    batches: vec![0],
+                },
+                GateVerdict {
+                    state: GateState::Kept,
+                    cause: None,
+                    causes: vec![],
+                    model: None,
+                    lean: None,
+                    confidence: None,
+                    skipped: vec![],
+                    status: None,
+                },
+            )
+        };
+        let mut s = ReviewSummary {
+            findings: vec![
+                at(Some("a.rs"), Some(9)),
+                at(Some("a.rs"), Some(1)),
+                at(Some("b.rs"), Some(9)),
+                at(None, None),
+                at(Some("a.rs"), None),
+            ],
+            ..ReviewSummary::default()
+        };
+        s.off_revision.insert(("a.rs".to_string(), 9));
+        let kept: Vec<(Option<String>, Option<u32>)> = s
+            .anchored_findings()
+            .into_iter()
+            .map(|(f, _)| (f.file, f.line))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                (Some("a.rs".to_string()), Some(1)),
+                (Some("b.rs".to_string()), Some(9)),
+                (None, None),
+                (Some("a.rs".to_string()), None),
+            ]
+        );
+    }
+
+    #[test]
     fn a_masked_file_is_declared_in_both_forms_and_never_as_skipped() {
         // [T3.7] RV22 amended: a file reviewed with its secret masked is declared with the cause
         // `secret` and its pattern, apart from the files left out.
