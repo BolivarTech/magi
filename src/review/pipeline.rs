@@ -3983,6 +3983,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_outbound_reserve_is_held_back_from_a_deadline_never_from_a_timeout() {
+        // [MAGI S6 MS3 loop3, R5 Melchior; pinned] An explicit `--timeout` counts from the first
+        // trio call, so the preparation never spends it: its refusal stays `--timeout` / batches
+        // against the floor whatever reserve the caller passes. A run deadline is wall clock,
+        // and the reserve comes off it.
+        let bare = precheck_budget(Some(100_000), None, 2, 2, false, 0).expect("fits");
+        let reserved = precheck_budget(Some(100_000), None, 2, 2, false, 50_000).expect("fits");
+        assert_eq!(bare, reserved);
+        assert_eq!(bare.map(|(total, _)| total), Some(100_000));
+        let deadline = Instant::now() + Duration::from_secs(100_000);
+        let held = precheck_budget(None, Some(deadline), 2, 2, false, 50_000).expect("fits");
+        assert!(held.is_some_and(|(total, _)| total <= 50_000), "{held:?}");
+    }
+
     #[tokio::test]
     async fn a_deadline_too_close_for_the_batches_fails_before_any_trio_call() {
         let dir = workspace(4);
