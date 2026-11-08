@@ -1389,26 +1389,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_state_carrying_a_secret_is_never_sent() {
+    async fn a_state_carrying_a_one_line_secret_is_sent_masked() {
         // RV22: every byte that leaves the process passes the secret detector, the gate's state too.
+        // [MAGI S6 MS3 loop2, R7b Caspar] RV22 amended masks a one-line secret at the state's
+        // egress, as at every other: the finding is judged on the masked state, never withheld.
         let mut c = MockDecisionClient::new();
-        c.expect_decide().times(0);
+        c.expect_decide().times(2).returning(|r| {
+            let sent = r.state().to_string();
+            assert!(
+                !sent.contains("sk-ant-") && !sent.contains("ghp_"),
+                "{sent}"
+            );
+            assert!(sent.contains("<redacted: "), "{sent}");
+            answer(r.model().unwrap_or(""), "real_defect", 0.9)
+        });
         let mut g = Gate::new(&c, chain(), 61_000);
         let code = "let k = \"sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\";\n"; // allow-secret-scan
         let v = g
             .judge(&finding(Severity::Warning, Some(1)), Some(code), None)
             .await;
-        assert_eq!((v.state, v.cause), (GateState::Unfiltered, Some("secret")));
+        assert_eq!((v.state, v.cause), (GateState::Kept, None));
         let mut f = finding(Severity::Warning, Some(1));
         f.details = vec!["token ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA leaks".into()]; // allow-secret-scan
         let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
+        assert_eq!((v.state, v.cause), (GateState::Kept, None));
+    }
+
+    #[tokio::test]
+    async fn a_state_carrying_a_private_key_block_is_never_sent() {
+        // RV22's exception: a key body has no pattern of its own, so masking cannot promise that
+        // none of it leaves; the state is withheld whole.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().times(0);
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let code = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\n{end}\n");
+        let v = g
+            .judge(&finding(Severity::Warning, Some(2)), Some(&code), None)
+            .await;
         assert_eq!((v.state, v.cause), (GateState::Unfiltered, Some("secret")));
     }
 
     #[tokio::test]
-    async fn a_merged_claim_carrying_a_secret_is_withheld_and_the_others_are_still_judged() {
+    async fn a_merged_claim_carrying_a_one_line_secret_is_asked_masked_with_the_others() {
         // [MAGI S6 loop 10, C1-c2] one reworded claim with a secret pattern made the whole merged
         // finding `unfiltered` with no question asked and no `not every claim judged`.
+        // [MAGI S6 MS3 loop2] Masked now, so every claim is asked and the finding can filter.
         let mut f = finding(Severity::Warning, Some(1));
         f.titles = vec!["a".into(), "b".into()];
         f.details = vec![
@@ -1417,21 +1444,16 @@ mod tests {
         ];
         let mut c = MockDecisionClient::new();
         c.expect_decide()
-            .times(1)
+            .times(2)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(
             (v.state, v.cause, v.causes),
-            (
-                GateState::LowConfidence,
-                Some("not every claim judged"),
-                vec!["not every claim judged", "secret"]
-            )
+            (GateState::Filtered, None, Vec::<&str>::new())
         );
-        assert_eq!(g.questions(), 1);
+        assert_eq!(g.questions(), 2);
     }
-
     #[tokio::test]
     async fn a_merged_claim_over_the_state_limit_is_withheld_and_a_kept_one_names_it() {
         // [MAGI S6 loop 10, C1-c2] the oversized claim is never sent nor truncated; the other
