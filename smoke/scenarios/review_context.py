@@ -150,15 +150,20 @@ def _degraded_labels(trimmed):
 
     Returns:
         list: Each :data:`DEGRADED_LABELS` label found, in order; ``None`` for a
-        shape the harness does not understand.
+        shape the harness does not understand, an entry without a string
+        ``label`` included (a missing label is shape drift, never a pass).
 
     Example:
         >>> _degraded_labels([{"kind": "history", "label": "no room left in the batch"}])
         []
         >>> _degraded_labels("x") is None
         True
+        >>> _degraded_labels([{"kind": "history"}]) is None
+        True
     """
-    if not isinstance(trimmed, list) or not all(isinstance(t, dict) for t in trimmed):
+    # MAGI FIX (S6 MS3 loop3): an entry without a string label was skipped, not refused.
+    if not isinstance(trimmed, list) or not all(
+            isinstance(t, dict) and isinstance(t.get(TRIMMED_LABEL_KEY), str) for t in trimmed):
         return None
     return [t.get(TRIMMED_LABEL_KEY) for t in trimmed
             if t.get(TRIMMED_LABEL_KEY) in DEGRADED_LABELS]
