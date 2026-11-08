@@ -1594,13 +1594,19 @@ fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp)
 /// reclassification compares it with `rev-parse` output).
 ///
 /// # Errors
-/// The redacted cause, when the SHA cannot be resolved or the store fails.
+/// The redacted cause, when the revision starts with `-` (never passed to git), the SHA cannot
+/// be resolved or the store fails.
 fn record_history(
     memory: &ReviewMemory,
     git: &dyn GitCommand,
     rev: &str,
     findings: &[(ConsolidatedFinding, GateVerdict)],
 ) -> Result<RecordStats, String> {
+    // MAGI FIX (MS3 §6 loop3): the revision is an argument of `rev-parse`; one starting with
+    // `-` would be read as an option (git's `--end-of-options` is not in every git it runs on).
+    if rev.starts_with('-') {
+        return Err(DASHED_REVISION.to_string());
+    }
     let commit = format!("{rev}^{{commit}}");
     let sha = git
         .run(&["rev-parse", "--verify", commit.as_str()])
@@ -1622,6 +1628,9 @@ fn record_history(
 
 /// What the history is reclassified against: everything after the reviewed commit, up to now.
 const HISTORY_HEAD: &str = "HEAD";
+
+/// Why the history of a revision starting with `-` is not recorded.
+const DASHED_REVISION: &str = "the reviewed revision starts with `-` and is never passed to git";
 
 #[cfg(test)]
 mod tests {
