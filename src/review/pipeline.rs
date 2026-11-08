@@ -559,16 +559,28 @@ pub async fn run_review(
         None => vec![Vec::new(); batches.len()],
     };
     // Read again: the preparation spent part of a caller's deadline, and the total is what is
-    // left when it ends. The check above reserved the preparation's bound, so this one refuses
-    // only if the preparation overran it.
-    let budget = precheck_budget(
+    // left when it ends. The check above reserved the preparation's bound; a preparation that
+    // overran it has already made its outbound calls, so a refusal now would come after bytes
+    // left the process (§5.0 stage 4). Without outbound calls this check may still refuse.
+    // MAGI FIX (MS3 §6 loop2): it refused after the embedder was called; now the review runs on
+    // what is left, its ceiling declared below the configured one, and the clock cuts and
+    // declares the batches that do not fit (RV06, M-5).
+    let sent_out = deps
+        .rag
+        .is_some_and(|rag| rag.outbound_reserve_secs(planned) > 0);
+    let budget = match precheck_budget(
         req.timeout_secs,
         req.deadline,
         planned,
         req.max_rotations,
         req.retry_disabled,
         0,
-    )?;
+    ) {
+        Err(ReviewError::Budget { .. }) if sent_out => {
+            review_total(req.timeout_secs, req.deadline, 0).map(|(total, _)| (total, 0))
+        }
+        other => other?,
+    };
     let total = budget.map(|(total, _)| total);
     if let Some((_, ceiling)) = budget {
         summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
