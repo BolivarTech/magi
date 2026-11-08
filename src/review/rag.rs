@@ -408,7 +408,9 @@ pub fn definitions_for(
 }
 
 /// The units that name any of `names` (the changed units), one item per `(file, unit)` and never
-/// the definition itself; at most [`MAX_CALLERS_PER_NAME`] per name, the first by `(file, line)`.
+/// the definition itself nor a unit with the same name (a nested method the index does not
+/// record, a homonym, a recursive call); at most [`MAX_CALLERS_PER_NAME`] per name, the first by
+/// `(file, line)`.
 ///
 /// Each file is read and split once. A file without an extractor, or that is gone, gives no
 /// caller. A unit already given for an earlier name or occurrence is not repeated.
@@ -466,6 +468,11 @@ pub fn callers_for(
             let Some(unit) = units.at(line) else {
                 continue;
             };
+            // MAGI FIX (MS3 §6 loop1): a unit with the name's own name is its definition (a nested
+            // method the index does not record) or a homonym, never a caller; it took a slot.
+            if unit.name == *name {
+                continue;
+            }
             let key = (file.to_string(), unit.start_line, unit.end_line);
             if seen.contains(&key) {
                 continue;
