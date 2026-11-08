@@ -27,7 +27,7 @@ use crate::decision::{
 
 use super::config::DEFAULT_CALL_TIMEOUT_SECS;
 use super::consolidate::ConsolidatedFinding;
-use super::secrets::find_secret;
+use super::secrets::{find_secret, holds_key_block, mask_secrets};
 
 /// Name of the gate's only question.
 pub const GATE_QUESTION_NAME: &str = "gate";
@@ -274,13 +274,29 @@ fn holds_line(code: &str, line: u32) -> bool {
         .is_some_and(|i| code.lines().nth(i).is_some())
 }
 
-/// Whether the secret detector finds a pattern in any string of `value`. O(bytes).
-fn carries_secret(value: &Value) -> bool {
+/// Whether `holds` is true of any string of `value`. O(bytes) times the cost of `holds`.
+fn any_string(value: &Value, holds: &dyn Fn(&str) -> bool) -> bool {
     match value {
-        Value::String(text) => find_secret(text).is_some(),
-        Value::Array(items) => items.iter().any(carries_secret),
-        Value::Object(fields) => fields.values().any(carries_secret),
+        Value::String(text) => holds(text),
+        Value::Array(items) => items.iter().any(|item| any_string(item, holds)),
+        Value::Object(fields) => fields.values().any(|item| any_string(item, holds)),
         Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+/// `value` with every string passed through [`mask_secrets`] (a state's keys are the gate's own
+/// field names, never foreign text). O(bytes).
+fn masked_strings(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(mask_secrets(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(masked_strings).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k, masked_strings(v)))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -666,15 +682,16 @@ impl<'a> Gate<'a> {
         // MAGI FIX (S6 loop 10, C1-c2): the checks run per pair. A pair too large or carrying a
         // secret is withheld (never sent, never truncated) and the others are still asked; only
         // a finding whose every pair is withheld leaves `unfiltered` with that pair's cause.
+        // MAGI FIX (MS3 §6 loop2): RV22 amended masks a one-line secret at the state's egress
+        // instead of withholding the pair; only a private-key block still withholds it.
         let mut withheld = None;
         let states: Vec<Value> = (0..asked)
-            .map(|i| gate_state_of(finding, i, code))
-            .filter(|state| match self.withheld_cause(state) {
-                Some(cause) => {
+            .filter_map(|i| match self.sendable(gate_state_of(finding, i, code)) {
+                Ok(state) => Some(state),
+                Err(cause) => {
                     withheld.get_or_insert(cause);
-                    false
+                    None
                 }
-                None => true,
             })
             .collect();
         if let (true, Some(cause)) = (states.is_empty(), withheld) {
@@ -707,15 +724,25 @@ impl<'a> Gate<'a> {
         outcome
     }
 
-    /// Why `state` cannot be sent, if it cannot: over `max_state_bytes` (`state too large`,
-    /// checked first) or carrying a secret pattern (`secret`). O(bytes of the state).
-    fn withheld_cause(&self, state: &Value) -> Option<&'static str> {
+    /// `state` as it may be sent, or why it cannot be. A string holding a private-key block
+    /// withholds it (`secret`: RV22's exception, a key body has no pattern of its own); otherwise
+    /// every one-line secret of every string is masked ([`mask_secrets`]), and the masked state
+    /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left a match
+    /// (`secret`). O(bytes of the state).
+    ///
+    /// # Errors
+    /// The cause the state is withheld for.
+    fn sendable(&self, state: Value) -> Result<Value, &'static str> {
+        if any_string(&state, &holds_key_block) {
+            return Err(CAUSE_SECRET);
+        }
+        let state = masked_strings(state);
         if state.to_string().len() > self.max_state_bytes {
-            Some(CAUSE_STATE_TOO_LARGE)
-        } else if carries_secret(state) {
-            Some(CAUSE_SECRET)
+            Err(CAUSE_STATE_TOO_LARGE)
+        } else if any_string(&state, &|text| find_secret(text).is_some()) {
+            Err(CAUSE_SECRET)
         } else {
-            None
+            Ok(state)
         }
     }
 
