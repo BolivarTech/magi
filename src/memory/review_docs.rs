@@ -285,15 +285,14 @@ impl ReviewDocStore {
         refuse_secrets(sources)?;
         let plan = self.plan(sources)?;
         let fresh = embed_all(&plan.to_embed, embedder).await?;
-        let stats = ReindexStats {
+        let rows = self.encode_rows(&plan, &fresh)?;
+        let rebuilt = self.write(&plan, &rows)?;
+        Ok(ReindexStats {
             embedded: plan.to_embed.len(),
             reused: plan.reusable.len(),
             sources: plan.new_sources.len(),
-            rebuilt: plan.rebuilt,
-        };
-        let rows = self.encode_rows(&plan, &fresh)?;
-        self.write(&plan, &rows)?;
-        Ok(stats)
+            rebuilt,
+        })
     }
 
     /// Reads, under one short lock, what `reindex` needs to decide: foreign rows, the sources
@@ -380,17 +379,31 @@ impl ReviewDocStore {
         Ok(rows)
     }
 
-    /// Writes the wipe (when `rebuilt`), the rows and the source rows in one transaction.
-    /// Inserts are `OR IGNORE` by key: two processes indexing the same source write the same
-    /// thing.
-    fn write(&self, plan: &Plan<'_>, rows: &[DocRow<'_>]) -> Result<(), MemoryError> {
+    /// Writes the wipe, the rows and the source rows in one transaction, and answers whether it
+    /// wiped. Rows of another identity are deleted when the plan saw them (`rebuilt`) or when
+    /// they appear by the time the transaction starts (another identity's reindex ran while
+    /// this one embedded unlocked); this store's own rows are never deleted here. Inserts are
+    /// `OR IGNORE` by key: two processes indexing the same source under one identity write the
+    /// same thing.
+    // MAGI FIX (MS3 §6 loop3): foreign rows written between the plan and the write were kept,
+    // and `OR IGNORE` then dropped this store's rows with the same keys.
+    fn write(&self, plan: &Plan<'_>, rows: &[DocRow<'_>]) -> Result<bool, MemoryError> {
         let mut c = self.locked_conn();
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
-        if plan.rebuilt {
-            tx.execute_batch("DELETE FROM code_review_docs; DELETE FROM code_review_doc_sources;")
-                .map_err(db_err)?;
+        let wiped = plan.rebuilt || self.has_foreign_rows(&tx)?;
+        if wiped {
+            tx.execute(
+                "DELETE FROM code_review_docs WHERE index_id <> ?1",
+                [&self.index_id],
+            )
+            .map_err(db_err)?;
+            tx.execute(
+                "DELETE FROM code_review_doc_sources WHERE index_id <> ?1",
+                [&self.index_id],
+            )
+            .map_err(db_err)?;
         }
         {
             let mut insert_row = tx
@@ -426,7 +439,8 @@ impl ReviewDocStore {
                     .map_err(db_err)?;
             }
         }
-        tx.commit().map_err(db_err)
+        tx.commit().map_err(db_err)?;
+        Ok(wiped)
     }
 
     /// The `k` chunks most similar to `query` among the rows whose `(path, key)` is in
