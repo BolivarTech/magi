@@ -1845,6 +1845,27 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_alone_cannot_be_masked_safely_so_an_unrebuildable_one_is_left_out() {
+        // [MAGI S6 MS3 loop3, R6a Caspar; the tie-break of RV22] Masking the raw diff text as a
+        // fallback would follow "mask, do not omit", but a hunk shows only some lines, and a
+        // pattern may need lines the hunk leaves out: a YAML value on the line after its key.
+        // The side, read whole, masks it; the diff alone holds the value with no key, and a
+        // masked diff would carry it raw. "No byte of the secret leaves the process" wins.
+        let key = concat!("aws_secret", "_access_key");
+        let value = concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"); // allow-secret-scan
+        let side = format!("{key}: |\n  {value}\n");
+        assert!(
+            find_secret(&side).is_some(),
+            "precondition: the side shows it"
+        );
+        let hunk = format!("@@ -2,0 +2,1 @@\n+  {value}\n");
+        assert!(
+            crate::review::secrets::mask_secrets(&hunk).contains(value),
+            "masking the diff alone leaves the value raw"
+        );
+    }
+
+    #[test]
     fn binaries_and_non_utf8_are_skipped_with_their_cause_and_unknown_text_is_kept() {
         let files = vec![
             ReviewFile {
