@@ -71,7 +71,9 @@ pub struct Assembled {
     pub items: Vec<ContextItem>,
     /// The items left out, in priority order.
     pub trimmed: Vec<(ContextKind, String)>,
-    /// Whether documentation and history were skipped for lack of an embedder.
+    /// Whether documentation and history were skipped because no embedder answered: none is
+    /// configured, or the configured one failed (then `trimmed` also carries "the embedder did
+    /// not answer", once per review, so the report tells the two apart).
     pub without_embedder: bool,
     /// Whether `--no-memory` left out the stores.
     pub without_memory: bool,

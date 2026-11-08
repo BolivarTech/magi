@@ -449,6 +449,17 @@ impl RagSource for StoreRag<'_> {
     /// database as `without_memory`; a failing embedder or store degrades, never fails. A
     /// configured embedder that fails also declares, once per review, "the embedder did not
     /// answer" for documentation and history, so the report tells it from a missing one.
+    ///
+    /// "Something could still enter" is checked against [`CONTEXT_ITEM_FRAME_TOKENS`], the floor
+    /// of any item's cost: a real item also costs its text, so with little room left the query
+    /// may be embedded for items that then do not fit (declared as trimmed). The check only
+    /// saves the call when nothing at all can enter.
+    ///
+    /// The query is embedded even when the documentation cannot be searched (no store, or an
+    /// index unavailable for the revision): the history goes with the embedder (RV07, CP2 MS3
+    /// loop 14), so the call is also the review's check that the embedder answers
+    /// (`a_down_embedder_is_seen_even_when_the_index_is_unavailable`). The query is masked
+    /// ([`doc_search_query`]) like every other byte that leaves the process.
     async fn context_for(&self, batch: &ReviewBatch) -> Result<Assembled, ReviewError> {
         let text = batch_text(batch);
         let mut units = Vec::new();
@@ -868,7 +879,10 @@ fn list_worktree(
 }
 
 /// Groups `sources`, in order, into reindex batches of at most [`EMBED_BATCH_ITEMS`] chunks; a
-/// larger source goes alone. O(sources).
+/// larger source goes alone. A batch is one all-or-nothing [`ReviewDocStore::reindex`], never
+/// one embedder request: `reindex` itself sends its chunks in requests of at most
+/// [`EMBED_BATCH_ITEMS`] texts (`embedding_requests_are_bounded_and_written_once`), so a source
+/// with more chunks still never sends a larger request. O(sources).
 fn reindex_batches(
     sources: Vec<(DocSource, Vec<DocChunk>)>,
 ) -> Vec<Vec<(DocSource, Vec<DocChunk>)>> {
@@ -908,7 +922,11 @@ fn reindex_batches(
 ///    [`reindex_or_degrade`] each, given what is left of `timeout`; what a batch wrote stays.
 /// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails, and `timeout` itself,
 ///    set `docs_unavailable` with a WARN; the first failing batch stops the rest. The size cap
-///    only cuts (declared as truncated), it never degrades.
+///    only cuts (declared as truncated), it never degrades. The two read failures differ on
+///    purpose: a revision's source that git lists but cannot give back means that revision's
+///    index cannot be completed, and U29 then serves no documentation rather than a partial
+///    one; a working-tree file that cannot be read is one the review itself leaves out (MS2's
+///    rule for a listed file), so it is not part of the revision's documentation at all.
 ///
 /// Never fails. `timeout` bounds the whole preparation, checked between steps and sources (a git
 /// call or read in flight ends by its own bound). O(listed sources + bytes read).
