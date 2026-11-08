@@ -5084,6 +5084,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_preparation_that_overran_its_reserve_runs_on_what_is_left_never_refused() {
+        // [MAGI S6 MS3 loop2, R4 Caspar/Melchior] the check after the context preparation refused
+        // a review whose preparation overran the reserve it declared: by then its outbound calls
+        // were made, against "a review refused for its budget sends no byte out" (§5.0). It runs
+        // on what is left; the clock cuts what does not fit, declared.
+        struct OverrunRag;
+        #[async_trait::async_trait]
+        impl RagSource for OverrunRag {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(Assembled {
+                    items: vec![],
+                    trimmed: vec![],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+            fn outbound_reserve_secs(&self, _batches: usize) -> u64 {
+                1
+            }
+        }
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let need = crate::magi::headless_consult_timeout_secs(
+            crate::magi::AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+            2,
+            false,
+        );
+        let r = review_dir_with_rag_budget(
+            dir.path(),
+            &OverrunRag,
+            &consult,
+            &gate_always("real_defect"),
+            None,
+            Some(Instant::now() + Duration::from_secs(need + 3)),
+        )
+        .await;
+        let out = r.expect("never refused after the outbound preparation");
+        assert_eq!(out.summary.batches_planned, 1, "precondition: one batch");
+        assert!(
+            out.summary.ceiling_below_configured,
+            "the short clock is declared"
+        );
+    }
+
+    #[tokio::test]
     async fn a_refused_budget_assembles_no_context_and_calls_no_one() {
         // [SMOKE1 S50] §5.0 stage 4 comes before every step that calls a model or an endpoint:
         // assembling a batch's context embeds its query, so a review refused for its budget must
