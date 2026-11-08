@@ -63,6 +63,10 @@ pub const RECLASSIFY_BUDGET_SECS: u64 = 60;
 /// answers in well under a second, so 30 s only fires on a hung or unreachable one.
 pub const EMBED_QUERY_TIMEOUT_SECS: u64 = 30;
 
+/// Bound on the one embedding [`ReviewMemory::doc_store`] sends to learn the dimension of an
+/// embedder that autodetects it: one short text, like a batch's query.
+pub const DIMENSION_PROBE_TIMEOUT_SECS: u64 = EMBED_QUERY_TIMEOUT_SECS;
+
 /// Documentation chunks retrieved per batch before `assemble` trims to the budget.
 pub const DOC_SEARCH_K: usize = 8;
 
@@ -548,6 +552,7 @@ fn query_reserve_secs(batches: usize) -> u64 {
 }
 
 /// The bound on a review's whole outbound preparation under a run deadline (§5.0 stage 4, RV06):
+/// the dimension probe [`ReviewMemory::doc_store`] may send ([`DIMENSION_PROBE_TIMEOUT_SECS`]),
 /// the documentation indexing ([`REINDEX_TIMEOUT_SECS`]) and one query embedding per batch.
 /// A review with no store or no embedder calls no one and reserves nothing.
 ///
@@ -559,9 +564,13 @@ fn query_reserve_secs(batches: usize) -> u64 {
 /// # Returns
 ///
 /// The seconds the budget check holds back from a run deadline. O(1).
+// MAGI FIX (MS3 §6 loop1): the probe ran after the budget check but outside the reserve, so a
+// run deadline could be overshot by up to its bound.
 pub fn outbound_prep_reserve_secs(batches: usize, calls_embedder: bool) -> u64 {
     if calls_embedder {
-        REINDEX_TIMEOUT_SECS.saturating_add(query_reserve_secs(batches))
+        DIMENSION_PROBE_TIMEOUT_SECS
+            .saturating_add(REINDEX_TIMEOUT_SECS)
+            .saturating_add(query_reserve_secs(batches))
     } else {
         0
     }
@@ -693,7 +702,8 @@ impl ReviewMemory {
     }
 
     /// The documentation index of `embedder`'s identity. An embedder that autodetects its
-    /// dimension is asked once (under [`EMBED_QUERY_TIMEOUT_SECS`]) to learn it.
+    /// dimension is asked once (under [`DIMENSION_PROBE_TIMEOUT_SECS`]) to learn it; the caller
+    /// runs this after the budget check, whose reserve counts that bound.
     ///
     /// # Errors
     ///
@@ -704,7 +714,7 @@ impl ReviewMemory {
         embedder: &dyn EmbeddingProvider,
     ) -> Result<ReviewDocStore, MemoryError> {
         if embedder.dim() == 0 {
-            let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
+            let bound = Duration::from_secs(DIMENSION_PROBE_TIMEOUT_SECS);
             let probe = vec![DIMENSION_PROBE.to_string()];
             // Its answer is not used: a successful call sets the dimension; a failed one leaves
             // it at 0, checked right below.
