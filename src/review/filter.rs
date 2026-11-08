@@ -488,7 +488,10 @@ fn kept_verdict(
 /// lines and `\ No newline` markers are kept; a hunk header keeps its ranges and loses its
 /// function context (a line of the file, possibly inside a masked block). `None` when a line
 /// names a side line that does not exist, a hunk header does not parse, or a body line has no
-/// marker: the diff and the sides disagree. O(diff + sides).
+/// marker: the positions of the diff and the sides disagree. A body line whose text differs from
+/// its side's line at that position is not detected: the side's (masked) text replaces it, which
+/// is what git would print for these sides (a rename's stale line included), and the rebuilt
+/// diff is checked for secrets again by the caller. O(diff + sides).
 fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<String> {
     let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
     let (mut next_new, mut next_old) = (0usize, 0usize);
@@ -1220,9 +1223,10 @@ mod tests {
 
     /// Filters `key.rs` (its diff, its new and old sides) beside a clean `a.rs`, through the
     /// masking cache, and asserts that no byte of a key body (`BODY`) leaves in a kept file: in its
-    /// diff, or in either side the batches, units and gate read. Whether `key.rs` is kept (masked)
-    /// or left out as `secret` is the guard's choice; either is safe.
-    // [T3.7 fix round 2] no longer requires the omission: the content check masks what it can.
+    /// diff, or in either side the batches, units and gate read, and that `key.rs` itself is left
+    /// out as `secret`, never reviewed masked (RV22's exception for a multi-line key block).
+    // [T3.7 fix round 3] the omission is required again: any side holding a key block leaves the
+    // file out (round 2 had let the guard mask instead).
     fn assert_no_key_body_leaves(diff: Option<&str>, new: &str, old: Option<&str>) {
         let olds: Vec<(&str, &str)> = old.map(|o| ("key.rs", o)).into_iter().collect();
         let inner = MapSource::new(&[("key.rs", new), ("a.rs", "fn f() {}\n")], &olds);
