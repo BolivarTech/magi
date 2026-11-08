@@ -206,10 +206,11 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
         cancel: &CancellationToken,
     ) -> Result<Rendered, ReviewError>;
 
-    /// What the last [`Self::run`] leaves for after its report is delivered: the review history
-    /// and the clean-up of the documentation index (RV08, RV-S39), as blocking work for
+    /// What the runs since the last call leave for after their reports are delivered: the review
+    /// history and the clean-up of the documentation index (RV08, RV-S39), as blocking work for
     /// [`finish_after_report`]. A surface runs it once it has printed or shown the report, so
-    /// cutting the process there never loses the report.
+    /// cutting the process there never loses the report. Each run's work is kept apart and none
+    /// is dropped when reviews of one runner overlap.
     ///
     /// # Returns
     /// The work, or `None` when the review left nothing to do. The work returns a one-line
@@ -1110,8 +1111,9 @@ pub(crate) struct ProductionReviewRunner {
     registry: LanguageRegistry,
     /// What it was built from.
     parts: ReviewRunnerParts,
-    /// What the last review left for after its report.
-    follow_up: Mutex<Option<FollowUp>>,
+    /// What the reviews left for after their reports, oldest first: each run adds its own, so
+    /// overlapping reviews of one runner never overwrite each other.
+    follow_up: Mutex<Vec<FollowUp>>,
 }
 
 impl ProductionReviewRunner {
@@ -1134,7 +1136,7 @@ impl ProductionReviewRunner {
             guard,
             registry: LanguageRegistry::new(),
             parts,
-            follow_up: Mutex::new(None),
+            follow_up: Mutex::new(Vec::new()),
         })
     }
 
@@ -1275,12 +1277,13 @@ impl ProductionReviewRunner {
         }
     }
 
-    /// Leaves `follow` for [`CodeReviewRunner::after_report`].
+    /// Leaves `follow` for [`CodeReviewRunner::after_report`], after what earlier reviews left.
+    // MAGI FIX (MS3 §6 loop3): one slot let a later review overwrite an earlier one's work.
     fn leave_follow_up(&self, follow: FollowUp) {
-        *self
-            .follow_up
+        self.follow_up
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(follow);
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(follow);
     }
 
     /// The guard as the pipeline takes it.
@@ -1459,19 +1462,29 @@ impl CodeReviewRunner for ProductionReviewRunner {
         .await
     }
 
-    /// Records the history of a revision review (anchored to the full SHA of its new side) and
-    /// cleans the documentation index, after the report ([`follow_up_work`]), as owned work
-    /// over its own git runner, so it can run on a blocking thread.
+    /// Records the history of each revision review left so far (anchored to the full SHA of its
+    /// new side) and cleans the documentation index, after the report ([`follow_up_work`]), as
+    /// owned work over its own git runner, so it can run on a blocking thread. Every pending
+    /// review is taken, oldest first: one whose surface reports later finds its work done.
     fn after_report(&self) -> Option<PostReport> {
-        let follow = self
-            .follow_up
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()?;
+        let follows = std::mem::take(
+            &mut *self
+                .follow_up
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        if follows.is_empty() {
+            return None;
+        }
         let memory = Arc::clone(self.parts.memory.as_ref()?);
         let workspace = self.workspace.clone();
         Some(Box::new(move || {
-            follow_up_work(&memory, &ScrubbedGit::new(workspace), follow)
+            let git = ScrubbedGit::new(workspace);
+            let warnings: Vec<String> = follows
+                .into_iter()
+                .filter_map(|follow| follow_up_work(&memory, &git, follow))
+                .collect();
+            (!warnings.is_empty()).then(|| warnings.join("\n"))
         }))
     }
 }
