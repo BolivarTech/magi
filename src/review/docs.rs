@@ -583,27 +583,44 @@ fn py_next_statement(lines: &[&str], from: usize) -> Option<usize> {
     })
 }
 
+/// Whether what follows a closing triple quote ends the statement: nothing, or a `#` comment.
+fn py_statement_ends(after: &str) -> bool {
+    let after = after.trim_start();
+    after.is_empty() || after.starts_with('#')
+}
+
 /// The docstring starting on line `at` (`"""` or `'''`, with an optional `r`/`u` prefix): its text
 /// and the index of the line after it.
+///
+/// The string must be a statement of its own: one followed by more code on its closing line
+/// (`"""a""" + x`) is data, and one that never closes is no docstring (malformed code indexes
+/// nothing, it never swallows the rest of the file).
+// MAGI FIX (MS3 §6 loop2): an expression that opened with a string, or an unterminated string,
+// was chunked as a docstring.
 fn py_docstring_at(lines: &[&str], at: usize) -> Option<(String, usize)> {
     let t = lines.get(at)?.trim_start();
     let t = t.strip_prefix(['r', 'R', 'u', 'U']).unwrap_or(t);
     let quote = PY_TRIPLE_QUOTES.iter().find(|q| t.starts_with(**q))?;
     let rest = t.get(quote.len()..)?;
     if let Some(end) = rest.find(quote) {
-        return Some((rest.get(..end)?.trim().to_string(), at + 1));
+        let after = rest.get(end + quote.len()..)?;
+        return py_statement_ends(after)
+            .then(|| (rest.get(..end).unwrap_or("").trim().to_string(), at + 1));
     }
     let mut body = vec![rest.trim().to_string()];
     let mut j = at + 1;
     while let Some(line) = lines.get(j) {
         j += 1;
         if let Some(end) = line.find(quote) {
+            if !py_statement_ends(line.get(end + quote.len()..).unwrap_or("")) {
+                return None;
+            }
             body.push(line.get(..end).unwrap_or("").trim().to_string());
-            break;
+            return Some((body.join("\n").trim().to_string(), j));
         }
         body.push(line.trim().to_string());
     }
-    Some((body.join("\n").trim().to_string(), j))
+    None
 }
 
 /// The name of the `def`/`class` on `line`, if it is one.
