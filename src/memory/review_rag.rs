@@ -2445,6 +2445,22 @@ mod tests {
         assert_eq!(f.embedder.calls(), 0);
     }
 
+    #[test]
+    fn the_outbound_reserve_covers_the_dimension_probe() {
+        // [MAGI S6 MS3 loop1, R2 Melchior] `doc_store` may embed one probe (under
+        // EMBED_QUERY_TIMEOUT_SECS) before the indexing: the reserve the budget check holds back
+        // must cover it, or a run deadline can be overshot by up to that bound.
+        assert_eq!(
+            outbound_prep_reserve_secs(2, true),
+            REINDEX_TIMEOUT_SECS + EMBED_QUERY_TIMEOUT_SECS + 2 * EMBED_QUERY_TIMEOUT_SECS
+        );
+        assert_eq!(
+            outbound_prep_reserve_secs(2, false),
+            0,
+            "no call, no reserve"
+        );
+    }
+
     #[tokio::test]
     async fn documentation_and_history_left_out_for_lack_of_room_are_declared() {
         // [MAGI S6 MS3 loop1, R2 Melchior and Balthasar] RV07: the report declares what was cut,
