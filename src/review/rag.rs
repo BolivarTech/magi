@@ -22,7 +22,7 @@ use super::languages::{
     enclosing_unit, ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, SemanticUnit,
     UnitKind,
 };
-use super::secrets::display_path;
+use super::secrets::{display_path, mask_secrets};
 use super::source::ContentSource;
 use super::window::estimate_tokens;
 
@@ -662,7 +662,11 @@ pub fn doc_query(text: &str) -> &str {
 }
 
 /// The text a batch's documentation query sends to the embedder: `prefix` (the embedder's query
-/// prefix) followed by `text`, whole query at most [`DOC_QUERY_MAX_BYTES`] bytes.
+/// prefix) followed by `text` with every one-line secret masked ([`mask_secrets`], RV22
+/// amended), the whole query at most [`DOC_QUERY_MAX_BYTES`] bytes.
+///
+/// The text is masked before it is cut: a cut through a raw secret could leave a fragment that
+/// no longer matches its pattern. A `prefix` longer than the bound leaves no room for the text.
 ///
 /// # Arguments
 ///
@@ -671,9 +675,16 @@ pub fn doc_query(text: &str) -> &str {
 ///
 /// # Returns
 ///
-/// The query to embed.
+/// The query to embed. O(bytes of `text`).
+// MAGI FIX (MS3 §6 loop3): the query left raw, and the bound did not count the prefix.
 pub fn doc_search_query(prefix: &str, text: &str) -> String {
-    format!("{prefix}{}", doc_query(text))
+    let masked = mask_secrets(text);
+    let room = DOC_QUERY_MAX_BYTES.saturating_sub(prefix.len());
+    let mut end = room.min(masked.len());
+    while !masked.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{prefix}{}", masked.get(..end).unwrap_or_default())
 }
 
 #[cfg(test)]
