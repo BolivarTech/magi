@@ -1118,6 +1118,40 @@ mod tests {
     }
 
     #[test]
+    fn the_context_left_out_is_listed_up_to_the_cap_and_the_rest_counted() {
+        // [MAGI S6 MS3 loop2, R6b Melchior] `trimmed` grows with the batches; it was written whole,
+        // unlike the other omission lists of the section, in the text and in the JSON.
+        let extra = 3;
+        let s = ReviewSummary {
+            trimmed: (0..MAX_OMISSIONS_SHOWN + extra)
+                .map(|i| TrimmedItem {
+                    kind: ContextKind::Caller,
+                    label: format!("f{i}"),
+                })
+                .collect(),
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("context left out: "))
+            .expect("the line");
+        assert_eq!(
+            line.matches("caller f").count(),
+            MAX_OMISSIONS_SHOWN,
+            "{line}"
+        );
+        assert!(line.ends_with(&format!("; and {extra} more")), "{line}");
+        let v = summary_json(&s);
+        assert_eq!(
+            v["trimmed"].as_array().map(Vec::len),
+            Some(MAX_OMISSIONS_SHOWN)
+        );
+        assert_eq!(v["trimmed_unlisted"], extra);
+    }
+
+    #[test]
     fn only_findings_on_a_line_of_the_reviewed_revision_are_anchored() {
         // [MAGI S6 MS3 loop2, R6b Caspar/Balthasar/Melchior] RV08: a removed-line finding never
         // reaches the history; an unlocated one and one on the same number of another file do.
