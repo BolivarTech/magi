@@ -37,9 +37,9 @@ use magi_rs::review::input::SourceKind;
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
-    assemble, callers_for, containing_units, declare_index, definitions_for, doc_query, item_cost,
-    Assembled, ContextItem, ContextKind, IndexDeclarations, CONTEXT_ITEM_FRAME_TOKENS,
-    MAX_CALLERS_PER_NAME,
+    assemble, callers_for, charged_tokens, containing_units, declare_index, definitions_for,
+    doc_query, item_cost, Assembled, ContextItem, ContextKind, IndexDeclarations,
+    CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
 };
 use magi_rs::review::secrets::{
     display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
@@ -460,10 +460,7 @@ impl RagSource for StoreRag<'_> {
         let limit = self
             .limit_tokens
             .saturating_sub(estimate_tokens(CONTEXT_HEADING));
-        let used = units
-            .iter()
-            .chain(&code)
-            .fold(batch.tokens, |acc, i| acc.saturating_add(item_cost(i)));
+        let used = charged_tokens(batch.tokens, &units, &code);
         let room = limit.saturating_sub(used) >= CONTEXT_ITEM_FRAME_TOKENS;
         let memory = self.docs.is_some() || self.history.is_some();
         let mut declared = Vec::new();

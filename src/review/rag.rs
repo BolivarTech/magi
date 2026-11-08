@@ -139,6 +139,39 @@ pub fn item_cost(item: &ContextItem) -> usize {
         .saturating_add(CONTEXT_ITEM_FRAME_TOKENS)
 }
 
+/// The key [`assemble`] deduplicates a unit, definition or caller by: `(file, lines, side)`; an
+/// item without `lines` has none and is never deduplicated.
+fn dedup_key(item: &ContextItem) -> Option<(String, (u32, u32), bool)> {
+    item.lines
+        .map(|lines| (item.file.clone(), lines, item.old_side))
+}
+
+/// What [`assemble`] would charge for the batch with `units` and every item of `code`, with the
+/// same deduplication: a repeated unit, and a definition or caller that repeats a unit or another
+/// item, are charged once. A caller asks it whether anything could still follow `code` before it
+/// pays to fetch documentation and history. O(n) in items.
+///
+/// # Arguments
+///
+/// * `batch_tokens` - Tokens of the batch's own code.
+/// * `units` - The containing units of the batch's changes.
+/// * `code` - Definitions followed by callers.
+///
+/// # Returns
+///
+/// The tokens charged, saturating.
+// MAGI FIX (MS3 §6 loop2): the room check charged a unit once per hunk inside it.
+pub fn charged_tokens(batch_tokens: usize, units: &[ContextItem], code: &[ContextItem]) -> usize {
+    let mut seen = HashSet::new();
+    units
+        .iter()
+        .chain(code)
+        .filter(|item| dedup_key(item).is_none_or(|key| seen.insert(key)))
+        .fold(batch_tokens, |acc, item| {
+            acc.saturating_add(item_cost(item))
+        })
+}
+
 /// Adds to the batch the context that fits, by the fixed priority: containing units (mandatory),
 /// then definitions and callers, documentation and history.
 ///
@@ -195,10 +228,8 @@ pub fn assemble(
     let mut seen: HashSet<(String, (u32, u32), bool)> = HashSet::new();
     let mut items = Vec::new();
     for unit in units {
-        if let Some(lines) = unit.lines {
-            if !seen.insert((unit.file.clone(), lines, unit.old_side)) {
-                continue;
-            }
+        if dedup_key(&unit).is_some_and(|key| !seen.insert(key)) {
+            continue;
         }
         let cost = item_cost(&unit);
         used = used.saturating_add(cost);
@@ -223,12 +254,10 @@ pub fn assemble(
     let mut trimmed = Vec::new();
     let mut full = false;
     for item in optional {
-        if matches!(item.kind, ContextKind::Definition | ContextKind::Caller) {
-            if let Some(lines) = item.lines {
-                if !seen.insert((item.file.clone(), lines, item.old_side)) {
-                    continue;
-                }
-            }
+        if matches!(item.kind, ContextKind::Definition | ContextKind::Caller)
+            && dedup_key(&item).is_some_and(|key| !seen.insert(key))
+        {
+            continue;
         }
         if !full {
             let cost = item_cost(&item);
