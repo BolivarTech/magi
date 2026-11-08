@@ -1147,6 +1147,31 @@ mod tests {
     }
 
     #[test]
+    fn a_python_string_is_a_docstring_only_as_a_whole_statement() {
+        // [MAGI S6 MS3 loop2, R1 Caspar] A string that opens an expression is data, and a
+        // string that never closes is no docstring: it swallowed the rest of the file.
+        let reg = LanguageRegistry::new();
+        let expr = chunk_doc_comments(
+            "m.py",
+            "def f():\n    \"\"\"part\"\"\" + x\n    return 1\n",
+            &reg,
+        );
+        assert!(expr.is_empty(), "{expr:?}");
+        let open = chunk_doc_comments(
+            "m.py",
+            "def f():\n    \"\"\"never closed\n    x = 1\n",
+            &reg,
+        );
+        assert!(open.is_empty(), "{open:?}");
+        let commented =
+            chunk_doc_comments("m.py", "def f():\n    \"\"\"Doc f.\"\"\"  # ok\n", &reg);
+        assert!(
+            commented.iter().any(|c| c.text.contains("Doc f.")),
+            "{commented:?}"
+        );
+    }
+
+    #[test]
     fn plain_comments_and_string_data_are_not_documentation() {
         // [CP2 MS3 loop 13] The false-positive side of the doc-comment rules.
         let reg = LanguageRegistry::new();
