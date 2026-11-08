@@ -654,11 +654,16 @@ fn side_units(
 ///
 /// A prefix of `text`. O(1) in the cut, never slices inside a character.
 pub fn doc_query(text: &str) -> &str {
-    let mut end = DOC_QUERY_MAX_BYTES.min(text.len());
+    cut_on_char(text, DOC_QUERY_MAX_BYTES)
+}
+
+/// `text` cut to at most `max` bytes, on a char boundary. O(1) in the cut.
+fn cut_on_char(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
     while !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
-    text.get(..end).unwrap_or(text)
+    text.get(..end).unwrap_or_default()
 }
 
 /// The text a batch's documentation query sends to the embedder: `prefix` (the embedder's query
@@ -680,11 +685,7 @@ pub fn doc_query(text: &str) -> &str {
 pub fn doc_search_query(prefix: &str, text: &str) -> String {
     let masked = mask_secrets(text);
     let room = DOC_QUERY_MAX_BYTES.saturating_sub(prefix.len());
-    let mut end = room.min(masked.len());
-    while !masked.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    format!("{prefix}{}", masked.get(..end).unwrap_or_default())
+    format!("{prefix}{}", cut_on_char(&masked, room))
 }
 
 #[cfg(test)]
