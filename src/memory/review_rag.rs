@@ -76,6 +76,10 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// The `trimmed` label of a documentation or history source that is unavailable for the review.
 const INDEX_UNAVAILABLE: &str = "index unavailable";
 
+/// The `trimmed` label of documentation or history left out of a batch because nothing more
+/// could fit in its budget (its query is then never embedded).
+const NO_ROOM: &str = "no room left in the batch";
+
 /// The fixed run-log line of a reindex that wiped an index of another identity.
 const REBUILT_LINE: &str = "documentation index rebuilt: embedding model or chunking changed";
 
@@ -462,7 +466,16 @@ impl RagSource for StoreRag<'_> {
         let mut withheld = 0usize;
         let (docs, history) = match (memory, self.embedder) {
             (false, _) | (true, None) => (None, None),
-            (true, Some(_)) if !room => (Some(Vec::new()), Some(Vec::new())),
+            (true, Some(_)) if !room => {
+                // MAGI FIX (MS3 §6 loop1): RV07 declares what was cut, this case included.
+                if self.docs.is_some() {
+                    declared.push((ContextKind::Documentation, NO_ROOM.to_string()));
+                }
+                if self.history.is_some() {
+                    declared.push((ContextKind::History, NO_ROOM.to_string()));
+                }
+                (Some(Vec::new()), Some(Vec::new()))
+            }
             (true, Some(embedder)) => match self.query_vector(embedder, &text).await {
                 None => (None, None),
                 Some(vector) => (
