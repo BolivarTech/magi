@@ -84,6 +84,10 @@ const INDEX_UNAVAILABLE: &str = "index unavailable";
 /// could fit in its budget (its query is then never embedded).
 const NO_ROOM: &str = "no room left in the batch";
 
+/// The cause declared for documentation and history when the configured embedder failed or did
+/// not answer the review's first query.
+const EMBEDDER_DOWN: &str = "the embedder did not answer";
+
 /// The fixed run-log line of a reindex that wiped an index of another identity.
 const REBUILT_LINE: &str = "documentation index rebuilt: embedding model or chunking changed";
 
@@ -440,7 +444,9 @@ impl RagSource for StoreRag<'_> {
     ///
     /// The query is embedded only when something could still enter the budget, and before any
     /// store is touched. A missing embedder is declared as `without_embedder`, a run without a
-    /// database as `without_memory`; a failing embedder or store degrades, never fails.
+    /// database as `without_memory`; a failing embedder or store degrades, never fails. A
+    /// configured embedder that fails also declares, once per review, "the embedder did not
+    /// answer" for documentation and history, so the report tells it from a missing one.
     async fn context_for(&self, batch: &ReviewBatch) -> Result<Assembled, ReviewError> {
         let text = batch_text(batch);
         let mut units = Vec::new();
@@ -477,13 +483,29 @@ impl RagSource for StoreRag<'_> {
                 }
                 (Some(Vec::new()), Some(Vec::new()))
             }
-            (true, Some(embedder)) => match self.query_vector(embedder, &text).await {
-                None => (None, None),
-                Some(vector) => (
-                    Some(self.documentation(&vector, &mut declared)),
-                    Some(self.history_items(&batch_files(batch), &mut declared, &mut withheld)),
-                ),
-            },
+            (true, Some(embedder)) => {
+                let was_down = self.embedder_down.load(Ordering::SeqCst);
+                match self.query_vector(embedder, &text).await {
+                    None => {
+                        // MAGI FIX (MS3 §6 loop2): a down embedder is said apart from a missing
+                        // one, once per review (the run log keeps its error).
+                        if !was_down {
+                            if self.docs.is_some() {
+                                declared
+                                    .push((ContextKind::Documentation, EMBEDDER_DOWN.to_string()));
+                            }
+                            if self.history.is_some() {
+                                declared.push((ContextKind::History, EMBEDDER_DOWN.to_string()));
+                            }
+                        }
+                        (None, None)
+                    }
+                    Some(vector) => (
+                        Some(self.documentation(&vector, &mut declared)),
+                        Some(self.history_items(&batch_files(batch), &mut declared, &mut withheld)),
+                    ),
+                }
+            }
         };
         let mut a = assemble(batch.tokens, limit, units, code, docs, history)?;
         if !memory {
