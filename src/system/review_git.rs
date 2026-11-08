@@ -827,6 +827,47 @@ mod tests {
         assert_eq!(readmes.len(), 2, "the tag's README and HEAD's: {live:?}");
     }
     #[test]
+    fn a_history_path_that_looks_like_pathspec_magic_is_read_literally() {
+        // [MAGI S6 MS3 loop3, R3 Melchior; false positive pinned] A stored path such as
+        // `:(glob)*.rs` reaches `git diff ... -- <file>` in `classify`. Every call of this runner
+        // carries GIT_LITERAL_PATHSPECS=1, so it names that file and no other: here it matches
+        // nothing (untouched, a weak reject), where read as magic it would match `a.rs`, whose
+        // line 1 changed (attended).
+        use magi_rs::review::history::{classify, HistoryEntry, HistoryStatus};
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "one\ntwo\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "c1"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let c1 = g
+            .run(&["rev-parse", "HEAD"])
+            .expect("sha")
+            .trim()
+            .to_string();
+        std::fs::write(d.path().join("a.rs"), "ONE\ntwo\n").expect("write");
+        git(d.path(), &["commit", "-q", "-am", "c2"]);
+        let magic = HistoryEntry {
+            id: "i".into(),
+            file: ":(glob)*.rs".into(),
+            line: Some(1),
+            reviewed_commit: c1.clone(),
+            title: "t".into(),
+            detail: "d".into(),
+            status: HistoryStatus::Pending,
+        };
+        assert_eq!(classify(&magic, "HEAD", &g), HistoryStatus::WeakReject);
+        let real = HistoryEntry {
+            file: "a.rs".into(),
+            ..magic
+        };
+        assert_eq!(
+            classify(&real, "HEAD", &g),
+            HistoryStatus::Attended,
+            "precondition: the change is seen"
+        );
+    }
+
+    #[test]
     fn names_taken_ahead_in_the_temp_directory_never_block_the_empty_repository() {
         // [MAGI S6 loop 5, A1-c1] another local user could take `<prefix>-<pid>-<n>` for the next
         // attempts; a random name leaves nothing to predict. nextest runs each test in its own
