@@ -654,6 +654,41 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_DDL)
 }
 
+/// [`init_schema`] for a store handed a connection (`ReviewDocStore`, `ReviewHistoryStore`).
+///
+/// # Errors
+///
+/// The cause, as text, when the schema cannot be created.
+pub(crate) fn init_store_schema(conn: &Connection) -> std::result::Result<(), String> {
+    init_schema(conn).map_err(|e| e.to_string())
+}
+
+/// A raw connection to a fresh file shaped like a 0.24.x database (its marker table, no
+/// v0.25.0 table), for the tests of the stores that are handed a connection.
+#[cfg(test)]
+pub(crate) fn pre_0_25_connection_for_test() -> (Arc<Mutex<Connection>>, tempfile::NamedTempFile) {
+    let tmp = tempfile::NamedTempFile::new().expect("tmp");
+    let conn = Connection::open(tmp.path()).expect("open");
+    conn.execute_batch(&format!(
+        "CREATE TABLE {PRE_0_25_MARKER_TABLE} (id INTEGER)"
+    ))
+    .expect("marker");
+    (Arc::new(Mutex::new(conn)), tmp)
+}
+
+/// How many `code_review_*` tables the database behind `conn` has.
+#[cfg(test)]
+pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
+    conn.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'code_review_%'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count")
+}
+
 /// The DDL [`init_schema`] runs, statement by statement (autocommit, no transaction), in
 /// this order.
 ///

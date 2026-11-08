@@ -95,7 +95,7 @@ impl ReviewHistoryStore {
     pub fn new(conn: Arc<Mutex<Connection>>, dek: MaskedDek) -> Result<Self, MemoryError> {
         {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
-            crate::system::database::init_schema(&c).map_err(db_err)?;
+            crate::system::database::init_store_schema(&c).map_err(MemoryError::Storage)?;
         }
         Ok(Self {
             conn,
@@ -403,6 +403,34 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("row")
+    }
+
+    #[test]
+    fn a_store_handed_an_older_database_refuses_it_and_creates_nothing() {
+        // [MAGI S6 MS3 loop3, R3 Melchior, Balthasar] The refusal of a 0.24.x database (RV19)
+        // rested on the caller's checked open: handed a raw connection, `new` created the
+        // v0.25.0 tables and upgraded the file in place, so every later open passed.
+        let dek = fresh_dek();
+        let (conn, _old) = crate::system::database::pre_0_25_connection_for_test();
+        let r = ReviewHistoryStore::new(Arc::clone(&conn), dek);
+        assert!(
+            matches!(&r, Err(MemoryError::Storage(m)) if m.contains("code_review_docs") && m.contains("0.24.x")),
+            "{:?}",
+            r.as_ref().err()
+        );
+        assert_eq!(crate::system::database::review_tables_for_test(&conn), 0);
+    }
+
+    /// A masked data key of a fresh database.
+    fn fresh_dek() -> MaskedDek {
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db")
+        .data_key()
+        .expect("dek")
     }
 
     #[test]

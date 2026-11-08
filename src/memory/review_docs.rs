@@ -143,7 +143,7 @@ impl ReviewDocStore {
     ) -> Result<Self, MemoryError> {
         {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
-            crate::system::database::init_schema(&c).map_err(db_err)?;
+            crate::system::database::init_store_schema(&c).map_err(MemoryError::Storage)?;
         }
         Ok(Self {
             conn,
@@ -1470,6 +1470,32 @@ mod tests {
             !vector.windows(4).any(|w| w == b"[0.5"),
             "embedding JSON stored in the clear"
         );
+    }
+
+    #[test]
+    fn a_store_handed_an_older_database_refuses_it_and_creates_nothing() {
+        // [MAGI S6 MS3 loop3, R1 Melchior] The refusal of a 0.24.x database (RV19) rested on the
+        // caller's checked open: handed a raw connection, `new` created the v0.25.0 tables.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let dek = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db")
+        .data_key()
+        .expect("dek");
+        let (conn, _old) = crate::system::database::pre_0_25_connection_for_test();
+        let r = ReviewDocStore::new(
+            Arc::clone(&conn),
+            dek,
+            magi_rs::review::docs::doc_index_id("fake", 3),
+        );
+        assert!(
+            matches!(&r, Err(MemoryError::Storage(m)) if m.contains("code_review_docs") && m.contains("0.24.x")),
+            "{:?}",
+            r.as_ref().err()
+        );
+        assert_eq!(crate::system::database::review_tables_for_test(&conn), 0);
     }
 
     #[tokio::test]
