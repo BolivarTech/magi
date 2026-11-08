@@ -463,8 +463,11 @@ fn rust_item_name(line: &str) -> String {
 /// and plain comments (`//` and `/* */`, on one line or several) are skipped; `""` when there is
 /// no named item.
 // MAGI FIX (MS3 §6 loop1): a plain `/* */` comment before the item was read as the item line.
+// MAGI FIX (MS3 §6 loop3): an attribute written over several lines is skipped whole, its
+// brackets counted, so its continuation lines are never read as the item line.
 fn item_name_after(lines: &[&str], from: usize) -> String {
     let mut in_comment = false;
+    let mut attr_depth = 0usize;
     for k in from..from.saturating_add(MAX_ITEM_LOOKAHEAD_LINES) {
         let Some(line) = lines.get(k) else {
             break;
@@ -472,6 +475,10 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
         let t = line.trim();
         if in_comment {
             in_comment = !t.contains(BLOCK_COMMENT_CLOSER);
+            continue;
+        }
+        if attr_depth > 0 || t.starts_with("#[") || t.starts_with("#![") {
+            attr_depth = bracket_depth(attr_depth, t);
             continue;
         }
         if let Some(rest) = t.strip_prefix(BLOCK_COMMENT_OPENER) {
@@ -484,12 +491,22 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
             }
             continue;
         }
-        if t.is_empty() || t.starts_with("#[") || t.starts_with("#![") || t.starts_with("//") {
+        if t.is_empty() || t.starts_with("//") {
             continue;
         }
         return rust_item_name(t);
     }
     String::new()
+}
+
+/// `depth` after the square brackets of `line`: each `[` opens, each `]` closes, saturating at
+/// zero. O(len of `line`).
+fn bracket_depth(depth: usize, line: &str) -> usize {
+    line.chars().fold(depth, |d, c| match c {
+        '[' => d.saturating_add(1),
+        ']' => d.saturating_sub(1),
+        _ => d,
+    })
 }
 
 /// Strips the `///` or `//!` opener and one following space.
@@ -498,23 +515,30 @@ fn strip_line_doc(trimmed: &str) -> &str {
     rest.strip_prefix(' ').unwrap_or(rest)
 }
 
-/// Collects the block doc comment starting at line `start` (which holds the opener): the text
-/// and the index of the line after the comment.
+/// Collects the block doc comment starting at line `start` (which holds the opener): the text,
+/// the index of the line after the comment, and what follows the closer on its own line (`""`
+/// when nothing does).
 ///
 /// The closer `*/` is looked for before a continuation line loses its leading `*`, so the usual
 /// ` */` line closes the comment.
 // MAGI FIX (MS3 §6 loop1): the leading `*` was stripped first, so a ` */` line closed nothing and
 // the code below was swallowed into the chunk.
-fn collect_block_doc(lines: &[&str], start: usize) -> (String, usize) {
+// MAGI FIX (MS3 §6 loop3): the text after the closer is returned, so an item declared on the
+// closing line names its chunk instead of the next item.
+fn collect_block_doc<'a>(lines: &[&'a str], start: usize) -> (String, usize, &'a str) {
     let mut body = String::new();
     let mut j = start;
-    while let Some(line) = lines.get(j) {
+    let mut after = "";
+    while let Some(&line) = lines.get(j) {
         let mut t = line.trim_start();
         if j == start {
             t = t.get(BLOCK_DOC_OPENER_LEN..).unwrap_or("");
         }
         let (content, closed) = match t.find(BLOCK_COMMENT_CLOSER) {
-            Some(e) => (t.get(..e).unwrap_or(t), true),
+            Some(e) => {
+                after = t.get(e + BLOCK_COMMENT_CLOSER.len()..).unwrap_or("");
+                (t.get(..e).unwrap_or(t), true)
+            }
             None => (t, false),
         };
         let content = if j == start {
@@ -530,7 +554,7 @@ fn collect_block_doc(lines: &[&str], start: usize) -> (String, usize) {
             break;
         }
     }
-    (body, j)
+    (body, j, after)
 }
 
 /// Rust doc comments of `lines`, in file order.
@@ -559,9 +583,13 @@ fn rust_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
             chunks.extend(make_chunks(path, &name, &body));
             i = j;
         } else if let Some(kind) = block_doc_kind(t) {
-            let (body, j) = collect_block_doc(lines, i);
+            let (body, j, after) = collect_block_doc(lines, i);
             let name = if kind == DocKind::Outer {
-                item_name_after(lines, j)
+                let tail: Vec<&str> = std::iter::once(after)
+                    .chain(lines.iter().skip(j).copied())
+                    .take(MAX_ITEM_LOOKAHEAD_LINES)
+                    .collect();
+                item_name_after(&tail, 0)
             } else {
                 String::new()
             };
