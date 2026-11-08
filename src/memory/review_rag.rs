@@ -42,7 +42,7 @@ use magi_rs::review::rag::{
     MAX_CALLERS_PER_NAME,
 };
 use magi_rs::review::secrets::{
-    display_path, find_secret, holds_key_block, masked_pattern, outward_text,
+    display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
 };
 use magi_rs::review::source::{ContentSource, GitCommand};
 use magi_rs::review::window::estimate_tokens;
@@ -375,9 +375,11 @@ impl StoreRag<'_> {
         docs.search_loaded(&vectors, query, DOC_SEARCH_K)
     }
 
-    /// The validated history on `files`; an entry whose title or detail holds a secret counts in
-    /// `withheld` instead. A read error leaves history out for the rest of the review, declared
-    /// once.
+    /// The validated history on `files`, each one-line secret of a title or detail masked
+    /// ([`mask_secrets`], RV22 amended); an entry whose title or detail holds a private-key block
+    /// counts in `withheld` instead (RV22's exception). A read error leaves history out for the
+    /// rest of the review, declared once.
+    // MAGI FIX (MS3 §6 loop1): an entry quoting a one-line secret was withheld, not masked.
     fn history_items(
         &self,
         files: &[String],
@@ -394,11 +396,15 @@ impl StoreRag<'_> {
             Ok(entries) => entries
                 .into_iter()
                 .filter_map(|e| {
-                    if find_secret(&e.title).is_some() || find_secret(&e.detail).is_some() {
+                    if holds_key_block(&e.title) || holds_key_block(&e.detail) {
                         *withheld = withheld.saturating_add(1);
                         None
                     } else {
-                        Some(history_item(e))
+                        Some(history_item(HistoryEntry {
+                            title: mask_secrets(&e.title),
+                            detail: mask_secrets(&e.detail),
+                            ..e
+                        }))
                     }
                 })
                 .collect(),
