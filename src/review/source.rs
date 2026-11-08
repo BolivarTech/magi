@@ -923,6 +923,33 @@ impl ContentSource for CachedSource<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_released_key_block_side_is_never_read_again() {
+        // [MAGI S6 MS3 loop3, R6a Melchior] A side holding a private-key block is held raw (RV22's
+        // exception), and only the filter leaving its file out kept it from a model; a later
+        // stage that read the path again got the raw key back. The cache now refuses that read.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let keyed = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n{end}\n");
+        let inner = crate::review::test_support::MapSource::new(
+            &[("k.pem", keyed.as_str()), ("a.rs", "fn a() {}\n")],
+            &[],
+        );
+        let cache = CachedSource::new(&inner);
+        assert!(cache.read("k.pem").expect("read").is_some());
+        assert!(cache.read("a.rs").expect("read").is_some());
+        cache.release(Face::New, "k.pem");
+        cache.release(Face::New, "a.rs");
+        assert!(
+            matches!(cache.read("k.pem"), Err(ReviewError::EgressSecret { .. })),
+            "the raw key came back"
+        );
+        assert_eq!(
+            cache.read("a.rs").expect("a clean side reads again"),
+            Some(b"fn a() {}\n".to_vec())
+        );
+    }
+
     #[cfg(unix)] // a FIFO is a unix file type; Windows has no open that blocks this way.
     #[test]
     fn a_file_swapped_for_a_fifo_before_the_open_is_refused_without_blocking() {
