@@ -976,6 +976,11 @@ pub fn mask_secrets(text: &str) -> String {
 /// The name of the first pattern (in table order) whose mask, `<redacted: <name>>`, appears in
 /// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
 ///
+/// It reads the text, not a record of the masking, so it serves declarations only: a text
+/// masked for several patterns names the first in table order, not the one masked first, and a
+/// text that quotes a mask literally (documentation of this very format, say) is declared
+/// masked though nothing was. Both err toward declaring, never toward a byte leaving.
+///
 /// # Arguments
 /// * `text` - A text that may have been masked.
 ///
