@@ -302,7 +302,11 @@ pub fn chunk_markdown(path: &str, text: &str) -> Vec<DocChunk> {
     for line in text.split_inclusive('\n') {
         let bare = line.trim_end_matches(['\n', '\r']);
         if let Some((ch, run)) = fence {
-            if fence_of(bare).is_some_and(|(c, r)| c == ch && r >= run) {
+            // MAGI FIX (MS3 §6 loop2): a closing fence carries no info string (CommonMark), so
+            // "```rust" inside a "```" fence is text, not its end.
+            if fence_of(bare).is_some_and(|(c, r)| c == ch && r >= run)
+                && bare.trim().chars().all(|c| c == ch)
+            {
                 fence = None;
             }
         } else if let Some(opened) = fence_of(bare) {
