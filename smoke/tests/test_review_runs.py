@@ -157,6 +157,18 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                           'base_url = "%s"' % runs.UNREACHABLE_EMBEDDER_URL, 'model = "m"'], lines)
         self.assertTrue(runs.DEFINITIONS["R17"].unreachable_embedder)
 
+    def test_a_spaced_or_commented_embedding_header_is_still_the_embedding_table(self) -> None:
+        # [MAGI S6 MS3 loop2, R7a Caspar] `[ embedding ]` or a comment after the header was not
+        # recognized, so a second `[embedding]` table was appended and the product refused it.
+        for header in ("[ embedding ]", "[embedding] # the embedder"):
+            with self.subTest(header=header), tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "magi.toml"
+                path.write_text('%s\nbase_url = "http://emb/v1"\nmodel = "m"\n' % header,
+                                encoding="utf-8")
+                runs.point_embedding_at(path, "http://127.0.0.1:1/v1")
+                lines = path.read_text(encoding="utf-8").splitlines()
+                self.assertEqual([header, 'base_url = "http://127.0.0.1:1/v1"', 'model = "m"'], lines)
+
     def test_a_config_without_an_embedding_table_gains_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "magi.toml"
