@@ -157,6 +157,18 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                           'base_url = "%s"' % runs.UNREACHABLE_EMBEDDER_URL, 'model = "m"'], lines)
         self.assertTrue(runs.DEFINITIONS["R17"].unreachable_embedder)
 
+    def test_the_unreachable_embedder_refuses_at_once_on_a_port_no_service_holds(self) -> None:
+        # [MAGI S6 MS3 loop2, R7a Caspar] port 9 is the discard service where it is enabled: a
+        # listener there accepts and swallows the request, a hang instead of a refusal.
+        import socket
+        import urllib.parse
+        url_of = getattr(runs, "unreachable_embedder_url", None)
+        self.assertIsNotNone(url_of, "the URL must be taken at run time, from a port just freed")
+        port = urllib.parse.urlsplit(url_of()).port
+        self.assertGreaterEqual(port, 1024, "a well-known port may hold a service")
+        with self.assertRaises(ConnectionRefusedError):
+            socket.create_connection(("127.0.0.1", port), timeout=5).close()
+
     def test_a_spaced_or_commented_embedding_header_is_still_the_embedding_table(self) -> None:
         # [MAGI S6 MS3 loop2, R7a Caspar] `[ embedding ]` or a comment after the header was not
         # recognized, so a second `[embedding]` table was appended and the product refused it.
