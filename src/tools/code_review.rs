@@ -2908,6 +2908,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn units_and_definitions_holding_a_one_line_secret_reach_the_trio_masked() {
+        // [MAGI S6 MS3 loop2, R2 Melchior/Caspar, R4 Caspar] A commit review through the
+        // production runner: `a`'s containing unit holds the key on a line no hunk shows, and the
+        // definition of `b` holds it too. Both are read through the review's masking cache, so
+        // they reach the prompt masked (never withheld) and no byte of the key leaves.
+        let key = concat!("sk-ant-", "api03-", "BBBBBBBBBBBBBBBBBBBB"); // allow-secret-scan
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        git_in(&ws, &["init", "-q"]);
+        let a = |tail: &str| {
+            format!(
+                "fn a() {{\n    let k = \"{key}\";\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    b(k);\n    {tail}\n}}\n"
+            )
+        };
+        let b = |tail: &str| format!("fn b(_k: &str) {{\n    let t = \"{key}\";\n    {tail}\n}}\n");
+        std::fs::write(ws.join("src").join("a.rs"), a("let w = 0;")).expect("a.rs");
+        std::fs::write(ws.join("src").join("b.rs"), b("let v = 0;")).expect("b.rs");
+        git_in(&ws, &["add", "."]);
+        git_in(&ws, &["commit", "-q", "-m", "one"]);
+        std::fs::write(ws.join("src").join("a.rs"), a("let w = 9;")).expect("a.rs");
+        std::fs::write(ws.join("src").join("b.rs"), b("let v = 9;")).expect("b.rs");
+        git_in(&ws, &["commit", "-q", "-am", "two"]);
+        let (_db, _mem, memory) = review_memory();
+        let embedder = Arc::new(RecordingEmbedder::default());
+        let consult = Arc::new(RecordingConsult::default());
+        let runner = ProductionReviewRunner::new(ReviewRunnerParts {
+            workspace: ws.clone(),
+            pool: vec![("m".into(), None)],
+            consult: consult.clone(),
+            gate_client: Arc::new(NoDecision),
+            gate_chain: vec![ModelSpec {
+                model: "g".into(),
+                min_confidence: None,
+            }],
+            max_state_bytes: 61_000,
+            call_timeout: Duration::from_secs(1),
+            max_rotations: 0,
+            retry_disabled: false,
+            agent_timeout_secs: 120,
+            structured: false,
+            memory: Some(memory),
+            embedder: Some(embedder.clone() as Arc<dyn EmbeddingProvider>),
+        })
+        .expect("runner");
+        let (rendered, _) = review_and_follow_up(&runner, ReviewInput::Commit(None)).await;
+        let embedded = embedder.0.lock().expect("lock").clone();
+        let prompts = consult.0.lock().expect("lock").clone();
+        assert!(!prompts.is_empty());
+        assert!(
+            embedded
+                .iter()
+                .chain(&prompts)
+                .all(|t| !t.contains("sk-ant-") && !t.contains("BBBBBBBBBBBBBBBBBBBB")),
+            "a byte of the key left the process: {embedded:?} {prompts:?}"
+        );
+        let context: String = prompts
+            .iter()
+            .filter_map(|p| p.split_once(magi_rs::review::pipeline::CONTEXT_HEADING))
+            .map(|(_, c)| c.to_string())
+            .collect();
+        assert!(
+            context.contains("<redacted: anthropic-key>"),
+            "the unit or definition reached the context masked: {prompts:?}"
+        );
+        assert_eq!(rendered.json["context_withheld"], 0, "{}", rendered.json);
+    }
+
+    #[tokio::test]
     async fn a_review_with_enough_budget_still_indexes_the_documentation() {
         // [SMOKE1 S50] The RAG is intact when the budget holds: the embedder is called and the
         // review runs (its trio double answers none, so the report is empty but delivered).
