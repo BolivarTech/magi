@@ -1131,6 +1131,17 @@ mod tests {
     }
 
     #[test]
+    fn a_visibility_written_with_a_space_still_names_the_item() {
+        // [MAGI S6 MS3 loop2, R1 Caspar] `pub (crate)` is valid Rust; the `(crate)` token was
+        // read as the item keyword and the section came out empty.
+        let reg = LanguageRegistry::new();
+        let c = chunk_doc_comments("src/m.rs", "/// S.\npub (crate) fn size() {}\n", &reg);
+        assert_eq!(c.first().map(|x| x.section.as_str()), Some("size"), "{c:?}");
+        let d = chunk_doc_comments("src/m.rs", "/// T.\npub ( in crate::a ) struct T;\n", &reg);
+        assert_eq!(d.first().map(|x| x.section.as_str()), Some("T"), "{d:?}");
+    }
+
+    #[test]
     fn plain_comments_and_string_data_are_not_documentation() {
         // [CP2 MS3 loop 13] The false-positive side of the doc-comment rules.
         let reg = LanguageRegistry::new();
