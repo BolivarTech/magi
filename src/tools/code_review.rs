@@ -1275,6 +1275,14 @@ impl ProductionReviewRunner {
         }
     }
 
+    /// Leaves `follow` for [`CodeReviewRunner::after_report`].
+    fn leave_follow_up(&self, follow: FollowUp) {
+        *self
+            .follow_up
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(follow);
+    }
+
     /// The guard as the pipeline takes it.
     fn guard(&self, p: &Path) -> Result<PathBuf, ReviewError> {
         review_path_guard(&self.guard, p)
@@ -1439,10 +1447,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
             )
             .await?;
             drop(rag);
-            *self
-                .follow_up
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(FollowUp::of_review(
+            self.leave_follow_up(FollowUp::of_review(
                 &outcome.summary,
                 rev,
                 worktree,
@@ -2694,6 +2699,43 @@ mod tests {
                 .is_some_and(|w| w.starts_with("warning: the review history was not updated: ")),
             "{warning:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn two_reviews_left_before_any_report_both_record_their_history() {
+        // [MAGI S6 MS3 loop3, R5 Caspar] One slot per runner: when two reviews overlap (the TUI
+        // and its agent share a runner; an agent may call the tool twice), the second run
+        // overwrote the first's follow-up and its history was lost without a word.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        git_in(&ws, &["init", "-q"]);
+        std::fs::write(ws.join("a.rs"), "fn a() {}\n").expect("a.rs");
+        git_in(&ws, &["add", "a.rs"]);
+        git_in(&ws, &["commit", "-q", "-m", "one"]);
+        let first = git_in(&ws, &["rev-parse", "HEAD"]);
+        git_in(&ws, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        let second = git_in(&ws, &["rev-parse", "HEAD"]);
+        let (_db, _mem, memory) = review_memory();
+        let runner = production_runner_with_memory(&ws, Some(Arc::clone(&memory)), None);
+        for (rev, line) in [(&first, 1), (&second, 2)] {
+            let mut follow = follow_up(Some(rev));
+            follow.findings[0].0.line = Some(line);
+            runner.leave_follow_up(follow);
+        }
+        for _ in 0..2 {
+            let _ = finish_after_report(&runner, None, None).await;
+        }
+        let mut anchors: Vec<String> = memory
+            .history()
+            .all()
+            .expect("all")
+            .into_iter()
+            .map(|e| e.reviewed_commit)
+            .collect();
+        anchors.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(anchors, expected);
     }
 
     #[tokio::test]
