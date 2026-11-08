@@ -48,7 +48,7 @@ import urllib.parse
 
 from smoke.binary import LOOPBACK_HOSTS, NO_PROXY_VARIABLE
 from smoke.config import PLACEHOLDER_ENTRIES, ROTATION_MARKER
-from smoke.env import MAGI_DIR_NAME, MAGI_TOML_NAME
+from smoke.env import MAGI_DIR_NAME, MAGI_TOML_NAME, table_header
 from smoke.errors import (HarnessError, PayloadTooSmall,
                           ProductOutputError, TimedOut)
 from smoke.payload import PayloadBuilder
@@ -2180,6 +2180,7 @@ _REVIEW_CONTEXT_FILE = (b"/// Adds two numbers.\n"
                         b"    a + b\n"
                         b"}\n")
 
+
 @contextlib.contextmanager
 def embedder_pointed_away(config_path):
     """Point the ``[embedding]`` of the ``magi.toml`` at *config_path* at a served error.
@@ -2205,34 +2206,9 @@ def embedder_pointed_away(config_path):
         point_embedding_at(config_path, url)
         yield url
 
+
 #: The table whose endpoint :func:`point_embedding_at` rewrites.
 _EMBEDDING_TABLE = "[embedding]"
-
-#: Its name, as :func:`_table_name` reads a header.
-_EMBEDDING_TABLE_NAME = "embedding"
-
-
-def _table_name(header: str) -> str:
-    """The name a TOML table header line declares, or ``""`` for anything else.
-
-    A trailing ``#`` comment is dropped and the spaces TOML allows inside the
-    brackets are trimmed; an array-of-tables header (``[[x]]``) declares no
-    plain table and gives ``""``.
-
-    Args:
-        header: A stripped line that starts with ``[``.
-
-    Returns:
-        str: The table's name.
-
-    Example:
-        >>> _table_name("[ embedding ] # the embedder"), _table_name("[[magi.fallback]]")
-        ('embedding', '')
-    """
-    code = header.split("#", 1)[0].strip()
-    if code.startswith("[[") or not code.endswith("]"):
-        return ""
-    return code[1:-1].strip()
 
 
 def review_context_files() -> tuple[tuple[str, bytes], ...]:
@@ -2283,7 +2259,7 @@ def point_embedding_at(config_path, url: str) -> None:
         if stripped.startswith("["):
             # MAGI FIX (S6 MS3 loop2): TOML allows spaces inside the brackets and a comment
             # after the header; an exact match appended a second [embedding] table.
-            in_embedding = _table_name(stripped) == _EMBEDDING_TABLE_NAME
+            in_embedding = table_header(stripped) == _EMBEDDING_TABLE
             lines.append(original)
             if in_embedding:
                 lines.append(line)
