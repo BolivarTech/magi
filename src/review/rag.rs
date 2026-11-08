@@ -97,6 +97,11 @@ pub const CONTEXT_ITEM_FRAME_TOKENS: usize = 18;
 /// Longest doc-search query, in bytes.
 pub const DOC_QUERY_MAX_BYTES: usize = 8_192;
 
+/// Deepest a block is cut to find the narrowest unit around a line (a method of an impl in a
+/// module in a module is three levels); each level must be strictly smaller, so the bound only
+/// stops a pathological nesting.
+const MAX_BLOCK_SPLIT_DEPTH: usize = 8;
+
 impl ContextItem {
     /// The text the prompt carries for the item (before fence escaping): a containing unit
     /// with known `lines` has each line prefixed with its absolute number, as the reviewed code
@@ -332,21 +337,33 @@ impl FileUnits {
         }
     }
 
-    /// The narrowest unit around `line`. A block (impl, class, trait, module) is cut one level
-    /// down by the extractor and the piece that holds the line wins, so a hunk in one method
-    /// of a large impl is not given the whole impl. O(units).
+    /// The narrowest unit around `line`. A block (impl, class, trait, module) is cut by the
+    /// extractor and the piece that holds the line wins, again while that piece is a strictly
+    /// smaller block, up to [`MAX_BLOCK_SPLIT_DEPTH`] levels: a hunk in one method of a large
+    /// impl, even one nested in a module, is not given the whole impl. O(depth · units).
+    // MAGI FIX (MS3 §6 loop1): a block was cut one level only, so a method of an impl inside a
+    // module took the whole impl as its mandatory unit.
     fn at(&self, line: u32) -> Option<SemanticUnit> {
-        let top = enclosing_unit(&self.units, line)?;
-        if matches!(
-            top.kind,
-            UnitKind::Impl | UnitKind::Class | UnitKind::Trait | UnitKind::Module
-        ) {
-            let pieces = self.extractor.split_block(top);
-            if let Some(piece) = enclosing_unit(&pieces, line) {
-                return Some(piece.clone());
+        let mut unit = enclosing_unit(&self.units, line)?.clone();
+        for _ in 0..MAX_BLOCK_SPLIT_DEPTH {
+            if !matches!(
+                unit.kind,
+                UnitKind::Impl | UnitKind::Class | UnitKind::Trait | UnitKind::Module
+            ) {
+                break;
+            }
+            let pieces = self.extractor.split_block(&unit);
+            match enclosing_unit(&pieces, line) {
+                Some(piece)
+                    if piece.end_line.saturating_sub(piece.start_line)
+                        < unit.end_line.saturating_sub(unit.start_line) =>
+                {
+                    unit = piece.clone();
+                }
+                _ => break,
             }
         }
-        Some(top.clone())
+        Some(unit)
     }
 }
 
