@@ -661,6 +661,21 @@ pub fn doc_query(text: &str) -> &str {
     text.get(..end).unwrap_or(text)
 }
 
+/// The text a batch's documentation query sends to the embedder: `prefix` (the embedder's query
+/// prefix) followed by `text`, whole query at most [`DOC_QUERY_MAX_BYTES`] bytes.
+///
+/// # Arguments
+///
+/// * `prefix` - The embedder's query prefix.
+/// * `text` - The batch's code.
+///
+/// # Returns
+///
+/// The query to embed.
+pub fn doc_search_query(prefix: &str, text: &str) -> String {
+    format!("{prefix}{}", doc_query(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1309,6 +1324,29 @@ mod tests {
         assert_eq!(
             doc_query(&format!("a{}", "é".repeat(DOC_QUERY_MAX_BYTES))).len(),
             DOC_QUERY_MAX_BYTES - 1
+        );
+    }
+
+    #[test]
+    fn the_doc_search_query_masks_its_secrets_and_bounds_the_whole_query() {
+        // [MAGI S6 MS3 loop3, R2 Melchior, Caspar, Balthasar] The query is an egress point
+        // (RV22): every one-line secret is masked before the cut, so a cut never leaves a
+        // fragment that no longer matches its pattern, and the bound covers the prefix too.
+        let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let q = doc_search_query("query: ", &format!("let k = \"{secret}\";"));
+        assert!(q.starts_with("query: "), "{q}");
+        assert!(!q.contains("sk-ant-"), "{q}");
+        assert!(q.contains("<redacted: anthropic-key>"), "{q}");
+        let long = doc_search_query("query: ", &"a".repeat(2 * DOC_QUERY_MAX_BYTES));
+        assert_eq!(long.len(), DOC_QUERY_MAX_BYTES);
+        let straddling = format!(
+            "{}{secret}",
+            "a".repeat(DOC_QUERY_MAX_BYTES - "query: ".len() - 10)
+        );
+        let cut = doc_search_query("query: ", &straddling);
+        assert!(
+            !cut.contains("sk-ant-"),
+            "a cut fragment of the key left: {cut}"
         );
     }
 

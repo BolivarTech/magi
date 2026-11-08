@@ -38,7 +38,7 @@ use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
     assemble, callers_for, charged_tokens, containing_units, declare_index, definitions_for,
-    doc_query, item_cost, Assembled, ContextItem, ContextKind, IndexDeclarations,
+    doc_search_query, item_cost, Assembled, ContextItem, ContextKind, IndexDeclarations,
     CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
 };
 use magi_rs::review::secrets::{
@@ -303,7 +303,7 @@ impl StoreRag<'_> {
         if self.embedder_down.load(Ordering::SeqCst) {
             return None;
         }
-        let query = format!("{}{}", embedder.query_prefix(), doc_query(text));
+        let query = doc_search_query(embedder.query_prefix(), text);
         let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
         let cause = match tokio::time::timeout(bound, embedder.embed(&[query])).await {
             // MAGI FIX (MS3 §6 loop2): one query, one vector; any other count is not guessed at.
@@ -2292,6 +2292,35 @@ mod tests {
         fn document_prefix(&self) -> &str {
             ""
         }
+    }
+
+    #[tokio::test]
+    async fn a_batch_quoting_a_one_line_secret_sends_its_documentation_query_masked() {
+        // [MAGI S6 MS3 loop3, R2 Melchior (critical), Caspar] `query_vector` is an egress point
+        // (RV22 amended): it masks the query itself, so no byte of a one-line secret in the
+        // batch reaches the embedder even when the batch text arrives raw (upstream, the review's
+        // cache masks it already: `no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio`
+        // in the runner).
+        let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let code = format!("const K: &str = \"{secret}\";\n");
+        let f = RagFixture::new(&[("a.rs", code.as_str())]).await;
+        let embedder = Recording(std::sync::Mutex::new(Vec::new()));
+        let mut rag = f.rag(true);
+        rag.embedder = Some(&embedder);
+        rag.context_for(&batch_on("a.rs", code.trim_end()))
+            .await
+            .expect("context");
+        let sent = embedder
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(sent.len(), 1, "one query: {sent:?}");
+        assert!(sent.iter().all(|t| !t.contains("sk-ant-")), "{sent:?}");
+        assert!(
+            sent.iter().all(|t| t.contains("<redacted: anthropic-key>")),
+            "{sent:?}"
+        );
     }
 
     #[tokio::test]
