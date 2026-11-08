@@ -1170,7 +1170,7 @@ const HIDDEN_FORMAT_CHARS: &[std::ops::RangeInclusive<char>] = &[
     '\u{e0000}'..='\u{e007f}',
 ];
 
-/// Whether `c` is one of the [`HIDDEN_FORMAT_CHARS`]: a format character or a line or
+/// Whether `c` is one of the `HIDDEN_FORMAT_CHARS`: a format character or a line or
 /// paragraph separator, which can break, reorder or hide text on a terminal or a log viewer.
 /// O(r) for r ranges, a constant.
 ///
