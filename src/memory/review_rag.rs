@@ -2178,6 +2178,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_git_failure_is_declared_once_as_an_unavailable_index_never_as_no_embedder() {
+        // [MAGI S6 MS3 loop3, R6b Melchior] RV21: a revision that cannot be indexed is declared,
+        // and accurately. A git failure is no missing embedder: the report says the index was
+        // unavailable, once, and `without_embedder` stays false (the embedder answered).
+        let f = RagFixture::new(&[("README.md", "# Usage\nWORKTREE-DOC\n")]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            Some(&CommitGit(false)),
+            Some("c1"),
+            &f.source,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        let rag = f.rag(true).with_prep(prep);
+        let mut declared = Vec::new();
+        for _ in 0..2 {
+            let a = rag
+                .context_for(&batch_on("README.md", "x"))
+                .await
+                .expect("context");
+            assert!(!a.without_embedder, "{:?}", a.trimmed);
+            declared.extend(
+                a.trimmed
+                    .into_iter()
+                    .filter(|(kind, _)| *kind == ContextKind::Documentation),
+            );
+        }
+        assert_eq!(
+            declared,
+            vec![(ContextKind::Documentation, INDEX_UNAVAILABLE.to_string())]
+        );
+    }
+
+    #[tokio::test]
     async fn a_working_tree_review_keys_its_sources_by_their_bytes() {
         // [CP2 MS3 loop 10] No revision: the working tree is listed and read, never git.
         // [CP2 MS3 loop 11] A path that quotes a secret is never stored: the source's path sits in a clear column.
