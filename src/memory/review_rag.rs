@@ -306,9 +306,11 @@ impl StoreRag<'_> {
         let query = format!("{}{}", embedder.query_prefix(), doc_query(text));
         let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
         let cause = match tokio::time::timeout(bound, embedder.embed(&[query])).await {
-            Ok(Ok(mut vectors)) => match vectors.pop() {
-                Some(v) if !v.is_empty() => return Some(v),
-                _ => "the embedder answered no vector".to_string(),
+            // MAGI FIX (MS3 §6 loop2): one query, one vector; any other count is not guessed at.
+            Ok(Ok(mut vectors)) => match (vectors.pop(), vectors.is_empty()) {
+                (Some(v), true) if !v.is_empty() => return Some(v),
+                (None, _) => "the embedder answered no vector".to_string(),
+                _ => "the embedder did not answer one vector for the query".to_string(),
             },
             Ok(Err(e)) => outward_text(&e.to_string()),
             Err(_) => format!("no answer within {EMBED_QUERY_TIMEOUT_SECS} s"),
