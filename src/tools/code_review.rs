@@ -954,13 +954,14 @@ impl Tool for CodeReviewTool {
         };
         // The tool's report is its result, so what follows it runs before the result is handed
         // back; a history that could not be updated is said in it, never dropped.
+        // MAGI FIX (MS3 §6 loop2): the warning opens the report, since the output cap cuts a
+        // report from its end and took the appended warning with it.
         let limit = self
             .deadline
             .map(|d| d.saturating_duration_since(Instant::now()));
         if let Some(warning) = finish_after_report(self.runner.as_ref(), limit, Some(cancel)).await
         {
-            report.push('\n');
-            report.push_str(&warning);
+            report = format!("{warning}\n{report}");
         }
         Ok(bounded_result(
             redact_foreign_text(&report).as_str(),
