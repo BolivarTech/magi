@@ -2188,6 +2188,32 @@ UNREACHABLE_EMBEDDER_URL = "http://127.0.0.1:9/v1"
 #: The table whose endpoint :func:`point_embedding_at` rewrites.
 _EMBEDDING_TABLE = "[embedding]"
 
+#: Its name, as :func:`_table_name` reads a header.
+_EMBEDDING_TABLE_NAME = "embedding"
+
+
+def _table_name(header: str) -> str:
+    """The name a TOML table header line declares, or ``""`` for anything else.
+
+    A trailing ``#`` comment is dropped and the spaces TOML allows inside the
+    brackets are trimmed; an array-of-tables header (``[[x]]``) declares no
+    plain table and gives ``""``.
+
+    Args:
+        header: A stripped line that starts with ``[``.
+
+    Returns:
+        str: The table's name.
+
+    Example:
+        >>> _table_name("[ embedding ] # the embedder"), _table_name("[[magi.fallback]]")
+        ('embedding', '')
+    """
+    code = header.split("#", 1)[0].strip()
+    if code.startswith("[[") or not code.endswith("]"):
+        return ""
+    return code[1:-1].strip()
+
 
 def review_context_files() -> tuple[tuple[str, bytes], ...]:
     """The file R17 reviews.
@@ -2235,7 +2261,9 @@ def point_embedding_at(config_path, url: str) -> None:
     for original in text.splitlines():
         stripped = original.strip()
         if stripped.startswith("["):
-            in_embedding = stripped == _EMBEDDING_TABLE
+            # MAGI FIX (S6 MS3 loop2): TOML allows spaces inside the brackets and a comment
+            # after the header; an exact match appended a second [embedding] table.
+            in_embedding = _table_name(stripped) == _EMBEDDING_TABLE_NAME
             lines.append(original)
             if in_embedding:
                 lines.append(line)
