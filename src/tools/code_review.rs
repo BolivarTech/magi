@@ -2794,6 +2794,21 @@ mod tests {
     }
 
     #[test]
+    fn two_keys_masked_alike_both_survive_the_masked_json() {
+        // [MAGI S6 MS3 loop2, R5 Caspar] two keys holding the same pattern mask to one string,
+        // and the map kept only the last field.
+        let a = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let b = concat!("sk-ant-", "api03-", "BBBBBBBBBBBBBBBBBBBB"); // allow-secret-scan
+        let masked = masked_json(json!({ a: 1, b: 2 }));
+        let fields = masked.as_object().expect("an object");
+        assert_eq!(fields.len(), 2, "{masked}");
+        let mut values: Vec<i64> = fields.values().filter_map(Value::as_i64).collect();
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2]);
+        assert!(!masked.to_string().contains("sk-ant-"), "{masked}");
+    }
+
+    #[test]
     fn the_terminal_text_drops_format_characters_that_reorder_or_hide_it() {
         // [MAGI S6 MS3 loop2, R5 Melchior] a bidi override or a zero-width character from a model
         // reached the headless terminal: only C0/C1 controls were dropped.
