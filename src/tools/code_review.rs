@@ -2785,6 +2785,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_plan_with_no_batch_never_reaches_the_embedder() {
+        // [MAGI S6 MS3 loop2, R5 Melchior] the budget check is skipped for a plan of no batch
+        // (it would divide by zero), but the documentation was still indexed after it: an
+        // outbound call for a review that sends nothing to the trio.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let plan = ReviewPlan {
+            input: ReviewInput::File("src".into()),
+            batches: 0,
+            digest: None,
+            worst_case_secs: 0,
+        };
+        let run = runner
+            .run(
+                plan,
+                ReviewBudget::Total(Duration::from_secs(1)),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(run.is_err(), "a plan of no batch is no review");
+        assert_eq!(fake.calls(), 0, "the embedder was never called");
+    }
+
+    #[tokio::test]
     async fn a_review_refused_for_its_budget_never_probes_the_embedder_dimension() {
         // [MAGI S6 MS3 loop1, R2 Melchior] `doc_store` probes an embedder that autodetects its
         // dimension: that probe is an outbound call too, so it must come after the budget check.
