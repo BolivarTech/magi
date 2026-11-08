@@ -1226,6 +1226,9 @@ impl ProductionReviewRunner {
             .ok()
             .and_then(doc_revision)
             .map(str::to_string);
+        // Without an embedder `docs_unavailable` stays false on purpose: the context source
+        // declares the omission as `without_embedder`, its own cause; "index unavailable" would
+        // name a failure that did not happen.
         let Some(embedder) = self.parts.embedder.as_deref() else {
             return DocContext {
                 rev,
@@ -1403,6 +1406,9 @@ impl CodeReviewRunner for ProductionReviewRunner {
             // again with its own); a plan that was never made (0 batches) has nothing to check.
             // MAGI FIX (Loop1 r1, M6): a run deadline keeps room for the documentation indexing
             // and the query embeddings that follow, so no later check refuses after them.
+            // The reserve comes off a run deadline only, never off a `--timeout` total, which the
+            // preparation does not spend (pinned in the pipeline by
+            // `the_outbound_reserve_is_held_back_from_a_deadline_never_from_a_timeout`).
             if plan.batches > 0 {
                 let calls_embedder = self.parts.memory.is_some() && self.parts.embedder.is_some();
                 precheck_budget(
@@ -1524,6 +1530,11 @@ impl CodeReviewRunner for ProductionReviewRunner {
 /// the full SHA of its new side) and the clean-up of the documentation index. A working-tree
 /// review records no history (RV08: there is no commit to anchor it). Every outcome is logged;
 /// a history that could not be updated is also returned as a warning; the clean-up only logs.
+///
+/// The clean-up runs only when the review opened its documentation index, which needs an
+/// embedder (the index's identity is the embedder's model and dimension). A review without one
+/// leaves the index as it is until the next review that has one: the safe direction of RV19 (a
+/// derived index never loses a row it may still need; the SQL purge stays available).
 ///
 /// # Arguments
 /// * `memory` - The review stores.

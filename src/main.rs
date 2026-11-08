@@ -5425,7 +5425,7 @@ fn review_context_of(
                 target: "magi_rs::review",
                 tracing::Level::WARN,
                 error = error.as_str(),
-                "the review embedder could not be built: reviews run without documentation and history"
+                "the review embedder could not be built: reviews run without documentation and without history as context (the history is still recorded)"
             );
             None
         }
