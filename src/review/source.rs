@@ -848,12 +848,13 @@ impl<'a> CachedSource<'a> {
 /// mask could promise that none of it leaves). O(bytes).
 // MAGI FIX (T3.7 fix round 3): three review rounds found key-body lines that masking let through.
 fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
+    // MAGI FIX (MS3 §6 loop2): the key-block scan ran over every side; a key block is a secret
+    // match, so it is looked for only in a side that holds one (one scan for most files).
     let masked = read
         .as_deref()
         .filter(|bytes| !bytes.contains(&0))
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .filter(|text| !holds_key_block(text))
-        .and_then(mask_secrets_keeping_lines);
+        .and_then(|text| mask_secrets_keeping_lines(text).filter(|_| !holds_key_block(text)));
     match masked {
         Some(m) => (
             Some(m.text.into_bytes()),
