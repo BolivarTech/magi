@@ -295,6 +295,18 @@ pub(crate) async fn finish_after_report(
     }
 }
 
+/// [`finish_after_report`] for a surface whose report is delivered and that has no run deadline
+/// or cancellation of its own.
+///
+/// # Arguments
+/// * `runner` - The runner whose reviews left work.
+///
+/// # Returns
+/// The work's warning, a note that it was cut, or `None`.
+pub(crate) async fn finish_after_delivered_report(runner: &dyn CodeReviewRunner) -> Option<String> {
+    finish_after_report(runner, None, None).await
+}
+
 /// Runs `fut` until it ends or `cancel` fires.
 ///
 /// On cancel the future, and the batch in flight with it, is dropped. Biased toward `fut`: a
@@ -2584,6 +2596,28 @@ mod tests {
                 .is_some_and(|r| r.contains(POST_REPORT_CUT)),
             "{out}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_surface_without_a_run_deadline_still_bounds_its_post_report_work() {
+        // [MAGI S6 MS3 loop3, R5 Caspar, Balthasar, Melchior] The subcommand and the TUI waited
+        // for the history and the clean-up with no bound: a stuck git pinned the CLI after its
+        // report and froze the TUI.
+        // A blocking task stops the paused clock from advancing by itself: it is moved by hand,
+        // past the bound, once the surface is waiting.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let runner = Arc::new(HangingFollowUpRunner {
+            release: std::sync::Mutex::new(Some(rx)),
+            started: Arc::default(),
+        });
+        let waiting = Arc::clone(&runner);
+        let surface =
+            tokio::spawn(async move { finish_after_delivered_report(waiting.as_ref()).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2 * RECLASSIFY_BUDGET_SECS + 1)).await;
+        let note = surface.await.expect("the surface goes on");
+        drop(tx);
+        assert_eq!(note.as_deref(), Some(POST_REPORT_CUT));
     }
 
     #[tokio::test]

@@ -5362,7 +5362,7 @@ async fn run_code_review_subcommand(
     // clean-up of the documentation index. A history that was not updated is a warning on
     // stderr, always; the exit code stays the report's.
     if let Some(warning) =
-        crate::tools::code_review::finish_after_report(runner.as_ref(), None, None).await
+        crate::tools::code_review::finish_after_delivered_report(runner.as_ref()).await
     {
         magi_rs::notices::eprint_audited(&warning);
     }
