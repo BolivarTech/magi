@@ -80,6 +80,12 @@ impl ReviewHistoryStore {
 
     /// Opens the store over `conn`, making sure the schema exists.
     ///
+    /// Precondition: `conn` is the connection of an `EncryptedSqliteMemory` that opened the
+    /// database, whose open refuses one written before v0.25.0 with the typed error naming the
+    /// missing table (RV19, never a migration). The schema call here is `CREATE ... IF NOT
+    /// EXISTS`, so on a connection that skipped that open it would create the v0.25.0 tables in
+    /// an older database instead of refusing it.
+    ///
     /// # Arguments
     /// * `conn` - the connection shared with `EncryptedSqliteMemory`.
     /// * `dek` - a masked duplicate of the data key.
