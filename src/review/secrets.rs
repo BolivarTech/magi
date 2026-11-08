@@ -383,6 +383,19 @@ fn skip_bytes(bytes: &[u8], mut at: usize, skip: &[u8]) -> usize {
 }
 
 impl Matcher {
+    /// Whether a match opens a multi-line private-key block, whose body lines have no pattern of
+    /// their own (REQ-RV22's exception, [`holds_key_block`]). Decided per variant with no
+    /// wildcard arm, so a new variant does not compile until it says whether it opens one: a
+    /// key-block format added under another variant would otherwise be masked, not left out.
+    // MAGI FIX (MS3 §6 loop2): `holds_key_block` listed the variants in a `matches!`, a coupling
+    // nothing checked.
+    fn opens_key_block(&self) -> bool {
+        match self {
+            Self::PemPrivateKey | Self::Header(_) => true,
+            Self::Token { .. } | Self::AwsSecretKey | Self::UrlCredential => false,
+        }
+    }
+
     /// Whether the pattern occurs anywhere in `text`.
     ///
     /// Linear in the text: each occurrence of a prefix reads at most its minimum tail length (an
@@ -1054,7 +1067,7 @@ pub struct LineMasked {
 pub fn holds_key_block(text: &str) -> bool {
     SECRET_PATTERNS
         .iter()
-        .filter(|p| matches!(p.matcher, Matcher::PemPrivateKey | Matcher::Header(_)))
+        .filter(|p| p.matcher.opens_key_block())
         .any(|p| p.matcher.matches(text))
 }
 
