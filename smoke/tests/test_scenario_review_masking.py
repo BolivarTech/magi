@@ -12,8 +12,10 @@ from smoke.tests.test_scenario_code_review import _outcomes, _result
 
 _KEY = runs.REVIEW_MASKED_KEY.decode("ascii")
 _BODY = runs.REVIEW_KEYBLOCK_BODY_LINES[0]
+#: [MAGI S6 MS3 loop2, R7b Melchior/Caspar] with the run-log field the stderr layer prints after the
+#: message, as the measured refusals of S48/S49 (``_ROOT_STDERR``, ``_SKIPPED_STDERR``) carry it.
 _REFUSAL = (b"error: nothing to review: no reviewable file in the input; left out: "
-            b"%s (secret)\n" % runs.REVIEW_KEYBLOCK_FILE.encode())
+            b"%s (secret) review.error=nothing_to_review\n" % runs.REVIEW_KEYBLOCK_FILE.encode())
 
 
 def _doc(masked=None, masked_unlisted=0, skipped=None, skipped_unlisted=0) -> dict:
@@ -107,7 +109,7 @@ class S54Tests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, self._judge(1, r))
 
     def test_an_extra_omitted_file_fails_the_listing(self) -> None:
-        r = _result("R19", 2, None, _REFUSAL.replace(b"\n", b", other.txt (binary)\n"))
+        r = _result("R19", 2, None, _REFUSAL.replace(b"(secret)", b"(secret), other.txt (binary)"))
         self.assertEqual(Outcome.FAIL, self._judge(1, r))
 
     def test_an_exit_other_than_two_fails(self) -> None:
