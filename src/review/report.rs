@@ -36,6 +36,10 @@ const SKIPPED_UNLISTED_KEY: &str = "skipped_unlisted";
 const MASKED_KEY: &str = "masked";
 /// The JSON key that declares how many of those files are not listed.
 const MASKED_UNLISTED_KEY: &str = "masked_unlisted";
+/// The JSON key of the context left out of a batch ([`ReviewSummary::trimmed`]).
+const TRIMMED_KEY: &str = "trimmed";
+/// The JSON key that declares how many of those entries are not listed.
+const TRIMMED_UNLISTED_KEY: &str = "trimmed_unlisted";
 /// The JSON key of the files reviewed without an extractor ([`ReviewSummary::no_extractor`]).
 const NO_EXTRACTOR_KEY: &str = "no_extractor";
 /// The JSON key that declares how many of those files are not listed.
@@ -360,11 +364,17 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
         )?;
     }
     if !s.trimmed.is_empty() {
-        let trimmed: Vec<String> = s
+        // MAGI FIX (MS3 §6 loop2): capped like the other omission lists; it grows with the batches.
+        let mut trimmed: Vec<String> = s
             .trimmed
             .iter()
+            .take(MAX_OMISSIONS_SHOWN)
             .map(|t| format!("{} {}", name(&t.kind), escape_controls(&t.label)))
             .collect();
+        match unlisted(s.trimmed.len()) {
+            0 => {}
+            rest => trimmed.push(format!("and {rest} more")),
+        }
         writeln!(out, "context left out: {}", trimmed.join("; "))?;
     }
     if unshown > 0 {
@@ -532,10 +542,11 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
 /// Every field of [`ReviewSummary`], with `findings` and `filtered` as
 /// `[{<fields of the finding>, "gate": <verdict>}]`, plus `batch_totals`
 /// (`{input_tokens, output_tokens, ms}` summed over `batches`) and `rejected_skips`
-/// (`{model: n}`, the models skipped after an HTTP 400). `skipped` and `no_extractor` list at
-/// most [`MAX_OMISSIONS_SHOWN`] entries each, and `skipped_unlisted` / `no_extractor_unlisted`
-/// declare how many more there are (0 when none), as the text form's `- ... and N more` does:
-/// both lists grow with the reviewed tree, not with the review's result. Every string and every
+/// (`{model: n}`, the models skipped after an HTTP 400). `skipped`, `masked`, `trimmed` and
+/// `no_extractor` list at most [`MAX_OMISSIONS_SHOWN`] entries each, and `skipped_unlisted`,
+/// `masked_unlisted`, `trimmed_unlisted` / `no_extractor_unlisted` declare how many more there
+/// are (0 when none), as the text form's `and N more` does: the lists grow with the reviewed
+/// tree and its batches, not with the review's result. Every string and every
 /// object key is redacted, so a model name used as a key passes the RV22 detector too.
 ///
 /// # Arguments
@@ -561,6 +572,7 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
         for (list, rest, len) in [
             (SKIPPED_KEY, SKIPPED_UNLISTED_KEY, s.skipped.len()),
             (MASKED_KEY, MASKED_UNLISTED_KEY, s.masked.len()),
+            (TRIMMED_KEY, TRIMMED_UNLISTED_KEY, s.trimmed.len()),
             (
                 NO_EXTRACTOR_KEY,
                 NO_EXTRACTOR_UNLISTED_KEY,
