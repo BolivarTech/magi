@@ -2533,6 +2533,48 @@ mod tests {
         );
     }
 
+    /// Answers two vectors for every text: a provider that does not keep one vector per input.
+    struct TwoVectors;
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for TwoVectors {
+        async fn embed(
+            &self,
+            texts: &[String],
+        ) -> Result<Vec<Vec<f32>>, crate::memory::error::EmbeddingError> {
+            Ok(texts
+                .iter()
+                .flat_map(|_| [vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]])
+                .collect())
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn a_query_answered_with_other_than_one_vector_is_a_down_embedder() {
+        // [MAGI S6 MS3 loop2, R2 Caspar] One query, one vector: any other count says the answer
+        // cannot be matched to the query, so no vector is guessed at (the last one was taken).
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let two = TwoVectors;
+        let mut rag = f.rag(true);
+        rag.embedder = Some(&two);
+        let a = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("never fails the review");
+        assert!(a.without_embedder, "{:?}", a.trimmed);
+    }
+
     #[tokio::test]
     async fn an_unavailable_index_is_never_declared_as_lack_of_room() {
         // [MAGI S6 MS3 loop2, R2 Balthasar] With the documentation index unavailable, a full batch
