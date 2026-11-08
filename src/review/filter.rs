@@ -1716,6 +1716,99 @@ mod tests {
     }
 
     #[test]
+    fn real_git_diffs_rebuild_unchanged_from_their_own_sides() {
+        // [MAGI S6 MS3 loop2, R6a Balthasar] `rebuilt_diff` reads git's dialect: on real output it
+        // must give the diff back byte for byte from unmasked sides (several hunks, a function
+        // context, an edit at the first line, a last line without a newline, a deletion, an
+        // addition), so a masked file is never left out for a parse it should have done.
+        fn git(dir: &Path, args: &[&str]) -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).expect("utf-8")
+        }
+        let d = tempfile::tempdir().expect("tempdir");
+        git(d.path(), &["init", "-q", "-b", "main"]);
+        for (k, v) in [
+            ("user.email", "t@example.invalid"),
+            ("user.name", "t"),
+            ("commit.gpgsign", "false"),
+            ("core.autocrlf", "false"),
+        ] {
+            git(d.path(), &["config", k, v]);
+        }
+        let body: String = (1..=30).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        let cases: [(&str, Option<String>, Option<String>); 4] = [
+            (
+                "edit.rs",
+                Some(body.clone()),
+                Some(
+                    body.replace("fn f1()", "fn g1()")
+                        .replace("fn f15()", "fn g15()")
+                        .replace("fn f30() {}\n", "fn f30() {}"),
+                ),
+            ),
+            ("gone.rs", Some(body.clone()), None),
+            ("new.rs", None, Some("fn n() {}\n".to_string())),
+            (
+                "tail.rs",
+                Some("a\nb".to_string()),
+                Some("a\nc\n".to_string()),
+            ),
+        ];
+        for (path, old, _) in &cases {
+            if let Some(old) = old {
+                std::fs::write(d.path().join(path), old).expect("write");
+            }
+        }
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        for (path, _, new) in &cases {
+            match new {
+                Some(new) => std::fs::write(d.path().join(path), new).expect("write"),
+                None => std::fs::remove_file(d.path().join(path)).expect("rm"),
+            }
+        }
+        git(d.path(), &["add", "-A"]);
+        for (path, old, new) in &cases {
+            let diff = git(
+                d.path(),
+                &[
+                    "diff",
+                    "--cached",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--",
+                    path,
+                ],
+            );
+            assert!(diff.contains("@@"), "{path}: {diff}");
+            let rebuilt = rebuilt_diff(
+                &diff,
+                new.as_deref().map(str::as_bytes),
+                old.as_deref().map(str::as_bytes),
+            );
+            // The function context after a hunk header's `@@` is dropped on purpose (it is a
+            // line of the file, possibly inside a masked block); everything else is git's.
+            let expected: String = diff
+                .split_inclusive('\n')
+                .map(|line| match line.strip_prefix("@@") {
+                    Some(rest) => match rest.find("@@") {
+                        Some(end) => format!("@@{}@@\n", rest.get(..end).unwrap_or_default()),
+                        None => line.to_string(),
+                    },
+                    None => line.to_string(),
+                })
+                .collect();
+            assert_eq!(rebuilt.as_deref(), Some(expected.as_str()), "{path}");
+        }
+    }
+
+    #[test]
     fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_as_secret() {
         // [MAGI S6 MS3 loop2, R6a Balthasar] the safe fallback of `kept_verdict`: a diff that
         // names a line its masked side does not have cannot be rebuilt, so the raw diff, which
