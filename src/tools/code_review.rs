@@ -2761,6 +2761,98 @@ mod tests {
         assert_eq!(fake.calls(), 0, "the embedder was never called");
     }
 
+    /// Records every text it is asked to embed.
+    #[derive(Default)]
+    struct RecordingEmbedder(std::sync::Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for RecordingEmbedder {
+        async fn embed(
+            &self,
+            texts: &[String],
+        ) -> Result<Vec<Vec<f32>>, crate::memory::error::EmbeddingError> {
+            self.0.lock().expect("lock").extend(texts.iter().cloned());
+            Ok(texts.iter().map(|_| vec![0.5; 3]).collect())
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio() {
+        // [MAGI S6 MS3 loop1, R2 Balthasar and Caspar] The query embedded per batch is the
+        // batch's text, the context items are read through the review's cache: both are masked
+        // upstream (the cache masks every side it holds, batching refuses any secret left), so no
+        // outbound byte carries the key: the documentation chunks, the query, the prompt.
+        let key = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        std::fs::write(
+            ws.join("src").join("a.rs"),
+            format!("/// Uses {key}.\nfn a() {{\n    let k = \"{key}\";\n    b(k);\n}}\nfn b(_k: &str) {{}}\n"),
+        )
+        .expect("a.rs");
+        std::fs::write(ws.join("README.md"), format!("# Setup\nexport KEY={key}\n"))
+            .expect("README");
+        let (_db, _mem, memory) = review_memory();
+        let embedder = Arc::new(RecordingEmbedder::default());
+        let consult = Arc::new(RecordingConsult::default());
+        let runner = ProductionReviewRunner::new(ReviewRunnerParts {
+            workspace: ws.clone(),
+            pool: vec![("m".into(), None)],
+            consult: consult.clone(),
+            gate_client: Arc::new(NoDecision),
+            gate_chain: vec![ModelSpec {
+                model: "g".into(),
+                min_confidence: None,
+            }],
+            max_state_bytes: 61_000,
+            call_timeout: Duration::from_secs(1),
+            max_rotations: 0,
+            retry_disabled: false,
+            agent_timeout_secs: 120,
+            structured: false,
+            memory: Some(memory),
+            embedder: Some(embedder.clone() as Arc<dyn EmbeddingProvider>),
+        })
+        .expect("runner");
+        let (rendered, _) = review_and_follow_up(&runner, ReviewInput::File("src".into())).await;
+        let embedded = embedder.0.lock().expect("lock").clone();
+        let prompts = consult.0.lock().expect("lock").clone();
+        assert!(!embedded.is_empty() && !prompts.is_empty());
+        assert!(
+            embedded
+                .iter()
+                .chain(&prompts)
+                .all(|t| !t.contains("sk-ant-") && !t.contains("AAAAAAAAAAAAAAAAAAAA")),
+            "a byte of the key left the process: {embedded:?} {prompts:?}"
+        );
+        assert!(
+            embedded
+                .iter()
+                .any(|t| t.contains("<redacted: anthropic-key>")),
+            "{embedded:?}"
+        );
+        let masked: Vec<&str> = rendered.json["masked"]
+            .as_array()
+            .map(|m| m.iter().filter_map(|e| e["path"].as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            masked.contains(&"src/a.rs") && masked.contains(&"README.md"),
+            "{masked:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_review_with_enough_budget_still_indexes_the_documentation() {
         // [SMOKE1 S50] The RAG is intact when the budget holds: the embedder is called and the
