@@ -145,7 +145,7 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 /// Anchored to the reviewed commit: `git diff --unified=0 --relative <commit> <head> -- <file>`
 /// gives hunks in the coordinates of `<commit>`, the ones the finding's line uses, so lines
 /// inserted above never move it. A hunk covering the line means [`HistoryStatus::Attended`]; a
-/// deleted or renamed file is covered whole. Otherwise the line is untouched, and it is a
+/// deleted or renamed file, or one whose change git shows as binary, is covered whole. Otherwise the line is untouched, and it is a
 /// [`HistoryStatus::WeakReject`] only once `head` is a commit after the reviewed one.
 ///
 /// Anything that is not a signal is [`HistoryStatus::Pending`]: no line, no file (an empty
