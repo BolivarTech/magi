@@ -1466,6 +1466,19 @@ mod tests {
             .is_ok());
     }
 
+    #[test]
+    fn the_state_size_is_measured_after_masking() {
+        // [MAGI S6 MS3 loop3, R6b Melchior] A mask can be longer than the secret it replaces;
+        // what is sent is the masked state, so that is what `max_state_bytes` bounds.
+        let c = MockDecisionClient::new();
+        let raw = "postgres://u:p@db/app";
+        let masked = mask_secrets(raw);
+        assert!(masked.len() > raw.len(), "precondition: {masked}");
+        let state = serde_json::json!({ "code": raw });
+        let g = Gate::new(&c, chain(), state.to_string().len());
+        assert_eq!(g.sendable(state), Err(CAUSE_STATE_TOO_LARGE));
+    }
+
     #[tokio::test]
     async fn a_state_carrying_a_private_key_block_is_never_sent() {
         // RV22's exception: a key body has no pattern of its own, so masking cannot promise that

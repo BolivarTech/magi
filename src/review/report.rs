@@ -1125,9 +1125,26 @@ mod tests {
             "without_embedder",
             "without_memory",
             "context_withheld",
+            // [MAGI S6 MS3 loop3, R6b Melchior] the count past the trimmed list's cap.
+            "trimmed_unlisted",
         ] {
             assert!(v.get(k).is_some(), "missing {k}: {v}");
         }
+    }
+
+    #[test]
+    fn without_a_database_the_text_names_that_cause_not_a_missing_embedder() {
+        // [MAGI S6 MS3 loop3, R6b Melchior] Both flags can be set for one review (no store, so
+        // no embedder either): the text names the database, the cause the user can act on.
+        let s = ReviewSummary {
+            without_memory: true,
+            without_embedder: true,
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(out.contains("the run opened no database"), "{out}");
+        assert!(!out.contains("no embedder answered"), "{out}");
     }
 
     #[test]
