@@ -141,7 +141,7 @@ class DecideRegistryTests(unittest.TestCase):
 
     def test_the_declared_totals_include_them(self) -> None:
         self.assertEqual(55, DECLARED_SCENARIO_COUNT)
-        self.assertEqual(164, DECLARED_ASSERTION_COUNT)
+        self.assertEqual(165, DECLARED_ASSERTION_COUNT)
 
 
 class TableHeaderTests(unittest.TestCase):

@@ -100,7 +100,11 @@ DECLARED_SCENARIO_COUNT = 55
 #: a review is not degraded: `without_embedder` is false and `trimmed` names
 #: no unavailable index nor unanswered embedder), MAGI §6 MS3 loop 2, v0.25.0.
 #: The scenario count goes 54 -> 55 with it.
-DECLARED_ASSERTION_COUNT = 164
+#:
+#: 165 on 2026-11-08: S52 adds "code_review.trimmed names an unavailable index
+#: or an embedder that did not answer" (RV07 declares the cause, not only the
+#: boolean), MAGI §6 MS3 loop 3, v0.25.0.
+DECLARED_ASSERTION_COUNT = 165
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

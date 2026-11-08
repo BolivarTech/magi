@@ -451,11 +451,11 @@ timeout is 3 000 s and `TRIO_RUNS_MEASURED_S["R12"]` carries 1 500 s provisional
 
 ### The review context scenario (v0.25.0)
 
-S52 adds two assertions (52 scenarios and 155 assertions when it was added; the current totals are in the latest section).
+S52 added two assertions (52 scenarios and 155 assertions when it was added) and a third in MAGI §6 MS3 loop 3, the `trimmed` declaration; the current totals are in the latest section.
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| S52 | `code-review ctx` over one small file, with the review workspace's `[embedding]` pointed at a loopback endpoint that answers every request with an HTTP error at once, exits 0 and prints a JSON document whose `code_review.without_embedder` is `true`: the review runs without documentation and history and says so. A missing key or any value other than `true` is `FAIL` | `CANNOT_TEST` with no reachable backend; a timed-out R17 is `CANNOT_TEST` too |
+| S52 | `code-review ctx` over one small file, with the review workspace's `[embedding]` pointed at a loopback endpoint that answers every request with an HTTP error at once, exits 0 and prints a JSON document whose `code_review.without_embedder` is `true` and whose `code_review.trimmed` names `index unavailable` or `the embedder did not answer`: the review runs without documentation and history and says so, cause included (RV07). A missing key, any value other than `true`, a `trimmed` entry without a string `label`, or a `trimmed` that names neither cause is `FAIL` | `CANNOT_TEST` with no reachable backend; a timed-out R17 is `CANNOT_TEST` too |
 
 R17 rewrites only the `[embedding]` table of the copied `magi.toml` (`embedder_pointed_away`, over
 `point_embedding_at`), to an error backend served for the run; the trio and the gate keep the real
@@ -487,11 +487,11 @@ so no scanner sees a key-shaped literal in the source.
 
 ### The working-RAG scenario (v0.25.0, RV07)
 
-S55 adds two assertions. The harness now promises 55 scenarios and 164 assertions.
+S55 adds two assertions (55 scenarios and 164 assertions when it was added). With the third S52 assertion of MAGI §6 MS3 loop 3, the harness now promises 55 scenarios and 165 assertions.
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
+| S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
 
 Without S55 the suite could not tell a working RAG from one that degrades on every run: S52 expects the
 degradation. What S55 observes is that the embedder answered the review and no index degraded; whether a
@@ -553,7 +553,7 @@ assumes is the exact failure this harness exists to avoid.
 | S49 | a directory of only a binary and a key-named file has nothing to review |
 | S50 | a `--timeout` too short for the batches is refused naming the floor and a minimum |
 | S51 | reviewing the workspace root never takes `.magi/` or `.git/` for review |
-| S52 | a review whose embedder is unreachable still reports, and declares `without_embedder` |
+| S52 | a review whose embedder is unreachable still reports, and declares `without_embedder` and the cause in `trimmed` |
 | S53 | a key in a file's content is masked, declared under `masked`, the file reviewed, and the key never printed or logged |
 | S54 | a file holding a private-key block is left out as `secret` and none of its body is printed or logged |
 | S55 | a review whose embedder answers is not degraded: `without_embedder` is false and no index degraded |

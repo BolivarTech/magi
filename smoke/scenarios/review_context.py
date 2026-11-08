@@ -7,7 +7,9 @@
   an endpoint that answers an HTTP error at once
   (``runs.embedder_pointed_away``), so documentation and history cannot be
   retrieved. The review must still run to its report, exit 0, and say
-  so: ``code_review.without_embedder`` is ``true``.
+  so: ``code_review.without_embedder`` is ``true`` and ``code_review.trimmed``
+  names the cause (an unavailable index, an embedder that did not answer),
+  RV07's declaration of what was left out.
 
 The unit suite proves each half with doubles (``src/memory/review_rag.rs``:
 ``a_failing_embedder_degrades_to_no_documentation_or_history``,
@@ -32,7 +34,11 @@ from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
 
 #: The verbatim assertion texts of S52.
-S52_ASSERTIONS = ("exit 0", "code_review.without_embedder is true")
+S52_ASSERTIONS = (
+    "exit 0",
+    "code_review.without_embedder is true",
+    "code_review.trimmed names an unavailable index or an embedder that did not answer",
+)
 
 #: Exit code of a review that produced its report.
 EXIT_OK = 0
@@ -101,12 +107,20 @@ def a_review_without_an_embedder_runs_and_says_so(run):
     try:
         report = run.output.json()
     except ProductOutputError as exc:
-        yield _finding(1, Outcome.FAIL, "stdout is not a JSON document: %s" % exc)
+        for index in range(1, len(S52_ASSERTIONS)):
+            yield _finding(index, Outcome.FAIL, "stdout is not a JSON document: %s" % exc)
         return
     summary = report.get(CODE_REVIEW_KEY)
-    value = summary.get(WITHOUT_EMBEDDER_KEY) if isinstance(summary, dict) else None
+    summary = summary if isinstance(summary, dict) else {}
+    value = summary.get(WITHOUT_EMBEDDER_KEY)
     yield _verdict(1, value is True,
                    "code_review.without_embedder is %r, not true" % (value,))
+    # MAGI FIX (S6 MS3 loop3): the boolean alone was read; RV07 declares the cause in `trimmed`.
+    degraded = _degraded_labels(summary.get(TRIMMED_KEY))
+    if degraded is None:
+        yield _finding(2, Outcome.FAIL, "code_review.trimmed is missing or not a list of entries")
+    else:
+        yield _verdict(2, bool(degraded), "code_review.trimmed names no degraded cause")
 
 
 #: The verbatim assertion texts of S55.
