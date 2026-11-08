@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use crate::encoding::lower_hex;
 use crate::review::error::ReviewError;
 use crate::review::languages::LanguageRegistry;
-use crate::review::secrets::{display_path, find_secret};
+use crate::review::secrets::{display_path, find_secret, holds_key_block, mask_secrets};
 use crate::review::source::GitCommand;
 
 /// One documentation chunk: a Markdown section or the doc comment of one item.
@@ -145,20 +145,24 @@ pub fn is_doc_source(path: &str) -> bool {
 ///
 /// A text longer than [`MAX_DOC_CHUNK_BYTES`] is split at line boundaries (a single longer line
 /// at a character boundary) into parts named `<section> (1)`, `<section> (2)`... Blank text gives
-/// no chunk. O(n) in the text.
+/// no chunk.
+///
+/// Every one-line secret of the section and the text is masked ([`mask_secrets`]) before the
+/// text is split, so no part holds a byte of one and the hash is over what is sent (RV22
+/// amended). A section or text that holds a private-key block is neither masked nor split: it
+/// stays one chunk for [`without_secrets`] to drop (RV22's exception). O(n) in the text.
+// MAGI FIX (MS3 §6 loop1): a chunk with a one-line secret was kept whole so that
+// `without_secrets` could drop it; RV22 amended masks it instead.
 fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
     let text = text.trim_end();
     if text.trim().is_empty() {
         return Vec::new();
     }
-    // A secret cut across two parts would match in neither: an unsplit match stays one (oversized)
-    // chunk for `without_secrets` to drop. An oversized chunk therefore only exists when it holds
-    // a secret, and no part of it is ever embedded.
-    let parts = if find_secret(section).is_some() || find_secret(text).is_some() {
-        vec![text.to_string()]
-    } else {
-        split_bounded(text)
-    };
+    if holds_key_block(section) || holds_key_block(text) {
+        return vec![chunk_of(path, section.to_string(), text.to_string())];
+    }
+    let section = mask_secrets(section);
+    let parts = split_bounded(&mask_secrets(text));
     let numbered = parts.len() > 1;
     parts
         .into_iter()
@@ -167,19 +171,24 @@ fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
             let section = if numbered {
                 format!("{section} ({})", i + 1).trim_start().to_string()
             } else {
-                section.to_string()
+                section.clone()
             };
-            let hash = lower_hex(&Sha256::digest(
-                format!("{path}\n{section}\n{part}").as_bytes(),
-            ));
-            DocChunk {
-                path: path.to_string(),
-                section,
-                text: part,
-                hash,
-            }
+            chunk_of(path, section, part)
         })
         .collect()
+}
+
+/// The chunk of `path` with `section` and `text`, hashed over the three. O(n) in the text.
+fn chunk_of(path: &str, section: String, text: String) -> DocChunk {
+    let hash = lower_hex(&Sha256::digest(
+        format!("{path}\n{section}\n{text}").as_bytes(),
+    ));
+    DocChunk {
+        path: path.to_string(),
+        section,
+        text,
+        hash,
+    }
 }
 
 /// Splits `text` into parts of at most [`MAX_DOC_CHUNK_BYTES`], at line boundaries.
@@ -774,8 +783,11 @@ pub fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<
 
 /// Splits `chunks` into those safe to send and the sources of those holding a secret.
 ///
-/// A chunk whose section or text matches [`find_secret`] is dropped (the section travels with
-/// the chunk). O(total text).
+/// The chunkers mask every one-line secret, so a chunk they built is dropped only when it holds
+/// a private-key block (RV22's exception). This is also the net before any embedding: a chunk
+/// whose section or text still matches [`find_secret`] (one built by hand, or a part whose cut
+/// made a match the whole text did not have) is dropped too, never sent (the section travels
+/// with the chunk). O(total text).
 ///
 /// # Returns
 ///
@@ -1278,9 +1290,11 @@ mod tests {
         assert!(kept.iter().all(|c| !c.text.contains("sk-ant-")
             && !c.text.contains("AAAAAAAAAAAAAAAAAAAA")
             && c.text.len() <= MAX_DOC_CHUNK_BYTES));
-        assert!(kept
-            .iter()
-            .any(|c| c.text.contains("<redacted: anthropic-key>")));
+        let joined: String = kept.iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            joined.contains("<redacted: anthropic-key>"),
+            "the mask may span the cut"
+        );
         assert_eq!(kept.last().map(|c| c.section.as_str()), Some("B"));
     }
 

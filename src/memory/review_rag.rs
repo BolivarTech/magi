@@ -41,7 +41,9 @@ use magi_rs::review::rag::{
     Assembled, ContextItem, ContextKind, IndexDeclarations, CONTEXT_ITEM_FRAME_TOKENS,
     MAX_CALLERS_PER_NAME,
 };
-use magi_rs::review::secrets::{display_path, find_secret, outward_text};
+use magi_rs::review::secrets::{
+    display_path, find_secret, holds_key_block, masked_pattern, outward_text,
+};
 use magi_rs::review::source::{ContentSource, GitCommand};
 use magi_rs::review::window::estimate_tokens;
 use magi_rs::vault::MaskedDek;
@@ -846,9 +848,11 @@ fn reindex_batches(
 ///    count; a path that quotes a secret is never read or stored (its
 ///    path would sit in a clear column) and counts as withheld.
 /// 2. **Index what is missing**: each source the store lacks is read through `sources`, chunked
-///    with `chunk_source`, then passed through `without_secrets` (every chunk, before any
-///    embedding) and `bounded`, in that order. A source with any chunk withheld is withheld
-///    whole. The rest is indexed in batches of at most [`EMBED_BATCH_ITEMS`] chunks, one
+///    with `chunk_source` (which masks every one-line secret, RV22 amended), then passed through
+///    `without_secrets` (every chunk, before any embedding) and `bounded`, in that order. A
+///    source indexed with a mask is declared in `masked_sources`; a source that holds a
+///    private-key block anywhere, or any chunk `without_secrets` drops, is withheld whole.
+///    The rest is indexed in batches of at most [`EMBED_BATCH_ITEMS`] chunks, one
 ///    [`reindex_or_degrade`] each, given what is left of `timeout`; what a batch wrote stays.
 /// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails, and `timeout` itself,
 ///    set `docs_unavailable` with a WARN; the first failing batch stops the rest. The size cap
@@ -944,8 +948,22 @@ pub async fn prepare_docs(
             prep.doc_sources.remove(&source);
             continue;
         };
-        let (kept, dropped) = without_secrets(chunk_source(&source.path, &text, registry));
+        // MAGI FIX (MS3 §6 loop1): RV22 amended: a chunk's one-line secrets are masked by the
+        // chunker and the file is declared as masked; only a private-key block, anywhere in the
+        // file (its code included), still withholds the whole source.
+        let (kept, dropped) = if holds_key_block(&text) {
+            (Vec::new(), vec![display_path(&source.path)])
+        } else {
+            without_secrets(chunk_source(&source.path, &text, registry))
+        };
         if dropped.is_empty() {
+            if let Some(pattern) = kept
+                .iter()
+                .find_map(|c| masked_pattern(&c.text).or_else(|| masked_pattern(&c.section)))
+            {
+                prep.masked_sources
+                    .push((display_path(&source.path), pattern));
+            }
             chunked.push((source, kept));
         } else {
             prep.doc_sources.remove(&source);

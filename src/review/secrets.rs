@@ -968,9 +968,13 @@ pub fn mask_secrets(text: &str) -> String {
 ///
 /// # Returns
 /// The pattern's name, or `None` when `text` holds no mask.
+// MAGI FIX (MS3 §6 loop1): documentation and history are masked, not withheld, and the report
+// declares their file from the mask.
 pub fn masked_pattern(text: &str) -> Option<&'static str> {
-    let _ = text;
-    None
+    SECRET_PATTERNS
+        .iter()
+        .map(|p| p.name)
+        .find(|name| text.contains(&format!("{REDACTED_OPEN}{name}>")))
 }
 
 /// The masking loop of [`mask_secrets`] and [`mask_secrets_keeping_lines`].

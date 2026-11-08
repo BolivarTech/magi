@@ -27,14 +27,14 @@ use super::consolidate::{
     apply_agreement, consolidate, BatchOutcome, Consolidated, ConsolidatedFinding,
 };
 use super::error::{BudgetLimit, ReviewError};
-use super::filter::{filter_files, Filtered, SkipCause, Skipped};
+use super::filter::{filter_files, Filtered, Masked, SkipCause, Skipped};
 use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
 use super::input::{renamed_from, resolve_input, ReviewFile, ReviewInput, SourceKind};
 use super::languages::LanguageRegistry;
 use super::rag::{Assembled, ContextItem, ContextKind};
 use super::report::{name, BatchMetrics, ReviewSummary, TrimmedItem};
-use super::secrets::{display_path, find_secret};
+use super::secrets::{display_path, find_secret, masked_pattern};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
 use super::window::estimate_tokens;
@@ -1234,6 +1234,29 @@ fn skip_for_secret(summary: &mut ReviewSummary, path: &str) {
     }
 }
 
+/// Adds a [`Masked`] entry for `shown` (a path as [`display_path`] shows it) with `pattern`,
+/// unless the path is already declared as masked. O(masked).
+fn declare_masked(summary: &mut ReviewSummary, shown: String, pattern: &'static str) {
+    if !summary.masked.iter().any(|m| m.path == shown) {
+        summary.masked.push(Masked {
+            path: shown,
+            cause: SkipCause::Secret,
+            pattern,
+        });
+    }
+}
+
+/// The pattern a documentation or history item was sent masked for, if any: these two kinds
+/// come from the review stores, not from a reviewed file the filter already declared. O(text).
+fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
+    match item.kind {
+        ContextKind::Documentation | ContextKind::History => {
+            masked_pattern(&item.text).or_else(|| masked_pattern(&item.label))
+        }
+        ContextKind::Unit | ContextKind::Definition | ContextKind::Caller => None,
+    }
+}
+
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
 ///
 /// Each item is passed through the secret detector (text, path and label, whatever its kind):
@@ -1241,7 +1264,9 @@ fn skip_for_secret(summary: &mut ReviewSummary, path: &str) {
 /// skipped with cause `secret`. The source's declarations (trimmed items, a missing embedder,
 /// `--no-memory`, withheld counts) reach `summary` here, so a batch the clock later cuts still
 /// declares them; the documentation paths the source left out for a secret are listed as
-/// skipped once each. The kept items are sorted, stably, by the fixed priority.
+/// skipped once each. A kept documentation or history item that carries a mask, and each
+/// documentation source the source indexed masked ([`RagSource::masked`]), declare their file
+/// as masked once (RV22 amended). The kept items are sorted, stably, by the fixed priority.
 /// O(items + bytes of the items).
 ///
 /// # Errors
@@ -1273,6 +1298,11 @@ async fn prepare_contexts(
                 summary.context_withheld = summary.context_withheld.saturating_add(1);
                 skip_for_secret(summary, &item.file);
             } else {
+                // MAGI FIX (MS3 §6 loop1): RV22 amended declares a file sent masked, the
+                // documentation and history included.
+                if let Some(pattern) = masked_store_item(&item) {
+                    declare_masked(summary, display_path(&item.file), pattern);
+                }
                 kept.push(item);
             }
         }
@@ -1281,6 +1311,9 @@ async fn prepare_contexts(
     }
     for path in rag.skipped() {
         skip_for_secret(summary, &path);
+    }
+    for (shown, pattern) in rag.masked() {
+        declare_masked(summary, shown, pattern);
     }
     Ok(contexts)
 }
