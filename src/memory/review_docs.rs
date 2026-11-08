@@ -1128,6 +1128,82 @@ mod tests {
         );
     }
 
+    /// Runs `other`'s reindex inside its own first `embed`, i.e. between this store's plan and
+    /// its write: the race two stores of different identities can run on one connection.
+    struct RacingEmbedder<'a> {
+        other: &'a ReviewDocStore,
+        sources: Vec<(DocSource, Vec<DocChunk>)>,
+        raced: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for RacingEmbedder<'_> {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            if !self.raced.swap(true, Ordering::SeqCst) {
+                self.other
+                    .reindex(&self.sources, &FakeEmbedder::new(3).named("m2"))
+                    .await
+                    .map_err(|e| EmbeddingError::Http(e.to_string()))?;
+            }
+            Ok(texts.iter().map(|_| vec![0.5; 3]).collect())
+        }
+        fn model_id(&self) -> &str {
+            "m1"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reindex_raced_by_another_identity_still_serves_what_it_wrote() {
+        // [MAGI S6 MS3 loop3, R1 Caspar] Plan and write are apart (the embedder runs unlocked).
+        // Another identity's reindex that lands in between left this store's rows ignored by
+        // `INSERT OR IGNORE` (the keys do not carry the identity): it reported success and served
+        // nothing. The foreign rows are now checked again inside the write's transaction.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        use magi_rs::review::docs::doc_index_id;
+        let open = |model: &str| {
+            ReviewDocStore::new(
+                mem.shared_conn(),
+                mem.data_key().expect("dek"),
+                doc_index_id(model, 3),
+            )
+            .expect("store")
+        };
+        let (mine, other) = (open("m1"), open("m2"));
+        let sources = vec![(src("d.md", "k"), vec![chunk("d.md", "A", "x")])];
+        let racing = RacingEmbedder {
+            other: &other,
+            sources: sources.clone(),
+            raced: Default::default(),
+        };
+        let stats = mine.reindex(&sources, &racing).await.expect("m1");
+        let wanted = BTreeSet::from([src("d.md", "k")]);
+        assert_eq!(
+            mine.search(&[0.5, 0.5, 0.5], 5, &wanted)
+                .expect("search")
+                .len(),
+            1,
+            "the store serves what it reported written"
+        );
+        assert!(stats.rebuilt, "the other identity's rows were wiped");
+        assert!(mine
+            .missing(&[src("d.md", "k")])
+            .expect("missing")
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn embedding_requests_are_bounded_and_written_once() {
         // Thousands of chunks never go in one request; all requests run before the one write.
