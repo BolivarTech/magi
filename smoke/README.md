@@ -451,14 +451,17 @@ timeout is 3 000 s and `TRIO_RUNS_MEASURED_S["R12"]` carries 1 500 s provisional
 
 ### The review context scenario (v0.25.0)
 
-S52 adds two assertions. The harness now promises 52 scenarios and 155 assertions.
+S52 adds two assertions (52 scenarios and 155 assertions when it was added; the current totals are in the latest section).
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| S52 | `code-review ctx` over one small file, with the review workspace's `[embedding]` pointed at `127.0.0.1:9` (nothing listens there), exits 0 and prints a JSON document whose `code_review.without_embedder` is `true`: the review runs without documentation and history and says so. A missing key or any value other than `true` is `FAIL` | `CANNOT_TEST` with no reachable backend; a timed-out R17 is `CANNOT_TEST` too |
+| S52 | `code-review ctx` over one small file, with the review workspace's `[embedding]` pointed at a loopback endpoint that answers every request with an HTTP error at once, exits 0 and prints a JSON document whose `code_review.without_embedder` is `true`: the review runs without documentation and history and says so. A missing key or any value other than `true` is `FAIL` | `CANNOT_TEST` with no reachable backend; a timed-out R17 is `CANNOT_TEST` too |
 
-R17 rewrites only the `[embedding]` table of the copied `magi.toml` (`point_embedding_at`); the trio
-and the gate keep the real backend. A run that declares this rewrite without the review workspace in
+R17 rewrites only the `[embedding]` table of the copied `magi.toml` (`embedder_pointed_away`, over
+`point_embedding_at`), to an error backend served for the run; the trio and the gate keep the real
+backend. A served error, never a guessed port: port 9 is the discard service where it runs (Windows
+ships it), which accepts a request and never answers, and a freed port can be dropped instead of
+refused; either way the run would hang. A run that declares this rewrite without the review workspace in
 its argv is a harness error.
 
 **Cost.** R17 is one batch by the real trio plus the gate, over a four-line file. Its harness timeout
@@ -466,7 +469,7 @@ is 900 s and `TRIO_RUNS_MEASURED_S["R17"]` carries 300 s provisionally; it has n
 
 ### The content-masking scenarios (v0.25.0, REQ-RV22)
 
-S53 and S54 add seven assertions (4 + 3). The harness now promises 54 scenarios and 162 assertions.
+S53 and S54 add seven assertions (4 + 3; 54 scenarios and 162 assertions when they were added).
 S49 covers a secret in a file's NAME; these cover its CONTENT.
 
 | Id | Invariant | Without its environment |
@@ -475,7 +478,10 @@ S49 covers a secret in a file's NAME; these cover its CONTENT.
 | S54 | `code-review rv22pem` over a directory holding only a toy PEM private-key block exits 2, stderr says nothing to review and its omission list is exactly `rv22pem/server.pem (secret)`, and no body line of the block appears in stdout, stderr or the run log | none: R19 reaches no model and a hang is a `FAIL` |
 
 The `<redacted: anthropic-key>` marker goes to the model only, so the harness reads the pattern name the
-product publishes instead. S54 reads the omission from stderr, not from a JSON `skipped` list, because a
+product publishes instead. S53's leak check reads the process's outputs (stdout, stderr, the run log);
+what reaches the model endpoint itself is beyond a smoke run against a real backend, and the unit suite
+pins it with recording doubles (`no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio`,
+`units_and_definitions_holding_a_one_line_secret_reach_the_trio_masked`). S54 reads the omission from stderr, not from a JSON `skipped` list, because a
 refusal prints no JSON document. The toy key and the block are assembled from pieces in `smoke/runs.py`
 so no scanner sees a key-shaped literal in the source.
 

@@ -314,10 +314,13 @@ def _stderr_text(run):
 
 
 def _refusal(texts, run_id, run, stderr_ok, stderr_detail):
-    """The two assertions shared by the refusal scenarios S48 and S49.
+    """The exit and stderr assertions shared by the refusal scenarios S48, S49 and S54.
 
     Args:
-        texts: The scenario's two assertion texts.
+        texts: The scenario's assertion texts; the first two are judged here, and every
+            one is ``CANNOT_TEST`` (no capture) or ``FAIL`` (a hang) when the run gives
+            nothing to judge, so a scenario with more assertions (S54) adds its own only
+            for a run that finished.
         run_id: The shared run.
         run: Its ``RunResult``, or ``None``.
         stderr_ok: Predicate over the decoded stderr.
