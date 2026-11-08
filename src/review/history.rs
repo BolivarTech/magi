@@ -588,6 +588,25 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_turned_binary_is_attended() {
+        // [MAGI S6 MS3 loop3, R3 Melchior] git gives no hunk for a binary change, only the
+        // `Binary files ... differ` line, so the entry read as untouched (a weak reject) while
+        // its line no longer exists. The whole file changed, as a deleted file is covered whole.
+        let git = FakeGit::from(&[
+            ("merge-base --is-ancestor c1 HEAD", Ok("")),
+            (
+                DIFF_C1_HEAD,
+                Ok("diff --git a/a.rs b/a.rs\nindex 1..2 100644\nBinary files a/a.rs and b/a.rs differ\n"),
+            ),
+            (HEAD_IS_C2, Ok("c2\n")),
+        ]);
+        assert_eq!(
+            classify(&entry(Some(5)), "HEAD", &git),
+            HistoryStatus::Attended
+        );
+    }
+
+    #[test]
     fn an_abbreviated_reviewed_commit_at_head_stays_pending() {
         // [MAGI S6 MS3 loop3, R3 all three] `rev-parse` answers the full SHA; an entry anchored
         // to an abbreviation of that same commit compared unequal and read as a weak reject.
