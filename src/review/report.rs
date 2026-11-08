@@ -1130,6 +1130,26 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_pattern_name_is_written_line_safe() {
+        // [MAGI S6 MS3 loop2, R6b Caspar] the path was escaped and the pattern written raw; the
+        // names are fixed today, and the text form keeps them line-safe whatever they become.
+        let s = ReviewSummary {
+            masked: vec![Masked {
+                path: "a.rs".into(),
+                cause: crate::review::filter::SkipCause::Secret,
+                pattern: "bell\u{7}\nname",
+            }],
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(
+            out.contains("- a.rs (secret: bell\\u{7}\\nname)\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn the_context_left_out_is_listed_up_to_the_cap_and_the_rest_counted() {
         // [MAGI S6 MS3 loop2, R6b Melchior] `trimmed` grows with the batches; it was written whole,
         // unlike the other omission lists of the section, in the text and in the JSON.
