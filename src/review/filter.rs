@@ -1712,6 +1712,42 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_as_secret() {
+        // [MAGI S6 MS3 loop2, R6a Balthasar] the safe fallback of `kept_verdict`: a diff that
+        // names a line its masked side does not have cannot be rebuilt, so the raw diff, which
+        // carries the key, is never kept; the file is left out as `secret` instead.
+        let removed = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
+        let diff = format!("@@ -5,2 +5,1 @@\n-{removed}\n fn f() {{}}\n");
+        let old = format!("{removed}\nfn f() {{}}\n");
+        let files = vec![
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: Some(diff),
+            },
+            ReviewFile {
+                path: "b.rs".into(),
+                diff: None,
+            },
+        ];
+        let inner = MapSource::new(
+            &[("a.rs", "fn f() {}\n"), ("b.rs", "fn b() {}\n")],
+            &[("a.rs", old.as_str())],
+        );
+        let src = CachedSource::new(&inner);
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("b.rs kept");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "a.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+        assert!(f.masked.is_empty(), "{:?}", f.masked);
+        assert!(f.kept.iter().all(|k| k.path == "b.rs"), "{:?}", f.kept);
+    }
+
+    #[test]
     fn binaries_and_non_utf8_are_skipped_with_their_cause_and_unknown_text_is_kept() {
         let files = vec![
             ReviewFile {
