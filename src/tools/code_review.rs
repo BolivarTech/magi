@@ -748,7 +748,12 @@ impl CodeReviewTool {
     }
 
     /// The plan for `args`: the one the approval prompt computed for the same arguments (taken
-    /// once), or a fresh one.
+    /// once), or a fresh one when no prompt was shown (auto-approved, or already used).
+    ///
+    /// # Errors
+    /// [`ReviewError::ContentChanged`] when the prompt was shown for other arguments: what runs
+    /// would not be what was approved. Any [`ReviewError`] of a fresh plan.
+    // MAGI FIX (MS3 §6 loop3): a prompt for other arguments was dropped and a fresh plan run.
     fn plan_for(&self, args: &Value, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
         let cached = self
             .approved
@@ -757,7 +762,8 @@ impl CodeReviewTool {
             .take();
         match cached {
             Some((shown, plan)) if &shown == args => Ok(plan),
-            _ => self.runner.plan(input),
+            Some(_) => Err(ReviewError::ContentChanged),
+            None => self.runner.plan(input),
         }
     }
 
