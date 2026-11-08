@@ -2532,6 +2532,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unavailable_index_is_never_declared_as_lack_of_room() {
+        // [MAGI S6 MS3 loop2, R2 Balthasar] With the documentation index unavailable, a full batch
+        // declared it cut for room too, a second cause that was not the reason.
+        let f = RagFixture::new(&[("notes.txt", "plain\n")]).await;
+        let mut rag = f.rag(true);
+        rag.docs_unavailable = true;
+        let b = batch_on("notes.txt", "plain");
+        rag.limit_tokens = b.tokens + estimate_tokens(CONTEXT_HEADING);
+        let a = rag.context_for(&b).await.expect("context");
+        let docs: Vec<&str> = a
+            .trimmed
+            .iter()
+            .filter(|(kind, _)| *kind == ContextKind::Documentation)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        assert_eq!(docs, vec![INDEX_UNAVAILABLE], "{:?}", a.trimmed);
+    }
+
+    #[tokio::test]
     async fn two_hunks_of_one_unit_are_charged_once_when_checking_for_room() {
         // [MAGI S6 MS3 loop2, R2 Melchior] `assemble` charges a repeated unit once; the room check
         // charged it per hunk, so a batch with room for one more item was declared full and its
