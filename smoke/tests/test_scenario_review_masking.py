@@ -66,6 +66,15 @@ class S53Tests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, self._judge(1, result))
         self.assertEqual(Outcome.FAIL, self._judge(2, result))
 
+    def test_valid_json_that_is_not_an_object_fails_both_json_assertions(self) -> None:
+        # [MAGI S6 MS3 loop2, R7a Melchior/Caspar] `.get` on a list escaped the scenario.
+        try:
+            result = _result("R18", 0, ["not", "an", "object"])
+            outcomes = (self._judge(1, result), self._judge(2, result))
+        except AttributeError as exc:
+            self.fail("a non-object document crashed S53: %s" % exc)
+        self.assertEqual((Outcome.FAIL, Outcome.FAIL), outcomes)
+
     def test_the_raw_key_in_stdout_fails_the_leak_assertion(self) -> None:
         doc = _doc()
         doc["code_review"]["note"] = _KEY

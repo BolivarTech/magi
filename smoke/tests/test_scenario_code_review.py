@@ -862,6 +862,14 @@ class CodeReviewWithoutEmbedderTests(unittest.TestCase):
         doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": True}}
         self.assertEqual({Outcome.PASS}, set(_outcomes("S52", _result("R17", 0, doc)).values()))
 
+    def test_s52_fails_on_valid_json_that_is_not_an_object(self) -> None:
+        # [MAGI S6 MS3 loop2, R7a Melchior/Caspar] `.get` on a list escaped the scenario.
+        try:
+            outcome = _outcomes("S52", _result("R17", 0, [1, 2]))[review_context.S52_ASSERTIONS[1]]
+        except AttributeError as exc:
+            self.fail("a non-object document crashed S52: %s" % exc)
+        self.assertEqual(Outcome.FAIL, outcome)
+
     def test_s52_fails_when_the_report_hides_it(self) -> None:
         doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": False}}
         self.assertEqual(Outcome.FAIL, _outcomes("S52", _result("R17", 0, doc))[review_context.S52_ASSERTIONS[1]])
