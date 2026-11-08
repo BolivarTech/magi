@@ -1467,6 +1467,47 @@ mod tests {
             .all(|i| !matches!(i.kind, ContextKind::Documentation | ContextKind::History)));
     }
 
+    #[tokio::test]
+    async fn a_down_embedder_is_declared_apart_from_a_missing_one_once() {
+        // [MAGI S6 MS3 loop2, R2 Melchior] A configured embedder that fails read in the report
+        // exactly like no embedder at all; the cause lived only in the run log.
+        const DOWN: &str = "the embedder did not answer";
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let failing = FailingEmbedder;
+        let mut rag = f.rag(true);
+        rag.embedder = Some(&failing);
+        let first = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("never fails the review");
+        assert_eq!(
+            first
+                .trimmed
+                .iter()
+                .filter(|(_, label)| label == DOWN)
+                .collect::<Vec<_>>(),
+            vec![
+                &(ContextKind::Documentation, DOWN.to_string()),
+                &(ContextKind::History, DOWN.to_string())
+            ]
+        );
+        let second = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("never fails the review");
+        assert!(
+            second.trimmed.iter().all(|(_, label)| label != DOWN),
+            "declared once per review: {:?}",
+            second.trimmed
+        );
+        let missing = f
+            .rag(false)
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(missing.trimmed.iter().all(|(_, label)| label != DOWN));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_hanging_query_embed_times_out_and_degrades() {
         // [CP2 MS3 loop 4] EMBED_QUERY_TIMEOUT_SECS bounds the query like REINDEX_TIMEOUT_SECS bounds the index.
