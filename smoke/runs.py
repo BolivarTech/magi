@@ -456,8 +456,8 @@ class RunDefinition:
             needs the review workspace, whose configuration is the one
             rewritten.
         unreachable_embedder: Whether the review workspace's ``[embedding]``
-            is pointed at :func:`unreachable_embedder_url` before the run
-            (:func:`point_embedding_at`), so documentation and history cannot
+            answers a served error for the run (:func:`embedder_pointed_away`),
+            so documentation and history cannot
             be retrieved while the trio still answers. It needs the review
             workspace too.
     """
@@ -2180,34 +2180,30 @@ _REVIEW_CONTEXT_FILE = (b"/// Adds two numbers.\n"
                         b"    a + b\n"
                         b"}\n")
 
-#: The loopback host whose freed port R17's ``[embedding]`` reaches.
-_UNREACHABLE_HOST = "127.0.0.1"
+@contextlib.contextmanager
+def embedder_pointed_away(config_path):
+    """Point the ``[embedding]`` of the ``magi.toml`` at *config_path* at a served error.
 
+    For the block's duration, an :func:`error_backend` on loopback answers every
+    request with an HTTP error at once, so documentation and history cannot be
+    retrieved and the review must go on without them. A served error, never a
+    guessed port: port 9 is the discard service where it runs (Windows ships it,
+    measured live for R6), which accepts a request and never answers, and a
+    freed ephemeral port can be dropped instead of refused; either way a hang.
 
-def unreachable_embedder_url() -> str:
-    """Where R17's ``[embedding]`` points: a loopback port nothing listens on.
+    Args:
+        config_path: The review workspace's configuration, rewritten in place.
 
-    The port is one the system just handed out and the harness closed again,
-    taken at run time: a fixed port could hold a service (port 9 is the discard
-    service where it is enabled, which accepts a request and swallows it, a hang
-    instead of a refusal). So every embedding request is refused at once and the
-    review must go on without documentation and history.
-
-    Returns:
-        str: ``http://127.0.0.1:<port>/v1``.
+    Yields:
+        str: The URL ``[embedding]`` now reaches.
 
     Raises:
-        HarnessError: When no port can be bound on loopback.
+        HarnessError: When the configuration cannot be read or written.
     """
-    # MAGI FIX (S6 MS3 loop2): port 9 was fixed and may run the discard service.
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.bind((_UNREACHABLE_HOST, 0))
-            port = probe.getsockname()[1]
-    except OSError as exc:
-        raise HarnessError("could not take a free loopback port for the embedder: %s"
-                           % exc) from exc
-    return "http://%s:%d/v1" % (_UNREACHABLE_HOST, port)
+    # MAGI FIX (S6 MS3 loop2): R17 pointed at port 9, the discard service where it runs.
+    with error_backend() as url:
+        point_embedding_at(config_path, url)
+        yield url
 
 #: The table whose endpoint :func:`point_embedding_at` rewrites.
 _EMBEDDING_TABLE = "[embedding]"
@@ -3442,12 +3438,6 @@ class RunExecutor:
         """
         started = time.monotonic()
         workspace = self._prepare_review_workspace(definition)
-        if definition.unreachable_embedder:
-            if workspace is None:
-                raise HarnessError("run %s points its embedder away but has no review "
-                                   "workspace" % definition.run_id)
-            point_embedding_at(workspace.joinpath(*CONFIG_PATH_PARTS),
-                               unreachable_embedder_url())
         # A second listing, after the run's files are written and before the
         # product starts: what the product's own enumeration will see.
         protected = () if workspace is None else protected_candidates(workspace)
@@ -3455,7 +3445,8 @@ class RunExecutor:
         baseline = None
         contacted: list[str] = []
         self._reached = []
-        with self._counted_endpoints(definition, workspace, contacted) as runnable:
+        with self._embedder_away(definition, workspace), \
+                self._counted_endpoints(definition, workspace, contacted) as runnable:
             try:
                 if runnable.rotates:
                     # The baseline is taken INSIDE, after the guard that refuses
@@ -3489,6 +3480,29 @@ class RunExecutor:
             model_requests=tuple(contacted),
             backend_requests=sum(self._reached) if self._reached else None,
         )
+
+    @contextlib.contextmanager
+    def _embedder_away(self, definition: RunDefinition, workspace):
+        """Keep a run's embedder on a served error for the block, when it asks for one.
+
+        Args:
+            definition: The run; only ``unreachable_embedder`` runs are touched.
+            workspace: Its review workspace, or ``None``.
+
+        Yields:
+            None: The configuration is rewritten (or left alone) for the block.
+
+        Raises:
+            HarnessError: When the run asks for it without a review workspace.
+        """
+        if not definition.unreachable_embedder:
+            yield
+            return
+        if workspace is None:
+            raise HarnessError("run %s points its embedder away but has no review "
+                               "workspace" % definition.run_id)
+        with embedder_pointed_away(workspace.joinpath(*CONFIG_PATH_PARTS)):
+            yield
 
     @contextlib.contextmanager
     def _counted_endpoints(self, definition: RunDefinition, workspace, contacted):

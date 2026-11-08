@@ -4,14 +4,15 @@
 """S52 -- ``code-review`` declares the documentation and history it could not retrieve.
 
 * **S52** (R17, the real trio): the review workspace's ``[embedding]`` points at
-  a closed port (``runs.unreachable_embedder_url()``), so documentation and history
-  cannot be retrieved. The review must still run to its report, exit 0, and say
+  an endpoint that answers an HTTP error at once
+  (``runs.embedder_pointed_away``), so documentation and history cannot be
+  retrieved. The review must still run to its report, exit 0, and say
   so: ``code_review.without_embedder`` is ``true``.
 
 The unit suite proves each half with doubles (``src/memory/review_rag.rs``:
 ``a_failing_embedder_degrades_to_no_documentation_or_history``,
 ``a_failing_reindex_degrades_and_never_fails_the_review``); what it cannot see is
-the release binary meeting a refused connection on its way to the embedder and
+the release binary meeting a failing embedder endpoint and
 still delivering a report. A timed-out R17 never reaches this body: S52 does not
 declare ``inspects_timeouts``, so the runner reports it as ``CANNOT_TEST``.
 """
