@@ -1442,6 +1442,24 @@ mod tests {
         assert_eq!((v.state, v.cause), (GateState::Kept, None));
     }
 
+    #[test]
+    fn a_state_whose_key_holds_a_secret_is_withheld_by_the_residual_check() {
+        // [MAGI S6 MS3 loop3, R6b Caspar, Balthasar] Masking reads the values only (a state's
+        // keys are the gate's own field names), and the residual check after it read the values
+        // only too: a key holding a secret would have left as written. The residual check now
+        // reads the keys, and this is the branch it guards.
+        let c = MockDecisionClient::new();
+        let g = Gate::new(&c, chain(), 61_000);
+        let key = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        assert_eq!(
+            g.sendable(serde_json::json!({ "finding": { key: "x" } })),
+            Err(CAUSE_SECRET)
+        );
+        assert!(g
+            .sendable(serde_json::json!({ "finding": { "file": "a.rs" } }))
+            .is_ok());
+    }
+
     #[tokio::test]
     async fn a_state_carrying_a_private_key_block_is_never_sent() {
         // RV22's exception: a key body has no pattern of its own, so masking cannot promise that
