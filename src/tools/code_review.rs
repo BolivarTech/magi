@@ -1162,7 +1162,9 @@ impl ProductionReviewRunner {
     /// The documentation side of a review (RV07(3), RV21): lists the reviewed revision's sources
     /// and indexes what the store lacks, before the review's clock. Without a database or an
     /// embedder there is nothing to prepare; any failure on the way degrades to a review without
-    /// documentation (declared once by the context source), never a failed review.
+    /// documentation (declared once by the context source), never a failed review. With a
+    /// database, the reviewed revision is returned whatever happened to the documentation, so a
+    /// revision review records its history (RV08) with or without an embedder.
     ///
     /// It runs before `run_review` re-checks the approved plan and digest, and so before a
     /// review that changed since its approval is refused: the documentation is part of the
@@ -1175,9 +1177,7 @@ impl ProductionReviewRunner {
     /// a review refused for its `--timeout` never reaches the embedder; this duration is still
     /// part of `prep_ms`.
     async fn prepare_documentation(&self, input: &ReviewInput) -> DocContext {
-        let (Some(memory), Some(embedder)) =
-            (self.parts.memory.as_deref(), self.parts.embedder.as_deref())
-        else {
+        let Some(memory) = self.parts.memory.as_deref() else {
             return DocContext::default();
         };
         // The same decision MS2's directory resolution makes: a git that fails where no `.git`
@@ -1187,6 +1187,22 @@ impl ProductionReviewRunner {
             in_work_tree(&self.git, &self.workspace, &self.workspace),
             Ok(false)
         );
+        let guard = |p: &Path| self.guard(p);
+        // MAGI FIX (MS3 §6 loop2): the history anchor depends on the input alone (RV08), so it
+        // is resolved before, and kept through, anything the documentation needs.
+        let kind = resolve_input(input, &self.workspace, &self.git, &guard).map(|r| r.source_kind);
+        let rev = kind
+            .as_ref()
+            .ok()
+            .and_then(doc_revision)
+            .map(str::to_string);
+        let Some(embedder) = self.parts.embedder.as_deref() else {
+            return DocContext {
+                rev,
+                repository,
+                ..DocContext::default()
+            };
+        };
         let unavailable = |docs: Option<ReviewDocStore>, cause: &str| {
             let cause = egress_text(cause);
             tracing::event!(
@@ -1201,6 +1217,7 @@ impl ProductionReviewRunner {
                     docs_unavailable: true,
                     ..DocPrep::default()
                 },
+                rev: rev.clone(),
                 repository,
                 ..DocContext::default()
             }
@@ -1209,17 +1226,14 @@ impl ProductionReviewRunner {
             Ok(docs) => docs,
             Err(e) => return unavailable(None, &e.to_string()),
         };
-        let guard = |p: &Path| self.guard(p);
-        let kind = match resolve_input(input, &self.workspace, &self.git, &guard) {
-            Ok(resolved) => resolved.source_kind,
-            Err(e) => return unavailable(Some(docs), &e.to_string()),
-        };
+        if let Err(e) = &kind {
+            return unavailable(Some(docs), &e.to_string());
+        }
         let whole = ReviewInput::Directory(PathBuf::from("."));
         let ignored = match self.ignored(&whole) {
             Ok(ignored) => ignored,
             Err(e) => return unavailable(Some(docs), &e.to_string()),
         };
-        let rev = doc_revision(&kind).map(str::to_string);
         let paths: Vec<String> = match &rev {
             Some(_) => Vec::new(),
             None => match resolve_input(&whole, &self.workspace, &self.git, &guard) {
