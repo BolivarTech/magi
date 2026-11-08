@@ -625,6 +625,19 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_without_a_file_stays_pending_without_running_git() {
+        // [MAGI S6 MS3 loop3, R3 Caspar] An empty pathspec after `--` would diff the whole
+        // tree, and a hunk of any file at the same line number would read as attended.
+        let git = CountingGit(std::sync::atomic::AtomicUsize::new(0));
+        let no_file = HistoryEntry {
+            file: String::new(),
+            ..entry(Some(5))
+        };
+        assert_eq!(classify(&no_file, "HEAD", &git), HistoryStatus::Pending);
+        assert_eq!(git.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn a_reference_starting_with_a_dash_is_never_passed_to_git() {
         // Security guardian: a stored commit or a head such as `--output=x` would be read by git as
         // an option; classify must stay Pending and must not run git at all.
