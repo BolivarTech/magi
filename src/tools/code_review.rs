@@ -37,7 +37,7 @@ use magi_rs::review::pipeline::{
     ReviewRequest, SystemReviewClock,
 };
 use magi_rs::review::report::{
-    failed_batch_lines, render_batch_reports, render_text, summary_json,
+    distinct_key, failed_batch_lines, render_batch_reports, render_text, summary_json,
 };
 use magi_rs::review::secrets::{is_hidden_format_char, mask_secrets};
 use magi_rs::review::source::{
@@ -491,15 +491,15 @@ fn map_json_text(value: Value, f: &dyn Fn(&str) -> String, keys: bool) -> Value 
                 .map(|v| map_json_text(v, f, keys))
                 .collect(),
         ),
-        Value::Object(fields) => Value::Object(
-            fields
-                .into_iter()
-                .map(|(k, v)| {
-                    let k = if keys { f(&k) } else { k };
-                    (k, map_json_text(v, f, keys))
-                })
-                .collect(),
-        ),
+        // MAGI FIX (MS3 §6 loop2): two keys masked alike collapsed into one field.
+        Value::Object(fields) => {
+            let mut out = Map::with_capacity(fields.len());
+            for (k, v) in fields {
+                let k = if keys { distinct_key(&out, f(&k)) } else { k };
+                out.insert(k, map_json_text(v, f, keys));
+            }
+            Value::Object(out)
+        }
         other => other,
     }
 }

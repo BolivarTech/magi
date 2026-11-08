@@ -935,10 +935,40 @@ fn redacted(text: &str) -> String {
     mask_secrets(redact_foreign_text(text).as_str())
 }
 
+/// `base`, or `base (2)`, `base (3)`, ... : the first spelling `taken` does not hold yet. Two keys
+/// that redact alike (two model names holding the same secret pattern) stay two fields.
+/// O(collisions · log size of `taken`).
+///
+/// # Arguments
+/// * `taken` - The object the key goes into.
+/// * `base` - The key as it may leave the process.
+///
+/// # Returns
+/// A key `taken` does not hold.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::report::distinct_key;
+///
+/// let mut taken = serde_json::Map::new();
+/// taken.insert("k".into(), serde_json::json!(1));
+/// assert_eq!(distinct_key(&taken, "k".into()), "k (2)");
+/// ```
+pub fn distinct_key(taken: &serde_json::Map<String, Value>, base: String) -> String {
+    let mut key = base.clone();
+    let mut n = 2_usize;
+    while taken.contains_key(&key) {
+        key = format!("{base} ({n})");
+        n = n.saturating_add(1);
+    }
+    key
+}
+
 /// Redacts every string of `value` in place, object keys included: besides field names, the
 /// keys are model names, states and causes, and a model name is operator text. Two keys that
 /// redact to the same text are both kept, the later one suffixed ` (n)` with the first free `n`
-/// from 2, so no count is lost. O(bytes).
+/// from 2 ([`distinct_key`]), so no count is lost. O(bytes).
 // MAGI FIX (S6 loop 11, C2-c1): keys were written as is, so a model name shaped like a key left
 // the process unmasked as a key of `per_model` or `rejected_skips` (RV22).
 fn redact_strings(value: &mut Value) {
@@ -949,13 +979,7 @@ fn redact_strings(value: &mut Value) {
             let mut safe = serde_json::Map::with_capacity(fields.len());
             for (key, mut item) in std::mem::take(fields) {
                 redact_strings(&mut item);
-                let base = redacted(&key);
-                let mut key = base.clone();
-                let mut n = 2_usize;
-                while safe.contains_key(&key) {
-                    key = format!("{base} ({n})");
-                    n = n.saturating_add(1);
-                }
+                let key = distinct_key(&safe, redacted(&key));
                 safe.insert(key, item);
             }
             *fields = safe;
