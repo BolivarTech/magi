@@ -775,6 +775,58 @@ mod tests {
     }
 
     #[test]
+    fn real_ls_tree_output_lists_whole_paths_and_peels_annotated_tags() {
+        // [MAGI S6 MS3 loop2, R1 Caspar/Balthasar] Real `git ls-tree -r -z` output, not a table:
+        // the path keeps its first byte, a tab or a space inside it survives the parse, and an
+        // annotated tag's object id lists its commit's tree.
+        use magi_rs::review::docs::{live_doc_sources, revision_doc_sources, DocSource};
+        use std::io::Write as _;
+        let d = repo();
+        let piped = |args: &[&str], input: &[u8]| -> String {
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(d.path())
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("git runs");
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(input)
+                .expect("write");
+            let out = child.wait_with_output().expect("git ends");
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout)
+                .expect("utf-8")
+                .trim()
+                .to_string()
+        };
+        std::fs::write(d.path().join("README.md"), "# one\n").expect("write");
+        git(d.path(), &["add", "README.md"]);
+        git(d.path(), &["commit", "-q", "-m", "one"]);
+        // A tab is no valid file name on every platform: the tagged tree is built with mktree.
+        let blob = piped(&["hash-object", "-w", "--stdin"], b"# two\n");
+        let listing = format!(
+            "100644 blob {blob}\tREADME.md\0100644 blob {blob}\ta b.md\0100644 blob {blob}\tt\tab.md\0"
+        );
+        let tree = piped(&["mktree", "-z"], listing.as_bytes());
+        let commit = piped(&["commit-tree", &tree, "-p", "HEAD", "-m", "tabbed"], b"");
+        git(d.path(), &["tag", "-a", "v1", "-m", "annotated", &commit]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let keep = |p: &str| p.ends_with(".md");
+        let at_tag = revision_doc_sources(&g, "v1", &keep).expect("lists");
+        let paths: Vec<&str> = at_tag.iter().map(|s| s.path.as_str()).collect();
+        assert_eq!(paths, vec!["README.md", "a b.md", "t\tab.md"]);
+        let live = live_doc_sources(&g, &keep)
+            .expect("lists")
+            .expect("git answers");
+        let readmes: Vec<&DocSource> = live.iter().filter(|s| s.path == "README.md").collect();
+        assert_eq!(readmes.len(), 2, "the tag's README and HEAD's: {live:?}");
+    }
+    #[test]
     fn names_taken_ahead_in_the_temp_directory_never_block_the_empty_repository() {
         // [MAGI S6 loop 5, A1-c1] another local user could take `<prefix>-<pid>-<n>` for the next
         // attempts; a random name leaves nothing to predict. nextest runs each test in its own
