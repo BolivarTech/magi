@@ -8,7 +8,7 @@
 //! ([`RevisionSource`], `git show <rev>:./<path>`) or the worktree ([`WorktreeSource`]), with an
 //! optional old side for deleted lines. Nothing mixes the worktree with another revision.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -696,7 +696,8 @@ impl ContentSource for RevisionSource<'_> {
 /// masked, line breaks kept (RV22; [`ContentSource::masked`] says what was masked). The exception
 /// is a side that holds a multi-line private-key block: it is held unmasked, and safety comes from
 /// the filter leaving its file out, so every later stage (index, units, definitions, callers, the
-/// gate) must read only files the filter kept. An `Err` is never kept, and the filter releases
+/// gate) must read only files the filter kept; once the filter released such a side, a read of it
+/// is refused ([`ReviewError::EgressSecret`]), so the rule holds mechanically. An `Err` is never kept, and the filter releases
 /// every side of a file it leaves out that no kept file was scanned with
 /// ([`ContentSource::release`]), so the cap and the memory count only
 /// what is reviewed and no skipped secret stays held. The bytes held are
@@ -725,6 +726,9 @@ struct Held {
     old: HashMap<String, Option<Vec<u8>>>,
     /// What was masked in each held side, by side and path (RV22).
     masks: HashMap<(Face, String), SideMask>,
+    /// Sides released while they held a private-key block raw (RV22's exception): never read
+    /// again, so no stage after the filter can get that key back.
+    withheld: HashSet<(Face, String)>,
     /// Bytes held across both sides.
     bytes: u64,
     /// The bytes held before, and the path of, the first read that passed the cap since the
@@ -794,6 +798,13 @@ impl<'a> CachedSource<'a> {
     // MAGI FIX (S6 loop 15, A2-5): the lock's scope was undocumented.
     fn get(&self, face: Face, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        // MAGI FIX (MS3 §6 loop3): the filter left this file out for its key block; a later read
+        // would have fetched the raw key again.
+        if held.withheld.contains(&(face, path.to_string())) {
+            return Err(ReviewError::EgressSecret {
+                path: path.to_string(),
+            });
+        }
         let side = match face {
             Face::New => &held.new,
             Face::Old => &held.old,
@@ -867,8 +878,9 @@ fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
 impl ContentSource for CachedSource<'_> {
     /// # Errors
     ///
-    /// The inner source's error (never kept), and [`ReviewError::InputTooLarge`] when keeping
-    /// the read would pass the total cap by more than the provisional headroom.
+    /// The inner source's error (never kept), [`ReviewError::InputTooLarge`] when keeping the read
+    /// would pass the total cap by more than the provisional headroom, and
+    /// [`ReviewError::EgressSecret`] for a side released while it held a private-key block.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
         self.get(Face::New, path)
     }
@@ -877,7 +889,9 @@ impl ContentSource for CachedSource<'_> {
         self.get(Face::Old, path)
     }
 
-    /// Removes side `face` of `path` and gives its bytes back to the total cap. O(1) expected.
+    /// Removes side `face` of `path` and gives its bytes back to the total cap. A side that held a
+    /// private-key block is remembered, and a later read of it is refused. O(1) expected, plus a
+    /// scan of the released bytes.
     fn release(&self, face: Face, path: &str) {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         let removed = match face {
@@ -885,9 +899,15 @@ impl ContentSource for CachedSource<'_> {
             Face::Old => held.old.remove(path),
         };
         held.masks.remove(&(face, path.to_string()));
-        let freed = removed
-            .flatten()
-            .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let removed = removed.flatten();
+        if removed
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .is_some_and(holds_key_block)
+        {
+            held.withheld.insert((face, path.to_string()));
+        }
+        let freed = removed.map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         held.bytes = held.bytes.saturating_sub(freed);
         if held.bytes <= self.cap {
             held.over = None;
