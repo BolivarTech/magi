@@ -1170,6 +1170,23 @@ const HIDDEN_FORMAT_CHARS: &[std::ops::RangeInclusive<char>] = &[
     '\u{e0000}'..='\u{e007f}',
 ];
 
+/// Whether `c` is one of the [`HIDDEN_FORMAT_CHARS`]: a format character or a line or
+/// paragraph separator, which can break, reorder or hide text on a terminal or a log viewer.
+/// O(r) for r ranges, a constant.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::is_hidden_format_char;
+///
+/// assert!(is_hidden_format_char('\u{202e}'));
+/// assert!(!is_hidden_format_char('a'));
+/// ```
+// MAGI FIX (MS3 §6 loop2): shared with the headless terminal text, which dropped only controls.
+pub fn is_hidden_format_char(c: char) -> bool {
+    HIDDEN_FORMAT_CHARS.iter().any(|r| r.contains(&c))
+}
+
 /// `text` with every control character escaped ([`char::escape_default`]) and every
 /// [`HIDDEN_FORMAT_CHARS`] character escaped as `\u{…}`. O(n · r) for r ranges, a constant.
 // MAGI FIX (S6 loop 5): a right-to-left override in a file name could reorder a report line.
@@ -1179,7 +1196,7 @@ pub(crate) fn escape_controls(text: &str) -> String {
         .map(|c| {
             if c.is_control() {
                 c.escape_default().to_string()
-            } else if HIDDEN_FORMAT_CHARS.iter().any(|r| r.contains(&c)) {
+            } else if is_hidden_format_char(c) {
                 c.escape_unicode().to_string()
             } else {
                 c.to_string()

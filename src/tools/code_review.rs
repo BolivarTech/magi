@@ -39,7 +39,7 @@ use magi_rs::review::pipeline::{
 use magi_rs::review::report::{
     failed_batch_lines, render_batch_reports, render_text, summary_json,
 };
-use magi_rs::review::secrets::mask_secrets;
+use magi_rs::review::secrets::{is_hidden_format_char, mask_secrets};
 use magi_rs::review::source::{
     is_never_reviewed, CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource,
 };
@@ -422,9 +422,11 @@ fn egress_safe(r: Rendered) -> Rendered {
 }
 
 /// `text` without the control characters a terminal acts on: every C0 and C1 control but `\n`
-/// and `\t`, the report's own layout, is dropped, so an escape sequence a model echoes from
-/// the reviewed code arrives as inert text (`ESC [2J` becomes `[2J`). The JSON forms escape
-/// control characters themselves and are left as they are. O(len of `text`).
+/// and `\t`, the report's own layout, is dropped, and so is every format character that can
+/// reorder or hide text ([`is_hidden_format_char`]: a bidi override, a zero-width space), so an
+/// escape sequence a model echoes from the reviewed code arrives as inert text (`ESC [2J`
+/// becomes `[2J`). The JSON forms escape control characters themselves and are left as they
+/// are. O(len of `text`).
 ///
 /// # Arguments
 /// * `text` - The text about to reach the screen.
@@ -433,9 +435,10 @@ fn egress_safe(r: Rendered) -> Rendered {
 /// The text with those characters removed.
 // MAGI FIX (S6 loop 8, C2-c6): the headless text output wrote model text to the terminal
 // verbatim; only the TUI ran it through `Agent::sanitize_text`.
+// MAGI FIX (MS3 §6 loop2): format characters (bidi overrides, zero-width) passed through.
 fn terminal_safe(text: &str) -> String {
     text.chars()
-        .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+        .filter(|&c| (!c.is_control() || c == '\n' || c == '\t') && !is_hidden_format_char(c))
         .collect()
 }
 
