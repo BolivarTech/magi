@@ -1374,6 +1374,29 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_method_is_never_its_own_caller() {
+        // [MAGI S6 MS3 loop1, R2 Melchior] The index records only top-level definitions, so a
+        // method's own line was an occurrence: its unit took a caller slot and pushed a real
+        // caller past the cap.
+        use crate::review::test_support::MapSource;
+        let a = "struct S;\nimpl S {\n    fn m(&self) {}\n}\n".to_string();
+        let b: String = (0..MAX_CALLERS_PER_NAME)
+            .map(|i| format!("fn c{i}() {{\n    S.m();\n}}\n\n"))
+            .collect();
+        let files = vec![
+            ("a.rs".to_string(), a.clone()),
+            ("b.rs".to_string(), b.clone()),
+        ];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let src = MapSource::new(&[("a.rs", a.as_str()), ("b.rs", b.as_str())], &[]);
+        let (callers, capped) =
+            callers_for(&["m"], &index, &src, &LanguageRegistry::new()).expect("reads");
+        assert!(capped.is_empty(), "{capped:?}");
+        assert_eq!(callers.len(), MAX_CALLERS_PER_NAME);
+        assert!(callers.iter().all(|c| c.file == "b.rs"), "{callers:?}");
+    }
+
+    #[test]
     fn the_kept_context_is_a_prefix_and_everything_after_the_first_misfit_is_trimmed() {
         // [CP2 MS3 loop 8] RV07 «se recorta desde el final»: a smaller item after a misfit is never
         // kept.
