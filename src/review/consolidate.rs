@@ -26,7 +26,7 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// The category every located finding carries into the consensus engine, so its key is
 /// file + line alone: a mage-reported category is unverified and must not split one defect
 /// into two single-mage findings.
-const NEUTRAL_CATEGORY: Category = Category::Other;
+pub(crate) const NEUTRAL_CATEGORY: Category = Category::Other;
 
 /// What one batch's `consult` returned: the mages that answered and their outputs.
 #[derive(Debug, Clone)]

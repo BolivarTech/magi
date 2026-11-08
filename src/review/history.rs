@@ -20,15 +20,10 @@
 //! ```
 
 use magi_core::finding_id::generate_finding_id;
-use magi_core::schema::Category;
 
-use super::consolidate::ConsolidatedFinding;
+use super::consolidate::{ConsolidatedFinding, NEUTRAL_CATEGORY};
 use super::gate::{GateState, GateVerdict};
 use super::source::GitCommand;
-
-/// The category every located finding is keyed with: the neutral one consolidation uses
-/// (`consolidate::NEUTRAL_CATEGORY`), so the id here is the id magi-core computed there.
-const NEUTRAL_CATEGORY: Category = Category::Other;
 
 /// Separator that joins the merged titles and details of a finding.
 const MERGED_TEXT_SEPARATOR: &str = "\n";
