@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
 # Date: 2026-11-08
-"""S52 -- ``code-review`` declares the documentation and history it could not retrieve.
+"""S52, S55 -- ``code-review`` retrieves its documentation and history, or says it could not.
 
 * **S52** (R17, the real trio): the review workspace's ``[embedding]`` points at
   an endpoint that answers an HTTP error at once
@@ -15,6 +15,16 @@ The unit suite proves each half with doubles (``src/memory/review_rag.rs``:
 the release binary meeting a failing embedder endpoint and
 still delivering a report. A timed-out R17 never reaches this body: S52 does not
 declare ``inspects_timeouts``, so the runner reports it as ``CANNOT_TEST``.
+
+* **S55** (R18, the real trio and the environment's own embedder, the one S9
+  needs answering): the same machinery with nothing pointed away must not
+  degrade. ``code_review.without_embedder`` is ``false`` and ``code_review.trimmed``
+  names neither an unavailable documentation index nor an embedder that did not
+  answer. Without it the suite could not tell a working RAG from one that
+  degrades on every run: S52 even expects the degradation. Whether a chunk was
+  relevant is the model side and is never asserted; a trim for room is the
+  budget at work and passes. A history the review would retrieve needs a chain
+  of revision reviews, which no smoke run makes, so it stays in the unit suite.
 """
 
 from smoke.errors import ProductOutputError
@@ -97,3 +107,97 @@ def a_review_without_an_embedder_runs_and_says_so(run):
     value = summary.get(WITHOUT_EMBEDDER_KEY) if isinstance(summary, dict) else None
     yield _verdict(1, value is True,
                    "code_review.without_embedder is %r, not true" % (value,))
+
+
+#: The verbatim assertion texts of S55.
+S55_ASSERTIONS = (
+    "code_review.without_embedder is false: the embedder answered the review",
+    "code_review.trimmed names no unavailable index and no embedder that did not answer",
+)
+
+#: The run S55 reads: a review with the environment's own embedder.
+S55_RUN_ID = "R18"
+
+#: The key of the context the review left out, and of each entry's cause.
+TRIMMED_KEY = "trimmed"
+TRIMMED_LABEL_KEY = "label"
+
+#: The ``trimmed`` labels of a degraded RAG (``INDEX_UNAVAILABLE`` and
+#: ``EMBEDDER_DOWN`` in ``src/memory/review_rag.rs``); a trim for room is not one.
+DEGRADED_LABELS = ("index unavailable", "the embedder did not answer")
+
+
+def _s55_finding(index, outcome, detail=""):
+    """Build the finding for assertion *index* of :data:`S55_ASSERTIONS`.
+
+    Args:
+        index: Position in :data:`S55_ASSERTIONS`.
+        outcome: What became of it.
+        detail: The cause when the outcome is not ``PASS``.
+
+    Returns:
+        Finding: The finding.
+    """
+    return Finding(assertion=S55_ASSERTIONS[index], outcome=outcome, detail=detail,
+                   run_id=S55_RUN_ID)
+
+
+def _degraded_labels(trimmed):
+    """The degraded causes *trimmed* names, or ``None`` when it is not a list of entries.
+
+    Args:
+        trimmed: The ``code_review.trimmed`` value read from the product.
+
+    Returns:
+        list: Each :data:`DEGRADED_LABELS` label found, in order; ``None`` for a
+        shape the harness does not understand.
+
+    Example:
+        >>> _degraded_labels([{"kind": "history", "label": "no room left in the batch"}])
+        []
+        >>> _degraded_labels("x") is None
+        True
+    """
+    if not isinstance(trimmed, list) or not all(isinstance(t, dict) for t in trimmed):
+        return None
+    return [t.get(TRIMMED_LABEL_KEY) for t in trimmed
+            if t.get(TRIMMED_LABEL_KEY) in DEGRADED_LABELS]
+
+
+@scenario("S55", assertions=S55_ASSERTIONS, run=S55_RUN_ID, needs_backend=True)
+def a_review_with_its_embedder_up_is_not_degraded(run):
+    """Check that a review whose embedder answers retrieves without degrading.
+
+    Both declarations must be present and well typed: a missing key is shape
+    drift and a ``FAIL``, never a pass by absence.
+
+    Args:
+        run: R18's ``RunResult``, or ``None`` when the run produced no capture.
+
+    Yields:
+        Finding: One per entry of :data:`S55_ASSERTIONS`, in that order.
+    """
+    # MAGI FIX (S6 MS3 loop2): no scenario observed a working RAG; S52 only its degradation.
+    if run is None:
+        for index in range(len(S55_ASSERTIONS)):
+            yield _s55_finding(index, Outcome.CANNOT_TEST,
+                               "run %s produced no capture to inspect" % S55_RUN_ID)
+        return
+    try:
+        summary = run.output.json().get(CODE_REVIEW_KEY)
+    except ProductOutputError as exc:
+        for index in range(len(S55_ASSERTIONS)):
+            yield _s55_finding(index, Outcome.FAIL, "stdout is not a JSON document: %s" % exc)
+        return
+    summary = summary if isinstance(summary, dict) else {}
+    value = summary.get(WITHOUT_EMBEDDER_KEY)
+    held = value is False
+    yield _s55_finding(0, Outcome.PASS if held else Outcome.FAIL,
+                       "" if held else "code_review.without_embedder is %r, not false" % (value,))
+    degraded = _degraded_labels(summary.get(TRIMMED_KEY))
+    if degraded is None:
+        yield _s55_finding(1, Outcome.FAIL, "code_review.trimmed is missing or not a list of entries")
+    elif degraded:
+        yield _s55_finding(1, Outcome.FAIL, "code_review.trimmed declares %s" % ", ".join(degraded))
+    else:
+        yield _s55_finding(1, Outcome.PASS)

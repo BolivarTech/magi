@@ -479,6 +479,19 @@ product publishes instead. S54 reads the omission from stderr, not from a JSON `
 refusal prints no JSON document. The toy key and the block are assembled from pieces in `smoke/runs.py`
 so no scanner sees a key-shaped literal in the source.
 
+### The working-RAG scenario (v0.25.0, RV07)
+
+S55 adds two assertions. The harness now promises 55 scenarios and 164 assertions.
+
+| Id | Invariant | Without its environment |
+|---|---|---|
+| S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
+
+Without S55 the suite could not tell a working RAG from one that degrades on every run: S52 expects the
+degradation. What S55 observes is that the embedder answered the review and no index degraded; whether a
+retrieved chunk was relevant is the model side and is never asserted. A history the review would retrieve
+needs a chain of revision reviews, which no smoke run makes, so it stays in the unit suite. S55 costs no run
+of its own: it reads R18.
 **Cost.** R18 is one batch by the real trio plus the gate over a four-line file, like R17: harness
 timeout 900 s, `TRIO_RUNS_MEASURED_S["R18"]` carries 300 s provisionally and has not been measured. R19
 never reaches a model.
@@ -537,6 +550,7 @@ assumes is the exact failure this harness exists to avoid.
 | S52 | a review whose embedder is unreachable still reports, and declares `without_embedder` |
 | S53 | a key in a file's content is masked, declared under `masked`, the file reviewed, and the key never printed or logged |
 | S54 | a file holding a private-key block is left out as `secret` and none of its body is printed or logged |
+| S55 | a review whose embedder answers is not degraded: `without_embedder` is false and no index degraded |
 
 The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 
