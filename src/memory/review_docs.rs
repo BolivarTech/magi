@@ -1390,6 +1390,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_secret_in_a_source_path_is_refused_before_anything_is_embedded_or_written() {
+        // [MAGI S6 MS3 loop3, R1 Caspar] RV22's tie-break: a path with a secret shape is never
+        // masked and never leaves the process, so a file named like a key is omitted whole. The
+        // path sits in a clear column and travels with every chunk, so the store refuses it
+        // itself, with or without chunks, whatever its caller checked before.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let path = "docs/sk-ant-api03-AAAAAAAAAAAAAAAAAAAA.md"; // allow-secret-scan
+        for chunks in [vec![chunk(path, "Usage", "harmless text")], Vec::new()] {
+            let r = store.reindex(&[(src(path, "k"), chunks)], &e).await;
+            assert!(
+                matches!(&r, Err(MemoryError::Storage(m)) if !m.contains("sk-ant-")),
+                "{:?}",
+                r.as_ref().err()
+            );
+        }
+        assert_eq!(e.calls(), 0);
+        assert_eq!(
+            store.missing(&[src(path, "k")]).expect("missing"),
+            vec![src(path, "k")],
+            "nothing was written"
+        );
+    }
+
+    #[tokio::test]
     async fn an_embedder_without_a_known_dimension_is_refused_even_with_nothing_to_embed() {
         // dim() == 0 (autodetect, nothing answered yet) would record sources under `#0#`.
         let tmp = tempfile::NamedTempFile::new().expect("tmp");

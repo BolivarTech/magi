@@ -1393,6 +1393,22 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_only_in_the_path_drops_the_chunk() {
+        // [MAGI S6 MS3 loop3, R1 Caspar] The path travels with the chunk (context frame, clear
+        // column) and a path cannot be masked and still name its file: RV22's tie-break omits it.
+        let path = "docs/sk-ant-api03-AAAAAAAAAAAAAAAAAAAA.md"; // allow-secret-scan
+        let chunks = chunk_markdown(path, "# Usage\nfine\n");
+        assert_eq!(chunks.len(), 1, "precondition: the text alone is clean");
+        let (kept, dropped) = without_secrets(chunks);
+        assert!(kept.is_empty(), "{kept:?}");
+        assert_eq!(dropped, vec![display_path(path)]);
+        assert!(
+            dropped.iter().all(|p| !p.contains("sk-ant-")),
+            "{dropped:?}"
+        );
+    }
+
+    #[test]
     fn a_secret_straddling_the_part_cut_never_reaches_the_embedder() {
         // One line longer than the bound with a secret across the cut: the text is masked before
         // it is split, so no part holds a byte of the secret, and every part stays bounded.
