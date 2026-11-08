@@ -2671,6 +2671,36 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_revision_review_indexes_documentation_the_working_tree_ignores() {
+        // [MAGI S6 MS3 loop2, R5 Melchior] `.gitignore` is a working-tree rule: a revision review
+        // applies none (MS2), and its documentation listing must not either.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        git_in(&ws, &["init", "-q"]);
+        std::fs::write(ws.join("README.md"), "# A\nabout a\n").expect("README");
+        std::fs::create_dir_all(ws.join("docs")).expect("docs");
+        std::fs::write(ws.join("docs").join("notes.md"), "# N\nnotes\n").expect("notes");
+        git_in(&ws, &["add", "README.md", "docs/notes.md"]);
+        git_in(&ws, &["commit", "-q", "-m", "one"]);
+        std::fs::write(ws.join(".gitignore"), "docs/notes.md\n").expect("ignore");
+        let head = git_in(&ws, &["rev-parse", "HEAD"]);
+        let (_db, _mem, memory) = review_memory();
+        let embedder: Arc<dyn EmbeddingProvider> =
+            Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let doc = runner
+            .prepare_documentation(&ReviewInput::Commit(Some(head)))
+            .await;
+        let paths: Vec<&str> = doc
+            .prep
+            .doc_sources
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["README.md", "docs/notes.md"], "{paths:?}");
+    }
+
     /// An embedder whose dimension never becomes known: `dim()` stays 0 after any answer.
     struct ZeroDimEmbedder;
     #[async_trait::async_trait]
