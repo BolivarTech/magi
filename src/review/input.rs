@@ -344,6 +344,10 @@ fn is_git_evidence(probe: &std::io::Result<()>) -> bool {
 /// pinned with the real git by `a_directory_outside_any_repository_is_walked_through_the_real_git`
 /// and `git_answers_false_only_inside_a_git_directory_where_the_review_fails_closed` (mutating
 /// this arm to `Ok(false)` walks the bare repository). S6 loop 7, A1-c1.
+///
+/// Public because the binary's review runner asks it whether the workspace is a repository
+/// before cleaning the documentation index (RV19): the same decision the directory resolution
+/// makes, never a second copy of it.
 pub fn in_work_tree(
     git: &dyn GitCommand,
     workspace: &Path,

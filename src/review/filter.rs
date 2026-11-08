@@ -437,6 +437,13 @@ struct SidesRead<'a> {
 /// masked, the diff is rebuilt from the masked sides ([`rebuilt_diff`]) and the file is declared
 /// with the first pattern found. The file is left out as `secret` instead, the safe direction,
 /// when the diff cannot be rebuilt from the sides or the rebuilt diff still holds a secret.
+///
+/// That fallback omits rather than masking the diff text itself on purpose: a hunk shows only
+/// some lines, and a pattern may need lines it leaves out (a YAML value on the line after its
+/// key), so a diff masked alone can still carry a secret the whole side masks
+/// (`a_diff_alone_cannot_be_masked_safely_so_an_unrebuildable_one_is_left_out`). RV22's
+/// tie-break, "no byte of the secret leaves the process", wins over "mask, do not omit" there; a
+/// file named explicitly is then refused like a file holding a key block.
 /// O(diff + sides).
 ///
 /// # Arguments
