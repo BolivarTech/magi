@@ -34,7 +34,7 @@ use super::input::{renamed_from, resolve_input, ReviewFile, ReviewInput, SourceK
 use super::languages::LanguageRegistry;
 use super::rag::{Assembled, ContextItem, ContextKind};
 use super::report::{name, BatchMetrics, ReviewSummary, TrimmedItem};
-use super::secrets::{display_path, find_secret, masked_pattern};
+use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets, masked_pattern};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
 use super::window::estimate_tokens;
@@ -1246,6 +1246,42 @@ fn declare_masked(summary: &mut ReviewSummary, shown: String, pattern: &'static 
     }
 }
 
+/// What [`context_egress`] decided for one context item.
+enum ContextEgress {
+    /// The item may be sent, with the pattern masked in it, if any.
+    Send(ContextItem, Option<&'static str>),
+    /// The item stays in the process; its file is listed as skipped for a secret.
+    Withhold(String),
+}
+
+/// A context item as it may leave the process (RV22 amended): each one-line secret of its text
+/// or label masked (the text escaped again for its frame, since a mask may sit next to `<<`),
+/// with the first pattern found. An item whose path quotes a secret (a path cannot be masked and
+/// still name its file) or whose text or label holds a private-key block (RV22's exception) is
+/// withheld, as is one in which masking left a match. O(text).
+// MAGI FIX (MS3 §6 loop2): a context item holding a one-line secret was withheld, not masked.
+fn context_egress(item: ContextItem) -> ContextEgress {
+    if find_secret(&item.file).is_some()
+        || holds_key_block(&item.text)
+        || holds_key_block(&item.label)
+    {
+        return ContextEgress::Withhold(item.file);
+    }
+    let Some(pattern) = find_secret(&item.text).or_else(|| find_secret(&item.label)) else {
+        return ContextEgress::Send(item, None);
+    };
+    let masked = ContextItem {
+        text: escape_fence(&mask_secrets(&item.text)),
+        label: mask_secrets(&item.label),
+        ..item
+    };
+    if holds_secret(&masked) {
+        ContextEgress::Withhold(masked.file)
+    } else {
+        ContextEgress::Send(masked, Some(pattern))
+    }
+}
+
 /// The pattern a documentation or history item was sent masked for, if any: these two kinds
 /// come from the review stores, not from a reviewed file the filter already declared. O(text).
 fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
@@ -1259,9 +1295,10 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
 
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
 ///
-/// Each item is passed through the secret detector (text, path and label, whatever its kind):
-/// one that matches never reaches the prompt, counts in `context_withheld` and lists its file as
-/// skipped with cause `secret`. The source's declarations (trimmed items, a missing embedder,
+/// Each item is passed through the secret detector (text, path and label, whatever its kind,
+/// [`context_egress`]): a one-line secret of its text or label is masked and its file declared
+/// as masked; an item whose path quotes a secret or that holds a private-key block never reaches
+/// the prompt, counts in `context_withheld` and lists its file as skipped with cause `secret`. The source's declarations (trimmed items, a missing embedder,
 /// `--no-memory`, withheld counts) reach `summary` here, so a batch the clock later cuts still
 /// declares them; the documentation paths the source left out for a secret are listed as
 /// skipped once each. A kept documentation or history item that carries a mask, and each
@@ -1294,16 +1331,19 @@ async fn prepare_contexts(
         summary.context_withheld = summary.context_withheld.saturating_add(assembled.withheld);
         let mut kept = Vec::with_capacity(assembled.items.len());
         for item in assembled.items {
-            if holds_secret(&item) {
-                summary.context_withheld = summary.context_withheld.saturating_add(1);
-                skip_for_secret(summary, &item.file);
-            } else {
-                // MAGI FIX (MS3 §6 loop1): RV22 amended declares a file sent masked, the
-                // documentation and history included.
-                if let Some(pattern) = masked_store_item(&item) {
-                    declare_masked(summary, display_path(&item.file), pattern);
+            match context_egress(item) {
+                ContextEgress::Withhold(file) => {
+                    summary.context_withheld = summary.context_withheld.saturating_add(1);
+                    skip_for_secret(summary, &file);
                 }
-                kept.push(item);
+                ContextEgress::Send(item, pattern) => {
+                    // MAGI FIX (MS3 §6 loop1): RV22 amended declares a file sent masked, the
+                    // documentation and history included.
+                    if let Some(pattern) = pattern.or_else(|| masked_store_item(&item)) {
+                        declare_masked(summary, display_path(&item.file), pattern);
+                    }
+                    kept.push(item);
+                }
             }
         }
         kept.sort_by_key(|item| kind_rank(&item.kind));
@@ -5396,8 +5436,13 @@ mod tests {
         );
         assert_eq!(
             prompts[0].matches("<redacted: anthropic-key>").count(),
-            2,
-            "the text and the label were sent masked: {}",
+            1,
+            "the text was sent masked: {}",
+            prompts[0]
+        );
+        assert!(
+            prompts[0].contains("file=d.rs"),
+            "the item with a secret label was sent: {}",
             prompts[0]
         );
         assert_eq!(
