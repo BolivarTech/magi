@@ -2726,6 +2726,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_review_refused_for_its_budget_never_probes_the_embedder_dimension() {
+        // [MAGI S6 MS3 loop1, R2 Melchior] `doc_store` probes an embedder that autodetects its
+        // dimension: that probe is an outbound call too, so it must come after the budget check.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let probing = Arc::new(RecordingEmbedder::default());
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(ProbedEmbedder(probing.clone()));
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        let run = runner
+            .run(
+                plan,
+                ReviewBudget::Total(Duration::from_secs(1)),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            matches!(run, Err(ReviewError::Budget { .. })),
+            "{:?}",
+            run.err()
+        );
+        assert!(
+            probing.0.lock().expect("lock").is_empty(),
+            "the dimension probe was sent"
+        );
+    }
+
+    /// [`RecordingEmbedder`] behind an unknown dimension (0), so `doc_store` probes it.
+    struct ProbedEmbedder(Arc<RecordingEmbedder>);
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for ProbedEmbedder {
+        async fn embed(
+            &self,
+            texts: &[String],
+        ) -> Result<Vec<Vec<f32>>, crate::memory::error::EmbeddingError> {
+            self.0.embed(texts).await
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            0
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
     async fn a_run_deadline_that_only_fits_the_batches_without_the_preparation_calls_no_one() {
         // [Loop1 r1, M6] Under a calling run's deadline the preparation spends the same clock as
         // the batches: a deadline that holds the one batch but not the bounded documentation and
