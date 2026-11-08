@@ -2472,6 +2472,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_hunks_of_one_unit_are_charged_once_when_checking_for_room() {
+        // [MAGI S6 MS3 loop2, R2 Melchior] `assemble` charges a repeated unit once; the room check
+        // charged it per hunk, so a batch with room for one more item was declared full and its
+        // documentation query never sent.
+        let f = RagFixture::new(&[(
+            "a.rs",
+            "fn a() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n",
+        )])
+        .await;
+        let mut rag = f.rag(true);
+        let hunk = |line: u32| BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: format!("+line {line}"),
+            first_line: line,
+            last_line: line,
+            old_first_line: line,
+            old_last_line: line,
+        };
+        let b = ReviewBatch {
+            index: 0,
+            tokens: 10,
+            companion_tokens: 0,
+            items: vec![hunk(2), hunk(4)],
+        };
+        let unit = rag.companion(&hunk(2)).expect("companion");
+        assert_eq!(unit.len(), 1, "precondition: one containing unit");
+        rag.limit_tokens = b.tokens
+            + estimate_tokens(CONTEXT_HEADING)
+            + unit[0].1
+            + magi_rs::review::rag::CONTEXT_ITEM_FRAME_TOKENS;
+        let a = rag.context_for(&b).await.expect("context");
+        assert_eq!(
+            f.embedder.calls(),
+            1,
+            "the query was embedded: {:?}",
+            a.trimmed
+        );
+    }
+
+    #[tokio::test]
     async fn documentation_and_history_left_out_for_lack_of_room_are_declared() {
         // [MAGI S6 MS3 loop1, R2 Melchior and Balthasar] RV07: the report declares what was cut,
         // also when nothing of (3) and (4) could enter and their query was never embedded.
