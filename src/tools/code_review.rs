@@ -1032,8 +1032,6 @@ struct FollowUp {
     worktree: Option<BTreeSet<DocSource>>,
     /// The review's documentation index, if one was opened.
     docs: Option<ReviewDocStore>,
-    /// The paths `.gitignore` excludes in the whole workspace.
-    ignored: HashSet<String>,
     /// Whether the workspace is inside a git work tree; without one the clean-up gets no git
     /// and the working tree alone is live.
     repository: bool,
@@ -1049,7 +1047,6 @@ impl FollowUp {
     /// * `rev` - The reviewed revision's new side; `None` for the working tree.
     /// * `worktree` - The working tree's documentation sources, when the review listed them.
     /// * `docs` - The review's documentation index, if one was opened.
-    /// * `ignored` - The paths `.gitignore` excludes in the whole workspace.
     /// * `repository` - Whether the workspace is inside a git work tree.
     ///
     /// # Returns
@@ -1061,7 +1058,6 @@ impl FollowUp {
         rev: Option<String>,
         worktree: Option<BTreeSet<DocSource>>,
         docs: Option<ReviewDocStore>,
-        ignored: HashSet<String>,
         repository: bool,
     ) -> Self {
         Self {
@@ -1070,7 +1066,6 @@ impl FollowUp {
             rev,
             worktree,
             docs,
-            ignored,
             repository,
         }
     }
@@ -1087,8 +1082,6 @@ struct DocContext {
     rev: Option<String>,
     /// The working tree's documentation sources, when the review listed them.
     worktree: Option<BTreeSet<DocSource>>,
-    /// The paths `.gitignore` excludes in the whole workspace.
-    ignored: HashSet<String>,
     /// Whether the workspace is inside a git work tree.
     repository: bool,
 }
@@ -1230,16 +1223,23 @@ impl ProductionReviewRunner {
             return unavailable(Some(docs), &e.to_string());
         }
         let whole = ReviewInput::Directory(PathBuf::from("."));
-        let ignored = match self.ignored(&whole) {
-            Ok(ignored) => ignored,
-            Err(e) => return unavailable(Some(docs), &e.to_string()),
-        };
-        let paths: Vec<String> = match &rev {
-            Some(_) => Vec::new(),
-            None => match resolve_input(&whole, &self.workspace, &self.git, &guard) {
-                Ok(resolved) => resolved.files.into_iter().map(|f| f.path).collect(),
-                Err(e) => return unavailable(Some(docs), &e.to_string()),
-            },
+        // MAGI FIX (MS3 §6 loop2): `.gitignore` is a working-tree rule (MS2): a revision's
+        // listing applies none, as its review does.
+        let (paths, ignored): (Vec<String>, HashSet<String>) = match &rev {
+            Some(_) => (Vec::new(), HashSet::new()),
+            None => {
+                let ignored = match self.ignored(&whole) {
+                    Ok(ignored) => ignored,
+                    Err(e) => return unavailable(Some(docs), &e.to_string()),
+                };
+                match resolve_input(&whole, &self.workspace, &self.git, &guard) {
+                    Ok(resolved) => (
+                        resolved.files.into_iter().map(|f| f.path).collect(),
+                        ignored,
+                    ),
+                    Err(e) => return unavailable(Some(docs), &e.to_string()),
+                }
+            }
         };
         let inner: Box<dyn ContentSource + '_> = match &rev {
             Some(r) => Box::new(RevisionSource::new(&self.git, r.clone(), None)),
@@ -1267,7 +1267,6 @@ impl ProductionReviewRunner {
             prep,
             rev,
             worktree,
-            ignored,
             repository,
         }
     }
@@ -1400,7 +1399,6 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 prep,
                 rev,
                 worktree,
-                ignored: workspace_ignored,
                 repository,
             } = doc_context;
             let rag = self.rag(docs.as_ref(), prep);
@@ -1439,7 +1437,6 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 rev,
                 worktree,
                 docs,
-                workspace_ignored,
                 repository,
             ));
             Ok(render_outcome(outcome, self.parts.structured))
@@ -1500,7 +1497,9 @@ fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp)
         }
     }
     if let Some(docs) = &follow.docs {
-        let keep = |p: &str| !is_never_reviewed(p) && !follow.ignored.contains(p);
+        // The working tree's sources were listed under its ignore rules already; a ref's tree is
+        // a revision, which applies none (MS2), as its indexing does.
+        let keep = |p: &str| !is_never_reviewed(p);
         match collect_garbage(
             docs,
             follow.repository.then_some(git),
@@ -2550,7 +2549,6 @@ mod tests {
             rev: rev.map(str::to_string),
             worktree: None,
             docs: None,
-            ignored: HashSet::new(),
             repository: true,
         }
     }
@@ -2585,14 +2583,7 @@ mod tests {
         removed.0.line = Some(9);
         summary.findings = vec![live, removed];
         summary.off_revision.insert(("a.rs".to_string(), 9));
-        let follow = FollowUp::of_review(
-            &summary,
-            Some("HEAD".into()),
-            None,
-            None,
-            HashSet::new(),
-            true,
-        );
+        let follow = FollowUp::of_review(&summary, Some("HEAD".into()), None, None, true);
         let (_db, _mem, memory) = review_memory();
         assert!(follow_up_work(&memory, &ShaGit, follow).is_none());
         let lines: Vec<Option<u32>> = memory
