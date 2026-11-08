@@ -221,25 +221,12 @@ impl BatchItem {
         else {
             return None;
         };
-        let headed = text.lines().any(is_hunk_header);
-        let mut counters = (*old_first_line, *first_line);
-        let mut in_body = !headed;
         let (mut added, mut removed) = (Vec::new(), Vec::new());
-        for line in text.lines() {
-            if is_hunk_header(line) {
-                if let Some(((old, _), (new, _))) = hunk_ranges(line) {
-                    counters = (old, new);
-                }
-                in_body = true;
-                continue;
-            }
-            if !in_body {
-                continue;
-            }
-            match step_body_line(&mut counters, line) {
-                BodyLine::Added(n) => added.push(n),
-                BodyLine::Removed(n) => removed.push(n),
-                BodyLine::Context(_) | BodyLine::Other => {}
+        for (_, read, _) in HunkLines::new(text, Some((*old_first_line, *first_line))) {
+            match read {
+                HunkLine::Body(BodyLine::Added(n)) => added.push(n),
+                HunkLine::Body(BodyLine::Removed(n)) => removed.push(n),
+                _ => {}
             }
         }
         // MAGI FIX (Loop1 r2, Minor 3): removed lines count even when the hunk also adds, so a
@@ -278,33 +265,25 @@ impl BatchItem {
         else {
             return None;
         };
-        let headed = text.lines().any(is_hunk_header);
-        let mut counters = (*old_first_line, *first_line);
-        if old < counters.0 {
-            return counters.1.checked_sub(counters.0 - old);
+        let start = (*old_first_line, *first_line);
+        if old < start.0 {
+            return start.1.checked_sub(start.0 - old);
         }
-        let mut in_body = !headed;
-        for line in text.lines() {
-            if is_hunk_header(line) {
-                if let Some(((o, _), (n, _))) = hunk_ranges(line) {
-                    counters = (o, n);
-                    if old < o {
-                        return n.checked_sub(o - old);
-                    }
+        let mut last = Some(start);
+        for (_, read, after) in HunkLines::new(text, Some(start)) {
+            match read {
+                HunkLine::Header(Some((o, n))) if old < o => return n.checked_sub(o - old),
+                HunkLine::Body(BodyLine::Removed(n)) if n == old => return None,
+                HunkLine::Body(BodyLine::Context(n))
+                    if after.is_some_and(|(next_old, _)| next_old == old.saturating_add(1)) =>
+                {
+                    return Some(n)
                 }
-                in_body = true;
-                continue;
-            }
-            if !in_body {
-                continue;
-            }
-            match step_body_line(&mut counters, line) {
-                BodyLine::Removed(n) if n == old => return None,
-                BodyLine::Context(n) if counters.0 == old.saturating_add(1) => return Some(n),
                 _ => {}
             }
+            last = after;
         }
-        let (next_old, next_new) = counters;
+        let (next_old, next_new) = last?;
         let after = old.checked_sub(next_old)?;
         next_new.checked_add(after)
     }
@@ -378,21 +357,12 @@ pub(crate) fn number_lines(text: &str, first: u32) -> String {
 /// new one, `-` the old one. Lines outside a hunk body carry a blank prefix. O(bytes).
 fn number_hunk(text: &str) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
-    let mut counters: Option<(u32, u32)> = None; // (old, new): the number of the next line
-    for line in text.split_inclusive('\n') {
-        // MAGI FIX (MS3 §6 loop3): the line ending as `str::lines` takes it, so a CRLF line is
-        // classified as `hunk_change` classifies it.
-        let body = line
-            .strip_suffix('\n')
-            .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
-        let number = if is_hunk_header(body) {
-            counters = hunk_ranges(body).map(|((old, _), (new, _))| (old, new));
-            None
-        } else {
-            match counters.as_mut().map(|c| step_body_line(c, body)) {
-                Some(BodyLine::Removed(n) | BodyLine::Added(n) | BodyLine::Context(n)) => Some(n),
-                Some(BodyLine::Other) | None => None,
+    for (line, read, _) in HunkLines::new(text, None) {
+        let number = match read {
+            HunkLine::Body(BodyLine::Removed(n) | BodyLine::Added(n) | BodyLine::Context(n)) => {
+                Some(n)
             }
+            HunkLine::Body(BodyLine::Other) | HunkLine::Header(_) | HunkLine::Outside => None,
         };
         out.push_str(&line_prefix(number));
         out.push_str(line);
@@ -400,9 +370,82 @@ fn number_hunk(text: &str) -> String {
     out
 }
 
+/// One line of a hunk's text, as [`HunkLines`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HunkLine {
+    /// A `@@` header ([`is_hunk_header`]): `Some((old, new))`, its first lines, from which the
+    /// counters start; `None` when it cannot be read, and then no line is counted until the next
+    /// header that can.
+    Header(Option<(u32, u32)>),
+    /// A body line, classified and numbered by [`step_body_line`].
+    Body(BodyLine),
+    /// A line no counter covers: before the first header of a headed text, or after a header
+    /// that cannot be read.
+    Outside,
+}
+
+/// The single walker of a hunk's text: each line as written (with its ending), how it reads
+/// ([`HunkLine`]) and the counters `(old, new)` after it, the numbers of the next line on each
+/// side (`None` where no counter runs).
+///
+/// [`number_hunk`], [`BatchItem::hunk_change`], [`BatchItem::new_line_of_old`] and the
+/// pipeline's deleted ranges all read a hunk through it, so none of them classifies or counts a
+/// line differently. A line is classified without its ending, taken as `str::lines` takes it
+/// (`\n` or `\r\n`). A headed text counts from each header; a text without one counts from
+/// `start`, and is all [`HunkLine::Outside`] when `start` is `None`. O(bytes) for a whole walk.
+// MAGI FIX (MS3 §6 loop3): three walkers (and the pipeline's fourth) kept their own copies of
+// this state machine and had drifted (line endings, `@@@`, an unreadable header).
+pub(crate) struct HunkLines<'a> {
+    /// The lines still to walk, each with its ending.
+    lines: std::str::SplitInclusive<'a, char>,
+    /// The numbers of the next line, `(old, new)`, while a counter runs.
+    counters: Option<(u32, u32)>,
+}
+
+impl<'a> HunkLines<'a> {
+    /// Starts a walk over `text`.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The hunk's text.
+    /// * `start` - Where a text without a header counts from, if it is counted at all.
+    ///
+    /// # Returns
+    ///
+    /// The walker. O(bytes) to look for a header.
+    pub(crate) fn new(text: &'a str, start: Option<(u32, u32)>) -> Self {
+        let headed = text.lines().any(is_hunk_header);
+        Self {
+            lines: text.split_inclusive('\n'),
+            counters: if headed { None } else { start },
+        }
+    }
+}
+
+impl<'a> Iterator for HunkLines<'a> {
+    type Item = (&'a str, HunkLine, Option<(u32, u32)>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let line = self.lines.next()?;
+        let body = line
+            .strip_suffix('\n')
+            .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
+        let read = if is_hunk_header(body) {
+            let first = hunk_ranges(body).map(|((old, _), (new, _))| (old, new));
+            self.counters = first;
+            HunkLine::Header(first)
+        } else {
+            match self.counters.as_mut() {
+                Some(counters) => HunkLine::Body(step_body_line(counters, body)),
+                None => HunkLine::Outside,
+            }
+        };
+        Some((line, read, self.counters))
+    }
+}
+
 /// Whether `line` is a hunk header of a two-sided diff (`@@`), never a combined diff's (`@@@`).
-/// The one test [`number_hunk`] and [`BatchItem::hunk_change`] share, so the two never number a
-/// body differently. O(1).
+/// The one test [`HunkLines`] applies, so no reader of a hunk numbers a body differently. O(1).
 // MAGI FIX (MS3 §6 loop2): `hunk_change` tested `@@` alone, `number_hunk` excluded `@@@`.
 fn is_hunk_header(line: &str) -> bool {
     line.starts_with(HUNK_MARKER) && !line.starts_with(COMBINED_HUNK_MARKER)
@@ -418,7 +461,8 @@ pub struct HunkChange {
 }
 
 /// What one body line of a hunk is, with its number on the side it belongs to.
-enum BodyLine {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyLine {
     /// A removed (`-`) line, numbered on the old side.
     Removed(u32),
     /// An added (`+`) line, numbered on the new side.

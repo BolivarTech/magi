@@ -19,8 +19,8 @@ use magi_core::reporting::MagiReport;
 use sha2::{Digest, Sha256};
 
 use super::batching::{
-    file_header, plan_batches, plan_batches_with, prompt_limit_tokens, BatchItem, Companion,
-    ReviewBatch, LINE_NUMBER_LEGEND,
+    file_header, plan_batches, plan_batches_with, prompt_limit_tokens, BatchItem, BodyLine,
+    Companion, HunkLine, HunkLines, ReviewBatch, LINE_NUMBER_LEGEND,
 };
 use super::clock::{batch_wall_clock_secs, pre_budget};
 use super::consolidate::{
@@ -1708,7 +1708,7 @@ fn faces_of<'b>(
             let f = faces.entry(file).or_default();
             f.new.push(new);
             f.old.push(old);
-            f.deleted.extend(deleted_ranges(text, old.0));
+            f.deleted.extend(deleted_ranges(text));
         }
         Shown::Whole { file, .. } => faces.entry(file).or_default().whole = true,
     });
@@ -1726,24 +1726,17 @@ fn faces_of<'b>(
     faces
 }
 
-/// The old-side ranges of the lines `hunk` deletes (its `-` lines), counting from `old_first`,
-/// the first old line of its `@@` header; the file header lines before that header are skipped.
-/// A context line (` `, or an empty line some tools leave for one) advances the old side, an
-/// added line (`+`) and a `\ No newline` marker do not. O(len of `hunk`).
-fn deleted_ranges(hunk: &str, old_first: u32) -> Vec<(u32, u32)> {
+/// The old-side ranges of the lines `hunk` deletes (its `-` lines), numbered from its `@@`
+/// header and read through [`HunkLines`], the walker that numbers the hunk for the trio; the
+/// file header lines before that header are skipped. O(len of `hunk`).
+fn deleted_ranges(hunk: &str) -> Vec<(u32, u32)> {
     let mut ranges: Vec<(u32, u32)> = Vec::new();
-    let mut old = old_first;
-    for line in hunk.lines().skip_while(|l| !l.starts_with("@@")).skip(1) {
-        match line.as_bytes().first() {
-            Some(b'-') => {
-                match ranges.last_mut() {
-                    Some((_, last)) if last.saturating_add(1) == old => *last = old,
-                    _ => ranges.push((old, old)),
-                }
-                old = old.saturating_add(1);
+    for (_, read, _) in HunkLines::new(hunk, None) {
+        if let HunkLine::Body(BodyLine::Removed(old)) = read {
+            match ranges.last_mut() {
+                Some((_, last)) if last.saturating_add(1) == old => *last = old,
+                _ => ranges.push((old, old)),
             }
-            Some(b'+' | b'\\') => {}
-            _ => old = old.saturating_add(1),
         }
     }
     ranges
