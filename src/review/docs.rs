@@ -1114,6 +1114,29 @@ mod tests {
     }
 
     #[test]
+    fn a_block_doc_closed_on_its_own_line_stops_before_the_code() {
+        // [MAGI S6 MS3 loop1, R1 Melchior] The usual ` */` closer line closed nothing: the
+        // continuation `*` was stripped first, so the code below was swallowed into the chunk.
+        let reg = LanguageRegistry::new();
+        let c = chunk_doc_comments("src/m.rs", "/**\n * x\n */\nfn f() {}\n", &reg);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].section, "f", "{c:?}");
+        assert!(!c[0].text.contains("fn f"), "{c:?}");
+        let flush = chunk_doc_comments("src/m.rs", "/*!\n * Crate.\n*/\nfn g() {}\n", &reg);
+        assert!(
+            flush.len() == 1 && !flush[0].text.contains("fn g"),
+            "{flush:?}"
+        );
+        // A plain block comment between the doc block and its item is skipped too.
+        let skipped = chunk_doc_comments(
+            "src/m.rs",
+            "/// Doc.\n/* plain\n   comment */\nfn h() {}\n",
+            &reg,
+        );
+        assert_eq!(skipped[0].section, "h", "{skipped:?}");
+    }
+
+    #[test]
     fn each_source_file_is_chunked_by_its_kind() {
         // [CP2 MS3 loop 7] RV07(3): a source file gives its doc comments, never its code.
         let reg = LanguageRegistry::new();
