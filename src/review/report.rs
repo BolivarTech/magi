@@ -1106,6 +1106,12 @@ mod tests {
             "ungrouped_unlocated",
             "batch_totals",
             "rejected_skips",
+            // [MAGI S6 MS3 loop2, R6b Melchior/Balthasar] the RAG declarations (RV07, RV13) the
+            // text form writes, pinned in the JSON form too.
+            "trimmed",
+            "without_embedder",
+            "without_memory",
+            "context_withheld",
         ] {
             assert!(v.get(k).is_some(), "missing {k}: {v}");
         }
