@@ -583,6 +583,26 @@ mod tests {
     }
 
     #[test]
+    fn an_abbreviated_reviewed_commit_at_head_stays_pending() {
+        // [MAGI S6 MS3 loop3, R3 all three] `rev-parse` answers the full SHA; an entry anchored
+        // to an abbreviation of that same commit compared unequal and read as a weak reject.
+        let full = "abc1234def5678901234567890123456789abcde";
+        let git = FakeGit::from(&[
+            ("merge-base --is-ancestor abc1234 HEAD", Ok("")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative abc1234 HEAD -- a.rs",
+                Ok(""),
+            ),
+            (HEAD_IS_C2, Ok(full)),
+        ]);
+        let short = HistoryEntry {
+            reviewed_commit: "abc1234".into(),
+            ..entry(Some(5))
+        };
+        assert_eq!(classify(&short, "HEAD", &git), HistoryStatus::Pending);
+    }
+
+    #[test]
     fn a_vanished_commit_leaves_the_entry_pending() {
         let git = FakeGit::from(&[(
             "merge-base --is-ancestor c1 HEAD",
