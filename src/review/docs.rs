@@ -1397,6 +1397,34 @@ mod tests {
     }
 
     #[test]
+    fn an_item_on_the_closing_line_of_its_block_doc_names_the_chunk() {
+        // [MAGI S6 MS3 loop3, R1 Melchior] The line after the closer was read, so a one-line
+        // `/** */` followed on the same line by its item took the next item's name.
+        let c = rust_doc_chunks("a.rs", &["/** Loads it. */ fn load() {}", "fn other() {}"]);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].section, "load");
+        let attr = rust_doc_chunks("a.rs", &["/** Gated. */ #[inline]", "fn gated() {}"]);
+        assert_eq!(attr[0].section, "gated");
+    }
+
+    #[test]
+    fn a_multi_line_attribute_before_the_item_is_skipped_whole() {
+        // [MAGI S6 MS3 loop3, R1 Melchior] The attribute's continuation lines were read as the
+        // item line, leaving the chunk without a section.
+        let lines = [
+            "/// Gated.",
+            "#[cfg(any(",
+            "    feature = \"a\",",
+            "    feature = \"b\"",
+            "))]",
+            "fn gated() {}",
+        ];
+        let c = rust_doc_chunks("a.rs", &lines);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].section, "gated");
+    }
+
+    #[test]
     fn a_secret_only_in_the_path_drops_the_chunk() {
         // [MAGI S6 MS3 loop3, R1 Caspar] The path travels with the chunk (context frame, clear
         // column) and a path cannot be masked and still name its file: RV22's tie-break omits it.
