@@ -1225,6 +1225,34 @@ mod tests {
     }
 
     #[test]
+    fn a_hunk_in_a_method_of_an_impl_inside_a_module_gets_that_method() {
+        // [MAGI S6 MS3 loop1, R2 Melchior] A block was cut one level only: a change in a method of
+        // an impl nested in a module took the whole impl as its (mandatory, untrimmable) unit.
+        use crate::review::test_support::MapSource;
+        let new = "mod m {\n    struct A;\n    impl A {\n        fn one() {\n            a();\n        }\n        fn two() {\n            b();\n        }\n    }\n}\n";
+        let src = MapSource::new(&[("a.rs", new)], &[]);
+        let hunk = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "+            b();".into(),
+            first_line: 8,
+            last_line: 8,
+            old_first_line: 8,
+            old_last_line: 8,
+        };
+        let u = containing_units(&hunk, &src, &LanguageRegistry::new())
+            .expect("reads")
+            .into_iter()
+            .next()
+            .expect("inside two");
+        assert_eq!(
+            (u.label.as_str(), u.lines),
+            ("two", Some((7, 9))),
+            "{}",
+            u.text
+        );
+    }
+
+    #[test]
     fn the_doc_query_is_cut_on_a_char_boundary() {
         // [CP2 MS3 loop 4] A byte cut inside a multi-byte char would panic (§0: no slicing).
         assert_eq!(doc_query("abc"), "abc");
