@@ -195,7 +195,7 @@ impl ReviewHistoryStore {
                      line = excluded.line, reviewed_commit = excluded.reviewed_commit, \
                      finding_blob = excluded.finding_blob, status = excluded.status, \
                      created_at = excluded.created_at, checked_at = 0 \
-                     WHERE code_review_history.status = 'attended'",
+                     WHERE code_review_history.status = ?8",
                 )
                 .map_err(db_err)?;
             for (e, blob) in entries.iter().zip(&sealed) {
@@ -207,7 +207,8 @@ impl ReviewHistoryStore {
                         e.reviewed_commit,
                         blob,
                         e.status.as_str(),
-                        created_at
+                        created_at,
+                        HistoryStatus::Attended.as_str()
                     ])
                     .map_err(db_err)?;
             }
@@ -294,7 +295,9 @@ impl ReviewHistoryStore {
             let rows = self.raw_rows(
                 &format!(
                     "SELECT {COLUMNS} FROM code_review_history \
-                     WHERE status IN ('attended', 'weak_reject') AND file IN ({marks})"
+                     WHERE status IN ('{attended}', '{weak}') AND file IN ({marks})",
+                    attended = HistoryStatus::Attended.as_str(),
+                    weak = HistoryStatus::WeakReject.as_str(),
                 ),
                 rusqlite::params_from_iter(batch.iter().copied()),
             )?;
