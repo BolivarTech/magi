@@ -284,7 +284,8 @@ impl ReviewHistoryStore {
     /// to [`Self::touch`] every entry it checked, changed or not, and `record_review` does
     /// (`record_review_touches_an_entry_whose_status_did_not_change`). Decrypts at most `limit`
     /// rows, so the cost of a review does not depend on the size of the history. The count and
-    /// the rows are read under one lock, so `total` matches the rows returned.
+    /// the rows are read under one lock and in one read transaction, one SQLite snapshot, so
+    /// `total` matches the rows returned even while another process writes.
     ///
     /// Complexity: the rows come off the `code_review_history_due` index in order, stopping at
     /// `limit` (no sort); the count reads the narrowest index, O(n) entries with no row read or
@@ -297,12 +298,16 @@ impl ReviewHistoryStore {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         // MAGI FIX (MS3 §6 loop4): the count and the rows took two locks, so a write between
         // them made `total` disagree with the rows.
+        // MAGI FIX (MS3 §6 loop5): one lock kept other threads out, not another process: the two
+        // reads now share one read transaction, so one snapshot.
         let (total, rows) = {
             let c = self.locked_conn();
-            let total: i64 = c
+            let snapshot = c.unchecked_transaction().map_err(db_err)?;
+            let total: i64 = snapshot
                 .query_row("SELECT COUNT(*) FROM code_review_history", [], |r| r.get(0))
                 .map_err(db_err)?;
-            let rows = raw_rows_in(&c, &due_sql(), [limit])?;
+            let rows = raw_rows_in(&snapshot, &due_sql(), [limit])?;
+            snapshot.commit().map_err(db_err)?;
             (total, rows)
         };
         Ok((
