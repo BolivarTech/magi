@@ -289,9 +289,11 @@ fn any_string(value: &Value, holds: &dyn Fn(&str) -> bool) -> bool {
     }
 }
 
-/// `value` with every string value passed through [`mask_secrets`]. Keys are left as they are:
-/// a state's keys are the gate's own field names, never foreign text, and should one ever hold a
-/// secret, [`any_string`], which reads the keys, withholds the state after masking. O(bytes).
+/// `value` with every string value passed through [`mask_secrets`]. Keys are not masked, but
+/// they are scanned: a state's keys are the gate's own field names today, and the residual
+/// check ([`any_string`], which reads every key) withholds a state whose key holds a secret.
+/// So a key built from foreign text would make the state withheld, never masked: build keys
+/// from the gate's own literals only. O(bytes).
 fn masked_strings(value: Value) -> Value {
     match value {
         Value::String(text) => Value::String(mask_secrets(&text)),
