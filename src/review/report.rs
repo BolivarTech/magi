@@ -969,8 +969,14 @@ fn redacted(text: &str) -> String {
 /// assert_eq!(distinct_key(&taken, "k".into()), "k (2)");
 /// ```
 pub fn distinct_key(taken: &serde_json::Map<String, Value>, base: String) -> String {
-    let mut key = base.clone();
+    // MAGI FIX (MS3 §6 loop4): `base` was cloned on every call; a free key (the usual case) is
+    // now returned as it came, with no allocation.
+    if !taken.contains_key(&base) {
+        return base;
+    }
     let mut n = 2_usize;
+    let mut key = format!("{base} ({n})");
+    n = n.saturating_add(1);
     while taken.contains_key(&key) {
         key = format!("{base} ({n})");
         n = n.saturating_add(1);
