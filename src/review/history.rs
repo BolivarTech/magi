@@ -369,7 +369,11 @@ pub fn entries_from_review(
             let detail = f.details.join(MERGED_TEXT_SEPARATOR);
             // MAGI FIX (MS3 §6 loop4): a backstop at storage, on top of the masking at the
             // context read: a key block is left out (masking would keep its body).
-            if holds_key_block(&title) || holds_key_block(&detail) {
+            // MAGI FIX (MS3 §6 loop6): looked for across the mages' texts too, and by its END
+            // line, not only by a header whole in one joined string.
+            if [&title, &detail].iter().any(|t| holds_key_block(t))
+                || quotes_a_split_key_block(&f.titles, &f.details)
+            {
                 return None;
             }
             Some(HistoryEntry {
@@ -383,6 +387,41 @@ pub fn entries_from_review(
             })
         })
         .collect()
+}
+
+/// The END markers of the private-key blocks RV22 leaves out (PEM and OpenPGP armor, SSH2), each
+/// as `(start of the line, text the line must also hold)`, compared without ASCII case.
+const KEY_BLOCK_END_MARKERS: &[(&str, &str)] = &[
+    ("-----END ", "PRIVATE KEY"),
+    ("---- END SSH2 ", "PRIVATE KEY"),
+];
+
+/// Whether a finding's texts quote a private-key block that no single joined string shows by its
+/// header: a header split across two mages' texts (the join puts a separator inside it), or
+/// split between the title and the detail, is whole in the separator-free concatenations; a
+/// header the detector cannot read still leaves the block's END line
+/// (`a_key_block_header_split_across_two_mages_texts_or_known_by_its_end_line_is_not_stored`).
+///
+/// The safe direction of RV22's tie-break ("no byte of the secret leaves the process"): a false
+/// match only keeps one finding out of the history. Limit, declared: a header broken inside one
+/// string, with its END line gone too, is recognized by nothing, as everywhere else the detector
+/// runs (`holds_key_block`). O(bytes of the texts).
+fn quotes_a_split_key_block(titles: &[String], details: &[String]) -> bool {
+    let (titles, details) = (titles.concat(), details.concat());
+    let both = format!("{titles}{details}");
+    [&titles, &details, &both]
+        .iter()
+        .any(|t| holds_key_block(t) || holds_key_block_end(t))
+}
+
+/// Whether `text` holds the END line of a private-key block ([`KEY_BLOCK_END_MARKERS`]). O(n).
+fn holds_key_block_end(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim().to_ascii_uppercase();
+        KEY_BLOCK_END_MARKERS
+            .iter()
+            .any(|(start, holds)| line.starts_with(start) && line.contains(holds))
+    })
 }
 
 #[cfg(test)]
