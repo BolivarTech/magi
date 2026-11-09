@@ -679,6 +679,12 @@ impl<'a> Gate<'a> {
         if !holds_line(code, line) {
             return Outcome::unfiltered(CAUSE_NO_LOCATION);
         }
+        // MAGI FIX (MS3 §6 loop5): the block is looked for in the whole code, before the window
+        // clips it: a window inside a longer block holds body lines only, which no pattern
+        // names, so [`Self::sendable`]'s check on the state could not see it.
+        if holds_key_block(code) {
+            return Outcome::unfiltered(CAUSE_SECRET);
+        }
         if let Some(cause) = self.stopped {
             return Outcome::unfiltered(cause);
         }
@@ -735,7 +741,10 @@ impl<'a> Gate<'a> {
         outcome
     }
 
-    /// `state` as it may be sent, or why it cannot be. A string holding a private-key block
+    /// `state` as it may be sent, or why it cannot be. The whole code was already checked for a
+    /// private-key block before the window was cut ([`Self::decide`];
+    /// `a_key_block_longer_than_the_window_is_found_in_the_whole_code_and_never_sent`), so here a
+    /// string holding one is the finding's own text. Such a string
     /// withholds it (`secret`: RV22's exception, a key body has no pattern of its own); otherwise
     /// every one-line secret of every string is masked ([`mask_secrets`]), and the masked state
     /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left a match
