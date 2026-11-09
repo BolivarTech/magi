@@ -4004,6 +4004,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn report_metadata_never_carries_a_secret_shaped_path_or_label_raw() {
+        // [MAGI S6 MS3 loop4, R4 Melchior] RV22's tie-break: a path or label that matches a
+        // secret pattern cannot be masked and still name its file, so it is reported only as
+        // `<path redacted: <pattern>>`. The source below hands every field raw: a withheld
+        // item's path, a trimmed label, a skipped and a masked path. None may reach the summary.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        struct RawRag(String);
+        #[async_trait::async_trait]
+        impl RagSource for RawRag {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(Assembled {
+                    items: vec![ContextItem {
+                        kind: ContextKind::Definition,
+                        file: format!("src/{}.rs", self.0),
+                        label: "f".into(),
+                        text: "fn f() {}".into(),
+                        candidate: false,
+                        lines: Some((1, 1)),
+                        old_side: false,
+                    }],
+                    trimmed: vec![(ContextKind::Documentation, format!("section {}", self.0))],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+            fn skipped(&self) -> Vec<String> {
+                vec![format!("docs/{}.md", self.0)]
+            }
+            fn masked(&self) -> Vec<(String, &'static str)> {
+                vec![(format!("docs/{}.txt", self.0), "anthropic-key")]
+            }
+        }
+        let batch = ReviewBatch {
+            index: 0,
+            items: vec![],
+            tokens: 1,
+            companion_tokens: 0,
+        };
+        let mut summary = ReviewSummary::default();
+        prepare_contexts(&RawRag(key.to_string()), &[batch], &mut summary)
+            .await
+            .expect("prepare");
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(!json.contains("sk-ant-"), "{json}");
+        assert!(json.contains("<path redacted: anthropic-key>"), "{json}");
+    }
+
     #[test]
     fn a_context_item_whose_mask_would_outgrow_its_charge_is_withheld() {
         // [MAGI S6 MS3 loop4, R4 Melchior] The budget charged an item's text before this egress
