@@ -169,7 +169,9 @@ pub trait RagSource: Send + Sync {
         0
     }
 
-    /// Documentation paths left out for a secret, to list as skipped (RV22).
+    /// Documentation paths left out for a secret, to list as skipped (RV22). Read from the
+    /// source the pipeline is given, never from the one [`Self::for_review`] binds (that one may
+    /// keep this default), as is [`Self::masked`].
     fn skipped(&self) -> Vec<String> {
         Vec::new()
     }
@@ -572,8 +574,9 @@ pub async fn run_review(
     let contexts = match deps.rag {
         Some(rag) => {
             let bound = bind(rag, &index, &source);
+            let given = rag;
             let rag = bound.as_deref().unwrap_or(rag);
-            prepare_contexts(rag, &batches, &mut summary).await?
+            prepare_contexts(rag, given, &batches, &mut summary).await?
         }
         None => vec![Vec::new(); batches.len()],
     };
@@ -1358,11 +1361,18 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
 /// as masked once (RV22 amended). The kept items are sorted, stably, by the fixed priority.
 /// O(items + bytes of the items).
 ///
+/// `rag` assembles the batches (the bound source, when there is one); `given` is the source the
+/// pipeline was handed, and the documentation declarations ([`RagSource::skipped`],
+/// [`RagSource::masked`]) are read from it, as the reserve and the indexing time are, so a
+/// bound source that keeps the trait's defaults never drops them
+/// (`the_documentation_declarations_come_from_the_source_given_not_the_bound_one`).
+///
 /// # Errors
 ///
 /// The first error of `rag`, before any trio call.
 async fn prepare_contexts(
     rag: &dyn RagSource,
+    given: &dyn RagSource,
     batches: &[ReviewBatch],
     summary: &mut ReviewSummary,
 ) -> Result<Vec<Vec<ContextItem>>, ReviewError> {
@@ -1401,12 +1411,14 @@ async fn prepare_contexts(
         kept.sort_by_key(|item| kind_rank(&item.kind));
         contexts.push(kept);
     }
-    for path in rag.skipped() {
+    // MAGI FIX (MS3 §6 loop5): from the source given, never the bound one, which the trait
+    // does not oblige to forward them.
+    for path in given.skipped() {
         skip_for_secret(summary, &path);
     }
     // MAGI FIX (MS3 §6 loop4): the masked paths were trusted as the source shaped them; they
     // pass `display_path` here like every other path the summary carries (idempotent).
-    for (shown, pattern) in rag.masked() {
+    for (shown, pattern) in given.masked() {
         declare_masked(summary, display_path(&shown), pattern);
     }
     Ok(contexts)
@@ -4106,7 +4118,8 @@ mod tests {
             companion_tokens: 0,
         };
         let mut summary = ReviewSummary::default();
-        prepare_contexts(&RawRag(key.to_string()), &[batch], &mut summary)
+        let raw = RawRag(key.to_string());
+        prepare_contexts(&raw, &raw, &[batch], &mut summary)
             .await
             .expect("prepare");
         let json = serde_json::to_string(&summary).expect("json");
