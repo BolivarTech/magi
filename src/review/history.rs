@@ -255,8 +255,16 @@ fn names_only(text: &str, file: &str) -> bool {
 }
 
 /// Whether `commit` reads as a commit id: non-empty hexadecimal, a full SHA as `record_history`
-/// records it or an abbreviation of one. A branch name, `HEAD~1`, an empty string or an option
-/// (`-x`) is not. O(len).
+/// records it or an abbreviation of one. A branch name that is not all hex, `HEAD~1`, an empty
+/// string or an option (`-x`) is not. O(len).
+///
+/// Declared limit: the check is lexical, so a branch named in hex (`deadbeef`) or a one-digit
+/// "abbreviation" passes it. Production never stores either: `record_history` resolves the
+/// reviewed revision with `rev-parse` to its full 40-hex SHA before `entries_from_review` runs,
+/// so only a hand-edited row can hold one, and the worst it gets is a wrong history status
+/// (`Pending` or a weak reject, never `Attended` without a hunk on its line); no byte leaves the
+/// process. No minimum length is enforced, so the tests' short ids (`c1`) keep standing for
+/// SHAs.
 fn is_commit_id(commit: &str) -> bool {
     !commit.is_empty() && commit.bytes().all(|b| b.is_ascii_hexdigit())
 }
