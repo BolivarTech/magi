@@ -383,6 +383,14 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
 ///
 /// # Returns
 /// The rendered review.
+/// What is left of the documentation bound ([`REINDEX_TIMEOUT_SECS`]) since `since`, the start
+/// of the working tree's listing: the listing and the indexing share that one bound, which the
+/// budget check reserves (`outbound_prep_reserve_secs`). O(1).
+fn docs_time_left(since: Instant) -> Duration {
+    let _ = since;
+    Duration::from_secs(REINDEX_TIMEOUT_SECS)
+}
+
 pub(crate) fn render_outcome(o: ReviewOutcome, structured: bool) -> Rendered {
     let json = summary_json(&o.summary);
     let rendered = match (o.consolidated, o.consolidation_error) {
@@ -1291,6 +1299,7 @@ impl ProductionReviewRunner {
             Err(e) => return unavailable(None, &e.to_string()),
         };
         let whole = ReviewInput::Directory(PathBuf::from("."));
+        let listing_started = Instant::now();
         // MAGI FIX (MS3 §6 loop2): `.gitignore` is a working-tree rule (MS2): a revision's
         // listing applies none, as its review does.
         let (paths, ignored): (Vec<String>, HashSet<String>) = match &rev {
@@ -1324,7 +1333,7 @@ impl ProductionReviewRunner {
             &keep,
             &self.registry,
             embedder,
-            Duration::from_secs(REINDEX_TIMEOUT_SECS),
+            docs_time_left(listing_started),
         )
         .await;
         // A degraded preparation did not complete its listing: the clean-up then keeps every
@@ -3232,6 +3241,23 @@ mod tests {
             probing.0.lock().expect("lock").is_empty(),
             "the dimension probe was sent"
         );
+    }
+
+    #[test]
+    fn the_working_tree_listing_is_paid_out_of_the_documentation_bound() {
+        // [MAGI S6 MS3 loop5, R5 Caspar] The working tree's listing (its `.gitignore` paths and
+        // its files) ran before `prepare_docs` started its own `REINDEX_TIMEOUT_SECS`, outside
+        // what the budget check reserves; the indexing now gets only what the listing left.
+        let bound = Duration::from_secs(REINDEX_TIMEOUT_SECS);
+        let ten_ago = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .expect("an instant ten seconds ago");
+        let left = docs_time_left(ten_ago);
+        assert!(left <= bound - Duration::from_secs(10), "{left:?}");
+        let long_ago = Instant::now()
+            .checked_sub(bound + Duration::from_secs(1))
+            .expect("an instant past the bound");
+        assert_eq!(docs_time_left(long_ago), Duration::ZERO);
     }
 
     #[tokio::test]
