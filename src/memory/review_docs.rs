@@ -500,7 +500,8 @@ impl ReviewDocStore {
     }
 
     /// The `k` chunks of `vectors` most similar to `query`, best first; only their section and
-    /// text are read and decrypted. A `query` of another dimension than `vectors` matches nothing.
+    /// text are read and decrypted. A `query` of another dimension than `vectors` matches nothing,
+    /// and a hit whose row was deleted since `vectors` was loaded is skipped.
     ///
     /// Complexity: O(r * d) to score plus O(r log r) to order the `r` loaded rows.
     ///
@@ -522,12 +523,15 @@ impl ReviewDocStore {
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.truncate(k);
-        scored
-            .into_iter()
-            .map(|(score, key, hash)| -> Result<_, MemoryError> {
-                Ok((self.load_chunk(key, hash.to_string())?, score))
-            })
-            .collect()
+        // MAGI FIX (MS3 §6 loop4): a row deleted since `load_vectors` (another process's
+        // clean-up) failed the whole search; it is now one hit fewer.
+        let mut hits = Vec::with_capacity(scored.len());
+        for (score, key, hash) in scored {
+            if let Some(chunk) = self.load_chunk(key, hash.to_string())? {
+                hits.push((chunk, score));
+            }
+        }
+        Ok(hits)
     }
 
     /// `(key, chunk hash, encrypted vector)` of the allowed rows of this identity and `dim`.
@@ -567,23 +571,24 @@ impl ReviewDocStore {
         }
         Ok(out)
     }
-    /// Reads one chunk's row raw under the lock, then decrypts it off the lock.
-    fn load_chunk(&self, key: &str, hash: String) -> Result<DocChunk, MemoryError> {
-        let (path, section, text): (String, Vec<u8>, Vec<u8>) = self
-            .locked_conn()
-            .query_row(
-                "SELECT path, section_blob, text_blob FROM code_review_docs \
-                 WHERE key = ?1 AND chunk_hash = ?2",
-                params![key, hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .map_err(db_err)?;
-        Ok(DocChunk {
+    /// Reads one chunk's row raw under the lock, then decrypts it off the lock; `None` when the
+    /// row no longer exists (deleted after the vectors were loaded).
+    fn load_chunk(&self, key: &str, hash: String) -> Result<Option<DocChunk>, MemoryError> {
+        let row: Option<(String, Vec<u8>, Vec<u8>)> = optional(self.locked_conn().query_row(
+            "SELECT path, section_blob, text_blob FROM code_review_docs \
+             WHERE key = ?1 AND chunk_hash = ?2",
+            params![key, hash],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ))?;
+        let Some((path, section, text)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(DocChunk {
             path,
             section: self.unseal(&section)?.to_string(),
             text: self.unseal(&text)?.to_string(),
             hash,
-        })
+        }))
     }
 
     /// Deletes (`DELETE FROM`, both tables, one transaction) every source not in `live`; with
