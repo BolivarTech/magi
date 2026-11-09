@@ -171,6 +171,8 @@ pub struct TrimmedItem {
 
 // MAGI FIX (S6 loop 8, C2-c5): written out so `judged_fraction` starts at its documented 1.0
 // (nothing reached the gate, so nothing was left unjudged); a derived `Default` said 0.0.
+// A new field cannot be forgotten here: the literal below has no `..` rest, so the compiler
+// refuses it until the field is listed.
 impl Default for ReviewSummary {
     /// An empty summary: no finding, no batch, and `judged_fraction` 1.0.
     fn default() -> Self {
