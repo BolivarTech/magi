@@ -204,7 +204,11 @@ struct Kept {
 /// (`suppressed_diff`).
 /// The binary and UTF-8 checks run on both sides that exist (binary first). The
 /// secret scan covers both whole sides, not only what is sent: the safe direction. A renamed
-/// file's old side is read under its old path (`rename from`).
+/// file's old side is read under its old path (`rename from`). Once every file is judged, the
+/// source is sealed ([`ContentSource::seal`]): no later stage is served a side held raw with a
+/// secret, whether this filter read it or not
+/// (`once_sealed_the_cache_never_serves_a_side_raw_with_a_secret_even_one_never_classified`,
+/// `src/review/source.rs`).
 ///
 /// # Arguments
 ///
@@ -292,6 +296,9 @@ pub fn filter_files(
         // so a file left out near the cap no longer fails the review.
         source.settle()?;
     }
+    // MAGI FIX (MS3 §6 loop5): the classification is over; from here no stage is served a side
+    // held raw with a secret, a path this filter never saw included.
+    source.seal();
     if filtered.kept.is_empty() {
         // MAGI FIX (S6 loop 3): the omissions and their causes travel with the error (RV20/RV22).
         return Err(ReviewError::NothingToReview {

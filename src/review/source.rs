@@ -744,6 +744,8 @@ struct Held {
     /// unread): a later read that would serve it raw with a secret is refused like a withheld
     /// side, so a side that gains a secret after its release is refused too.
     released: HashSet<(Face, String)>,
+    /// Whether the filter has ended its classification ([`ContentSource::seal`]).
+    sealed: bool,
     /// Bytes held across both sides.
     bytes: u64,
     /// The bytes held before, and the path of, the first read that passed the cap since the
@@ -815,7 +817,10 @@ impl<'a> CachedSource<'a> {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         // MAGI FIX (MS3 §6 loop3): the filter left this file out for its key block; a later read
         // would have fetched the raw key again.
-        if held.withheld.contains(&(face, path.to_string())) {
+        // MAGI FIX (MS3 §6 loop5): once sealed, a side held raw with a secret is served to no
+        // stage, released or not.
+        let key = (face, path.to_string());
+        if held.withheld.contains(&key) || (held.sealed && held.raw_secret.contains(&key)) {
             return Err(ReviewError::EgressSecret {
                 path: path.to_string(),
             });
@@ -844,7 +849,8 @@ impl<'a> CachedSource<'a> {
         // MAGI FIX (MS3 §6 loop5): for every released side, read or not, and for any secret it
         // would be served raw with (a binary side, one too dense to mask, a key block it gained
         // after its release), not a key block alone.
-        if raw_secret && held.released.contains(&(face, path.to_string())) {
+        // MAGI FIX (MS3 §6 loop5): and once sealed, for a side the filter never read either.
+        if raw_secret && (held.sealed || held.released.contains(&key)) {
             return Err(ReviewError::EgressSecret {
                 path: path.to_string(),
             });
@@ -1021,6 +1027,17 @@ impl ContentSource for CachedSource<'_> {
             held: before,
             path,
         })
+    }
+
+    /// From now on no side held raw with a secret is served, read before or not
+    /// (`once_sealed_the_cache_never_serves_a_side_raw_with_a_secret_even_one_never_classified`).
+    /// A kept file never has such a side (the filter left it out), so only a read beyond the
+    /// kept files is refused. O(1).
+    fn seal(&self) {
+        self.held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .sealed = true;
     }
 
     /// What the cache masked when it read side `face` of `path`. O(1) expected.
