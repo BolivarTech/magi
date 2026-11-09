@@ -378,6 +378,11 @@ pub struct ReviewRequest<'a> {
     pub approved_digest: Option<[u8; 32]>,
     /// When the caller started preparing this review, if before this call: the preparation it
     /// did first (its own git reads, the gate) is part of `prep_ms`. `None` starts it here.
+    ///
+    /// Contract: it marks a moment after the documentation indexing, never before it. `prep_ms`
+    /// adds the context source's own `index_ms` to the time since this instant, so an instant
+    /// taken before the indexing would count it twice. The production runner takes it after
+    /// `prepare_documentation` returns.
     pub prep_started: Option<Instant>,
 }
 
@@ -1846,7 +1851,13 @@ impl GateCode {
 /// through `old_paths`, and a colliding one is ambiguous as above.
 /// `None` (the gate's `no location`) without a line, without a face that holds
 /// it, or when the read fails, with a WARN; with the cache that read is unreachable, because
-/// every face of a reviewed file was read during the preparation. The full side is returned:
+/// every face of a reviewed file was read during the preparation. `source` is the review's
+/// `CachedSource`, which serves every side with its one-line secrets already masked, so the text
+/// the gate sends is the masked text the batch saw
+/// (`a_file_with_a_secret_is_reviewed_with_it_masked_in_the_prompt_and_the_gate`,
+/// `a_secret_on_a_deleted_line_is_masked_in_the_batch_and_the_gate`); `Gate::judge` masks every
+/// string of its state again and withholds one whose whole code holds a private-key block,
+/// before the window is cut (both pinned in `gate.rs`). The full side is returned:
 /// the gate's state shows only RV10's ±40 numbered lines of it (`gate::gate_state_of`; pinned by
 /// `the_request_sent_holds_forty_lines_each_side_not_the_whole_file`). Each finding copies its
 /// side out of the cache and decodes it once: at most two copies of one file
