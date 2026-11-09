@@ -2309,6 +2309,24 @@ mod tests {
     }
 
     #[test]
+    fn every_code_review_table_of_the_schema_is_a_table_the_pre_0_25_check_names() {
+        // [MAGI S6 MS3 loop5, R3 Balthasar] Two hand-kept lists: a v0.25.0 table added to the
+        // DDL and not to the check would let an older database without it open as current.
+        const OPEN: &str = "CREATE TABLE IF NOT EXISTS ";
+        let created: std::collections::BTreeSet<&str> = SCHEMA_DDL
+            .match_indices(OPEN)
+            .filter_map(|(at, _)| {
+                let rest = SCHEMA_DDL.get(at + OPEN.len()..)?;
+                rest.split([' ', '(']).next()
+            })
+            .filter(|t| t.starts_with("code_review_"))
+            .collect();
+        let checked: std::collections::BTreeSet<&str> =
+            PRE_0_25_MISSING_TABLES.into_iter().collect();
+        assert_eq!(created, checked);
+    }
+
+    #[test]
     fn every_schema_initializer_refuses_a_0_24_database_and_creates_nothing() {
         // [MAGI S6 MS3 loop5, R1 Caspar] `init_schema` ran `CREATE TABLE IF NOT EXISTS` with no
         // pre-0.25 check, and the vector store and the capability cache call it on the
