@@ -386,9 +386,9 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
 /// What is left of the documentation bound ([`REINDEX_TIMEOUT_SECS`]) since `since`, the start
 /// of the working tree's listing: the listing and the indexing share that one bound, which the
 /// budget check reserves (`outbound_prep_reserve_secs`). O(1).
+// MAGI FIX (MS3 §6 loop5): the listing ran outside the bound; the indexing kept the whole of it.
 fn docs_time_left(since: Instant) -> Duration {
-    let _ = since;
-    Duration::from_secs(REINDEX_TIMEOUT_SECS)
+    Duration::from_secs(REINDEX_TIMEOUT_SECS).saturating_sub(since.elapsed())
 }
 
 pub(crate) fn render_outcome(o: ReviewOutcome, structured: bool) -> Rendered {
@@ -1299,6 +1299,10 @@ impl ProductionReviewRunner {
             Err(e) => return unavailable(None, &e.to_string()),
         };
         let whole = ReviewInput::Directory(PathBuf::from("."));
+        // The listing below and the indexing share one bound (`docs_time_left`), the one the
+        // budget check reserves: a large workspace spends it on listing, and the indexing then
+        // degrades, declared, instead of running past the caller's deadline. One git call of the
+        // listing can still run to its own timeout (`GIT_CALL_TIMEOUT_SECS`) before it is seen.
         let listing_started = Instant::now();
         // MAGI FIX (MS3 §6 loop2): `.gitignore` is a working-tree rule (MS2): a revision's
         // listing applies none, as its review does.
