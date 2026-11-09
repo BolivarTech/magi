@@ -970,7 +970,7 @@ pub fn display_path(path: &str) -> String {
 /// rescanning loop (`one_pass_masking_equals_the_rescanning_loop_…`) is what catches a mismatch.
 // MAGI FIX (S6 loop 4): each turn rescanned the rest for every pattern, O(k · n · p).
 pub fn mask_secrets(text: &str) -> String {
-    mask_spans(text, false)
+    mask_spans(text, false, usize::MAX).unwrap_or_default()
 }
 
 /// The name of the first pattern (in table order) whose mask, `<redacted: <name>>`, appears in
@@ -1000,10 +1000,12 @@ pub fn masked_pattern(text: &str) -> Option<&'static str> {
 /// # Arguments
 /// * `text` - The text to mask.
 /// * `keep_lines` - Whether each line break a mask covers is written back after it.
+/// * `max_bytes` - The largest output accepted; `usize::MAX` for no bound.
 ///
 /// # Returns
-/// The masked text.
-fn mask_spans(text: &str, keep_lines: bool) -> String {
+/// The masked text, or `None` as soon as it passes `max_bytes` (never with `usize::MAX`: the
+/// output of a text that fits in memory fits in `usize`).
+fn mask_spans(text: &str, keep_lines: bool, max_bytes: usize) -> Option<String> {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
     let lanes: Vec<(&SecretPattern, usize)> = SECRET_PATTERNS
         .iter()
@@ -1032,6 +1034,9 @@ fn mask_spans(text: &str, keep_lines: bool) -> String {
                 .map_or(0, |t| t.matches('\n').count());
             out.extend(std::iter::repeat_n('\n', breaks));
         }
+        if out.len() > max_bytes {
+            return None;
+        }
         done = end;
         let rest = text.get(done..).unwrap_or_default();
         for (slot, (p, lane)) in next.iter_mut().zip(&lanes) {
@@ -1043,7 +1048,7 @@ fn mask_spans(text: &str, keep_lines: bool) -> String {
         }
     }
     out.push_str(text.get(done..).unwrap_or_default());
-    out
+    (out.len() <= max_bytes).then_some(out)
 }
 
 /// What [`mask_secrets_keeping_lines`] gave for a text that held a secret.
@@ -1089,7 +1094,7 @@ pub fn holds_key_block(text: &str) -> bool {
 pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
     let pattern = find_secret(text)?;
     Some(LineMasked {
-        text: mask_spans(text, true),
+        text: mask_spans(text, true, usize::MAX).unwrap_or_default(),
         pattern,
     })
 }
@@ -1116,11 +1121,18 @@ pub enum BoundedMask {
 ///
 /// # Returns
 /// [`BoundedMask::Clean`], the masked text, or [`BoundedMask::TooLarge`].
+// MAGI FIX (MS3 §6 loop4): a file dense in short secrets grew several times while masked,
+// before any cap was checked.
 pub fn mask_secrets_keeping_lines_within(text: &str, max_bytes: usize) -> BoundedMask {
-    let _ = max_bytes;
-    match mask_secrets_keeping_lines(text) {
-        Some(m) => BoundedMask::Masked(m),
-        None => BoundedMask::Clean,
+    let Some(pattern) = find_secret(text) else {
+        return BoundedMask::Clean;
+    };
+    match mask_spans(text, true, max_bytes) {
+        Some(masked) => BoundedMask::Masked(LineMasked {
+            text: masked,
+            pattern,
+        }),
+        None => BoundedMask::TooLarge,
     }
 }
 
