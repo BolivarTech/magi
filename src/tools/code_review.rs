@@ -451,8 +451,8 @@ fn egress_safe(r: Rendered) -> Rendered {
 /// and `\t`, the report's own layout, is dropped, and so is every format character that can
 /// reorder or hide text ([`is_hidden_format_char`]: a bidi override, a zero-width space), so an
 /// escape sequence a model echoes from the reviewed code arrives as inert text (`ESC [2J`
-/// becomes `[2J`). The JSON forms escape control characters themselves and are left as they
-/// are. O(len of `text`).
+/// becomes `[2J`). The JSON forms escape control characters themselves and drop the same format
+/// characters in [`masked_json`]. O(len of `text`).
 ///
 /// # Arguments
 /// * `text` - The text about to reach the screen.
@@ -485,9 +485,22 @@ pub(crate) fn egress_text(text: &str) -> String {
     mask_secrets(redact_foreign_text(text).as_str())
 }
 
-/// `value` with every string and key passed through [`mask_secrets`]. O(size of `value`).
+/// `value` with every string and key passed through [`mask_secrets`], after the format
+/// characters that reorder or hide text ([`is_hidden_format_char`]) are dropped, as the text
+/// form drops them; serde escapes C0 controls itself. O(size of `value`).
+// MAGI FIX (MS3 §6 loop4): a bidi override reached the JSON envelope; only the text dropped it.
 fn masked_json(value: Value) -> Value {
-    map_json_text(value, &|text| mask_secrets(text), true)
+    map_json_text(
+        value,
+        &|text| {
+            let shown: String = text
+                .chars()
+                .filter(|&c| !is_hidden_format_char(c))
+                .collect();
+            mask_secrets(&shown)
+        },
+        true,
+    )
 }
 
 /// `value` with every string redacted. O(size of `value`).
