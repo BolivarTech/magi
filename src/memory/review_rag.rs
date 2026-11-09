@@ -2329,6 +2329,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_working_tree_path_listed_twice_is_read_and_indexed_once() {
+        // [MAGI S6 MS3 loop5, R2 Balthasar] Duplicate paths were each read, chunked and handed
+        // to the reindex; the store is content-addressed, so it was waste, not a wrong index.
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl ContentSource for Counting {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(b"# Usage\nrun it\n".to_vec()))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let source = Counting(std::sync::atomic::AtomicUsize::new(0));
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &source,
+            &["README.md".to_string(), "README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert_eq!(prep.doc_sources.len(), 1);
+        assert_eq!(source.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn a_documentation_source_that_is_not_utf8_is_left_out_and_declared() {
         // [MAGI S6 MS3 loop5, R2 Caspar] It was removed with an INFO entry only, so the report
         // never said why that documentation was missing (RV07 declares what was cut).
