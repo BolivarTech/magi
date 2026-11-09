@@ -1873,6 +1873,54 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_a_warning() {
+        // [MAGI S6 MS3 loop4, R6a Balthasar] The fallback branch itself: a masked file whose diff
+        // disagrees with its sides (a body line without a marker) is left out as `secret`, the
+        // safe direction, and the run log says why at WARN so a parser drift is visible.
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Warns(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warns {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if e.metadata().target() == LOG_TARGET
+                    && *e.metadata().level() == tracing::Level::WARN
+                {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let warns = Warns::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(warns.clone()));
+        let key = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let new = format!("let k = \"{key}\";\n");
+        let inner = MapSource::new(&[("a.rs", new.as_str())], &[("a.rs", "let k = 1;\n")]);
+        let src = CachedSource::new(&inner);
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some("@@ -1 +1 @@\nno marker here\n".into()),
+        }];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false);
+        let skipped = match f {
+            Ok(f) => f.skipped,
+            Err(ReviewError::NothingToReview { skipped }) => skipped,
+            Err(e) => panic!("{e:?}"),
+        };
+        assert_eq!(
+            skipped,
+            vec![Skipped {
+                path: "a.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+        assert_eq!(warns.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn binaries_and_non_utf8_are_skipped_with_their_cause_and_unknown_text_is_kept() {
         let files = vec![
             ReviewFile {
