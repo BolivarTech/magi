@@ -159,6 +159,11 @@ pub trait RagSource: Send + Sync {
     /// Under a calling run's deadline the preparation spends the same clock as the batches, so
     /// the budget check that precedes it reserves this much ([`precheck_budget`]): a review it
     /// lets through cannot be refused for its budget after those calls were made.
+    ///
+    /// Contract: the pipeline reads this from the source it was given, before binding it with
+    /// [`Self::for_review`], and never asks the bound source. So the bound source must make no
+    /// outbound call beyond what the unbound one declares here (the production `ReviewRag`
+    /// declares the query embeddings its bound `StoreRag` makes, and `StoreRag` keeps the default).
     fn outbound_reserve_secs(&self, batches: usize) -> u64 {
         let _ = batches;
         0
