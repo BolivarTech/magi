@@ -1469,6 +1469,10 @@ impl CodeReviewRunner for ProductionReviewRunner {
         budget: ReviewBudget,
         cancel: &CancellationToken,
     ) -> Result<Rendered, ReviewError> {
+        // `Until(d)` is already the margined end: the tool takes `REVIEW_DEADLINE_MARGIN_SECS` off
+        // the run's deadline before calling this (`CodeReviewTool::review_budget`, pinned by
+        // `as_a_tool_the_review_gets_what_is_left_of_the_run`), so the budget check below and the
+        // review both read the same, shorter end; nothing here adds the margin back.
         let (timeout_secs, deadline) = match budget {
             ReviewBudget::Unbounded => (None, None),
             ReviewBudget::Total(t) => (Some(t.as_secs()), None),
@@ -2638,6 +2642,33 @@ mod tests {
         let memory = ReviewMemory::open(mem.shared_conn(), mem.data_key().expect("dek"))
             .expect("review stores");
         (db, mem, Arc::new(memory))
+    }
+
+    #[test]
+    fn the_review_stores_open_twice_on_one_shared_connection_and_share_their_rows() {
+        // [MAGI S6 MS3 loop6, R5 Caspar] `review_context_of` opens `ReviewMemory` once per
+        // surface over the one shared connection; a second open must neither fail nor reset
+        // anything: the schema is `CREATE ... IF NOT EXISTS` and the stores hold no state of their
+        // own but the connection and a key duplicate.
+        let (_db, mem, first) = review_memory();
+        let second = ReviewMemory::open(mem.shared_conn(), mem.data_key().expect("dek"))
+            .expect("a second open on the same connection");
+        let entry = magi_rs::review::history::HistoryEntry {
+            id: "i1".into(),
+            file: "a.rs".into(),
+            line: Some(3),
+            reviewed_commit: "c1".into(),
+            title: "t".into(),
+            detail: "d".into(),
+            status: magi_rs::review::history::HistoryStatus::Pending,
+        };
+        assert_eq!(first.history().record(&[entry]).expect("record"), 1);
+        let (due, total) = second.history().due(10).expect("due");
+        assert_eq!(
+            (due.len(), total),
+            (1, 1),
+            "the second open sees the first one's row"
+        );
     }
 
     /// [`production_runner_with`] with review stores and an embedder.

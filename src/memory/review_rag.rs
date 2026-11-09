@@ -773,6 +773,13 @@ pub struct ReviewMemory {
 impl ReviewMemory {
     /// Opens the history over `conn`.
     ///
+    /// Idempotent on a shared connection: the schema call is `CREATE ... IF NOT EXISTS` (and
+    /// refuses a pre-0.25 database the same way every time), and the stores keep no state but
+    /// the connection and a duplicate of the key, so a second open over the same connection
+    /// (one per surface in one process) neither fails nor resets anything, and both see the same
+    /// rows (`the_review_stores_open_twice_on_one_shared_connection_and_share_their_rows`,
+    /// `tools::code_review`).
+    ///
     /// # Arguments
     ///
     /// * `conn` - The connection shared with `EncryptedSqliteMemory`.
