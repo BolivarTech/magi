@@ -9378,6 +9378,69 @@ end"
         assert!(parse_tui_code_review("/code-review src --uncommitted").is_err());
     }
 
+    /// A runner whose review renders `REPORT-BODY` and whose post-report work warns, or whose
+    /// review fails with a secret-shaped error.
+    struct WarningRunner {
+        fail: bool,
+    }
+    #[async_trait::async_trait]
+    impl crate::tools::code_review::CodeReviewRunner for WarningRunner {
+        fn plan(
+            &self,
+            _input: &magi_rs::review::input::ReviewInput,
+        ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
+        {
+            Ok(shown_plan())
+        }
+        async fn run(
+            &self,
+            _plan: crate::tools::code_review::ReviewPlan,
+            _budget: crate::tools::code_review::ReviewBudget,
+            _c: &tokio_util::sync::CancellationToken,
+        ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
+        {
+            if self.fail {
+                return Err(magi_rs::review::error::ReviewError::Io(
+                    concat!("cannot read ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").into(), // allow-secret-scan
+                ));
+            }
+            Ok(crate::tools::code_review::Rendered {
+                text: "REPORT-BODY".into(),
+                json: serde_json::Value::Null,
+                consult: serde_json::Value::Null,
+                failure: None,
+            })
+        }
+        fn after_report(&self) -> Option<crate::tools::code_review::PostReport> {
+            Some(Box::new(|| Some("HISTORY-WARNING".to_string())))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_post_report_warning_is_added_after_the_report_never_in_its_place() {
+        // [MAGI S6 MS3 loop5, R5 Caspar] The history warning goes through `apply_response` as an
+        // `Error`; that arm appends a line, so the report shown just before stays on screen.
+        let mut app = App::new_for_test();
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            Arc::new(WarningRunner { fail: false }),
+            shown_plan(),
+        );
+        let review = app.approve_code_review().expect("pending");
+        app.run_approved_code_review(review).await;
+        let report = app
+            .messages
+            .iter()
+            .position(|m| m.contains("REPORT-BODY"))
+            .expect("the report is on screen");
+        let warning = app
+            .messages
+            .iter()
+            .position(|m| m.contains("HISTORY-WARNING"))
+            .expect("the warning is on screen");
+        assert!(report < warning, "{:?}", app.messages);
+    }
+
     #[tokio::test]
     async fn without_y_the_tui_never_starts_the_review() {
         // The pending confirmation is answered with 'c': the runner is never called and the transcript says so.
