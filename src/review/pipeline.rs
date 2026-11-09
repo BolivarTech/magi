@@ -4148,12 +4148,13 @@ mod tests {
     }
 
     #[test]
-    fn a_context_item_whose_mask_would_outgrow_its_charge_is_withheld() {
+    fn a_context_item_whose_mask_outgrows_its_charge_is_still_sent_masked() {
         // [MAGI S6 MS3 loop4, R4 Melchior] The budget charged an item's text before this egress
-        // pass; a mask longer than its secret (a short URL password) would make the prompt pass
-        // the limit RV04 checked. The items arrive masked from the review's cache, so this pass
-        // normally changes nothing; when it would grow an item it withholds it instead, and a
-        // mask that shrinks the text is sent.
+        // pass; a mask longer than its secret (a short URL password) grows it.
+        // [MAGI S6 MS3 loop6, R4 Caspar] RV22 amended masks a one-line secret at every egress
+        // point and omits only a key block: the grown item was withheld; it is now sent masked,
+        // and `prepare_contexts` pays for the growth with optional context
+        // (`the_growth_of_a_mask_is_paid_by_trimming_optional_context_never_by_omitting_the_item`).
         use crate::review::rag::{item_cost, ContextItem, ContextKind};
         let item = |text: &str| ContextItem {
             kind: ContextKind::Definition,
@@ -4173,7 +4174,13 @@ mod tests {
             item_cost(&grown) > item_cost(&short),
             "the fixture must grow"
         );
-        assert!(matches!(context_egress(short), ContextEgress::Withhold(f) if f == "a.rs"));
+        match context_egress(short) {
+            ContextEgress::Send(sent, Some(pattern)) => {
+                assert_eq!(pattern, "url-credential");
+                assert!(!sent.text.contains("u:p@"), "{}", sent.text);
+            }
+            _ => panic!("a growing mask is sent, never withheld"),
+        }
         let long = item(&format!(
             "let k = \"sk-ant-api03-{}\";", // allow-secret-scan
             "A".repeat(80)
@@ -4185,6 +4192,69 @@ mod tests {
             }
             _ => panic!("a shrinking mask is sent"),
         }
+    }
+
+    #[tokio::test]
+    async fn the_growth_of_a_mask_is_paid_by_trimming_optional_context_never_by_omitting_the_item()
+    {
+        // [MAGI S6 MS3 loop6, R4 Caspar] What the prompt carries is charged on the masked text:
+        // when masking grows the items past what the source charged, the lowest-priority optional
+        // items are trimmed (and declared) until it fits; the masked item itself is sent.
+        use crate::review::rag::{ContextItem, ContextKind};
+        struct GrowingRag;
+        #[async_trait::async_trait]
+        impl RagSource for GrowingRag {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                let item = |kind, file: &str, label: &str, text: &str| ContextItem {
+                    kind,
+                    file: file.into(),
+                    label: label.into(),
+                    text: text.into(),
+                    candidate: false,
+                    lines: None,
+                    old_side: false,
+                };
+                Ok(Assembled {
+                    items: vec![
+                        item(
+                            ContextKind::Definition,
+                            "a.rs",
+                            "f",
+                            "let u = \"a://u:p@h\";",
+                        ),
+                        item(ContextKind::Documentation, "README.md", "Usage", "run it"),
+                    ],
+                    trimmed: vec![],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+        }
+        let batch = ReviewBatch {
+            index: 0,
+            items: vec![],
+            tokens: 1,
+            companion_tokens: 0,
+        };
+        let mut summary = ReviewSummary::default();
+        let contexts = prepare_contexts(&GrowingRag, &GrowingRag, &[batch], &mut summary)
+            .await
+            .expect("prepare");
+        let sent = &contexts[0];
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].kind == ContextKind::Definition && !sent[0].text.contains("u:p@"));
+        assert_eq!(summary.context_withheld, 0, "never omitted");
+        assert!(summary.skipped.is_empty(), "{:?}", summary.skipped);
+        assert!(summary.masked.iter().any(|m| m.path == "a.rs"));
+        assert!(
+            summary
+                .trimmed
+                .iter()
+                .any(|t| t.kind == ContextKind::Documentation && t.label == "Usage"),
+            "{:?}",
+            summary.trimmed
+        );
     }
 
     #[test]
