@@ -793,10 +793,10 @@ impl<'a> Gate<'a> {
         outcome
     }
 
-    /// `state` as it may be sent, or why it cannot be. The whole code was already checked for a
-    /// private-key block before the window was cut ([`Self::decide`];
-    /// `a_key_block_longer_than_the_window_is_found_in_the_whole_code_and_never_sent`), so here a
-    /// string holding one is the finding's own text. Such a string
+    /// `state` as it may be sent, or why it cannot be. The code was already checked for a
+    /// private-key block overlapping the window before the window was cut ([`Self::decide`],
+    /// `window_overlaps_key_block`), so here a string holding one is the finding's own text
+    /// (`a_state_whose_own_text_quotes_a_key_block_is_never_sent`). Such a string
     /// withholds it (`secret`: RV22's exception, a key body has no pattern of its own); otherwise
     /// every one-line secret of every string is masked ([`mask_secrets`]), and the masked state
     /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left a match
