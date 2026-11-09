@@ -807,9 +807,22 @@ impl ReviewMemory {
         if embedder.dim() == 0 {
             let bound = Duration::from_secs(DIMENSION_PROBE_TIMEOUT_SECS);
             let probe = vec![DIMENSION_PROBE.to_string()];
-            // Its answer is not used: a successful call sets the dimension; a failed one leaves
+            // Its vectors are not used: a successful call sets the dimension; a failed one leaves
             // it at 0, checked right below.
-            let _ = tokio::time::timeout(bound, embedder.embed(&probe)).await;
+            // MAGI FIX (MS3 §6 loop5): its error was discarded; the run log now says why.
+            let failure = match tokio::time::timeout(bound, embedder.embed(&probe)).await {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(outward_text(&e.to_string())),
+                Err(_) => Some(format!("no answer within {DIMENSION_PROBE_TIMEOUT_SECS} s")),
+            };
+            if let Some(error) = failure {
+                tracing::event!(
+                    target: LOG_TARGET,
+                    tracing::Level::WARN,
+                    error = error.as_str(),
+                    "the embedder's dimension probe failed"
+                );
+            }
         }
         if embedder.dim() == 0 {
             return Err(MemoryError::Storage(
