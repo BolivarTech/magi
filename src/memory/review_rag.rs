@@ -2455,6 +2455,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_revision_source_over_the_size_cap_is_cut_and_left_out_of_the_searched_sources() {
+        // [MAGI S6 MS3 loop6, R2 Melchior] The size cap cuts a source (declared `size_capped`):
+        // like a not-UTF-8 or key-block source, it is no source of the revision's index, so it
+        // leaves `doc_sources` and the search never asks for rows it was never given.
+        struct CappedReadme;
+        impl ContentSource for CappedReadme {
+            fn read(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                if p == "README.md" {
+                    Err(ReviewError::TooLarge {
+                        path: p.to_string(),
+                        limit: 1,
+                    })
+                } else {
+                    Ok(Some(b"/// Doc.\nfn a() {}\n".to_vec()))
+                }
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            Some(&CommitGit(true)),
+            Some("c1"),
+            &CappedReadme,
+            &[],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.doc_index.size_capped, "declared");
+        assert!(!prep.docs_unavailable, "a cut, never a degradation");
+        assert_eq!(prep.doc_sources, BTreeSet::from([src("a.rs", "k2")]));
+    }
+
+    #[tokio::test]
     async fn a_revision_source_git_lists_but_cannot_give_back_degrades_the_documentation() {
         // [MAGI S6 MS3 loop4, R2 Caspar] U29: the revision's index cannot be completed, so the
         // review serves no documentation (declared) rather than a partial set.
