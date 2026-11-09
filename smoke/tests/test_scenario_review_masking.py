@@ -147,6 +147,13 @@ class S54Tests(unittest.TestCase):
         r = _result("R19", 2, None, _REFUSAL)
         self.assertEqual(Outcome.FAIL, self._judge(2, r, log=runs.REVIEW_KEYBLOCK_BODY_LINES[1]))
 
+    def test_the_block_header_or_footer_in_any_output_fails_the_leak_assertion(self) -> None:
+        # [MAGI S6 MS3 loop4, R7a Caspar] RV22 leaves the whole block out, its marker lines too.
+        for line in (runs.REVIEW_KEYBLOCK_HEADER, runs.REVIEW_KEYBLOCK_FOOTER):
+            with self.subTest(line=line):
+                r = _result("R19", 2, None, _REFUSAL + line)
+                self.assertEqual(Outcome.FAIL, self._judge(2, r))
+
     def test_the_fixture_is_a_whole_block_with_unique_body_lines(self) -> None:
         (_, body), = runs.review_keyblock_files()
         lines = body.split(b"\n")

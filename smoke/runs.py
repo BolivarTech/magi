@@ -2146,6 +2146,10 @@ REVIEW_KEYBLOCK_FILE = REVIEW_KEYBLOCK_DIR + "/server.pem"
 #: only protection is leaving the whole file out.
 REVIEW_KEYBLOCK_BODY_LINES = (b"TOYBODYLINEONE" + b"Q" * 40, b"TOYBODYLINETWO" + b"R" * 40)
 
+#: The toy block's marker lines (split so the source holds no PEM header).
+REVIEW_KEYBLOCK_HEADER = b"-----BEGIN " + b"RSA PRIVATE KEY-----"  # allow-secret-scan
+REVIEW_KEYBLOCK_FOOTER = b"-----END " + b"RSA PRIVATE KEY-----"  # allow-secret-scan
+
 
 def review_masked_files() -> tuple[tuple[str, bytes], ...]:
     """The file R18 reviews: valid Rust holding one single-line toy key.
