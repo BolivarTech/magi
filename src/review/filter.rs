@@ -801,7 +801,13 @@ enum Side {
 ///
 /// An I/O failure of a listed file (`explicit` false) is the skip [`SkipCause::Unreadable`],
 /// logged at WARN with the shown path and the scrubbed error; for a file named explicitly it
-/// stays an error. Nothing of the file is sent either way.
+/// stays an error. Nothing of the file is sent either way. A side the cache refuses for a
+/// secret ([`ReviewError::EgressSecret`]: one already left out, such as a path listed twice) is
+/// the skip `secret`. Past the filter that refusal stays an error that ends the review, on
+/// purpose: every later stage reads only the kept files, so a refusal there means a stage read
+/// beyond them, and failing closed is RV22's tie-break
+/// (`a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review`,
+/// `after_the_filter_no_stage_is_served_a_key_block_it_never_classified`).
 ///
 /// # Arguments
 ///
@@ -838,6 +844,9 @@ fn read_side(
         Err(ReviewError::TooLarge { .. }) => Ok(Side::Skip(SkipCause::TooLarge)),
         Err(ReviewError::Protected(_)) => Ok(Side::Skip(SkipCause::Ignored)),
         Err(ReviewError::NotRegularFile(_)) => Ok(Side::Skip(SkipCause::NotRegularFile)),
+        // MAGI FIX (MS3 §6 loop5): the cache refuses a side already left out for a secret (a
+        // path listed twice); inside the filter that is the same skip, not a failed review.
+        Err(ReviewError::EgressSecret { .. }) => Ok(Side::Skip(SkipCause::Secret)),
         // The source's one `NotReviewable`, keyed on the constant it is built from.
         Err(ReviewError::NotReviewable {
             cause: HARD_LINK_CAUSE,
