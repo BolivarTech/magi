@@ -426,7 +426,8 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
                 listed(&m.path),
                 name(&m.cause),
                 // MAGI FIX (MS3 §6 loop2): line-safe like the path beside it.
-                escape_controls(m.pattern)
+                // MAGI FIX (MS3 §6 loop5): and through the same backstop, as the JSON form does.
+                listed(m.pattern)
             )?;
         }
         write_unlisted(out, &s.masked)?;
