@@ -221,6 +221,9 @@ impl LexicalIndex {
                 if !self.identifiers.contains(run) {
                     if self.identifiers.len() >= cap {
                         self.complete = false;
+                        // MAGI FIX (MS3 §6 loop5): the files after this point record no
+                        // occurrence either, so callers may be missing too.
+                        self.callers_complete = false;
                         return false;
                     }
                     self.identifiers.insert(run.to_string());
@@ -399,8 +402,8 @@ impl LexicalIndex {
         self.complete
     }
 
-    /// False when `build` stopped recording occurrences at their cap: some callers may be
-    /// missing from the context.
+    /// False when `build` stopped recording occurrences, at their cap or because the identifier
+    /// cap stopped the scan: some callers may be missing from the context.
     pub fn callers_complete(&self) -> bool {
         self.callers_complete
     }
