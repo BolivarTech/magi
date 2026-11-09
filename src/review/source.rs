@@ -15,7 +15,7 @@ use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
 use super::secrets::{
-    find_secret, holds_key_block, mask_secrets_keeping_lines_within, BoundedMask,
+    holds_key_block, holds_secret_prefix, mask_secrets_keeping_lines_within, BoundedMask,
 };
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
@@ -953,10 +953,12 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
         },
         // MAGI FIX (MS3 §6 loop5): a binary side is never masked; whether it holds a secret is
         // what decides that it is never served again once released.
+        // MAGI FIX (MS3 §6 loop6): any pattern's opening, not a whole match: a NUL inside a
+        // token ends its tail, so `ghp_\0AAAA…` matched nothing (R6a Caspar).
         None => (
             None,
             read.as_deref()
-                .is_some_and(|bytes| find_secret(&String::from_utf8_lossy(bytes)).is_some()),
+                .is_some_and(|bytes| holds_secret_prefix(&String::from_utf8_lossy(bytes))),
         ),
     };
     match masked {
@@ -1108,7 +1110,7 @@ mod tests {
         // a later read served it raw. A binary side holding any pattern's prefix now is one.
         let split = b"x\0ghp_\0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n".to_vec(); // allow-secret-scan
         assert!(
-            find_secret(&String::from_utf8_lossy(&split)).is_none(),
+            crate::review::secrets::find_secret(&String::from_utf8_lossy(&split)).is_none(),
             "precondition: no whole pattern matches"
         );
         assert!(held_side(Some(split), MAX_MASKED_SIDE_BYTES).raw_secret);

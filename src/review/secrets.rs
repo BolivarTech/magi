@@ -329,6 +329,38 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
     },
 ];
 
+/// The fixed openings of the patterns that are not tokens, lowercase: a PEM, SSH2 or OpenPGP
+/// header, the AWS secret key's names and a URL's authority.
+const NON_TOKEN_PREFIXES: &[&str] = &[
+    "-----begin ",
+    "---- begin ssh2 ",
+    "aws_secret",
+    "secretaccesskey",
+    URL_AUTHORITY_START,
+];
+
+/// Whether `text` holds the opening of any secret pattern, in any ASCII case: a token prefix
+/// (`ghp_`, `sk-`, `AKIA`…) or a header, name or URL opening ([`NON_TOKEN_PREFIXES`]), whatever
+/// follows it.
+///
+/// For bytes no pattern can be matched over: a binary side, whose NULs break a token's tail
+/// (`ghp_\0AAAA…`), is never masked and never sent, but whether it may be served again once
+/// released rests on this (`CachedSource`): over-matching only refuses a later read of a file
+/// already left out, the safe direction. O(n · p).
+pub(crate) fn holds_secret_prefix(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let mut tokens = SECRET_PATTERNS.iter().filter_map(|p| match p.matcher {
+        Matcher::Token { prefixes, .. } => Some(prefixes),
+        Matcher::PemPrivateKey | Matcher::Header(_) | Matcher::AwsSecretKey => None,
+        Matcher::UrlCredential => None,
+    });
+    tokens.any(|prefixes| {
+        prefixes
+            .iter()
+            .any(|p| lower.contains(p.to_ascii_lowercase().as_str()))
+    }) || NON_TOKEN_PREFIXES.iter().any(|p| lower.contains(p))
+}
+
 /// `[A-Za-z0-9_-]`: the characters of a token, and the ones a left boundary may not be.
 fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
