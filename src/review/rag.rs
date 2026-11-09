@@ -685,7 +685,8 @@ fn cut_on_char(text: &str, max: usize) -> &str {
 /// amended), the whole query at most [`DOC_QUERY_MAX_BYTES`] bytes.
 ///
 /// The text is masked before it is cut: a cut through a raw secret could leave a fragment that
-/// no longer matches its pattern. A `prefix` longer than the bound leaves no room for the text.
+/// no longer matches its pattern. A `prefix` longer than the bound is cut to it (on a char
+/// boundary) and leaves no room for the text.
 ///
 /// # Arguments
 ///
@@ -697,6 +698,8 @@ fn cut_on_char(text: &str, max: usize) -> &str {
 /// The query to embed. O(bytes of `text`).
 // MAGI FIX (MS3 §6 loop3): the query left raw, and the bound did not count the prefix.
 pub fn doc_search_query(prefix: &str, text: &str) -> String {
+    // MAGI FIX (MS3 §6 loop4): an oversized prefix passed whole, over the bound.
+    let prefix = cut_on_char(prefix, DOC_QUERY_MAX_BYTES);
     let masked = mask_secrets(text);
     let room = DOC_QUERY_MAX_BYTES.saturating_sub(prefix.len());
     format!("{prefix}{}", cut_on_char(&masked, room))
