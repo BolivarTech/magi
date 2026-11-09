@@ -597,6 +597,12 @@ fn query_reserve_secs(batches: usize) -> u64 {
 /// the documentation indexing ([`REINDEX_TIMEOUT_SECS`]) and one query embedding per batch.
 /// A review with no store or no embedder calls no one and reserves nothing.
 ///
+/// This is the reserve of the runner's check, made before the probe and the indexing. The
+/// pipeline checks again after them with [`ReviewRag`]'s `outbound_reserve_secs`, which keeps
+/// only the query embeddings still to come; both count those with the same `query_reserve_secs`,
+/// so the two bounds never drift apart
+/// (`the_two_stage_four_reserves_differ_only_by_what_runs_between_the_checks`).
+///
 /// # Arguments
 ///
 /// * `batches` - The batches the review was planned into.
@@ -651,7 +657,10 @@ impl RagSource for ReviewRag<'_> {
     }
 
     /// One query embedding per batch, each bounded by [`EMBED_QUERY_TIMEOUT_SECS`], when the
-    /// bound source will call the embedder (a store and an embedder); 0 otherwise.
+    /// bound source will call the embedder (a store and an embedder); 0 otherwise. The pipeline's
+    /// second check uses this, after the probe and the indexing already ran under the runner's
+    /// [`outbound_prep_reserve_secs`]. The bound `StoreRag` keeps the trait's default because
+    /// the pipeline reads the reserve from this unbound source, before binding it.
     // MAGI FIX (Loop1 r1, M6): the run deadline keeps room for these calls.
     fn outbound_reserve_secs(&self, batches: usize) -> u64 {
         let calls = self.embedder.is_some() && (self.docs.is_some() || self.history.is_some());
@@ -2716,6 +2725,40 @@ mod tests {
             0,
             "no call, no reserve"
         );
+    }
+
+    #[tokio::test]
+    async fn the_two_stage_four_reserves_differ_only_by_what_runs_between_the_checks() {
+        // [MAGI S6 MS3 loop4, R2 Melchior] Two budget checks, one bound: the runner checks with
+        // `outbound_prep_reserve_secs` before the dimension probe and the indexing; the pipeline
+        // checks again with `ReviewRag::outbound_reserve_secs` after them, when only the query
+        // embeddings are left. Both count those queries with the same `query_reserve_secs`.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let with = ReviewRag {
+            docs: Some(&f.docs),
+            history: Some(&f.history),
+            registry: &f.registry,
+            embedder: Some(&f.embedder),
+            limit_tokens: 100_000,
+            prep: DocPrep::default(),
+        };
+        let without = ReviewRag {
+            embedder: None,
+            prep: DocPrep::default(),
+            ..with
+        };
+        for batches in [1, 3] {
+            assert_eq!(
+                with.outbound_reserve_secs(batches),
+                outbound_prep_reserve_secs(batches, true)
+                    - DIMENSION_PROBE_TIMEOUT_SECS
+                    - REINDEX_TIMEOUT_SECS
+            );
+            assert_eq!(
+                without.outbound_reserve_secs(batches),
+                outbound_prep_reserve_secs(batches, false)
+            );
+        }
     }
 
     /// Answers two vectors for every text: a provider that does not keep one vector per input.
