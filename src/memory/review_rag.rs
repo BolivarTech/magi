@@ -495,11 +495,17 @@ impl RagSource for StoreRag<'_> {
             (true, Some(_)) if !room => {
                 // MAGI FIX (MS3 §6 loop1): RV07 declares what was cut, this case included.
                 // MAGI FIX (MS3 §6 loop2): an unavailable index has its own cause, never room.
-                let docs_down = self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst);
+                // MAGI FIX (MS3 §6 loop4): nor for what a down embedder or a failed history
+                // read already left out, each declared once with its own cause.
+                let embedder_down = self.embedder_down.load(Ordering::SeqCst);
+                let docs_down = self.docs_unavailable
+                    || self.docs_failed.load(Ordering::SeqCst)
+                    || embedder_down;
+                let history_down = self.history_failed.load(Ordering::SeqCst) || embedder_down;
                 if self.docs.is_some() && !docs_down {
                     declared.push((ContextKind::Documentation, NO_ROOM.to_string()));
                 }
-                if self.history.is_some() {
+                if self.history.is_some() && !history_down {
                     declared.push((ContextKind::History, NO_ROOM.to_string()));
                 }
                 (Some(Vec::new()), Some(Vec::new()))
