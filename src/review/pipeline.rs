@@ -967,7 +967,8 @@ fn review_total(
             .saturating_sub(reserve_secs)
     });
     match (timeout_secs, left) {
-        (Some(t), Some(l)) if l < t => Some((l, BudgetLimit::RunDeadline)),
+        // MAGI FIX (MS3 §6 loop4): on a tie the deadline binds; it runs through the preparation.
+        (Some(t), Some(l)) if l <= t => Some((l, BudgetLimit::RunDeadline)),
         (Some(t), _) => Some((t, BudgetLimit::Timeout)),
         (None, l) => l.map(|l| (l, BudgetLimit::RunDeadline)),
     }
