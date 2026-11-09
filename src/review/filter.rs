@@ -2089,6 +2089,47 @@ mod tests {
     }
 
     #[test]
+    fn a_real_later_stage_reading_a_left_out_key_block_file_fails_closed() {
+        // [MAGI S6 MS3 loop6, R6a Melchior] The seal's contract against a real stage, not the
+        // cache alone: the containing-unit lookup of the RAG, handed a hunk of a file the filter
+        // left out for its key block, is refused (`EgressSecret`, which ends the review) instead
+        // of being served the raw side. Every production stage reads only kept files, so this
+        // is the fail-closed direction of RV22's tie-break.
+        use crate::review::batching::BatchItem;
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let key = format!(
+            "fn k() {{\n    let s = \"{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\";\n}}\n"
+        );
+        let inner = MapSource::new(&[("k.rs", key.as_str()), ("a.rs", "fn a() {}\n")], &[]);
+        let src = CachedSource::new(&inner);
+        let files = vec![
+            ReviewFile {
+                path: "k.rs".into(),
+                diff: None,
+            },
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("a.rs kept");
+        assert_eq!(f.skipped.len(), 1, "precondition: k.rs left out");
+        let hunk = BatchItem::Hunk {
+            file: "k.rs".into(),
+            text: "@@ -0,0 +1,2 @@\n+fn k() {\n+    let s = 1;\n".into(),
+            first_line: 1,
+            last_line: 2,
+            old_first_line: 0,
+            old_last_line: 0,
+        };
+        assert!(matches!(
+            crate::review::rag::containing_units(&hunk, &src, &LanguageRegistry::new()),
+            Err(ReviewError::EgressSecret { .. })
+        ));
+    }
+
+    #[test]
     fn a_filter_that_fails_still_seals_the_source() {
         // [MAGI S6 MS3 loop6, R6a Melchior] The seal ran on the success path only: a filter that
         // returned early (a key-block file named explicitly) left the cache unsealed, so a later
