@@ -63,6 +63,11 @@ use crate::tools::{Tool, ToolError, ToolResult};
 /// linear in the model text, bounded by batches × three mages × the output cap (65 536 tokens,
 /// about 256 KiB): a hundred batches are about 75 MiB, under a second at 100 MB/s or more. A
 /// larger review needs a generous `--timeout`.
+///
+/// The tool also runs the post-report work (history, index clean-up) inside this margin, bounded
+/// by what is left of the run (`finish_after_report`): with little left it is skipped or cut and
+/// says so in a note, never holding the result past the run's token. A trade-off, accepted: the
+/// report is rendered before that work starts, and the work only gets what is left after it.
 pub(crate) const REVIEW_DEADLINE_MARGIN_SECS: u64 = 30;
 
 /// Exit code of a rendered review that produced its report.
