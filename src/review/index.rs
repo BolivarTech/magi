@@ -11,8 +11,13 @@ use super::languages::{
 };
 
 /// Distinct identifiers the index holds before it stops growing (memory bound; a starting point,
-/// not a measurement). At the cap, roughly 100-150 MB of heap (an owned String plus a hash slot
-/// each; an estimate), on top of the content cache.
+/// not a measurement). Each name is stored once (interned): its `String` (24 bytes plus its
+/// bytes, rounded up by the allocator), a `u32` id and a hash slot, plus the 24-byte header of
+/// its place list, about 70 bytes plus the name. At the cap, with 16-byte names, about 170 MB
+/// of heap (computed from that layout, not measured), plus at most 64 MB of places
+/// ([`MAX_INDEX_OCCURRENCES`]), on top of the content cache.
+// MAGI FIX (MS3 §6 loop5): each occurring name was stored twice (set and place-map key), and the
+// estimate left the second copy, the list headers and the map slots out.
 pub const MAX_INDEX_IDENTIFIERS: usize = 2_000_000;
 
 /// Places (`(file, line)` of an identifier) the index records before it stops recording more:
@@ -88,7 +93,9 @@ pub(crate) fn identifier_runs(text: &str) -> impl Iterator<Item = &str> {
 /// [`MAX_INDEX_IDENTIFIERS`] distinct identifiers; an index that hit the cap is incomplete and
 /// cannot say that a symbol is absent.
 pub struct LexicalIndex {
-    identifiers: HashSet<String>,
+    /// Each distinct identifier, once, with its id: the index of its places in
+    /// [`Self::occurrences`]. Interned so a name is stored once, not again as a key of its places.
+    identifiers: HashMap<String, u32>,
     extractor_files: HashSet<String>,
     file_extensions: HashSet<String>,
     /// Last path component of every file given to `build` (`lib/this.ts` gives `this.ts`).
@@ -97,9 +104,9 @@ pub struct LexicalIndex {
     definitions: HashMap<String, Vec<(String, u32, u32)>>,
     /// Paths of the new-side files given to `build`; an occurrence names its file by position.
     paths: Vec<String>,
-    /// `(file id, line)` of each new-side line an identifier appears on, 8 bytes each: at most
-    /// one entry per name per line, and at most [`MAX_INDEX_OCCURRENCES`] in all.
-    occurrences: HashMap<String, Vec<(u32, u32)>>,
+    /// By identifier id, `(file id, line)` of each new-side line it appears on, 8 bytes each: at
+    /// most one entry per name per line, and at most [`MAX_INDEX_OCCURRENCES`] in all.
+    occurrences: Vec<Vec<(u32, u32)>>,
     complete: bool,
     /// Places recorded so far, against `places_cap`.
     places: usize,
@@ -165,7 +172,7 @@ impl LexicalIndex {
         places_cap: usize,
     ) -> Self {
         let mut index = Self {
-            identifiers: HashSet::new(),
+            identifiers: HashMap::new(),
             extractor_files: HashSet::new(),
             file_extensions: registry
                 .extensions()
@@ -175,7 +182,7 @@ impl LexicalIndex {
             file_names: HashSet::new(),
             definitions: HashMap::new(),
             paths: Vec::new(),
-            occurrences: HashMap::new(),
+            occurrences: Vec::new(),
             complete: true,
             places: 0,
             places_cap,
@@ -218,35 +225,41 @@ impl LexicalIndex {
         for (idx, line_text) in text.lines().enumerate() {
             let line = u32::try_from(idx.saturating_add(1)).unwrap_or(u32::MAX);
             for run in identifier_runs(line_text) {
-                if !self.identifiers.contains(run) {
-                    if self.identifiers.len() >= cap {
-                        self.complete = false;
-                        // MAGI FIX (MS3 §6 loop5): the files after this point record no
-                        // occurrence either, so callers may be missing too.
-                        self.callers_complete = false;
-                        return false;
+                let name = match self.identifiers.get(run) {
+                    Some(&name) => name,
+                    None => {
+                        if self.identifiers.len() >= cap {
+                            self.complete = false;
+                            // MAGI FIX (MS3 §6 loop5): the files after this point record no
+                            // occurrence either, so callers may be missing too.
+                            self.callers_complete = false;
+                            return false;
+                        }
+                        let name = u32::try_from(self.occurrences.len()).unwrap_or(u32::MAX);
+                        self.identifiers.insert(run.to_string(), name);
+                        self.occurrences.push(Vec::new());
+                        name
                     }
-                    self.identifiers.insert(run.to_string());
-                }
+                };
                 if let Some(id) = id {
-                    self.record_occurrence(run, id, line);
+                    self.record_occurrence(name, id, line);
                 }
             }
         }
         true
     }
 
-    /// Records that `name` occurs at `line` of the file with id `file`; a second occurrence on
-    /// the same line is not recorded again. Allocates only when a place is really added (and, for
-    /// the first place of a name, the name). O(1) expected.
+    /// Records that the identifier with id `name` occurs at `line` of the file with id `file`; a
+    /// second occurrence on the same line is not recorded again. Allocates only when a place is
+    /// really added. O(1) amortized.
     // MAGI FIX (MS3 §6 loop4): the places grew with the reviewed lines, without a bound.
-    fn record_occurrence(&mut self, name: &str, file: u32, line: u32) {
+    // MAGI FIX (MS3 §6 loop5): keyed by the interned id; the name was stored a second time.
+    fn record_occurrence(&mut self, name: u32, file: u32, line: u32) {
         let entry = (file, line);
-        let fresh = self
-            .occurrences
-            .get(name)
-            .is_none_or(|places| places.last() != Some(&entry));
-        if !fresh {
+        let Some(places) = self.occurrences.get_mut(name as usize) else {
+            return;
+        };
+        if places.last() == Some(&entry) {
             return;
         }
         if self.places >= self.places_cap {
@@ -254,12 +267,7 @@ impl LexicalIndex {
             return;
         }
         self.places = self.places.saturating_add(1);
-        match self.occurrences.get_mut(name) {
-            Some(places) => places.push(entry),
-            None => {
-                self.occurrences.insert(name.to_string(), vec![entry]);
-            }
-        }
+        places.push(entry);
     }
 
     /// Records the named top-level units of `text` as definitions: a function, a method, a type
@@ -299,7 +307,7 @@ impl LexicalIndex {
     /// Whether `name` occurs in the reviewed code; a qualified citation (`Baz::qux`,
     /// `self.helper`) is looked up by its last segment. O(1) expected.
     pub fn contains(&self, name: &str) -> bool {
-        self.identifiers.contains(last_segment(name))
+        self.identifiers.contains_key(last_segment(name))
     }
 
     /// Where `name` is defined, as `(file, first_line, last_line)`, in the order the files were
@@ -331,8 +339,9 @@ impl LexicalIndex {
     ///
     /// The places, empty when `name` does not occur.
     pub fn occurrences(&self, name: &str) -> impl Iterator<Item = (&str, u32)> + '_ {
-        self.occurrences
+        self.identifiers
             .get(name)
+            .and_then(|&id| self.occurrences.get(id as usize))
             .into_iter()
             .flatten()
             .filter_map(|&(file, line)| {
