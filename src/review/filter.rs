@@ -74,8 +74,8 @@ pub struct Skipped {
 ///
 /// Serialized as the text the report shows, spelled in one place (`SkipCause::as_str`, pinned by
 /// `skip_causes_serialize_with_the_spec_texts`): `binary`, `not utf-8`, `secret`, `ignored`,
-/// `outside workspace`, `too large`, `not a regular file`, `hard link`, `unreadable` and
-/// `disappeared`. A file named explicitly that is skipped fails with that same text as the cause
+/// `outside workspace`, `too large`, `not a regular file`, `hard link`, `unreadable`,
+/// `disappeared` and `diff not rebuilt`. A file named explicitly that is skipped fails with that same text as the cause
 /// of [`ReviewError::NotReviewable`].
 // MAGI FIX (S6 loop 13, A2-m6 / A2-b5): the list named 7 of the 10 causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,8 +450,10 @@ struct SidesRead<'a> {
 /// holding a private-key block is never masked and never reaches here, [`content_verdict`]
 /// leaves it out); a secret in `diff` alone is gone once the diff is rebuilt. When anything was
 /// masked, the diff is rebuilt from the masked sides ([`rebuilt_diff`]) and the file is declared
-/// with the first pattern found. The file is left out as `secret` instead, the safe direction,
-/// when the diff cannot be rebuilt from the sides or the rebuilt diff still holds a secret.
+/// with the first pattern found. The file is left out instead, the safe direction, when the diff
+/// cannot be rebuilt from the sides (cause `diff not rebuilt`,
+/// `a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_its_own_cause`) or the rebuilt
+/// diff still holds a secret (cause `secret`).
 ///
 /// That fallback omits rather than masking the diff text itself on purpose: a hunk shows only
 /// some lines, and a pattern may need lines it leaves out (a YAML value on the line after its
@@ -526,7 +528,12 @@ fn kept_verdict(
                     cause = why,
                     "a masked file's diff could not be rebuilt from its sides; the file is left out"
                 );
-                return secret(read.path, pattern);
+                // MAGI FIX (MS3 §6 loop6): a structural failure has its own cause; `secret` is
+                // kept for a rebuilt diff that still holds one.
+                return match rebuilt {
+                    None => Verdict::Skip(SkipCause::DiffNotRebuilt),
+                    Some(_) => secret(read.path, pattern),
+                };
             }
         },
         None => None,
@@ -2105,8 +2112,9 @@ mod tests {
     #[test]
     fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_a_warning() {
         // [MAGI S6 MS3 loop4, R6a Balthasar] The fallback branch itself: a masked file whose diff
-        // disagrees with its sides (a body line without a marker) is left out as `secret`, the
-        // safe direction, and the run log says why at WARN so a parser drift is visible.
+        // disagrees with its sides (a body line without a marker) is left out, the safe
+        // direction, and the run log says why at WARN so a parser drift is visible.
+        // [MAGI S6 MS3 loop6] Its cause is now `diff not rebuilt`, no longer `secret`.
         use tracing_subscriber::layer::SubscriberExt;
         #[derive(Clone, Default)]
         struct Warns(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -2144,7 +2152,7 @@ mod tests {
             skipped,
             vec![Skipped {
                 path: "a.rs".into(),
-                cause: SkipCause::Secret
+                cause: SkipCause::DiffNotRebuilt
             }]
         );
         assert_eq!(warns.0.load(std::sync::atomic::Ordering::SeqCst), 1);
