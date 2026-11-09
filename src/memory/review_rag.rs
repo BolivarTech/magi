@@ -136,7 +136,10 @@ pub struct StoreRag<'a> {
     pub history_failed: AtomicBool,
     /// The reviewed revision's documentation sources: `search` sees only these (RV21).
     pub doc_sources: BTreeSet<DocSource>,
-    /// Documentation paths left out for a secret, as `display_path`, returned by `skipped`.
+    /// Documentation paths left out for a secret, as `display_path`, returned by `skipped`: a
+    /// path that itself matches a secret pattern is written `<path redacted: <pattern>>`, never
+    /// raw (pinned by `a_working_tree_review_keys_its_sources_by_their_bytes`, which asserts the
+    /// redacted form and that no byte of the key is in the list).
     pub withheld_sources: Vec<String>,
     /// Documentation paths indexed with a secret masked, with the first pattern masked in each,
     /// returned by `masked`.
@@ -159,7 +162,8 @@ pub struct DocPrep {
     pub docs_unavailable: bool,
     /// Milliseconds the preparation took.
     pub index_ms: u64,
-    /// Sources left out for a secret, as `display_path`.
+    /// Sources left out for a secret, as `display_path` (a secret-shaped path is redacted, see
+    /// [`StoreRag::withheld_sources`]).
     pub withheld_sources: Vec<String>,
     /// Sources indexed with a secret masked, as `display_path`, each with the first pattern
     /// masked in it.
