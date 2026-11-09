@@ -642,6 +642,11 @@ pub fn containing_units(
 /// items marked with that side; none when `lines` is empty or the side is gone. O(lines ·
 /// units) plus one read and one extraction.
 ///
+/// A line inside a unit already found is skipped: that unit carries every line of any narrower
+/// unit around it (an impl taken for a change on its header holds the method of a later change),
+/// so every changed line still lies in a unit that is sent and nothing is repeated
+/// (`a_changed_line_inside_a_unit_already_found_is_covered_by_that_unit`).
+///
 /// # Errors
 ///
 /// An error of `sources`, unchanged; [`ReviewError::NotReviewable`] for non-UTF-8 content.
@@ -1173,6 +1178,29 @@ mod tests {
             .into_iter()
             .map(|u| (u.label, u.lines, u.old_side))
             .collect()
+    }
+
+    #[test]
+    fn a_changed_line_inside_a_unit_already_found_is_covered_by_that_unit() {
+        // [MAGI S6 MS3 loop4, R2 Balthasar] A change on an impl's header line takes the whole
+        // impl (no method holds that line); a later change inside one of its methods is then
+        // already covered: the impl carries every line of the method, so the narrower unit
+        // would only repeat text. Every changed line still lies inside a unit that is sent.
+        let old = "impl T {\n    fn m() {\n        y();\n    }\n}\n";
+        let new = "impl S {\n    fn m() {\n        x();\n    }\n}\n";
+        let text = "diff --git a/a.rs b/a.rs\nindex 1111111..2222222 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -1,5 +1,5 @@\n-impl T {\n+impl S {\n     fn m() {\n-        y();\n+        x();\n     }\n }\n";
+        let hunk = real_hunk(text, (1, 5), (1, 5));
+        let units = units_of(&hunk, new, old);
+        for line in [1, 3] {
+            assert!(
+                units
+                    .iter()
+                    .any(|(_, l, old_side)| !old_side
+                        && l.is_some_and(|(a, b)| a <= line && line <= b)),
+                "changed line {line} has no new-side unit: {units:?}"
+            );
+        }
     }
 
     #[test]
