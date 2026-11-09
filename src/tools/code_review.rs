@@ -1468,6 +1468,11 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     outbound_prep_reserve_secs(plan.batches, calls_embedder),
                 )?;
             }
+            // The local preparation from here (the re-check below, then the documentation) is
+            // counted once, as the context source's `index_ms`, which the pipeline adds to
+            // `prep_ms`; the re-check's re-plan was counted nowhere.
+            // MAGI FIX (MS3 §6 loop5): the clock starts before the re-check, not after it.
+            let docs_started = Instant::now();
             // MAGI FIX (MS3 §6 loop4): the approved plan is checked again here, before the
             // documentation indexing calls the embedder, so a review refused because its content
             // moved since the approval sends nothing out (`run_review` checks once more).
@@ -1486,9 +1491,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 }
             }
             let input = path_input(&self.workspace, plan.input);
-            // The documentation is prepared first, before the review clock; its duration is the
-            // context source's `index_ms`, which the pipeline adds once to `prep_ms`.
-            let docs_started = Instant::now();
+            // The documentation is prepared first, before the review clock.
             // MAGI FIX (MS3 §6 loop2): a plan of no batch skips the budget check above, so it
             // calls no endpoint either; `run_review` then refuses it before any trio call.
             let mut doc_context = if plan.batches > 0 {
