@@ -1094,8 +1094,11 @@ pub async fn prepare_docs(
                     );
                     return degraded(prep, &cause, started);
                 }
+                // MAGI FIX (MS3 §6 loop6): cut, so no source of the index: it left `doc_sources`
+                // like a not-UTF-8 or key-block source.
                 Err(e) if is_size_cap(&e) => {
                     prep.doc_index.size_capped = true;
+                    prep.doc_sources.remove(&source);
                     continue;
                 }
                 Err(e) => return degraded(prep, &outward_text(&e.to_string()), started),
