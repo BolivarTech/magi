@@ -478,7 +478,24 @@ fn kept_verdict(
     let diff = match diff {
         Some(d) => match rebuilt_diff(&d, read.new, read.old) {
             Some(r) if find_secret(&r).is_none() => Some(r),
-            _ => return secret(read.path, pattern),
+            rebuilt => {
+                // MAGI FIX (MS3 §6 loop4): the fallback was silent beyond the INFO of every
+                // `secret` skip; a WARN makes a parser drift visible in the run log.
+                let shown = display_path(read.path);
+                let why = if rebuilt.is_none() {
+                    "the diff disagrees with the file's sides"
+                } else {
+                    "the rebuilt diff still holds a secret"
+                };
+                tracing::event!(
+                    target: LOG_TARGET,
+                    tracing::Level::WARN,
+                    path = shown.as_str(),
+                    cause = why,
+                    "a masked file's diff could not be rebuilt from its sides; the file is left out"
+                );
+                return secret(read.path, pattern);
+            }
         },
         None => None,
     };
