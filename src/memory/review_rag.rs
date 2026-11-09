@@ -2701,6 +2701,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_no_room_left_content_already_out_for_another_cause_is_not_declared_again() {
+        // [MAGI S6 MS3 loop4, R2 Melchior] After the embedder went down, or the history read
+        // failed (each declared once with its own cause), a batch with no room must not add
+        // "no room left in the batch" for content that is out regardless of room.
+        let f = RagFixture::new(&[("notes.txt", "plain\n")]).await;
+        let b = batch_on("notes.txt", "plain");
+        let tight = b.tokens
+            + magi_rs::review::window::estimate_tokens(magi_rs::review::pipeline::CONTEXT_HEADING);
+        let mut down = f.rag(true);
+        down.limit_tokens = tight;
+        down.embedder_down = AtomicBool::new(true);
+        let a = down.context_for(&b).await.expect("context");
+        assert!(
+            a.trimmed.iter().all(|(_, label)| label != NO_ROOM),
+            "{:?}",
+            a.trimmed
+        );
+        let mut failed = f.rag(true);
+        failed.limit_tokens = tight;
+        failed.history_failed = AtomicBool::new(true);
+        let a = failed.context_for(&b).await.expect("context");
+        assert!(
+            !a.trimmed
+                .iter()
+                .any(|(kind, label)| *kind == ContextKind::History && label == NO_ROOM),
+            "{:?}",
+            a.trimmed
+        );
+    }
+
+    #[tokio::test]
     async fn with_no_room_left_the_documentation_query_is_not_embedded() {
         // [CP2 MS3 loop 13] Nothing could enter: no embed call and no search are paid for it.
         let f = RagFixture::new(&[("notes.txt", "plain\n")]).await;
