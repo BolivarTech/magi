@@ -621,39 +621,19 @@ pub fn containing_units(
     sources: &dyn ContentSource,
     registry: &LanguageRegistry,
 ) -> Result<Vec<ContextItem>, ReviewError> {
-    let (BatchItem::Hunk { file, text, .. }, Some(change)) = (item, item.hunk_change()) else {
-        return Ok(Vec::new());
-    };
-    let Some(extractor) = registry.get(file) else {
-        return Ok(Vec::new());
-    };
-    let mut found = side_units(&change.added, false, file, file, sources, extractor)?;
-    if !change.removed.is_empty() {
-        // MAGI FIX (Loop1 r1, M1): the old side of a rename lives under its `rename from` path,
-        // as the filter and the lexical index read it; the hunk's diff header names it.
-        let old_path = renamed_from(text).unwrap_or_else(|| file.clone());
-        let old = side_units(&change.removed, true, file, &old_path, sources, extractor)?;
-        // MAGI FIX (Loop1 r3, Minor 2): the same unit by position, never by name alone, so a
-        // deleted homonym or overload keeps its old-side unit.
-        let new_units: Vec<(String, Option<u32>)> = found
-            .iter()
-            .map(|u| (u.label.clone(), u.lines.map(|(a, _)| a)))
-            .collect();
-        found.extend(old.into_iter().filter(|u| {
-            let moved = u.lines.and_then(|(a, _)| item.new_line_of_old(a));
-            !new_units
-                .iter()
-                .any(|(name, start)| *name == u.label && moved.is_some() && *start == moved)
-        }));
-    }
-    Ok(found)
+    containing_units_cached(item, sources, registry, &UnitCache::default())
 }
+
+/// A file's read path and its units, as [`UnitCache`] holds them for one side.
+type HeldUnits = Option<(String, std::sync::Arc<FileUnits>)>;
 
 /// The units of the last file read on each side, so consecutive hunks of one file (the order
 /// the planner and a batch walk them in) extract it once instead of once per hunk. Holds at most
 /// one file per side, so its memory is one file's units.
 #[derive(Default)]
 pub struct UnitCache {
+    /// The last file extracted on each side (`[new, old]`): its read path and its units.
+    last: std::sync::Mutex<[HeldUnits; 2]>,
     /// Extractions done, for tests that count them.
     loads: std::sync::atomic::AtomicUsize,
 }
@@ -662,6 +642,36 @@ impl UnitCache {
     /// How many files this cache extracted.
     pub fn loads(&self) -> usize {
         self.loads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The units of `text` (side `old_side`, read under `read_path`), extracted unless they
+    /// are the ones held for that side. The lock is held through the extraction, which never
+    /// awaits; a review reads its batches in series (RV05), so it is never contended. Keyed by
+    /// path because a review's content source gives the same bytes for a path on every read.
+    fn units(
+        &self,
+        old_side: bool,
+        read_path: &str,
+        file: &str,
+        text: &str,
+        extractor: &ExtractorKind,
+    ) -> std::sync::Arc<FileUnits> {
+        let slot = usize::from(old_side);
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(Some((path, units))) = last.get(slot) {
+            if path == read_path {
+                return std::sync::Arc::clone(units);
+            }
+        }
+        let units = std::sync::Arc::new(FileUnits::load(extractor, file, text));
+        self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(held) = last.get_mut(slot) {
+            *held = Some((read_path.to_string(), std::sync::Arc::clone(&units)));
+        }
+        units
     }
 }
 
@@ -677,8 +687,35 @@ pub fn containing_units_cached(
     registry: &LanguageRegistry,
     cache: &UnitCache,
 ) -> Result<Vec<ContextItem>, ReviewError> {
-    let _ = cache;
-    containing_units(item, sources, registry)
+    let (BatchItem::Hunk { file, text, .. }, Some(change)) = (item, item.hunk_change()) else {
+        return Ok(Vec::new());
+    };
+    let Some(extractor) = registry.get(file) else {
+        return Ok(Vec::new());
+    };
+    let side = |lines: &[u32], old_side: bool, read_path: &str| {
+        side_units(lines, old_side, file, read_path, sources, extractor, cache)
+    };
+    let mut found = side(&change.added, false, file)?;
+    if !change.removed.is_empty() {
+        // MAGI FIX (Loop1 r1, M1): the old side of a rename lives under its `rename from` path,
+        // as the filter and the lexical index read it; the hunk's diff header names it.
+        let old_path = renamed_from(text).unwrap_or_else(|| file.clone());
+        let old = side(&change.removed, true, &old_path)?;
+        // MAGI FIX (Loop1 r3, Minor 2): the same unit by position, never by name alone, so a
+        // deleted homonym or overload keeps its old-side unit.
+        let new_units: Vec<(String, Option<u32>)> = found
+            .iter()
+            .map(|u| (u.label.clone(), u.lines.map(|(a, _)| a)))
+            .collect();
+        found.extend(old.into_iter().filter(|u| {
+            let moved = u.lines.and_then(|(a, _)| item.new_line_of_old(a));
+            !new_units
+                .iter()
+                .any(|(name, start)| *name == u.label && moved.is_some() && *start == moved)
+        }));
+    }
+    Ok(found)
 }
 
 /// The distinct units around `lines` on one side of `file`, read under `read_path`, as `Unit`
@@ -700,6 +737,7 @@ fn side_units(
     read_path: &str,
     sources: &dyn ContentSource,
     extractor: &ExtractorKind,
+    cache: &UnitCache,
 ) -> Result<Vec<ContextItem>, ReviewError> {
     if lines.is_empty() {
         return Ok(Vec::new());
@@ -707,7 +745,8 @@ fn side_units(
     let Some(text) = read_text(sources, read_path, old_side)? else {
         return Ok(Vec::new());
     };
-    let units = FileUnits::load(extractor, file, &text);
+    // MAGI FIX (MS3 §6 loop4): each hunk of one file extracted the whole file again.
+    let units = cache.units(old_side, read_path, file, &text, extractor);
     let mut found: Vec<ContextItem> = Vec::new();
     for &line in lines {
         let covered = found

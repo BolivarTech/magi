@@ -37,9 +37,9 @@ use magi_rs::review::input::SourceKind;
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
-    assemble, callers_for, charged_tokens, containing_units, declare_index, declare_lexical,
+    assemble, callers_for, charged_tokens, containing_units_cached, declare_index, declare_lexical,
     definitions_for, doc_search_query, item_cost, Assembled, ContextItem, ContextKind,
-    IndexDeclarations, CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
+    IndexDeclarations, UnitCache, CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
 };
 use magi_rs::review::secrets::{
     display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
@@ -149,6 +149,9 @@ pub struct StoreRag<'a> {
     /// The decrypted vectors of `doc_sources`, loaded by the first batch that searches and
     /// scored by every later one: a review decrypts each allowed vector once.
     pub doc_vectors: Mutex<Option<Arc<DocVectors>>>,
+    /// The last file's units on each side, so consecutive hunks of one file (planning and each
+    /// batch walk them in order) extract it once.
+    pub units: UnitCache,
 }
 
 /// What the documentation preparation of one review produced.
@@ -471,7 +474,7 @@ impl RagSource for StoreRag<'_> {
         let mut units = Vec::new();
         for item in &batch.items {
             units.extend(
-                containing_units(item, self.sources, self.registry)?
+                containing_units_cached(item, self.sources, self.registry, &self.units)?
                     .into_iter()
                     .map(escaped),
             );
@@ -567,18 +570,20 @@ impl RagSource for StoreRag<'_> {
     /// new-side one with the same numbers) and charged at its escaped cost, so planning counts
     /// exactly what `context_for` will add.
     fn companion(&self, item: &BatchItem) -> Result<Vec<Companion>, ReviewError> {
-        Ok(containing_units(item, self.sources, self.registry)?
-            .into_iter()
-            .map(|unit| {
-                let (first, last) = unit.lines.unwrap_or_default();
-                let side = if unit.old_side { "old:" } else { "" };
-                let unit = escaped(unit);
-                (
-                    format!("{}:{side}{first}-{last}", unit.file),
-                    item_cost(&unit),
-                )
-            })
-            .collect())
+        Ok(
+            containing_units_cached(item, self.sources, self.registry, &self.units)?
+                .into_iter()
+                .map(|unit| {
+                    let (first, last) = unit.lines.unwrap_or_default();
+                    let side = if unit.old_side { "old:" } else { "" };
+                    let unit = escaped(unit);
+                    (
+                        format!("{}:{side}{first}-{last}", unit.file),
+                        item_cost(&unit),
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn skipped(&self) -> Vec<String> {
@@ -705,6 +710,7 @@ impl RagSource for ReviewRag<'_> {
             masked_sources: Vec::new(),
             index_ms: 0,
             doc_vectors: Mutex::new(None),
+            units: UnitCache::default(),
         }
         .with_prep(self.prep.clone());
         Some(Box::new(rag))
@@ -1319,6 +1325,7 @@ mod tests {
                 masked_sources: Vec::new(),
                 index_ms: 0,
                 doc_vectors: Mutex::new(None),
+                units: UnitCache::default(),
             }
         }
     }
