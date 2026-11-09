@@ -461,7 +461,7 @@ mod tests {
                               // [CP2 MS3 loop 13] Scripted, so reclassifying the new entry would make it WeakReject
                               // (HEAD resolves to a commit other than the c9 it was reviewed at): the
                               // mutation goes red whatever FakeGit answers for an unscripted argv.
-                              (HEAD_IS_C2, Ok("c9\n"))]);
+                              (HEAD_IS_C2, Ok("c8\n"))]);
         let (updates, to_record) =
             reclassify_then_record(&[entry(Some(5))], &[fresh.clone()], "HEAD", &git);
         assert_eq!(updates, vec![("i".to_string(), HistoryStatus::Attended)]);
