@@ -1387,10 +1387,10 @@ fn runner_for_command(
     runner: Arc<dyn crate::tools::code_review::CodeReviewRunner>,
 ) -> Result<Arc<dyn crate::tools::code_review::CodeReviewRunner>, magi_rs::review::error::ReviewError>
 {
-    if cmd.no_memory {
-        let _twin = runner.stateless()?;
+    if !cmd.no_memory {
+        return Ok(runner);
     }
-    Ok(runner)
+    Ok(runner.stateless()?.unwrap_or(runner))
 }
 
 /// Why a line did not parse as a `/code-review` command.
@@ -1416,9 +1416,11 @@ const TUI_HELP_NOTE: &str = "In the TUI, -w/--workdir is refused (/code-review r
      session's workspace), and the output, log and tier flags parse but are not applied: the \
      report goes to the transcript.";
 /// The clap ids of the `magi code-review` arguments the TUI applies: the review input
-/// ([`crate::review_input_of`]) and the total. Every other argument but `-w` parses and is named
-/// as not applied ([`tui_inert_flags`]).
-const TUI_APPLIED_ARGS: [&str; 8] = [
+/// ([`crate::review_input_of`]), the total and `--no-memory` ([`runner_for_command`]). Every
+/// other argument but `-w` parses and is named as not applied ([`tui_inert_flags`]).
+// MAGI FIX (MS3 §6 loop6): `--no-memory` was parsed and named as not applied; the other
+// surfaces apply it.
+const TUI_APPLIED_ARGS: [&str; 9] = [
     "path",
     "commit",
     "from",
@@ -1427,6 +1429,7 @@ const TUI_APPLIED_ARGS: [&str; 8] = [
     "head",
     "uncommitted",
     "timeout",
+    "no_memory",
 ];
 
 /// The arguments of `command` the TUI parses but does not apply, as `(clap id, spelling)` in
@@ -1524,7 +1527,7 @@ pub(crate) fn parse_tui_code_review(
         input: crate::review_input_of(&args),
         timeout: args.timeout,
         ignored_flags,
-        no_memory: false,
+        no_memory: args.no_memory,
     })
 }
 

@@ -1099,6 +1099,7 @@ impl Tool for CodeReviewTool {
 }
 
 /// What the production runner is built from.
+#[derive(Clone)]
 pub(crate) struct ReviewRunnerParts {
     /// The workspace root.
     pub workspace: PathBuf,
@@ -1611,6 +1612,23 @@ impl CodeReviewRunner for ProductionReviewRunner {
             Ok(render_outcome(outcome, self.parts.structured))
         })
         .await
+    }
+
+    /// A runner built from the same parts with no review stores and no embedder: what
+    /// `--no-memory` gives on the surfaces that never open them. `None` when this one has none.
+    // MAGI FIX (MS3 §6 loop6): the TUI's `/code-review --no-memory` (R5 Melchior).
+    fn stateless(&self) -> Result<Option<Arc<dyn CodeReviewRunner>>, ReviewError> {
+        if self.parts.memory.is_none() {
+            return Ok(None);
+        }
+        let parts = ReviewRunnerParts {
+            memory: None,
+            embedder: None,
+            ..self.parts.clone()
+        };
+        let runner =
+            ProductionReviewRunner::new(parts).map_err(|e| ReviewError::Io(e.to_string()))?;
+        Ok(Some(Arc::new(runner)))
     }
 
     /// Records the history of each revision review left so far (anchored to the full SHA of its
