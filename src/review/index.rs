@@ -234,7 +234,11 @@ impl LexicalIndex {
                             self.complete = false;
                             // MAGI FIX (MS3 §6 loop5): the files after this point record no
                             // occurrence either, so callers may be missing too.
-                            self.callers_complete = false;
+                            // MAGI FIX (MS3 §6 loop6): only on the new side, which records
+                            // occurrences; the old side runs last and records none.
+                            if id.is_some() {
+                                self.callers_complete = false;
+                            }
                             return false;
                         }
                         let name = u32::try_from(self.occurrences.len()).unwrap_or(u32::MAX);
