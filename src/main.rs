@@ -5376,6 +5376,10 @@ async fn run_code_review_subcommand(
 /// built only with stores, from `[embedding]` and its key; one that cannot be built is logged
 /// and the report declares `without_embedder`.
 ///
+/// Both log lines carry their cause through [`review_setup_cause`], which is the tool's
+/// `egress_text` (URL credentials redacted and every RV22 pattern masked), never the URL
+/// redaction alone (`a_review_setup_failure_reaches_the_log_with_its_secrets_masked`).
+///
 /// # Arguments
 /// * `store` - The open database, if any (`None` with `--no-memory`).
 /// * `magi_config` - The loaded configuration.
