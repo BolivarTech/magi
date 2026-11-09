@@ -251,12 +251,15 @@ pub fn filter_files(
     // The sides a kept file was scanned with: never released, whoever else names their path.
     let mut kept_sides: HashSet<(Face, String)> = HashSet::new();
     for file in files {
-        match classify(&file, source, is_ignored, explicit)? {
+        let sides = sides_of(&file);
+        // MAGI FIX (MS3 §6 loop5): the diff moves into the verdict; it was copied for every file.
+        let ReviewFile { path, diff } = file;
+        match classify(&path, diff, source, is_ignored, explicit)? {
             Verdict::Keep(kept) => {
-                if registry.get(&file.path).is_none() {
-                    filtered.no_extractor.push(display_path(&file.path));
+                if registry.get(&path).is_none() {
+                    filtered.no_extractor.push(display_path(&path));
                 }
-                let mut sides = sides_of(&file).into_iter();
+                let mut sides = sides.into_iter();
                 if kept.with_old {
                     // Both sides stay: the deleted lines are read from the old side.
                     kept_sides.extend(sides);
@@ -267,16 +270,16 @@ pub fn filter_files(
                     release_unkept(source, &kept_sides, sides);
                 }
                 if let Some(pattern) = kept.masked {
-                    filtered.masked.push(masked_file(&file.path, pattern));
+                    filtered.masked.push(masked_file(&path, pattern));
                 }
                 filtered.kept.push(ReviewFile {
-                    path: file.path,
+                    path,
                     diff: kept.diff,
                 });
             }
             Verdict::Skip(cause) if explicit => {
                 return Err(ReviewError::NotReviewable {
-                    path: display_path(&file.path),
+                    path: display_path(&path),
                     cause: cause.as_str(),
                 })
             }
@@ -285,9 +288,9 @@ pub fn filter_files(
                 // cache keeps none of it: the total cap bounds what is reviewed.
                 // MAGI FIX (S6 loop 13, A2-m2 / A2-b1): side by side, and never a side a kept file
                 // was scanned with: a rename's old path can be a kept file's path.
-                release_unkept(source, &kept_sides, sides_of(&file));
+                release_unkept(source, &kept_sides, sides);
                 filtered.skipped.push(Skipped {
-                    path: display_path(&file.path),
+                    path: display_path(&path),
                     cause,
                 });
             }
@@ -342,14 +345,14 @@ fn sides_of(file: &ReviewFile) -> Vec<(Face, String)> {
 
 /// Classifies one file (see [`filter_files`] for the order).
 fn classify(
-    file: &ReviewFile,
+    path: &str,
+    diff: Option<String>,
     source: &dyn ContentSource,
     is_ignored: &dyn Fn(&str) -> bool,
     explicit: bool,
 ) -> Result<Verdict, ReviewError> {
-    let path = file.path.as_str();
     // A renamed or copied file's old side lives under its old path.
-    let old_path = file.diff.as_deref().and_then(renamed_from);
+    let old_path = diff.as_deref().and_then(renamed_from);
     // MAGI FIX (S6 loop 7): the old path meets the same name rule as the new one: a crafted
     // commit carried a blob stored under `.git/` (or an ignored name) in as a rename's old side.
     if [Some(path), old_path.as_deref()]
@@ -368,8 +371,8 @@ fn classify(
     {
         return Ok(secret(path, name));
     }
-    if file.diff.as_deref().is_some_and(is_binary_section) {
-        return suppressed_diff(file, source, old_path.as_deref(), explicit);
+    if diff.as_deref().is_some_and(is_binary_section) {
+        return suppressed_diff(path, diff.as_deref(), source, old_path.as_deref(), explicit);
     }
     let new = match read_side(source.read(path), path, explicit)? {
         Side::Content(bytes) => bytes,
@@ -378,7 +381,7 @@ fn classify(
     // MAGI FIX (S6 loop 14, A2-5): the old side's read failure is logged under the path it was
     // read under (a rename's old path), not the new one, which reads fine.
     let old_side = old_path.as_deref().unwrap_or(path);
-    let old = match &file.diff {
+    let old = match &diff {
         Some(_) => match read_side(source.read_old(old_side), old_side, explicit)? {
             Side::Content(bytes) => bytes,
             Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
@@ -388,7 +391,7 @@ fn classify(
     // MAGI FIX (S6 loop 8): a diff with neither side is a gitlink (a submodule reads as absent
     // on both sides) or a path gone from both revisions; it was kept with no content and no
     // cause. `split_diff` drops gitlink sections before this, so this is the filter's own answer.
-    if new.is_none() && old.is_none() && file.diff.is_some() {
+    if new.is_none() && old.is_none() && diff.is_some() {
         return Ok(Verdict::Skip(SkipCause::NotRegularFile));
     }
     // MAGI FIX (S6 loop 11): a dangling link reads as absent here too, but it never reaches this
@@ -396,7 +399,7 @@ fn classify(
     // gone to `ResolvedInput::dangling_links` before the filter runs (`without_dangling`, pinned
     // by `an_input_left_with_only_dangling_links_is_nothing_to_review_and_names_them`), and they
     // are reported as `SkipCause::NotRegularFile`. Only a file removed after listing lands here.
-    if new.is_none() && file.diff.is_none() {
+    if new.is_none() && diff.is_none() {
         if explicit {
             return Err(ReviewError::NotReviewable {
                 path: display_path(path),
@@ -421,7 +424,7 @@ fn classify(
     // MAGI FIX (T3.7): a one-line secret in the content no longer leaves the file out; it is
     // masked and the file reviewed (RV22 amended, user decision 2026-11-06). A key-block side is
     // held unmasked by the cache, so `content_verdict` above already left that file out.
-    Ok(kept_verdict(&read, source, file.diff.clone(), true))
+    Ok(kept_verdict(&read, source, diff, true))
 }
 
 /// The two sides [`classify`] read for a kept file, with the paths they were read under.
@@ -455,9 +458,8 @@ struct SidesRead<'a> {
 /// The diff is rebuilt even when it holds no detectable secret of its own, for the same reason:
 /// a clean-looking hunk can carry the value line of a secret whose key line it does not show
 /// (the YAML case above), so only the side's masked text is trusted. The cost is the hunk's
-/// function context (see [`rebuilt_diff`]). The caller passes the diff as a copy (one O(diff)
-/// allocation per kept file, bounded by the review's total cap) because it still needs the file.
-/// O(diff + sides).
+/// function context (see [`rebuilt_diff`]). The diff is moved in, never copied: a file
+/// with no secret keeps the very string git produced. O(diff + sides).
 ///
 /// # Arguments
 ///
@@ -489,7 +491,7 @@ fn kept_verdict(
         });
     };
     let diff = match diff {
-        Some(d) => match rebuilt_diff_counting(&d, read.new, read.old) {
+        Some(d) => match rebuilt_diff(&d, read.new, read.old) {
             Some((r, diverged)) if find_secret(&r).is_none() => {
                 if diverged > 0 {
                     let shown = display_path(read.path);
@@ -539,27 +541,27 @@ fn kept_verdict(
 /// names a side line that does not exist, a hunk header does not parse, or a body line has no
 /// marker: the positions of the diff and the sides disagree. A body line whose text differs from
 /// its side's line at that position is replaced by the side's (masked) text, which is what git
-/// would print for these sides (a rename's stale line included); the caller logs such lines at
-/// WARN when the difference is not a mask ([`rebuilt_diff_counting`]), and checks the rebuilt
-/// diff for secrets again. The diff's header lines (`diff --git`,
+/// would print for these sides (a rename's stale line included). Such lines are counted when
+/// the side's line holds no mask (the difference is then not masking's), and the caller logs
+/// the count at WARN (a stale diff, two revisions mixed: RV21) and checks the rebuilt diff for
+/// secrets again. The diff's header lines (`diff --git`,
 /// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
 /// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
 /// cannot be masked and still name its file). O(diff + sides).
-#[cfg(test)]
-fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<String> {
-    rebuilt_diff_counting(diff, new, old).map(|(rebuilt, _)| rebuilt)
-}
-
-/// [`rebuilt_diff`], with the number of body lines whose text differed from their side's
-/// (masked) line for a reason other than a mask: a line of the side that holds no mask but
-/// differs from the diff's line. The caller logs them at WARN (a stale diff, two revisions
-/// mixed: RV21), and still reviews the file from its sides. O(diff + sides).
-// MAGI FIX (MS3 §6 loop5): the divergence was replaced silently.
-fn rebuilt_diff_counting(
-    diff: &str,
-    new: Option<&[u8]>,
-    old: Option<&[u8]>,
-) -> Option<(String, usize)> {
+///
+/// The subset of git's unified diff it reads: lines before the first hunk and between files
+/// (`diff --git`, `index`, `---`, `+++`, rename and mode lines) are kept verbatim; a hunk opens
+/// at a `@@ -a[,b] +c[,d] @@` header (a combined diff's `@@@` header does not parse, so it
+/// gives `None`); its body lines start with ` `, `+`, `-` or `\`. Anything else
+/// inside a hunk returns `None`, and the caller then leaves the file out as `secret`, never sends
+/// the raw diff (pinned against real git output by
+/// `real_git_diffs_rebuild_unchanged_from_their_own_sides`).
+///
+/// # Returns
+///
+/// The rebuilt diff and the number of lines that diverged beyond a mask, or `None`.
+// MAGI FIX (MS3 §6 loop5): the divergence was replaced silently, and the parsed subset unstated.
+fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(String, usize)> {
     let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
     let (mut next_new, mut next_old) = (0usize, 0usize);
     let mut in_hunk = false;
@@ -685,7 +687,8 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2]) -> Option<Verdict> {
 ///
 /// # Arguments
 ///
-/// * `file` - The file.
+/// * `path` - The file's path.
+/// * `section` - Its diff section, git's binary marker in it.
 /// * `source` - The review's content source.
 /// * `old_path` - Its `rename from` path, if any.
 /// * `explicit` - Whether the file was requested by name.
@@ -702,12 +705,12 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2]) -> Option<Verdict> {
 // MAGI FIX (S6 loop 14, A2-4): a failed read was `binary`, and the total cap's `InputTooLarge`
 // an omission that could end as `NothingToReview`; each now goes through `read_side`.
 fn suppressed_diff(
-    file: &ReviewFile,
+    path: &str,
+    section: Option<&str>,
     source: &dyn ContentSource,
     old_path: Option<&str>,
     explicit: bool,
 ) -> Result<Verdict, ReviewError> {
-    let path = file.path.as_str();
     let new = match read_side(source.read(path), path, explicit)? {
         Side::Content(bytes) => bytes,
         Side::Skip(cause) => return Ok(Verdict::Skip(cause)),
@@ -730,14 +733,12 @@ fn suppressed_diff(
     // MAGI FIX (review residual A2-b): a deleted text file marked `-diff` was left out as
     // `binary`, a false cause; its deletion is rebuilt from the old side, already scanned above.
     if new.is_none() {
-        return Ok(
-            match (old.as_deref().map(std::str::from_utf8), &file.diff) {
-                (Some(Ok(text)), Some(section)) => {
-                    kept_verdict(&read, source, Some(deletion_diff(section, text)), true)
-                }
-                _ => Verdict::Skip(SkipCause::Binary),
-            },
-        );
+        return Ok(match (old.as_deref().map(std::str::from_utf8), section) {
+            (Some(Ok(text)), Some(section)) => {
+                kept_verdict(&read, source, Some(deletion_diff(section, text)), true)
+            }
+            _ => Verdict::Skip(SkipCause::Binary),
+        });
     }
     let shown = display_path(path);
     tracing::event!(
@@ -1935,7 +1936,8 @@ mod tests {
                 &diff,
                 new.as_deref().map(str::as_bytes),
                 old.as_deref().map(str::as_bytes),
-            );
+            )
+            .map(|(rebuilt, _)| rebuilt);
             // The function context after a hunk header's `@@` is dropped on purpose (it is a
             // line of the file, possibly inside a masked block); everything else is git's.
             let expected: String = diff
