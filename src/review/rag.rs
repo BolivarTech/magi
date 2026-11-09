@@ -187,6 +187,7 @@ fn dedup_key(item: &ContextItem) -> Option<(String, (u32, u32), bool)> {
 // MAGI FIX (MS3 §6 loop2): the room check charged a unit once per hunk inside it.
 pub fn charged_tokens(batch_tokens: usize, units: &[ContextItem], code: &[ContextItem]) -> usize {
     let mut seen = HashSet::new();
+    // `Option::is_none_or` is stable since Rust 1.82; the crate declares `rust-version = 1.98`.
     units
         .iter()
         .chain(code)
@@ -549,6 +550,9 @@ pub fn callers_for(
     let mut files: HashMap<String, Option<FileUnits>> = HashMap::new();
     for name in names {
         let mut places: Vec<(&str, u32)> = index.occurrences(name).collect();
+        // Not redundant: `occurrences` yields the files in the order they were given to the
+        // index (the listing's order), not by path, and the cap keeps "the first by
+        // `(file, line)`"; the sort makes which callers survive the cap independent of that order.
         places.sort_unstable();
         let defined = index.definitions(name);
         let mut kept = 0usize;
