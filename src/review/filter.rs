@@ -102,6 +102,10 @@ pub enum SkipCause {
     Unreadable,
     /// A listed file removed between the listing and its read.
     Disappeared,
+    /// A file with a one-line secret whose diff could not be rebuilt from its masked sides: it
+    /// cannot be sent masked, so it is left out, the safe direction of RV22's tie-break ("no
+    /// byte of the secret leaves the process").
+    DiffNotRebuilt,
 }
 
 impl serde::Serialize for SkipCause {
@@ -131,6 +135,7 @@ impl SkipCause {
             Self::HardLink => HARD_LINK_CAUSE,
             Self::Unreadable => "unreadable",
             Self::Disappeared => "disappeared",
+            Self::DiffNotRebuilt => "diff not rebuilt",
         }
     }
 }
@@ -1555,6 +1560,7 @@ mod tests {
             SkipCause::OutsideWorkspace,
             SkipCause::TooLarge,
             SkipCause::NotRegularFile,
+            SkipCause::DiffNotRebuilt,
         ]
         .iter()
         .map(|c| serde_json::to_string(c).expect("serializes"))
@@ -1568,7 +1574,8 @@ mod tests {
                 "\"ignored\"",
                 "\"outside workspace\"",
                 "\"too large\"",
-                "\"not a regular file\""
+                "\"not a regular file\"",
+                "\"diff not rebuilt\""
             ]
         );
     }
@@ -1977,10 +1984,13 @@ mod tests {
     }
 
     #[test]
-    fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_as_secret() {
+    fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_its_own_cause() {
         // [MAGI S6 MS3 loop2, R6a Balthasar] the safe fallback of `kept_verdict`: a diff that
         // names a line its masked side does not have cannot be rebuilt, so the raw diff, which
-        // carries the key, is never kept; the file is left out as `secret` instead.
+        // carries the key, is never kept; the file is left out instead.
+        // [MAGI S6 MS3 loop6, R6a Melchior, R7b Caspar] Under `diff not rebuilt`, not `secret`:
+        // the omission is the RV22 tie-break's safe direction, and the cause says that the diff
+        // could not be rebuilt rather than that no masking was possible.
         let removed = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
         let diff = format!("@@ -5,2 +5,1 @@\n-{removed}\n fn f() {{}}\n");
         let old = format!("{removed}\nfn f() {{}}\n");
@@ -2005,11 +2015,24 @@ mod tests {
             f.skipped,
             vec![Skipped {
                 path: "a.rs".into(),
-                cause: SkipCause::Secret
+                cause: SkipCause::DiffNotRebuilt
             }]
         );
         assert!(f.masked.is_empty(), "{:?}", f.masked);
         assert!(f.kept.iter().all(|k| k.path == "b.rs"), "{:?}", f.kept);
+        // Named explicitly, it is refused with that cause.
+        let one = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(format!("@@ -5,2 +5,1 @@\n-{removed}\n fn f() {{}}\n")),
+        }];
+        let src = CachedSource::new(&inner);
+        assert!(matches!(
+            filter_files(one, &src, &LanguageRegistry::new(), true, &|_| false),
+            Err(ReviewError::NotReviewable {
+                cause: "diff not rebuilt",
+                ..
+            })
+        ));
     }
 
     #[test]
