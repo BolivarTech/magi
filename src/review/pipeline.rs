@@ -806,7 +806,10 @@ pub fn plan_review(
 /// the frames are fixed text added deterministically to it. The retrieved context
 /// (documentation and history, RV07(3)-(4)) is not covered: it is reference text chosen per
 /// batch after the approval, from the reviewed revision (RV21), never code under review, so a
-/// documentation edit between the approval and the run does not refuse the review.
+/// documentation edit between the approval and the run does not refuse the review
+/// (`the_approval_digest_covers_the_reviewed_files_and_never_the_retrieved_documentation`). The
+/// cost, accepted: such an edit is a narrow prompt-injection surface after the approval, bounded
+/// by the context being framed as reference data and secret-scanned like every other byte.
 /// O(bytes reviewed).
 ///
 /// # Errors
@@ -4004,6 +4007,30 @@ mod tests {
         assert_eq!(
             consult.clocks.lock().expect("lock")[0],
             Some(Duration::from_secs(200))
+        );
+    }
+
+    #[test]
+    fn the_approval_digest_covers_the_reviewed_files_and_never_the_retrieved_documentation() {
+        // [MAGI S6 MS3 loop4, R4 Caspar] By design: a documentation file that is not under
+        // review is reference text for the context, so editing it after the approval does not
+        // refuse the review; the same file under review is covered like any code.
+        use crate::review::test_support::MapSource;
+        let a = MapSource::new(&[("a.rs", "fn a() {}"), ("README.md", "# A\nold\n")], &[]);
+        let b = MapSource::new(&[("a.rs", "fn a() {}"), ("README.md", "# A\nnew\n")], &[]);
+        let file = |path: &str| ReviewFile {
+            path: path.into(),
+            diff: None,
+        };
+        let code = [file("a.rs")];
+        assert_eq!(
+            content_digest(&code, &a).expect("a"),
+            content_digest(&code, &b).expect("b")
+        );
+        let with_readme = [file("a.rs"), file("README.md")];
+        assert_ne!(
+            content_digest(&with_readme, &a).expect("a"),
+            content_digest(&with_readme, &b).expect("b")
         );
     }
 
