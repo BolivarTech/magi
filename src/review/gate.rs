@@ -266,6 +266,54 @@ fn numbered_window(code: &str, line: u32) -> String {
     out
 }
 
+/// The armor that opens the `END` line of a PEM or OpenPGP block, and of an SSH2 one.
+const KEY_BLOCK_END_OPENERS: [&str; 2] = ["-----END ", "---- END "];
+
+/// Whether the window [`numbered_window`] cuts around `line` overlaps a private-key block of
+/// `code` (RV10's state is the finding plus ±[`GATE_CONTEXT_LINES`]; RV22's exception keeps a
+/// block out of it).
+///
+/// A block runs from a line that opens one ([`holds_key_block`] on that line) to the first later
+/// line holding an armor `END` line ([`KEY_BLOCK_END_OPENERS`]), or to the end of `code` when it
+/// has none: a window inside a long block holds body lines only, which no pattern names, and is
+/// still withheld (`a_key_block_longer_than_the_window_is_found_in_the_whole_code_and_never_sent`),
+/// while a finding far from the block is judged
+/// (`a_key_block_far_from_the_window_does_not_withhold_the_finding`). When the whole code holds a
+/// block that no single line opens (a header the detector reads only across lines), the whole
+/// code counts as the block: the safe direction. Declared limit: a body line copied far from
+/// its block is not recognized here; the filter leaves every file holding a block out first
+/// (RV22's file-level exception), so this is a backstop. O(bytes of `code`).
+// MAGI FIX (MS3 §6 loop6): the whole-code check withheld every finding of such a file.
+fn window_overlaps_key_block(code: &str, line: u32) -> bool {
+    if !holds_key_block(code) {
+        return false;
+    }
+    let first = line.saturating_sub(GATE_CONTEXT_LINES).max(1);
+    let last = line.saturating_add(GATE_CONTEXT_LINES);
+    let mut opened: Option<u32> = None;
+    let mut found = false;
+    for (n, text) in (1u32..).zip(code.lines()) {
+        match opened {
+            None if holds_key_block(text) => {
+                found = true;
+                opened = Some(n);
+            }
+            Some(start) if KEY_BLOCK_END_OPENERS.iter().any(|e| text.contains(e)) => {
+                if start <= last && n >= first {
+                    return true;
+                }
+                opened = None;
+            }
+            None | Some(_) => {}
+        }
+    }
+    // A block still open at the end runs to the last line; none found by line is the whole code.
+    match opened {
+        Some(start) => start <= last,
+        None => !found,
+    }
+}
+
 /// Whether `code` has a line numbered `line` (from 1). O(bytes up to that line).
 fn holds_line(code: &str, line: u32) -> bool {
     usize::try_from(line)
@@ -679,14 +727,18 @@ impl<'a> Gate<'a> {
         if !holds_line(code, line) {
             return Outcome::unfiltered(CAUSE_NO_LOCATION);
         }
+        // MAGI FIX (MS3 §6 loop6): a stopped gate keeps its cause (C-6: `unauthorized` for every
+        // later finding, declared once); the key-block check ran first and said `secret`.
+        if let Some(cause) = self.stopped {
+            return Outcome::unfiltered(cause);
+        }
         // MAGI FIX (MS3 §6 loop5): the block is looked for in the whole code, before the window
         // clips it: a window inside a longer block holds body lines only, which no pattern
         // names, so [`Self::sendable`]'s check on the state could not see it.
-        if holds_key_block(code) {
+        // MAGI FIX (MS3 §6 loop6): only a finding whose window overlaps a block's lines is
+        // withheld; one far from it is judged (R6b).
+        if window_overlaps_key_block(code, line) {
             return Outcome::unfiltered(CAUSE_SECRET);
-        }
-        if let Some(cause) = self.stopped {
-            return Outcome::unfiltered(cause);
         }
         if deadline.is_some_and(|d| d <= Instant::now()) {
             return self.stop(CAUSE_TIMEOUT);
