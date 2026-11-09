@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
-use super::secrets::{holds_key_block, mask_secrets_keeping_lines};
+use super::secrets::{holds_key_block, mask_secrets_keeping_lines_within, BoundedMask};
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
 pub const MAX_REVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -867,7 +867,9 @@ impl<'a> CachedSource<'a> {
 }
 
 /// A side as the cache holds it: a UTF-8 text with no NUL has each secret masked, its line
-/// breaks kept ([`mask_secrets_keeping_lines`]); anything else is held as read, since the filter
+/// breaks kept ([`mask_secrets_keeping_lines_within`], bounded by `MAX_MASKED_SIDE_BYTES`: a
+/// side too dense in secrets to mask within it is held as read and its file left out as
+/// `secret`); anything else is held as read, since the filter
 /// leaves a binary or non-UTF-8 side out (masking could hide the NUL that makes it binary). A
 /// text that holds a multi-line private-key block is held as read too, so the filter's secret
 /// check leaves its file out (REQ-RV22's exception: a key body has no pattern of its own, so no
@@ -887,19 +889,19 @@ fn masked_side_within(
     read: Option<Vec<u8>>,
     max_bytes: usize,
 ) -> (Option<Vec<u8>>, Option<SideMask>) {
-    let _ = max_bytes;
-    masked_side_unbounded(read)
-}
-
-/// The masking of [`masked_side`] without a bound.
-fn masked_side_unbounded(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
     // MAGI FIX (MS3 §6 loop2): the key-block scan ran over every side; a key block is a secret
     // match, so it is looked for only in a side that holds one (one scan for most files).
+    // MAGI FIX (MS3 §6 loop4): the mask is bounded; a side too dense to mask is held as read.
     let masked = read
         .as_deref()
         .filter(|bytes| !bytes.contains(&0))
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(|text| mask_secrets_keeping_lines(text).filter(|_| !holds_key_block(text)));
+        .and_then(
+            |text| match mask_secrets_keeping_lines_within(text, max_bytes) {
+                BoundedMask::Masked(m) if !holds_key_block(text) => Some(m),
+                _ => None,
+            },
+        );
     match masked {
         Some(m) => (
             Some(m.text.into_bytes()),
