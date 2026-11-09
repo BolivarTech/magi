@@ -856,6 +856,11 @@ type Listed = (DocSource, Option<Vec<u8>>);
 /// leaves a listed file out of a review: one such file never costs the rest their documentation.
 /// The size cap cuts the source (declared as `size_capped`).
 ///
+/// Memory: the bytes of every listed file are held until the missing ones are chunked. They are
+/// bounded: `sources` is the review's `CachedSource`, whose total cap (`MAX_REVIEW_TOTAL_BYTES`)
+/// refuses a read past it (then the source is `size_capped`), so the listing holds at most that
+/// much, and the peak is at most twice it with the cache's own copy.
+///
 /// # Errors
 ///
 /// A cause when the deadline passes.
