@@ -1974,20 +1974,48 @@ mod tests {
                 old.as_deref().map(str::as_bytes),
             )
             .map(|(rebuilt, _)| rebuilt);
-            // The function context after a hunk header's `@@` is dropped on purpose (it is a
-            // line of the file, possibly inside a masked block); everything else is git's.
-            let expected: String = diff
-                .split_inclusive('\n')
-                .map(|line| match line.strip_prefix("@@") {
-                    Some(rest) => match rest.find("@@") {
-                        Some(end) => format!("@@{}@@\n", rest.get(..end).unwrap_or_default()),
-                        None => line.to_string(),
-                    },
-                    None => line.to_string(),
-                })
-                .collect();
-            assert_eq!(rebuilt.as_deref(), Some(expected.as_str()), "{path}");
+            // [MAGI S6 MS3 loop6, R6a Melchior] Byte for byte, the hunk's function context
+            // included: it is kept, masked, and no longer dropped.
+            assert_eq!(rebuilt.as_deref(), Some(diff.as_str()), "{path}");
         }
+    }
+
+    #[test]
+    fn a_rebuilt_hunk_keeps_its_function_context_masked_and_counts_every_unexplained_difference() {
+        // [MAGI S6 MS3 loop6, R6a Melchior] The reconstruction dropped the function context
+        // after `@@`, a change git never makes; and a differing line was never counted once its
+        // side held a mask, whether the mask explained the difference or not.
+        let key = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let new = format!("fn outer() {{\n    let k = \"{key}\";\n}}\n");
+        let masked = crate::review::secrets::mask_secrets_keeping_lines(&new)
+            .expect("masks")
+            .text;
+        let diff = format!(
+            "@@ -1,3 +1,3 @@ fn outer() {{ // {key}\n fn outer() {{\n-    let k = 1;\n+    let k = \"{key}\";\n }}\n"
+        );
+        let (rebuilt, diverged) = rebuilt_diff(
+            &diff,
+            Some(masked.as_bytes()),
+            Some(b"fn outer() {\n    let k = 1;\n}\n"),
+        )
+        .expect("rebuilds");
+        let header = rebuilt.lines().next().unwrap_or_default();
+        assert!(
+            header.starts_with("@@ -1,3 +1,3 @@ fn outer() {"),
+            "{rebuilt}"
+        );
+        assert!(header.contains("<redacted: anthropic-key>"), "{rebuilt}");
+        assert!(!rebuilt.contains("sk-ant-"), "{rebuilt}");
+        assert_eq!(diverged, 0, "a difference the mask explains is not counted");
+        // A line that differs beyond its mask is counted, though its side holds one.
+        let stale = diff.replace("+    let k = \"", "+    let k = \"x");
+        let (_, diverged) = rebuilt_diff(
+            &stale,
+            Some(masked.as_bytes()),
+            Some(b"fn outer() {\n    let k = 1;\n}\n"),
+        )
+        .expect("rebuilds");
+        assert_eq!(diverged, 1);
     }
 
     #[test]
