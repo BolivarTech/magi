@@ -685,14 +685,24 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 ///
 /// # Errors
 ///
-/// [`pre_0_25_detail`] naming the first missing v0.25.0 table, or the cause, as text, when the
-/// schema cannot be read or created.
+/// [`MemoryError::UnsupportedSchema`] naming the first missing v0.25.0 table (its `detail` is
+/// [`pre_0_25_detail`]), or [`MemoryError::Storage`] with the cause when the schema cannot be
+/// read or created.
 // MAGI FIX (MS3 §6 loop3): the refusal rested on the caller's open.
-pub(crate) fn init_store_schema(conn: &Connection) -> std::result::Result<(), String> {
-    if let Some(table) = pre_0_25_missing_table(conn).map_err(|e| e.to_string())? {
-        return Err(pre_0_25_detail(table));
+// MAGI FIX (MS3 §6 loop4): the refusal was a storage string a caller could not tell apart.
+pub(crate) fn init_store_schema(
+    conn: &Connection,
+) -> std::result::Result<(), crate::memory::error::MemoryError> {
+    use crate::memory::error::MemoryError;
+    if let Some(table) =
+        pre_0_25_missing_table(conn).map_err(|e| MemoryError::Storage(e.to_string()))?
+    {
+        return Err(MemoryError::UnsupportedSchema {
+            missing_table: table,
+            detail: pre_0_25_detail(table),
+        });
     }
-    init_schema(conn).map_err(|e| e.to_string())
+    init_schema(conn).map_err(|e| MemoryError::Storage(e.to_string()))
 }
 
 /// A raw connection to a fresh file shaped like a 0.24.x database (its marker table, no

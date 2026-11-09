@@ -142,7 +142,8 @@ impl ReviewDocStore {
     ///   [`Self::reindex`]: the identity of the vectors this store serves.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] for a database older than v0.25.0, or if the schema DDL fails.
+    /// [`MemoryError::UnsupportedSchema`] for a database older than v0.25.0;
+    /// [`MemoryError::Storage`] if the schema DDL fails.
     pub fn new(
         conn: Arc<Mutex<Connection>>,
         dek: MaskedDek,
@@ -150,7 +151,7 @@ impl ReviewDocStore {
     ) -> Result<Self, MemoryError> {
         {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
-            crate::system::database::init_store_schema(&c).map_err(MemoryError::Storage)?;
+            crate::system::database::init_store_schema(&c)?;
         }
         Ok(Self {
             conn,
