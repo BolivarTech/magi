@@ -2264,6 +2264,36 @@ mod tests {
     }
 
     #[test]
+    fn every_schema_initializer_refuses_a_0_24_database_and_creates_nothing() {
+        // [MAGI S6 MS3 loop5, R1 Caspar] `init_schema` ran `CREATE TABLE IF NOT EXISTS` with no
+        // pre-0.25 check, and the vector store and the capability cache call it on the
+        // connection they are handed: an older database reaching either gained the v0.25.0
+        // tables, and every later open took it for a current one (RV19: no migration).
+        let (conn, _tmp) = pre_0_25_connection_for_test();
+        {
+            let c = conn
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(init_schema(&c).is_err(), "init_schema upgraded it");
+        }
+        assert_eq!(review_tables_for_test(&conn), 0);
+        let dek =
+            || magi_rs::vault::MaskedDek::new(zeroize::Zeroizing::new(vec![3u8; 32])).expect("32B");
+        assert!(matches!(
+            crate::memory::store::SqliteVectorStore::new(Arc::clone(&conn), dek()),
+            Err(crate::memory::error::MemoryError::UnsupportedSchema {
+                missing_table: "code_review_docs",
+                ..
+            })
+        ));
+        assert!(
+            crate::system::model_cache::ModelCapabilityCache::new(Arc::clone(&conn), dek())
+                .is_err()
+        );
+        assert_eq!(review_tables_for_test(&conn), 0);
+    }
+
+    #[test]
     fn new_refuses_a_0_24_shaped_database_with_an_envelope_and_leaves_it_intact() {
         // The three v0.25.0 tables dropped from a real envelope DB: what 0.24.x wrote.
         let (mem, tmp) = fresh_db();
