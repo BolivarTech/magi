@@ -23,6 +23,7 @@ use magi_core::finding_id::generate_finding_id;
 
 use super::consolidate::{ConsolidatedFinding, NEUTRAL_CATEGORY};
 use super::gate::{GateState, GateVerdict};
+use super::secrets::{holds_key_block, mask_secrets};
 use super::source::GitCommand;
 
 /// Separator that joins the merged titles and details of a finding.
@@ -270,9 +271,15 @@ pub fn reclassify_then_record(
 /// it against an unrelated new-side line. A number that is both a removed and a live line (an
 /// in-place edit, or a removed line whose old number also falls in a new-side range of the file)
 /// is ambiguous: it is read on the new side, the side the gate judged, and recorded there.
+/// Text is stored with its one-line secrets masked, and a finding whose title or detail holds a
+/// private-key block is not recorded (RV22: masking would keep the block's body); the context
+/// read masks again when it serves an entry back
+/// (`a_history_entry_quoting_a_secret_reaches_the_context_masked`, `memory::review_rag`).
 /// The `id` is magi-core's `generate_finding_id` over file, line and the neutral category
 /// consolidation uses, so it is stable across reviews while file and line do not change; a
-/// failure that moves to another line is another id. It depends on magi-core's algorithm
+/// failure that moves to another line is another id. Declared limitation: two different
+/// findings on one unchanged `file:line` in two reviews share the id, and the first sighting
+/// wins (`ReviewHistoryStore::record`) unless the stored one is `attended`, whose code changed. It depends on magi-core's algorithm
 /// (pinned `=4.2.0`): a bump that changes it leaves old rows with ids no new review
 /// repeats, and must re-verify this.
 ///
@@ -294,13 +301,20 @@ pub fn entries_from_review(
         .filter(|(_, v)| matches!(v.state, GateState::Kept | GateState::LowConfidence))
         .filter_map(|(f, _)| {
             let (file, line) = (f.file.as_ref()?, f.line?);
+            let title = f.titles.join(MERGED_TEXT_SEPARATOR);
+            let detail = f.details.join(MERGED_TEXT_SEPARATOR);
+            // MAGI FIX (MS3 §6 loop4): a backstop at storage, on top of the masking at the
+            // context read: a key block is left out (masking would keep its body).
+            if holds_key_block(&title) || holds_key_block(&detail) {
+                return None;
+            }
             Some(HistoryEntry {
                 id: generate_finding_id(file, line, NEUTRAL_CATEGORY),
                 file: file.clone(),
                 line: Some(line),
                 reviewed_commit: reviewed_commit.to_string(),
-                title: f.titles.join(MERGED_TEXT_SEPARATOR),
-                detail: f.details.join(MERGED_TEXT_SEPARATOR),
+                title: mask_secrets(&title),
+                detail: mask_secrets(&detail),
                 status: HistoryStatus::Pending,
             })
         })
