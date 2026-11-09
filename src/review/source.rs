@@ -935,8 +935,14 @@ struct HeldSide {
     raw_secret: bool,
 }
 
-/// [`masked_side`] with an explicit bound on the masked side. One secret scan for a clean or masked
-/// text side, two for a binary one. O(bytes).
+/// [`masked_side`] with an explicit bound on the masked side. O(bytes), in passes over the side:
+/// a clean text side is scanned once (the detector finds nothing); a masked one three times (the
+/// detector, the span masking, then the key-block check); a binary one once for the openings of
+/// the patterns. The filter's `content_verdict` scans the served sides once more, on purpose: it
+/// trusts no source to have masked (a source that masks nothing reaches it too), so the cost of
+/// a masked file is four passes, a constant factor on bytes the review caps
+/// (`MAX_REVIEW_TOTAL_BYTES`).
+// MAGI FIX (MS3 §6 loop6): the count said one pass for a masked side (R6a Melchior).
 fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
     // MAGI FIX (MS3 §6 loop2): the key-block scan ran over every side; a key block is a secret
     // match, so it is looked for only in a side that holds one (one scan for most files).
