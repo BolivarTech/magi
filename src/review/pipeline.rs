@@ -592,7 +592,9 @@ pub async fn run_review(
     let sent_out = deps
         .rag
         .is_some_and(|rag| rag.outbound_reserve_secs(planned) > 0);
-    let budget = match precheck_budget(
+    // MAGI FIX (MS3 §6 loop5): the overrun was a ceiling of `0` that only read as "below the
+    // configured one"; it is now said as what it is.
+    let (total, ceiling) = match precheck_budget(
         req.timeout_secs,
         req.deadline,
         planned,
@@ -600,15 +602,19 @@ pub async fn run_review(
         req.retry_disabled,
         0,
     ) {
-        Err(ReviewError::Budget { .. }) if sent_out => {
-            review_total(req.timeout_secs, req.deadline, 0).map(|(total, _)| (total, 0))
+        Err(ReviewError::Budget { .. }) if sent_out => (
+            review_total(req.timeout_secs, req.deadline, 0).map(|(total, _)| total),
+            None,
+        ),
+        other => {
+            let budget = other?;
+            (budget.map(|(total, _)| total), budget.map(|(_, c)| c))
         }
-        other => other?,
     };
-    let total = budget.map(|(total, _)| total);
-    if let Some((_, ceiling)) = budget {
-        summary.ceiling_below_configured = ceiling < req.agent_timeout_secs;
-    }
+    // An overrun has no derived ceiling (`None`): the batches run on what is left, below the
+    // floor the check asks for, so below the configured ceiling whatever that one is.
+    summary.ceiling_below_configured =
+        total.is_some() && ceiling.is_none_or(|c| c < req.agent_timeout_secs);
     summary.prep_ms =
         millis(prep.elapsed()).saturating_add(deps.rag.map_or(0, |rag| rag.index_ms()));
 
