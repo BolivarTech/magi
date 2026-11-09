@@ -702,7 +702,8 @@ fn refuse_secrets(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryEr
 ///
 /// # Errors
 /// [`MemoryError::Embedding`] if the embedder fails; [`MemoryError::Storage`] if it answers
-/// a different count than asked, or a vector of another length than `embedder.dim()`.
+/// a different count than asked, a vector of another length than `embedder.dim()`, or a vector
+/// holding a value that is not finite.
 async fn embed_all(
     chunks: &[&DocChunk],
     embedder: &dyn EmbeddingProvider,
@@ -723,6 +724,13 @@ async fn embed_all(
                 vectors.len(),
                 batch.len()
             )));
+        }
+        // MAGI FIX (MS3 §6 loop4): serde_json stores NaN and infinity as `null`, which never
+        // reads back, so a non-finite vector would poison its source for every later review.
+        if vectors.iter().flatten().any(|x| !x.is_finite()) {
+            return Err(MemoryError::Storage(
+                "the embedder answered a vector holding a value that is not finite".to_string(),
+            ));
         }
         out.extend(vectors);
     }
