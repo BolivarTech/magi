@@ -51,7 +51,7 @@ use magi_rs::vault::MaskedDek;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
 use crate::memory::review_docs::{DocVectors, ReviewDocStore, EMBED_BATCH_ITEMS};
-use crate::memory::review_history::ReviewHistoryStore;
+use crate::memory::review_history::{ReviewHistoryStore, MAX_HISTORY_PER_BATCH};
 
 /// Wall-clock bound on one reclassification pass of the review history, checked between
 /// entries. Each entry's git calls carry MS2's own `GIT_CALL_TIMEOUT_SECS`, so a pass lasts at
@@ -416,21 +416,33 @@ impl StoreRag<'_> {
             return Vec::new();
         }
         match history.validated_on_files(files) {
-            Ok((entries, _cut)) => entries
-                .into_iter()
-                .filter_map(|e| {
-                    if holds_key_block(&e.title) || holds_key_block(&e.detail) {
-                        *withheld = withheld.saturating_add(1);
-                        None
-                    } else {
-                        Some(history_item(HistoryEntry {
-                            title: mask_secrets(&e.title),
-                            detail: mask_secrets(&e.detail),
-                            ..e
-                        }))
-                    }
-                })
-                .collect(),
+            Ok((entries, cut)) => {
+                // MAGI FIX (MS3 §6 loop4): the read is bounded now; what it cut is declared.
+                if cut {
+                    declared.push((
+                        ContextKind::History,
+                        format!(
+                            "more than MAX_HISTORY_PER_BATCH ({MAX_HISTORY_PER_BATCH}) validated \
+                             entries on these files: the newest kept"
+                        ),
+                    ));
+                }
+                entries
+                    .into_iter()
+                    .filter_map(|e| {
+                        if holds_key_block(&e.title) || holds_key_block(&e.detail) {
+                            *withheld = withheld.saturating_add(1);
+                            None
+                        } else {
+                            Some(history_item(HistoryEntry {
+                                title: mask_secrets(&e.title),
+                                detail: mask_secrets(&e.detail),
+                                ..e
+                            }))
+                        }
+                    })
+                    .collect()
+            }
             Err(e) => {
                 if !self.history_failed.swap(true, Ordering::SeqCst) {
                     let error = outward_text(&e.to_string());
