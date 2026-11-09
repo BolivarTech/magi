@@ -2228,10 +2228,12 @@ mod tests {
         );
     }
 
-    /// Oldest bundled SQLite engine this release certifies: 3.53.2, the one
-    /// `libsqlite3-sys 0.38.2` (pulled by `rusqlite 0.40.2`) compiles in.
+    /// Oldest bundled SQLite engine this release certifies: 3.54.1, the one
+    /// `libsqlite3-sys 0.39.1` (pulled by `rusqlite 0.41.1`) compiles in. The
+    /// floor sits above 3.53.2 on purpose: that engine carries RUSTSEC-2026-0459
+    /// (CVE-2026-119375), so it must never come back.
     /// Encoded as `sqlite3_libversion_number()` does (X * 1_000_000 + Y * 1_000 + Z).
-    const MIN_BUNDLED_SQLITE_VERSION_NUMBER: i32 = 3_053_002;
+    const MIN_BUNDLED_SQLITE_VERSION_NUMBER: i32 = 3_054_001;
 
     #[test]
     fn the_bundled_sqlite_engine_is_at_least_the_certified_release() {
