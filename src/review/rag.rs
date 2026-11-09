@@ -107,6 +107,9 @@ pub struct IndexDeclarations {
     pub size_capped: bool,
 }
 
+/// What the report says when a documentation source was left out for the review's size cap.
+const SIZE_CAPPED_SOURCE: &str = "a documentation source over the review's size cap was left out";
+
 /// Fixed tokens of one item's frame in the prompt.
 pub const CONTEXT_ITEM_FRAME_TOKENS: usize = 18;
 
@@ -295,8 +298,9 @@ pub fn assemble(
     })
 }
 
-/// Adds what indexing left out to `a`: `withheld` is summed, and a truncation becomes a
-/// `Documentation` entry in `trimmed` that names [`MAX_DOC_CHUNKS`].
+/// Adds what indexing left out to `a`: `withheld` is summed, a truncation becomes a
+/// `Documentation` entry in `trimmed` that names [`MAX_DOC_CHUNKS`], and a source left out for
+/// the size cap an entry of its own (the report names the cap that cut).
 ///
 /// # Arguments
 ///
@@ -309,6 +313,11 @@ pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
             ContextKind::Documentation,
             format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})"),
         ));
+    }
+    // MAGI FIX (MS3 §6 loop4): a source over the size cap was declared as the chunk cap.
+    if d.size_capped {
+        a.trimmed
+            .push((ContextKind::Documentation, SIZE_CAPPED_SOURCE.to_string()));
     }
 }
 

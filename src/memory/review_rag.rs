@@ -842,7 +842,7 @@ type Listed = (DocSource, Option<Vec<u8>>);
 /// A file that cannot be read (a hard link, a link that escapes the workspace or names a
 /// directory, a file another process holds open) is left out with one WARN naming it, as MS2
 /// leaves a listed file out of a review: one such file never costs the rest their documentation.
-/// The size cap cuts the source (declared as truncated).
+/// The size cap cuts the source (declared as `size_capped`).
 ///
 /// # Errors
 ///
@@ -878,7 +878,7 @@ fn list_worktree(
                 Some(bytes),
             )),
             Ok(None) => {}
-            Err(e) if is_size_cap(&e) => prep.doc_index.truncated = true,
+            Err(e) if is_size_cap(&e) => prep.doc_index.size_capped = true,
             Err(e) => {
                 let (shown, error) = (display_path(path), outward_text(&e.to_string()));
                 tracing::event!(
@@ -939,7 +939,7 @@ fn reindex_batches(
 /// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails (a revision source git
 ///    lists but the content source cannot give back included), and `timeout` itself,
 ///    set `docs_unavailable` with a WARN; the first failing batch stops the rest. The size cap
-///    only cuts (declared as truncated), it never degrades. The two read failures differ on
+///    only cuts (declared as `size_capped`), it never degrades. The two read failures differ on
 ///    purpose: a revision's source that git lists but cannot give back means that revision's
 ///    index cannot be completed, and U29 then serves no documentation rather than a partial
 ///    one; a working-tree file that cannot be read is one the review itself leaves out (MS2's
@@ -1025,7 +1025,7 @@ pub async fn prepare_docs(
                     return degraded(prep, &cause, started);
                 }
                 Err(e) if is_size_cap(&e) => {
-                    prep.doc_index.truncated = true;
+                    prep.doc_index.size_capped = true;
                     continue;
                 }
                 Err(e) => return degraded(prep, &outward_text(&e.to_string()), started),
