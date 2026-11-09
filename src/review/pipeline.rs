@@ -5993,6 +5993,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_documentation_declarations_come_from_the_source_given_not_the_bound_one() {
+        // [MAGI S6 MS3 loop5, R4 Melchior] The declarations were read from the bound source; one
+        // that kept the trait's defaults (the trait never said it must forward them) dropped
+        // every documentation path left out for a secret or sent masked. They are read from the
+        // source the pipeline was given, as its reserve and its indexing time are.
+        struct Unbound(Assembled);
+        struct Bound(Assembled);
+        #[async_trait::async_trait]
+        impl RagSource for Unbound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Err(ReviewError::Io("unbound".into()))
+            }
+            fn skipped(&self) -> Vec<String> {
+                vec!["docs/k.md".into()]
+            }
+            fn masked(&self) -> Vec<(String, &'static str)> {
+                vec![("docs/a.md".into(), "openai-key")]
+            }
+            fn for_review<'r>(&'r self, _m: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
+                Some(Box::new(Bound(self.0.clone())))
+            }
+        }
+        #[async_trait::async_trait]
+        impl RagSource for Bound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(self.0.clone())
+            }
+        }
+        let dir = workspace(1);
+        let rag = Unbound(Assembled {
+            items: vec![],
+            trimmed: vec![],
+            without_embedder: false,
+            without_memory: false,
+            withheld: 0,
+        });
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect"))
+            .await
+            .expect("runs");
+        assert!(
+            out.summary
+                .skipped
+                .iter()
+                .any(|s| s.cause == SkipCause::Secret && s.path == "docs/k.md"),
+            "{:?}",
+            out.summary.skipped
+        );
+        assert!(
+            out.summary.masked.iter().any(|m| m.path == "docs/a.md"),
+            "{:?}",
+            out.summary.masked
+        );
+    }
+
+    #[tokio::test]
     async fn masked_documentation_and_history_are_declared_as_masked() {
         // [MAGI S6 MS3 loop1] RV22 amended: a file sent with its secrets masked is declared with
         // the cause `secret` and its pattern, the documentation sources included: those the source
