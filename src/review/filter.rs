@@ -1994,6 +1994,30 @@ mod tests {
     }
 
     #[test]
+    fn a_hunk_context_that_no_masked_side_line_shows_is_dropped() {
+        // [MAGI S6 MS3 loop6] A function context masked on its own is the diff-alone case: a
+        // YAML value line has no pattern without its key on the line above, so masking the
+        // context alone left the value raw. Only a context some masked side line shows as it is
+        // is kept.
+        let key = concat!("aws_secret", "_access_key");
+        let value = concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"); // allow-secret-scan
+        let side = format!("{key}: |\n{value}\nother: 1\n");
+        let masked = crate::review::secrets::mask_secrets_keeping_lines(&side)
+            .expect("masks")
+            .text;
+        assert!(
+            !masked.contains(value),
+            "precondition: the whole side masks it"
+        );
+        let diff = format!("@@ -3,1 +3,1 @@ {value}\n-other: 0\n+other: 1\n");
+        let old = masked.replace("other: 1", "other: 0");
+        let (rebuilt, _) =
+            rebuilt_diff(&diff, Some(masked.as_bytes()), Some(old.as_bytes())).expect("rebuilds");
+        assert!(!rebuilt.contains(value), "{rebuilt}");
+        assert!(rebuilt.starts_with("@@ -3,1 +3,1 @@\n"), "{rebuilt}");
+    }
+
+    #[test]
     fn a_rebuilt_hunk_keeps_its_function_context_masked_and_counts_every_unexplained_difference() {
         // [MAGI S6 MS3 loop6, R6a Melchior] The reconstruction dropped the function context
         // after `@@`, a change git never makes; and a differing line was never counted once its
@@ -2004,22 +2028,21 @@ mod tests {
             .expect("masks")
             .text;
         let diff = format!(
-            "@@ -1,3 +1,3 @@ fn outer() {{ // {key}\n fn outer() {{\n-    let k = 1;\n+    let k = \"{key}\";\n }}\n"
+            "@@ -1,3 +1,3 @@ fn outer() {{\n fn outer() {{\n-    let k = 1;\n+    let k = \"{key}\";\n }}\n"
         );
-        let (rebuilt, diverged) = rebuilt_diff(
-            &diff,
-            Some(masked.as_bytes()),
-            Some(b"fn outer() {\n    let k = 1;\n}\n"),
-        )
-        .expect("rebuilds");
+        let old: &[u8] = b"fn outer() {\n    let k = 1;\n}\n";
+        let (rebuilt, diverged) =
+            rebuilt_diff(&diff, Some(masked.as_bytes()), Some(old)).expect("rebuilds");
         let header = rebuilt.lines().next().unwrap_or_default();
-        assert!(
-            header.starts_with("@@ -1,3 +1,3 @@ fn outer() {"),
-            "{rebuilt}"
-        );
-        assert!(header.contains("<redacted: anthropic-key>"), "{rebuilt}");
+        assert_eq!(header, "@@ -1,3 +1,3 @@ fn outer() {", "{rebuilt}");
         assert!(!rebuilt.contains("sk-ant-"), "{rebuilt}");
         assert_eq!(diverged, 0, "a difference the mask explains is not counted");
+        // A context that carries the secret is no masked side line as it is: it is dropped.
+        let leaky = diff.replacen("@@ fn outer() {", &format!("@@ fn outer() {{ // {key}"), 1);
+        let (rebuilt, _) =
+            rebuilt_diff(&leaky, Some(masked.as_bytes()), Some(old)).expect("rebuilds");
+        assert!(rebuilt.starts_with("@@ -1,3 +1,3 @@\n"), "{rebuilt}");
+        assert!(!rebuilt.contains("sk-ant-"), "{rebuilt}");
         // A line that differs beyond its mask is counted, though its side holds one.
         let stale = diff.replace("+    let k = \"", "+    let k = \"x");
         let (_, diverged) = rebuilt_diff(
