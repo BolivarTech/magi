@@ -1377,6 +1377,13 @@ mod tests {
     }
 
     #[test]
+    fn a_query_prefix_longer_than_the_bound_is_cut_to_it_too() {
+        // [MAGI S6 MS3 loop4, R2 Caspar] The bound is on the whole query, the prefix included.
+        let q = doc_search_query(&"é".repeat(DOC_QUERY_MAX_BYTES), "fn a() {}");
+        assert!(q.len() <= DOC_QUERY_MAX_BYTES, "{}", q.len());
+    }
+
+    #[test]
     fn without_an_embedder_docs_and_history_are_skipped_and_declared() {
         let a = assemble(0, 100, vec![], vec![], None, None).expect("ok");
         assert!(a.without_embedder);
