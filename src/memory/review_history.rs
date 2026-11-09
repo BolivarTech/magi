@@ -45,7 +45,7 @@ const FILES_PER_QUERY: usize = 400;
 pub const MAX_HISTORY_PER_BATCH: usize = 32;
 
 /// The columns every read selects, in the order [`RawRow`] reads them.
-const COLUMNS: &str = "id, file, line, reviewed_commit, finding_blob, status";
+const COLUMNS: &str = "id, file, line, reviewed_commit, finding_blob, status, created_at";
 
 /// One row as stored: the finding text still encrypted.
 struct RawRow {
@@ -55,6 +55,8 @@ struct RawRow {
     reviewed_commit: String,
     finding_blob: Vec<u8>,
     status: String,
+    /// Unix seconds of the recording, for the newest-first order of the context read.
+    created_at: i64,
 }
 
 /// Encrypted store of remembered findings, over the shared connection.
@@ -247,6 +249,7 @@ impl ReviewHistoryStore {
                     reviewed_commit: r.get(3)?,
                     finding_blob: r.get(4)?,
                     status: r.get(5)?,
+                    created_at: r.get(6)?,
                 })
             })
             .map_err(db_err)?;
@@ -285,11 +288,14 @@ impl ReviewHistoryStore {
     }
 
     /// The validated (`attended` / `weak_reject`) entries on `files`, by SQL over the clear
-    /// `file` and `status` columns: only the matching rows are decrypted. This is the context
-    /// read, once per batch. The files go in batches of [`FILES_PER_QUERY`] so no query passes
-    /// SQLite's parameter limit (a mass rename touches thousands).
+    /// `file` and `status` columns, newest first and then by id (a stable order, so the tail the
+    /// context trims is the same on every run), at most [`MAX_HISTORY_PER_BATCH`], and whether
+    /// more existed. Only the returned rows are decrypted. This is the context read, once per
+    /// batch. The files go in batches of [`FILES_PER_QUERY`] so no query passes SQLite's
+    /// parameter limit (a mass rename touches thousands); each batch reads at most one row past
+    /// the bound, raw.
     ///
-    /// Complexity: O(files + matching rows).
+    /// Complexity: O(files + (file batches x bound) log) raw rows, O(bound) decryptions.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
@@ -297,23 +303,35 @@ impl ReviewHistoryStore {
         &self,
         files: &[String],
     ) -> Result<(Vec<HistoryEntry>, bool), MemoryError> {
+        // MAGI FIX (MS3 §6 loop4): no order (the trimmed tail varied run to run) and no bound
+        // (every validated row of the files was decrypted for every batch).
         let distinct: Vec<&String> = files.iter().collect::<BTreeSet<_>>().into_iter().collect();
-        let mut out = Vec::new();
+        let over = i64::try_from(MAX_HISTORY_PER_BATCH.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut raw = Vec::new();
         for batch in distinct.chunks(FILES_PER_QUERY) {
             let marks = vec!["?"; batch.len()].join(", ");
-            let rows = self.raw_rows(
+            let mut args: Vec<&dyn rusqlite::ToSql> =
+                batch.iter().map(|f| *f as &dyn rusqlite::ToSql).collect();
+            args.push(&over);
+            raw.extend(self.raw_rows(
                 &format!(
                     "SELECT {COLUMNS} FROM code_review_history \
-                     WHERE status IN ('{attended}', '{weak}') AND file IN ({marks})",
+                     WHERE status IN ('{attended}', '{weak}') AND file IN ({marks}) \
+                     ORDER BY created_at DESC, id LIMIT ?",
                     attended = HistoryStatus::Attended.as_str(),
                     weak = HistoryStatus::WeakReject.as_str(),
                 ),
-                rusqlite::params_from_iter(batch.iter().copied()),
-            )?;
-            out.extend(self.decode_all(rows)?);
+                rusqlite::params_from_iter(args),
+            )?);
         }
-        let _ = MAX_HISTORY_PER_BATCH;
-        Ok((out, false))
+        raw.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let cut = raw.len() > MAX_HISTORY_PER_BATCH;
+        raw.truncate(MAX_HISTORY_PER_BATCH);
+        Ok((self.decode_all(raw)?, cut))
     }
 
     /// Sets `checked_at = now` on `ids`, all or nothing.
