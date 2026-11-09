@@ -2069,6 +2069,32 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_that_fails_still_seals_the_source() {
+        // [MAGI S6 MS3 loop6, R6a Melchior] The seal ran on the success path only: a filter that
+        // returned early (a key-block file named explicitly) left the cache unsealed, so a later
+        // read of that side would have been served raw had the caller gone on.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let key = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n");
+        let inner = MapSource::new(&[("k.rs", key.as_str())], &[]);
+        let src = CachedSource::new(&inner);
+        let one = vec![ReviewFile {
+            path: "k.rs".into(),
+            diff: None,
+        }];
+        assert!(matches!(
+            filter_files(one, &src, &LanguageRegistry::new(), true, &|_| false),
+            Err(ReviewError::NotReviewable {
+                cause: "secret",
+                ..
+            })
+        ));
+        assert!(matches!(
+            src.read("k.rs"),
+            Err(ReviewError::EgressSecret { .. })
+        ));
+    }
+
+    #[test]
     fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_its_own_cause() {
         // [MAGI S6 MS3 loop2, R6a Balthasar] the safe fallback of `kept_verdict`: a diff that
         // names a line its masked side does not have cannot be rebuilt, so the raw diff, which
