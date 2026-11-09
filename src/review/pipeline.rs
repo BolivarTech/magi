@@ -1395,8 +1395,10 @@ async fn prepare_contexts(
     for path in rag.skipped() {
         skip_for_secret(summary, &path);
     }
+    // MAGI FIX (MS3 §6 loop4): the masked paths were trusted as the source shaped them; they
+    // pass `display_path` here like every other path the summary carries (idempotent).
     for (shown, pattern) in rag.masked() {
-        declare_masked(summary, shown, pattern);
+        declare_masked(summary, display_path(&shown), pattern);
     }
     Ok(contexts)
 }
