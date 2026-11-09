@@ -1654,6 +1654,10 @@ fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp)
 /// Reclassifies and records the history of a review of `rev`, anchored to its full SHA (the
 /// reclassification compares it with `rev-parse` output).
 ///
+/// The entries are built by `entries_from_review`, which stores each finding's text with its
+/// one-line secrets masked and leaves out one quoting a private-key block (a backstop at
+/// storage, on top of the masking at the context read; RV22).
+///
 /// # Errors
 /// The redacted cause, when the revision starts with `-` (never passed to git), the SHA cannot
 /// be resolved or the store fails.
