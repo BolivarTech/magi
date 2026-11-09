@@ -1311,18 +1311,21 @@ enum ContextEgress {
 }
 
 /// A context item as it may leave the process (RV22 amended): each one-line secret of its text
-/// or label masked (the text escaped again for its frame, since a mask may sit next to `<<`),
-/// with the first pattern found. An item whose path quotes a secret (a path cannot be masked and
-/// still name its file) or whose text or label holds a private-key block (RV22's exception) is
-/// withheld, as is one in which masking left a match. O(text).
+/// or label masked, and the text escaped for its frame as the prompt writes it (a mask may sit
+/// next to `<<`; [`escape_fence`] is a fixed point, so a source that escaped already is
+/// unchanged), with the first pattern found. An item whose path quotes a secret (a path cannot
+/// be masked and still name its file) or whose text or label holds a private-key block (RV22's
+/// exception) is withheld, as is one in which masking left a match (fail closed). O(text).
 ///
 /// A backstop: every item arrives masked already (units, definitions and callers from the
 /// review's cache, documentation at chunking, history at retrieval; see the `review::rag`
-/// module doc), and the budget charged that text, so this pass normally changes nothing. If it
-/// does mask and the mask is longer than what the budget charged ([`item_cost`]), the item is
-/// withheld rather than sent over the limit RV04 checked
-/// (`a_context_item_whose_mask_would_outgrow_its_charge_is_withheld`).
+/// module doc), so this pass normally changes nothing. A one-line secret is never a reason to
+/// omit an item: one whose mask is longer than its secret is sent masked, and
+/// [`prepare_contexts`] charges what is sent, trimming optional context to pay for the growth
+/// (`a_context_item_whose_mask_outgrows_its_charge_is_still_sent_masked`).
 // MAGI FIX (MS3 §6 loop2): a context item holding a one-line secret was withheld, not masked.
+// MAGI FIX (MS3 §6 loop6): nor withheld when its mask grows it; the batch pays with optional
+// context instead.
 fn context_egress(item: ContextItem) -> ContextEgress {
     if find_secret(&item.file).is_some()
         || holds_key_block(&item.text)
@@ -1331,20 +1334,46 @@ fn context_egress(item: ContextItem) -> ContextEgress {
         return ContextEgress::Withhold(item.file);
     }
     let Some(pattern) = find_secret(&item.text).or_else(|| find_secret(&item.label)) else {
-        return ContextEgress::Send(item, None);
+        let text = escape_fence(&item.text);
+        return ContextEgress::Send(ContextItem { text, ..item }, None);
     };
-    let charged = item_cost(&item);
     let masked = ContextItem {
         text: escape_fence(&mask_secrets(&item.text)),
         label: mask_secrets(&item.label),
         ..item
     };
-    // MAGI FIX (MS3 §6 loop4): the budget charged the text before this pass; a mask longer than
-    // its secret would make the prompt pass the limit RV04 checked.
-    if holds_secret(&masked) || item_cost(&masked) > charged {
+    if holds_secret(&masked) {
         ContextEgress::Withhold(masked.file)
     } else {
         ContextEgress::Send(masked, Some(pattern))
+    }
+}
+
+/// Trims `kept` (sorted by [`kind_rank`]) from its lowest-priority end until what it costs is at
+/// most `charged`, the cost the source charged against the batch budget (RV04). Only optional
+/// items (definitions, callers, documentation, history) are trimmed, each declared in
+/// `summary.trimmed`; a containing unit is mandatory (RV07(1)) and stays, so a growth that only
+/// the units could pay is sent within the margin of the batch fraction. O(items).
+fn pay_for_growth(
+    kept: &mut Vec<(ContextItem, Option<&'static str>)>,
+    charged: usize,
+    summary: &mut ReviewSummary,
+) {
+    let mut sent: usize = kept.iter().map(|(item, _)| item_cost(item)).sum();
+    while sent > charged {
+        let Some((item, _)) = kept
+            .last()
+            .filter(|(item, _)| item.kind != ContextKind::Unit)
+        else {
+            break;
+        };
+        sent = sent.saturating_sub(item_cost(item));
+        if let Some((item, _)) = kept.pop() {
+            summary.trimmed.push(TrimmedItem {
+                kind: item.kind,
+                label: display_path(&item.label),
+            });
+        }
     }
 }
 
@@ -1402,6 +1431,7 @@ async fn prepare_contexts(
         summary.without_embedder |= assembled.without_embedder;
         summary.without_memory |= assembled.without_memory;
         summary.context_withheld = summary.context_withheld.saturating_add(assembled.withheld);
+        let charged: usize = assembled.items.iter().map(item_cost).sum();
         let mut kept = Vec::with_capacity(assembled.items.len());
         for item in assembled.items {
             match context_egress(item) {
@@ -1409,18 +1439,20 @@ async fn prepare_contexts(
                     summary.context_withheld = summary.context_withheld.saturating_add(1);
                     skip_for_secret(summary, &file);
                 }
-                ContextEgress::Send(item, pattern) => {
-                    // MAGI FIX (MS3 §6 loop1): RV22 amended declares a file sent masked, the
-                    // documentation and history included.
-                    if let Some(pattern) = pattern.or_else(|| masked_store_item(&item)) {
-                        declare_masked(summary, display_path(&item.file), pattern);
-                    }
-                    kept.push(item);
-                }
+                ContextEgress::Send(item, pattern) => kept.push((item, pattern)),
             }
         }
-        kept.sort_by_key(|item| kind_rank(&item.kind));
-        contexts.push(kept);
+        kept.sort_by_key(|(item, _)| kind_rank(&item.kind));
+        // MAGI FIX (MS3 §6 loop6): what is sent is charged, masks included (R4 Caspar).
+        pay_for_growth(&mut kept, charged, summary);
+        for (item, pattern) in &kept {
+            // MAGI FIX (MS3 §6 loop1): RV22 amended declares a file sent masked, the
+            // documentation and history included.
+            if let Some(pattern) = pattern.or_else(|| masked_store_item(item)) {
+                declare_masked(summary, display_path(&item.file), pattern);
+            }
+        }
+        contexts.push(kept.into_iter().map(|(item, _)| item).collect());
     }
     // MAGI FIX (MS3 §6 loop5): from the source given, never the bound one, which the trait
     // does not oblige to forward them.
