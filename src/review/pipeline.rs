@@ -748,6 +748,10 @@ pub async fn run_review(
     summary.gate_questions = deps.gate.questions();
     summary.gate_stopped = deps.gate.stopped().map(str::to_string);
 
+    // The verdicts pair with the findings by position: `apply_agreement` takes a slice, so it
+    // cannot add or remove a finding, and it changes fields in place without reordering
+    // (`consolidate::apply_agreement`: "Nothing is ever removed"). Weighting comes after the
+    // gate (§5.0 steps 8-9), so the gate judged the severity the trio reported.
     apply_agreement(&mut consolidated.findings, &consolidated.answered);
     record_verdicts(&mut summary, &consolidated.findings, verdicts);
 
@@ -1190,6 +1194,10 @@ async fn run_batches(
 /// Records the gate's verdicts in `summary`: the counts per state and cause, the fraction
 /// judged (every `unfiltered` counts as not judged; 1.0 with no finding), and each finding in
 /// the main list or, when filtered, apart.
+///
+/// `verdicts[i]` is the verdict of `findings[i]`: the caller judges the findings in order and
+/// passes the same list; one verdict per finding is a precondition, and a count that differs
+/// counts only the pairs (never a finding paired with another's verdict).
 fn record_verdicts(
     summary: &mut ReviewSummary,
     findings: &[ConsolidatedFinding],
@@ -1758,7 +1766,13 @@ fn walk_completed<'b>(
 
 /// What the completed batches showed (U24): both ranges of each hunk, each whole file, and each
 /// file split by units whole when every batch holding one completed, else only its finished
-/// units. Never fails, because the batches are already paid: a unit-split file that cannot be
+/// units.
+///
+/// U24 says "the union of what every batch showed"; it is read as every batch that **ran to a
+/// report**, on purpose: a failed or clock-cut batch produced nothing and showed nothing to any
+/// mage (each consult is independent), so a finding of a completed batch that cites lines only a
+/// failed batch would have shown points at code its author never saw, and leaves as not
+/// reviewed. Never fails, because the batches are already paid: a unit-split file that cannot be
 /// read again (unreachable with the cache, which already holds it) counts only its finished
 /// units, with a WARN. O(items · log r).
 fn reviewed_of(
