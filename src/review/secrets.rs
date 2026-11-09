@@ -962,6 +962,13 @@ pub fn display_path(path: &str) -> String {
 /// follows each of them; the others check only whether a token opens at the mask's end. Most
 /// texts it masks are small (paths, one-line errors, report fields); a reviewed file is masked
 /// once, through [`mask_secrets_keeping_lines`], and k is the number of secrets it holds.
+///
+/// That bound is loose: each search only moves forward (a rerun starts at the mask's end, past
+/// the span it had), so over the whole text a search reads each byte about once and the
+/// amortized cost is O(n · s), linear in the text; measured near 0.15 s per MiB of dense secrets
+/// in release (MS3 §6 loop3). The output can be longer than the text (a mask is longer than a
+/// short URL password); [`mask_secrets_keeping_lines_within`] bounds it, and the review's cache
+/// uses that bound, so a file dense in secrets is left out instead of growing.
 // MAGI FIX (S6 loop 13, A2-b6): the bound omitted the k factor of a search rerun after each mask.
 ///
 /// Maintenance: the cached spans are correct only while every boundary a search over the whole
@@ -1066,6 +1073,12 @@ pub struct LineMasked {
 /// Such a block's body matches no pattern of its own, so a body line copied, moved or edited
 /// outside the block cannot be recognized and masking cannot promise that none of it leaves;
 /// a review leaves a file holding one out (REQ-RV22, its exception). O(n · p).
+///
+/// Which patterns open a block is decided per `Matcher` variant with no wildcard arm, so a new
+/// variant does not compile until it says. Limit, declared like every limit of the detector: a
+/// header the detector does not recognize (split across lines on purpose, or a format it does not
+/// know such as PuTTY `.ppk` or a JWK) opens no block, and its body is sent as it is; the README
+/// says the detector does not replace the operator's responsibility for what is reviewed.
 ///
 /// # Examples
 ///
