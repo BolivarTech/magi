@@ -729,6 +729,9 @@ struct Held {
     /// Sides released while they held a private-key block raw (RV22's exception): never read
     /// again, so no stage after the filter can get that key back.
     withheld: HashSet<(Face, String)>,
+    /// Sides released before they were ever read (a file the filter left out by its name): a
+    /// later read that finds a private-key block in them is refused like a withheld side.
+    released_unread: HashSet<(Face, String)>,
     /// Bytes held across both sides.
     bytes: u64,
     /// The bytes held before, and the path of, the first read that passed the cap since the
@@ -816,6 +819,18 @@ impl<'a> CachedSource<'a> {
             Face::New => self.inner.read(path)?,
             Face::Old => self.inner.read_old(path)?,
         };
+        // MAGI FIX (MS3 §6 loop4): a side released unread (left out by its name) was fetched
+        // fresh and, holding a key block, served raw; the rule now holds for those sides too.
+        if held.released_unread.contains(&(face, path.to_string()))
+            && raw
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .is_some_and(holds_key_block)
+        {
+            return Err(ReviewError::EgressSecret {
+                path: path.to_string(),
+            });
+        }
         // MAGI FIX (T3.7): RV22 masks a one-line secret instead of leaving its file out; every
         // stage reads through this cache, so masking here is the one place it happens. A side with
         // a key block is not masked (see `masked_side`): the filter leaves that file out.
@@ -890,8 +905,10 @@ impl ContentSource for CachedSource<'_> {
     }
 
     /// Removes side `face` of `path` and gives its bytes back to the total cap. A side that held a
-    /// private-key block is remembered, and a later read of it is refused. O(1) expected, plus a
-    /// scan of the released bytes.
+    /// private-key block is remembered, and a later read of it is refused; so is a side released
+    /// before it was ever read, if a later read finds a private-key block in it
+    /// (`a_key_block_side_released_before_it_was_ever_read_is_refused_too`). O(1) expected, plus
+    /// a scan of the released bytes.
     fn release(&self, face: Face, path: &str) {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         let removed = match face {
@@ -899,6 +916,9 @@ impl ContentSource for CachedSource<'_> {
             Face::Old => held.old.remove(path),
         };
         held.masks.remove(&(face, path.to_string()));
+        if removed.is_none() {
+            held.released_unread.insert((face, path.to_string()));
+        }
         let removed = removed.flatten();
         if removed
             .as_deref()
