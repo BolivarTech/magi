@@ -3044,6 +3044,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_review_whose_content_changed_since_the_approval_sends_nothing_to_the_embedder() {
+        // [MAGI S6 MS3 loop4, R5 Caspar] The run re-checks the approved plan before the
+        // documentation indexing, so a review refused because its content moved after the
+        // approval has called no endpoint.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        std::fs::write(ws.join("src").join("a.rs"), "fn a() { changed(); }\n").expect("edit");
+        let run = runner
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
+            .await;
+        assert!(
+            matches!(run, Err(ReviewError::ContentChanged)),
+            "{:?}",
+            run.err()
+        );
+        assert_eq!(fake.calls(), 0, "the embedder was never called");
+    }
+
+    #[tokio::test]
+    async fn without_a_database_a_review_leaves_no_follow_up_work() {
+        // [MAGI S6 MS3 loop4, R5 Melchior, Caspar] Without a store there is no history and no
+        // index to clean, so a review leaves nothing; `after_report` used to drain such work and
+        // drop it unrun, which hid the invariant.
+        let (_tmp, ws) = workspace_with_readme();
+        let embedder: Arc<dyn EmbeddingProvider> =
+            Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let runner = production_runner_with_memory(&ws, None, Some(embedder));
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        runner
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
+            .await
+            .expect("runs");
+        assert!(runner
+            .follow_up
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty());
+        assert!(runner.after_report().is_none());
+    }
+
+    #[test]
+    fn the_json_forms_drop_format_characters_like_the_text() {
+        // [MAGI S6 MS3 loop4, R5 Melchior] A bidi override or a zero-width character inside a
+        // finding reached the headless JSON envelope: serde escapes C0 controls, not these.
+        let r = egress_safe(Rendered {
+            text: String::new(),
+            json: json!({"finding": "a\u{202e}b\u{200b}c"}),
+            consult: json!(["d\u{2066}e"]),
+            failure: None,
+        });
+        assert_eq!(r.json, json!({"finding": "abc"}));
+        assert_eq!(r.consult, json!(["de"]));
+    }
+
+    #[tokio::test]
     async fn a_plan_with_no_batch_never_reaches_the_embedder() {
         // [MAGI S6 MS3 loop2, R5 Melchior] the budget check is skipped for a plan of no batch
         // (it would divide by zero), but the documentation was still indexed after it: an
