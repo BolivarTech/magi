@@ -156,7 +156,7 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 /// [`HistoryStatus::WeakReject`] only once `head` is a commit after the reviewed one.
 ///
 /// Anything that is not a signal is [`HistoryStatus::Pending`]: no line, no file (an empty
-/// pathspec would be the whole tree), a reviewed commit that is no commit id ([`is_commit_id`]:
+/// pathspec would be the whole tree), a reviewed commit that is no commit id (`is_commit_id`:
 /// a symbolic name moves, so it anchors nothing), a `head` that starts with `-`, a commit that is
 /// not an ancestor of `head` (another branch, or gone), a git
 /// failure, a hunk header that cannot be read, or `head` still at the reviewed commit.
@@ -348,7 +348,7 @@ pub fn reclassify_then_record(
 ///
 /// # Returns
 /// One `Pending` entry per recordable finding; none when `reviewed_commit` is no commit id
-/// ([`is_commit_id`]: empty, as a working-tree review would have it, or symbolic), since RV08
+/// (`is_commit_id`: empty, as a working-tree review would have it, or symbolic), since RV08
 /// records history only against a commit.
 // MAGI FIX (Loop1 r3, Minor 1): the removed-line rule stated as the code applies it.
 pub fn entries_from_review(
