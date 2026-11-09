@@ -3232,6 +3232,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_input_that_does_not_resolve_never_probes_the_embedder_dimension() {
+        // [MAGI S6 MS3 loop5, R5 Melchior] The store was opened (and an autodetecting embedder
+        // probed) before the failed input was looked at; the input is checked first now.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let probing = Arc::new(RecordingEmbedder::default());
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(ProbedEmbedder(probing.clone()));
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let doc = runner
+            .prepare_documentation(&ReviewInput::File("no/such/file.rs".into()))
+            .await;
+        assert!(doc.prep.docs_unavailable);
+        assert!(
+            probing.0.lock().expect("lock").is_empty(),
+            "the dimension probe was sent"
+        );
+    }
+
     /// [`RecordingEmbedder`] behind an unknown dimension (0), so `doc_store` probes it.
     struct ProbedEmbedder(Arc<RecordingEmbedder>);
     #[async_trait::async_trait]
