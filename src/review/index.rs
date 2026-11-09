@@ -15,6 +15,13 @@ use super::languages::{
 /// each; an estimate), on top of the content cache.
 pub const MAX_INDEX_IDENTIFIERS: usize = 2_000_000;
 
+/// Places (`(file, line)` of an identifier) the index records before it stops recording more:
+/// 8 bytes each, so about 64 MB at the cap (an estimate, a starting point). Without it the places
+/// grew with the reviewed lines, up to the review's 256 MiB total, since one name repeated on
+/// every line of a generated file adds one place per line. Past it some callers are missing,
+/// declared ([`LexicalIndex::callers_complete`]).
+pub const MAX_INDEX_OCCURRENCES: usize = 8_000_000;
+
 /// Extensions that name a file even when nothing reviewed has them: a citation such as `conf.toml`
 /// is a file name, not the symbol `toml`. A citation whose extension is in none of this list, the
 /// registry or the reviewed files (`notes.zzz`) is looked up as the symbol `zzz` and counted by the
@@ -361,6 +368,21 @@ impl LexicalIndex {
     pub fn is_complete(&self) -> bool {
         self.complete
     }
+
+    /// False when `build` stopped recording occurrences at their cap: some callers may be
+    /// missing from the context.
+    pub fn callers_complete(&self) -> bool {
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_with_occurrence_cap(
+        files: &[(String, String)],
+        registry: &LanguageRegistry,
+        _cap: usize,
+    ) -> Self {
+        Self::build(files, registry)
+    }
 }
 
 /// Lines of each file that some completed batch showed to the trio.
@@ -670,5 +692,21 @@ mod tests {
         r.add_lines("a.rs", u32::MAX, u32::MAX);
         assert!(r.contains_line("a.rs", 5) && r.contains_line("a.rs", u32::MAX));
         assert!(!r.contains_line("a.rs", 4));
+    }
+
+    #[test]
+    fn occurrences_stop_at_their_cap_and_the_index_says_callers_may_be_missing() {
+        // [MAGI S6 MS3 loop4, R2 Caspar] One name repeated on millions of lines (generated code)
+        // grew the place lists without bound; past the cap no place is added and the index
+        // says so, so the context declares that callers may be missing.
+        let text = "x\n".repeat(10);
+        let files = [("a.rs".to_string(), text)];
+        let capped = LexicalIndex::build_with_occurrence_cap(&files, &LanguageRegistry::new(), 3);
+        assert_eq!(capped.occurrences("x").count(), 3);
+        assert!(!capped.callers_complete());
+        assert!(capped.contains("x"), "identifiers are not cut by this cap");
+        let whole = LexicalIndex::build(&files, &LanguageRegistry::new());
+        assert_eq!(whole.occurrences("x").count(), 10);
+        assert!(whole.callers_complete());
     }
 }

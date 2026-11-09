@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use super::batching::{number_lines, BatchItem};
 use super::docs::MAX_DOC_CHUNKS;
 use super::error::ReviewError;
-use super::index::{identifier_runs, LexicalIndex};
+use super::index::{identifier_runs, LexicalIndex, MAX_INDEX_OCCURRENCES};
 use super::input::renamed_from;
 use super::languages::{
     enclosing_unit, ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, SemanticUnit,
@@ -308,6 +308,17 @@ pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
             format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})"),
         ));
     }
+}
+
+/// Adds to `a` what the lexical index left out: when it stopped recording occurrences at
+/// [`MAX_INDEX_OCCURRENCES`], a `Caller` entry in `trimmed` that says callers may be missing.
+///
+/// # Arguments
+///
+/// * `a` - The assembled context to declare on (the first batch's, once per review).
+/// * `index` - The review's lexical index.
+pub fn declare_lexical(a: &mut Assembled, index: &LexicalIndex) {
+    let _ = (a, index, MAX_INDEX_OCCURRENCES);
 }
 
 /// Reads one side of `file` as UTF-8 text; `None` when that side is gone.
@@ -1377,6 +1388,34 @@ mod tests {
             !cut.contains("sk-ant-"),
             "a cut fragment of the key left: {cut}"
         );
+    }
+
+    #[test]
+    fn an_occurrence_index_cut_at_its_cap_is_declared_for_the_callers() {
+        // [MAGI S6 MS3 loop4, R2 Caspar] RV07 declares what was cut: past the occurrence cap
+        // some callers cannot be found, and the report says so.
+        let files = [("a.rs".to_string(), "x\n".repeat(10))];
+        let mut a = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+        declare_lexical(
+            &mut a,
+            &LexicalIndex::build_with_occurrence_cap(&files, &LanguageRegistry::new(), 3),
+        );
+        assert_eq!(
+            a.trimmed,
+            vec![(
+                ContextKind::Caller,
+                format!(
+                    "occurrence index cut at MAX_INDEX_OCCURRENCES ({MAX_INDEX_OCCURRENCES}): \
+                     some callers may be missing"
+                )
+            )]
+        );
+        let mut whole = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+        declare_lexical(
+            &mut whole,
+            &LexicalIndex::build(&files, &LanguageRegistry::new()),
+        );
+        assert!(whole.trimmed.is_empty());
     }
 
     #[test]
