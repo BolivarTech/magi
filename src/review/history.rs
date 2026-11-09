@@ -301,12 +301,19 @@ pub fn reclassify_then_record(
 /// * `reviewed_commit` - the pinned SHA of the reviewed revision.
 ///
 /// # Returns
-/// One `Pending` entry per recordable finding.
+/// One `Pending` entry per recordable finding; none when `reviewed_commit` is no commit id
+/// ([`is_commit_id`]: empty, as a working-tree review would have it, or symbolic), since RV08
+/// records history only against a commit.
 // MAGI FIX (Loop1 r3, Minor 1): the removed-line rule stated as the code applies it.
 pub fn entries_from_review(
     findings: &[(ConsolidatedFinding, GateVerdict)],
     reviewed_commit: &str,
 ) -> Vec<HistoryEntry> {
+    // MAGI FIX (MS3 §6 loop5): the anchor is checked where it is written, not only when it is
+    // classified: no commit id, no history (RV08).
+    if !is_commit_id(reviewed_commit) {
+        return Vec::new();
+    }
     findings
         .iter()
         .filter(|(_, v)| matches!(v.state, GateState::Kept | GateState::LowConfidence))
