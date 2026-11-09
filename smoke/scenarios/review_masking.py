@@ -49,7 +49,7 @@ S53_ASSERTIONS = (
 S54_ASSERTIONS = (
     "exit 2",
     "stderr says nothing to review, leaving out the private-key file as secret and nothing else",
-    "no line of the private-key body reaches stdout, stderr or the run log",
+    "no line of the private-key block, header and footer included, reaches stdout, stderr or the run log",
 )
 
 #: Exit code of a review that produced its report.
@@ -256,6 +256,10 @@ def a_private_key_block_is_left_out_and_never_leaked(run):
         lambda text: code_review.NOTHING_TO_REVIEW_TEXT in text and _keyblock_listed_as_secret(text),
         "stderr does not say there is nothing to review with %s (secret) left out"
         % runs.REVIEW_KEYBLOCK_FILE)
+    # With no capture or a hang, `_refusal` already judged all three texts (pinned by
+    # `test_every_one_of_the_three_assertions_is_judged_on_a_hang_or_no_capture`), so the leak
+    # check runs only on a finished run and the count of findings stays three either way.
     if run is not None and not run.timed_out:
-        yield _leak_finding(S54_ASSERTIONS, 2, "R19", run, runs.REVIEW_KEYBLOCK_BODY_LINES,
-                            "a private-key body line")
+        # MAGI FIX (MS3 §6 loop4): the marker lines are part of the block RV22 leaves out.
+        yield _leak_finding(S54_ASSERTIONS, 2, "R19", run, runs.REVIEW_KEYBLOCK_LINES,
+                            "a private-key block line")

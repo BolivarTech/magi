@@ -2150,6 +2150,10 @@ REVIEW_KEYBLOCK_BODY_LINES = (b"TOYBODYLINEONE" + b"Q" * 40, b"TOYBODYLINETWO" +
 REVIEW_KEYBLOCK_HEADER = b"-----BEGIN " + b"RSA PRIVATE KEY-----"  # allow-secret-scan
 REVIEW_KEYBLOCK_FOOTER = b"-----END " + b"RSA PRIVATE KEY-----"  # allow-secret-scan
 
+#: Every line of the toy block, header to footer: S54 looks for each in every
+#: output, since RV22 leaves the whole block out, its marker lines too.
+REVIEW_KEYBLOCK_LINES = (REVIEW_KEYBLOCK_HEADER, *REVIEW_KEYBLOCK_BODY_LINES, REVIEW_KEYBLOCK_FOOTER)
+
 
 def review_masked_files() -> tuple[tuple[str, bytes], ...]:
     """The file R18 reviews: valid Rust holding one single-line toy key.
@@ -2170,10 +2174,7 @@ def review_keyblock_files() -> tuple[tuple[str, bytes], ...]:
     Returns:
         tuple: One ``(path, content)`` pair, :data:`REVIEW_KEYBLOCK_FILE`.
     """
-    header = "-----BEGIN " + "RSA PRIVATE KEY-----"  # allow-secret-scan
-    footer = "-----END " + "RSA PRIVATE KEY-----"  # allow-secret-scan
-    lines = [header.encode("ascii"), *REVIEW_KEYBLOCK_BODY_LINES, footer.encode("ascii")]
-    return ((REVIEW_KEYBLOCK_FILE, b"\n".join(lines) + b"\n"),)
+    return ((REVIEW_KEYBLOCK_FILE, b"\n".join(REVIEW_KEYBLOCK_LINES) + b"\n"),)
 
 
 #: Directory (workspace-relative) R17 reviews: one small source file, so the run
