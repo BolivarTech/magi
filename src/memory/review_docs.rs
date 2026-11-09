@@ -84,6 +84,9 @@ struct DocRow<'a> {
     dim: i64,
 }
 
+/// One stored chunk read raw: its path and its still-encrypted section and text.
+type RawChunk = (String, Vec<u8>, Vec<u8>);
+
 /// The decrypted vectors of one review's allowed documentation rows, from
 /// [`ReviewDocStore::load_vectors`]: `(source key, chunk hash, vector)` of the given dimension.
 #[derive(Debug, Clone, Default)]
@@ -524,11 +527,22 @@ impl ReviewDocStore {
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.truncate(k);
         // MAGI FIX (MS3 §6 loop4): a row deleted since `load_vectors` (another process's
-        // clean-up) failed the whole search; it is now one hit fewer.
+        // clean-up) failed the whole search; it is now one hit fewer. The hits are read in one
+        // query per `ALLOWED_PAIRS_PER_QUERY` pairs, not one query each.
+        let wanted: Vec<(&str, &str)> = scored.iter().map(|(_, k, h)| (*k, *h)).collect();
+        let mut rows = self.load_chunks(&wanted)?;
         let mut hits = Vec::with_capacity(scored.len());
         for (score, key, hash) in scored {
-            if let Some(chunk) = self.load_chunk(key, hash.to_string())? {
-                hits.push((chunk, score));
+            if let Some((path, section, text)) = rows.remove(&(key.to_string(), hash.to_string())) {
+                hits.push((
+                    DocChunk {
+                        path,
+                        section: self.unseal(&section)?.to_string(),
+                        text: self.unseal(&text)?.to_string(),
+                        hash: hash.to_string(),
+                    },
+                    score,
+                ));
             }
         }
         Ok(hits)
@@ -571,24 +585,36 @@ impl ReviewDocStore {
         }
         Ok(out)
     }
-    /// Reads one chunk's row raw under the lock, then decrypts it off the lock; `None` when the
-    /// row no longer exists (deleted after the vectors were loaded).
-    fn load_chunk(&self, key: &str, hash: String) -> Result<Option<DocChunk>, MemoryError> {
-        let row: Option<(String, Vec<u8>, Vec<u8>)> = optional(self.locked_conn().query_row(
-            "SELECT path, section_blob, text_blob FROM code_review_docs \
-             WHERE key = ?1 AND chunk_hash = ?2",
-            params![key, hash],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ))?;
-        let Some((path, section, text)) = row else {
-            return Ok(None);
-        };
-        Ok(Some(DocChunk {
-            path,
-            section: self.unseal(&section)?.to_string(),
-            text: self.unseal(&text)?.to_string(),
-            hash,
-        }))
+    /// The raw `(path, section blob, text blob)` of each `(key, chunk hash)` in `wanted` that
+    /// still exists, read under one lock and decrypted by the caller off it (R-V08). A pair whose
+    /// row was deleted is simply absent.
+    ///
+    /// Complexity: one query per [`ALLOWED_PAIRS_PER_QUERY`] pairs.
+    fn load_chunks(
+        &self,
+        wanted: &[(&str, &str)],
+    ) -> Result<BTreeMap<(String, String), RawChunk>, MemoryError> {
+        let c = self.locked_conn();
+        let mut out = BTreeMap::new();
+        for batch in wanted.chunks(ALLOWED_PAIRS_PER_QUERY) {
+            let values = vec!["(?, ?)"; batch.len()].join(", ");
+            let sql = format!(
+                "SELECT key, chunk_hash, path, section_blob, text_blob FROM code_review_docs \
+                 WHERE (key, chunk_hash) IN (VALUES {values})"
+            );
+            let args = batch.iter().flat_map(|(k, h)| [*k, *h]);
+            let mut stmt = c.prepare(&sql).map_err(db_err)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(args), |r| {
+                    Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, r.get(3)?, r.get(4)?)))
+                })
+                .map_err(db_err)?;
+            for row in rows {
+                let (k, v) = row.map_err(db_err)?;
+                out.insert(k, v);
+            }
+        }
+        Ok(out)
     }
 
     /// Deletes (`DELETE FROM`, both tables, one transaction) every source not in `live`; with
