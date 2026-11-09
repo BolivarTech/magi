@@ -930,21 +930,38 @@ pub fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<
 /// a private-key block (RV22's exception). This is also the net before any embedding: a chunk
 /// whose section or text still matches [`find_secret`] (one built by hand, or a part whose cut
 /// made a match the whole text did not have) is dropped too, never sent (the section travels
-/// with the chunk). O(total text).
+/// with the chunk). O(total text) plus O(chunks log sources).
+///
+/// **Source-scoped** (RV22's exception omits the *file*): once any chunk of a path is dropped,
+/// every chunk of that path is dropped, its clean siblings included. A body line of a key block
+/// copied into another section matches no pattern of its own, so only the whole source being
+/// left out keeps it from the embedder
+/// (`a_private_key_block_in_one_chunk_withholds_every_chunk_of_its_source`). A caller holding
+/// the whole file should still test it with `holds_key_block` first: a block in the file's code
+/// is in no doc-comment chunk at all (the product's caller does, `prepare_docs`).
 ///
 /// # Returns
 ///
 /// The kept chunks, and the [`display_path`] of each dropped chunk's source, one per chunk in
 /// order (its length is the count).
+// MAGI FIX (MS3 §6 loop6): the drop was per chunk, so a sibling holding a copied key line was
+// kept; it is now per source.
 pub fn without_secrets(chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
+    // MAGI FIX (MS3 §6 loop3): the path travels with the chunk; RV22's tie-break omits it.
+    let holds = |c: &DocChunk| {
+        find_secret(&c.path).is_some()
+            || find_secret(&c.section).is_some()
+            || find_secret(&c.text).is_some()
+    };
+    let tainted: BTreeSet<String> = chunks
+        .iter()
+        .filter(|c| holds(c))
+        .map(|c| c.path.clone())
+        .collect();
     let mut kept = Vec::with_capacity(chunks.len());
     let mut dropped = Vec::new();
     for chunk in chunks {
-        // MAGI FIX (MS3 §6 loop3): the path travels with the chunk; RV22's tie-break omits it.
-        if find_secret(&chunk.path).is_some()
-            || find_secret(&chunk.section).is_some()
-            || find_secret(&chunk.text).is_some()
-        {
+        if tainted.contains(&chunk.path) {
             dropped.push(display_path(&chunk.path));
         } else {
             kept.push(chunk);
