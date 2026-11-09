@@ -430,7 +430,8 @@ impl SqliteVectorStore {
     /// exists, delegating to the shared [`crate::system::database::init_schema`].
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if the DDL statement fails.
+    /// [`MemoryError::UnsupportedSchema`] for a database written before v0.25.0 (nothing is
+    /// created, RV19), [`MemoryError::Storage`] if the DDL statement fails.
     // Narrow allow: called by the agent wiring in Task 12.
     #[allow(dead_code)]
     pub fn new(
@@ -441,8 +442,8 @@ impl SqliteVectorStore {
             let c = conn.lock().unwrap_or_else(|p| p.into_inner());
             // Single source of truth for the schema (incl. the `memories` table and
             // its scope index) lives in `database::init_schema` — reuse it (DRY).
-            crate::system::database::init_schema(&c)
-                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            // MAGI FIX (MS3 §6 loop5): an older database is refused typed, never upgraded.
+            crate::system::database::init_schema(&c).map_err(MemoryError::from)?;
         }
         Ok(Self {
             conn,

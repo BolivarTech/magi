@@ -672,10 +672,64 @@ fn bootstrap_fresh_envelope(
 /// re-running against an initialized DB is a no-op. Does **not** set any
 /// `PRAGMA` (WAL/synchronous) — those stay at the connection-open call sites.
 ///
+/// It first refuses, read-only, a database written before v0.25.0 (RV19: no migration), so no
+/// initializer can upgrade one in place, whoever calls it and whatever connection it is handed
+/// (`every_schema_initializer_refuses_a_0_24_database_and_creates_nothing`). A fresh or empty
+/// file has no marker table and is created.
+///
 /// # Errors
-/// Returns the underlying [`rusqlite::Error`] if any `CREATE` statement fails.
-pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA_DDL)
+/// [`SchemaInitError::OlderDatabase`] naming the first missing v0.25.0 table,
+/// [`SchemaInitError::Storage`] if the schema cannot be read, or
+/// [`SchemaInitError::Sqlite`] if any `CREATE` statement fails.
+// MAGI FIX (MS3 §6 loop5): the check lived beside two of the five callers; the vector store and
+// the capability cache could upgrade a 0.24 database.
+pub(crate) fn init_schema(conn: &Connection) -> std::result::Result<(), SchemaInitError> {
+    if let Some(table) =
+        pre_0_25_missing_table(conn).map_err(|e| SchemaInitError::Storage(e.to_string()))?
+    {
+        return Err(SchemaInitError::OlderDatabase {
+            missing_table: table,
+            detail: pre_0_25_detail(table),
+        });
+    }
+    conn.execute_batch(SCHEMA_DDL)?;
+    Ok(())
+}
+
+/// Why [`init_schema`] did not initialize a database.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SchemaInitError {
+    /// The database was written before v0.25.0; nothing was created (RV19).
+    #[error("{detail}")]
+    OlderDatabase {
+        /// The first v0.25.0 table it lacks.
+        missing_table: &'static str,
+        /// [`pre_0_25_detail`] for that table.
+        detail: String,
+    },
+    /// The schema could not be read.
+    #[error("{0}")]
+    Storage(String),
+    /// A `CREATE` statement failed.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+impl From<SchemaInitError> for crate::memory::error::MemoryError {
+    /// The older database is [`crate::memory::error::MemoryError::UnsupportedSchema`], so a store
+    /// handed one can tell it apart; anything else is a storage error with its cause.
+    fn from(e: SchemaInitError) -> Self {
+        match e {
+            SchemaInitError::OlderDatabase {
+                missing_table,
+                detail,
+            } => Self::UnsupportedSchema {
+                missing_table,
+                detail,
+            },
+            other => Self::Storage(other.to_string()),
+        }
+    }
 }
 
 /// [`init_schema`] for a store handed a connection (`ReviewDocStore`, `ReviewHistoryStore`),
@@ -693,16 +747,7 @@ pub(crate) fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 pub(crate) fn init_store_schema(
     conn: &Connection,
 ) -> std::result::Result<(), crate::memory::error::MemoryError> {
-    use crate::memory::error::MemoryError;
-    if let Some(table) =
-        pre_0_25_missing_table(conn).map_err(|e| MemoryError::Storage(e.to_string()))?
-    {
-        return Err(MemoryError::UnsupportedSchema {
-            missing_table: table,
-            detail: pre_0_25_detail(table),
-        });
-    }
-    init_schema(conn).map_err(|e| MemoryError::Storage(e.to_string()))
+    Ok(init_schema(conn)?)
 }
 
 /// A raw connection to a fresh file shaped like a 0.24.x database (its marker table, no
