@@ -1892,6 +1892,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chunk_whose_hash_or_path_does_not_match_it_is_refused_before_any_reuse() {
+        // [MAGI S6 MS3 loop6, R1 Caspar] Reuse is keyed by the chunk hash: a stale hash on a
+        // changed text, or a chunk filed under another source's path, would serve the stored
+        // vector of other text. The store recomputes the hash and checks the path first.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        store
+            .reindex(&[(src("d.md", "k1"), vec![chunk("d.md", "A", "old")])], &e)
+            .await
+            .expect("first");
+        let mut stale = chunk("d.md", "A", "new text");
+        stale.hash = chunk("d.md", "A", "old").hash;
+        let other_path = chunk("other.md", "A", "x");
+        for (case, bad) in [("stale hash", stale), ("other path", other_path)] {
+            let r = store.reindex(&[(src("d.md", "k2"), vec![bad])], &e).await;
+            assert!(
+                matches!(&r, Err(MemoryError::Storage(m)) if m.contains("d.md")),
+                "{case}: {r:?}"
+            );
+            assert_eq!(
+                store.missing(&[src("d.md", "k2")]).expect("missing").len(),
+                1,
+                "{case}: nothing written"
+            );
+        }
+        assert_eq!(e.calls(), 1, "only the first reindex embedded");
+    }
+
+    #[tokio::test]
     async fn a_chunk_holding_a_private_key_block_is_refused_before_anything_is_embedded() {
         // [MAGI S6 MS3 loop4, R1 Caspar] RV22's exception: a multi-line private-key block never
         // leaves the process. `refuse_secrets` refuses it by itself, whatever its caller netted
