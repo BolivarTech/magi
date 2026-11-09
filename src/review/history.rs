@@ -543,6 +543,33 @@ mod tests {
     }
 
     #[test]
+    fn a_finding_is_stored_with_its_secrets_masked_and_one_quoting_a_key_block_is_not_stored() {
+        // [MAGI S6 MS3 loop4, R5 Balthasar] Backstop for the history, an egress point of RV22
+        // when it is served back: a one-line secret quoted by the trio is stored masked, and a
+        // finding quoting a private-key block is not stored (masking would leave its body).
+        use crate::review::gate::GateState;
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let mut keyed = found("a.rs", 9, "key");
+        keyed.details = vec![format!("{begin}\nMIIEvQIBADANBg")];
+        let main = vec![
+            (
+                found("a.rs", 3, &format!("leaks {key}")),
+                judged(GateState::Kept),
+            ),
+            (keyed, judged(GateState::Kept)),
+        ];
+        let entries = entries_from_review(&main, "c1");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            !entries[0].title.contains("sk-ant-")
+                && entries[0].title.contains("<redacted: anthropic-key>"),
+            "{}",
+            entries[0].title
+        );
+    }
+
+    #[test]
     fn a_filtered_finding_is_never_recorded() {
         let main = vec![(
             found("a.rs", 3, "f"),
