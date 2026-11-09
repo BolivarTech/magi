@@ -247,6 +247,35 @@ pub fn filter_files(
     explicit: bool,
     is_ignored: &dyn Fn(&str) -> bool,
 ) -> Result<Filtered, ReviewError> {
+    let classified = classify_files(files, source, registry, explicit, is_ignored);
+    // MAGI FIX (MS3 §6 loop5): the classification is over; from here no stage is served a side
+    // held raw with a secret, a path this filter never saw included.
+    // MAGI FIX (MS3 §6 loop6): on every path, an early error included, not on success alone
+    // (`a_filter_that_fails_still_seals_the_source`).
+    source.seal();
+    let filtered = classified?;
+    if filtered.kept.is_empty() {
+        // MAGI FIX (S6 loop 3): the omissions and their causes travel with the error (RV20/RV22).
+        return Err(ReviewError::NothingToReview {
+            skipped: filtered.skipped,
+        });
+    }
+    Ok(filtered)
+}
+
+/// The classification loop of [`filter_files`], which seals the source after it whatever it
+/// returns.
+///
+/// # Errors
+///
+/// As [`filter_files`], but for `NothingToReview`, which the caller decides.
+fn classify_files(
+    files: Vec<ReviewFile>,
+    source: &dyn ContentSource,
+    registry: &LanguageRegistry,
+    explicit: bool,
+    is_ignored: &dyn Fn(&str) -> bool,
+) -> Result<Filtered, ReviewError> {
     let mut filtered = Filtered {
         kept: Vec::new(),
         skipped: Vec::new(),
@@ -303,15 +332,6 @@ pub fn filter_files(
         // MAGI FIX (S6 loop 15, A2-3): the total is checked after the verdict and its releases,
         // so a file left out near the cap no longer fails the review.
         source.settle()?;
-    }
-    // MAGI FIX (MS3 §6 loop5): the classification is over; from here no stage is served a side
-    // held raw with a secret, a path this filter never saw included.
-    source.seal();
-    if filtered.kept.is_empty() {
-        // MAGI FIX (S6 loop 3): the omissions and their causes travel with the error (RV20/RV22).
-        return Err(ReviewError::NothingToReview {
-            skipped: filtered.skipped,
-        });
     }
     Ok(filtered)
 }
