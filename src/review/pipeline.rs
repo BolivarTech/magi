@@ -32,7 +32,7 @@ use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
 use super::input::{renamed_from, resolve_input, ReviewFile, ReviewInput, SourceKind};
 use super::languages::LanguageRegistry;
-use super::rag::{Assembled, ContextItem, ContextKind};
+use super::rag::{item_cost, Assembled, ContextItem, ContextKind};
 use super::report::{name, BatchMetrics, ReviewSummary, TrimmedItem};
 use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets, masked_pattern};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
@@ -1292,6 +1292,13 @@ enum ContextEgress {
 /// with the first pattern found. An item whose path quotes a secret (a path cannot be masked and
 /// still name its file) or whose text or label holds a private-key block (RV22's exception) is
 /// withheld, as is one in which masking left a match. O(text).
+///
+/// A backstop: every item arrives masked already (units, definitions and callers from the
+/// review's cache, documentation at chunking, history at retrieval; see the `review::rag`
+/// module doc), and the budget charged that text, so this pass normally changes nothing. If it
+/// does mask and the mask is longer than what the budget charged ([`item_cost`]), the item is
+/// withheld rather than sent over the limit RV04 checked
+/// (`a_context_item_whose_mask_would_outgrow_its_charge_is_withheld`).
 // MAGI FIX (MS3 §6 loop2): a context item holding a one-line secret was withheld, not masked.
 fn context_egress(item: ContextItem) -> ContextEgress {
     if find_secret(&item.file).is_some()
@@ -1303,12 +1310,15 @@ fn context_egress(item: ContextItem) -> ContextEgress {
     let Some(pattern) = find_secret(&item.text).or_else(|| find_secret(&item.label)) else {
         return ContextEgress::Send(item, None);
     };
+    let charged = item_cost(&item);
     let masked = ContextItem {
         text: escape_fence(&mask_secrets(&item.text)),
         label: mask_secrets(&item.label),
         ..item
     };
-    if holds_secret(&masked) {
+    // MAGI FIX (MS3 §6 loop4): the budget charged the text before this pass; a mask longer than
+    // its secret would make the prompt pass the limit RV04 checked.
+    if holds_secret(&masked) || item_cost(&masked) > charged {
         ContextEgress::Withhold(masked.file)
     } else {
         ContextEgress::Send(masked, Some(pattern))
