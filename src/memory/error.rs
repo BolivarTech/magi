@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 1.0.0
-// Date: 2026-06-26
+// Version: 0.25.0
+// Date: 2026-11-08
 
 //! Domain error types for the memory subsystem.
 //!
