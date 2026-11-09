@@ -47,6 +47,28 @@ pub const MAX_HISTORY_PER_BATCH: usize = 32;
 /// The columns every read selects, in the order [`RawRow`] reads them.
 const COLUMNS: &str = "id, file, line, reviewed_commit, finding_blob, status, created_at";
 
+/// The rows [`ReviewHistoryStore::due`] reads: every entry, least recently checked first, at
+/// most `?1`.
+fn due_sql() -> String {
+    format!(
+        "SELECT {COLUMNS} FROM code_review_history \
+         ORDER BY checked_at, created_at, id LIMIT ?1"
+    )
+}
+
+/// The rows [`ReviewHistoryStore::validated_on_files`] reads for one batch of `files` files:
+/// the validated ones, newest first, at most the last parameter.
+fn validated_sql(files: usize) -> String {
+    let marks = vec!["?"; files].join(", ");
+    format!(
+        "SELECT {COLUMNS} FROM code_review_history \
+         WHERE status IN ('{attended}', '{weak}') AND file IN ({marks}) \
+         ORDER BY created_at DESC, id LIMIT ?",
+        attended = HistoryStatus::Attended.as_str(),
+        weak = HistoryStatus::WeakReject.as_str(),
+    )
+}
+
 /// One row as stored: the finding text still encrypted.
 struct RawRow {
     id: String,
@@ -277,14 +299,7 @@ impl ReviewHistoryStore {
             let total: i64 = c
                 .query_row("SELECT COUNT(*) FROM code_review_history", [], |r| r.get(0))
                 .map_err(db_err)?;
-            let rows = raw_rows_in(
-                &c,
-                &format!(
-                    "SELECT {COLUMNS} FROM code_review_history \
-                     ORDER BY checked_at, created_at, id LIMIT ?1"
-                ),
-                [limit],
-            )?;
+            let rows = raw_rows_in(&c, &due_sql(), [limit])?;
             (total, rows)
         };
         Ok((
@@ -321,18 +336,11 @@ impl ReviewHistoryStore {
         let over = i64::try_from(MAX_HISTORY_PER_BATCH.saturating_add(1)).unwrap_or(i64::MAX);
         let mut raw = Vec::new();
         for batch in distinct.chunks(FILES_PER_QUERY) {
-            let marks = vec!["?"; batch.len()].join(", ");
             let mut args: Vec<&dyn rusqlite::ToSql> =
                 batch.iter().map(|f| *f as &dyn rusqlite::ToSql).collect();
             args.push(&over);
             raw.extend(self.raw_rows(
-                &format!(
-                    "SELECT {COLUMNS} FROM code_review_history \
-                     WHERE status IN ('{attended}', '{weak}') AND file IN ({marks}) \
-                     ORDER BY created_at DESC, id LIMIT ?",
-                    attended = HistoryStatus::Attended.as_str(),
-                    weak = HistoryStatus::WeakReject.as_str(),
-                ),
+                &validated_sql(batch.len()),
                 rusqlite::params_from_iter(args),
             )?);
         }
