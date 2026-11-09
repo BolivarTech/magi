@@ -3242,7 +3242,7 @@ mod tests {
         let embedder: Arc<dyn EmbeddingProvider> = Arc::new(ProbedEmbedder(probing.clone()));
         let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
         let doc = runner
-            .prepare_documentation(&ReviewInput::File("no/such/file.rs".into()))
+            .prepare_documentation(&ReviewInput::Commit(Some("--output=x".into())))
             .await;
         assert!(doc.prep.docs_unavailable);
         assert!(
