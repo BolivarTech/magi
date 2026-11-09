@@ -71,6 +71,12 @@ pub const MAX_DOC_CHUNKS: usize = 20_000;
 
 /// Version of the chunking rules: bump it whenever [`chunk_source`] would cut a source
 /// differently, so every stored chunk is indexed again instead of mixing two chunkers.
+///
+/// A change to the secret patterns (`SECRET_PATTERNS` in [`crate::review::secrets`]) counts:
+/// chunks are masked before they are hashed, so a source indexed under the old patterns keeps
+/// serving chunks masked the old way until this version changes (egress still masks with the
+/// current patterns, so nothing leaks; the index is just stale). Pinned by
+/// `a_change_to_the_secret_patterns_comes_with_a_doc_index_version_bump`.
 pub const DOC_INDEX_VERSION: u32 = 1;
 
 /// Bound on the distinct commits [`live_doc_sources`] walks; past it the clean-up is skipped for
@@ -1775,6 +1781,42 @@ mod tests {
         assert!(
             !is_doc_source("sub/CLAUDE.md"),
             "[CP2 MS3 loop 13] root files by exact path"
+        );
+    }
+    /// The secret patterns, by name and in table order, that `DOC_INDEX_VERSION` was last
+    /// bumped for.
+    const PATTERNS_OF_THIS_DOC_INDEX_VERSION: &[&str] = &[
+        "anthropic-key",
+        "openai-key",
+        "github-token",
+        "github-token",
+        "aws-access-key",
+        "pem-private-key",
+        "pem-private-key",
+        "pem-private-key",
+        "pgp-private-key",
+        "stripe-key",
+        "google-api-key",
+        "slack-token",
+        "gitlab-token",
+        "aws-secret-key",
+        "url-credential",
+    ];
+
+    #[test]
+    fn a_change_to_the_secret_patterns_comes_with_a_doc_index_version_bump() {
+        // [MAGI S6 MS3 loop4, R1 Melchior] Stored chunks are masked and hashed with the patterns
+        // of their time; a source already indexed is never re-chunked until DOC_INDEX_VERSION
+        // changes. A pattern added, removed or reordered fails here: bump DOC_INDEX_VERSION (and
+        // its value below) and update the list in the same change.
+        let names: Vec<&str> = crate::review::secrets::SECRET_PATTERNS
+            .iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(
+            (DOC_INDEX_VERSION, names.as_slice()),
+            (1, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
+            "the secret patterns changed: bump DOC_INDEX_VERSION and update this list"
         );
     }
 }
