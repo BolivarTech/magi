@@ -286,7 +286,10 @@ impl ReviewHistoryStore {
     /// rows, so the cost of a review does not depend on the size of the history. The count and
     /// the rows are read under one lock, so `total` matches the rows returned.
     ///
-    /// Complexity: O(n log n) in SQLite to order, O(limit) to decrypt.
+    /// Complexity: the rows come off the `code_review_history_due` index in order, stopping at
+    /// `limit` (no sort); the count reads the narrowest index, O(n) entries with no row read or
+    /// decrypted; O(limit) to decrypt. Pinned by
+    /// `the_bounded_history_reads_are_served_by_their_indexes_not_by_a_full_sort`.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
@@ -322,7 +325,9 @@ impl ReviewHistoryStore {
     /// masked again by the context read before it can leave the process
     /// (`a_history_entry_quoting_a_secret_reaches_the_context_masked`, `memory::review_rag`).
     ///
-    /// Complexity: O(files + (file batches x bound) log) raw rows, O(bound) decryptions.
+    /// Complexity: each batch searches the `code_review_history_by_file` index for its files'
+    /// validated rows (never a scan of the history) and sorts only those, O(m log m) for the `m`
+    /// such rows; O(files + (file batches x bound) log) raw rows kept, O(bound) decryptions.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].

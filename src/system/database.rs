@@ -814,7 +814,7 @@ const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             checked_at INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS code_review_history_due
-            ON code_review_history (status, checked_at, created_at, id);
+            ON code_review_history (checked_at, created_at, id);
         CREATE INDEX IF NOT EXISTS code_review_history_by_file
             ON code_review_history (file, status);
         CREATE TABLE IF NOT EXISTS sessions (
@@ -2437,8 +2437,9 @@ mod tests {
                 .expect("query");
             assert_eq!(n, 1, "{t}");
         }
-        // due() and validated_on_files() read through an index, never a full scan, and so
-        // does reindex's reuse lookup by chunk hash.
+        // The indexes exist; that due() and validated_on_files() use them is pinned by query
+        // plan in `the_bounded_history_reads_are_served_by_their_indexes_not_by_a_full_sort`.
+        // reindex's reuse lookup by chunk hash uses the third.
         for i in [
             "code_review_history_due",
             "code_review_history_by_file",
