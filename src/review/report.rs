@@ -371,7 +371,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
             .trimmed
             .iter()
             .take(MAX_OMISSIONS_SHOWN)
-            .map(|t| format!("{} {}", name(&t.kind), escape_controls(&t.label)))
+            .map(|t| format!("{} {}", name(&t.kind), listed(&t.label)))
             .collect();
         match unlisted(s.trimmed.len()) {
             0 => {}
@@ -409,12 +409,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     if !s.skipped.is_empty() {
         writeln!(out, "\n## Skipped")?;
         for skip in s.skipped.iter().take(MAX_OMISSIONS_SHOWN) {
-            writeln!(
-                out,
-                "- {} ({})",
-                escape_controls(&skip.path),
-                name(&skip.cause)
-            )?;
+            writeln!(out, "- {} ({})", listed(&skip.path), name(&skip.cause))?;
         }
         write_unlisted(out, &s.skipped)?;
     }
@@ -424,7 +419,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
             writeln!(
                 out,
                 "- {} ({}: {})",
-                escape_controls(&m.path),
+                listed(&m.path),
                 name(&m.cause),
                 // MAGI FIX (MS3 §6 loop2): line-safe like the path beside it.
                 escape_controls(m.pattern)
@@ -435,7 +430,7 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
     if !s.no_extractor.is_empty() {
         writeln!(out, "\n## Reviewed without language context")?;
         for path in s.no_extractor.iter().take(MAX_OMISSIONS_SHOWN) {
-            writeln!(out, "- {}", escape_controls(path))?;
+            writeln!(out, "- {}", listed(path))?;
         }
         write_unlisted(out, &s.no_extractor)?;
     }
@@ -948,6 +943,14 @@ fn to_json<T: serde::Serialize>(value: &T, what: &str) -> Value {
 // product's detector instead of relying on the caller's `egress_safe`.
 fn redacted(text: &str) -> String {
     mask_secrets(redact_foreign_text(text).as_str())
+}
+
+/// A path or label of an omission list as the text form writes it: [`redacted`], then
+/// [`escape_controls`], so the list is line-safe and holds no secret whatever its builder did
+/// (`the_text_form_masks_a_raw_secret_in_its_paths_and_labels_as_it_writes_them`).
+// MAGI FIX (MS3 §6 loop4): these lists relied on their builders' `display_path` alone.
+fn listed(text: &str) -> String {
+    escape_controls(&redacted(text))
 }
 
 /// `base`, or `base (2)`, `base (3)`, ... : the first spelling `taken` does not hold yet. Two keys
