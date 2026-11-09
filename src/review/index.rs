@@ -772,4 +772,22 @@ mod tests {
         assert!(!capped.callers_complete());
         assert!(LexicalIndex::build(&files, &LanguageRegistry::new()).callers_complete());
     }
+
+    #[test]
+    fn an_identifier_cap_reached_on_the_old_side_keeps_the_callers_complete() {
+        // [MAGI S6 MS3 loop6, R2 Caspar] The old side records identifiers only, so a cap reached
+        // there loses no occurrence: every new-side place was recorded, and the context must not
+        // declare that callers may be missing.
+        let files = [("a.rs".to_string(), "alpha beta\n".to_string())];
+        let old = [("a.rs".to_string(), "gamma delta epsilon\n".to_string())];
+        let registry = LanguageRegistry::new();
+        let capped =
+            LexicalIndex::build_with_limit(&files, &old, &registry, 3, MAX_INDEX_OCCURRENCES);
+        assert!(
+            !capped.is_complete(),
+            "precondition: the old side hit the cap"
+        );
+        assert!(capped.callers_complete());
+        assert_eq!(capped.occurrences("alpha").count(), 1);
+    }
 }
