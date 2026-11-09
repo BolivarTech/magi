@@ -97,11 +97,16 @@ pub struct LexicalIndex {
     definitions: HashMap<String, Vec<(String, u32, u32)>>,
     /// Paths of the new-side files given to `build`; an occurrence names its file by position.
     paths: Vec<String>,
-    /// `(file id, line)` of each new-side line an identifier appears on, 8 bytes each. The
-    /// number of names is bounded by [`MAX_INDEX_IDENTIFIERS`], but the places are not: they
-    /// grow with the lines of the reviewed files (at most one entry per name per line).
+    /// `(file id, line)` of each new-side line an identifier appears on, 8 bytes each: at most
+    /// one entry per name per line, and at most [`MAX_INDEX_OCCURRENCES`] in all.
     occurrences: HashMap<String, Vec<(u32, u32)>>,
     complete: bool,
+    /// Places recorded so far, against `places_cap`.
+    places: usize,
+    /// [`MAX_INDEX_OCCURRENCES`], or a smaller cap in tests.
+    places_cap: usize,
+    /// False once a place was dropped at `places_cap`.
+    callers_complete: bool,
 }
 
 impl LexicalIndex {
@@ -114,7 +119,13 @@ impl LexicalIndex {
     /// Complexity: O(total bytes of `files`) time; O(distinct identifiers, bounded by the cap,
     /// plus occurrences) space.
     pub fn build(files: &[(String, String)], registry: &LanguageRegistry) -> Self {
-        Self::build_with_limit(files, &[], registry, MAX_INDEX_IDENTIFIERS)
+        Self::build_with_limit(
+            files,
+            &[],
+            registry,
+            MAX_INDEX_IDENTIFIERS,
+            MAX_INDEX_OCCURRENCES,
+        )
     }
 
     /// Like [`Self::build`], for a diff: `files` is the new side of every reviewed file and
@@ -128,7 +139,13 @@ impl LexicalIndex {
         old_files: &[(String, String)],
         registry: &LanguageRegistry,
     ) -> Self {
-        Self::build_with_limit(files, old_files, registry, MAX_INDEX_IDENTIFIERS)
+        Self::build_with_limit(
+            files,
+            old_files,
+            registry,
+            MAX_INDEX_IDENTIFIERS,
+            MAX_INDEX_OCCURRENCES,
+        )
     }
 
     #[cfg(test)]
@@ -137,7 +154,7 @@ impl LexicalIndex {
         registry: &LanguageRegistry,
         cap: usize,
     ) -> Self {
-        Self::build_with_limit(files, &[], registry, cap)
+        Self::build_with_limit(files, &[], registry, cap, MAX_INDEX_OCCURRENCES)
     }
 
     fn build_with_limit(
@@ -145,6 +162,7 @@ impl LexicalIndex {
         old_files: &[(String, String)],
         registry: &LanguageRegistry,
         cap: usize,
+        places_cap: usize,
     ) -> Self {
         let mut index = Self {
             identifiers: HashSet::new(),
@@ -159,6 +177,9 @@ impl LexicalIndex {
             paths: Vec::new(),
             occurrences: HashMap::new(),
             complete: true,
+            places: 0,
+            places_cap,
+            callers_complete: true,
         };
         for (path, _) in files {
             if let Some(ext) = extension_of(path) {
@@ -215,14 +236,23 @@ impl LexicalIndex {
     /// Records that `name` occurs at `line` of the file with id `file`; a second occurrence on
     /// the same line is not recorded again. Allocates only when a place is really added (and, for
     /// the first place of a name, the name). O(1) expected.
+    // MAGI FIX (MS3 §6 loop4): the places grew with the reviewed lines, without a bound.
     fn record_occurrence(&mut self, name: &str, file: u32, line: u32) {
         let entry = (file, line);
+        let fresh = self
+            .occurrences
+            .get(name)
+            .is_none_or(|places| places.last() != Some(&entry));
+        if !fresh {
+            return;
+        }
+        if self.places >= self.places_cap {
+            self.callers_complete = false;
+            return;
+        }
+        self.places = self.places.saturating_add(1);
         match self.occurrences.get_mut(name) {
-            Some(places) => {
-                if places.last() != Some(&entry) {
-                    places.push(entry);
-                }
-            }
+            Some(places) => places.push(entry),
             None => {
                 self.occurrences.insert(name.to_string(), vec![entry]);
             }
@@ -372,16 +402,16 @@ impl LexicalIndex {
     /// False when `build` stopped recording occurrences at their cap: some callers may be
     /// missing from the context.
     pub fn callers_complete(&self) -> bool {
-        true
+        self.callers_complete
     }
 
     #[cfg(test)]
     pub(crate) fn build_with_occurrence_cap(
         files: &[(String, String)],
         registry: &LanguageRegistry,
-        _cap: usize,
+        cap: usize,
     ) -> Self {
-        Self::build(files, registry)
+        Self::build_with_limit(files, &[], registry, MAX_INDEX_IDENTIFIERS, cap)
     }
 }
 

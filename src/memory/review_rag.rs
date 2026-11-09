@@ -37,9 +37,9 @@ use magi_rs::review::input::SourceKind;
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
-    assemble, callers_for, charged_tokens, containing_units, declare_index, definitions_for,
-    doc_search_query, item_cost, Assembled, ContextItem, ContextKind, IndexDeclarations,
-    CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
+    assemble, callers_for, charged_tokens, containing_units, declare_index, declare_lexical,
+    definitions_for, doc_search_query, item_cost, Assembled, ContextItem, ContextKind,
+    IndexDeclarations, CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
 };
 use magi_rs::review::secrets::{
     display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
@@ -543,6 +543,7 @@ impl RagSource for StoreRag<'_> {
         a.trimmed.extend(declared);
         if !self.declared.swap(true, Ordering::SeqCst) {
             declare_index(&mut a, &self.doc_index);
+            declare_lexical(&mut a, self.index);
             if memory && self.docs_unavailable {
                 a.trimmed
                     .push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));

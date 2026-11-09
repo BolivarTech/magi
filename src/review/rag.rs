@@ -318,7 +318,15 @@ pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
 /// * `a` - The assembled context to declare on (the first batch's, once per review).
 /// * `index` - The review's lexical index.
 pub fn declare_lexical(a: &mut Assembled, index: &LexicalIndex) {
-    let _ = (a, index, MAX_INDEX_OCCURRENCES);
+    if !index.callers_complete() {
+        a.trimmed.push((
+            ContextKind::Caller,
+            format!(
+                "occurrence index cut at MAX_INDEX_OCCURRENCES ({MAX_INDEX_OCCURRENCES}): some \
+                 callers may be missing"
+            ),
+        ));
+    }
 }
 
 /// Reads one side of `file` as UTF-8 text; `None` when that side is gone.
