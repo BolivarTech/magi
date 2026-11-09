@@ -123,6 +123,12 @@ fn parse_hunk_header(line: &str) -> Option<(u64, u64)> {
 /// if none does, `None` if a hunk header cannot be read (never decide on a format that is not
 /// understood).
 ///
+/// It reads the subset of git's unified diff that `git diff --unified=0` prints for one file
+/// (git-diff(1), "Combined diff format" excluded: two revisions are compared, never a merge's
+/// parents): only the hunk headers, `@@ -a[,b] +c[,d] @@[ function context]`, whose old range
+/// `a,b` (`b` absent means 1, `b` = 0 an insertion after line `a`) is what covers the line, and
+/// git's `Binary files … differ` line. Body lines are not read.
+///
 /// Complexity: O(lines of the diff).
 // MAGI FIX (MS3 §6 loop3): a binary change has no hunk; it read as untouched.
 fn diff_covers(text: &str, line: u32) -> Option<bool> {
@@ -160,7 +166,11 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 /// # Arguments
 /// * `entry` - the remembered finding.
 /// * `head` - the revision to compare against.
-/// * `git` - the git runner, rooted at the workspace so `--relative` and the paths agree.
+/// * `git` - the git runner, rooted at the workspace so `--relative` and the paths agree. It
+///   must run git with `GIT_LITERAL_PATHSPECS=1`, as the production runner (`ScrubbedGit`,
+///   `src/system/review_git.rs`, tested there) does: `entry.file` is passed as a pathspec
+///   after `--`, and without literal pathspecs a stored name such as `:(glob)*.rs` or
+///   `src[0].rs` would match other files and read their hunks as this line's.
 ///
 /// # Returns
 /// The status the evidence supports.
