@@ -3995,6 +3995,46 @@ mod tests {
     }
 
     #[test]
+    fn a_context_item_whose_mask_would_outgrow_its_charge_is_withheld() {
+        // [MAGI S6 MS3 loop4, R4 Melchior] The budget charged an item's text before this egress
+        // pass; a mask longer than its secret (a short URL password) would make the prompt pass
+        // the limit RV04 checked. The items arrive masked from the review's cache, so this pass
+        // normally changes nothing; when it would grow an item it withholds it instead, and a
+        // mask that shrinks the text is sent.
+        use crate::review::rag::{item_cost, ContextItem, ContextKind};
+        let item = |text: &str| ContextItem {
+            kind: ContextKind::Definition,
+            file: "a.rs".into(),
+            label: "f".into(),
+            text: text.into(),
+            candidate: false,
+            lines: Some((1, 1)),
+            old_side: false,
+        };
+        let short = item("let u = \"a://u:p@h\";");
+        let grown = ContextItem {
+            text: mask_secrets(&short.text),
+            ..short.clone()
+        };
+        assert!(
+            item_cost(&grown) > item_cost(&short),
+            "the fixture must grow"
+        );
+        assert!(matches!(context_egress(short), ContextEgress::Withhold(f) if f == "a.rs"));
+        let long = item(&format!(
+            "let k = \"sk-ant-api03-{}\";", // allow-secret-scan
+            "A".repeat(80)
+        ));
+        let charged = item_cost(&long);
+        match context_egress(long) {
+            ContextEgress::Send(sent, Some(_)) => {
+                assert!(!sent.text.contains("sk-ant-") && item_cost(&sent) <= charged);
+            }
+            _ => panic!("a shrinking mask is sent"),
+        }
+    }
+
+    #[test]
     fn the_outbound_reserve_is_held_back_from_a_deadline_never_from_a_timeout() {
         // [MAGI S6 MS3 loop3, R5 Melchior; pinned] An explicit `--timeout` counts from the first
         // trio call, so the preparation never spends it: its refusal stays `--timeout` / batches
