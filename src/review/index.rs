@@ -739,4 +739,19 @@ mod tests {
         assert_eq!(whole.occurrences("x").count(), 10);
         assert!(whole.callers_complete());
     }
+
+    #[test]
+    fn the_identifier_cap_also_says_callers_may_be_missing() {
+        // [MAGI S6 MS3 loop5, R2 Melchior] The identifier cap stopped the scan, so no occurrence
+        // of any later file was recorded, but only the places cap cleared `callers_complete`:
+        // the context lacked those callers and declared nothing.
+        let files = [
+            ("a.rs".to_string(), "alpha beta\n".to_string()),
+            ("b.rs".to_string(), "gamma alpha\n".to_string()),
+        ];
+        let capped = LexicalIndex::build_with_cap(&files, &LanguageRegistry::new(), 2);
+        assert!(!capped.is_complete());
+        assert!(!capped.callers_complete());
+        assert!(LexicalIndex::build(&files, &LanguageRegistry::new()).callers_complete());
+    }
 }
