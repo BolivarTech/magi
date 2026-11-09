@@ -874,6 +874,25 @@ impl<'a> CachedSource<'a> {
 /// mask could promise that none of it leaves). O(bytes).
 // MAGI FIX (T3.7 fix round 3): three review rounds found key-body lines that masking let through.
 fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
+    masked_side_within(read, MAX_MASKED_SIDE_BYTES)
+}
+
+/// The largest masked side the cache builds: twice the per-file cap, since a mask can be longer
+/// than its secret. A side whose mask would pass it is too dense in secrets to mask; it is held
+/// as read, so the filter leaves its file out as `secret`, the safe direction of RV22.
+const MAX_MASKED_SIDE_BYTES: usize = 2 * MAX_REVIEW_FILE_BYTES as usize;
+
+/// [`masked_side`] with an explicit bound on the masked side.
+fn masked_side_within(
+    read: Option<Vec<u8>>,
+    max_bytes: usize,
+) -> (Option<Vec<u8>>, Option<SideMask>) {
+    let _ = max_bytes;
+    masked_side_unbounded(read)
+}
+
+/// The masking of [`masked_side`] without a bound.
+fn masked_side_unbounded(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
     // MAGI FIX (MS3 §6 loop2): the key-block scan ran over every side; a key block is a secret
     // match, so it is looked for only in a side that holds one (one scan for most files).
     let masked = read
@@ -988,6 +1007,17 @@ mod tests {
             cache.read("a.rs").expect("a clean side reads again"),
             Some(b"fn a() {}\n".to_vec())
         );
+    }
+
+    #[test]
+    fn a_side_too_dense_in_secrets_is_held_as_read_so_its_file_is_left_out() {
+        // [MAGI S6 MS3 loop4, R6a Caspar] Its mask would pass the bound: it is not masked, and
+        // the filter's secret check then leaves the file out (declared `secret`).
+        let dense = "a://:p@h ".repeat(1_000).into_bytes();
+        let (held, mask) = masked_side_within(Some(dense.clone()), dense.len());
+        assert_eq!((held, mask), (Some(dense.clone()), None));
+        let (held, mask) = masked_side_within(Some(dense.clone()), 64 * dense.len());
+        assert!(mask.is_some() && held != Some(dense));
     }
 
     #[test]
