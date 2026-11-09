@@ -105,6 +105,8 @@ pub struct IndexDeclarations {
     pub truncated: bool,
     /// Whether a source was left out because reading it passed the review's size cap.
     pub size_capped: bool,
+    /// Whether a source was left out because its bytes are not UTF-8 text.
+    pub not_utf8: bool,
 }
 
 /// What the report says when a documentation source was left out for the review's size cap.
@@ -1603,6 +1605,27 @@ mod tests {
             vec![(
                 ContextKind::Documentation,
                 format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_documentation_source_that_is_not_utf8_is_declared() {
+        // [MAGI S6 MS3 loop5, R2 Caspar] It left the index with an INFO entry only; RV07
+        // declares what was cut, and every other omission had its declaration.
+        let mut a = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+        declare_index(
+            &mut a,
+            &IndexDeclarations {
+                not_utf8: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            a.trimmed,
+            vec![(
+                ContextKind::Documentation,
+                "a documentation source that is not UTF-8 text was left out".to_string()
             )]
         );
     }

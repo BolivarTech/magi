@@ -2315,6 +2315,39 @@ mod tests {
 
     const BOUND: Duration = Duration::from_secs(REINDEX_TIMEOUT_SECS);
 
+    /// A working tree of one README whose bytes are not UTF-8.
+    struct Latin1Readme;
+    impl ContentSource for Latin1Readme {
+        fn read(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+            Ok((p == "README.md").then(|| b"# Caf\xe9\nnot utf-8\n".to_vec()))
+        }
+        fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_documentation_source_that_is_not_utf8_is_left_out_and_declared() {
+        // [MAGI S6 MS3 loop5, R2 Caspar] It was removed with an INFO entry only, so the report
+        // never said why that documentation was missing (RV07 declares what was cut).
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &Latin1Readme,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.doc_sources.is_empty(), "{:?}", prep.doc_sources);
+        assert!(prep.doc_index.not_utf8);
+        assert!(!prep.docs_unavailable);
+    }
+
     #[tokio::test]
     async fn a_commit_review_indexes_and_serves_the_commits_documentation_not_the_working_trees() {
         // [CP2 MS3 loop 10] RV-S36 through the composition main.rs calls: the working tree's README says something else.
