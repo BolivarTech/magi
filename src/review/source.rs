@@ -970,6 +970,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_key_block_side_released_before_it_was_ever_read_is_refused_too() {
+        // [MAGI S6 MS3 loop4, R6a Melchior] The filter leaves some files out before reading them
+        // (a secret-shaped path, an ignored name) and releases their sides unread; a later read
+        // of such a side fetched it fresh and, holding a key block, got it raw.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let keyed = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n{end}\n");
+        let inner = crate::review::test_support::MapSource::new(
+            &[("k.pem", keyed.as_str()), ("a.rs", "fn a() {}\n")],
+            &[],
+        );
+        let cache = CachedSource::new(&inner);
+        cache.release(Face::New, "k.pem");
+        cache.release(Face::New, "a.rs");
+        assert!(
+            matches!(cache.read("k.pem"), Err(ReviewError::EgressSecret { .. })),
+            "the raw key came back"
+        );
+        assert_eq!(
+            cache.read("a.rs").expect("a clean side reads"),
+            Some(b"fn a() {}\n".to_vec())
+        );
+    }
+
     #[cfg(unix)] // a FIFO is a unix file type; Windows has no open that blocks this way.
     #[test]
     fn a_file_swapped_for_a_fifo_before_the_open_is_refused_without_blocking() {
