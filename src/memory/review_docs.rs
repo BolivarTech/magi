@@ -665,6 +665,13 @@ impl ReviewDocStore {
     /// `true` and leaves those sources for the next one that does. Never `DROP TABLE`: a
     /// dropped table would make the next open read this database as one from an older version.
     ///
+    /// Every identity's rows are considered, not only this store's `index_id`, on purpose: a row
+    /// no ref and no working tree reaches is garbage whatever identity wrote it, and a live one
+    /// stays whatever its identity, since `live` names sources by `(path, key)` alone. Two
+    /// identities never hold the index at once: a rebuild wipes the old one, and a race between
+    /// two is a conflict (the write's own check, and [`Self::load_vectors`]), so no identity's live rows are
+    /// lost to another's clean-up.
+    ///
     /// Complexity: O(stored sources) with one pair of deletes per [`ALLOWED_PAIRS_PER_QUERY`]
     /// doomed sources; `live` is only probed, so no SQL parameter limit applies to it. Each
     /// delete of `code_review_docs` by `(path, key)` scans that table: its primary key is

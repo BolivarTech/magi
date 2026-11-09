@@ -106,10 +106,10 @@ pub const DOC_INDEX_VERSION: u32 = 2;
 ///
 /// The bound counts references, as specified, so sixty-five refs at one commit still skip
 /// (`past_the_ref_cap_the_clean_up_is_skipped_even_when_every_ref_shares_one_commit`). Under it,
-/// the tips are deduplicated into distinct commits before listing, a cost optimization only: a
-/// every ref at one commit costs one `ls-tree`, and never more than
-/// `MAX_GC_REFS + 1` run (the refs plus `HEAD`). Deletion is unaffected: only what no ref tip nor the working tree
-/// reaches goes.
+/// the tips are deduplicated into distinct commits before listing, a cost optimization only:
+/// every ref at one commit costs one `ls-tree`, and never more than `MAX_GC_REFS + 1` run (the
+/// refs plus `HEAD`). Deletion is unaffected: only what no ref tip nor the working tree reaches
+/// goes.
 pub const MAX_GC_REFS: usize = 64;
 
 /// How far below a doc block the item line is looked for (attributes and plain comments between).
