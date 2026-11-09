@@ -101,13 +101,15 @@ pub const MAX_DOC_CHUNKS: usize = 20_000;
 /// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5).
 pub const DOC_INDEX_VERSION: u32 = 2;
 
-/// Bound on the distinct commits [`live_doc_sources`] walks; past it the clean-up is skipped for
-/// that review.
+/// Bound on the local references (branches and tags) [`live_doc_sources`] reads; with more, the
+/// clean-up is skipped for that review (RV19: "more than `MAX_GC_REFS` references").
 ///
-/// RV19 words the bound as references; it counts the distinct commits the refs point at,
-/// which is what costs one `ls-tree` each (a hundred refs at one commit cost one listing), so a
-/// repository with many refs on few commits still cleans. Deletion is unaffected: only what no
-/// ref tip nor the working tree reaches goes.
+/// The bound counts references, as specified, so sixty-five refs at one commit still skip
+/// (`past_the_ref_cap_the_clean_up_is_skipped_even_when_every_ref_shares_one_commit`). Under it,
+/// the tips are deduplicated into distinct commits before listing, a cost optimization only: a
+/// every ref at one commit costs one `ls-tree`, and never more than
+/// `MAX_GC_REFS + 1` run (the refs plus `HEAD`). Deletion is unaffected: only what no ref tip nor the working tree
+/// reaches goes.
 pub const MAX_GC_REFS: usize = 64;
 
 /// How far below a doc block the item line is looked for (attributes and plain comments between).
@@ -1089,7 +1091,7 @@ pub fn revision_doc_sources(
 ///
 /// # Returns
 ///
-/// `Ok(None)` when the clean-up must be skipped (more than [`MAX_GC_REFS`] distinct commits, or
+/// `Ok(None)` when the clean-up must be skipped (more than [`MAX_GC_REFS`] references, or
 /// a git that does not answer); otherwise the union of every ref's sources.
 ///
 /// # Errors
@@ -1113,14 +1115,16 @@ pub fn live_doc_sources(
             .map_err(|_| ReviewError::Git("git printed a non-UTF-8 object id".to_string()))?;
         Ok(text.split_whitespace().map(str::to_string).collect())
     };
-    let mut commits: BTreeSet<String> = to_ids(&refs)?.into_iter().collect();
+    let ref_ids = to_ids(&refs)?;
+    // MAGI FIX (MS3 §6 loop6): RV19 bounds the references; the bound counted distinct commits.
+    if ref_ids.len() > MAX_GC_REFS {
+        return Ok(None);
+    }
+    let mut commits: BTreeSet<String> = ref_ids.into_iter().collect();
     match head {
         Ok(bytes) => commits.extend(to_ids(&bytes)?),
         Err(_) if commits.is_empty() => return Ok(Some(BTreeSet::new())),
         Err(_) => return Ok(None),
-    }
-    if commits.len() > MAX_GC_REFS {
-        return Ok(None);
     }
     let mut live = BTreeSet::new();
     for commit in &commits {
