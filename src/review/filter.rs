@@ -465,7 +465,7 @@ struct SidesRead<'a> {
 /// The diff is rebuilt even when it holds no detectable secret of its own, for the same reason:
 /// a clean-looking hunk can carry the value line of a secret whose key line it does not show
 /// (the YAML case above), so only the side's masked text is trusted; the hunk's function context
-/// is kept, masked (see [`rebuilt_diff`]). The diff is moved in, never copied: a file
+/// is kept only as a masked side shows it (see [`rebuilt_diff`]). The diff is moved in, never copied: a file
 /// with no secret keeps the very string git produced. O(diff + sides).
 ///
 /// # Arguments
@@ -548,9 +548,10 @@ fn kept_verdict(
 
 /// `diff` with every content line taken from the (masked) side it shows: a context or added line
 /// from `new`, a deleted line from `old`, each at the line number its hunk header gives. Header
-/// lines and `\ No newline` markers are kept; a hunk header keeps its ranges and its function
-/// context, masked (a line of the file; dropped only when it opens a private-key block, whose body
-/// has nothing to mask by). `None` when a line names a side line that does not exist, a hunk
+/// lines and `\ No newline` markers are kept; a hunk header keeps its ranges, and its function
+/// context when a masked side line shows that context as it is ([`shown_by_a_side`]; one that
+/// carries a secret, which the sides hold masked, is dropped:
+/// `a_hunk_context_that_no_masked_side_line_shows_is_dropped`). `None` when a line names a side line that does not exist, a hunk
 /// header does not parse, or a body line has no marker: the positions of the diff and the sides
 /// disagree. A body line whose text differs from its side's line at that position is replaced by
 /// the side's (masked) text, which is what git would print for these sides (a rename's stale line
@@ -590,12 +591,13 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
         if line.starts_with(HUNK_START) {
             let (header, old_start, new_start) = hunk_header(line)?;
             out.push_str(header);
-            // MAGI FIX (MS3 §6 loop6): the function context is a line of the file; it is kept,
-            // masked, instead of dropped (R6a Melchior). One that opens a key block is dropped:
-            // a key's body has no pattern to mask by.
+            // MAGI FIX (MS3 §6 loop6): the function context is a line of the file; it was
+            // dropped (R6a Melchior). It is kept when a masked side line starts with it as it
+            // is, so it carries what the whole-file mask left there and nothing more; masking
+            // the context alone would be the diff-alone case (a YAML value with no key line).
             let context = line.get(header.len()..).unwrap_or_default();
-            if !holds_key_block(context) {
-                out.push_str(&mask_secrets(context));
+            if shown_by_a_side(context, &new_lines, &old_lines) {
+                out.push_str(context);
             }
             next_old = old_start.saturating_sub(1);
             next_new = new_start.saturating_sub(1);
@@ -624,6 +626,18 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
         out.push_str(eol);
     }
     Some((out, diverged))
+}
+
+/// Whether a hunk header's function context (` <text>` after the closing `@@`, git cuts it to
+/// 80 bytes) is shown as it is by some line of the masked sides: the line starts with `<text>`.
+/// An empty context is shown. A context that carries a secret byte never matches, since the
+/// sides carry its mask there instead, and neither does one that opens a private-key block
+/// (such sides never reach here). O(lines · context).
+fn shown_by_a_side(context: &str, new: &[&str], old: &[&str]) -> bool {
+    let Some(text) = context.strip_prefix(' ').filter(|t| !t.is_empty()) else {
+        return context.is_empty();
+    };
+    !holds_key_block(text) && new.iter().chain(old).any(|line| line.starts_with(text))
 }
 
 /// The lines of a side, each without its `\n` (a `\r` stays, as git shows it); none for an
