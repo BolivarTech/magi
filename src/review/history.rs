@@ -150,7 +150,9 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 /// [`HistoryStatus::WeakReject`] only once `head` is a commit after the reviewed one.
 ///
 /// Anything that is not a signal is [`HistoryStatus::Pending`]: no line, no file (an empty
-/// pathspec would be the whole tree), a reference that starts with `-`, a commit that is not an ancestor of `head` (another branch, or gone), a git
+/// pathspec would be the whole tree), a reviewed commit that is no commit id ([`is_commit_id`]:
+/// a symbolic name moves, so it anchors nothing), a `head` that starts with `-`, a commit that is
+/// not an ancestor of `head` (another branch, or gone), a git
 /// failure, a hunk header that cannot be read, or `head` still at the reviewed commit.
 ///
 /// Complexity: three git calls at most, O(size of the diff of one file).
@@ -168,7 +170,9 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
         return HistoryStatus::Pending;
     };
     // MAGI FIX (MS3 §6 loop3): an empty file would be an empty pathspec, the whole tree.
-    if commit.starts_with('-') || head.starts_with('-') || entry.file.is_empty() {
+    // MAGI FIX (MS3 §6 loop5): a reviewed commit that is no commit id (a branch name, `HEAD~1`)
+    // gives no signal on any branch, not only the weak reject's: a moving ref anchors nothing.
+    if !is_commit_id(commit) || head.starts_with('-') || entry.file.is_empty() {
         return HistoryStatus::Pending;
     }
     if git
@@ -197,6 +201,13 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
     }
 }
 
+/// Whether `commit` reads as a commit id: non-empty hexadecimal, a full SHA as `record_history`
+/// records it or an abbreviation of one. A branch name, `HEAD~1`, an empty string or an option
+/// (`-x`) is not. O(len).
+fn is_commit_id(commit: &str) -> bool {
+    !commit.is_empty() && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// [`HistoryStatus::WeakReject`] when `head` resolves to a commit other than `commit`;
 /// otherwise [`HistoryStatus::Pending`]: with no commit after the reviewed one there is no
 /// signal yet, and a failing `rev-parse` is no signal either.
@@ -209,7 +220,7 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
 // MAGI FIX (MS3 §6 loop3): an abbreviated SHA of HEAD itself read as a later commit.
 // MAGI FIX (MS3 §6 loop4): a non-SHA commit read as a later one, a false weak reject.
 fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> HistoryStatus {
-    if commit.is_empty() || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !is_commit_id(commit) {
         return HistoryStatus::Pending;
     }
     match git.run(&["rev-parse", "--verify", &format!("{head}^{{commit}}")]) {
