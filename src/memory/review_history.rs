@@ -238,22 +238,7 @@ impl ReviewHistoryStore {
 
     /// Reads raw rows under the lock; the caller decrypts them after it is released.
     fn raw_rows(&self, sql: &str, args: impl rusqlite::Params) -> Result<Vec<RawRow>, MemoryError> {
-        let c = self.locked_conn();
-        let mut stmt = c.prepare(sql).map_err(db_err)?;
-        let rows = stmt
-            .query_map(args, |r| {
-                Ok(RawRow {
-                    id: r.get(0)?,
-                    file: r.get(1)?,
-                    line: r.get(2)?,
-                    reviewed_commit: r.get(3)?,
-                    finding_blob: r.get(4)?,
-                    status: r.get(5)?,
-                    created_at: r.get(6)?,
-                })
-            })
-            .map_err(db_err)?;
-        rows.collect::<Result<_, _>>().map_err(db_err)
+        raw_rows_in(&self.locked_conn(), sql, args)
     }
 
     /// At most `limit` entries, of any status, least recently checked first (`checked_at`,
@@ -261,8 +246,11 @@ impl ReviewHistoryStore {
     ///
     /// Every status is due: a weak reject can become attended, and an attended entry whose
     /// change was reverted goes back to a weak reject. An entry that never resolves is checked
-    /// again only after all the others, so it never starves them. Decrypts at most `limit`
-    /// rows, so the cost of a review does not depend on the size of the history.
+    /// again only after all the others, so it never starves them: that rotation needs the caller
+    /// to [`Self::touch`] every entry it checked, changed or not, and `record_review` does
+    /// (`record_review_touches_an_entry_whose_status_did_not_change`). Decrypts at most `limit`
+    /// rows, so the cost of a review does not depend on the size of the history. The count and
+    /// the rows are read under one lock, so `total` matches the rows returned.
     ///
     /// Complexity: O(n log n) in SQLite to order, O(limit) to decrypt.
     ///
@@ -270,17 +258,23 @@ impl ReviewHistoryStore {
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
     pub fn due(&self, limit: usize) -> Result<(Vec<HistoryEntry>, usize), MemoryError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let total: i64 = self
-            .locked_conn()
-            .query_row("SELECT COUNT(*) FROM code_review_history", [], |r| r.get(0))
-            .map_err(db_err)?;
-        let rows = self.raw_rows(
-            &format!(
-                "SELECT {COLUMNS} FROM code_review_history \
-                 ORDER BY checked_at, created_at, id LIMIT ?1"
-            ),
-            [limit],
-        )?;
+        // MAGI FIX (MS3 §6 loop4): the count and the rows took two locks, so a write between
+        // them made `total` disagree with the rows.
+        let (total, rows) = {
+            let c = self.locked_conn();
+            let total: i64 = c
+                .query_row("SELECT COUNT(*) FROM code_review_history", [], |r| r.get(0))
+                .map_err(db_err)?;
+            let rows = raw_rows_in(
+                &c,
+                &format!(
+                    "SELECT {COLUMNS} FROM code_review_history \
+                     ORDER BY checked_at, created_at, id LIMIT ?1"
+                ),
+                [limit],
+            )?;
+            (total, rows)
+        };
         Ok((
             self.decode_all(rows)?,
             usize::try_from(total).unwrap_or(usize::MAX),
@@ -375,6 +369,29 @@ impl ReviewHistoryStore {
         }
         Ok(())
     }
+}
+
+/// Reads raw rows over `c`, a connection whose lock the caller holds.
+fn raw_rows_in(
+    c: &Connection,
+    sql: &str,
+    args: impl rusqlite::Params,
+) -> Result<Vec<RawRow>, MemoryError> {
+    let mut stmt = c.prepare(sql).map_err(db_err)?;
+    let rows = stmt
+        .query_map(args, |r| {
+            Ok(RawRow {
+                id: r.get(0)?,
+                file: r.get(1)?,
+                line: r.get(2)?,
+                reviewed_commit: r.get(3)?,
+                finding_blob: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })
+        .map_err(db_err)?;
+    rows.collect::<Result<_, _>>().map_err(db_err)
 }
 
 /// The error for an id no row has; never a silent success.
