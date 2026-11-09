@@ -103,6 +103,8 @@ pub struct IndexDeclarations {
     pub withheld: usize,
     /// Whether indexing stopped at its cap.
     pub truncated: bool,
+    /// Whether a source was left out because reading it passed the review's size cap.
+    pub size_capped: bool,
 }
 
 /// Fixed tokens of one item's frame in the prompt.
@@ -1427,6 +1429,37 @@ mod tests {
     }
 
     #[test]
+    fn a_source_over_the_size_cap_is_declared_apart_from_the_chunk_cap() {
+        // [MAGI S6 MS3 loop4, R2 Melchior] RV07 declares what was actually cut: a source too
+        // large to read is not a stop at MAX_DOC_CHUNKS.
+        let declared = |d: IndexDeclarations| {
+            let mut a = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+            declare_index(&mut a, &d);
+            a.trimmed
+        };
+        assert_eq!(
+            declared(IndexDeclarations {
+                size_capped: true,
+                ..Default::default()
+            }),
+            vec![(
+                ContextKind::Documentation,
+                "a documentation source over the review's size cap was left out".to_string()
+            )]
+        );
+        assert_eq!(
+            declared(IndexDeclarations {
+                truncated: true,
+                ..Default::default()
+            }),
+            vec![(
+                ContextKind::Documentation,
+                format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})")
+            )]
+        );
+    }
+
+    #[test]
     fn an_occurrence_index_cut_at_its_cap_is_declared_for_the_callers() {
         // [MAGI S6 MS3 loop4, R2 Caspar] RV07 declares what was cut: past the occurrence cap
         // some callers cannot be found, and the report says so.
@@ -1545,6 +1578,7 @@ mod tests {
             &IndexDeclarations {
                 withheld: 2,
                 truncated: true,
+                ..Default::default()
             },
         );
         assert_eq!(a.withheld, 2);

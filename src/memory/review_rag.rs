@@ -1613,6 +1613,7 @@ mod tests {
         rag.doc_index = IndexDeclarations {
             withheld: 1,
             truncated: true,
+            ..Default::default()
         };
         let first = rag
             .context_for(&batch_on("a.rs", "fn a() {}"))
@@ -2898,6 +2899,7 @@ mod tests {
             doc_index: IndexDeclarations {
                 withheld: 2,
                 truncated: true,
+                ..Default::default()
             },
             docs_unavailable: true,
             index_ms: 7,
@@ -2914,7 +2916,8 @@ mod tests {
             rag.doc_index,
             IndexDeclarations {
                 withheld: 2,
-                truncated: true
+                truncated: true,
+                ..Default::default()
             }
         );
         assert!(rag.docs_unavailable);
