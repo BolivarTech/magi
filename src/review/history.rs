@@ -449,15 +449,17 @@ mod tests {
     fn existing_pending_entries_are_reclassified_before_new_ones_are_recorded() {
         // [CP2 MS3 loop 1] A new entry reviewed at HEAD would classify WeakReject (HEAD..HEAD is empty) if it were
         // reclassified after recording; it must come back untouched, as Pending.
+        // [MAGI S6 MS3 loop5] anchored to a commit id (`c9`), since a symbolic anchor now gives no
+        // signal at all and would keep this guardian green under its mutation.
         let mut fresh = entry(Some(5));
         fresh.id = "new".into();
-        fresh.reviewed_commit = "HEAD".into();
+        fresh.reviewed_commit = "c9".into();
         let git = FakeGit::from(&[("merge-base --is-ancestor c1 HEAD", Ok("")),
                               (DIFF_C1_HEAD, Ok("@@ -5 +5 @@\n")),
-                              ("merge-base --is-ancestor HEAD HEAD", Ok("")),
-                              ("diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative HEAD HEAD -- a.rs", Ok("")),
+                              ("merge-base --is-ancestor c9 HEAD", Ok("")),
+                              ("diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative c9 HEAD -- a.rs", Ok("")),
                               // [CP2 MS3 loop 13] Scripted, so reclassifying the new entry would make it WeakReject
-                              // (HEAD resolves to a commit other than the literal "HEAD" it was reviewed at): the
+                              // (HEAD resolves to a commit other than the c9 it was reviewed at): the
                               // mutation goes red whatever FakeGit answers for an unscripted argv.
                               (HEAD_IS_C2, Ok("c9\n"))]);
         let (updates, to_record) =
