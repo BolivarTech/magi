@@ -98,4 +98,15 @@ pub enum MemoryError {
     /// batch on the next scheduled pass.
     #[error("LLM provider error: {0}")]
     Llm(String),
+
+    /// The database was written before v0.25.0: it lacks `missing_table` and there is no
+    /// migration (RV19). `detail` names the table, the probable version and what to do; the
+    /// database is left as it was.
+    #[error("unsupported database schema: {detail}")]
+    UnsupportedSchema {
+        /// The first v0.25.0 table the database lacks.
+        missing_table: &'static str,
+        /// The message for the user: the table, the probable version and the remedy.
+        detail: String,
+    },
 }

@@ -1571,7 +1571,8 @@ mod tests {
             magi_rs::review::docs::doc_index_id("fake", 3),
         );
         assert!(
-            matches!(&r, Err(MemoryError::Storage(m)) if m.contains("code_review_docs") && m.contains("0.24.x")),
+            // [MAGI S6 MS3 loop4, R3 Balthasar] typed, so a caller can tell it from storage.
+            matches!(&r, Err(e @ MemoryError::UnsupportedSchema { missing_table: "code_review_docs", .. }) if e.to_string().contains("0.24.x")),
             "{:?}",
             r.as_ref().err()
         );
