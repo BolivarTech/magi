@@ -649,6 +649,38 @@ pub fn containing_units(
     Ok(found)
 }
 
+/// The units of the last file read on each side, so consecutive hunks of one file (the order
+/// the planner and a batch walk them in) extract it once instead of once per hunk. Holds at most
+/// one file per side, so its memory is one file's units.
+#[derive(Default)]
+pub struct UnitCache {
+    /// Extractions done, for tests that count them.
+    loads: std::sync::atomic::AtomicUsize,
+}
+
+impl UnitCache {
+    /// How many files this cache extracted.
+    pub fn loads(&self) -> usize {
+        self.loads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// [`containing_units`] through `cache`: a file the cache already holds on that side is not
+/// extracted again.
+///
+/// # Errors
+///
+/// As [`containing_units`].
+pub fn containing_units_cached(
+    item: &BatchItem,
+    sources: &dyn ContentSource,
+    registry: &LanguageRegistry,
+    cache: &UnitCache,
+) -> Result<Vec<ContextItem>, ReviewError> {
+    let _ = cache;
+    containing_units(item, sources, registry)
+}
+
 /// The distinct units around `lines` on one side of `file`, read under `read_path`, as `Unit`
 /// items marked with that side; none when `lines` is empty or the side is gone. O(lines ·
 /// units) plus one read and one extraction.
@@ -1189,6 +1221,35 @@ mod tests {
             .into_iter()
             .map(|u| (u.label, u.lines, u.old_side))
             .collect()
+    }
+
+    #[test]
+    fn consecutive_hunks_of_one_file_extract_it_once() {
+        // [MAGI S6 MS3 loop4, R2 Caspar] A batch with many hunks of one large file extracted it
+        // once per hunk: O(hunks x file size) before any embedder call.
+        use crate::review::test_support::MapSource;
+        let new =
+            "fn e() {\n    aa();\n}\n\nfn f() {\n    bb();\n    c();\n}\n\nfn g() {\n    d();\n}\n";
+        let src = MapSource::new(&[("a.rs", new)], &[("a.rs", THREE_FNS)]);
+        let reg = LanguageRegistry::new();
+        let first = real_hunk(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -2 +2 @@\n-    a();\n+    aa();\n",
+            (2, 2),
+            (2, 2),
+        );
+        let second = real_hunk(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -6 +6 @@\n-    b();\n+    bb();\n",
+            (6, 6),
+            (6, 6),
+        );
+        let cache = UnitCache::default();
+        for hunk in [&first, &second] {
+            assert_eq!(
+                containing_units_cached(hunk, &src, &reg, &cache).expect("reads"),
+                containing_units(hunk, &src, &reg).expect("reads")
+            );
+        }
+        assert_eq!(cache.loads(), 2, "one extraction per side, not per hunk");
     }
 
     #[test]
