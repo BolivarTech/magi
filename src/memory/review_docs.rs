@@ -37,7 +37,7 @@ use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
 use crate::memory::index::cosine;
 use cryptovault::CryptoVault;
-use magi_rs::review::docs::{doc_index_id, DocChunk, DocSource, WORKTREE_KEY_PREFIX};
+use magi_rs::review::docs::{chunk_hash, doc_index_id, DocChunk, DocSource, WORKTREE_KEY_PREFIX};
 use magi_rs::review::secrets::{display_path, find_secret};
 use magi_rs::vault::MaskedDek;
 
@@ -305,6 +305,7 @@ impl ReviewDocStore {
             )));
         }
         refuse_secrets(sources)?;
+        refuse_inconsistent_chunks(sources)?;
         let plan = self.plan(sources)?;
         let fresh = embed_all(&plan.to_embed, embedder).await?;
         let rows = self.encode_rows(&plan, &fresh)?;
@@ -745,6 +746,33 @@ fn refuse_secrets(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryEr
             return Err(MemoryError::Storage(format!(
                 "documentation chunk of `{}` matches a secret pattern and was not embedded",
                 display_path(&chunk.path)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a chunk whose hash is not [`chunk_hash`] of its own path, section and text, or whose
+/// path is not its source's path, before anything is read, embedded or written.
+///
+/// Vector reuse ([`ReviewDocStore::reindex`]'s plan) is keyed by the chunk hash, so a stale
+/// hash on changed text, or a chunk filed under another source, would otherwise serve the
+/// stored vector of other text without a word. The chunkers always agree; this checks the
+/// contract at the storage boundary instead of trusting it
+/// (`a_chunk_whose_hash_or_path_does_not_match_it_is_refused_before_any_reuse`). All or
+/// nothing, like [`refuse_secrets`]. O(total text) hashing. The message names the source path
+/// through [`display_path`].
+// MAGI FIX (MS3 §6 loop6): the hash was trusted as given.
+fn refuse_inconsistent_chunks(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
+    for (source, chunks) in sources {
+        let bad = chunks
+            .iter()
+            .any(|c| c.path != source.path || c.hash != chunk_hash(&c.path, &c.section, &c.text));
+        if bad {
+            return Err(MemoryError::Storage(format!(
+                "documentation source `{}` has a chunk whose hash or path does not match it \
+                 and was not indexed",
+                display_path(&source.path)
             )));
         }
     }
