@@ -1536,6 +1536,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_key_block_far_from_the_window_does_not_withhold_the_finding() {
+        // [MAGI S6 MS3 loop6, R6b Melchior, Caspar] The whole-code check withheld every finding
+        // of a file holding a block. Only a finding whose ±40-line window overlaps the block's
+        // lines is withheld; one far from it is judged.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(1)
+            .returning(|r| answer(r.model().unwrap_or(""), "real_defect", 0.9));
+        let mut g = Gate::new(&c, chain(), 1_000_000);
+        let begin = concat!("-----", "BEGIN ", "RSA PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "RSA PRIVATE KEY-----");
+        let tail: String = (0..200).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        let code = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n{end}\n{tail}");
+        let far = g
+            .judge(&finding(Severity::Warning, Some(150)), Some(&code), None)
+            .await;
+        assert_eq!(far.state, GateState::Kept, "{far:?}");
+        let near = g
+            .judge(&finding(Severity::Warning, Some(40)), Some(&code), None)
+            .await;
+        assert_eq!(
+            (near.state, near.cause),
+            (GateState::Unfiltered, Some("secret"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_gate_keeps_its_cause_for_a_finding_near_a_key_block() {
+        // [MAGI S6 MS3 loop6, R6b Caspar] After a 401 every later finding is `unauthorized` with
+        // no call (C-6); the key-block check ran first and said `secret` instead.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().times(1).returning(|_| {
+            Err(DecisionError::Unauthorized {
+                status: 401,
+                trace: Trace::default(),
+            })
+        });
+        let mut g = Gate::new(&c, chain(), 61_000);
+        g.judge(&finding(Severity::Warning, Some(1)), Some("x\nx\n"), None)
+            .await;
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let code = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n");
+        let v = g
+            .judge(&finding(Severity::Warning, Some(1)), Some(&code), None)
+            .await;
+        assert_eq!(v.cause, Some("unauthorized"));
+    }
+
+    #[test]
+    fn a_state_whose_own_text_quotes_a_key_block_is_never_sent() {
+        // [MAGI S6 MS3 loop6, R6b Melchior] The state-level branch of `sendable` alone: the code
+        // is clean, the block is in the finding's own detail.
+        let c = MockDecisionClient::new();
+        let g = Gate::new(&c, chain(), 1_000_000);
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let mut f = finding(Severity::Warning, Some(1));
+        f.details = vec![format!(
+            "the key is {begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w"
+        )];
+        let state = gate_state_of(&f, 0, "fn a() {}\n");
+        assert_eq!(g.sendable(state), Err(CAUSE_SECRET));
+    }
+
+    #[tokio::test]
     async fn a_merged_claim_carrying_a_one_line_secret_is_asked_masked_with_the_others() {
         // [MAGI S6 loop 10, C1-c2] one reworded claim with a secret pattern made the whole merged
         // finding `unfiltered` with no question asked and no `not every claim judged`.
