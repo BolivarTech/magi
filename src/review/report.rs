@@ -1217,6 +1217,25 @@ mod tests {
     }
 
     #[test]
+    fn the_text_form_writes_the_context_only_cause_with_the_spec_text() {
+        // [MAGI S6 MS3 loop5, R6b Melchior] The JSON form pins `context only`; the text form's
+        // discarded list writes the same serde name, pinned here.
+        let s = ReviewSummary {
+            discarded: vec![Discarded {
+                agent: AgentName::Melchior,
+                batch: 0,
+                finding: magi_core::schema::Finding::new(Severity::Warning, "t", "d"),
+                cause: DiscardCause::ContextOnly,
+                symbol: None,
+            }],
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(out.contains(" [context only] t (batch 1, "), "{out}");
+    }
+
+    #[test]
     fn a_masked_pattern_name_shaped_like_a_secret_is_masked_in_the_text_form() {
         // [MAGI S6 MS3 loop5, R6b Caspar] The pattern names are the detector's own constants
         // today, but the text form wrote this field with `escape_controls` alone while every
