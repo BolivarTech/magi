@@ -899,13 +899,9 @@ pub(crate) mod test_embedder {
         }
     }
 
-    /// A chunk of `path` with the hash `chunk_markdown` gives its section.
+    /// A chunk of `path` carrying the hash of its own path, section and text.
     pub(crate) fn chunk(path: &str, section: &str, text: &str) -> DocChunk {
-        let hash = magi_rs::review::docs::chunk_markdown(path, &format!("# {section}\n{text}\n"))
-            .into_iter()
-            .next()
-            .expect("one chunk")
-            .hash;
+        let hash = magi_rs::review::docs::chunk_hash(path, section, text);
         DocChunk {
             path: path.into(),
             section: section.into(),

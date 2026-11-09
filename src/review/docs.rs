@@ -238,11 +238,28 @@ fn bounded_section(section: &str) -> String {
     )
 }
 
+/// The hash a [`DocChunk`] carries: SHA-256 hex of `path + "\n" + section + "\n" + text`.
+///
+/// The one definition of the chunk hash, so the chunkers and the store that checks a chunk
+/// before reusing a stored vector by it cannot drift apart. O(n) in the three.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::docs::{chunk_hash, chunk_markdown};
+///
+/// let c = &chunk_markdown("README.md", "# A\nx\n")[0];
+/// assert_eq!(c.hash, chunk_hash(&c.path, &c.section, &c.text));
+/// ```
+pub fn chunk_hash(path: &str, section: &str, text: &str) -> String {
+    lower_hex(&Sha256::digest(
+        format!("{path}\n{section}\n{text}").as_bytes(),
+    ))
+}
+
 /// The chunk of `path` with `section` and `text`, hashed over the three. O(n) in the text.
 fn chunk_of(path: &str, section: String, text: String) -> DocChunk {
-    let hash = lower_hex(&Sha256::digest(
-        format!("{path}\n{section}\n{text}").as_bytes(),
-    ));
+    let hash = chunk_hash(path, &section, &text);
     DocChunk {
         path: path.to_string(),
         section,
