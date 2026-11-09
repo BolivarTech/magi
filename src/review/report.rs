@@ -121,7 +121,11 @@ pub struct ReviewSummary {
     /// Retrieved context left out of a batch, in priority order, each label as
     /// [`crate::review::secrets::display_path`] shows it (REQ-RV07, REQ-RV13).
     pub trimmed: Vec<TrimmedItem>,
-    /// Whether documentation and history were left out because no embedder answered.
+    /// Whether documentation and history were left out because no embedder answered. Only that
+    /// cause sets it: an index that could not be built for another reason (git failing to list
+    /// the revision, an unreadable source) leaves it `false` and adds `index unavailable` to
+    /// [`Self::trimmed`] once (RV21/U29;
+    /// `a_git_failure_is_declared_once_as_an_unavailable_index_never_as_no_embedder`).
     pub without_embedder: bool,
     /// Whether documentation and history were left out because the run opened no database
     /// (`--no-memory`).
