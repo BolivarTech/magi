@@ -103,6 +103,11 @@ pub const DOC_INDEX_VERSION: u32 = 2;
 
 /// Bound on the distinct commits [`live_doc_sources`] walks; past it the clean-up is skipped for
 /// that review.
+///
+/// RV19 words the bound as references; it counts the distinct commits the refs point at,
+/// which is what costs one `ls-tree` each (a hundred refs at one commit cost one listing), so a
+/// repository with many refs on few commits still cleans. Deletion is unaffected: only what no
+/// ref tip nor the working tree reaches goes.
 pub const MAX_GC_REFS: usize = 64;
 
 /// How far below a doc block the item line is looked for (attributes and plain comments between).
@@ -178,7 +183,12 @@ pub fn is_doc_source(path: &str) -> bool {
 /// Every one-line secret of the section and the text is masked ([`mask_secrets`]) before the
 /// text is split, so no part holds a byte of one and the hash is over what is sent (RV22
 /// amended). A section or text that holds a private-key block is neither masked nor split: it
-/// stays one chunk for [`without_secrets`] to drop (RV22's exception). O(n) in the text.
+/// stays one chunk for [`without_secrets`] to drop (RV22's exception). That drop rests on
+/// `find_secret` matching the block's header, the same table `holds_key_block` filters; it is
+/// pinned here (`a_chunk_holding_a_private_key_block_is_left_out`) and again at the store,
+/// which refuses such a chunk by itself
+/// (`a_chunk_holding_a_private_key_block_is_refused_before_anything_is_embedded`). O(n) in the
+/// text.
 // MAGI FIX (MS3 §6 loop1): a chunk with a one-line secret was kept whole so that
 // `without_secrets` could drop it; RV22 amended masks it instead.
 fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
