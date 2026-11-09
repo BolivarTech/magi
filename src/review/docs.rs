@@ -700,6 +700,10 @@ fn py_statement_ends(after: &str) -> bool {
 /// The docstring starting on line `at` (`"""` or `'''`, with an optional `r`/`u` prefix): its text
 /// and the index of the line after it.
 ///
+/// One `r`/`R`/`u`/`U` prefix is accepted; a bytes prefix (`b`, `rb`, `br`, any case) is not,
+/// on purpose: Python keeps only a `str` literal as `__doc__`, so a bytes literal in docstring
+/// position is data (`a_bytes_literal_is_no_python_docstring_whatever_its_prefix`).
+///
 /// The string must be a statement of its own: one followed by more code on its closing line
 /// (`"""a""" + x`) is data, and one that never closes is no docstring (malformed code indexes
 /// nothing, it never swallows the rest of the file).
@@ -1799,6 +1803,24 @@ mod tests {
             sources.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
             vec!["docs/real.md"]
         );
+    }
+
+    #[test]
+    fn a_bytes_literal_is_no_python_docstring_whatever_its_prefix() {
+        // [MAGI S6 MS3 loop6, R1 Melchior] Python keeps only a `str` literal as `__doc__`: a bytes
+        // literal (`b`, `rb`, `br`, any case) in docstring position is data, so it is no chunk,
+        // while the `r` and `u` string prefixes still make a docstring.
+        for prefix in ["b", "B", "rb", "br", "Rb", "bR"] {
+            let text = format!("{prefix}\"\"\"Bytes.\"\"\"\n");
+            let c = py_doc_chunks("m.py", &text.lines().collect::<Vec<_>>());
+            assert!(c.is_empty(), "{prefix}: {c:?}");
+        }
+        for prefix in ["", "r", "R", "u", "U"] {
+            let text = format!("{prefix}\"\"\"Module doc.\"\"\"\n");
+            let c = py_doc_chunks("m.py", &text.lines().collect::<Vec<_>>());
+            assert_eq!(c.len(), 1, "{prefix}: {c:?}");
+            assert_eq!(c[0].text, "Module doc.", "{prefix}");
+        }
     }
 
     #[test]
