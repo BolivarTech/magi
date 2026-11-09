@@ -1281,13 +1281,15 @@ impl ProductionReviewRunner {
                 ..DocContext::default()
             }
         };
+        // MAGI FIX (MS3 §6 loop5): the input is looked at before the store is opened, so a failed
+        // one never probes the embedder.
+        if let Err(e) = &kind {
+            return unavailable(None, &e.to_string());
+        }
         let docs = match memory.doc_store(embedder).await {
             Ok(docs) => docs,
             Err(e) => return unavailable(None, &e.to_string()),
         };
-        if let Err(e) = &kind {
-            return unavailable(Some(docs), &e.to_string());
-        }
         let whole = ReviewInput::Directory(PathBuf::from("."));
         // MAGI FIX (MS3 §6 loop2): `.gitignore` is a working-tree rule (MS2): a revision's
         // listing applies none, as its review does.
