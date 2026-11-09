@@ -112,6 +112,9 @@ pub struct IndexDeclarations {
 /// What the report says when a documentation source was left out for the review's size cap.
 const SIZE_CAPPED_SOURCE: &str = "a documentation source over the review's size cap was left out";
 
+/// What the report says when a documentation source was left out because it is not UTF-8.
+const NOT_UTF8_SOURCE: &str = "a documentation source that is not UTF-8 text was left out";
+
 /// Fixed tokens of one item's frame in the prompt.
 pub const CONTEXT_ITEM_FRAME_TOKENS: usize = 18;
 
@@ -306,7 +309,8 @@ pub fn assemble(
 
 /// Adds what indexing left out to `a`: `withheld` is summed, a truncation becomes a
 /// `Documentation` entry in `trimmed` that names [`MAX_DOC_CHUNKS`], and a source left out for
-/// the size cap an entry of its own (the report names the cap that cut).
+/// the size cap an entry of its own (the report names the cap that cut), as does one left out
+/// for not being UTF-8 text.
 ///
 /// # Arguments
 ///
@@ -324,6 +328,11 @@ pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
     if d.size_capped {
         a.trimmed
             .push((ContextKind::Documentation, SIZE_CAPPED_SOURCE.to_string()));
+    }
+    // MAGI FIX (MS3 §6 loop5): a source that is not UTF-8 left with an INFO entry only.
+    if d.not_utf8 {
+        a.trimmed
+            .push((ContextKind::Documentation, NOT_UTF8_SOURCE.to_string()));
     }
 }
 

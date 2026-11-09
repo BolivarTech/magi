@@ -1099,6 +1099,8 @@ pub async fn prepare_docs(
                 path = path.as_str(),
                 "a documentation source is not UTF-8 and is left out"
             );
+            // MAGI FIX (MS3 §6 loop5): declared in the report too (RV07), not only logged.
+            prep.doc_index.not_utf8 = true;
             prep.doc_sources.remove(&source);
             continue;
         };
