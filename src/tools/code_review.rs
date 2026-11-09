@@ -704,17 +704,36 @@ pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
 /// A `File` whose path is a directory under `workspace` becomes `Directory`; anything else
 /// passes through. One rule for the CLI positional and the tool's `path`.
 ///
+/// The path is looked at on disk only after the workspace's `PathGuard` accepted it
+/// ([`review_path_guard`]), and then through the guarded (canonical) path: a path the guard
+/// refuses (`..`, an absolute path elsewhere, a link that leaves) is never stat-ed and stays a
+/// `File`, for [`check_review_input`] and the review's own resolution to refuse
+/// (`a_path_is_classified_as_a_directory_only_after_the_guard_accepts_it`).
+///
 /// # Arguments
 /// * `workspace` - The workspace root.
 /// * `input` - The input as given.
 ///
 /// # Returns
 /// The input, by what is on disk.
+// MAGI FIX (MS3 §6 loop6): the raw path was stat-ed before any guard ran.
 pub(crate) fn path_input(workspace: &Path, input: ReviewInput) -> ReviewInput {
     match input {
-        ReviewInput::File(p) if workspace.join(&p).is_dir() => ReviewInput::Directory(p),
+        ReviewInput::File(p) if guarded_dir(workspace, &p) => ReviewInput::Directory(p),
         other => other,
     }
+}
+
+/// Whether `p` under `workspace` passes the workspace's guard and its guarded path is a
+/// directory; `false` when the guard refuses it or the workspace cannot be guarded.
+fn guarded_dir(workspace: &Path, p: &Path) -> bool {
+    PathGuard::new(workspace.to_path_buf())
+        .ok()
+        .and_then(|guard| {
+            let root = guard.workspace_root().to_path_buf();
+            review_path_guard(&guard, &root.join(p)).ok()
+        })
+        .is_some_and(|guarded| guarded.is_dir())
 }
 
 /// Refuses a hostile or unknown input before anything that contacts an endpoint (RV01 first,
