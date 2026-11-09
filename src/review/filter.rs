@@ -1003,6 +1003,47 @@ mod tests {
     }
 
     #[test]
+    fn a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review() {
+        // [MAGI S6 MS3 loop5, R6a Caspar] The second read of the released side was refused by
+        // the cache, and that refusal ended the whole review; inside the filter it is the skip
+        // the first read already chose.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let keyed = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n");
+        let inner = MapSource::new(&[("a.rs", "fn f() {}\n"), ("k.pem", keyed.as_str())], &[]);
+        let src = CachedSource::new(&inner);
+        let file = |p: &str| ReviewFile {
+            path: p.into(),
+            diff: None,
+        };
+        let f = filter_files(
+            vec![file("k.pem"), file("a.rs"), file("k.pem")],
+            &src,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        )
+        .expect("a.rs kept");
+        let secret = Skipped {
+            path: "k.pem".into(),
+            cause: SkipCause::Secret,
+        };
+        assert_eq!(f.skipped, vec![secret.clone(), secret]);
+        assert!(matches!(
+            filter_files(
+                vec![file("k.pem")],
+                &src,
+                &LanguageRegistry::new(),
+                true,
+                &|_| false
+            ),
+            Err(ReviewError::NotReviewable {
+                cause: "secret",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn a_source_that_does_not_mask_still_never_lets_a_secret_through() {
         // [T3.7] the fallback: a source with no mask (no production path builds one) hands the
         // filter raw content, so a file that holds a secret is left out as before, and an
