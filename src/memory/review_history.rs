@@ -20,7 +20,7 @@
 //! let store = ReviewHistoryStore::new(conn, dek)?;
 //! store.record(&entries)?;
 //! let (due, total) = store.due(200)?;
-//! let validated = store.validated_on_files(&["src/a.rs".to_string()])?;
+//! let (validated, cut) = store.validated_on_files(&["src/a.rs".to_string()])?;
 //! ```
 
 use std::collections::BTreeSet;
@@ -38,6 +38,11 @@ use magi_rs::vault::MaskedDek;
 /// Files per `validated_on_files` query: one parameter each plus none fixed, well under the
 /// 999-parameter limit of older SQLite builds.
 const FILES_PER_QUERY: usize = 400;
+
+/// Validated entries one batch reads at most (a starting point, not a measurement): the context
+/// keeps only what fits after the code and the documentation, so more would be decrypted to be
+/// trimmed. Past it the newest are kept and the cut is declared.
+pub const MAX_HISTORY_PER_BATCH: usize = 32;
 
 /// The columns every read selects, in the order [`RawRow`] reads them.
 const COLUMNS: &str = "id, file, line, reviewed_commit, finding_blob, status";
@@ -288,7 +293,10 @@ impl ReviewHistoryStore {
     ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
-    pub fn validated_on_files(&self, files: &[String]) -> Result<Vec<HistoryEntry>, MemoryError> {
+    pub fn validated_on_files(
+        &self,
+        files: &[String],
+    ) -> Result<(Vec<HistoryEntry>, bool), MemoryError> {
         let distinct: Vec<&String> = files.iter().collect::<BTreeSet<_>>().into_iter().collect();
         let mut out = Vec::new();
         for batch in distinct.chunks(FILES_PER_QUERY) {
@@ -304,7 +312,8 @@ impl ReviewHistoryStore {
             )?;
             out.extend(self.decode_all(rows)?);
         }
-        Ok(out)
+        let _ = MAX_HISTORY_PER_BATCH;
+        Ok((out, false))
     }
 
     /// Sets `checked_at = now` on `ids`, all or nothing.
@@ -603,13 +612,47 @@ mod tests {
         let ids: Vec<String> = sorted(
             store
                 .validated_on_files(&["src/a.rs".to_string()])
-                .expect("read"),
+                .expect("read")
+                .0,
         )
         .into_iter()
         .map(|e| e.id)
         .collect();
         assert_eq!(ids, vec!["a".to_string(), "w".to_string()]);
-        assert!(store.validated_on_files(&[]).expect("read").is_empty());
+        assert!(store.validated_on_files(&[]).expect("read").0.is_empty());
+    }
+
+    #[test]
+    fn validated_history_comes_in_a_stable_order_and_is_cut_at_its_bound() {
+        // [MAGI S6 MS3 loop4, R3 Balthasar] The read had no ORDER BY (the trimmed tail could
+        // change between identical runs) and no bound (every validated row of a file was
+        // decrypted for every batch). Newest first, then by id; at most
+        // MAX_HISTORY_PER_BATCH, the cut said.
+        let (store, _tmp) = store_for_test();
+        let n = MAX_HISTORY_PER_BATCH + 2;
+        let entries: Vec<HistoryEntry> = (0..n)
+            .rev()
+            .map(|i| stored(&format!("e{i:03}"), Some(1), "c1"))
+            .collect();
+        store.record(&entries).expect("record");
+        for e in &entries {
+            store
+                .update_status(&e.id, HistoryStatus::Attended)
+                .expect("attend");
+        }
+        let (got, cut) = store
+            .validated_on_files(&["src/a.rs".to_string()])
+            .expect("read");
+        let ids: Vec<String> = got.into_iter().map(|e| e.id).collect();
+        let expected: Vec<String> = (0..MAX_HISTORY_PER_BATCH)
+            .map(|i| format!("e{i:03}"))
+            .collect();
+        assert_eq!(ids, expected, "same created_at: by id");
+        assert!(cut);
+        let (few, cut) = store
+            .validated_on_files(&["src/b.rs".to_string()])
+            .expect("read");
+        assert!(few.is_empty() && !cut);
     }
 
     #[test]
@@ -628,6 +671,7 @@ mod tests {
         let ids: Vec<String> = store
             .validated_on_files(&files)
             .expect("read")
+            .0
             .into_iter()
             .map(|e| e.id)
             .collect();
@@ -687,6 +731,7 @@ mod tests {
             store
                 .validated_on_files(&["src/a.rs".to_string()])
                 .expect("read")
+                .0
                 .is_empty(),
             "the old attended text is no longer served"
         );
@@ -742,6 +787,7 @@ mod tests {
         let ids: Vec<String> = store
             .validated_on_files(&files)
             .expect("read")
+            .0
             .into_iter()
             .map(|e| e.id)
             .collect();

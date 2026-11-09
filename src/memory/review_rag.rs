@@ -416,7 +416,7 @@ impl StoreRag<'_> {
             return Vec::new();
         }
         match history.validated_on_files(files) {
-            Ok(entries) => entries
+            Ok((entries, _cut)) => entries
                 .into_iter()
                 .filter_map(|e| {
                     if holds_key_block(&e.title) || holds_key_block(&e.detail) {
