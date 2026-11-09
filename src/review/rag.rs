@@ -273,15 +273,19 @@ pub fn assemble(
     let mut trimmed = Vec::new();
     let mut full = false;
     for item in optional {
-        if matches!(item.kind, ContextKind::Definition | ContextKind::Caller)
-            && dedup_key(&item).is_some_and(|key| !seen.insert(key))
-        {
+        // MAGI FIX (MS3 §6 loop5): a span counts as seen only once its item entered; a trimmed
+        // one marked it too, and a later item of that span went undeclared.
+        let key = matches!(item.kind, ContextKind::Definition | ContextKind::Caller)
+            .then(|| dedup_key(&item))
+            .flatten();
+        if key.as_ref().is_some_and(|key| seen.contains(key)) {
             continue;
         }
         if !full {
             let cost = item_cost(&item);
             if used.saturating_add(cost) <= limit_tokens {
                 used = used.saturating_add(cost);
+                seen.extend(key);
                 items.push(item);
                 continue;
             }
