@@ -622,6 +622,21 @@ mod tests {
     }
 
     #[test]
+    fn a_review_with_no_commit_id_to_anchor_to_records_nothing() {
+        // [MAGI S6 MS3 loop5, R3 Caspar] Any anchor string was serialized into a row: an empty
+        // one (a working-tree path that supplied `""`, which RV08 forbids) or a symbolic one,
+        // which classification can never resolve to a signal.
+        let main = vec![(
+            found("a.rs", 3, "k"),
+            judged(crate::review::gate::GateState::Kept),
+        )];
+        for anchor in ["", "HEAD", "main", "HEAD~1", "-c"] {
+            assert!(entries_from_review(&main, anchor).is_empty(), "{anchor:?}");
+        }
+        assert_eq!(entries_from_review(&main, "c1").len(), 1);
+    }
+
+    #[test]
     fn a_filtered_finding_is_never_recorded() {
         let main = vec![(
             found("a.rs", 3, "f"),
