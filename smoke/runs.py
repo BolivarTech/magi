@@ -500,6 +500,12 @@ class RunDefinition:
             raise HarnessError(
                 "run %s points its embedder away but has no %s whose "
                 "configuration could be rewritten" % (self.run_id, REVIEW_WORKSPACE_TOKEN))
+        # MAGI FIX (MS3 §6 loop4): the request counter rewrites every endpoint the workspace
+        # declares, the embedder's too, so it would undo the rewrite above.
+        if self.unreachable_embedder and self.forbids_model_calls:
+            raise HarnessError(
+                "run %s both points its embedder away and counts model calls; the counter "
+                "would overwrite the embedder's endpoint" % self.run_id)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2234,7 +2240,12 @@ def point_embedding_at(config_path, url: str) -> None:
     backend. An active ``base_url`` inside ``[embedding]`` is replaced; without
     one the line is added right after the table header; without the table, the
     table is appended. Line-based like :func:`point_config_at`, and parsed back
-    by the product, which refuses a duplicate key.
+    by the product, which refuses a duplicate key. The ``[embedding]`` table is
+    the only form it knows (the one ``magi init`` writes); a dotted key or an
+    inline table is refused, named, and the file is left as it was.
+
+    Nothing restores the file: the executor runs every review on a fresh copy
+    of the workspace, so the rewrite never outlives its run.
 
     Complexity: ``O(file bytes)``.
 
@@ -2243,7 +2254,8 @@ def point_embedding_at(config_path, url: str) -> None:
         url: The endpoint ``[embedding]`` must reach.
 
     Raises:
-        HarnessError: When the file cannot be read or written.
+        HarnessError: When the file cannot be read or written, or sets the
+            embedder other than as the ``[embedding]`` table.
 
     Example:
         >>> import tempfile
@@ -2260,6 +2272,14 @@ def point_embedding_at(config_path, url: str) -> None:
     except (OSError, UnicodeError) as exc:
         raise HarnessError("could not read %s to point its embedder away: %s"
                            % (config_path, exc)) from exc
+    # MAGI FIX (MS3 §6 loop4): a dotted key or an inline table got a second table appended,
+    # and the product then refused the file with a parse error that hid the cause.
+    for original in text.splitlines():
+        key = original.split("=", 1)[0].strip() if "=" in original else ""
+        if key == "embedding" or key.startswith("embedding."):
+            raise HarnessError(
+                "%s sets the embedder as %r; point_embedding_at rewrites only the "
+                "[embedding] table form the harness writes" % (config_path, key))
     lines, in_embedding, placed = [], False, False
     for original in text.splitlines():
         stripped = original.strip()
