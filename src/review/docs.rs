@@ -150,6 +150,9 @@ const MAX_BLOCK_INDENT: usize = 3;
 /// Shortest fence run (`` ``` `` or `~~~`).
 const MIN_FENCE_LEN: usize = 3;
 
+/// The `git ls-tree` mode of a symbolic link: its blob holds the target path, not a file.
+pub const SYMLINK_MODE: &str = "120000";
+
 /// The three quote characters of a Python docstring opener.
 const PY_TRIPLE_QUOTES: [&str; 2] = ["\"\"\"", "'''"];
 
@@ -1033,7 +1036,8 @@ pub fn doc_index_id(model_id: &str, dim: usize) -> String {
 /// The blobs of `git ls-tree -r -z` output (`<mode> <type> <id>\t<path>\0`) whose path `keep`
 /// accepts, in listing order.
 ///
-/// A submodule (`commit`) is skipped, and so is a path that is not UTF-8 (it cannot be a
+/// A submodule (`commit`) is skipped, so is a symlink (a blob of mode [`SYMLINK_MODE`], whose
+/// content is its target path), and so is a path that is not UTF-8 (it cannot be a
 /// documentation source). Any other entry that does not parse is [`ReviewError::Git`], never
 /// skipped in silence. O(bytes).
 ///
@@ -1054,12 +1058,14 @@ pub fn parse_ls_tree(
         let (meta, path) = entry.split_at_checked(tab).ok_or_else(malformed)?;
         let meta = std::str::from_utf8(meta).map_err(|_| malformed())?;
         let mut fields = meta.split_whitespace();
-        let (Some(_mode), Some(kind), Some(id), None) =
+        let (Some(mode), Some(kind), Some(id), None) =
             (fields.next(), fields.next(), fields.next(), fields.next())
         else {
             return Err(malformed());
         };
         match kind {
+            // MAGI FIX (MS3 §6 loop6): a symlink's blob is its target path, no documentation.
+            "blob" if mode == SYMLINK_MODE => continue,
             "blob" => {}
             "commit" => continue,
             _ => return Err(malformed()),
