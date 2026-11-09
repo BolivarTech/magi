@@ -283,7 +283,9 @@ pub fn reclassify_then_record(
 /// in-place edit, or a removed line whose old number also falls in a new-side range of the file)
 /// is ambiguous: it is read on the new side, the side the gate judged, and recorded there.
 /// Text is stored with its one-line secrets masked, and a finding whose title or detail holds a
-/// private-key block is not recorded (RV22: masking would keep the block's body); the context
+/// private-key block is not recorded (RV22: masking would keep the block's body; a block is
+/// recognised by its header alone, so one split between title and detail is caught on the side
+/// that holds the header, `a_key_block_whose_header_ends_the_title_and_body_opens_the_detail_is_not_stored`); the context
 /// read masks again when it serves an entry back
 /// (`a_history_entry_quoting_a_secret_reaches_the_context_masked`, `memory::review_rag`).
 /// The `id` is magi-core's `generate_finding_id` over file, line and the neutral category
@@ -626,6 +628,19 @@ mod tests {
             "{}",
             entries[0].title
         );
+    }
+
+    #[test]
+    fn a_key_block_whose_header_ends_the_title_and_body_opens_the_detail_is_not_stored() {
+        // [MAGI S6 MS3 loop5, R3 Melchior] Title and detail are checked apart; a block split
+        // between them is still caught, because a block is recognised by its header alone,
+        // whatever follows it (no END line is needed), and the header is whole in the title.
+        use crate::review::gate::GateState;
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let mut split = found("a.rs", 3, &format!("see {begin}"));
+        split.details = vec!["MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----".into()];
+        let main = vec![(split, judged(GateState::Kept))];
+        assert!(entries_from_review(&main, "c1").is_empty());
     }
 
     #[test]
