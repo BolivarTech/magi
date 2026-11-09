@@ -600,7 +600,10 @@ pub fn callers_for(
 /// The anchors are [`BatchItem::hunk_change`]'s: the added lines, looked up on the new side, and
 /// the removed lines, looked up on the old side, because the new file has no line for them. The
 /// old side of a renamed (or copied) file is read under the `rename from` path its diff header
-/// names, while the unit keeps the reviewed path. git's context lines are never anchors, so a
+/// names, while the unit keeps the reviewed path; each side is parsed with the extractor of the
+/// path it is read under, so a rename that changes the language reads its old side as that
+/// language (`the_old_side_of_a_rename_that_changes_language_is_read_with_its_own_extractor`),
+/// and a side whose path has no extractor gives no unit. git's context lines are never anchors, so a
 /// change at the top of a function gets that function, not the one above it. Each distinct unit
 /// is returned once, new side first, each side in line order: a hunk that spans two units brings
 /// both, and a hunk that edits `f` and deletes `g` brings the new `f` and the old `g`. An
@@ -705,17 +708,17 @@ pub fn containing_units_cached(
     let (BatchItem::Hunk { file, text, .. }, Some(change)) = (item, item.hunk_change()) else {
         return Ok(Vec::new());
     };
-    let Some(extractor) = registry.get(file) else {
-        return Ok(Vec::new());
-    };
-    let side = |lines: &[u32], old_side: bool, read_path: &str| {
-        side_units(lines, old_side, file, read_path, sources, extractor, cache)
+    // MAGI FIX (Loop1 r1, M1): the old side of a rename lives under its `rename from` path,
+    // as the filter and the lexical index read it; the hunk's diff header names it.
+    let old_path = renamed_from(text).unwrap_or_else(|| file.clone());
+    // MAGI FIX (MS3 §6 loop6): each side is parsed with its own path's extractor, so a rename
+    // that changes the language (`a.py` to `b.rs`) reads its old side as what it was.
+    let side = |lines: &[u32], old_side: bool, read_path: &str| match registry.get(read_path) {
+        Some(extractor) => side_units(lines, old_side, file, read_path, sources, extractor, cache),
+        None => Ok(Vec::new()),
     };
     let mut found = side(&change.added, false, file)?;
     if !change.removed.is_empty() {
-        // MAGI FIX (Loop1 r1, M1): the old side of a rename lives under its `rename from` path,
-        // as the filter and the lexical index read it; the hunk's diff header names it.
-        let old_path = renamed_from(text).unwrap_or_else(|| file.clone());
         let old = side(&change.removed, true, &old_path)?;
         // MAGI FIX (Loop1 r3, Minor 2): the same unit by position, never by name alone, so a
         // deleted homonym or overload keeps its old-side unit.
