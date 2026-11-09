@@ -1560,6 +1560,16 @@ fn renamed_old_paths(files: &[ReviewFile]) -> HashMap<String, String> {
 
 /// The lexical index over both sides of every reviewed file. O(bytes reviewed).
 ///
+/// Scope, as the approved plan sets it (MS2 T2.6, "índice léxico O(bytes revisados)"; RV19):
+/// the files under review, not the whole revision. Consequence, declared: RV07(2) finds the
+/// definitions and callers that live in reviewed files only, so a helper defined or called only
+/// in an unchanged file is not retrieved, and RV09's symbol check sees the identifiers of the
+/// reviewed text (comments and calls included), so a finding that cites a name appearing in no
+/// reviewed file is counted as an unknown symbol (PM-S-2; a `critical` is never discarded for
+/// it, RV-S35). A revision-wide index would read every file of the revision through the cache,
+/// against its total cap (`MAX_REVIEW_TOTAL_BYTES`) and its secret filter; that is a change of
+/// scope left to the user.
+///
 /// `files` must be the files the filter kept. The review's cache holds a side that carries a
 /// multi-line private-key block unmasked (RV22's exception), and the filter leaves that file out;
 /// indexing a skipped file would hand its bytes to every stage that resolves units, definitions
