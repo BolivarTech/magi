@@ -692,6 +692,9 @@ impl<'a> Gate<'a> {
         // a finding whose every pair is withheld leaves `unfiltered` with that pair's cause.
         // MAGI FIX (MS3 §6 loop2): RV22 amended masks a one-line secret at the state's egress
         // instead of withholding the pair; only a private-key block still withholds it.
+        // The first withheld pair's cause is the one reported, on purpose: RV10 names "that
+        // pair's cause" in the singular, and one cause already tells the finding was not fully
+        // judged; a second cause (another pair over `max_state_bytes`) is not listed.
         let mut withheld = None;
         let states: Vec<Value> = (0..asked)
             .filter_map(|i| match self.sendable(gate_state_of(finding, i, code)) {
