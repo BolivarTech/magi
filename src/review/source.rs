@@ -1102,6 +1102,21 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_side_holding_a_secret_split_by_a_nul_is_held_as_raw_secret() {
+        // [MAGI S6 MS3 loop6, R6a Caspar] A NUL inside a token (`ghp_\0AAAA…`) ends the token's
+        // tail, so no pattern matches the side and it was not held as raw secret: once released
+        // a later read served it raw. A binary side holding any pattern's prefix now is one.
+        let split = b"x\0ghp_\0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n".to_vec(); // allow-secret-scan
+        assert!(
+            find_secret(&String::from_utf8_lossy(&split)).is_none(),
+            "precondition: no whole pattern matches"
+        );
+        assert!(held_side(Some(split), MAX_MASKED_SIDE_BYTES).raw_secret);
+        let clean = b"\x7fELF\0\0\x01plain bytes".to_vec();
+        assert!(!held_side(Some(clean), MAX_MASKED_SIDE_BYTES).raw_secret);
+    }
+
+    #[test]
     fn a_released_side_held_raw_for_any_reason_or_raw_on_its_next_read_is_refused() {
         // [MAGI S6 MS3 loop5, R6a Caspar] Only a key block was withheld at release: a side held
         // raw because it is binary (a NUL stops masking) or too dense to mask came back raw on a
