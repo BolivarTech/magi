@@ -1209,12 +1209,17 @@ impl ProductionReviewRunner {
     /// database, the reviewed revision is returned whatever happened to the documentation, so a
     /// revision review records its history (RV08) with or without an embedder.
     ///
-    /// It runs before `run_review` re-checks the approved plan and digest, and so before a
-    /// review that changed since its approval is refused: the documentation is part of the
-    /// preparation, which must end before the review's clock starts, and that check lives inside
-    /// `run_review`. The cost of a refused review is bounded by [`REINDEX_TIMEOUT_SECS`], nothing
-    /// is sent to the trio, every chunk has passed the secret detector before any embedding, and
-    /// what was indexed is reused by the next review of the same revision.
+    /// [`CodeReviewRunner::run`] re-plans and compares with the approved plan and digest before
+    /// calling this, so a review that changed since its approval is refused before any embedding
+    /// (`a_review_whose_content_changed_since_the_approval_sends_nothing_to_the_embedder`).
+    /// `run_review` checks once more; content that moves in the short window between the two
+    /// checks is refused there after the indexing, a cost bounded by [`REINDEX_TIMEOUT_SECS`]:
+    /// nothing is sent to the trio, every chunk passed the secret detector before any embedding,
+    /// and what was indexed is reused by the next review of the same revision.
+    ///
+    /// A working-tree review lists the tree here and again for the review (and computes the
+    /// ignored paths twice): local git calls, bounded and counted in `prep_ms`, kept apart so the
+    /// documentation side never shares state with the reviewed side.
     ///
     /// [`CodeReviewRunner::run`] checks the budget ([`precheck_budget`]) before calling this, so
     /// a review refused for its `--timeout` never reaches the embedder; this duration is still
@@ -1439,6 +1444,23 @@ impl CodeReviewRunner for ProductionReviewRunner {
                     self.parts.retry_disabled,
                     outbound_prep_reserve_secs(plan.batches, calls_embedder),
                 )?;
+            }
+            // MAGI FIX (MS3 §6 loop4): the approved plan is checked again here, before the
+            // documentation indexing calls the embedder, so a review refused because its content
+            // moved since the approval sends nothing out (`run_review` checks once more).
+            if plan.batches > 0 {
+                if let Some(approved) = plan.digest.as_deref() {
+                    let now = self.plan(&plan.input)?;
+                    if now.batches != plan.batches {
+                        return Err(ReviewError::PlanChanged {
+                            approved: plan.batches,
+                            now: now.batches,
+                        });
+                    }
+                    if now.digest.as_deref() != Some(approved) {
+                        return Err(ReviewError::ContentChanged);
+                    }
+                }
             }
             let input = path_input(&self.workspace, plan.input);
             // The documentation is prepared first, before the review clock; its duration is the
