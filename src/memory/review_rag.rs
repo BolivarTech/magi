@@ -112,7 +112,9 @@ pub struct StoreRag<'a> {
     pub history: Option<&'a ReviewHistoryStore>,
     /// The review's lexical index.
     pub index: &'a LexicalIndex,
-    /// The review's content source.
+    /// The review's content source: the review's `CachedSource`, whose sides are held masked,
+    /// so every unit, definition and caller is built masked
+    /// (`a_secret_outside_the_changed_lines_reaches_every_code_context_item_masked`).
     pub sources: &'a dyn ContentSource,
     /// The language extractors.
     pub registry: &'a LanguageRegistry,

@@ -10,6 +10,18 @@
 //! [`ContextKind`]): the batch's code, its containing units, definitions and callers,
 //! documentation, history. What does not fit the batch budget is cut from the end and named; the
 //! containing unit is never cut, so a unit that cannot fit is a typed error.
+//!
+//! # Secrets (RV22)
+//!
+//! The units, definitions and callers are read from the `sources` they are given, and the
+//! pipeline gives the review's `CachedSource`: it holds every text side with each one-line secret
+//! masked before any stage reads it, and refuses a side the filter left out for a private-key
+//! block. So these items are masked when they are built, and the text charged to the budget is the
+//! masked text (pinned by
+//! `a_secret_outside_the_changed_lines_reaches_every_code_context_item_masked` in
+//! `memory::review_rag`). Documentation is masked when it is chunked, history when it is
+//! retrieved, and the doc query in [`doc_search_query`]; the pipeline's egress pass over every
+//! item is a backstop on top of that.
 
 use std::collections::{HashMap, HashSet};
 
