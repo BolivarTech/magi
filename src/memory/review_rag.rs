@@ -1458,6 +1458,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validated_history_cut_at_its_bound_is_declared() {
+        // [MAGI S6 MS3 loop4, R3 Balthasar] RV07 declares what was cut: past
+        // MAX_HISTORY_PER_BATCH the newest entries are kept and the cut is named.
+        use crate::memory::review_history::MAX_HISTORY_PER_BATCH;
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let entries: Vec<HistoryEntry> = (0..=MAX_HISTORY_PER_BATCH)
+            .map(|i| attended(&format!("h{i}"), "fine"))
+            .collect();
+        f.history.record(&entries).expect("record");
+        for e in &entries {
+            f.history
+                .update_status(&e.id, HistoryStatus::Attended)
+                .expect("status");
+        }
+        let a = f
+            .rag(true)
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            a.trimmed.contains(&(
+                ContextKind::History,
+                format!(
+                    "more than MAX_HISTORY_PER_BATCH ({MAX_HISTORY_PER_BATCH}) validated \
+                     entries on these files: the newest kept"
+                )
+            )),
+            "{:?}",
+            a.trimmed
+        );
+    }
+
+    #[tokio::test]
     async fn a_history_entry_quoting_a_secret_reaches_the_context_masked() {
         // [MAGI S6 MS3 loop1, R2 all three] RV22 amended lists history among the egress points
         // that mask, not omit: each entry stays, its one-line secret masked in title and detail.
