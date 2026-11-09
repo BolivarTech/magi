@@ -509,6 +509,29 @@ mod tests {
     }
 
     #[test]
+    fn a_validated_entry_goes_back_to_pending_once_head_is_the_reviewed_commit_again() {
+        // [MAGI S6 MS3 loop5, R3 Caspar] RV08: with no commit after the reviewed one there is
+        // no signal, and the entry is pending. Attended after c1 -> c2, then HEAD reset to c1:
+        // it stayed attended and kept being served as validated context. That answer is
+        // definitive (git resolved HEAD to the reviewed commit), unlike a git that failed.
+        for status in [HistoryStatus::Attended, HistoryStatus::WeakReject] {
+            let mut done = entry(Some(5));
+            done.status = status;
+            let git = FakeGit::from(&[
+                ("merge-base --is-ancestor c1 HEAD", Ok("")),
+                (DIFF_C1_HEAD, Ok("")),
+                (HEAD_IS_C2, Ok("c1\n")),
+            ]);
+            let (updates, _) = reclassify_then_record(&[done], &[], "HEAD", &git);
+            assert_eq!(
+                updates,
+                vec![("i".to_string(), HistoryStatus::Pending)],
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
     fn no_signal_never_downgrades_a_validated_entry() {
         // [CP2 MS3 loop 14 (pasada final)] A failing git classifies Pending; an Attended entry keeps its status.
         let mut done = entry(Some(5));
