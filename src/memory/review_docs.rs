@@ -332,11 +332,10 @@ impl ReviewDocStore {
             if !known.insert(chunk.hash.as_str()) {
                 continue;
             }
-            let stored: Option<Vec<u8>> = if rebuilt {
-                None
-            } else {
-                optional(lookup.query_row(params![chunk.hash, self.index_id], |r| r.get(0)))?
-            };
+            // MAGI FIX (MS3 §6 loop4): a rebuild wipes only foreign rows, so this identity's
+            // stored vectors are still reusable (the lookup is filtered by index_id).
+            let stored: Option<Vec<u8>> =
+                optional(lookup.query_row(params![chunk.hash, self.index_id], |r| r.get(0)))?;
             match stored {
                 Some(blob) => {
                     reusable.insert(chunk.hash.clone(), blob);
