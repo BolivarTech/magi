@@ -702,10 +702,15 @@ impl ContentSource for RevisionSource<'_> {
 /// cache, so a file is read once per side and every stage sees the bytes the filter scanned,
 /// even if the file changes on disk meanwhile. A text side is held with each one-line secret
 /// masked, line breaks kept (RV22; [`ContentSource::masked`] says what was masked). The exception
-/// is a side that holds a multi-line private-key block: it is held unmasked, and safety comes from
-/// the filter leaving its file out, so every later stage (index, units, definitions, callers, the
-/// gate) must read only files the filter kept; once the filter released such a side, a read of it
-/// is refused ([`ReviewError::EgressSecret`]), so the rule holds mechanically. An `Err` is never kept, and the filter releases
+/// is a side held raw with a secret in it (a multi-line private-key block, a text too dense to
+/// mask, a binary side): safety comes from the filter leaving its file out, and the cache
+/// enforces it. A released side that was, or on a later read would be, held raw with a secret is
+/// refused ([`ReviewError::EgressSecret`]); a side withheld at its release stays refused even if
+/// the file later loses the header that made it recognisable (its body matches no pattern). Once
+/// the filter sealed the cache ([`ContentSource::seal`]), no such side is served to any stage,
+/// read by the filter or not, so a stage reading beyond the kept files cannot get one either. What
+/// no pattern recognises (a key body with no header anywhere in the file) is beyond any of these
+/// checks, as it is beyond the detector. An `Err` is never kept, and the filter releases
 /// every side of a file it leaves out that no kept file was scanned with
 /// ([`ContentSource::release`]), so the cap and the memory count only
 /// what is reviewed and no skipped secret stays held. The bytes held are
