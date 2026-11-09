@@ -475,7 +475,7 @@ S49 covers a secret in a file's NAME; these cover its CONTENT.
 | Id | Invariant | Without its environment |
 |---|---|---|
 | S53 | `code-review rv22keyed` over one Rust file whose content holds a single-line toy key exits 0 and prints JSON in which `code_review.masked` is exactly `[{path: rv22keyed/keyed.rs, cause: secret, pattern: anthropic-key}]` with `masked_unlisted` 0, `code_review.skipped` is empty with `skipped_unlisted` 0 (the file was reviewed, not left out), and the raw key appears in neither stdout, stderr nor the run log | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
-| S54 | `code-review rv22pem` over a directory holding only a toy PEM private-key block exits 2, stderr says nothing to review and its omission list is exactly `rv22pem/server.pem (secret)`, and no body line of the block appears in stdout, stderr or the run log | none: R19 reaches no model and a hang is a `FAIL` |
+| S54 | `code-review rv22pem` over a directory holding only a toy PEM private-key block exits 2, stderr says nothing to review and its omission list is exactly `rv22pem/server.pem (secret)`, and no line of the block, its `BEGIN` and `END` lines included, appears in stdout, stderr or the run log | none: R19 reaches no model and a hang is a `FAIL` |
 
 The `<redacted: anthropic-key>` marker goes to the model only, so the harness reads the pattern name the
 product publishes instead. S53's leak check reads the process's outputs (stdout, stderr, the run log);
@@ -498,6 +498,21 @@ degradation. What S55 observes is that the embedder answered the review and no i
 retrieved chunk was relevant is the model side and is never asserted. A history the review would retrieve
 needs a chain of revision reviews, which no smoke run makes, so it stays in the unit suite. S55 costs no run
 of its own: it reads R18.
+
+**RV08 is not observed end to end, declared.** Every smoke review is a working-tree review in a fresh
+workspace, with no commit of its own, and RV08 records no history for a review without a commit; so the
+history the review records, the history it serves back, the re-gate of a validated entry and the encrypted
+history table are never exercised against the release binary. Observing them would need run machinery the
+harness does not have (plant, commit, review, commit again, review again). They are covered by the unit
+suite (`record_review_*`, `validated_history_*`, `a_history_entry_quoting_a_secret_reaches_the_context_masked`)
+and the gap stays open beside the premortem's history gaps (PM-MS3-2: the history measured only in real use).
+
+**Exact strings, on purpose.** S52 and S55 compare the product's trimmed labels (`index unavailable`, `the
+embedder did not answer`) and S49 and S53 its redacted path and masked entry shapes exactly: a reworded label
+or a new field fails SMOKE loudly instead of passing for the wrong reason. `RagDeclarationSyncTests` reads the
+labels from `src/memory/review_rag.rs`, so a rename there fails the harness's own tests first; change a label
+or a shape together with these scenarios.
+
 **Cost.** R18 is one batch by the real trio plus the gate over a four-line file, like R17: harness
 timeout 900 s, `TRIO_RUNS_MEASURED_S["R18"]` carries 300 s provisionally and has not been measured. R19
 never reaches a model.
