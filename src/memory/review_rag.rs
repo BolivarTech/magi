@@ -637,6 +637,11 @@ fn query_reserve_secs(batches: usize) -> u64 {
 /// the documentation indexing ([`REINDEX_TIMEOUT_SECS`]) and one query embedding per batch.
 /// A review with no store or no embedder calls no one and reserves nothing.
 ///
+/// It counts each bound whole, not a typical latency (a query embedding answers in about a
+/// second against its 30 s bound), so a many-batch review under a tight `--timeout` can be
+/// refused though it would have fit: the fail-closed direction of RV06 (a refused review sends
+/// no byte out), declared, not a defect.
+///
 /// This is the reserve of the runner's check, made before the probe and the indexing. The
 /// pipeline checks again after them with [`ReviewRag`]'s `outbound_reserve_secs`, which keeps
 /// only the query embeddings still to come; both count those with the same `query_reserve_secs`,
