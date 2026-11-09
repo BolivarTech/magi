@@ -1720,6 +1720,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_hit_whose_row_vanished_after_loading_is_skipped_not_a_failed_search() {
+        // [MAGI S6 MS3 loop4, R1 Melchior] Another process may delete a row between
+        // `load_vectors` and `search_loaded` (its clean-up); the other hits still serve.
+        let (store, _dir) = store_for_test();
+        let e =
+            FakeEmbedder::with_vectors(&[("x", vec![1.0, 0.0, 0.0]), ("y", vec![0.9, 0.1, 0.0])]);
+        store
+            .reindex(
+                &[
+                    (src("a.md", "k1"), vec![chunk("a.md", "A", "x")]),
+                    (src("b.md", "k2"), vec![chunk("b.md", "B", "y")]),
+                ],
+                &e,
+            )
+            .await
+            .expect("index");
+        let allowed: BTreeSet<DocSource> = [src("a.md", "k1"), src("b.md", "k2")].into();
+        let vectors = store.load_vectors(3, &allowed).expect("load");
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("DELETE FROM code_review_docs WHERE key = 'k1'", [])
+            .expect("delete");
+        let hits = store
+            .search_loaded(&vectors, &[1.0, 0.0, 0.0], 5)
+            .expect("the search survives a vanished row");
+        let paths: Vec<&str> = hits.iter().map(|(c, _)| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["b.md"]);
+    }
+
     /// Another model with the same dimension as the store's.
     struct OtherModelEmbedder;
     #[async_trait::async_trait]
