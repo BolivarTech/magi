@@ -9442,6 +9442,23 @@ end"
     }
 
     #[tokio::test]
+    async fn a_failed_tui_review_writes_its_error_with_its_secrets_masked() {
+        // [MAGI S6 MS3 loop5, R5 Melchior] The error line went through URL redaction alone; the
+        // tool path masks the same errors with the RV22 detector (`egress_text`).
+        let mut app = App::new_for_test();
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            Arc::new(WarningRunner { fail: true }),
+            shown_plan(),
+        );
+        let review = app.approve_code_review().expect("pending");
+        app.run_approved_code_review(review).await;
+        let all = app.messages.join("\n");
+        assert!(all.contains("cannot read"), "{all}");
+        assert!(!all.contains("ghp_AAAA"), "{all}");
+    }
+
+    #[tokio::test]
     async fn without_y_the_tui_never_starts_the_review() {
         // The pending confirmation is answered with 'c': the runner is never called and the transcript says so.
         let mut app = App::new_for_test();
