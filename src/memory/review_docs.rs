@@ -1693,6 +1693,25 @@ mod tests {
         assert_eq!(dims(&store), vec![3], "nothing written");
     }
 
+    #[tokio::test]
+    async fn an_embedder_answering_a_non_finite_vector_fails_the_reindex_and_writes_nothing() {
+        // [MAGI S6 MS3 loop4, R1 Melchior] serde_json writes NaN or infinity as `null`, so a
+        // stored non-finite vector could never be read back: every later review of its source
+        // would fail. The reindex refuses it up front instead, all or nothing.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (store, _dir) = store_for_test();
+            let e = FakeEmbedder::with_vectors(&[("y", vec![1.0, bad, 0.0])]);
+            let r = store
+                .reindex(&[(src("d.md", "k"), vec![chunk("d.md", "B", "y")])], &e)
+                .await;
+            assert!(
+                matches!(&r, Err(MemoryError::Storage(m)) if m.contains("finite")),
+                "{bad}: {r:?}"
+            );
+            assert!(dims(&store).is_empty(), "{bad}: nothing written");
+        }
+    }
+
     /// Another model with the same dimension as the store's.
     struct OtherModelEmbedder;
     #[async_trait::async_trait]
