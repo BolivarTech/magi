@@ -851,6 +851,16 @@ mod tests {
     }
 
     #[test]
+    fn the_embedder_query_prefix_is_masked_too() {
+        // [MAGI S6 MS3 loop5, R2 Caspar] Only the batch text was masked; the prefix comes from
+        // `[embedding]` operator config, and RV22 covers every byte that leaves the process.
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let q = doc_search_query(&format!("search {token}: "), "fn a() {}");
+        assert!(!q.contains(token), "{q}");
+        assert!(q.ends_with("fn a() {}"), "{q}");
+    }
+
+    #[test]
     fn a_trimmed_definition_does_not_hide_a_later_item_of_its_span_from_the_declaration() {
         // [MAGI S6 MS3 loop5, R2 Melchior] The dedup key was taken before the budget check, so a
         // definition that did not fit marked its span as seen, and a caller with the same span
