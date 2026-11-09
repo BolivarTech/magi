@@ -847,6 +847,28 @@ mod tests {
     }
 
     #[test]
+    fn a_trimmed_definition_does_not_hide_a_later_item_of_its_span_from_the_declaration() {
+        // [MAGI S6 MS3 loop5, R2 Melchior] The dedup key was taken before the budget check, so a
+        // definition that did not fit marked its span as seen, and a caller with the same span
+        // after it was dropped silently instead of being declared as trimmed.
+        let mut def = spanning(ContextKind::Definition, Some((1, 3)));
+        def.label = "def f".into();
+        let mut caller = spanning(ContextKind::Caller, Some((1, 3)));
+        caller.label = "caller f".into();
+        let a = assemble(
+            10,
+            10,
+            vec![],
+            vec![def, caller],
+            Some(vec![]),
+            Some(vec![]),
+        )
+        .expect("assembles");
+        let labels: Vec<&str> = a.trimmed.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(labels, ["def f", "caller f"]);
+    }
+
+    #[test]
     fn a_containing_unit_is_rendered_with_its_absolute_line_numbers() {
         // [T3.7-fix3] RV09 counts the unit as reviewed, so its lines carry the numbers it accepts.
         let u = spanning(ContextKind::Unit, Some((5, 7)));
