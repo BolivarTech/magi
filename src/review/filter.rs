@@ -1979,6 +1979,52 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuilt_line_that_differs_from_the_diff_beyond_its_mask_is_logged_at_warn() {
+        // [MAGI S6 MS3 loop5, R6a Caspar] The side's text replaced a body line that disagreed
+        // with it and nothing said so: a stale diff, or two revisions mixed (RV21), was papered
+        // over. The file is still reviewed from its sides; the run log now says it diverged.
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Diverged(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Diverged {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if e.metadata().target() == LOG_TARGET
+                    && *e.metadata().level() == tracing::Level::WARN
+                {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let key = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let new = format!("let k = \"{key}\";\nfn f() {{}}\n");
+        let old = "let k = 1;\nfn f() {}\n";
+        let run = |diff: &str| {
+            let warns = Diverged::default();
+            let _guard = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(warns.clone()),
+            );
+            let inner = MapSource::new(&[("a.rs", new.as_str())], &[("a.rs", old)]);
+            let src = CachedSource::new(&inner);
+            let files = vec![ReviewFile {
+                path: "a.rs".into(),
+                diff: Some(diff.to_string()),
+            }];
+            let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+                .expect("kept");
+            assert_eq!(f.kept.len(), 1);
+            warns.0.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        let agrees = format!("@@ -1,2 +1,2 @@\n-let k = 1;\n+let k = \"{key}\";\n fn f() {{}}\n");
+        assert_eq!(run(&agrees), 0, "a masked line alone is no divergence");
+        let stale = format!("@@ -1,2 +1,2 @@\n-let k = 1;\n+let k = \"{key}\";\n fn g() {{}}\n");
+        assert_eq!(run(&stale), 1, "a stale context line is");
+    }
+
+    #[test]
     fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_a_warning() {
         // [MAGI S6 MS3 loop4, R6a Balthasar] The fallback branch itself: a masked file whose diff
         // disagrees with its sides (a body line without a marker) is left out as `secret`, the
