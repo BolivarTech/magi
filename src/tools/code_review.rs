@@ -1324,9 +1324,16 @@ impl ProductionReviewRunner {
         }
     }
 
-    /// Leaves `follow` for [`CodeReviewRunner::after_report`], after what earlier reviews left.
+    /// Leaves `follow` for [`CodeReviewRunner::after_report`], after what earlier reviews left;
+    /// nothing without a review store, since there is then no history to record and no index to
+    /// clean (`without_a_database_a_review_leaves_no_follow_up_work`).
     // MAGI FIX (MS3 §6 loop3): one slot let a later review overwrite an earlier one's work.
+    // MAGI FIX (MS3 §6 loop4): without a store a follow-up has nothing to do (no history, no
+    // index); it was queued and `after_report` then dropped it unrun, hiding that invariant.
     fn leave_follow_up(&self, follow: FollowUp) {
+        if self.parts.memory.is_none() {
+            return;
+        }
         self.follow_up
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
