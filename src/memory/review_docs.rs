@@ -50,8 +50,8 @@ pub const EMBED_BATCH_ITEMS: usize = 64;
 const ALLOWED_PAIRS_PER_QUERY: usize = 400;
 
 /// The `VALUES` list of `pairs` two-parameter rows, `(?, ?), (?, ?), ...`: the one builder of
-/// the batched pair queries ([`ReviewDocStore::allowed_vectors`], [`ReviewDocStore::load_chunks`]),
-/// so they cannot drift apart. O(pairs).
+/// the batched pair queries ([`ReviewDocStore::allowed_vectors`], [`ReviewDocStore::load_chunks`],
+/// [`ReviewDocStore::gc`]), so they cannot drift apart. O(pairs).
 fn pair_values(pairs: usize) -> String {
     vec!["(?, ?)"; pairs].join(", ")
 }
@@ -634,8 +634,11 @@ impl ReviewDocStore {
     /// `true` and leaves those sources for the next one that does. Never `DROP TABLE`: a
     /// dropped table would make the next open read this database as one from an older version.
     ///
-    /// Complexity: O(stored sources) with one pair of deletes per doomed source; `live` is
-    /// only probed, so no SQL parameter limit applies.
+    /// Complexity: O(stored sources) with one pair of deletes per [`ALLOWED_PAIRS_PER_QUERY`]
+    /// doomed sources; `live` is only probed, so no SQL parameter limit applies to it. Each
+    /// delete of `code_review_docs` by `(path, key)` scans that table: its primary key is
+    /// `(key, chunk_hash)`; at the documented bound ([`magi_rs::review::docs::MAX_DOC_CHUNKS`]
+    /// per review) a scan per batch is milliseconds, so no second index is kept.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if a statement fails (nothing is deleted then).
@@ -669,17 +672,18 @@ impl ReviewDocStore {
                     && !(keep_worktree_keys && s.key.starts_with(WORKTREE_KEY_PREFIX))
             })
             .collect();
-        for s in &doomed {
-            tx.execute(
-                "DELETE FROM code_review_docs WHERE path = ?1 AND key = ?2",
-                params![s.path, s.key],
-            )
-            .map_err(db_err)?;
-            tx.execute(
-                "DELETE FROM code_review_doc_sources WHERE path = ?1 AND key = ?2",
-                params![s.path, s.key],
-            )
-            .map_err(db_err)?;
+        // MAGI FIX (MS3 §6 loop5): one pair of deletes per batch of doomed sources, not per
+        // source.
+        for batch in doomed.chunks(ALLOWED_PAIRS_PER_QUERY) {
+            let values = pair_values(batch.len());
+            for table in ["code_review_docs", "code_review_doc_sources"] {
+                let args = batch.iter().flat_map(|s| [&s.path, &s.key]);
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE (path, key) IN (VALUES {values})"),
+                    rusqlite::params_from_iter(args),
+                )
+                .map_err(db_err)?;
+            }
         }
         tx.commit().map_err(db_err)?;
         Ok(doomed.len())
