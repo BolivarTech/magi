@@ -18,7 +18,7 @@ use super::input::{
     ReviewInput,
 };
 use super::languages::LanguageRegistry;
-use super::secrets::{display_path, find_secret, REDACTED_OPEN};
+use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets};
 use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LINK_CAUSE};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
@@ -464,8 +464,8 @@ struct SidesRead<'a> {
 ///
 /// The diff is rebuilt even when it holds no detectable secret of its own, for the same reason:
 /// a clean-looking hunk can carry the value line of a secret whose key line it does not show
-/// (the YAML case above), so only the side's masked text is trusted. The cost is the hunk's
-/// function context (see [`rebuilt_diff`]). The diff is moved in, never copied: a file
+/// (the YAML case above), so only the side's masked text is trusted; the hunk's function context
+/// is kept, masked (see [`rebuilt_diff`]). The diff is moved in, never copied: a file
 /// with no secret keeps the very string git produced. O(diff + sides).
 ///
 /// # Arguments
@@ -548,15 +548,18 @@ fn kept_verdict(
 
 /// `diff` with every content line taken from the (masked) side it shows: a context or added line
 /// from `new`, a deleted line from `old`, each at the line number its hunk header gives. Header
-/// lines and `\ No newline` markers are kept; a hunk header keeps its ranges and loses its
-/// function context (a line of the file, possibly inside a masked block). `None` when a line
-/// names a side line that does not exist, a hunk header does not parse, or a body line has no
-/// marker: the positions of the diff and the sides disagree. A body line whose text differs from
-/// its side's line at that position is replaced by the side's (masked) text, which is what git
-/// would print for these sides (a rename's stale line included). Such lines are counted when
-/// the side's line holds no mask (the difference is then not masking's), and the caller logs
-/// the count at WARN (a stale diff, two revisions mixed: RV21) and checks the rebuilt diff for
-/// secrets again. The diff's header lines (`diff --git`,
+/// lines and `\ No newline` markers are kept; a hunk header keeps its ranges and its function
+/// context, masked (a line of the file; dropped only when it opens a private-key block, whose body
+/// has nothing to mask by). `None` when a line names a side line that does not exist, a hunk
+/// header does not parse, or a body line has no marker: the positions of the diff and the sides
+/// disagree. A body line whose text differs from its side's line at that position is replaced by
+/// the side's (masked) text, which is what git would print for these sides (a rename's stale line
+/// included). Such a line is counted unless masking the diff's own line gives the side's line
+/// (the difference is then the mask's, and nothing else), and the caller logs the count at WARN (a
+/// stale diff, two revisions mixed: RV21) and checks the rebuilt diff for secrets again
+/// (`a_rebuilt_hunk_keeps_its_function_context_masked_and_counts_every_unexplained_difference`).
+/// A masked file is thus reviewed through the diff git printed, with the masks the sides carry
+/// and nothing else changed, unless the diff and the sides disagree (counted). The diff's header lines (`diff --git`,
 /// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
 /// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
 /// cannot be masked and still name its file). O(diff + sides).
@@ -587,6 +590,13 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
         if line.starts_with(HUNK_START) {
             let (header, old_start, new_start) = hunk_header(line)?;
             out.push_str(header);
+            // MAGI FIX (MS3 §6 loop6): the function context is a line of the file; it is kept,
+            // masked, instead of dropped (R6a Melchior). One that opens a key block is dropped:
+            // a key's body has no pattern to mask by.
+            let context = line.get(header.len()..).unwrap_or_default();
+            if !holds_key_block(context) {
+                out.push_str(&mask_secrets(context));
+            }
             next_old = old_start.saturating_sub(1);
             next_new = new_start.saturating_sub(1);
             in_hunk = true;
@@ -602,7 +612,10 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
                 '-' => ('-', take(&old_lines, &mut next_old)?),
                 _ => return None,
             };
-            if line.get(1..) != Some(text) && !text.contains(REDACTED_OPEN) {
+            // MAGI FIX (MS3 §6 loop6): a difference counts unless masking the diff's own line
+            // gives the side's; a mask on the side's line no longer excused any difference.
+            let shown = line.get(1..).unwrap_or_default();
+            if shown != text && mask_secrets(shown) != text {
                 diverged = diverged.saturating_add(1);
             }
             out.push(marker);
