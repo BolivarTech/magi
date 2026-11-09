@@ -942,7 +942,12 @@ fn to_json<T: serde::Serialize>(value: &T, what: &str) -> Value {
 }
 
 /// `text` as the report may write it: every credential in an embedded URL redacted, then every
-/// secret the RV22 detector names masked.
+/// secret the RV22 detector names masked. A private-key block in model text is masked whole,
+/// from its header through its END line or, with none, to the end of the text, so none of its
+/// body lines (which match no pattern of their own) is written in either form
+/// (`a_private_key_block_in_model_text_leaves_no_body_line_in_either_form`). A body line quoted
+/// without its header cannot be recognised by any pattern: that limit is RV22's, stated in the
+/// README.
 // MAGI FIX (S6 loop 6): the report is an egress point of its own (REQ-RV22), so it runs the
 // product's detector instead of relying on the caller's `egress_safe`.
 fn redacted(text: &str) -> String {
@@ -1784,6 +1789,53 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing `{needle}` in:\n{text}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_private_key_block_in_model_text_leaves_no_body_line_in_either_form() {
+        // [MAGI S6 MS3 loop5, R6b Balthasar] A key body matches no pattern of its own; the
+        // report's backstop (`redacted`, `mask_secrets`) masks a block from its header through
+        // its END line, and an open block to the end of the text, so no body line is written,
+        // whether the block sits in a detail, spans lines of a title or has no END line.
+        let begin = concat!("-----", "BEGIN ", "OPENSSH PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "OPENSSH PRIVATE KEY-----");
+        let body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB";
+        let block = format!("{begin}\n{body}\n{body}\n{end}");
+        let f = serde_json::json!([{"severity":"warning","title":"t","detail":"d","file":"a.rs","line":1}]);
+        let report = real_report([f.clone(), f, serde_json::json!([])]).await;
+        let mut c = consolidate(&[BatchOutcome {
+            batch: 0,
+            agents: report.agents.clone(),
+            answered: report.agents.iter().map(|a| a.agent).collect(),
+        }])
+        .expect("consolidates");
+        c.findings[0].details = vec![format!("the key:\n{block}\nends here")];
+        c.findings[0].titles = vec![format!("open {begin}\n{body}")];
+        let verdict = GateVerdict {
+            state: GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+            status: None,
+        };
+        let mut s = ReviewSummary::default();
+        s.findings.push((c.findings[0].clone(), verdict.clone()));
+        s.filtered.push((c.findings[0].clone(), verdict));
+        s.discarded.push(Discarded {
+            agent: AgentName::Melchior,
+            batch: 0,
+            finding: magi_core::schema::Finding::new(Severity::Critical, block.as_str(), "d"),
+            cause: DiscardCause::LineOutOfRange,
+            symbol: None,
+        });
+        let text = render_text(&c, &s);
+        assert!(!text.contains(body), "{text}");
+        assert!(text.contains("<redacted: "), "{text}");
+        let json = summary_json(&s).to_string();
+        assert!(!json.contains(body), "{json}");
     }
 
     #[tokio::test]
