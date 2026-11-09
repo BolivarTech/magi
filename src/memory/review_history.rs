@@ -150,10 +150,22 @@ impl ReviewHistoryStore {
                 row.id, row.status
             ))
         })?;
+        // MAGI FIX (MS3 §6 loop4): a line out of range read silently as no line.
+        let line = row
+            .line
+            .map(|l| {
+                u32::try_from(l).map_err(|_| {
+                    MemoryError::Storage(format!(
+                        "history entry `{}` has the line `{l}`, out of range",
+                        row.id
+                    ))
+                })
+            })
+            .transpose()?;
         Ok(HistoryEntry {
             id: row.id,
             file: row.file,
-            line: row.line.and_then(|l| u32::try_from(l).ok()),
+            line,
             reviewed_commit: row.reviewed_commit,
             title,
             detail,
