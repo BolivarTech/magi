@@ -1835,6 +1835,32 @@ mod tests {
     }
 
     #[test]
+    fn past_the_ref_cap_the_clean_up_is_skipped_even_when_every_ref_shares_one_commit() {
+        // [MAGI S6 MS3 loop6, R1 Caspar] RV19 bounds the references, not the distinct commits:
+        // sixty-five refs at one commit cost one listing, and the clean-up is still skipped.
+        let refs = "h1\n".repeat(MAX_GC_REFS + 1);
+        let at_cap = "h1\n".repeat(MAX_GC_REFS);
+        let git = |refs: &str| {
+            TableGit(vec![
+                ("rev-parse --verify HEAD^{commit}", b"h1\n".to_vec()),
+                (
+                    "for-each-ref --format=%(objectname) refs/heads refs/tags",
+                    refs.as_bytes().to_vec(),
+                ),
+                ("ls-tree -r -z h1", b"100644 blob k1\tREADME.md\0".to_vec()),
+            ])
+        };
+        assert_eq!(
+            live_doc_sources(&git(&refs), &|_: &str| true).expect("ok"),
+            None
+        );
+        let live = live_doc_sources(&git(&at_cap), &|_: &str| true)
+            .expect("ok")
+            .expect("at the cap the clean-up runs");
+        assert_eq!(live.len(), 1, "one listing for the shared commit");
+    }
+
+    #[test]
     fn an_unborn_head_contributes_nothing_and_is_not_an_error() {
         // [CP2 MS3 loop 13] A repository with no commit yet: rev-parse fails, no refs, an empty live set.
         let git = TableGit(vec![(
