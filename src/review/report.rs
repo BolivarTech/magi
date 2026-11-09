@@ -130,7 +130,15 @@ pub struct ReviewSummary {
     /// Whether documentation and history were left out because the run opened no database
     /// (`--no-memory`).
     pub without_memory: bool,
-    /// Context items left out because the secret detector matched them (REQ-RV22).
+    /// Context items left out because the secret detector matched them (REQ-RV22), as the
+    /// pipeline counts them (`prepare_contexts`): an item holding a private-key block (RV22's
+    /// exception), one whose path quotes a secret (a path cannot be masked and still name its
+    /// file), one in which masking left a match or whose mask outgrew what the budget charged,
+    /// plus those the context source withheld itself. An item holding a one-line secret is not
+    /// counted here: it is sent masked and declared in [`Self::masked`] (RV22 amended;
+    /// pipeline tests `a_context_item_quoting_a_one_line_secret_reaches_the_prompt_masked` and
+    /// `a_context_item_whose_mask_would_outgrow_its_charge_is_withheld`). This module only
+    /// writes the count it is given.
     pub context_withheld: usize,
     /// `(file, line)` of the findings whose line names no line of the reviewed revision: one
     /// whose number can only be a removed line (read on the old side only). A number that is
@@ -965,7 +973,9 @@ fn listed(text: &str) -> String {
 
 /// `base`, or `base (2)`, `base (3)`, ... : the first spelling `taken` does not hold yet. Two keys
 /// that redact alike (two model names holding the same secret pattern) stay two fields.
-/// O(collisions · log size of `taken`).
+/// O(collisions · log size of `taken`). Public because a second module uses it, not for its
+/// doctest: the agent tool's own JSON masking (`tools::code_review`) keeps colliding keys the
+/// same way.
 ///
 /// # Arguments
 /// * `taken` - The object the key goes into.
