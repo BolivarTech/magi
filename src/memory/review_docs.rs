@@ -49,6 +49,13 @@ pub const EMBED_BATCH_ITEMS: usize = 64;
 /// the 999-parameter limit of older SQLite builds.
 const ALLOWED_PAIRS_PER_QUERY: usize = 400;
 
+/// The `VALUES` list of `pairs` two-parameter rows, `(?, ?), (?, ?), ...`: the one builder of
+/// the batched pair queries ([`ReviewDocStore::allowed_vectors`], [`ReviewDocStore::load_chunks`]),
+/// so they cannot drift apart. O(pairs).
+fn pair_values(pairs: usize) -> String {
+    vec!["(?, ?)"; pairs].join(", ")
+}
+
 /// What one [`ReviewDocStore::reindex`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReindexStats {
@@ -563,7 +570,7 @@ impl ReviewDocStore {
         let c = self.locked_conn();
         let mut out = Vec::new();
         for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
-            let values = vec!["(?, ?)"; batch.len()].join(", ");
+            let values = pair_values(batch.len());
             let sql = format!(
                 "SELECT key, chunk_hash, embedding_blob FROM code_review_docs \
                  WHERE index_id = ? AND dim = ? AND (path, key) IN (VALUES {values})"
@@ -597,7 +604,7 @@ impl ReviewDocStore {
         let c = self.locked_conn();
         let mut out = BTreeMap::new();
         for batch in wanted.chunks(ALLOWED_PAIRS_PER_QUERY) {
-            let values = vec!["(?, ?)"; batch.len()].join(", ");
+            let values = pair_values(batch.len());
             let sql = format!(
                 "SELECT key, chunk_hash, path, section_blob, text_blob FROM code_review_docs \
                  WHERE (key, chunk_hash) IN (VALUES {values})"
