@@ -2153,6 +2153,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_revision_source_git_lists_but_cannot_give_back_degrades_the_documentation() {
+        // [MAGI S6 MS3 loop4, R2 Caspar] U29: the revision's index cannot be completed, so the
+        // review serves no documentation (declared) rather than a partial set.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let rev = TwoSides {
+            new: vec![("a.rs", "/// REVIEWED-COMMENT\nfn a() {}\n")],
+            old: vec![],
+        };
+        let prep = prepare_docs(
+            &f.docs,
+            Some(&CommitGit(true)),
+            Some("c1"),
+            &rev,
+            &[],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.docs_unavailable, "{:?}", prep.doc_sources);
+    }
+
+    #[tokio::test]
     async fn a_working_tree_review_reads_only_the_files_that_can_hold_documentation() {
         // [Loop1 r2, Minor 1] Only Markdown doc sources and the languages whose doc comments are
         // chunked (`.rs`, `.py`) can yield a chunk: a Java file has an extractor but no doc
