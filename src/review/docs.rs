@@ -12,6 +12,15 @@
 //! A documentation source is identified by [`DocSource`] (path plus the key of its content), which
 //! lets the index serve each reviewed revision exactly its own documentation.
 //!
+//! # Limits of line-based extraction
+//!
+//! Doc comments are found line by line, without a lexer, so the cut is bounded but not exact: a
+//! `///` line inside a plain `/* */` comment or a string literal is taken as documentation, a
+//! `def` line inside a Python triple-quoted string can yield a chunk of its own, and a Python
+//! header whose default value holds an odd number of quotes inside a triple-quoted string hides
+//! the docstrings after it in that file. Each case changes only which text is retrieved: every
+//! chunk is still masked and netted for secrets, and malformed input never panics.
+//!
 //! # No panics
 //!
 //! The module inherits the lints of [`crate::review`]: every read goes through `.get()` and
