@@ -1998,6 +1998,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_review_touches_an_entry_whose_status_did_not_change() {
+        // [MAGI S6 MS3 loop4, R3 Melchior] `due()` promises that an entry that never resolves
+        // goes to the back of the queue; that holds only because every entry checked is
+        // touched, changed or not. A git that cannot answer leaves the entry pending.
+        struct NoGit;
+        impl GitCommand for NoGit {
+            fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                Err(ReviewError::Git(a.join(" ")))
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let pending = HistoryEntry {
+            status: HistoryStatus::Pending,
+            ..attended("stuck", "d")
+        };
+        f.history.record(&[pending]).expect("seed");
+        record_review(&f.history, &[], "HEAD", &NoGit, 4242, BUDGET).expect("ok");
+        let all = f.history.all().expect("all");
+        assert_eq!(all.first().map(|e| e.status), Some(HistoryStatus::Pending));
+        let checked: i64 = f
+            .history
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .query_row(
+                "SELECT checked_at FROM code_review_history WHERE id = 'stuck'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(checked, 4242, "an unchanged entry is touched too");
+    }
+
+    #[tokio::test]
     async fn record_review_reports_the_backlog_left_beyond_the_cap() {
         // [CP2 MS3 loop 6] What the INFO carries: due entries this review did not reach.
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
