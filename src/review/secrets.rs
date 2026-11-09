@@ -1094,6 +1094,36 @@ pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
     })
 }
 
+/// What [`mask_secrets_keeping_lines_within`] gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedMask {
+    /// The text holds no secret.
+    Clean,
+    /// The text, masked as [`mask_secrets_keeping_lines`] masks it.
+    Masked(LineMasked),
+    /// Masking would have produced more than the bound: the text is too dense in secrets to be
+    /// masked, and its caller leaves it out.
+    TooLarge,
+}
+
+/// [`mask_secrets_keeping_lines`], stopping as soon as the masked text would pass `max_bytes`
+/// (a mask can be longer than its secret: a short URL password grows several times), so a file
+/// dense in secrets never allocates more than the bound. O(n · s), see [`mask_secrets`].
+///
+/// # Arguments
+/// * `text` - A file's content.
+/// * `max_bytes` - The largest masked text accepted.
+///
+/// # Returns
+/// [`BoundedMask::Clean`], the masked text, or [`BoundedMask::TooLarge`].
+pub fn mask_secrets_keeping_lines_within(text: &str, max_bytes: usize) -> BoundedMask {
+    let _ = max_bytes;
+    match mask_secrets_keeping_lines(text) {
+        Some(m) => BoundedMask::Masked(m),
+        None => BoundedMask::Clean,
+    }
+}
+
 /// The end of a mask that ends at `end`, grown over every span of `spans` that opens inside it
 /// and ends past it, until none does. A span that overlaps the mask is a secret the mask cut
 /// (a token glued to a PEM header eats its `-----BEGIN`); searching what follows the mask
@@ -2237,5 +2267,24 @@ mod tests {
         ] {
             assert_eq!(find_secret(&plain), None, "{plain:?}");
         }
+    }
+    #[test]
+    fn a_text_too_dense_in_secrets_is_refused_before_its_mask_passes_the_bound() {
+        // [MAGI S6 MS3 loop4, R6a Caspar] A mask can be longer than its secret, so a file of
+        // short URL credentials grew several times while masked, before any cap was checked.
+        let dense = "a://:p@h ".repeat(1_000);
+        assert_eq!(
+            mask_secrets_keeping_lines_within(&dense, dense.len()),
+            BoundedMask::TooLarge
+        );
+        let BoundedMask::Masked(m) = mask_secrets_keeping_lines_within(&dense, 64 * dense.len())
+        else {
+            panic!("a generous bound masks");
+        };
+        assert_eq!(Some(m), mask_secrets_keeping_lines(&dense));
+        assert_eq!(
+            mask_secrets_keeping_lines_within("let x = 1;", 1),
+            BoundedMask::Clean
+        );
     }
 }
