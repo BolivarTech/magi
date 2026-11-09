@@ -301,6 +301,12 @@ impl ReviewHistoryStore {
     /// parameter limit (a mass rename touches thousands); each batch reads at most one row past
     /// the bound, raw.
     ///
+    /// The text comes back decrypted, as it was stored: already masked
+    /// (`entries_from_review` masks it before it is recorded,
+    /// `a_finding_is_stored_with_its_secrets_masked_and_one_quoting_a_key_block_is_not_stored`), and
+    /// masked again by the context read before it can leave the process
+    /// (`a_history_entry_quoting_a_secret_reaches_the_context_masked`, `memory::review_rag`).
+    ///
     /// Complexity: O(files + (file batches x bound) log) raw rows, O(bound) decryptions.
     ///
     /// # Errors
