@@ -636,6 +636,27 @@ mod tests {
     }
 
     #[test]
+    fn a_reviewed_commit_that_is_not_a_sha_stays_pending_never_a_weak_reject() {
+        // [MAGI S6 MS3 loop4, R3 Melchior] The prefix comparison is exact only for a SHA. A
+        // symbolic name (a hand-edited row, a future caller) compared unequal to HEAD's SHA and
+        // read as a later commit: unvalidated context served as validated. Now: no signal.
+        let full = "abc1234def5678901234567890123456789abcde";
+        let git = FakeGit::from(&[
+            ("merge-base --is-ancestor main HEAD", Ok("")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative main HEAD -- a.rs",
+                Ok(""),
+            ),
+            (HEAD_IS_C2, Ok(full)),
+        ]);
+        let symbolic = HistoryEntry {
+            reviewed_commit: "main".into(),
+            ..entry(Some(5))
+        };
+        assert_eq!(classify(&symbolic, "HEAD", &git), HistoryStatus::Pending);
+    }
+
+    #[test]
     fn a_vanished_commit_leaves_the_entry_pending() {
         let git = FakeGit::from(&[(
             "merge-base --is-ancestor c1 HEAD",
