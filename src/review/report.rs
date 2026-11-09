@@ -65,6 +65,11 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// same base as the `[batch k]` labels of the consolidated summaries. In the JSON form the
 /// renumbering is part of each index field's type-level `Serialize` (`serialize_batch` and its
 /// siblings, declared on the field), so no pass over the serialized layout names fields.
+///
+/// Flat on purpose: each field is a top-level key of the `code_review` JSON object the README
+/// documents and the smoke harness reads (`without_memory`, `context_withheld`, `trimmed`…), so
+/// grouping fields into sub-structs would move published keys; the exhaustive `Default` keeps a
+/// new field from being forgotten. A regrouping is a schema change, decided as one.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReviewSummary {
     /// Findings per gate state (`kept`, `filtered`, `low_confidence`, `unfiltered`).
@@ -159,7 +164,10 @@ impl ReviewSummary {
     ///
     /// # Returns
     ///
-    /// A copy of those findings, in order. O(findings · log off_revision).
+    /// A copy of those findings, in order. O(findings · log off_revision). Each lookup builds a
+    /// `(path, line)` key, one short path copy per finding beside the copy of the finding itself
+    /// that the result holds anyway; a linear scan of `off_revision` would save it and lose the
+    /// logarithm when the removed-line findings are many.
     // MAGI FIX (Loop1 r1, M2): removed-line findings were anchored with their old-file number.
     pub fn anchored_findings(&self) -> Vec<(ConsolidatedFinding, GateVerdict)> {
         self.findings
