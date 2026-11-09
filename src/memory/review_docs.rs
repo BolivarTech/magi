@@ -700,7 +700,12 @@ fn optional<T>(r: rusqlite::Result<T>) -> Result<Option<T>, MemoryError> {
 /// All or nothing, on purpose: one refused chunk fails the whole reindex, so the revision runs
 /// without documentation and says so (U29: "if the index of the revision cannot be completed,
 /// that revision runs without documentation"), rather than serving a partial index that hides
-/// which source is missing. It never fires when the caller netted with `without_secrets` first.
+/// which source is missing. It never fires for the product's caller (`prepare_docs`), which
+/// withholds a source whose path matches a pattern before chunking it and nets every chunk with
+/// `without_secrets`; `without_secrets` alone nets chunks, not sources, so a caller that only
+/// netted can still pass a chunkless source with such a path, and that is refused here. Its
+/// message names the path through [`display_path`], never the matching bytes
+/// (`a_source_path_shaped_like_a_secret_is_refused_without_quoting_it`).
 fn refuse_secrets(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
     // MAGI FIX (MS3 §6 loop3): a source path is stored in clear and travels with each chunk.
     if let Some((source, _)) = sources.iter().find(|s| find_secret(&s.0.path).is_some()) {
@@ -1903,6 +1908,27 @@ mod tests {
                 assert!(dims(&store).is_empty(), "nothing written");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_source_path_shaped_like_a_secret_is_refused_without_quoting_it() {
+        // [MAGI S6 MS3 loop5, R1 Melchior] The source-path arm is the one place where bytes that
+        // match a pattern reach a message (one that can surface in the run log): it names the
+        // path through `display_path`, which redacts it, and a source with no chunk is still
+        // refused, so the path never reaches the store either.
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let path = format!("docs/{token}.md");
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let r = store.reindex(&[(src(&path, "k"), vec![])], &e).await;
+        match r {
+            Err(MemoryError::Storage(m)) => {
+                assert!(!m.contains(token), "{m}");
+                assert!(m.contains("<path redacted: "), "{m}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(e.calls(), 0);
     }
 
     /// Embeds like FakeEmbedder and records whether the DB lock was taken while it ran.
