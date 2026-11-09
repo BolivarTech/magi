@@ -70,6 +70,9 @@ pub const DOC_SOURCES: &[&str] = &["README.md", "CLAUDE.md", "docs/", "adr/"];
 /// `nomic-embed-text`.
 pub const MAX_DOC_CHUNK_BYTES: usize = 8_192;
 
+/// Bound on one chunk's section, its part number included.
+pub const MAX_DOC_SECTION_BYTES: usize = 512;
+
 /// Bound on the chunks one review indexes (its missing sources): indexing runs before the clock,
 /// so it must be bounded itself.
 ///
@@ -1154,6 +1157,29 @@ mod tests {
         );
         assert_eq!(c[0].section, "A (1)");
         assert_eq!(c[1].section, "A (2)");
+    }
+
+    #[test]
+    fn a_huge_heading_gives_every_part_a_bounded_section() {
+        // [MAGI S6 MS3 loop5, R1 Caspar] The section was copied whole into every part of its
+        // split text: a 1 MiB heading made ~128 parts carrying ~128 MiB of section (an 8 MiB
+        // file, gigabytes), each encrypted and stored again. The heading line stays whole in
+        // the body; the section that names the part is cut to a bound.
+        let heading = "h".repeat(1 << 20);
+        let c = chunk_markdown("README.md", &format!("# {heading}\nbody\n"));
+        assert!(c.len() > 100, "{}", c.len());
+        let section_bytes: usize = c.iter().map(|x| x.section.len()).sum();
+        assert!(
+            c.iter().all(|x| x.section.len() <= MAX_DOC_SECTION_BYTES),
+            "a section past the bound"
+        );
+        assert!(section_bytes <= c.len() * MAX_DOC_SECTION_BYTES);
+        assert!(c[0].section.ends_with(" (1)"), "parts stay numbered");
+        let text: String = c.iter().map(|x| x.text.as_str()).collect();
+        assert!(
+            text.contains(&heading),
+            "the heading itself is still indexed"
+        );
     }
 
     #[test]
