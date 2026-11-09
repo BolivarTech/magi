@@ -116,6 +116,17 @@ class S53Tests(unittest.TestCase):
         (path, body), = runs.review_masked_files()
         self.assertIn(runs.REVIEW_MASKED_KEY, body)
         self.assertNotIn(_KEY, path)
+        # [MAGI S6 MS3 loop6, R7b Melchior] S53 needs the path to match no secret pattern at all
+        # (a path match leaves the file out instead of masking it), not only to lack the full
+        # key: no opening of a pattern may appear in it, in any case. The openings are those of
+        # the product's table (`SECRET_PATTERNS`, `src/review/secrets.rs`) the key's family
+        # shares, plus the fixed headers and the URL authority.
+        lowered = path.lower()
+        for opening in (_KEY[:len("sk-ant-")].lower(), "sk-", "ghp_", "github_pat_", "akia",
+                        "asia", "aiza", "xox", "glpat-", "sk_live_", "rk_live_", "-----begin",
+                        "---- begin", "aws_secret", "secretaccesskey", "://"):
+            with self.subTest(opening=opening):
+                self.assertNotIn(opening, lowered)
 
 
 class S54Tests(unittest.TestCase):
