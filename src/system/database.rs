@@ -27,6 +27,14 @@ const BUSY_TIMEOUT_SECS: u64 = 5;
 /// Iterated in this deterministic order so the reported corruption is stable.
 /// `code_review_history` is user data (validated review findings); the two code-review
 /// documentation tables are a reconstructible index and stay out, like `model_capabilities`.
+///
+/// Consequence, accepted: the product never writes a doc row before the envelope, so doc rows
+/// without an envelope mean someone deleted the `vault_meta` row by hand. Such a database
+/// bootstraps a fresh data key and keeps the old doc rows (never-delete, REQ-V35: nothing is
+/// deleted at open); they no longer decrypt, so every review of their sources declares
+/// `index unavailable` and runs without documentation, never with a wrong byte, until those
+/// sources leave every ref (clean-up) or the documented purge
+/// (`DELETE FROM code_review_docs; DELETE FROM code_review_doc_sources;`) runs.
 const DATA_TABLES: [&str; 5] = [
     "sessions",
     "messages",
