@@ -929,6 +929,19 @@ class CodeReviewWithoutEmbedderTests(unittest.TestCase):
                 doc = {"consult": {"consensus": {}}, "code_review": summary}
                 self.assertIn(Outcome.FAIL, set(_outcomes("S52", _result("R17", 0, doc)).values()))
 
+    def test_s52_fails_when_a_trimmed_entry_has_no_string_label(self) -> None:
+        # [MAGI S6 MS3 loop6, R7b Caspar] the smoke README lists this FAIL path; it had no test.
+        # A valid degraded entry stands beside the malformed one, so only the malformed entry can
+        # make the assertion fail.
+        valid = {"kind": "documentation", "label": review_context.DEGRADED_LABELS[0]}
+        for entry in ({"kind": "history"}, {"kind": "documentation", "label": None},
+                      {"kind": "documentation", "label": 3}, "not an entry"):
+            with self.subTest(entry=entry):
+                doc = {"consult": {"consensus": {}},
+                       "code_review": {"without_embedder": True, "trimmed": [valid, entry]}}
+                outcome = _outcomes("S52", _result("R17", 0, doc))[review_context.S52_ASSERTIONS[2]]
+                self.assertEqual(Outcome.FAIL, outcome)
+
     def test_s52_fails_when_the_declaration_is_missing(self) -> None:
         # [MAGI S6 MS3 loop2, R7b Melchior] a missing key is shape drift, never a pass by absence.
         doc = {"consult": {"consensus": {}}, "code_review": {}}
