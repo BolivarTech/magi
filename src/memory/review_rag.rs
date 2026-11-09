@@ -460,6 +460,37 @@ impl StoreRag<'_> {
     }
 }
 
+impl StoreRag<'_> {
+    /// What a batch with no room left declares for documentation and history: `no room` for each
+    /// layer this review has, unless that layer is already out for a cause declared once on its
+    /// own (an unavailable or failed index, a down embedder, a failed history read). O(1).
+    // MAGI FIX (MS3 §6 loop1): RV07 declares what was cut, this case included.
+    // MAGI FIX (MS3 §6 loop2): an unavailable index has its own cause, never room.
+    // MAGI FIX (MS3 §6 loop4): nor for what a down embedder or a failed history read already
+    // left out, each declared once with its own cause.
+    // MAGI FIX (MS3 §6 loop5): one helper, so the next rule changes one place.
+    fn no_room_declarations(&self) -> Vec<(ContextKind, String)> {
+        let embedder_down = self.embedder_down.load(Ordering::SeqCst);
+        let docs_down =
+            self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst) || embedder_down;
+        let history_down = self.history_failed.load(Ordering::SeqCst) || embedder_down;
+        [
+            (
+                self.docs.is_some() && !docs_down,
+                ContextKind::Documentation,
+            ),
+            (
+                self.history.is_some() && !history_down,
+                ContextKind::History,
+            ),
+        ]
+        .into_iter()
+        .filter(|(declare, _)| *declare)
+        .map(|(_, kind)| (kind, NO_ROOM.to_string()))
+        .collect()
+    }
+}
+
 #[async_trait::async_trait]
 impl RagSource for StoreRag<'_> {
     /// The batch's context: containing units, definitions and callers from the review's own
@@ -508,21 +539,7 @@ impl RagSource for StoreRag<'_> {
         let (docs, history) = match (memory, self.embedder) {
             (false, _) | (true, None) => (None, None),
             (true, Some(_)) if !room => {
-                // MAGI FIX (MS3 §6 loop1): RV07 declares what was cut, this case included.
-                // MAGI FIX (MS3 §6 loop2): an unavailable index has its own cause, never room.
-                // MAGI FIX (MS3 §6 loop4): nor for what a down embedder or a failed history
-                // read already left out, each declared once with its own cause.
-                let embedder_down = self.embedder_down.load(Ordering::SeqCst);
-                let docs_down = self.docs_unavailable
-                    || self.docs_failed.load(Ordering::SeqCst)
-                    || embedder_down;
-                let history_down = self.history_failed.load(Ordering::SeqCst) || embedder_down;
-                if self.docs.is_some() && !docs_down {
-                    declared.push((ContextKind::Documentation, NO_ROOM.to_string()));
-                }
-                if self.history.is_some() && !history_down {
-                    declared.push((ContextKind::History, NO_ROOM.to_string()));
-                }
+                declared.extend(self.no_room_declarations());
                 (Some(Vec::new()), Some(Vec::new()))
             }
             (true, Some(embedder)) => {
