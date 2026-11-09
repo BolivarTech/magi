@@ -1361,17 +1361,36 @@ pub(crate) struct TuiCodeReviewCommand {
     /// The flags given that parse but that the TUI does not apply (output, log and tier
     /// flags), named in the confirmation.
     pub ignored_flags: Vec<String>,
+    /// `--no-memory`: the review runs without the review stores, as on the other surfaces.
+    pub no_memory: bool,
 }
 
 impl Default for TuiCodeReviewCommand {
-    /// A bare `/code-review`: the `HEAD` commit, no total, no ignored flag.
+    /// A bare `/code-review`: the `HEAD` commit, no total, no ignored flag, with the stores.
     fn default() -> Self {
         Self {
             input: magi_rs::review::input::ReviewInput::Commit(None),
             timeout: None,
             ignored_flags: Vec::new(),
+            no_memory: false,
         }
     }
+}
+
+/// The runner a `/code-review` command runs on: the session's, or with `--no-memory` the same
+/// runner without its review stores ([`crate::tools::code_review::CodeReviewRunner::stateless`]).
+///
+/// # Errors
+/// The stateless runner's build error: the review is refused, never run with the stores.
+fn runner_for_command(
+    cmd: &TuiCodeReviewCommand,
+    runner: Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+) -> Result<Arc<dyn crate::tools::code_review::CodeReviewRunner>, magi_rs::review::error::ReviewError>
+{
+    if cmd.no_memory {
+        let _twin = runner.stateless()?;
+    }
+    Ok(runner)
 }
 
 /// Why a line did not parse as a `/code-review` command.
@@ -1505,6 +1524,7 @@ pub(crate) fn parse_tui_code_review(
         input: crate::review_input_of(&args),
         timeout: args.timeout,
         ignored_flags,
+        no_memory: false,
     })
 }
 
@@ -4403,8 +4423,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         Ok(cmd) => {
                                             app.push_message(format!("User: {trimmed}"));
                                             match app.code_review_runner.clone() {
-                                                Some(runner) => match runner.plan(&cmd.input) {
-                                                    Ok(plan) => app.begin_code_review_confirmation(
+                                                Some(runner) => match runner_for_command(&cmd, runner)
+                                                    .and_then(|r| r.plan(&cmd.input).map(|p| (r, p)))
+                                                {
+                                                    Ok((runner, plan)) => app.begin_code_review_confirmation(
                                                         cmd, runner, plan,
                                                     ),
                                                     Err(e) => apply_response(
@@ -9366,6 +9388,64 @@ end"
     }
 
     #[test]
+    fn no_memory_is_applied_in_the_tui_by_running_without_the_review_stores() {
+        // [MAGI S6 MS3 loop6, R5 Melchior] The subcommand and the headless path drop the review
+        // stores for `--no-memory`; the TUI parsed it and named it "not applied". It is applied
+        // now: the command says so and runs on the runner's stateless twin.
+        let cmd = parse_tui_code_review("/code-review src --no-memory").expect("parses");
+        assert!(cmd.no_memory);
+        assert!(cmd.ignored_flags.is_empty(), "{:?}", cmd.ignored_flags);
+        struct WithStores(Arc<FakeTuiRunner>);
+        #[async_trait::async_trait]
+        impl crate::tools::code_review::CodeReviewRunner for WithStores {
+            fn plan(
+                &self,
+                input: &magi_rs::review::input::ReviewInput,
+            ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
+            {
+                self.0.plan(input)
+            }
+            async fn run(
+                &self,
+                plan: crate::tools::code_review::ReviewPlan,
+                budget: crate::tools::code_review::ReviewBudget,
+                c: &tokio_util::sync::CancellationToken,
+            ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
+            {
+                self.0.run(plan, budget, c).await
+            }
+            fn stateless(
+                &self,
+            ) -> Result<
+                Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
+                magi_rs::review::error::ReviewError,
+            > {
+                Ok(Some(
+                    Arc::clone(&self.0) as Arc<dyn crate::tools::code_review::CodeReviewRunner>
+                ))
+            }
+        }
+        let stateless = Arc::new(FakeTuiRunner::default());
+        let session: Arc<dyn crate::tools::code_review::CodeReviewRunner> =
+            Arc::new(WithStores(Arc::clone(&stateless)));
+        let chosen = runner_for_command(&cmd, Arc::clone(&session)).expect("runner");
+        let as_ptr =
+            |r: &Arc<dyn crate::tools::code_review::CodeReviewRunner>| Arc::as_ptr(r).cast::<()>();
+        assert_eq!(
+            as_ptr(&chosen),
+            Arc::as_ptr(&stateless).cast::<()>(),
+            "--no-memory runs on the stateless runner"
+        );
+        let with = runner_for_command(&TuiCodeReviewCommand::default(), Arc::clone(&session))
+            .expect("runner");
+        assert_eq!(
+            as_ptr(&with),
+            as_ptr(&session),
+            "without the flag, the session's"
+        );
+    }
+
+    #[test]
     fn parse_tui_code_review_reads_the_same_flags_as_the_subcommand() {
         assert!(matches!(
             parse_tui_code_review("/code-review"),
@@ -9571,7 +9651,6 @@ end"
                 "--log-dir",
                 "--auto",
                 "--full-auto",
-                "--no-memory",
                 "--structured-verdicts"
             ]
         );

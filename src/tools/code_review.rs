@@ -223,6 +223,21 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     fn after_report(&self) -> Option<PostReport> {
         None
     }
+
+    /// The same runner without the review stores, for a review asked with `--no-memory` on a
+    /// surface whose runner holds them (the TUI's): no documentation, no history read or
+    /// written, no embedder called.
+    ///
+    /// # Returns
+    /// `Ok(None)` when this runner holds no stores (it is already stateless; use it as it is),
+    /// or the stateless runner.
+    ///
+    /// # Errors
+    /// [`ReviewError::Io`] when the stateless runner cannot be built; the caller refuses the
+    /// review then, never runs it with the stores.
+    fn stateless(&self) -> Result<Option<Arc<dyn CodeReviewRunner>>, ReviewError> {
+        Ok(None)
+    }
 }
 
 /// Blocking work a review leaves for after its report: git and SQLite calls, never awaited on
@@ -3136,6 +3151,36 @@ mod tests {
         assert_eq!(rendered.json["without_memory"], true);
         assert_eq!(rendered.json["without_embedder"], false);
         assert!(warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_stateless_twin_reviews_without_the_stores_or_the_embedder() {
+        // [MAGI S6 MS3 loop6, R5 Melchior] The TUI applies `--no-memory` through this twin: it
+        // must read and write no store and call no embedder, as `--no-memory` does elsewhere.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let twin = runner
+            .stateless()
+            .expect("builds")
+            .expect("a runner with stores has a stateless twin");
+        let plan = twin.plan(&ReviewInput::File("src".into())).expect("plans");
+        let rendered = twin
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
+            .await
+            .expect("the review runs");
+        assert_eq!(rendered.json["without_memory"], true);
+        assert!(twin.after_report().is_none(), "nothing to record");
+        assert_eq!(fake.calls(), 0, "the embedder was never called");
+        assert!(
+            production_runner_with_memory(&ws, None, None)
+                .stateless()
+                .expect("ok")
+                .is_none(),
+            "a runner without stores is its own stateless runner"
+        );
     }
 
     #[tokio::test]
