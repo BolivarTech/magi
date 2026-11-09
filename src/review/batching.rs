@@ -244,7 +244,9 @@ impl BatchItem {
     /// The new-side number of old line `old` across this hunk: a line before the hunk keeps its
     /// distance to the hunk's start, a context line of the hunk has both numbers, a line after
     /// the hunk moves by the hunk's net growth; a line the hunk removed has none. Counted with
-    /// the same stepper as [`BatchItem::rendered`].
+    /// the same stepper as [`BatchItem::rendered`]. An empty side (`-5,0`, an insertion after
+    /// old line 5) starts one past the line git names, as `hunk_ranges` reads it, so that line
+    /// is before the hunk (`an_insertion_only_hunk_maps_the_line_before_it_to_itself`).
     ///
     /// # Arguments
     ///
@@ -1590,6 +1592,32 @@ mod tests {
             lines: 1,
         };
         assert_eq!(whole.new_line_of_old(1), None);
+    }
+
+    #[test]
+    fn an_insertion_only_hunk_maps_the_line_before_it_to_itself() {
+        // [MAGI S6 MS3 loop4, R4 Melchior] `@@ -5,0 +6,2 @@` inserts after old line 5. The item is
+        // built from the header as the pipeline builds it (`hunk_items`, where an empty side
+        // `s,0` starts at s + 1), so old line 5 is before the hunk and keeps its number, and
+        // old line 6 follows the two inserted lines.
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -5,0 +6,2 @@\n+x\n+y\n";
+        let items = hunk_items("a.rs", diff).expect("one hunk");
+        let [hunk] = items.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert_eq!(
+            hunk.new_line_of_old(5),
+            Some(5),
+            "the line before the insertion"
+        );
+        assert_eq!(hunk.new_line_of_old(6), Some(8), "the line after it");
+        assert_eq!(
+            hunk.hunk_change(),
+            Some(HunkChange {
+                added: vec![6, 7],
+                removed: vec![]
+            })
+        );
     }
 
     #[test]
