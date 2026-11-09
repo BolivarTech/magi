@@ -658,6 +658,34 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_line_out_of_range_is_a_storage_error_naming_the_entry() {
+        // [MAGI S6 MS3 loop4, R3 Melchior] The write path is u32-typed, so only a hand edit puts
+        // a negative or too large line in the clear column. It read as "no line" and held the
+        // entry pending forever; now it is reported, like an unknown status.
+        let (store, _tmp) = store_for_test();
+        store
+            .record(&[stored("bad", Some(3), "c1")])
+            .expect("record");
+        for line in [-5_i64, i64::from(u32::MAX) + 1] {
+            store
+                .connection_for_test()
+                .lock()
+                .expect("lock")
+                .execute(
+                    "UPDATE code_review_history SET line = ?1 WHERE id = 'bad'",
+                    [line],
+                )
+                .expect("edit");
+            let r = store.all();
+            assert!(
+                matches!(&r, Err(MemoryError::Storage(m)) if m.contains("bad") && m.contains("line")),
+                "{line}: {:?}",
+                r.as_ref().err()
+            );
+        }
+    }
+
+    #[test]
     fn validated_history_comes_in_a_stable_order_and_is_cut_at_its_bound() {
         // [MAGI S6 MS3 loop4, R3 Balthasar] The read had no ORDER BY (the trimmed tail could
         // change between identical runs) and no bound (every validated row of a file was
