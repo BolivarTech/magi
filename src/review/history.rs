@@ -385,6 +385,31 @@ mod tests {
     }
 
     #[test]
+    fn a_symbolic_reviewed_commit_gives_no_signal_even_when_its_diff_covers_the_line() {
+        // [MAGI S6 MS3 loop5, R3 Melchior, Caspar] The hexadecimal check ran only on the weak
+        // reject branch: a branch name or `HEAD~1` in a hand-edited row that resolves as an
+        // ancestor, with a diff covering the line, was marked attended against a moving ref.
+        for commit in ["main", "HEAD~1"] {
+            let mut e = entry(Some(5));
+            e.reviewed_commit = commit.into();
+            let diff = format!(
+                "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 \
+                 --relative {commit} HEAD -- a.rs"
+            );
+            let ancestor = format!("merge-base --is-ancestor {commit} HEAD");
+            let git = FakeGit::from(&[
+                (ancestor.as_str(), Ok("")),
+                (diff.as_str(), Ok("@@ -5 +5 @@\n")),
+            ]);
+            assert_eq!(
+                classify(&e, "HEAD", &git),
+                HistoryStatus::Pending,
+                "{commit}"
+            );
+        }
+    }
+
+    #[test]
     fn an_unparsable_hunk_header_leaves_the_entry_pending() {
         // [CP2 MS3 loop 6] A diff format this parser does not know never decides attended or weak_reject.
         let git = FakeGit::from(&[
