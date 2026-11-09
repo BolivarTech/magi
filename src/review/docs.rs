@@ -1784,6 +1784,18 @@ mod tests {
     }
 
     #[test]
+    fn a_symlink_blob_is_no_documentation_source() {
+        // [MAGI S6 MS3 loop6, R1 Melchior] git stores a symlink (mode 120000) as a blob whose
+        // content is the target path: a junk chunk, never documentation.
+        let out = b"120000 blob aaaa\tdocs/link.md\x00100644 blob bbbb\tdocs/real.md\0";
+        let sources = parse_ls_tree(out, &|_: &str| true).expect("parses");
+        assert_eq!(
+            sources.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+            vec!["docs/real.md"]
+        );
+    }
+
+    #[test]
     fn an_ls_tree_entry_that_does_not_parse_is_an_error_never_skipped() {
         // [RV21 D+B, 2026-10-20] A silent skip would leave a source out of the reviewed revision's set.
         assert!(matches!(
