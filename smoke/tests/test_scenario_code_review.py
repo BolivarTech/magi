@@ -122,7 +122,9 @@ def _review(batches: int = 3, findings=None, discarded=None) -> dict:
 
 
 #: R16's stderr as the release binary printed it over a workspace root holding the environment's
-#: ``.magi`` and R14's two skipped files (measured 2026-10-29).
+#: ``.magi`` and R14's two skipped files (measured 2026-10-29; the secret entry rewritten on
+#: 2026-11-06, ``29f316b3``, when T3.7 renamed R14's secret file to the key itself and the product
+#: redacts such a path: the rest of the line is the 2026-10-29 measurement).
 _ROOT_STDERR = (
     b"error: nothing to review: no reviewable file in the input; left out: "
     b".magi/.magi-rs-memory.db (ignored), .magi/logs/magi-2026-10-29.log (ignored), "
