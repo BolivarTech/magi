@@ -141,8 +141,16 @@ pub struct StoreRag<'a> {
     /// raw (pinned by `a_working_tree_review_keys_its_sources_by_their_bytes`, which asserts the
     /// redacted form and that no byte of the key is in the list).
     pub withheld_sources: Vec<String>,
-    /// Documentation paths indexed with a secret masked, with the first pattern masked in each,
-    /// returned by `masked`.
+    /// Documentation paths indexed with a secret masked **by this review**, with the first
+    /// pattern masked in each, returned by `masked`.
+    ///
+    /// A source masked when an earlier review indexed it is not in this list: the declaration
+    /// RV22 asks for is of what is sent, and it is made when its chunk is served. Every chunk
+    /// served carries its `<redacted: …>` mask (stored masked), and the pipeline declares the
+    /// file of each documentation or history item that carries one (`masked_store_item`,
+    /// `masked_documentation_and_history_are_declared_as_masked` in `review::pipeline`); a
+    /// source not served in this review sends nothing, so it needs no declaration
+    /// (`a_source_masked_by_an_earlier_review_is_served_with_its_mask`).
     pub masked_sources: Vec<(String, &'static str)>,
     /// Milliseconds the documentation preparation took, returned by `index_ms`.
     pub index_ms: u64,
@@ -1159,7 +1167,12 @@ pub async fn prepare_docs(
 
 /// One [`ReviewDocStore::reindex`] under `timeout`: `true` when it wrote, `false` (with a WARN)
 /// when it failed or did not finish. A reindex is all or nothing, so a timeout writes nothing
-/// and the next review tries the same sources again. Leaves an INFO with its duration, and the
+/// and the next review tries the same sources again. That rests on the store's contract, not on
+/// this function: `reindex` embeds first and then writes every row in **one** transaction with
+/// no `.await` inside it (its rustdoc, "all or nothing"; pinned by
+/// `a_reindex_whose_embedder_fails_leaves_the_previous_index_whole` in `memory::review_docs`), so
+/// a future dropped here is dropped before that transaction starts, and the sources stay
+/// `missing`. A store that committed per batch would break this and must change it here too. Leaves an INFO with its duration, and the
 /// fixed rebuilt line when the index changed identity.
 ///
 /// # Arguments
@@ -1241,6 +1254,12 @@ pub async fn reindex_or_degrade(
 /// # Errors
 ///
 /// [`MemoryError`] of the store, never swallowed.
+///
+/// Not one transaction, on purpose: each step is correct on its own. A reclassified entry's new
+/// status is git's evidence about that entry whether or not this review's findings are then
+/// recorded, and `touch` only moves it back in the due queue. If `record` fails, the error is
+/// returned (and logged by the caller), the review's own findings are not in the history, and
+/// nothing stored is wrong; the next review records its own findings again.
 pub fn record_review(
     history: &ReviewHistoryStore,
     findings: &[HistoryEntry],
@@ -2727,6 +2746,54 @@ mod tests {
             "{sent:?}"
         );
         assert!(sent.iter().any(|t| t.contains("fine")), "{sent:?}");
+    }
+
+    #[tokio::test]
+    async fn a_source_masked_by_an_earlier_review_is_served_with_its_mask() {
+        // [MAGI S6 MS3 loop6, R2 Caspar] A second review finds the source indexed, so its
+        // `masked_sources` is empty; what it serves still carries the mask, which is what the
+        // pipeline declares the file as masked by (`masked_store_item`).
+        let readme = "# Setup\nexport KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
+        let f = RagFixture::new(&[("README.md", readme), ("a.rs", "fn a() {}\n")]).await;
+        let (paths, keep) = (["README.md".to_string()], |_: &str| true);
+        let prepare = || {
+            prepare_docs(
+                &f.docs,
+                None,
+                None,
+                &f.source,
+                &paths,
+                &keep,
+                &f.registry,
+                &f.embedder,
+                BOUND,
+            )
+        };
+        assert_eq!(prepare().await.masked_sources.len(), 1, "the first review");
+        let second = prepare().await;
+        assert!(
+            second.masked_sources.is_empty(),
+            "{:?}",
+            second.masked_sources
+        );
+        let a = f
+            .rag(true)
+            .with_prep(second)
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        let docs: Vec<&ContextItem> = a
+            .items
+            .iter()
+            .filter(|i| i.kind == ContextKind::Documentation)
+            .collect();
+        assert!(!docs.is_empty(), "the source is served");
+        assert!(
+            docs.iter()
+                .all(|i| !i.text.contains("sk-ant-")
+                    && masked_pattern(&i.text) == Some("anthropic-key")),
+            "{docs:?}"
+        );
     }
 
     #[tokio::test]
