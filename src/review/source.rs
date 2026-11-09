@@ -1011,6 +1011,51 @@ mod tests {
         );
     }
 
+    /// A one-file source whose new side can change between reads, as a worktree file can.
+    struct SwapSource(Mutex<Vec<u8>>);
+
+    impl ContentSource for SwapSource {
+        fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+            Ok(Some(
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone(),
+            ))
+        }
+
+        fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn a_released_side_held_raw_for_any_reason_or_raw_on_its_next_read_is_refused() {
+        // [MAGI S6 MS3 loop5, R6a Caspar] Only a key block was withheld at release: a side held
+        // raw because it is binary (a NUL stops masking) or too dense to mask came back raw on a
+        // later read, and so did a clean side that gained a key block after its release.
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let inner = SwapSource(Mutex::new(format!("x\0{token}\n").into_bytes()));
+        let cache = CachedSource::new(&inner);
+        assert!(cache.read("b.bin").expect("read").is_some());
+        cache.release(Face::New, "b.bin");
+        assert!(
+            matches!(cache.read("b.bin"), Err(ReviewError::EgressSecret { .. })),
+            "a raw binary side came back"
+        );
+        let inner = SwapSource(Mutex::new(b"fn a() {}\n".to_vec()));
+        let cache = CachedSource::new(&inner);
+        assert!(cache.read("a.rs").expect("read").is_some());
+        cache.release(Face::New, "a.rs");
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        *inner.0.lock().unwrap_or_else(PoisonError::into_inner) =
+            format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n").into_bytes();
+        assert!(
+            matches!(cache.read("a.rs"), Err(ReviewError::EgressSecret { .. })),
+            "a key block gained after the release was served raw"
+        );
+    }
+
     #[test]
     fn a_side_too_dense_in_secrets_is_held_as_read_so_its_file_is_left_out() {
         // [MAGI S6 MS3 loop4, R6a Caspar] Its mask would pass the bound: it is not masked, and
