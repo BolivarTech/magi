@@ -1499,6 +1499,36 @@ mod tests {
     }
 
     #[test]
+    fn the_old_side_of_a_rename_that_changes_language_is_read_with_its_own_extractor() {
+        // [MAGI S6 MS3 loop6, R2 Melchior] The extractor was chosen by the reviewed (new) path, so
+        // the old side of `a.py` renamed to `b.rs` was parsed as Rust and its unit was lost.
+        use crate::review::test_support::MapSource;
+        let old = "def f():\n    b()\n    c()\n";
+        let src = MapSource::new(&[("b.rs", "fn f() {\n    c();\n}\n")], &[("a.py", old)]);
+        let text = "diff --git a/a.py b/b.rs\nsimilarity index 51%\nrename from a.py\n\
+                    rename to b.rs\n--- a/a.py\n+++ b/b.rs\n\
+                    @@ -1,3 +1,2 @@\n def f():\n-    b()\n     c()\n";
+        let hunk = BatchItem::Hunk {
+            file: "b.rs".into(),
+            text: text.into(),
+            first_line: 1,
+            last_line: 2,
+            old_first_line: 1,
+            old_last_line: 3,
+        };
+        let units: Vec<(String, UnitView)> =
+            containing_units(&hunk, &src, &LanguageRegistry::new())
+                .expect("reads")
+                .into_iter()
+                .map(|u| (u.file, (u.label, u.lines, u.old_side)))
+                .collect();
+        assert_eq!(
+            units,
+            vec![("b.rs".to_string(), ("f".to_string(), Some((1, 3)), true))]
+        );
+    }
+
+    #[test]
     fn a_hunk_in_one_method_of_a_large_impl_gets_that_method_not_the_whole_impl() {
         // The extractor yields an impl as one top-level unit; narrowing by `split_block` keeps a
         // hunk from dragging every method of the impl into the context.
