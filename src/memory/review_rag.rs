@@ -1598,6 +1598,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_dimension_probe_is_logged_with_its_cause_masked() {
+        // [MAGI S6 MS3 loop5, R2 Caspar] The probe's error was discarded: the run log was silent
+        // and the caller saw only "no known dimension". Its cause now reaches the log, through
+        // the same scrubbing as every other outward text.
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Warns(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, _: &tracing::field::Field, value: &str) {
+                self.0.push_str(value);
+                self.0.push(' ');
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{value:?} "));
+            }
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warns {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *e.metadata().level() == tracing::Level::WARN {
+                    let mut f = Fields(String::new());
+                    e.record(&mut f);
+                    self.0.lock().expect("lock").push(f.0);
+                }
+            }
+        }
+        struct Autodetect;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Autodetect {
+            async fn embed(&self, _t: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+                Err(EmbeddingError::Http(
+                    concat!("refused for ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").into(), // allow-secret-scan
+                ))
+            }
+            fn model_id(&self) -> &str {
+                "fake"
+            }
+            fn dim(&self) -> usize {
+                0
+            }
+            fn query_prefix(&self) -> &str {
+                ""
+            }
+            fn document_prefix(&self) -> &str {
+                ""
+            }
+        }
+        let warns = Warns::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(warns.clone()));
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        let memory =
+            ReviewMemory::open(mem.shared_conn(), mem.data_key().expect("dek")).expect("open");
+        assert!(memory.doc_store(&Autodetect).await.is_err());
+        let logged = warns.0.lock().expect("lock").join("\n");
+        assert!(logged.contains("refused for"), "{logged}");
+        assert!(!logged.contains("ghp_AAAA"), "{logged}");
+    }
+
+    #[tokio::test]
     async fn a_failing_embedder_degrades_to_no_documentation_or_history() {
         // [CP2 MS3 loop 2] RV07: the review goes on without (3) and (4), declared.
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
