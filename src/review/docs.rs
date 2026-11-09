@@ -70,8 +70,16 @@ pub const DOC_SOURCES: &[&str] = &["README.md", "CLAUDE.md", "docs/", "adr/"];
 /// `nomic-embed-text`.
 pub const MAX_DOC_CHUNK_BYTES: usize = 8_192;
 
-/// Bound on one chunk's section, its part number included.
+/// Bound on one chunk's section, its part number included. Every part of a split section carries
+/// the section again, so an unbounded one made the chunks (and their stored, encrypted rows)
+/// grow with the square of a long heading; bounded, they grow linearly with the text.
 pub const MAX_DOC_SECTION_BYTES: usize = 512;
+
+/// Room kept under [`MAX_DOC_SECTION_BYTES`] for a part number (` (n)`, up to 13 digits).
+const SECTION_PART_ROOM: usize = 16;
+
+/// What ends a section cut to its bound.
+const SECTION_CUT_MARK: &str = "…";
 
 /// Bound on the chunks one review indexes (its missing sources): indexing runs before the clock,
 /// so it must be bounded itself.
@@ -89,7 +97,9 @@ pub const MAX_DOC_CHUNKS: usize = 20_000;
 /// serving chunks masked the old way until this version changes (egress still masks with the
 /// current patterns, so nothing leaks; the index is just stale). Pinned by
 /// `a_change_to_the_secret_patterns_comes_with_a_doc_index_version_bump`.
-pub const DOC_INDEX_VERSION: u32 = 1;
+///
+/// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5).
+pub const DOC_INDEX_VERSION: u32 = 2;
 
 /// Bound on the distinct commits [`live_doc_sources`] walks; past it the clean-up is skipped for
 /// that review.
@@ -179,7 +189,9 @@ fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
     if holds_key_block(section) || holds_key_block(text) {
         return vec![chunk_of(path, section.to_string(), text.to_string())];
     }
-    let section = mask_secrets(section);
+    // MAGI FIX (MS3 §6 loop5): a section is cut to its bound after masking (a cut before it could
+    // leave half a secret no pattern matches); it was copied whole into every part.
+    let section = bounded_section(&mask_secrets(section));
     let parts = split_bounded(&mask_secrets(text));
     let numbered = parts.len() > 1;
     parts
@@ -194,6 +206,24 @@ fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
             chunk_of(path, section, part)
         })
         .collect()
+}
+
+/// `section` cut at a character boundary so that, with a part number ([`SECTION_PART_ROOM`]),
+/// it fits [`MAX_DOC_SECTION_BYTES`]; a cut one ends with [`SECTION_CUT_MARK`]. The heading
+/// line itself is part of the chunk's text, so nothing of it is lost to the index. O(bound).
+fn bounded_section(section: &str) -> String {
+    let limit = MAX_DOC_SECTION_BYTES - SECTION_PART_ROOM;
+    if section.len() <= limit {
+        return section.to_string();
+    }
+    let mut cut = limit - SECTION_CUT_MARK.len();
+    while !section.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}{SECTION_CUT_MARK}",
+        section.get(..cut).unwrap_or_default()
+    )
 }
 
 /// The chunk of `path` with `section` and `text`, hashed over the three. O(n) in the text.
@@ -1850,7 +1880,7 @@ mod tests {
             .collect();
         assert_eq!(
             (DOC_INDEX_VERSION, names.as_slice()),
-            (1, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
+            (2, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
             "the secret patterns changed: bump DOC_INDEX_VERSION and update this list"
         );
     }
