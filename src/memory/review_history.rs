@@ -506,6 +506,54 @@ mod tests {
         .expect("dek")
     }
 
+    /// The `EXPLAIN QUERY PLAN` details of `sql`, with `params` bound.
+    fn plan_of(
+        store: &ReviewHistoryStore,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Vec<String> {
+        let c = store.connection_for_test().lock().expect("lock");
+        let mut stmt = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("plan");
+        stmt.query_map(params, |r| r.get::<_, String>(3))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("details")
+    }
+
+    #[test]
+    fn the_bounded_history_reads_are_served_by_their_indexes_not_by_a_full_sort() {
+        // [MAGI S6 MS3 loop5, R3 Caspar, Melchior] The output caps did not bound the SQL work:
+        // `due` ordered by (checked_at, created_at, id) with an index led by `status`, so every
+        // review sorted the whole history to return at most a cap of rows.
+        let (store, _tmp) = store_for_test();
+        let due = plan_of(&store, &due_sql(), [32_i64]);
+        assert!(
+            due.iter()
+                .any(|d| d.contains("USING INDEX code_review_history_due")),
+            "{due:?}"
+        );
+        assert!(!due.iter().any(|d| d.contains("TEMP B-TREE")), "{due:?}");
+        let validated = plan_of(
+            &store,
+            &validated_sql(2),
+            rusqlite::params!["a.rs", "b.rs", 33_i64],
+        );
+        assert!(
+            validated
+                .iter()
+                .any(|d| d.contains("USING INDEX code_review_history_by_file")),
+            "{validated:?}"
+        );
+        assert!(
+            !validated
+                .iter()
+                .any(|d| d.starts_with("SCAN code_review_history")),
+            "{validated:?}"
+        );
+    }
+
     #[test]
     fn recorded_entries_come_back_whole() {
         let (store, _tmp) = store_for_test();
