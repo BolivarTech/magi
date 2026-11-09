@@ -175,6 +175,21 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError):
                     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     opener.open(url + "/embeddings", timeout=5)
+
+    def test_a_dotted_or_inline_embedding_config_is_refused_with_its_cause(self) -> None:
+        # [MAGI S6 MS3 loop4, R7a Caspar] The rewrite is line-based and knows the `[embedding]`
+        # table only; a dotted key or an inline table would get a second table appended and the
+        # product would refuse a duplicate key with a confusing parse error. Refused here, named.
+        for text in ('embedding.base_url = "http://emb/v1"\n',
+                     'embedding = { base_url = "http://emb/v1" }\n'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "magi.toml"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(HarnessError) as caught:
+                    runs.point_embedding_at(path, "http://127.0.0.1:1/v1")
+                self.assertIn("[embedding] table", str(caught.exception))
+                self.assertEqual(text, path.read_text(encoding="utf-8"), "left as it was")
+
     def test_a_spaced_or_commented_embedding_header_is_still_the_embedding_table(self) -> None:
         # [MAGI S6 MS3 loop2, R7a Caspar] `[ embedding ]` or a comment after the header was not
         # recognized, so a second `[embedding]` table was appended and the product refused it.
@@ -1566,6 +1581,14 @@ class RefusalRunModelCallTests(unittest.TestCase):
             runs.RunDefinition(run_id="Rx", argv=("query",), stdin=b"", needs_trio=False,
                                payload_size=runs.PAYLOAD_SMALL, timeout_s=1,
                                unreachable_embedder=True)
+
+    def test_pointing_the_embedder_away_on_a_run_that_counts_model_calls_is_refused(self) -> None:
+        # [MAGI S6 MS3 loop4, R7a Melchior] The counter would overwrite the embedder rewrite, and
+        # the degradation would then fail its reading scenarios for the wrong reason.
+        with self.assertRaises(HarnessError):
+            runs.RunDefinition(run_id="Rx", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN),
+                               stdin=b"", needs_trio=False, payload_size=runs.PAYLOAD_SMALL,
+                               timeout_s=1, forbids_model_calls=True, unreachable_embedder=True)
 
     @unittest.skipUnless(_git_available(), "git is required")
     def test_a_refusal_run_that_reaches_a_model_records_the_request(self) -> None:
