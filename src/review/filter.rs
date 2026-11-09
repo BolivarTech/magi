@@ -18,7 +18,7 @@ use super::input::{
     ReviewInput,
 };
 use super::languages::LanguageRegistry;
-use super::secrets::{display_path, find_secret};
+use super::secrets::{display_path, find_secret, REDACTED_OPEN};
 use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LINK_CAUSE};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
@@ -489,8 +489,20 @@ fn kept_verdict(
         });
     };
     let diff = match diff {
-        Some(d) => match rebuilt_diff(&d, read.new, read.old) {
-            Some(r) if find_secret(&r).is_none() => Some(r),
+        Some(d) => match rebuilt_diff_counting(&d, read.new, read.old) {
+            Some((r, diverged)) if find_secret(&r).is_none() => {
+                if diverged > 0 {
+                    let shown = display_path(read.path);
+                    tracing::event!(
+                        target: LOG_TARGET,
+                        tracing::Level::WARN,
+                        path = shown.as_str(),
+                        lines = diverged,
+                        "diff lines differ from the file's sides; the file is reviewed from its sides"
+                    );
+                }
+                Some(r)
+            }
             rebuilt => {
                 // MAGI FIX (MS3 §6 loop4): the fallback was silent beyond the INFO of every
                 // `secret` skip; a WARN makes a parser drift visible in the run log.
@@ -526,16 +538,32 @@ fn kept_verdict(
 /// function context (a line of the file, possibly inside a masked block). `None` when a line
 /// names a side line that does not exist, a hunk header does not parse, or a body line has no
 /// marker: the positions of the diff and the sides disagree. A body line whose text differs from
-/// its side's line at that position is not detected: the side's (masked) text replaces it, which
-/// is what git would print for these sides (a rename's stale line included), and the rebuilt
-/// diff is checked for secrets again by the caller. The diff's header lines (`diff --git`,
+/// its side's line at that position is replaced by the side's (masked) text, which is what git
+/// would print for these sides (a rename's stale line included); the caller logs such lines at
+/// WARN when the difference is not a mask ([`rebuilt_diff_counting`]), and checks the rebuilt
+/// diff for secrets again. The diff's header lines (`diff --git`,
 /// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
 /// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
 /// cannot be masked and still name its file). O(diff + sides).
+#[cfg(test)]
 fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<String> {
+    rebuilt_diff_counting(diff, new, old).map(|(rebuilt, _)| rebuilt)
+}
+
+/// [`rebuilt_diff`], with the number of body lines whose text differed from their side's
+/// (masked) line for a reason other than a mask: a line of the side that holds no mask but
+/// differs from the diff's line. The caller logs them at WARN (a stale diff, two revisions
+/// mixed: RV21), and still reviews the file from its sides. O(diff + sides).
+// MAGI FIX (MS3 §6 loop5): the divergence was replaced silently.
+fn rebuilt_diff_counting(
+    diff: &str,
+    new: Option<&[u8]>,
+    old: Option<&[u8]>,
+) -> Option<(String, usize)> {
     let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
     let (mut next_new, mut next_old) = (0usize, 0usize);
     let mut in_hunk = false;
+    let mut diverged = 0usize;
     let mut out = String::with_capacity(diff.len());
     for raw in diff.split_inclusive('\n') {
         let (line, eol) = match raw.strip_suffix('\n') {
@@ -560,12 +588,15 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<St
                 '-' => ('-', take(&old_lines, &mut next_old)?),
                 _ => return None,
             };
+            if line.get(1..) != Some(text) && !text.contains(REDACTED_OPEN) {
+                diverged = diverged.saturating_add(1);
+            }
             out.push(marker);
             out.push_str(text);
         }
         out.push_str(eol);
     }
-    Some(out)
+    Some((out, diverged))
 }
 
 /// The lines of a side, each without its `\n` (a `\r` stays, as git shows it); none for an

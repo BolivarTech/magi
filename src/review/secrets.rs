@@ -114,7 +114,7 @@ const SSH2_ARMOR_END: &str = "---- END ";
 /// The dashes that close an SSH2 armor line.
 const SSH2_ARMOR_DASHES: &str = "----";
 /// What opens the mark that replaces a masked secret: `<redacted: <pattern name>>`.
-const REDACTED_OPEN: &str = "<redacted: ";
+pub(crate) const REDACTED_OPEN: &str = "<redacted: ";
 /// The words of the AWS secret access key's name, in order, each with whether it may be left
 /// out: `AWS_SECRET_KEY` and the STS field `SecretAccessKey` name the same key. A name must keep
 /// `aws` or `access` (see [`aws_name_end`]), so a generic `secret_key` is not taken for it.
