@@ -1138,6 +1138,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rebuild_still_reuses_the_vectors_of_its_own_identity() {
+        // [MAGI S6 MS3 loop4, R1 Balthasar] The wipe deletes only rows of another identity, so a
+        // chunk already stored under this one keeps its vector and is not embedded again.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        store
+            .reindex(&[(src("d.md", "k1"), vec![chunk("d.md", "A", "x")])], &e)
+            .await
+            .expect("first");
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute(
+                "INSERT INTO code_review_doc_sources (path, key, index_id) \
+                 VALUES ('old.md', 'k0', 'other#3#1')",
+                [],
+            )
+            .expect("foreign row");
+        let s = store
+            .reindex(&[(src("d.md", "k2"), vec![chunk("d.md", "A", "x")])], &e)
+            .await
+            .expect("rebuild");
+        assert_eq!((s.embedded, s.reused, s.rebuilt), (0, 1, true));
+        assert_eq!(e.calls(), 1, "only the first reindex embedded");
+    }
+
+    #[tokio::test]
     async fn another_embedding_model_rebuilds_the_index_even_with_nothing_new() {
         // Same dimension, another model: the old vectors are not comparable. Every source is
         // missing again, so the next review re-indexes instead of serving no documentation,
