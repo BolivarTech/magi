@@ -917,7 +917,10 @@ fn trimmed_summary(summary: Value, cap: usize) -> Value {
 
 /// `report`, or its longest truncation (marker included) whose JSON-escaped form takes at most
 /// `budget` bytes; empty when not even the marker fits. Binary search over the cut, whose escaped
-/// length does not decrease as the cut grows. O(n log n) for n report bytes.
+/// length does not decrease as the cut grows below the full length
+/// (`the_escaped_length_of_a_truncation_never_shrinks_as_the_cut_grows`); the full length is the
+/// report without its marker, checked first, so the search only runs when it does not fit.
+/// O(n log n) for n report bytes.
 fn fit_escaped(report: &str, budget: usize) -> String {
     if escaped_len(report) <= budget {
         return report.to_string();
@@ -3132,6 +3135,21 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner)
             .is_empty());
         assert!(runner.after_report().is_none());
+    }
+
+    #[test]
+    fn the_escaped_length_of_a_truncation_never_shrinks_as_the_cut_grows() {
+        // [MAGI S6 MS3 loop4, R5 Balthasar, Caspar] `fit_escaped`'s binary search is exact only
+        // while this holds; pinned over multibyte text and characters JSON escapes. A cut at the
+        // full length is the report itself, without the marker, and may be shorter: the search
+        // never needs it, since `fit_escaped` returns the report whole when that fits.
+        let report = "a\"b\\c\né\u{1}ñ".repeat(40);
+        let mut last = 0;
+        for cut in 0..report.len() {
+            let len = escaped_len(&truncate_result(&report, cut));
+            assert!(len >= last, "cut {cut}: {len} < {last}");
+            last = len;
+        }
     }
 
     #[test]
