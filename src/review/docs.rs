@@ -1482,11 +1482,33 @@ mod tests {
         let text =
             format!("# Keys\n{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n# Other\nfine\n");
         let (kept, dropped) = without_secrets(chunk_markdown("README.md", &text));
-        assert_eq!(dropped, vec!["README.md".to_string()]);
-        assert_eq!(
-            kept.iter().map(|x| x.section.as_str()).collect::<Vec<_>>(),
-            vec!["Other"]
+        // [MAGI S6 MS3 loop6, R1 Caspar] The exception omits the file: the clean sibling goes too.
+        assert_eq!(dropped, vec!["README.md".to_string(); 2]);
+        assert!(kept.is_empty(), "{kept:?}");
+    }
+
+    #[test]
+    fn a_private_key_block_in_one_chunk_withholds_every_chunk_of_its_source() {
+        // [MAGI S6 MS3 loop6, R1 Caspar] RV22's exception omits the whole file: a body line
+        // copied into another section has no pattern of its own, so only omitting every chunk of
+        // the source keeps it from the embedder. Another source's chunks are unaffected.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let body = "MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w";
+        let text = format!("# Keys\n{begin}\n{body}\n# Copied\nsee {body}\n# Other\nfine\n");
+        let mut chunks = chunk_markdown("README.md", &text);
+        assert_eq!(chunks.len(), 3, "precondition: three sections");
+        assert!(
+            find_secret(&chunks[1].text).is_none(),
+            "precondition: the copied line matches no pattern"
         );
+        chunks.extend(chunk_markdown("docs/b.md", "# B\nfine\n"));
+        let (kept, dropped) = without_secrets(chunks);
+        assert_eq!(dropped, vec!["README.md".to_string(); 3]);
+        assert_eq!(
+            kept.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+            vec!["docs/b.md"]
+        );
+        assert!(kept.iter().all(|c| !c.text.contains(body)), "{kept:?}");
     }
 
     #[test]
