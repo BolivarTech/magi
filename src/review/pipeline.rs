@@ -4006,6 +4006,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_deadline_that_ties_the_timeout_is_named_as_the_binding_bound() {
+        // [MAGI S6 MS3 loop4, R4 Caspar] With both bounds at the same whole second the caller's
+        // deadline binds: it is absolute and keeps running through the preparation, while the
+        // `--timeout` starts at the first trio call.
+        let deadline = Instant::now() + Duration::from_millis(100_500);
+        assert_eq!(
+            review_total(Some(100), Some(deadline), 0),
+            Some((100, BudgetLimit::RunDeadline))
+        );
+        assert_eq!(
+            review_total(Some(99), Some(deadline), 0),
+            Some((99, BudgetLimit::Timeout))
+        );
+    }
+
     #[tokio::test]
     async fn report_metadata_never_carries_a_secret_shaped_path_or_label_raw() {
         // [MAGI S6 MS3 loop4, R4 Melchior] RV22's tie-break: a path or label that matches a
