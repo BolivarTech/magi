@@ -1156,6 +1156,34 @@ mod tests {
     }
 
     #[test]
+    fn the_text_form_masks_a_raw_secret_in_its_paths_and_labels_as_it_writes_them() {
+        // [MAGI S6 MS3 loop4, R6b Melchior] The module promises both forms redact as they are
+        // written; the omission lists relied on their builders (`display_path`) alone. A raw
+        // secret handed in any of them must not reach the text.
+        let key = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let s = ReviewSummary {
+            trimmed: vec![TrimmedItem {
+                kind: ContextKind::Documentation,
+                label: format!("section {key}"),
+            }],
+            skipped: vec![Skipped {
+                path: format!("skipped/{key}.txt"),
+                cause: crate::review::filter::SkipCause::Secret,
+            }],
+            masked: vec![Masked {
+                path: format!("masked/{key}.rs"),
+                cause: crate::review::filter::SkipCause::Secret,
+                pattern: "anthropic-key",
+            }],
+            no_extractor: vec![format!("plain/{key}.txt")],
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(!out.contains("sk-ant-"), "{out}");
+    }
+
+    #[test]
     fn a_masked_pattern_name_is_written_line_safe() {
         // [MAGI S6 MS3 loop2, R6b Caspar] the path was escaped and the pattern written raw; the
         // names are fixed today, and the text form keeps them line-safe whatever they become.
