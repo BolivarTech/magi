@@ -660,6 +660,16 @@ fn optional<T>(r: rusqlite::Result<T>) -> Result<Option<T>, MemoryError> {
 /// Defense in depth (RV22): a source whose path, or a chunk whose path, section or text, matches
 /// a secret pattern is refused before anything is embedded or written. The message names the
 /// path as [`display_path`] shows it, never the secret.
+///
+/// Multi-line private-key blocks (PEM, OpenPGP, SSH2) are refused here too, by this same check:
+/// their headers are patterns of the table [`find_secret`] scans, and `holds_key_block` is a
+/// filter over that table, so a chunk holding one never reaches the embedder whatever its caller
+/// netted first (`a_chunk_holding_a_private_key_block_is_refused_before_anything_is_embedded`).
+///
+/// All or nothing, on purpose: one refused chunk fails the whole reindex, so the revision runs
+/// without documentation and says so (U29: "if the index of the revision cannot be completed,
+/// that revision runs without documentation"), rather than serving a partial index that hides
+/// which source is missing. It never fires when the caller netted with `without_secrets` first.
 fn refuse_secrets(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
     // MAGI FIX (MS3 §6 loop3): a source path is stored in clear and travels with each chunk.
     if let Some((source, _)) = sources.iter().find(|s| find_secret(&s.0.path).is_some()) {
