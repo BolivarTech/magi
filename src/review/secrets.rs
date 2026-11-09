@@ -1662,6 +1662,24 @@ mod tests {
     }
 
     #[test]
+    fn masking_with_lines_kept_writes_back_crlf_breaks_as_crlf() {
+        // [MAGI S6 MS3 loop6, R6a Caspar] A mask over a CRLF break wrote back `\n` alone, so a
+        // CRLF file's masked side changed its line endings and the rebuilt diff counted a drift.
+        let end = concat!("-----", "END RSA PRIVATE KEY-----");
+        let text = format!(
+            "fn a() {{}}\r\nconst K: &str = \"{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\r\nMIIBOgIBAAJBAK\r\n{end}\";\r\nfn b() {{}}\r\n"
+        );
+        let m = mask_secrets_keeping_lines(&text).expect("a key block");
+        assert_eq!(
+            m.text.matches("\r\n").count(),
+            text.matches("\r\n").count(),
+            "{:?}",
+            m.text
+        );
+        assert_eq!(m.text.matches('\n').count(), text.matches('\n').count());
+    }
+
+    #[test]
     fn masking_with_lines_kept_masks_a_one_line_secret_as_mask_secrets_does() {
         let text = "let u = \"postgres://svc:S3cr3t@db/app\";\nfn f() {}\n";
         let m = mask_secrets_keeping_lines(text).expect("a url credential");
