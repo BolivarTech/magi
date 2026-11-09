@@ -444,6 +444,12 @@ struct SidesRead<'a> {
 /// (`a_diff_alone_cannot_be_masked_safely_so_an_unrebuildable_one_is_left_out`). RV22's
 /// tie-break, "no byte of the secret leaves the process", wins over "mask, do not omit" there; a
 /// file named explicitly is then refused like a file holding a key block.
+///
+/// The diff is rebuilt even when it holds no detectable secret of its own, for the same reason:
+/// a clean-looking hunk can carry the value line of a secret whose key line it does not show
+/// (the YAML case above), so only the side's masked text is trusted. The cost is the hunk's
+/// function context (see [`rebuilt_diff`]). The caller passes the diff as a copy (one O(diff)
+/// allocation per kept file, bounded by the review's total cap) because it still needs the file.
 /// O(diff + sides).
 ///
 /// # Arguments
@@ -515,7 +521,10 @@ fn kept_verdict(
 /// marker: the positions of the diff and the sides disagree. A body line whose text differs from
 /// its side's line at that position is not detected: the side's (masked) text replaces it, which
 /// is what git would print for these sides (a rename's stale line included), and the rebuilt
-/// diff is checked for secrets again by the caller. O(diff + sides).
+/// diff is checked for secrets again by the caller. The diff's header lines (`diff --git`,
+/// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
+/// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
+/// cannot be masked and still name its file). O(diff + sides).
 fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<String> {
     let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
     let (mut next_new, mut next_old) = (0usize, 0usize);
