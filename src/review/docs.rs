@@ -289,7 +289,17 @@ fn split_bounded(text: &str) -> Vec<String> {
     parts
 }
 
+/// The longest UTF-8 encoding of one character, in bytes.
+const MAX_UTF8_CHAR_BYTES: usize = 4;
+
+// MAGI FIX (MS3 §6 loop6): `split_long_line` steps back to a character boundary from the bound;
+// a bound under one character's length would cut at 0 and never advance. Checked at build time.
+const _: () = assert!(MAX_DOC_CHUNK_BYTES >= MAX_UTF8_CHAR_BYTES);
+
 /// Cuts a line longer than the bound at character boundaries; shorter lines come back whole.
+///
+/// Every cut advances by at least one character because [`MAX_DOC_CHUNK_BYTES`] is at least
+/// [`MAX_UTF8_CHAR_BYTES`] (a build-time assertion), so the loop always ends.
 fn split_long_line(line: &str) -> Vec<&str> {
     let mut pieces = Vec::new();
     let mut rest = line;
