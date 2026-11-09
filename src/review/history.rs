@@ -455,6 +455,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_diff_of_another_file_than_the_entrys_gives_no_signal() {
+        // [MAGI S6 MS3 loop6, R3 Melchior] A directory as `file` (`src`) is a tree-wide pathspec
+        // even with literal pathspecs: another file's hunk at the same line read as attended.
+        let mut dir = entry(Some(5));
+        dir.file = "src".into();
+        let other = "diff --git a/src/b.rs b/src/b.rs\n@@ -4,3 +4,3 @@\n";
+        let git = FakeGit::from(&[
+            ("merge-base --is-ancestor c1 HEAD", Ok("")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative c1 HEAD -- src",
+                Ok(other),
+            ),
+            ("rev-parse --verify HEAD^{commit}", Ok("c2\n")),
+        ]);
+        assert_eq!(classify(&dir, "HEAD", &git), HistoryStatus::Pending);
+        // The entry's own file named by the header is still read.
+        let own = FakeGit::from(&[
+            ("merge-base --is-ancestor c1 HEAD", Ok("")),
+            (
+                DIFF_C1_HEAD,
+                Ok("diff --git a/a.rs b/a.rs\nindex 1..2 100644\n@@ -4,3 +4,3 @@\n"),
+            ),
+        ]);
+        assert_eq!(
+            classify(&entry(Some(5)), "HEAD", &own),
+            HistoryStatus::Attended
+        );
+    }
+
     const DIFF_C1_HEAD: &str = "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative c1 HEAD -- a.rs";
     /// [CP2 MS3 loop 12] A weak reject needs a commit after the reviewed one.
     const HEAD_IS_C2: &str = "rev-parse --verify HEAD^{commit}";
