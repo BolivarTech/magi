@@ -1216,6 +1216,26 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_pattern_name_shaped_like_a_secret_is_masked_in_the_text_form() {
+        // [MAGI S6 MS3 loop5, R6b Caspar] The pattern names are the detector's own constants
+        // today, but the text form wrote this field with `escape_controls` alone while every
+        // other omission field went through the backstop; the JSON form masks it already.
+        const PATTERN: &str = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let s = ReviewSummary {
+            masked: vec![Masked {
+                path: "a.rs".into(),
+                cause: crate::review::filter::SkipCause::Secret,
+                pattern: PATTERN,
+            }],
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(!out.contains("sk-ant-"), "{out}");
+        assert!(!summary_json(&s).to_string().contains("sk-ant-"));
+    }
+
+    #[test]
     fn the_context_left_out_is_listed_up_to_the_cap_and_the_rest_counted() {
         // [MAGI S6 MS3 loop2, R6b Melchior] `trimmed` grows with the batches; it was written whole,
         // unlike the other omission lists of the section, in the text and in the JSON.
