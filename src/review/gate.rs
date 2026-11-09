@@ -1501,6 +1501,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_key_block_longer_than_the_window_is_found_in_the_whole_code_and_never_sent() {
+        // [MAGI S6 MS3 loop5, R6b Balthasar] The state shows RV10's ±40 lines; a finding in the
+        // middle of a longer block sees only body lines, which match no pattern of their own, so
+        // the windowed check alone would send them. The block is looked for in the whole code.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().times(0);
+        let mut g = Gate::new(&c, chain(), 1_000_000);
+        let begin = concat!("-----", "BEGIN ", "RSA PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "RSA PRIVATE KEY-----");
+        let body: String = (0..200)
+            .map(|_| "MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\n")
+            .collect();
+        let code = format!("fn a() {{}}\n{begin}\n{body}{end}\n");
+        let line = 102;
+        let window = gate_state_of(&finding(Severity::Warning, Some(line)), 0, &code);
+        assert!(
+            !any_string(&window, &holds_key_block),
+            "precondition: the window holds body lines only"
+        );
+        let v = g
+            .judge(&finding(Severity::Warning, Some(line)), Some(&code), None)
+            .await;
+        assert_eq!((v.state, v.cause), (GateState::Unfiltered, Some("secret")));
+    }
+
+    #[tokio::test]
     async fn a_merged_claim_carrying_a_one_line_secret_is_asked_masked_with_the_others() {
         // [MAGI S6 loop 10, C1-c2] one reworded claim with a secret pattern made the whole merged
         // finding `unfiltered` with no question asked and no `not every claim judged`.
