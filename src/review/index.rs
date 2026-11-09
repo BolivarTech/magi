@@ -210,8 +210,10 @@ impl LexicalIndex {
                 break;
             }
         }
+        // A path given twice is one file: its definitions are recorded once.
+        let mut defined: HashSet<&str> = HashSet::new();
         for (path, text) in files {
-            if let Some(extractor) = registry.get(path) {
+            if let Some(extractor) = registry.get(path).filter(|_| defined.insert(path)) {
                 index.record_definitions(extractor, path, text);
             }
         }
@@ -282,6 +284,9 @@ impl LexicalIndex {
     /// would cover them; it is not done in v0.25.0.
     // MAGI FIX (Loop1 r1, M5): the limitation is declared where it lives.
     fn record_definitions(&mut self, extractor: &ExtractorKind, file: &str, text: &str) {
+        // MAGI FIX (MS3 §6 loop5): the duplicate check scanned each name's list, O(n^2) for a
+        // name defined many times in one file (generated code); spans seen are now a set.
+        let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
         for unit in extractor.extract_units(text, file, ChangedLines::All) {
             if !matches!(
                 unit.kind,
@@ -295,12 +300,13 @@ impl LexicalIndex {
             ) {
                 continue;
             }
-            let place = (file.to_string(), unit.start_line, unit.end_line);
-            let places = self.definitions.entry(unit.name).or_default();
-            // The same span listed twice (a path given twice) is one definition.
-            if !places.contains(&place) {
-                places.push(place);
+            // The same span yielded twice is one definition (a path given twice is skipped by
+            // the caller).
+            if !seen.insert((unit.name.clone(), unit.start_line, unit.end_line)) {
+                continue;
             }
+            let place = (file.to_string(), unit.start_line, unit.end_line);
+            self.definitions.entry(unit.name).or_default().push(place);
         }
     }
 
