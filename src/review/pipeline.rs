@@ -1775,7 +1775,7 @@ fn faces_of<'b>(
             let f = faces.entry(file).or_default();
             f.new.push(new);
             f.old.push(old);
-            f.deleted.extend(deleted_ranges(text));
+            f.deleted.extend(deleted_ranges(text, (old.0, new.0)));
         }
         Shown::Whole { file, .. } => faces.entry(file).or_default().whole = true,
     });
@@ -1796,7 +1796,8 @@ fn faces_of<'b>(
 /// The old-side ranges of the lines `hunk` deletes (its `-` lines), numbered from its `@@`
 /// header and read through [`HunkLines`], the walker that numbers the hunk for the trio; the
 /// file header lines before that header are skipped. O(len of `hunk`).
-fn deleted_ranges(hunk: &str) -> Vec<(u32, u32)> {
+fn deleted_ranges(hunk: &str, start: (u32, u32)) -> Vec<(u32, u32)> {
+    let _ = start;
     let mut ranges: Vec<(u32, u32)> = Vec::new();
     for (_, read, _) in HunkLines::new(hunk, None) {
         if let HunkLine::Body(BodyLine::Removed(old)) = read {
@@ -6009,6 +6010,18 @@ mod tests {
             .map(|s| s.path.as_str())
             .collect();
         assert_eq!(secret, vec!["README.md"]);
+    }
+
+    #[test]
+    fn a_headerless_hunk_gives_its_deleted_lines_from_the_items_first_lines() {
+        // [MAGI S6 MS3 loop5, R4 Melchior] With no `@@` header the walker started no counter, so
+        // the gate saw no deleted line where `hunk_change` (counting from the item) saw one.
+        assert_eq!(deleted_ranges(" a\n-b\n-c\n+d\n", (7, 7)), vec![(8, 9)]);
+        assert_eq!(
+            deleted_ranges("@@ -3,2 +3,1 @@\n-b\n c\n", (7, 7)),
+            vec![(3, 3)],
+            "a header still wins"
+        );
     }
 
     #[tokio::test]

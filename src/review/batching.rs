@@ -1001,6 +1001,28 @@ mod tests {
     use crate::review::test_support::MapSource;
 
     #[test]
+    fn a_headerless_hunk_is_numbered_from_its_item_as_hunk_change_counts_it() {
+        // [MAGI S6 MS3 loop5, R4 Melchior] `hunk_change` counts a text with no `@@` header from
+        // the item's own first lines; `number_hunk` started no counter, so the trio saw no line
+        // numbers where the anchors had them. `parse_hunks` always writes a header, so this is
+        // agreement on a text the pipeline does not build, not a live defect.
+        let item = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: " a\n-b\n+c\n".into(),
+            first_line: 7,
+            last_line: 8,
+            old_first_line: 7,
+            old_last_line: 8,
+        };
+        assert_eq!(
+            item.rendered(),
+            "     7| a\n     8|-b\n     8|+c\n",
+            "{:?}",
+            item.hunk_change()
+        );
+    }
+
+    #[test]
     fn an_empty_crlf_context_line_is_numbered_as_hunk_change_counts_it() {
         // [MAGI S6 MS3 loop3, R4 Melchior, Balthasar] `number_hunk` split lines on '\n' alone, so
         // an empty context line of a CRLF hunk ("\r") was no line and moved no counter, while
