@@ -1637,6 +1637,52 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_state_is_keyed_by_the_gates_own_literals_only() {
+        // [MAGI S6 MS3 loop6, R6b Balthasar] `masked_strings` masks values, not keys, on the
+        // invariant that every key is one of the gate's literals; this pins that invariant
+        // (a key built from model or code text would show here) and the net behind it: a state
+        // whose key holds a secret is withheld, never sent with the key raw.
+        fn keys(value: &Value, out: &mut BTreeSet<String>) {
+            match value {
+                Value::Object(fields) => {
+                    for (k, v) in fields {
+                        out.insert(k.clone());
+                        keys(v, out);
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|v| keys(v, out)),
+                _ => {}
+            }
+        }
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let mut f = finding(Severity::Warning, Some(1));
+        f.titles = vec![token.into()];
+        f.details = vec![token.into()];
+        f.file = Some(format!("src/{token}.rs"));
+        let mut seen = BTreeSet::new();
+        keys(
+            &gate_state_of(&f, 0, &format!("let t = \"{token}\";\n")),
+            &mut seen,
+        );
+        let mut clean = BTreeSet::new();
+        keys(
+            &gate_state_of(&finding(Severity::Info, Some(1)), 0, "x\n"),
+            &mut clean,
+        );
+        assert_eq!(
+            seen, clean,
+            "the keys never depend on the finding or the code"
+        );
+        assert!(seen.iter().all(|k| find_secret(k).is_none()), "{seen:?}");
+        let c = MockDecisionClient::new();
+        let g = Gate::new(&c, chain(), 1_000_000);
+        assert_eq!(
+            g.sendable(serde_json::json!({ token: "v" })),
+            Err(CAUSE_SECRET)
+        );
+    }
+
+    #[test]
     fn a_state_whose_own_text_quotes_a_key_block_is_never_sent() {
         // [MAGI S6 MS3 loop6, R6b Melchior] The state-level branch of `sendable` alone: the code
         // is clean, the block is in the finding's own detail.
