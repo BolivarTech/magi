@@ -980,6 +980,29 @@ mod tests {
     }
 
     #[test]
+    fn after_the_filter_no_stage_is_served_a_key_block_it_never_classified() {
+        // [MAGI S6 MS3 loop5, R6a Melchior] A later stage reading a path this filter never saw
+        // (beyond the kept files) got a raw key block: the filter now seals the cache.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let keyed = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n");
+        let inner = MapSource::new(
+            &[("a.rs", "fn f() {}\n"), ("never.pem", keyed.as_str())],
+            &[],
+        );
+        let src = CachedSource::new(&inner);
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: None,
+        }];
+        filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false).expect("kept");
+        assert!(matches!(
+            src.read("never.pem"),
+            Err(ReviewError::EgressSecret { .. })
+        ));
+        assert!(src.read("a.rs").expect("kept file").is_some());
+    }
+
+    #[test]
     fn a_source_that_does_not_mask_still_never_lets_a_secret_through() {
         // [T3.7] the fallback: a source with no mask (no production path builds one) hands the
         // filter raw content, so a file that holds a secret is left out as before, and an
