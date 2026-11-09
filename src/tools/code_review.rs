@@ -1676,6 +1676,17 @@ impl CodeReviewRunner for ProductionReviewRunner {
 /// # Returns
 /// The `warning: the review history was not updated: <cause>` line, or `None`.
 fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp) -> Option<String> {
+    follow_up_work_until(memory, git, follow, None)
+}
+
+/// [`follow_up_work`] under `deadline`.
+fn follow_up_work_until(
+    memory: &ReviewMemory,
+    git: &dyn GitCommand,
+    follow: FollowUp,
+    deadline: Option<std::time::Instant>,
+) -> Option<String> {
+    let _ = deadline;
     let mut warning = None;
     if let Some(rev) = &follow.rev {
         match record_history(memory, git, rev, &follow.findings) {
@@ -2988,6 +2999,54 @@ mod tests {
         );
         assert_eq!(git.0.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(memory.history().all().expect("all").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_post_report_work_stops_at_its_own_bound_even_once_detached() {
+        // [MAGI S6 MS3 loop6, R5 Caspar] A surface that stops waiting leaves the work on its
+        // blocking thread; each git call had its own bound but the sequence had none (the
+        // clean-up lists up to `MAX_GC_REFS + 1` trees). Past its own deadline the work stops
+        // between steps and deletes nothing.
+        use crate::memory::review_docs::test_embedder::{chunk, src, FakeEmbedder};
+        let (_db, _mem, memory) = review_memory();
+        let embedder = FakeEmbedder::new(3);
+        let indexed = || async {
+            let docs = memory.doc_store(&embedder).await.expect("store");
+            docs.reindex(
+                &[(src("docs/a.md", "k"), vec![chunk("docs/a.md", "A", "x")])],
+                &embedder,
+            )
+            .await
+            .expect("indexed");
+            docs
+        };
+        let follow = |docs| FollowUp {
+            findings: Vec::new(),
+            rev: None,
+            worktree: Some(BTreeSet::new()),
+            docs: Some(docs),
+            repository: false,
+        };
+        let git = CountingGit(std::sync::atomic::AtomicUsize::new(0));
+        let docs = indexed().await;
+        let spent = Some(std::time::Instant::now());
+        assert!(follow_up_work_until(&memory, &git, follow(docs), spent).is_none());
+        let docs = memory.doc_store(&embedder).await.expect("store");
+        assert!(
+            docs.missing(&[src("docs/a.md", "k")])
+                .expect("missing")
+                .is_empty(),
+            "past its bound the clean-up deleted nothing"
+        );
+        assert!(follow_up_work_until(&memory, &git, follow(docs), None).is_none());
+        let docs = memory.doc_store(&embedder).await.expect("store");
+        assert_eq!(
+            docs.missing(&[src("docs/a.md", "k")])
+                .expect("missing")
+                .len(),
+            1,
+            "within its bound the clean-up ran"
+        );
     }
 
     #[test]
