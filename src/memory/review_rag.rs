@@ -922,7 +922,8 @@ fn reindex_batches(
 ///    private-key block anywhere, or any chunk `without_secrets` drops, is withheld whole.
 ///    The rest is indexed in batches of at most [`EMBED_BATCH_ITEMS`] chunks, one
 ///    [`reindex_or_degrade`] each, given what is left of `timeout`; what a batch wrote stays.
-/// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails, and `timeout` itself,
+/// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails (a revision source git
+///    lists but the content source cannot give back included), and `timeout` itself,
 ///    set `docs_unavailable` with a WARN; the first failing batch stops the rest. The size cap
 ///    only cuts (declared as truncated), it never degrades. The two read failures differ on
 ///    purpose: a revision's source that git lists but cannot give back means that revision's
@@ -1000,7 +1001,15 @@ pub async fn prepare_docs(
             Some(bytes) => bytes,
             None => match sources.read(&source.path) {
                 Ok(Some(bytes)) => bytes,
-                Ok(None) => continue,
+                // MAGI FIX (MS3 §6 loop4): git listed it, so the revision's index cannot be
+                // completed without it (U29); skipping it served a partial set undeclared.
+                Ok(None) => {
+                    let cause = format!(
+                        "the reviewed revision lists `{}` but it could not be read",
+                        display_path(&source.path)
+                    );
+                    return degraded(prep, &cause, started);
+                }
                 Err(e) if is_size_cap(&e) => {
                     prep.doc_index.truncated = true;
                     continue;
