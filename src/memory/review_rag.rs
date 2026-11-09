@@ -17,7 +17,7 @@
 //! The query is embedded before any store is touched, and every store call is a short
 //! synchronous one: no database lock is ever held across an `.await`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -891,7 +891,8 @@ fn degraded(mut prep: DocPrep, cause: &str, started: Instant) -> DocPrep {
 type Listed = (DocSource, Option<Vec<u8>>);
 
 /// The working tree's documentation sources: each path of `paths` that `wanted` accepts, read
-/// through `sources` and keyed by [`worktree_key`]; a path that quotes a secret is never read.
+/// through `sources` and keyed by [`worktree_key`]; a path that quotes a secret is never read,
+/// and a path given twice is one source.
 ///
 /// A file that cannot be read (a hard link, a link that escapes the workspace or names a
 /// directory, a file another process holds open) is left out with one WARN naming it, as MS2
@@ -914,7 +915,12 @@ fn list_worktree(
     prep: &mut DocPrep,
 ) -> Result<Vec<Listed>, String> {
     let mut listed = Vec::new();
-    for path in paths.iter().filter(|p| wanted(p)) {
+    // MAGI FIX (MS3 §6 loop5): a path given twice is one source, read and indexed once.
+    let mut seen: HashSet<&str> = HashSet::new();
+    for path in paths
+        .iter()
+        .filter(|p| wanted(p) && seen.insert(p.as_str()))
+    {
         if Instant::now() >= deadline {
             return Err(format!("not listed within {REINDEX_TIMEOUT_SECS} s"));
         }
