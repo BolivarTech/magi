@@ -711,6 +711,30 @@ mod tests {
     }
 
     #[test]
+    fn a_key_block_header_split_across_two_mages_texts_or_known_by_its_end_line_is_not_stored() {
+        // [MAGI S6 MS3 loop6, R3 Melchior] Two mages' texts are joined with a separator, so a
+        // header split between them is whole in neither the parts nor the join; and a header the
+        // detector cannot read leaves only the body and its END line. Both were stored.
+        use crate::review::gate::GateState;
+        let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC";
+        let mut across = found("a.rs", 3, concat!("see -----", "BEGIN PRIV"));
+        across.titles.push(concat!("ATE ", "KEY-----").into());
+        across.details = vec![body.into()];
+        let mut end_only = found("a.rs", 4, "see the key");
+        end_only.details = vec![format!(
+            "{}\n{body}\n{}",
+            concat!("-----", "BEG IN ", "PRIVATE KEY-----"),
+            concat!("-----", "END PRIVATE KEY-----")
+        )];
+        for (case, f) in [("across", across), ("end only", end_only)] {
+            let main = vec![(f, judged(GateState::Kept))];
+            assert!(entries_from_review(&main, "c1").is_empty(), "{case}");
+        }
+        let clean = vec![(found("a.rs", 5, "fine"), judged(GateState::Kept))];
+        assert_eq!(entries_from_review(&clean, "c1").len(), 1);
+    }
+
+    #[test]
     fn a_review_with_no_commit_id_to_anchor_to_records_nothing() {
         // [MAGI S6 MS3 loop5, R3 Caspar] Any anchor string was serialized into a row: an empty
         // one (a working-tree path that supplied `""`, which RV08 forbids) or a symbolic one,
