@@ -402,19 +402,31 @@ impl ReviewDocStore {
     }
 
     /// Writes the wipe, the rows and the source rows in one transaction, and answers whether it
-    /// wiped. Rows of another identity are deleted when the plan saw them (`rebuilt`) or when
-    /// they appear by the time the transaction starts (another identity's reindex ran while
-    /// this one embedded unlocked); this store's own rows are never deleted here. Inserts are
-    /// `OR IGNORE` by key: two processes indexing the same source under one identity write the
-    /// same thing.
+    /// wiped. Rows of another identity are deleted only when the plan saw them (`rebuilt`: an
+    /// index left by an earlier model, dimension or chunker). Rows of another identity that
+    /// appear only by the time the transaction starts mean another identity's reindex ran while
+    /// this one embedded unlocked: that is a conflict, and the write fails with nothing written
+    /// or deleted, so neither side erases the other's successful write in silence
+    /// (`a_reindex_raced_by_another_identity_is_a_conflict_that_deletes_nothing`); the review
+    /// that loses runs without documentation and says so. This store's own rows are never
+    /// deleted here. Inserts are `OR IGNORE` by key: two processes indexing the same source
+    /// under one identity write the same thing.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] for the conflict or a failing statement.
     // MAGI FIX (MS3 §6 loop3): foreign rows written between the plan and the write were kept,
     // and `OR IGNORE` then dropped this store's rows with the same keys.
+    // MAGI FIX (MS3 §6 loop6): they were then wiped, erasing the other identity's write; a race
+    // is now a conflict.
     fn write(&self, plan: &Plan<'_>, rows: &[DocRow<'_>]) -> Result<bool, MemoryError> {
         let mut c = self.locked_conn();
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
-        let wiped = plan.rebuilt || self.has_foreign_rows(&tx)?;
+        if !plan.rebuilt && self.has_foreign_rows(&tx)? {
+            return Err(identity_conflict());
+        }
+        let wiped = plan.rebuilt;
         if wiped {
             tx.execute(
                 "DELETE FROM code_review_docs WHERE index_id <> ?1",
@@ -497,15 +509,26 @@ impl ReviewDocStore {
     /// batch of a review. Rows are read raw under the connection lock and decrypted after it is
     /// released (R-V08).
     ///
+    /// While rows of another identity are stored, a non-empty `allowed` is an error, never an
+    /// empty answer: after this review indexed, only another identity's rebuild can have put
+    /// them there, and it may have wiped this review's rows
+    /// (`vectors_loaded_while_another_identity_holds_the_index_are_an_error_not_silence`). The
+    /// review then declares its documentation unavailable instead of serving none undeclared.
+    ///
     /// Complexity: O(r) decryptions for the `r` allowed rows.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if a query fails; [`MemoryError::Crypto`] if decryption fails.
+    /// [`MemoryError::Storage`] if another identity holds the index or a query fails;
+    /// [`MemoryError::Crypto`] if decryption fails.
+    // MAGI FIX (MS3 §6 loop6): a wipe by another identity read as an empty index.
     pub fn load_vectors(
         &self,
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<DocVectors, MemoryError> {
+        if !allowed.is_empty() && self.has_foreign_rows(&self.locked_conn())? {
+            return Err(identity_conflict());
+        }
         let candidates = self.allowed_vectors(dim, allowed)?;
         let mut rows = Vec::with_capacity(candidates.len());
         for (key, hash, blob) in candidates {
@@ -696,6 +719,14 @@ impl ReviewDocStore {
         tx.commit().map_err(db_err)?;
         Ok(doomed.len())
     }
+}
+
+/// The error of a documentation index held by another index identity at the same time
+/// (another embedding model, dimension or chunker on the same database).
+fn identity_conflict() -> MemoryError {
+    MemoryError::Storage(
+        "another index identity changed the documentation index while this review ran".to_string(),
+    )
 }
 
 /// `Ok(None)` for "no row", the error otherwise.
