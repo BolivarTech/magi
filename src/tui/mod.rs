@@ -2439,7 +2439,11 @@ impl App {
                 }
             }
             Err(e) => {
-                let text = magi_rs::redact::redact_foreign_text(&e.to_string()).to_string();
+                // MAGI FIX (MS3 §6 loop5): the same two stages as the tool path's errors (URL
+                // credentials, then the RV22 detector), not URL redaction alone; the transcript
+                // auditor still runs after it
+                // (`a_failed_tui_review_writes_its_error_with_its_secrets_masked`).
+                let text = crate::tools::code_review::egress_text(&e.to_string());
                 apply_response(
                     self,
                     AgentResponse::Error(crate::agent::Agent::sanitize_text(&text)),
