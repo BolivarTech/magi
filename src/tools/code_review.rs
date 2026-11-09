@@ -368,14 +368,28 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
     }
 }
 
+/// What is left of the documentation bound ([`REINDEX_TIMEOUT_SECS`]) since `since`, the start
+/// of the working tree's listing: the listing and the indexing share that one bound, which the
+/// budget check reserves (`outbound_prep_reserve_secs`). O(1).
+///
+/// # Arguments
+/// * `since` - When the working tree's listing started.
+///
+/// # Returns
+/// The time left, zero once the bound has passed.
+// MAGI FIX (MS3 §6 loop5): the listing ran outside the bound; the indexing kept the whole of it.
+fn docs_time_left(since: Instant) -> Duration {
+    Duration::from_secs(REINDEX_TIMEOUT_SECS).saturating_sub(since.elapsed())
+}
+
 /// A runner's [`ReviewOutcome`] rendered for every surface, pure.
 ///
 /// On success: `text` = the consolidated report, `json` = the summary, `consult` = the
 /// consensus (and the consolidated agents when `structured`). When consolidation failed or no
 /// batch completed: `text` = the paid batch reports, then one line per batch that did not
 /// complete with its cause, `json` = the summary, `consult` = null, `failure` = the redacted
-/// reason, followed by those causes joined by `; ` so the stderr line says why. The raw batch reports reach text only through the report
-/// renderers, which redact.
+/// reason, followed by those causes joined by `; ` so the stderr line says why. The raw batch
+/// reports reach text only through the report renderers, which redact.
 ///
 /// # Arguments
 /// * `o` - The outcome.
@@ -383,14 +397,8 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
 ///
 /// # Returns
 /// The rendered review.
-/// What is left of the documentation bound ([`REINDEX_TIMEOUT_SECS`]) since `since`, the start
-/// of the working tree's listing: the listing and the indexing share that one bound, which the
-/// budget check reserves (`outbound_prep_reserve_secs`). O(1).
-// MAGI FIX (MS3 §6 loop5): the listing ran outside the bound; the indexing kept the whole of it.
-fn docs_time_left(since: Instant) -> Duration {
-    Duration::from_secs(REINDEX_TIMEOUT_SECS).saturating_sub(since.elapsed())
-}
-
+// MAGI FIX (MS3 §6 loop6): this doc block sat on `docs_time_left`, which a helper inserted
+// between it and its function had taken.
 pub(crate) fn render_outcome(o: ReviewOutcome, structured: bool) -> Rendered {
     let json = summary_json(&o.summary);
     let rendered = match (o.consolidated, o.consolidation_error) {
