@@ -59,7 +59,10 @@ const LINE_SEPARATOR: char = '\u{2028}';
 /// The Unicode paragraph separator, which a model may read as a line break.
 const PARAGRAPH_SEPARATOR: char = '\u{2029}';
 
-/// Digits of the line-number prefix of a reviewed line (right-aligned).
+/// Digits of the line-number prefix of a reviewed line (right-aligned). A number of seven or more
+/// digits (a file past 999 999 lines, which the 8 MiB per-file cap allows) widens its own prefix:
+/// the columns no longer line up, but the `|` still ends the number and the diff marker still
+/// follows it, which is all [`LINE_NUMBER_LEGEND`] tells the trio to read.
 const LINE_NUMBER_WIDTH: usize = 6;
 
 /// The character that closes the line-number prefix.
