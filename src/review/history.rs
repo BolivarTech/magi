@@ -165,21 +165,42 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 /// # Returns
 /// The status the evidence supports.
 pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> HistoryStatus {
+    match signal(entry, head, git) {
+        Signal::Status(status) => status,
+        Signal::NoLaterCommit | Signal::Unknown => HistoryStatus::Pending,
+    }
+}
+
+/// What git says of a remembered finding: a status, a definitive lack of signal, or no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signal {
+    /// The status the evidence supports (attended or weak reject).
+    Status(HistoryStatus),
+    /// `head` resolves to the reviewed commit itself: nothing came after it, so there is no
+    /// signal, and RV08 says the entry is pending. A definitive answer of git.
+    NoLaterCommit,
+    /// No answer: an entry that cannot be checked, a git that failed, a diff not understood.
+    Unknown,
+}
+
+/// [`classify`], telling a definitive lack of signal ([`Signal::NoLaterCommit`]) from no answer
+/// ([`Signal::Unknown`]). Same cases and cost as [`classify`].
+fn signal(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Signal {
     let commit = entry.reviewed_commit.as_str();
     let Some(line) = entry.line else {
-        return HistoryStatus::Pending;
+        return Signal::Unknown;
     };
     // MAGI FIX (MS3 §6 loop3): an empty file would be an empty pathspec, the whole tree.
     // MAGI FIX (MS3 §6 loop5): a reviewed commit that is no commit id (a branch name, `HEAD~1`)
     // gives no signal on any branch, not only the weak reject's: a moving ref anchors nothing.
     if !is_commit_id(commit) || head.starts_with('-') || entry.file.is_empty() {
-        return HistoryStatus::Pending;
+        return Signal::Unknown;
     }
     if git
         .run(&["merge-base", "--is-ancestor", commit, head])
         .is_err()
     {
-        return HistoryStatus::Pending;
+        return Signal::Unknown;
     }
     let diff = git.run(&[
         "diff",
@@ -195,8 +216,8 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
         entry.file.as_str(),
     ]);
     match diff.ok().and_then(|text| diff_covers(&text, line)) {
-        None => HistoryStatus::Pending,
-        Some(true) => HistoryStatus::Attended,
+        None => Signal::Unknown,
+        Some(true) => Signal::Status(HistoryStatus::Attended),
         Some(false) => weak_reject_if_later(commit, head, git),
     }
 }
@@ -209,8 +230,8 @@ fn is_commit_id(commit: &str) -> bool {
 }
 
 /// [`HistoryStatus::WeakReject`] when `head` resolves to a commit other than `commit`;
-/// otherwise [`HistoryStatus::Pending`]: with no commit after the reviewed one there is no
-/// signal yet, and a failing `rev-parse` is no signal either.
+/// [`Signal::NoLaterCommit`] when it resolves to `commit` itself (no commit after the reviewed
+/// one: no signal, RV08), and [`Signal::Unknown`] when `rev-parse` fails.
 ///
 /// `commit` is the SHA recorded at review time (`record_history` resolves it with `rev-parse`);
 /// an abbreviation of the SHA `head` resolves to is the same commit, so it is compared as a
@@ -219,13 +240,16 @@ fn is_commit_id(commit: &str) -> bool {
 /// comparison with a SHA would read it as a later commit.
 // MAGI FIX (MS3 §6 loop3): an abbreviated SHA of HEAD itself read as a later commit.
 // MAGI FIX (MS3 §6 loop4): a non-SHA commit read as a later one, a false weak reject.
-fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> HistoryStatus {
+fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> Signal {
     if !is_commit_id(commit) {
-        return HistoryStatus::Pending;
+        return Signal::Unknown;
     }
     match git.run(&["rev-parse", "--verify", &format!("{head}^{{commit}}")]) {
-        Ok(resolved) if !resolved.trim().starts_with(commit) => HistoryStatus::WeakReject,
-        _ => HistoryStatus::Pending,
+        Ok(resolved) if !resolved.trim().starts_with(commit) => {
+            Signal::Status(HistoryStatus::WeakReject)
+        }
+        Ok(_) => Signal::NoLaterCommit,
+        Err(_) => Signal::Unknown,
     }
 }
 
@@ -241,7 +265,12 @@ fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> Histo
 /// attended entry whose change was reverted goes back to a weak reject, RV08 by net state), but
 /// only the first [`MAX_RECLASSIFY_PER_REVIEW`], in the order received: the caller passes the
 /// least recently checked first (`ReviewHistoryStore::due`). The updates are only the statuses
-/// that change, and a `Pending` result never replaces a validated status.
+/// that change. A validated status goes back to `Pending` only on git's definitive answer that
+/// `head` is the reviewed commit again (RV08: no later commit, no signal;
+/// `a_validated_entry_goes_back_to_pending_once_head_is_the_reviewed_commit_again`); an entry
+/// git could not answer for (a failure, another branch, a gone commit) keeps its status, so a
+/// broken or partial clone never erases what was validated
+/// (`no_signal_never_downgrades_a_validated_entry`).
 ///
 /// Complexity: O(min(existing, [`MAX_RECLASSIFY_PER_REVIEW`])) classifications.
 ///
@@ -262,9 +291,14 @@ pub fn reclassify_then_record(
     let updates = existing
         .iter()
         .take(MAX_RECLASSIFY_PER_REVIEW)
-        .filter_map(|e| {
-            let status = classify(e, head, git);
-            (status != HistoryStatus::Pending && status != e.status).then(|| (e.id.clone(), status))
+        // MAGI FIX (MS3 §6 loop5): a definitive lack of signal is recorded as pending (RV08); it
+        // was dropped like a git failure, so a reset to the reviewed commit kept it validated.
+        .filter_map(|e| match signal(e, head, git) {
+            Signal::Status(status) if status != e.status => Some((e.id.clone(), status)),
+            Signal::NoLaterCommit if e.status != HistoryStatus::Pending => {
+                Some((e.id.clone(), HistoryStatus::Pending))
+            }
+            Signal::Status(_) | Signal::NoLaterCommit | Signal::Unknown => None,
         })
         .collect();
     (updates, new.to_vec())
