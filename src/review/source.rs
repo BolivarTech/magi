@@ -201,6 +201,12 @@ pub trait ContentSource: Send + Sync {
         Ok(())
     }
 
+    /// Ends the filter's classification (§5.0 step 2): from now on, no side held raw with a
+    /// secret in it is served, whether the filter read it or not. The filter has to read such a
+    /// side to leave its file out; no later stage may. The default holds nothing and does
+    /// nothing.
+    fn seal(&self) {}
+
     /// What this source masked in side `face` of `path` (RV22): the secrets of a held text side
     /// are replaced by `<redacted: …>`, line breaks kept, before any stage reads it. A side that
     /// holds a multi-line private-key block is never masked (RV22's exception), so the filter
@@ -1098,6 +1104,45 @@ mod tests {
             matches!(cache.read("a.rs"), Err(ReviewError::EgressSecret { .. })),
             "a key block gained after the release was served raw"
         );
+    }
+
+    #[test]
+    fn once_sealed_the_cache_never_serves_a_side_raw_with_a_secret_even_one_never_classified() {
+        // [MAGI S6 MS3 loop5, R6a Melchior] The refusals covered only sides the filter released;
+        // a path it never classified (a later stage reading beyond the kept files) was fetched
+        // fresh and served raw. After the filter seals the cache, no side held raw with a secret
+        // is served, read before or not; clean and masked sides still are.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let keyed = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n");
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let masked = format!("let t = \"{token}\";\n");
+        let inner = crate::review::test_support::MapSource::new(
+            &[
+                ("seen.pem", keyed.as_str()),
+                ("never.pem", keyed.as_str()),
+                ("a.rs", "fn a() {}\n"),
+                ("t.rs", masked.as_str()),
+            ],
+            &[],
+        );
+        let cache = CachedSource::new(&inner);
+        assert!(cache
+            .read("seen.pem")
+            .expect("the filter reads it")
+            .is_some());
+        cache.seal();
+        for path in ["seen.pem", "never.pem"] {
+            assert!(
+                matches!(cache.read(path), Err(ReviewError::EgressSecret { .. })),
+                "{path} was served raw after the seal"
+            );
+        }
+        assert_eq!(
+            cache.read("a.rs").expect("clean"),
+            Some(b"fn a() {}\n".to_vec())
+        );
+        let t = cache.read("t.rs").expect("masked").expect("present");
+        assert!(!String::from_utf8_lossy(&t).contains(token));
     }
 
     #[test]
