@@ -1113,6 +1113,10 @@ pub async fn prepare_docs(
         // MAGI FIX (MS3 §6 loop1): RV22 amended: a chunk's one-line secrets are masked by the
         // chunker and the file is declared as masked; only a private-key block, anywhere in the
         // file (its code included), still withholds the whole source.
+        // `kept` are the chunks safe to send; `dropped` names (once per chunk) the source of
+        // each chunk left out for a secret, which after the chunker's masking means a private-key
+        // block. A non-empty `dropped` withholds the whole source: U29 indexes a source whole or
+        // not at all, so it is never served partly.
         let (kept, dropped) = if holds_key_block(&text) {
             (Vec::new(), vec![display_path(&source.path)])
         } else {
