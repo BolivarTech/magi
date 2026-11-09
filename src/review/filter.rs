@@ -1044,6 +1044,28 @@ mod tests {
     }
 
     #[test]
+    fn a_url_credential_file_is_reviewed_masked_and_its_mask_never_reads_as_a_secret() {
+        // [MAGI S6 MS3 loop5, R6a Melchior] Masking holds only while a mask never matches a
+        // pattern again: a mask that re-matched would turn masking back into a `secret` skip.
+        // The placeholder lands inside the URL for this pattern, the one whose omission
+        // motivated RV22's amendment (PM-S-14).
+        let text = "let url = \"postgres://svc:pa55word@db.internal/app\";\n";
+        let inner = MapSource::new(&[("db.rs", text)], &[]);
+        let src = CachedSource::new(&inner);
+        let files = vec![ReviewFile {
+            path: "db.rs".into(),
+            diff: None,
+        }];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("kept masked");
+        assert_eq!(f.masked, vec![masked("db.rs", "url-credential")]);
+        let held =
+            String::from_utf8(src.read("db.rs").expect("read").expect("present")).expect("utf-8");
+        assert!(!held.contains("pa55word"), "{held}");
+        assert_eq!(find_secret(&held), None, "{held}");
+    }
+
+    #[test]
     fn a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review() {
         // [MAGI S6 MS3 loop5, R6a Caspar] The second read of the released side was refused by
         // the cache, and that refusal ended the whole review; inside the filter it is the skip
