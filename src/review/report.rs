@@ -133,12 +133,13 @@ pub struct ReviewSummary {
     /// Context items left out because the secret detector matched them (REQ-RV22), as the
     /// pipeline counts them (`prepare_contexts`): an item holding a private-key block (RV22's
     /// exception), one whose path quotes a secret (a path cannot be masked and still name its
-    /// file), one in which masking left a match or whose mask outgrew what the budget charged,
-    /// plus those the context source withheld itself. An item holding a one-line secret is not
-    /// counted here: it is sent masked and declared in [`Self::masked`] (RV22 amended;
-    /// pipeline tests `a_context_item_quoting_a_one_line_secret_reaches_the_prompt_masked` and
-    /// `a_context_item_whose_mask_would_outgrow_its_charge_is_withheld`). This module only
-    /// writes the count it is given.
+    /// file), one in which masking left a match, plus those the context source withheld itself.
+    /// An item holding a one-line secret is not counted here, even when its mask is longer than
+    /// what the budget charged: it is sent masked and declared in [`Self::masked`], and the batch
+    /// pays for the growth with trimmed optional context, listed in [`Self::trimmed`] (RV22
+    /// amended; pipeline tests `a_context_item_quoting_a_one_line_secret_reaches_the_prompt_masked`
+    /// and `the_growth_of_a_mask_is_paid_by_trimming_optional_context_never_by_omitting_the_item`).
+    /// This module only writes the count it is given.
     pub context_withheld: usize,
     /// `(file, line)` of the findings whose line names no line of the reviewed revision: one
     /// whose number can only be a removed line (read on the old side only). A number that is
