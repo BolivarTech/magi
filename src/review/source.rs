@@ -14,7 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
-use super::secrets::{holds_key_block, mask_secrets_keeping_lines_within, BoundedMask};
+use super::secrets::{
+    find_secret, holds_key_block, mask_secrets_keeping_lines_within, BoundedMask,
+};
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
 pub const MAX_REVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -726,12 +728,16 @@ struct Held {
     old: HashMap<String, Option<Vec<u8>>>,
     /// What was masked in each held side, by side and path (RV22).
     masks: HashMap<(Face, String), SideMask>,
-    /// Sides released while they held a private-key block raw (RV22's exception): never read
-    /// again, so no stage after the filter can get that key back.
+    /// Sides released while they were held raw with a secret in them ([`HeldSide::raw_secret`]:
+    /// a private-key block, RV22's exception, a text too dense to mask, a binary side): never
+    /// read again, so no stage after the filter can get that secret back.
     withheld: HashSet<(Face, String)>,
-    /// Sides released before they were ever read (a file the filter left out by its name): a
-    /// later read that finds a private-key block in them is refused like a withheld side.
-    released_unread: HashSet<(Face, String)>,
+    /// Held sides that are raw with a secret in them ([`HeldSide::raw_secret`]).
+    raw_secret: HashSet<(Face, String)>,
+    /// Every side released, read or not (a file the filter left out by its name is released
+    /// unread): a later read that would serve it raw with a secret is refused like a withheld
+    /// side, so a side that gains a secret after its release is refused too.
+    released: HashSet<(Face, String)>,
     /// Bytes held across both sides.
     bytes: u64,
     /// The bytes held before, and the path of, the first read that passed the cap since the
@@ -819,22 +825,24 @@ impl<'a> CachedSource<'a> {
             Face::New => self.inner.read(path)?,
             Face::Old => self.inner.read_old(path)?,
         };
+        // MAGI FIX (T3.7): RV22 masks a one-line secret instead of leaving its file out; every
+        // stage reads through this cache, so masking here is the one place it happens. A side with
+        // a key block is not masked (see `masked_side`): the filter leaves that file out.
+        let HeldSide {
+            bytes: read,
+            mask,
+            raw_secret,
+        } = masked_side(raw);
         // MAGI FIX (MS3 §6 loop4): a side released unread (left out by its name) was fetched
         // fresh and, holding a key block, served raw; the rule now holds for those sides too.
-        if held.released_unread.contains(&(face, path.to_string()))
-            && raw
-                .as_deref()
-                .and_then(|bytes| std::str::from_utf8(bytes).ok())
-                .is_some_and(holds_key_block)
-        {
+        // MAGI FIX (MS3 §6 loop5): for every released side, read or not, and for any secret it
+        // would be served raw with (a binary side, one too dense to mask, a key block it gained
+        // after its release), not a key block alone.
+        if raw_secret && held.released.contains(&(face, path.to_string())) {
             return Err(ReviewError::EgressSecret {
                 path: path.to_string(),
             });
         }
-        // MAGI FIX (T3.7): RV22 masks a one-line secret instead of leaving its file out; every
-        // stage reads through this cache, so masking here is the one place it happens. A side with
-        // a key block is not masked (see `masked_side`): the filter leaves that file out.
-        let (read, mask) = masked_side(raw);
         let len = read
             .as_ref()
             .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX));
@@ -857,6 +865,9 @@ impl<'a> CachedSource<'a> {
         if let Some(mask) = mask {
             held.masks.insert((face, path.to_string()), mask);
         }
+        if raw_secret {
+            held.raw_secret.insert((face, path.to_string()));
+        }
         let side = match face {
             Face::New => &mut held.new,
             Face::Old => &mut held.old,
@@ -875,8 +886,8 @@ impl<'a> CachedSource<'a> {
 /// check leaves its file out (REQ-RV22's exception: a key body has no pattern of its own, so no
 /// mask could promise that none of it leaves). O(bytes).
 // MAGI FIX (T3.7 fix round 3): three review rounds found key-body lines that masking let through.
-fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
-    masked_side_within(read, MAX_MASKED_SIDE_BYTES)
+fn masked_side(read: Option<Vec<u8>>) -> HeldSide {
+    held_side(read, MAX_MASKED_SIDE_BYTES)
 }
 
 /// The largest masked side the cache builds: twice the per-file cap, since a mask can be longer
@@ -884,30 +895,64 @@ fn masked_side(read: Option<Vec<u8>>) -> (Option<Vec<u8>>, Option<SideMask>) {
 /// as read, so the filter leaves its file out as `secret`, the safe direction of RV22.
 const MAX_MASKED_SIDE_BYTES: usize = 2 * MAX_REVIEW_FILE_BYTES as usize;
 
-/// [`masked_side`] with an explicit bound on the masked side.
+/// [`masked_side`] with an explicit bound on the masked side, its bytes and mask only.
+#[cfg(test)]
 fn masked_side_within(
     read: Option<Vec<u8>>,
     max_bytes: usize,
 ) -> (Option<Vec<u8>>, Option<SideMask>) {
+    let held = held_side(read, max_bytes);
+    (held.bytes, held.mask)
+}
+
+/// A side as the cache holds it ([`masked_side`]), and whether it is held raw with a secret in it.
+struct HeldSide {
+    /// The bytes held.
+    bytes: Option<Vec<u8>>,
+    /// What was masked in them, if anything.
+    mask: Option<SideMask>,
+    /// The bytes held still hold a secret the detector finds: a private-key block, a text too
+    /// dense to mask within the bound, or a binary or non-UTF-8 side (never masked) with a match
+    /// in its lossy decoding. Such a side reaches no model only because the filter leaves its
+    /// file out, so the cache never serves it again once released ([`CachedSource::get`]).
+    raw_secret: bool,
+}
+
+/// [`masked_side`] with an explicit bound on the masked side. One secret scan for a clean or masked
+/// text side, two for a binary one. O(bytes).
+fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
     // MAGI FIX (MS3 §6 loop2): the key-block scan ran over every side; a key block is a secret
     // match, so it is looked for only in a side that holds one (one scan for most files).
     // MAGI FIX (MS3 §6 loop4): the mask is bounded; a side too dense to mask is held as read.
-    let masked = read
+    let text = read
         .as_deref()
         .filter(|bytes| !bytes.contains(&0))
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(
-            |text| match mask_secrets_keeping_lines_within(text, max_bytes) {
-                BoundedMask::Masked(m) if !holds_key_block(text) => Some(m),
-                _ => None,
-            },
-        );
-    match masked {
-        Some(m) => (
-            Some(m.text.into_bytes()),
-            Some(SideMask { pattern: m.pattern }),
+        .and_then(|bytes| std::str::from_utf8(bytes).ok());
+    let (masked, raw_secret) = match text {
+        Some(text) => match mask_secrets_keeping_lines_within(text, max_bytes) {
+            BoundedMask::Clean => (None, false),
+            BoundedMask::Masked(m) if !holds_key_block(text) => (Some(m), false),
+            BoundedMask::Masked(_) | BoundedMask::TooLarge => (None, true),
+        },
+        // MAGI FIX (MS3 §6 loop5): a binary side is never masked; whether it holds a secret is
+        // what decides that it is never served again once released.
+        None => (
+            None,
+            read.as_deref()
+                .is_some_and(|bytes| find_secret(&String::from_utf8_lossy(bytes)).is_some()),
         ),
-        None => (read, None),
+    };
+    match masked {
+        Some(m) => HeldSide {
+            bytes: Some(m.text.into_bytes()),
+            mask: Some(SideMask { pattern: m.pattern }),
+            raw_secret,
+        },
+        None => HeldSide {
+            bytes: read,
+            mask: None,
+            raw_secret,
+        },
     }
 }
 
@@ -916,7 +961,8 @@ impl ContentSource for CachedSource<'_> {
     ///
     /// The inner source's error (never kept), [`ReviewError::InputTooLarge`] when keeping the read
     /// would pass the total cap by more than the provisional headroom, and
-    /// [`ReviewError::EgressSecret`] for a side released while it held a private-key block.
+    /// [`ReviewError::EgressSecret`] for a released side that was, or would be, held raw with a
+    /// secret in it.
     fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
         self.get(Face::New, path)
     }
@@ -925,29 +971,27 @@ impl ContentSource for CachedSource<'_> {
         self.get(Face::Old, path)
     }
 
-    /// Removes side `face` of `path` and gives its bytes back to the total cap. A side that held a
-    /// private-key block is remembered, and a later read of it is refused; so is a side released
-    /// before it was ever read, if a later read finds a private-key block in it
-    /// (`a_key_block_side_released_before_it_was_ever_read_is_refused_too`). O(1) expected, plus
-    /// a scan of the released bytes.
+    /// Removes side `face` of `path` and gives its bytes back to the total cap. A side held raw
+    /// with a secret in it (a private-key block, a text too dense to mask, a binary side) is
+    /// remembered, and a later read of it is refused; so is any later read of a released side,
+    /// read before or not, that would serve it raw with a secret
+    /// (`a_key_block_side_released_before_it_was_ever_read_is_refused_too`,
+    /// `a_released_side_held_raw_for_any_reason_or_raw_on_its_next_read_is_refused`). O(1)
+    /// expected.
     fn release(&self, face: Face, path: &str) {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         let removed = match face {
             Face::New => held.new.remove(path),
             Face::Old => held.old.remove(path),
         };
-        held.masks.remove(&(face, path.to_string()));
-        if removed.is_none() {
-            held.released_unread.insert((face, path.to_string()));
+        let key = (face, path.to_string());
+        held.masks.remove(&key);
+        // MAGI FIX (MS3 §6 loop5): every side held raw with a secret, not a key block alone.
+        if held.raw_secret.remove(&key) {
+            held.withheld.insert(key.clone());
         }
+        held.released.insert(key);
         let removed = removed.flatten();
-        if removed
-            .as_deref()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .is_some_and(holds_key_block)
-        {
-            held.withheld.insert((face, path.to_string()));
-        }
         let freed = removed.map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         held.bytes = held.bytes.saturating_sub(freed);
         if held.bytes <= self.cap {
