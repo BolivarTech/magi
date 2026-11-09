@@ -321,6 +321,16 @@ pub(crate) async fn finish_after_report(
 /// flight; the clean-up of the documentation index gets as much again.
 pub(crate) const POST_REPORT_LIMIT_SECS: u64 = 2 * RECLASSIFY_BUDGET_SECS;
 
+/// What the run log says when the post-report work reached its own bound
+/// ([`POST_REPORT_LIMIT_SECS`], counted from when the work starts) and stopped before a step.
+const POST_REPORT_BOUND_REACHED: &str =
+    "the post-report work reached its bound: the rest of the clean-up is left for the next review";
+
+/// Whether `deadline` has passed; never without one. O(1).
+fn past(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
 /// [`finish_after_report`] for a surface whose report is delivered and that has no run deadline
 /// or cancellation of its own: bounded by [`POST_REPORT_LIMIT_SECS`]. Past it the surface goes
 /// on, says so, and leaves the work to finish on its blocking thread.
@@ -1649,10 +1659,19 @@ impl CodeReviewRunner for ProductionReviewRunner {
         let workspace = self.workspace.clone();
         Some(Box::new(move || {
             let git = ScrubbedGit::new(workspace);
-            let warnings: Vec<String> = follows
-                .into_iter()
-                .filter_map(|follow| follow_up_work(&memory, &git, follow))
-                .collect();
+            let deadline = std::time::Instant::now() + Duration::from_secs(POST_REPORT_LIMIT_SECS);
+            let mut warnings: Vec<String> = Vec::new();
+            for follow in follows {
+                if past(Some(deadline)) {
+                    tracing::event!(
+                        target: REVIEW_LOG_TARGET,
+                        tracing::Level::WARN,
+                        "{POST_REPORT_BOUND_REACHED}"
+                    );
+                    break;
+                }
+                warnings.extend(follow_up_work_until(&memory, &git, follow, Some(deadline)));
+            }
             (!warnings.is_empty()).then(|| warnings.join("\n"))
         }))
     }
@@ -1675,18 +1694,24 @@ impl CodeReviewRunner for ProductionReviewRunner {
 ///
 /// # Returns
 /// The `warning: the review history was not updated: <cause>` line, or `None`.
+#[cfg(test)]
 fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp) -> Option<String> {
     follow_up_work_until(memory, git, follow, None)
 }
 
-/// [`follow_up_work`] under `deadline`.
+/// [`follow_up_work`] under `deadline`: once it has passed, the clean-up is skipped (logged at
+/// WARN, nothing deleted), so the work ends by itself even when its surface stopped waiting
+/// for it (`the_post_report_work_stops_at_its_own_bound_even_once_detached`). A git call in
+/// flight ends by its own bound (`GIT_CALL_TIMEOUT_SECS`); no git call runs under the
+/// database lock (the history and the index read git first, then write in a short
+/// transaction), so a slow git never holds a later review's writes.
+// MAGI FIX (MS3 §6 loop6): the detached sequence had no total bound (R5 Caspar).
 fn follow_up_work_until(
     memory: &ReviewMemory,
     git: &dyn GitCommand,
     follow: FollowUp,
     deadline: Option<std::time::Instant>,
 ) -> Option<String> {
-    let _ = deadline;
     let mut warning = None;
     if let Some(rev) = &follow.rev {
         match record_history(memory, git, rev, &follow.findings) {
@@ -1708,6 +1733,14 @@ fn follow_up_work_until(
                 warning = Some(format!("{HISTORY_NOT_UPDATED}: {cause}"));
             }
         }
+    }
+    if follow.docs.is_some() && past(deadline) {
+        tracing::event!(
+            target: REVIEW_LOG_TARGET,
+            tracing::Level::WARN,
+            "{POST_REPORT_BOUND_REACHED}"
+        );
+        return warning;
     }
     if let Some(docs) = &follow.docs {
         // The working tree's sources were listed under its ignore rules already; a ref's tree is
