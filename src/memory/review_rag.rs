@@ -1808,6 +1808,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_secret_outside_the_changed_lines_reaches_every_code_context_item_masked() {
+        // [MAGI S6 MS3 loop4, R2 all three] Units, definitions and callers are read through the
+        // review's cache (`CachedSource`, the source the pipeline binds), which holds every text
+        // side with its one-line secrets masked before any stage reads it (RV22 amended). So a
+        // secret in an unreviewed line of the containing unit, of a definition or of a caller
+        // never reaches the context raw, and the text charged to the budget is the masked one.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let f = RagFixture::new(&[
+            (
+                "a.rs",
+                &format!("fn a() {{\n    b();\n    let k = \"{key}\";\n}}\n"),
+            ),
+            ("b.rs", &format!("fn b() {{\n    let k = \"{key}\";\n}}\n")),
+            (
+                "c.rs",
+                &format!("fn c() {{\n    a();\n    let k = \"{key}\";\n}}\n"),
+            ),
+        ])
+        .await;
+        let cached = magi_rs::review::source::CachedSource::new(&f.source);
+        let rag = StoreRag {
+            sources: &cached,
+            ..f.rag(false)
+        };
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 10,
+            companion_tokens: 0,
+            items: vec![BatchItem::Hunk {
+                file: "a.rs".into(),
+                text: "    b();".into(),
+                first_line: 2,
+                last_line: 2,
+                old_first_line: 2,
+                old_last_line: 2,
+            }],
+        };
+        let a = rag.context_for(&batch).await.expect("context");
+        let kinds: BTreeSet<String> = a.items.iter().map(|i| format!("{:?}", i.kind)).collect();
+        assert_eq!(
+            kinds,
+            ["Caller", "Definition", "Unit"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        for item in &a.items {
+            assert!(
+                !item.text.contains("sk-ant-") && item.text.contains("<redacted: anthropic-key>"),
+                "{:?} of {} left raw: {}",
+                item.kind,
+                item.file,
+                item.text
+            );
+        }
+    }
+
     /// Answers every git call with a diff covering line 1 (so `merge-base` succeeds too).
     struct LineOneChanged;
     impl GitCommand for LineOneChanged {
