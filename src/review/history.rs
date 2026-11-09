@@ -38,6 +38,9 @@ const BINARY_PREFIX: &str = "Binary files ";
 /// End of that line.
 const BINARY_SUFFIX: &str = " differ";
 
+/// What opens the header of one file in git's diff.
+const DIFF_HEADER_PREFIX: &str = "diff --git ";
+
 /// What became of a remembered finding, judged from git alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,11 +228,30 @@ fn signal(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Signal {
         "--",
         entry.file.as_str(),
     ]);
-    match diff.ok().and_then(|text| diff_covers(&text, line)) {
+    // MAGI FIX (MS3 §6 loop6): a directory as `file` is a tree-wide pathspec; a diff that names
+    // any other file is no signal about this entry.
+    let diff = diff.ok().filter(|text| names_only(text, &entry.file));
+    match diff.and_then(|text| diff_covers(&text, line)) {
         None => Signal::Unknown,
         Some(true) => Signal::Status(HistoryStatus::Attended),
         Some(false) => weak_reject_if_later(commit, head, git),
     }
+}
+
+/// Whether every file header of the diff `text` (`diff --git a/<path> b/<path>`, `--no-renames`
+/// so both paths are one) names `file` itself.
+///
+/// A directory as `file` (`src`, `.`) is a pathspec over a whole subtree even with literal
+/// pathspecs, so its diff can hold another file's hunk at the entry's line; such a diff gives no
+/// signal (`a_diff_of_another_file_than_the_entrys_gives_no_signal`). A diff without a header
+/// (nothing changed) names nothing else. The production runner writes paths unquoted
+/// (`core.quotePath=false`); a path git still quotes (a tab, a newline or a quote in its name)
+/// does not match here either, so it gives no signal: `Pending`, the safe direction. O(lines).
+fn names_only(text: &str, file: &str) -> bool {
+    let plain = format!("{DIFF_HEADER_PREFIX}a/{file} b/{file}");
+    text.lines()
+        .filter(|l| l.starts_with(DIFF_HEADER_PREFIX))
+        .all(|l| l == plain)
 }
 
 /// Whether `commit` reads as a commit id: non-empty hexadecimal, a full SHA as `record_history`
