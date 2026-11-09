@@ -1798,6 +1798,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_path_is_classified_as_a_directory_only_after_the_guard_accepts_it() {
+        // [MAGI S6 MS3 loop6, R5 Caspar] `path_input` stat-ed the raw path to tell a file from a
+        // directory before any guard ran, so `..` (a directory outside the workspace) was read.
+        // A path the guard refuses now stays a `File`, for the input check to refuse.
+        let root = tempfile::tempdir().expect("tmp");
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(ws.join("src")).expect("src");
+        assert_eq!(
+            path_input(&ws, ReviewInput::File("..".into())),
+            ReviewInput::File("..".into())
+        );
+        assert_eq!(
+            path_input(&ws, ReviewInput::File("src".into())),
+            ReviewInput::Directory("src".into())
+        );
+    }
+
     #[tokio::test]
     async fn as_a_tool_the_review_gets_what_is_left_of_the_run() {
         let runner = Arc::new(FakeRunner::default());
