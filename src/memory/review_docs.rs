@@ -1743,6 +1743,39 @@ mod tests {
         assert_eq!(e.calls(), 0);
     }
 
+    #[tokio::test]
+    async fn a_chunk_holding_a_private_key_block_is_refused_before_anything_is_embedded() {
+        // [MAGI S6 MS3 loop4, R1 Caspar] RV22's exception: a multi-line private-key block never
+        // leaves the process. `refuse_secrets` refuses it by itself, whatever its caller netted
+        // first: the PEM, OpenPGP and SSH2 headers are patterns of the same table `find_secret`
+        // scans, in the text or in the section.
+        let pem = concat!("-----", "BEGIN ", "PRIVATE KEY-----\nMIIEvQIBADANBg\n");
+        let pgp = concat!("-----", "BEGIN PGP ", "PRIVATE KEY BLOCK-----\nlQOYBGZ\n");
+        let ssh2 = concat!(
+            "---- BEGIN SSH2 ",
+            "ENCRYPTED PRIVATE KEY ----\nP2/56wAAA\n"
+        );
+        for block in [pem, pgp, ssh2] {
+            for (section, text) in [("Setup", block), (block, "harmless text")] {
+                let (store, _dir) = store_for_test();
+                let e = FakeEmbedder::new(3);
+                let r = store
+                    .reindex(
+                        &[(src("key.md", "k"), vec![chunk("key.md", section, text)])],
+                        &e,
+                    )
+                    .await;
+                assert!(
+                    matches!(&r, Err(MemoryError::Storage(m)) if m.contains("key.md")),
+                    "{block:?} in {section:?}: {:?}",
+                    r.as_ref().err()
+                );
+                assert_eq!(e.calls(), 0, "{block:?} reached the embedder");
+                assert!(dims(&store).is_empty(), "nothing written");
+            }
+        }
+    }
+
     /// Embeds like FakeEmbedder and records whether the DB lock was taken while it ran.
     struct LockProbe {
         conn: Arc<Mutex<rusqlite::Connection>>,
