@@ -585,6 +585,10 @@ pub async fn run_review(
         }
         None => vec![Vec::new(); batches.len()],
     };
+    // MAGI FIX (MS3 §6 loop6): every prompt is rendered now, before a caller's deadline is read
+    // again and before the clock starts, so no batch's wall clock is computed before work the
+    // total never counted (R4 Caspar).
+    let prompts = render_prompts(&batches, &contexts);
     // Read again: the preparation spent part of a caller's deadline, and the total is what is
     // left when it ends. The check above reserved the preparation's bound; a preparation that
     // overran it has already made its outbound calls, so a refusal now would come after bytes
@@ -628,7 +632,7 @@ pub async fn run_review(
         t0: deps.clock.elapsed_secs(),
         total,
     };
-    let finished = run_batches(&batches, &contexts, deps.consult, &clock, &mut summary).await;
+    let finished = run_batches(&batches, &prompts, deps.consult, &clock, &mut summary).await;
 
     // MAGI FIX (S6 loop 4): `planned` is never 0 here: a plan without a batch already failed in
     // `filter_and_plan` with `NothingToReview` naming the files left out (RV20), before any spend.
@@ -1117,32 +1121,46 @@ impl ReviewTimer<'_> {
     }
 }
 
+/// The prompt of every batch, its code and then its context, in batch order: rendered before
+/// the review clock starts (§5.0 step 3, part of the preparation RV06 keeps off the clock).
+/// O(bytes of the batches and their contexts).
+fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec<String> {
+    batches
+        .iter()
+        .map(|batch| {
+            let mut prompt = prompt_of(batch);
+            if let Some(items) = contexts.get(batch.index) {
+                write_context(&mut prompt, items);
+            }
+            prompt
+        })
+        .collect()
+}
+
 /// Runs every batch in series (§5.0 step 5), recording metrics and failures in `summary`.
 ///
-/// Each batch's wall clock is recomputed from what is left, split over the pending batches; a
+/// Each batch's wall clock is recomputed from what is left, split over the pending batches,
+/// right before its trio call: the prompts are rendered before the clock starts
+/// ([`render_prompts`]), so nothing between that reading and the call spends the total. A
 /// batch whose wall clock ran out cuts it and every pending one, each declared as
 /// `clock expired`. Every batch that ran gets its metrics, failed or not (a failed one counts no
 /// tokens: its report never arrived); a batch cut before it started spent nothing and has none.
 async fn run_batches(
     batches: &[ReviewBatch],
-    contexts: &[Vec<ContextItem>],
+    prompts: &[String],
     consult: &dyn BatchConsult,
     clock: &ReviewTimer<'_>,
     summary: &mut ReviewSummary,
 ) -> Vec<Finished> {
     let planned = batches.len();
     let mut finished = Vec::new();
-    for batch in batches {
+    for (batch, prompt) in batches.iter().zip(prompts) {
         let wall = clock.left_secs().map(|left| {
             let pending = planned.saturating_sub(batch.index);
             Duration::from_secs(batch_wall_clock_secs(left, pending))
         });
         let started = Instant::now();
-        let mut prompt = prompt_of(batch);
-        if let Some(items) = contexts.get(batch.index) {
-            write_context(&mut prompt, items);
-        }
-        match consult.consult(&prompt, wall).await {
+        match consult.consult(prompt, wall).await {
             Ok(report) => {
                 summary
                     .batches
