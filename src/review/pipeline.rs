@@ -111,7 +111,7 @@ pub struct ReviewMaterial<'r> {
 ///
 /// Contract on egress (RV22): every byte a source sends out of the process itself (a query to
 /// its embedder, a chunk it indexes) is masked by the source before it is sent; the pipeline
-/// masks only what the source hands back ([`context_egress`]), so it cannot mask what was sent
+/// masks only what the source hands back (`context_egress`), so it cannot mask what was sent
 /// before. Items should arrive masked and charged at their masked cost: a growth the pipeline's
 /// own masking adds is paid by trimming optional items, never by omitting the masked one.
 #[async_trait::async_trait]
