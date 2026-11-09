@@ -1794,12 +1794,14 @@ fn faces_of<'b>(
 }
 
 /// The old-side ranges of the lines `hunk` deletes (its `-` lines), numbered from its `@@`
-/// header and read through [`HunkLines`], the walker that numbers the hunk for the trio; the
-/// file header lines before that header are skipped. O(len of `hunk`).
+/// header, or from `start` (the item's `(old_first_line, first_line)`) when it has none, and
+/// read through [`HunkLines`], the walker that numbers the hunk for the trio and `hunk_change`
+/// anchors it; the file header lines before that header are skipped. O(len of `hunk`).
 fn deleted_ranges(hunk: &str, start: (u32, u32)) -> Vec<(u32, u32)> {
-    let _ = start;
     let mut ranges: Vec<(u32, u32)> = Vec::new();
-    for (_, read, _) in HunkLines::new(hunk, None) {
+    // MAGI FIX (MS3 §6 loop5): counted from the item's first lines when the text has no header,
+    // as `hunk_change` counts them.
+    for (_, read, _) in HunkLines::new(hunk, Some(start)) {
         if let HunkLine::Body(BodyLine::Removed(old)) = read {
             match ranges.last_mut() {
                 Some((_, last)) if last.saturating_add(1) == old => *last = old,

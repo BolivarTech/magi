@@ -189,7 +189,12 @@ impl BatchItem {
     /// The numbered text, in the same line structure as the item's text.
     pub fn rendered(&self) -> String {
         match self {
-            Self::Hunk { text, .. } => number_hunk(text),
+            Self::Hunk {
+                text,
+                first_line,
+                old_first_line,
+                ..
+            } => number_hunk(text, (*old_first_line, *first_line)),
             Self::Unit {
                 text, first_line, ..
             } => number_lines(text, *first_line),
@@ -359,10 +364,13 @@ pub(crate) fn number_lines(text: &str, first: u32) -> String {
 /// A hunk's text with its body lines numbered by side (see [`BatchItem::rendered`]). The two
 /// counters start at the `@@` header's first lines ([`hunk_ranges`], the same parse the reviewed
 /// range uses) and a line moves the counters of the sides it belongs to: context both, `+` the
-/// new one, `-` the old one. Lines outside a hunk body carry a blank prefix. O(bytes).
-fn number_hunk(text: &str) -> String {
+/// new one, `-` the old one. Lines outside a hunk body carry a blank prefix. A text with no
+/// header counts from `start`, the item's `(old_first_line, first_line)`, as
+/// [`BatchItem::hunk_change`] does, so the numbers shown and the anchors agree. O(bytes).
+// MAGI FIX (MS3 §6 loop5): a headerless text was shown with no numbers at all.
+fn number_hunk(text: &str, start: (u32, u32)) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
-    for (line, read, _) in HunkLines::new(text, None) {
+    for (line, read, _) in HunkLines::new(text, Some(start)) {
         let number = match read {
             HunkLine::Body(BodyLine::Removed(n) | BodyLine::Added(n) | BodyLine::Context(n)) => {
                 Some(n)
