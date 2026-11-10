@@ -3896,7 +3896,7 @@ mod tests {
         fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
             match args.join(" ").as_str() {
                 "rev-parse --verify HEAD^{commit}" => Ok(b"h0\n".to_vec()),
-                "for-each-ref --format=%(objectname) refs/heads refs/tags" => Ok((0
+                "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags" => Ok((0
                     ..=magi_rs::review::docs::MAX_GC_REFS)
                     .map(|i| format!("h{i}\n"))
                     .collect::<String>()
@@ -3934,7 +3934,7 @@ mod tests {
         fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
             match args.join(" ").as_str() {
                 "rev-parse --verify HEAD^{commit}"
-                | "for-each-ref --format=%(objectname) refs/heads refs/tags" => {
+                | "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags" => {
                     Ok(b"h1\n".to_vec())
                 }
                 "ls-tree -r -z h1" => Ok(b"100644 blob k1\tREADME.md\0".to_vec()),
@@ -3979,7 +3979,7 @@ mod tests {
         fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
             match args.join(" ").as_str() {
                 "rev-parse --verify HEAD^{commit}"
-                | "for-each-ref --format=%(objectname) refs/heads refs/tags" => {
+                | "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags" => {
                     Ok(b"h1\n".to_vec())
                 }
                 _ => Err(ReviewError::Git(LEAKY.into())),
