@@ -1185,7 +1185,8 @@ pub enum BoundedMask {
 
 /// [`mask_secrets_keeping_lines`], stopping as soon as the masked text would pass `max_bytes`
 /// (a mask can be longer than its secret: a short URL password grows several times), so a file
-/// dense in secrets never allocates more than the bound. O(n · s), see [`mask_secrets`].
+/// dense in secrets allocates at most the bound plus the clean tail after its last mask (no
+/// more than the text) before it answers `TooLarge`. O(n · s), see [`mask_secrets`].
 ///
 /// # Arguments
 /// * `text` - A file's content.
