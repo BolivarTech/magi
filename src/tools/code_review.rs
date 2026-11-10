@@ -1829,7 +1829,13 @@ fn record_history(
     let sha = git
         .run(&["rev-parse", "--verify", commit.as_str()])
         .map_err(|e| egress_text(&e.to_string()))?;
-    let entries = entries_from_review(findings, sha.trim());
+    let sha = sha.trim();
+    // MAGI FIX (MS3 §6 loop7): the anchor was whatever `rev-parse` printed; only a full object
+    // name (SHA-1 or SHA-256 hex) anchors, as the reclassification compares full SHAs.
+    if !FULL_SHA_LENGTHS.contains(&sha.len()) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(NOT_A_FULL_SHA.to_string());
+    }
+    let entries = entries_from_review(findings, sha);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
@@ -1846,6 +1852,12 @@ fn record_history(
 
 /// Why the history of a revision starting with `-` is not recorded.
 const DASHED_REVISION: &str = "the reviewed revision starts with `-` and is never passed to git";
+
+/// The hex lengths of a full git object name: SHA-1 (40) and SHA-256 (64).
+const FULL_SHA_LENGTHS: [usize; 2] = [40, 64];
+
+/// Why a history whose anchor did not resolve to a full object name is not recorded.
+const NOT_A_FULL_SHA: &str = "the reviewed revision did not resolve to a full object name";
 
 #[cfg(test)]
 mod tests {
