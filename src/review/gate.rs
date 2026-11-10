@@ -288,22 +288,36 @@ const KEY_BLOCK_END_OPENERS: [&str; 2] = ["-----END ", "---- END "];
 /// its block is not recognized here; the filter leaves every file holding a block out first
 /// (RV22's file-level exception), so this is a backstop. O(bytes of `code`).
 // MAGI FIX (MS3 §6 loop6): the whole-code check withheld every finding of such a file.
-fn window_overlaps_key_block(code: &str, line: u32) -> bool {
-    window_overlaps_block_of(code, line, &holds_key_block)
+// MAGI FIX (MS3 §6 loop8): `scan` is the per-file part, memoized by `Gate`: no second whole-code
+// pass and no allocation per finding.
+fn window_overlaps_key_block(code: &str, line: u32, scan: KeyBlockScan) -> bool {
+    scan.holds && (scan.untracked || overlaps_tracked_block(code, line, &holds_key_block))
+}
+
+/// What the gate knows of one file's private-key blocks, whatever the finding: computed once
+/// per file ([`Gate::key_block_scan`]).
+#[derive(Debug, Clone, Copy)]
+struct KeyBlockScan {
+    /// The code holds a block ([`holds_key_block`]).
+    holds: bool,
+    /// The detector finds one outside the blocks its lines open and close ([`untracked_block`]).
+    untracked: bool,
 }
 
 /// [`window_overlaps_key_block`] with the block detector `opens` given, so the cases the real
-/// detector cannot produce today (a header read only across lines) are testable. O(bytes of
-/// `code`) times the cost of `opens`.
+/// detector cannot produce today (a header read only across lines) are testable.
+#[cfg(test)]
 fn window_overlaps_block_of(code: &str, line: u32, opens: &dyn Fn(&str) -> bool) -> bool {
-    if !opens(code) {
-        return false;
-    }
+    opens(code) && (untracked_block(code, opens) || overlaps_tracked_block(code, line, opens))
+}
+
+/// Whether the window around `line` overlaps a block of `code` opened by one of its lines and
+/// closed by its armor `END` line (or by the end of `code`). Allocates nothing. O(bytes of
+/// `code`) times the cost of `opens`.
+fn overlaps_tracked_block(code: &str, line: u32, opens: &dyn Fn(&str) -> bool) -> bool {
     let first = line.saturating_sub(GATE_CONTEXT_LINES).max(1);
     let last = line.saturating_add(GATE_CONTEXT_LINES);
     let mut opened: Option<u32> = None;
-    // The lines outside every block opened by a line: what the tracked blocks do not explain.
-    let mut outside = String::new();
     for (n, text) in (1u32..).zip(code.lines()) {
         match opened {
             None if opens(text) => opened = Some(n),
@@ -313,17 +327,31 @@ fn window_overlaps_block_of(code: &str, line: u32, opens: &dyn Fn(&str) -> bool)
                 }
                 opened = None;
             }
-            None => {
-                outside.push_str(text);
-                outside.push('\n');
-            }
-            Some(_) => {}
+            _ => {}
         }
     }
-    // A block still open at the end runs to the last line. A block the detector still finds
-    // outside the tracked ones (a header read only across lines) makes the whole code count.
-    // MAGI FIX (MS3 §6 loop7): that fallback was off once any block was tracked by its lines.
-    opened.is_some_and(|start| start <= last) || opens(&outside)
+    // A block still open at the end runs to the last line.
+    opened.is_some_and(|start| start <= last)
+}
+
+/// Whether the detector still finds a block in the lines outside every block tracked by its
+/// lines (a header read only across lines): then the whole code counts as the block, whatever the
+/// window. Independent of the finding, so computed once per file. O(bytes of `code`).
+// MAGI FIX (MS3 §6 loop7): that fallback was off once any block was tracked by its lines.
+fn untracked_block(code: &str, opens: &dyn Fn(&str) -> bool) -> bool {
+    let mut opened = false;
+    let mut outside = String::new();
+    for text in code.lines() {
+        if !opened && opens(text) {
+            opened = true;
+        } else if opened && KEY_BLOCK_END_OPENERS.iter().any(|e| text.contains(e)) {
+            opened = false;
+        } else if !opened {
+            outside.push_str(text);
+            outside.push('\n');
+        }
+    }
+    opens(&outside)
 }
 
 /// Whether `code` has a line numbered `line` (from 1). O(bytes up to that line).
@@ -508,10 +536,11 @@ pub struct Gate<'a> {
     stopped: Option<&'static str>,
     per_model: BTreeMap<String, usize>,
     questions: usize,
-    /// The last code scanned for a private-key block, and whether it holds one: the findings of
-    /// one file come together, so its whole-code scan runs once, not once per finding. Reused
-    /// only for byte-equal code, so it can never answer for another file.
-    last_scan: Option<(String, bool)>,
+    /// The last code scanned for private-key blocks, and what the scan found: the findings of
+    /// one file come together, so its whole-code scans run once, not once per finding. Reused
+    /// only for byte-equal code, so it can never answer for another file; it holds one copy of
+    /// one file (at most `MAX_REVIEW_FILE_BYTES`), the price of a comparison that cannot collide.
+    last_scan: Option<(String, KeyBlockScan)>,
 }
 
 impl<'a> Gate<'a> {
@@ -544,19 +573,20 @@ impl<'a> Gate<'a> {
         }
     }
 
-    /// Whether `code` holds a private-key block ([`holds_key_block`]), from [`Self::last_scan`]
-    /// when `code` is the code scanned last. O(bytes of `code`): a comparison, or the scan and
-    /// one copy when the file changed.
+    /// The [`KeyBlockScan`] of `code`, from [`Self::last_scan`] when `code` is the code scanned
+    /// last. O(bytes of `code`): a comparison, or the scans and one copy when the file changed.
     // MAGI FIX (MS3 §6 loop7): the whole-code scan ran once per finding (R6b Melchior).
-    fn code_holds_key_block(&mut self, code: &str) -> bool {
-        if let Some((last, holds)) = &self.last_scan {
+    fn key_block_scan(&mut self, code: &str) -> KeyBlockScan {
+        if let Some((last, scan)) = &self.last_scan {
             if last == code {
-                return *holds;
+                return *scan;
             }
         }
         let holds = holds_key_block(code);
-        self.last_scan = Some((code.to_string(), holds));
-        holds
+        let untracked = holds && untracked_block(code, &holds_key_block);
+        let scan = KeyBlockScan { holds, untracked };
+        self.last_scan = Some((code.to_string(), scan));
+        scan
     }
 
     /// Sets the per-call HTTP timeout (`[code_review].timeout_secs`).
@@ -769,7 +799,7 @@ impl<'a> Gate<'a> {
         // names, so [`Self::sendable`]'s check on the state could not see it.
         // MAGI FIX (MS3 §6 loop6): only a finding whose window overlaps a block's lines is
         // withheld; one far from it is judged (R6b).
-        if self.code_holds_key_block(code) && window_overlaps_key_block(code, line) {
+        if window_overlaps_key_block(code, line, self.key_block_scan(code)) {
             return Outcome::unfiltered(CAUSE_SECRET);
         }
         if deadline.is_some_and(|d| d <= Instant::now()) {
