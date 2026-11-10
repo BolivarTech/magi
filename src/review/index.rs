@@ -794,4 +794,16 @@ mod tests {
         assert!(capped.callers_complete());
         assert_eq!(capped.occurrences("alpha").count(), 1);
     }
+
+    #[test]
+    fn a_path_given_twice_is_one_file_for_its_occurrences() {
+        // [MAGI S6 MS3 loop7, R2 Melchior] Each copy got its own file id, so one line was listed
+        // twice and counted twice against MAX_INDEX_OCCURRENCES.
+        let file = ("a.rs".to_string(), "fn alpha() {}\n".to_string());
+        let index = LexicalIndex::build(&[file.clone(), file], &LanguageRegistry::new());
+        assert_eq!(
+            index.occurrences("alpha").collect::<Vec<_>>(),
+            vec![("a.rs", 1)]
+        );
+    }
 }
