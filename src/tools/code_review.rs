@@ -1766,6 +1766,12 @@ fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp)
 /// flight ends by its own bound (`GIT_CALL_TIMEOUT_SECS`); no git call runs under the
 /// database lock (the history and the index read git first, then write in a short
 /// transaction), so a slow git never holds a later review's writes.
+///
+/// The two steps are bounded differently on purpose: the history comes first and carries its
+/// own sub-budget ([`RECLASSIFY_BUDGET_SECS`], checked between entries), and the deadline is
+/// read only before the clean-up. The history is evidence a later review cannot rebuild, the
+/// index is derived and the next review cleans it again, so under a tight bound the clean-up is
+/// what yields; [`POST_REPORT_LIMIT_SECS`] is twice the sub-budget, so it still gets as long.
 // MAGI FIX (MS3 §6 loop6): the detached sequence had no total bound (R5 Caspar).
 fn follow_up_work_until(
     memory: &ReviewMemory,
