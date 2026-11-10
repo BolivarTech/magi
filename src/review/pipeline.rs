@@ -2148,6 +2148,28 @@ mod tests {
     }
 
     #[test]
+    fn backstop_masks_then_escapes() {
+        // [MAGI S6 MS3 loop9, R4 Melchior] The whole-prompt mask ran after the escaping, so `<<`
+        // before a raw secret became `<<<` in a frame body; the only `<<<` left are the frames'.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![BatchItem::WholeFile {
+                file: "a.rs".into(),
+                text: "fn a() {}\n".into(),
+                lines: 1,
+            }],
+        };
+        let mut raw = ctx(ContextKind::Documentation, "README.md", "Setup", None);
+        raw.text = format!("x <<{key}\n");
+        let prompts = render_prompts(&[batch], &[vec![raw]]);
+        assert_eq!(prompts[0].matches("<<<").count(), 2, "{}", prompts[0]);
+        assert!(!prompts[0].contains("sk-ant-"));
+    }
+
+    #[test]
     fn a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous() {
         // [MAGI S6 MS3 loop7, R4 Melchior] An old-side unit's line and a new-side hunk line can
         // share a number once a hunk shifts the numbering; the gate read the new side and could
