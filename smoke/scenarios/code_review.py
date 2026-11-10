@@ -158,11 +158,11 @@ SQLITE_SIDE_SUFFIXES = ("-wal", "-shm")
 #: (``unreadable``) or has more than one hard link (``hard link``).
 # MAGI FIX (S6 loop 12): the three causes R1 added were missing, and the comment
 # still called a vanished listed file an I/O error.
-# MAGI FIX (MS3 S6 loop6): ``diff not rebuilt``, a masked file whose diff
-# could not be rebuilt from its masked sides (it was ``secret``).
+# MAGI FIX (MS3 S6 loop9): ``diff not rebuilt`` is gone; such a file is ``secret``
+# again (RV22 names that cause).
 OMISSION_CAUSES = ("binary", "not utf-8", "secret", "ignored",
                    "outside workspace", "too large", "not a regular file",
-                   "hard link", "unreadable", "disappeared", "diff not rebuilt")
+                   "hard link", "unreadable", "disappeared")
 
 #: The omission list of a ``nothing to review`` refusal, to the end of its line.
 OMISSION_LIST_PATTERN = re.compile(r"; left out: (?P<list>.*)")
