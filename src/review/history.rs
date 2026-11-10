@@ -982,6 +982,36 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_diff_is_a_weak_reject_only_for_a_regular_file_of_the_reviewed_commit() {
+        // [MAGI S6 MS3 loop7, R3 Caspar] An empty diff names no file, so `names_only` passed
+        // vacuously: an entry whose `file` is a directory (or a path that never existed) became a
+        // weak reject though it refers to no file. A weak reject now needs a blob at that path.
+        let for_path = |path: &str, tree: Result<&'static str, &'static str>| {
+            let diff = DIFF_C1_HEAD.replace("-- a.rs", &format!("-- {path}"));
+            let tree_call = format!("ls-tree -z c1 -- {path}");
+            let git = FakeGit::from(&[
+                ("merge-base --is-ancestor c1 HEAD", Ok("")),
+                (diff.as_str(), Ok("")),
+                (HEAD_IS_C2, Ok("c2\n")),
+                (tree_call.as_str(), tree),
+            ]);
+            let mut e = entry(Some(5));
+            e.file = path.into();
+            classify(&e, "HEAD", &git)
+        };
+        assert_eq!(
+            for_path("src", Ok("040000 tree aaaa\tsrc\0")),
+            HistoryStatus::Pending
+        );
+        assert_eq!(for_path("gone.rs", Ok("")), HistoryStatus::Pending);
+        assert_eq!(for_path("a.rs", Err("fatal")), HistoryStatus::Pending);
+        assert_eq!(
+            for_path("a.rs", Ok("100644 blob bbbb\ta.rs\0")),
+            HistoryStatus::WeakReject
+        );
+    }
+
+    #[test]
     fn merged_without_changes_is_a_weak_reject() {
         let git = FakeGit::from(&[
             ("merge-base --is-ancestor c1 HEAD", Ok("")),
