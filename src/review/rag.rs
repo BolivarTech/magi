@@ -212,19 +212,15 @@ pub fn charged_tokens(batch_tokens: usize, units: &[ContextItem], code: &[Contex
 /// Adds to the batch the context that fits, by the fixed priority: containing units (mandatory),
 /// then definitions and callers, documentation and history.
 ///
-/// `batch_tokens` is `ReviewBatch::tokens`, which does not include the companions: the units are
-/// charged here, once, and nothing else charges them. What enters is a prefix of the optional
-/// list in priority order: the first item that does not fit and everything after it go to
-/// `trimmed`, in that order, even if a later one is smaller. A unit repeated by `(file, lines,
-/// side)` (two hunks of one function) is kept once and charged once; a definition or caller with
-/// the `(file, lines)` of a new-side unit is not added, because the unit already carries it. An
-/// old-side unit and a new-side one with the same numbers are different code and both enter. An
-/// item without `lines` is never deduplicated.
+/// `batch_tokens` excludes the companions: the units are charged here, once. What enters is a
+/// prefix of the optional list in priority order: the first item that does not fit and all after
+/// it go to `trimmed`, even a smaller one. A unit repeated by `(file, lines, side)` is kept and
+/// charged once; a definition or caller with a new-side unit's `(file, lines)` is not added (the
+/// unit carries it); old- and new-side units with the same numbers both enter; an item without
+/// `lines` is never deduplicated.
 ///
-/// `docs` and `history` are `None` when their source is not there; the result then reports
-/// `without_embedder`, a default the caller corrects: with a live embedder the caller always
-/// passes `Some` (empty when there is nothing or the source degraded), and `without_memory` is
-/// the caller's to set.
+/// `docs`/`history` `None` (no source) reports `without_embedder`, a default the caller corrects
+/// (with a live embedder it passes `Some`); `without_memory` is the caller's to set.
 ///
 /// O(n) in items, with one key set.
 ///
@@ -638,24 +634,16 @@ pub fn callers_for(
 /// The units that contain a batch item's changed lines, as `Unit` items with their `lines`
 /// (RV07(1): "the containing unit of each change"; RV21).
 ///
-/// The anchors are [`BatchItem::hunk_change`]'s: the added lines, looked up on the new side, and
-/// the removed lines, looked up on the old side, because the new file has no line for them. The
-/// old side of a renamed (or copied) file is read under the `rename from` path its diff header
-/// names, while the unit keeps the reviewed path; each side is parsed with the extractor of the
-/// path it is read under, so a rename that changes the language reads its old side as that
-/// language (`the_old_side_of_a_rename_that_changes_language_is_read_with_its_own_extractor`),
-/// and a side whose path has no extractor gives no unit. git's context lines are never anchors, so a
-/// change at the top of a function gets that function, not the one above it. Each distinct unit
-/// is returned once, new side first, each side in line order: a hunk that spans two units brings
-/// both, and a hunk that edits `f` and deletes `g` brings the new `f` and the old `g`. An
-/// old-side unit that is the edited unit itself, the same name starting on the line its start
-/// moves to across the hunk ([`BatchItem::new_line_of_old`]), is not brought again: its removed
-/// lines are in the hunk, and the new version is its unit. A deleted homonym or overload starts
-/// on a removed line, so it keeps its old-side unit; so does a unit whose first line was edited
-/// (more context, never less). The side
-/// is recorded in [`ContextItem::old_side`], so no later stage infers it from the hunks.
-/// Planning's companions and the context both use this, so what was charged is what `assemble`
-/// adds.
+/// The anchors are [`BatchItem::hunk_change`]'s: added lines looked up on the new side, removed
+/// lines on the old side. A renamed (or copied) file's old side is read under its `rename from`
+/// path and parsed with that path's extractor (a side with none gives no unit), the unit keeping
+/// the reviewed path. git's context lines are never anchors, so a change at a function's top gets
+/// that function. Each distinct unit comes once, new side first, in line order (a hunk editing
+/// `f` and deleting `g` brings the new `f` and the old `g`). An old-side unit that is the edited
+/// unit itself (same name, starting where its start moves to, [`BatchItem::new_line_of_old`]) is
+/// not brought again; a deleted homonym, or a unit whose first line was edited, keeps its old-side
+/// unit. The side is in [`ContextItem::old_side`]. Planning's companions use this too, so what
+/// was charged is what `assemble` adds.
 ///
 /// # Arguments
 ///

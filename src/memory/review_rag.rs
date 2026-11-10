@@ -1128,23 +1128,18 @@ fn reindex_batches(
 /// Lists, indexes and, on any failure, degrades the documentation of the reviewed revision
 /// (RV07(3), RV19, RV21, U29).
 ///
-/// 1. **List**: `rev` = the reviewed revision's new side, listed through `git` without reading
-///    any file; `None` = the working tree, each of `worktree_paths` read through `sources` and
-///    keyed by [`worktree_key`]. Only paths `keep` accepts that can yield a chunk
-///    ([`yields_doc_chunks`]) count; a path that quotes a secret is never read or stored and
-///    counts as withheld.
-/// 2. **Index what is missing**: each source the store lacks is read, chunked with
-///    `netted_chunks` (one-line secrets masked, every chunk netted before any embedding), then
-///    `bounded`. A masked source is declared in `masked_sources`; one holding a private-key
-///    block, or a chunk the net drops, is withheld. The rest is indexed in batches of at most
-///    [`EMBED_BATCH_ITEMS`] chunks, one [`reindex_or_degrade`] each; what a batch wrote stays.
-/// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails, and `timeout` itself,
-///    set `docs_unavailable` with a WARN; the first failing batch stops the rest. The size cap
-///    only cuts (`size_capped`). A revision's source git lists but cannot give back degrades
-///    (U29: no partial index); an unreadable working-tree file is one the review leaves out.
+/// 1. **List**: `rev` = the revision's new side, listed through `git` without reading a file;
+///    `None` = the working tree, each of `worktree_paths` read through `sources`, keyed by
+///    [`worktree_key`]. Only paths `keep` accepts that can yield a chunk count; a path that quotes
+///    a secret is never read or stored, and counts as withheld.
+/// 2. **Index what is missing**: read, `netted_chunks`, `bounded`; a masked source is declared
+///    in `masked_sources`, a key-block one (or one the net or the store refuses) withheld; the
+///    rest indexed in batches of at most [`EMBED_BATCH_ITEMS`] chunks; what a batch wrote stays.
+/// 3. **Degrade (B)**: a failing listing, `missing`, read or reindex, or `timeout`, sets
+///    `docs_unavailable` with a WARN and stops. The size cap only cuts (`size_capped`); a source
+///    git lists but cannot give back degrades (U29); an unreadable working-tree file is left out.
 ///
-/// Never fails. `timeout` bounds the whole preparation, checked between steps and sources.
-/// O(listed sources + bytes read).
+/// Never fails. `timeout` bounds it all, checked between steps and sources. O(sources + bytes).
 ///
 /// # Arguments
 /// * `docs` - The documentation index.
