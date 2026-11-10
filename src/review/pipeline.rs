@@ -532,6 +532,7 @@ pub async fn run_review(
         ),
         &resolved.not_utf8,
     )?;
+    let limit = prompt_limit_tokens(&window);
     summary.skipped = filtered.skipped;
     summary
         .skipped
@@ -587,7 +588,7 @@ pub async fn run_review(
             let bound = bind(rag, &index, &source);
             let given = rag;
             let rag = bound.as_deref().unwrap_or(rag);
-            prepare_contexts(rag, given, &batches, &mut summary).await?
+            prepare_contexts(rag, given, &batches, limit, &mut summary).await?
         }
         None => vec![Vec::new(); batches.len()],
     };
@@ -1465,13 +1466,18 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
 /// ([`RagSource::skipped`], [`RagSource::masked`]) are read from `given`, the source the
 /// pipeline was handed, so a bound source keeping the trait's defaults never drops them.
 ///
+/// `limit` is the batch limit (RV04): what the batch's code and the heading leave is the most
+/// its kept context may cost, whatever the source charged (`over_limit_context_is_trimmed`).
+///
 /// # Errors
 ///
-/// The first error of `rag`, before any trio call.
+/// The first error of `rag`, and [`ReviewError::TooLargeForBatch`] when a batch's containing
+/// units alone pass `limit` (`oversized_unit_fails_closed`), all before any trio call.
 async fn prepare_contexts(
     rag: &dyn RagSource,
     given: &dyn RagSource,
     batches: &[ReviewBatch],
+    limit: usize,
     summary: &mut ReviewSummary,
 ) -> Result<Vec<Vec<ContextItem>>, ReviewError> {
     let mut contexts = Vec::with_capacity(batches.len());
@@ -1503,7 +1509,25 @@ async fn prepare_contexts(
         kept.sort_by_key(|(item, _)| kind_rank(&item.kind));
         // MAGI FIX (MS3 §6 loop6): what is sent is charged, masks included (R4 Caspar).
         // MAGI FIX (MS3 §6 loop8): an overshoot only the units could pay was sent unsaid.
-        let over = pay_for_growth(&mut kept, charged, summary);
+        // MAGI FIX (MS3 §6 loop9): RV04 rested on the source's contract; the sent context is
+        // held to what the limit leaves after the batch's code, optional items trimmed first.
+        let fit = limit.saturating_sub(
+            batch
+                .tokens
+                .saturating_add(estimate_tokens(CONTEXT_HEADING)),
+        );
+        let target = charged.min(fit);
+        let over = pay_for_growth(&mut kept, target, summary);
+        if target.saturating_add(over) > fit {
+            return Err(ReviewError::TooLargeForBatch {
+                what: format!("batch {} with its containing units", batch.index),
+                tokens: limit
+                    .saturating_sub(fit)
+                    .saturating_add(target)
+                    .saturating_add(over),
+                limit,
+            });
+        }
         if over > 0 {
             tracing::event!(
                 target: LOG_TARGET,
@@ -4291,7 +4315,7 @@ mod tests {
         };
         let mut summary = ReviewSummary::default();
         let raw = RawRag(key.to_string());
-        prepare_contexts(&raw, &raw, &[batch], &mut summary)
+        prepare_contexts(&raw, &raw, &[batch], usize::MAX, &mut summary)
             .await
             .expect("prepare");
         let json = serde_json::to_string(&summary).expect("json");
@@ -4390,9 +4414,10 @@ mod tests {
             companion_tokens: 0,
         };
         let mut summary = ReviewSummary::default();
-        let contexts = prepare_contexts(&GrowingRag, &GrowingRag, &[batch], &mut summary)
-            .await
-            .expect("prepare");
+        let contexts =
+            prepare_contexts(&GrowingRag, &GrowingRag, &[batch], usize::MAX, &mut summary)
+                .await
+                .expect("prepare");
         let sent = &contexts[0];
         assert_eq!(sent.len(), 1, "{sent:?}");
         assert!(sent[0].kind == ContextKind::Definition && !sent[0].text.contains("u:p@"));
