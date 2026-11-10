@@ -20,25 +20,14 @@ from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
 from smoke.scenarios import review_context  # noqa: F401 - import registers it
 from smoke.scenarios import trio
+from smoke.tests import support
 
 #: The ``.magi/`` files git lists in R16's workspace when the environment's ``.magi`` is copied in (the three
 #: :data:`_ROOT_STDERR` names). [MAGI §6 MS2 loop 9, F1a-c1] S51 reads them off the result.
-_R16_PROTECTED = (".magi/.magi-rs-memory.db", ".magi/logs/magi-2026-10-29.log", ".magi/magi.toml")
+_R16_PROTECTED = support.R16_PROTECTED
 
-
-def _result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"", timed_out: bool = False,
-            review_log=None, protected_visible=None) -> RunResult:
-    """A real ``RunResult`` for *run_id* whose stdout is *document* serialised (``None`` → empty stdout).
-
-    *protected_visible* defaults to :data:`_R16_PROTECTED` for R16 and to nothing for every other run.
-    """
-    body = b"" if document is None else json.dumps(document).encode()
-    if protected_visible is None:
-        protected_visible = _R16_PROTECTED if run_id == "R16" else ()
-    return RunResult(run_id=run_id,
-                     output=ProductOutput(stdout=body, stderr=stderr, exit_code=exit_code, command=["magi-rs"]),
-                     duration_s=1.0, timed_out=timed_out, planted=(), review_log=review_log,
-                     protected_visible=protected_visible)
+#: [MAGI S6 MS3 loop7, R7b Balthasar] the shared doubles live in :mod:`smoke.tests.support`.
+_result = support.scenario_result
 
 
 RUN_ID = "4242-0123456789abcdef"
@@ -79,26 +68,8 @@ def _with_id(tail: bytes) -> bytes:
     return b"run: " + RUN_ID.encode() + _NL + tail
 
 
-def _findings(scenario_id: str, result, log=b"") -> list:
-    """The findings *scenario_id* yields; *log* is the run log captured on the result (``None``: no directory).
-
-    [MAGI §6 MS2 loop 3, F4] the log rides on the ``RunResult`` the executor captured right after the
-    run; the scratch area handed to ``runs`` stays empty, so a scenario that read the live directory
-    would find nothing.
-    """
-    result = dataclasses.replace(result, review_log=None if log is None else (log,))
-    with tempfile.TemporaryDirectory() as tmp:
-        scratch = pathlib.Path(tmp)
-        runs.configure(None, types.SimpleNamespace(scratch_dir=scratch, prepare_scratch=lambda: None), None)
-        try:
-            return list(DEFAULT_REGISTRY.get(scenario_id).func(result))
-        finally:
-            runs.reset_for_test()
-
-
-def _outcomes(scenario_id: str, result, log=b"") -> dict[str, Outcome]:
-    """Outcomes of *scenario_id*, keyed by assertion text (see :func:`_findings`)."""
-    return {f.assertion: f.outcome for f in _findings(scenario_id, result, log)}
+_findings = support.scenario_findings
+_outcomes = support.scenario_outcomes
 
 
 def _details(scenario_id: str, result, log=b"") -> dict[str, str]:

@@ -18,10 +18,12 @@ assertion, and it must still report ALL of them.
 """
 
 import dataclasses
+import json
 import pathlib
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 import urllib.request
 from typing import Callable, Optional
@@ -323,3 +325,80 @@ def install_fake_runs(case: unittest.TestCase,
     runs.configure(binary, FakeEnvironment(root, create=env_root is None),
                    FakeConfig(FAKE_PASSPHRASE))
     return binary
+
+#: The ``.magi/`` files git lists in R16's workspace when the environment's
+#: ``.magi`` is copied in. [MAGI §6 MS2 loop 9, F1a-c1] S51 reads them off the result.
+R16_PROTECTED = (".magi/.magi-rs-memory.db", ".magi/logs/magi-2026-10-29.log", ".magi/magi.toml")
+
+
+def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",
+                    timed_out: bool = False, review_log=None, protected_visible=None):
+    """A real ``RunResult`` for *run_id* whose stdout is *document* serialised.
+
+    [MAGI S6 MS3 loop7, R7b Balthasar] Moved here from the code-review scenario
+    tests, so the masking tests depend on the harness's shared doubles, not on
+    another test module.
+
+    Args:
+        run_id: The run the result stands for.
+        exit_code: The product's exit code.
+        document: What stdout carries, JSON-serialised; ``None`` for empty stdout.
+        stderr: The product's stderr.
+        timed_out: Whether the run was cut by its wall clock.
+        review_log: The captured run-log bodies, or ``None``.
+        protected_visible: The protected paths git listed; defaults to
+            :data:`R16_PROTECTED` for R16 and to nothing for every other run.
+
+    Returns:
+        RunResult: The result.
+    """
+    from smoke.runs import RunResult
+    body = b"" if document is None else json.dumps(document).encode()
+    if protected_visible is None:
+        protected_visible = R16_PROTECTED if run_id == "R16" else ()
+    return RunResult(run_id=run_id,
+                     output=ProductOutput(stdout=body, stderr=stderr, exit_code=exit_code,
+                                          command=["magi-rs"]),
+                     duration_s=1.0, timed_out=timed_out, planted=(), review_log=review_log,
+                     protected_visible=protected_visible)
+
+
+def scenario_findings(scenario_id: str, result, log=b"") -> list:
+    """The findings *scenario_id* yields over *result*, with *log* as its run log.
+
+    [MAGI §6 MS2 loop 3, F4] the log rides on the ``RunResult`` the executor
+    captured right after the run; the scratch area handed to ``runs`` stays
+    empty, so a scenario that read the live directory would find nothing.
+
+    Args:
+        scenario_id: The registered scenario.
+        result: The ``RunResult`` it reads.
+        log: The run log captured on the result (``None``: no directory).
+
+    Returns:
+        list: The findings, in order.
+    """
+    from smoke.registry import DEFAULT_REGISTRY
+    result = dataclasses.replace(result, review_log=None if log is None else (log,))
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch = pathlib.Path(tmp)
+        runs.configure(None, types.SimpleNamespace(scratch_dir=scratch,
+                                                   prepare_scratch=lambda: None), None)
+        try:
+            return list(DEFAULT_REGISTRY.get(scenario_id).func(result))
+        finally:
+            runs.reset_for_test()
+
+
+def scenario_outcomes(scenario_id: str, result, log=b"") -> dict:
+    """Outcomes of *scenario_id*, keyed by assertion text (see :func:`scenario_findings`).
+
+    Args:
+        scenario_id: The registered scenario.
+        result: The ``RunResult`` it reads.
+        log: The run log captured on the result.
+
+    Returns:
+        dict: Assertion text to outcome.
+    """
+    return {f.assertion: f.outcome for f in scenario_findings(scenario_id, result, log)}
