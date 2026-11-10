@@ -350,25 +350,35 @@ fn is_commit_id(commit: &str) -> bool {
 /// [`Signal::NoLaterCommit`] when it resolves to `commit` itself (no commit after the reviewed
 /// one: no signal, RV08), and [`Signal::Unknown`] when `rev-parse` fails.
 ///
-/// `commit` is the SHA recorded at review time (`record_history` resolves it with `rev-parse`);
-/// an abbreviation of the SHA `head` resolves to is the same commit, so it is compared as a
-/// prefix. `head` itself is canonical here: `rev-parse --verify` prints the full name whatever
-/// `core.abbrev` says, so an abbreviated `head` equals a full stored SHA of its commit
-/// (`a_full_reviewed_sha_against_an_abbreviated_head_of_that_commit_stays_pending`). A symbolic name is never recorded, and the code defends it: a `commit` that is not
-/// hexadecimal (a branch name in a hand-edited row) gives no signal, `Pending`, since a prefix
-/// comparison with a SHA would read it as a later commit.
+/// `commit` is the SHA recorded at review time (`record_history` resolves it with `rev-parse`).
+/// Both sides are compared as full names, exactly: `head` is resolved by `rev-parse --verify`,
+/// which prints the full name whatever `core.abbrev` says, and a stored `commit` of another
+/// length (an abbreviation in a hand-edited row) is resolved the same way first, one more call
+/// (`stored_sha_is_compared_in_full`). A `commit` that is not hexadecimal gives no signal.
 // MAGI FIX (MS3 §6 loop3): an abbreviated SHA of HEAD itself read as a later commit.
 // MAGI FIX (MS3 §6 loop4): a non-SHA commit read as a later one, a false weak reject.
 fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> Signal {
     if !is_commit_id(commit) {
         return Signal::Unknown;
     }
-    match git.run(&["rev-parse", "--verify", &format!("{head}^{{commit}}")]) {
-        Ok(resolved) if !resolved.trim().starts_with(commit) => {
-            Signal::Status(HistoryStatus::WeakReject)
+    let Ok(resolved) = git.run(&["rev-parse", "--verify", &format!("{head}^{{commit}}")]) else {
+        return Signal::Unknown;
+    };
+    let resolved = resolved.trim();
+    // MAGI FIX (MS3 §6 loop8): a stored abbreviation was compared as a prefix of HEAD's SHA;
+    // it is resolved too, so both sides are full names and the comparison is exact.
+    let stored = if commit.len() == resolved.len() {
+        commit.to_string()
+    } else {
+        match git.run(&["rev-parse", "--verify", &format!("{commit}^{{commit}}")]) {
+            Ok(full) => full.trim().to_string(),
+            Err(_) => return Signal::Unknown,
         }
-        Ok(_) => Signal::NoLaterCommit,
-        Err(_) => Signal::Unknown,
+    };
+    if stored == resolved {
+        Signal::NoLaterCommit
+    } else {
+        Signal::Status(HistoryStatus::WeakReject)
     }
 }
 
