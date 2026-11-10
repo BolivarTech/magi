@@ -1021,8 +1021,12 @@ pub fn display_path(path: &str) -> String {
 /// rescanning loop (`one_pass_masking_equals_the_rescanning_loop_…`) is what catches a mismatch.
 // MAGI FIX (S6 loop 4): each turn rescanned the rest for every pattern, O(k · n · p).
 pub fn mask_secrets(text: &str) -> String {
-    mask_spans(text, false, usize::MAX).unwrap_or_default()
+    mask_spans(text, false, usize::MAX).unwrap_or_else(|| MASK_FAILED.to_string())
 }
+
+/// What an unbounded mask answers if it ever had no output (it cannot: see `mask_spans`): no
+/// byte of the text, and a mask that says so, rather than an empty string. Fail closed.
+const MASK_FAILED: &str = "<redacted: masking failed>";
 
 /// The name of the first pattern (in table order) whose mask, `<redacted: <name>>`, appears in
 /// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
@@ -1162,7 +1166,7 @@ pub fn holds_key_block(text: &str) -> bool {
 pub fn mask_secrets_keeping_lines(text: &str) -> Option<LineMasked> {
     let pattern = find_secret(text)?;
     Some(LineMasked {
-        text: mask_spans(text, true, usize::MAX).unwrap_or_default(),
+        text: mask_spans(text, true, usize::MAX).unwrap_or_else(|| MASK_FAILED.to_string()),
         pattern,
     })
 }
