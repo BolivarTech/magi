@@ -468,17 +468,13 @@ struct Faces {
 ///    source (`deps.rag`), each item's containing unit is charged at planning. All of it is
 ///    local: no model and no endpoint is called.
 /// 4. With an explicit `--timeout` or a caller's deadline, check the budget
-///    ([`precheck_budget`], over [`pre_budget`]): it needs only the number of batches, so it
-///    runs here, before any context is assembled, and a refused review calls no model and no
-///    endpoint from here on; the source's own indexing ran before this function and is covered
-///    by the caller's check ([`RagSource::index_ms`]). Then, with a context source, the source is bound to the review's index and
-///    content and every batch's context is assembled (its query embedded), scanned for secrets
-///    and recorded in the summary; the budget is read again after it, and a preparation that
-///    overran its declared reserve runs on what is left instead of being refused, since its
-///    outbound calls were made. The total is the `--timeout`, at most what is left of the
-///    deadline when the preparation ends. Steps 1-4 are the preparation, measured apart (plus
-///    the source's own indexing time, [`RagSource::index_ms`]) and never charged to the
-///    `--timeout`.
+///    ([`precheck_budget`], over [`pre_budget`]) on the batch count alone, before any context
+///    is assembled: a refused review calls no model and no endpoint (the source's own indexing
+///    is the caller's check). Then the context source is bound, and each batch's context
+///    assembled (its query embedded), scanned and recorded; the budget is read again, and a
+///    preparation that overran its declared reserve runs on what is left (its calls were made).
+///    The total is the `--timeout`, at most what is left of the deadline then. Steps 1-4 are the
+///    preparation, measured apart (with [`RagSource::index_ms`]), never charged to the total.
 /// 5. Run one `consult` per batch, in series, its context after its code under
 ///    [`CONTEXT_HEADING`]. Without `--timeout` each batch runs on the normal
 ///    `consult` clock; with it, each gets what is left split over the pending batches, counted
@@ -1135,13 +1131,10 @@ impl ReviewTimer<'_> {
 /// the review clock starts (§5.0 step 3, part of the preparation RV06 keeps off the clock).
 /// `contexts[i]` is the context of `batches[i]`, by position, as every other stage pairs them;
 /// the planner numbers batches by position too (`batch.index == i`, which `run_batches`'s
-/// pending count also relies on). Precondition: the batches' code (the filter's masked sides)
-/// and their context ([`context_egress`]) arrive masked; each prompt is masked once more here,
-/// a backstop that changes nothing then (masking is a fixed point) and that no future path into
-/// the prompt can skip (`a_prompt_masks_a_secret_its_stages_left_raw`). O(bytes of the batches
-/// and their contexts).
-// MAGI FIX (MS3 §6 loop7): looked up by `batch.index` while every other stage zips by position;
-// and the prompt trusted every earlier stage to have masked.
+/// pending count also relies on). Code and context arrive masked (the filter, [`context_egress`]);
+/// each prompt is masked once more, a no-op backstop no new path can skip
+/// (`a_prompt_masks_a_secret_its_stages_left_raw`). O(bytes).
+// MAGI FIX (MS3 §6 loop7): looked up by `batch.index`; and it trusted earlier stages to mask.
 fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec<String> {
     batches
         .iter()
