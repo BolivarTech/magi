@@ -180,11 +180,19 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> HistoryStatus {
     match signal(entry, head, git) {
         Signal::Status(status) => status,
-        Signal::NoLaterCommit | Signal::Unknown => HistoryStatus::Pending,
+        Signal::NoLaterCommit | Signal::OffLine | Signal::Unknown => HistoryStatus::Pending,
     }
 }
 
-/// Whether a stored validated `entry` may be served as validated context against `head`.
+/// Whether a stored validated `entry` may be served as validated context against `head`: only
+/// when its reviewed commit is an ancestor of `head`, so a finding validated on another branch
+/// never reaches a review of this one (RV08 reads git's signal on `head`'s line). The context
+/// read applies it to every history entry it serves (`StoreRag::history_items`,
+/// `memory::review_rag`), and the reclassification turns the entry `Pending` once git says so
+/// for certain ([`reclassify_then_record`]). Fails closed: a commit that is no commit id, a
+/// `head` that starts with `-`, or a git that does not answer, serves nothing
+/// (`a_validated_entry_off_heads_line_goes_back_to_pending_and_is_never_served`). One local git
+/// call.
 ///
 /// # Arguments
 /// * `entry` - the stored entry.
@@ -193,8 +201,20 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
 ///
 /// # Returns
 /// Whether it may be served.
-pub fn served_as_validated(_entry: &HistoryEntry, _head: &str, _git: &dyn GitCommand) -> bool {
-    true
+// MAGI FIX (MS3 §6 loop7): a validated entry was served whatever branch HEAD was on.
+pub fn served_as_validated(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> bool {
+    let commit = entry.reviewed_commit.as_str();
+    is_commit_id(commit)
+        && !head.starts_with('-')
+        && git
+            .run(&["merge-base", "--is-ancestor", commit, head])
+            .is_ok()
+}
+
+/// Whether `rev` resolves to a commit: `rev-parse --verify <rev>^{commit}` answers. One call.
+fn resolves(rev: &str, git: &dyn GitCommand) -> bool {
+    git.run(&["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
+        .is_ok()
 }
 
 /// What git says of a remembered finding: a status, a definitive lack of signal, or no answer.
@@ -205,6 +225,10 @@ enum Signal {
     /// `head` resolves to the reviewed commit itself: nothing came after it, so there is no
     /// signal, and RV08 says the entry is pending. A definitive answer of git.
     NoLaterCommit,
+    /// The reviewed commit is not an ancestor of `head`, and both resolve: `head` is on another
+    /// line (another branch), so there is no signal there, a definitive answer of git, and a
+    /// validated entry goes back to `Pending` like [`Self::NoLaterCommit`].
+    OffLine,
     /// No answer: an entry that cannot be checked, a git that failed, a diff not understood.
     Unknown,
 }
@@ -226,7 +250,13 @@ fn signal(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Signal {
         .run(&["merge-base", "--is-ancestor", commit, head])
         .is_err()
     {
-        return Signal::Unknown;
+        // MAGI FIX (MS3 §6 loop7): a definitive "not an ancestor" (both commits resolve) is told
+        // apart from a git that failed; it was kept as validated, served on another branch.
+        return if resolves(commit, git) && resolves(head, git) {
+            Signal::OffLine
+        } else {
+            Signal::Unknown
+        };
     }
     let diff = git.run(&[
         "diff",
@@ -320,10 +350,12 @@ fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> Signa
 /// least recently checked first (`ReviewHistoryStore::due`). The updates are only the statuses
 /// that change. A validated status goes back to `Pending` only on git's definitive answer that
 /// `head` is the reviewed commit again (RV08: no later commit, no signal;
-/// `a_validated_entry_goes_back_to_pending_once_head_is_the_reviewed_commit_again`); an entry
-/// git could not answer for (a failure, another branch, a gone commit) keeps its status, so a
-/// broken or partial clone never erases what was validated
-/// (`no_signal_never_downgrades_a_validated_entry`).
+/// `a_validated_entry_goes_back_to_pending_once_head_is_the_reviewed_commit_again`) or that the
+/// reviewed commit is on another line than `head`, both resolving
+/// (`a_validated_entry_off_heads_line_goes_back_to_pending_and_is_never_served`); an entry git
+/// could not answer for (a failure, a gone commit) keeps its status, so a broken or partial
+/// clone never erases what was validated (`no_signal_never_downgrades_a_validated_entry`); the
+/// context read still serves it only on `head`'s line ([`served_as_validated`]).
 ///
 /// Complexity: O(min(existing, [`MAX_RECLASSIFY_PER_REVIEW`])) classifications.
 ///
@@ -348,10 +380,10 @@ pub fn reclassify_then_record(
         // was dropped like a git failure, so a reset to the reviewed commit kept it validated.
         .filter_map(|e| match signal(e, head, git) {
             Signal::Status(status) if status != e.status => Some((e.id.clone(), status)),
-            Signal::NoLaterCommit if e.status != HistoryStatus::Pending => {
+            Signal::NoLaterCommit | Signal::OffLine if e.status != HistoryStatus::Pending => {
                 Some((e.id.clone(), HistoryStatus::Pending))
             }
-            Signal::Status(_) | Signal::NoLaterCommit | Signal::Unknown => None,
+            Signal::Status(_) | Signal::NoLaterCommit | Signal::OffLine | Signal::Unknown => None,
         })
         .collect();
     (updates, new.to_vec())
