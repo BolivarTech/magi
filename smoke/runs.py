@@ -28,6 +28,7 @@ unconfigured is what makes the write-once half checkable rather than assumed.
 import contextlib
 import dataclasses
 import datetime
+import http.client
 import http.server
 import io
 import itertools
@@ -404,6 +405,32 @@ def _archive(output, label, planted) -> None:
 
 
 @dataclasses.dataclass(frozen=True)
+class Commit:
+    """A setup step: files written into the review workspace and committed, exactly them.
+
+    Attributes:
+        files: Workspace-relative ``(path, content)`` pairs.
+        message: The commit message.
+    """
+
+    files: tuple[tuple[str, bytes], ...]
+    message: str = "smoke setup"
+
+
+@dataclasses.dataclass(frozen=True)
+class Invocation:
+    """A setup step: the product run once before the measured run, e.g. a review whose history the run reads.
+
+    Attributes:
+        argv: The product's arguments, tokens as in :attr:`RunDefinition.argv`.
+        timeout_s: Its own wall clock; past it the whole run counts as timed out.
+    """
+
+    argv: tuple[str, ...]
+    timeout_s: int
+
+
+@dataclasses.dataclass(frozen=True)
 class RunDefinition:
     """One shared run: what to invoke, what to feed it, and what it costs.
 
@@ -460,6 +487,13 @@ class RunDefinition:
             so documentation and history cannot
             be retrieved while the trio still answers. It needs the review
             workspace too.
+        records_requests: Whether every request the run sends goes through
+            a recording relay (:func:`recording_relay`) to the workspace's one
+            endpoint, so a scenario reads the bytes that left the process
+            (MAGI §6 MS3 loop9). It needs the review workspace.
+        setup: :class:`Commit` and :class:`Invocation` steps run in order in
+            the review workspace before :attr:`files` are written and the run
+            starts; their outputs ride on the result.
     """
 
     run_id: str
@@ -474,6 +508,8 @@ class RunDefinition:
     files: tuple[tuple[str, bytes], ...] = ()
     forbids_model_calls: bool = False
     unreachable_embedder: bool = False
+    records_requests: bool = False
+    setup: tuple["Commit | Invocation", ...] = ()
 
     def __post_init__(self) -> None:
         """Refuse files, or a model-call ban, on a run without a review workspace.
@@ -506,6 +542,13 @@ class RunDefinition:
             raise HarnessError(
                 "run %s both points its embedder away and counts model calls; the counter "
                 "would overwrite the embedder's endpoint" % self.run_id)
+        # MAGI FIX (MS3 §6 loop9): the relay rewrites every endpoint too, so it excludes both.
+        if (self.records_requests or self.setup) and REVIEW_WORKSPACE_TOKEN not in self.argv:
+            raise HarnessError("run %s records its requests or has setup steps but no %s"
+                               % (self.run_id, REVIEW_WORKSPACE_TOKEN))
+        if self.records_requests and (self.forbids_model_calls or self.unreachable_embedder):
+            raise HarnessError("run %s records its requests through the relay, which rewrites "
+                               "every endpoint the counter or the error backend needs" % self.run_id)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -573,6 +616,13 @@ class RunResult:
     #: one. Zero means the product never reached it, so nothing it printed
     #: walked the error path the backend plants a credential on.
     backend_requests: int | None = None
+    #: ``(path, body)`` of every request a ``records_requests`` run sent through
+    #: the relay, in arrival order; ``None`` for a run that records none, or
+    #: whose record is incomplete (:attr:`RequestBodies.complete`), so a
+    #: scenario never reads a partial record as "nothing was sent".
+    request_bodies: tuple[tuple[str, bytes], ...] | None = None
+    #: The output of each :class:`Invocation` setup step, in order.
+    setup_outputs: tuple[ProductOutput, ...] = ()
 
 
 #: Where the product writes its logs, relative to a workspace root. The one
@@ -649,9 +699,11 @@ LARGE_CONSULT_CEILING_S = 20184
 #: four-line file and the gate, plus what R17 does not do: indexing that file's
 #: one doc comment and embedding the batch's query with the environment's
 #: embedder, seconds on a local one. Replace it at the first real run too.
+#: R20 and R21 carry R18's provisional figure too (R21 per review: its two
+#: setup reviews have their own wall clock each). Replace them at the first run.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
                                         "R10": 67, "R12": 1500, "R17": 300,
-                                        "R18": 300}
+                                        "R18": 300, "R20": 300, "R21": 300}
 
 #: The factor a trio run's ``timeout_s`` must reach over its measurement in
 #: :data:`TRIO_RUNS_MEASURED_S`: at least this many times it, equality
@@ -2171,11 +2223,60 @@ def review_masked_files() -> tuple[tuple[str, bytes], ...]:
     Returns:
         tuple: One ``(path, content)`` pair, :data:`REVIEW_MASKED_FILE`.
     """
-    body = (b"/// Returns the token of the toy service.\n"
+    body = (b"/// " + REVIEW_MASKED_DOC + b"\n"
             b"pub fn token() -> &'static str {\n"
             b'    "' + REVIEW_MASKED_KEY + b'"\n'
             b"}\n")
     return ((REVIEW_MASKED_FILE, body),)
+
+
+#: The doc comment of R18's file: S55 finds it indexed alone, as a documentation
+#: chunk, in a request the relay forwarded to the embedder.
+REVIEW_MASKED_DOC = b"Returns the token of the toy service."
+
+#: R20 (S56, RV21, RV-S36) reviews ``HEAD`` of a two-commit history whose file's
+#: doc comment says :data:`REVIEW_COMMITTED_DOC`, while the working tree's copy,
+#: left dirty, says :data:`REVIEW_DIRTY_DOC`: no request may carry the second.
+REVIEW_DOCREV_FILE = "docrev/answer.rs"
+REVIEW_COMMITTED_DOC = b"Returns the committed answer."
+REVIEW_DIRTY_DOC = b"Returns the dirty answer."
+
+
+def _answer_file(doc: bytes, value: bytes) -> bytes:
+    """A small documented Rust function for R20.
+
+    Args:
+        doc: Its doc comment.
+        value: What it returns.
+
+    Returns:
+        bytes: The file.
+    """
+    return b"/// " + doc + b"\npub fn answer() -> u32 {\n    " + value + b"\n}\n"
+
+
+#: R21 (S57, RV08) reviews a buggy commit, fixes every line of it, reviews again
+#: (which reclassifies the first review's entries as attended, after its report)
+#: and reviews a third time, whose trio prompt must carry the validated entry.
+REVIEW_HISTORY_FILE = "hist/calc.rs"
+_HISTORY_BUGGY = (b"/// Returns the mean of the values.\n"
+                  b"pub fn mean(v: &[i32]) -> i32 {\n"
+                  b"    v.iter().sum::<i32>() / v.len() as i32\n"
+                  b"}\n")
+_HISTORY_FIXED = (b"/// Returns the mean of the values, 0 for none, without overflow.\n"
+                  b"pub fn mean(values: &[i32]) -> i32 {\n"
+                  b"    if values.is_empty() {\n"
+                  b"        return 0;\n"
+                  b"    }\n"
+                  b"    let sum: i64 = values.iter().map(|&x| i64::from(x)).sum();\n"
+                  b"    i32::try_from(sum / values.len() as i64).unwrap_or(0)\n"
+                  b"}\n")
+
+#: The review R20 and R21 run (and R21's setup runs twice): ``HEAD``'s commit.
+_REVIEW_HEAD_ARGV = ("code-review",) + REVIEW_FLAGS
+
+#: Each review R21 runs before the measured one; R18's provisional figure each.
+_HISTORY_SETUP_TIMEOUT_S = 900
 
 
 def review_keyblock_files() -> tuple[tuple[str, bytes], ...]:
@@ -2985,6 +3086,240 @@ def requests_past_the_probe(log: RequestLog) -> tuple[str, ...]:
                     % (seen, "request" if seen == 1 else "requests", len(recorded)),)
 
 
+#: Requests the recording relay keeps; past this its record is incomplete, and
+#: a scenario reading it says ``CANNOT_TEST``, never ``PASS``.
+RELAY_MAX_REQUESTS = 512
+
+#: The largest request body the relay reads (far above any review prompt); a
+#: larger one, or a chunked one, is refused and leaves the record incomplete.
+RELAY_MAX_BODY_BYTES = 32 * 1024 * 1024
+
+#: Seconds the relay waits on its upstream per read: a trio completion streams
+#: for minutes, and the run's own timeout bounds the whole.
+RELAY_UPSTREAM_TIMEOUT_S = 900
+
+#: Headers never copied across the relay: hop by hop, or framing it writes.
+_RELAY_DROPPED_HEADERS = frozenset({"connection", "keep-alive", "proxy-connection",
+                                    "transfer-encoding", "te", "trailer", "upgrade",
+                                    "content-length", "host"})
+
+
+class RequestBodies:
+    """A bounded, thread-safe record of the requests :func:`recording_relay` forwarded.
+
+    Example:
+        >>> rec = RequestBodies(cap=1)
+        >>> rec.record("/v1/embeddings", b"a"); rec.record("/api/chat", b"b")
+        >>> rec.recorded, rec.complete
+        ((('/v1/embeddings', b'a'),), False)
+    """
+
+    def __init__(self, cap: int | None = None) -> None:
+        """Start an empty record.
+
+        Args:
+            cap: Requests kept; ``None`` reads :data:`RELAY_MAX_REQUESTS`.
+        """
+        self._cap = RELAY_MAX_REQUESTS if cap is None else cap
+        self._lock = threading.Lock()
+        self._recorded: list[tuple[str, bytes]] = []
+        self._lost = False
+
+    def record(self, path: str, body: bytes) -> None:
+        """Keep one request, or mark the record incomplete past the cap.
+
+        Args:
+            path: Its path, without the query.
+            body: Its body.
+        """
+        with self._lock:
+            if len(self._recorded) < self._cap:
+                self._recorded.append((path, body))
+            else:
+                self._lost = True
+
+    def lose(self) -> None:
+        """Mark the record incomplete: a request reached the relay unrecorded."""
+        with self._lock:
+            self._lost = True
+
+    @property
+    def recorded(self) -> tuple[tuple[str, bytes], ...]:
+        """tuple: The kept ``(path, body)`` pairs, in arrival order."""
+        with self._lock:
+            return tuple(self._recorded)
+
+    @property
+    def complete(self) -> bool:
+        """bool: Whether every request that reached the relay was kept whole."""
+        with self._lock:
+            return not self._lost
+
+
+class _RelayHandler(_RecordingHandler):
+    """Records each request's path and body, forwards it to the upstream, streams the answer back.
+
+    Answers HTTP/1.0 and closes, so the streamed body needs no framing of its
+    own; a request it cannot keep whole (chunked, or over
+    :data:`RELAY_MAX_BODY_BYTES`) is refused and marks the record incomplete.
+    """
+
+    timeout = RELAY_UPSTREAM_TIMEOUT_S
+
+    def _answer(self) -> None:
+        """Record the request, then relay it (see the class)."""
+        rec = self.server.bodies
+        declared = (self.headers.get("Content-Length") or "0").strip()
+        usable = declared.isascii() and declared.isdigit() and len(declared) <= MAX_CONTENT_LENGTH_DIGITS
+        self.close_connection = True
+        try:
+            if self.headers.get("Transfer-Encoding") or not usable or int(declared) > RELAY_MAX_BODY_BYTES:
+                rec.lose()
+                self.send_error(413)
+                return
+            body = self.rfile.read(int(declared))
+            rec.record(urllib.parse.urlsplit(self.path).path, body)
+            self._forward(body)
+        except (OSError, http.client.HTTPException):
+            rec.lose()
+
+    def _forward(self, body: bytes) -> None:
+        """Send *body* to the upstream and stream its answer back.
+
+        Args:
+            body: The request body, already recorded.
+
+        Raises:
+            OSError: When either side fails.
+            http.client.HTTPException: When the upstream answers no HTTP.
+        """
+        up = self.server.upstream
+        kind = http.client.HTTPSConnection if up.scheme == "https" else http.client.HTTPConnection
+        conn = kind(up.hostname, up.port, timeout=RELAY_UPSTREAM_TIMEOUT_S)
+        try:
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in _RELAY_DROPPED_HEADERS}
+            conn.request(self.command, self.path, body=body, headers=headers)
+            reply = conn.getresponse()
+            self.send_response_only(reply.status, reply.reason)
+            for key, value in reply.getheaders():
+                if key.lower() not in _RELAY_DROPPED_HEADERS:
+                    self.send_header(key, value)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while chunk := reply.read1(MODEL_COUNTER_CHUNK_BYTES):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        finally:
+            conn.close()
+
+    def log_message(self, fmt: str, *args) -> None:
+        """Swallow the access log, as :class:`_EchoingHandler` does.
+
+        Args:
+            fmt: The format string the base class passes.
+            *args: Its arguments.
+        """
+
+
+@contextlib.contextmanager
+def recording_relay(upstream: str):
+    """Serve a loopback relay to *upstream* that records every request, for the block.
+
+    MAGI FIX (MS3 §6 loop9): S53 and S55 read only the product's own outputs, so
+    a product that sent a secret, or never indexed a chunk, to a real backend
+    passed (R7a Balthasar). The relay keeps each request's path and body
+    before forwarding it. It observes what reaches it: an endpoint the
+    configuration does not steer is outside it, as for :func:`model_counter`.
+
+    Args:
+        upstream: The endpoint every request goes on to, ``http`` or ``https``
+            and without credentials (the relay cannot forward them).
+
+    Yields:
+        tuple: The URL to point the product at (*upstream*'s path on the
+        relay's loopback port) and the :class:`RequestBodies` it fills.
+
+    Raises:
+        HarnessError: When *upstream* is not a plain http(s) URL.
+    """
+    parts = urllib.parse.urlsplit(upstream)
+    if parts.scheme not in ("http", "https") or not parts.hostname or "@" in parts.netloc:
+        raise HarnessError("the recording relay needs a plain http(s) upstream without "
+                           "credentials, not %r" % upstream)
+    server = _BoundedThreadingServer(("127.0.0.1", 0), _RelayHandler)
+    server.daemon_threads = True
+    server.bodies, server.upstream = RequestBodies(), parts
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield "http://127.0.0.1:%d%s" % (server.server_address[1], parts.path), server.bodies
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=ERROR_BACKEND_TIMEOUT_S)
+
+
+def relay_upstream(config_path, environ=None) -> str:
+    """The one endpoint every request of a run reaches, for :func:`recording_relay`.
+
+    Args:
+        config_path: The review workspace's ``magi.toml``.
+        environ: The environment the product inherits; ``None`` reads ``os.environ``.
+
+    Returns:
+        str: The root ``base_url``, which every section inherits or repeats.
+
+    Raises:
+        HarnessError: When the file has no root ``base_url``, a section names
+            another endpoint, or ``OPENAI_BASE_URL`` overrides it with another:
+            one relay stands in for one endpoint.
+    """
+    environ = os.environ if environ is None else environ
+    document = _parsed_config(config_path)
+    root = document.get(_ENDPOINT_KEY)
+    if not isinstance(root, str) or not root.strip():
+        raise HarnessError("%s has no root base_url for the relay to stand in for" % config_path)
+    others = {value for path, value in _config_leaves(document)
+              if path[-1] == _ENDPOINT_KEY and len(path) > 1}
+    override = (environ.get(_BACKEND_URL_VARIABLE) or "").strip()
+    if others - {root} or override not in ("", root):
+        raise HarnessError("%s reaches more than one endpoint; the relay stands in for one"
+                           % config_path)
+    return root
+
+
+def commit_files(workspace, commit: Commit) -> None:
+    """Write *commit*'s files under *workspace* and commit exactly them.
+
+    The workspace is the harness's own nested repository, so hooks and signing
+    are off for these fixture commits (:data:`HARNESS_GIT_CONFIG`).
+
+    Args:
+        workspace: The review workspace, already a repository.
+        commit: What to write and commit.
+
+    Raises:
+        HarnessError: When a path leaves *workspace*, or a write or git fails.
+    """
+    root = _resolved(workspace, "the review workspace")
+    paths = [relative for relative, _ in commit.files]
+    try:
+        for relative, body in commit.files:
+            target = _resolved(root / relative, "a setup file")
+            if root not in target.parents:
+                raise HarnessError("a setup commit names a file outside its workspace: %s" % relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+        identity = ("-c", "user.name=smoke", "-c", "user.email=smoke@example.invalid",
+                    "-c", "commit.gpgsign=false")
+        for args in (("add", "--", *paths), identity + ("commit", "-q", "-m", commit.message)):
+            subprocess.run(git_command(root, *args), check=True, env=git_env(),
+                           capture_output=True, timeout=GIT_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HarnessError("could not commit %r in %s: %s"
+                           % (commit.message, root, _error_detail(exc))) from exc
+
+
 def point_config_at(config_path, url: str) -> None:
     """Rewrite the ``magi.toml`` at *config_path* so every endpoint is *url*.
 
@@ -3383,7 +3718,7 @@ DEFINITIONS: dict[str, RunDefinition] = {
         argv=("code-review",) + REVIEW_FLAGS + (REVIEW_MASKED_DIR,),
         stdin=b"",
         needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
-        files=review_masked_files()),
+        files=review_masked_files(), records_requests=True),
     "R19": RunDefinition(
         run_id="R19",
         argv=("code-review",) + REVIEW_FLAGS + (REVIEW_KEYBLOCK_DIR,),
@@ -3391,6 +3726,29 @@ DEFINITIONS: dict[str, RunDefinition] = {
         forbids_model_calls=True,
         needs_trio=False, payload_size=PAYLOAD_SMALL, timeout_s=60,
         files=review_keyblock_files()),
+    # R20 feeds S56 (RV21): a commit review whose working tree is dirty. R21 feeds
+    # S57 (RV08): a third review of a fixed commit, after two that record and
+    # reclassify the history. Both send every request through the recording relay.
+    "R20": RunDefinition(
+        run_id="R20",
+        argv=_REVIEW_HEAD_ARGV,
+        stdin=b"",
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
+        files=((REVIEW_DOCREV_FILE, _answer_file(REVIEW_DIRTY_DOC, b"3")),),
+        records_requests=True,
+        setup=(Commit(((REVIEW_DOCREV_FILE, _answer_file(REVIEW_COMMITTED_DOC, b"1")),)),
+               Commit(((REVIEW_DOCREV_FILE, _answer_file(REVIEW_COMMITTED_DOC, b"2")),)))),
+    "R21": RunDefinition(
+        run_id="R21",
+        argv=_REVIEW_HEAD_ARGV,
+        stdin=b"",
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
+        records_requests=True,
+        setup=(Commit((("README.md", b"# smoke history\n"),)),
+               Commit(((REVIEW_HISTORY_FILE, _HISTORY_BUGGY),)),
+               Invocation(_REVIEW_HEAD_ARGV, _HISTORY_SETUP_TIMEOUT_S),
+               Commit(((REVIEW_HISTORY_FILE, _HISTORY_FIXED),)),
+               Invocation(_REVIEW_HEAD_ARGV, _HISTORY_SETUP_TIMEOUT_S))),
 }
 
 
@@ -3461,6 +3819,10 @@ class RunExecutor:
         #: one entry per backend served (:meth:`_invoke`); reset by
         #: :meth:`execute`, which runs one definition at a time.
         self._reached: list[int] = []
+        #: The outputs of the run in progress's setup invocations, and the
+        #: timeout one of them hit, if any (:meth:`_run_setup`).
+        self._setup_outputs: list[ProductOutput] = []
+        self._setup_expired: TimedOut | None = None
 
     def execute(self, definition: RunDefinition) -> RunResult:
         """Run one definition and return everything it produced.
@@ -3487,6 +3849,8 @@ class RunExecutor:
                 result.
         """
         started = time.monotonic()
+        self._setup_outputs = []
+        self._setup_expired = None
         workspace = self._prepare_review_workspace(definition)
         # A second listing, after the run's files are written and before the
         # product starts: what the product's own enumeration will see.
@@ -3494,10 +3858,15 @@ class RunExecutor:
         stdin = self._stdin_for(definition)
         baseline = None
         contacted: list[str] = []
+        recorded: list[RequestBodies] = []
         self._reached = []
         with self._embedder_away(definition, workspace), \
-                self._counted_endpoints(definition, workspace, contacted) as runnable:
+                self._counted_endpoints(definition, workspace, contacted) as counted, \
+                self._recorded_requests(counted, workspace, recorded) as runnable:
             try:
+                if self._setup_expired is not None:
+                    # MAGI FIX (MS3 §6 loop9): a setup review that hung is the run's hang.
+                    raise self._setup_expired
                 if runnable.rotates:
                     # The baseline is taken INSIDE, after the guard that refuses
                     # to rotate a credential there is nothing to put back.
@@ -3529,7 +3898,90 @@ class RunExecutor:
             protected_visible=protected,
             model_requests=tuple(contacted),
             backend_requests=sum(self._reached) if self._reached else None,
+            request_bodies=(recorded[0].recorded if recorded and recorded[0].complete
+                            else None),
+            setup_outputs=tuple(self._setup_outputs),
         )
+
+    @contextlib.contextmanager
+    def _recorded_requests(self, definition: RunDefinition, workspace, recorded):
+        """Send every request of a ``records_requests`` run through :func:`recording_relay`.
+
+        Like :meth:`_counted_endpoints`: every endpoint of the workspace's
+        ``magi.toml`` and ``OPENAI_BASE_URL`` point at the relay, checked
+        before the run, and the proxy variables are removed so loopback is
+        reached directly; the relay forwards to the one endpoint the file
+        declared (:func:`relay_upstream`). The file is put back when the block
+        ends.
+
+        Args:
+            definition: The run about to execute.
+            workspace: Its review workspace, or ``None``.
+            recorded: A list that receives the run's :class:`RequestBodies`.
+
+        Yields:
+            RunDefinition: *definition* itself for any other run, otherwise a
+            copy whose ``env`` reaches the relay.
+
+        Raises:
+            HarnessError: When there is no workspace, or the rewritten
+                configuration could still reach past the relay.
+        """
+        if not definition.records_requests:
+            yield definition
+            return
+        if workspace is None:
+            raise HarnessError("run %s records its requests but has no review workspace"
+                               % definition.run_id)
+        config = workspace.joinpath(*CONFIG_PATH_PARTS)
+        try:
+            original = config.read_bytes()
+        except OSError as exc:
+            raise HarnessError("could not read %s to relay its requests: %s" % (config, exc)) from exc
+        with recording_relay(relay_upstream(config)) as (url, bodies):
+            try:
+                point_config_at(config, url)
+                off = (endpoints_off_the_counter(config, url)
+                       + changes_besides_endpoints(original.decode("utf-8"), config))
+                if off:
+                    raise HarnessError("run %s records its requests, but its configuration "
+                                       "could still reach past the relay: %s"
+                                       % (definition.run_id, "; ".join(off)))
+                yield dataclasses.replace(
+                    definition, env=definition.env + ((_BACKEND_URL_VARIABLE, url),
+                                                      (_PROVIDER_VARIABLE, ""))
+                    + tuple((name, None) for name in _PROXY_VARIABLES)
+                    + ((_NO_PROXY_VARIABLE, _LOOPBACK_HOSTS),))
+            finally:
+                _replace_bytes(config, original, "restore %s" % config)
+        recorded.append(bodies)
+
+    def _run_setup(self, definition: RunDefinition, workspace: pathlib.Path) -> None:
+        """Run *definition*'s setup steps in order in *workspace* (MAGI §6 MS3 loop9).
+
+        A :class:`Commit` is written and committed; an :class:`Invocation` runs
+        the product once and its output is kept for the result. A step that
+        hangs stops the rest and is raised by :meth:`execute` as the run's hang.
+
+        Args:
+            definition: The run about to execute.
+            workspace: Its review workspace, already a repository.
+
+        Raises:
+            HarnessError: When a commit fails.
+            ProductOutputError: When the product cannot be started.
+        """
+        for step in definition.setup:
+            if isinstance(step, Commit):
+                commit_files(workspace, step)
+                continue
+            once = dataclasses.replace(definition, argv=step.argv, timeout_s=step.timeout_s,
+                                       setup=(), records_requests=False, files=())
+            try:
+                self._setup_outputs.append(self._invoke(once, b""))
+            except TimedOut as expired:
+                self._setup_expired = expired
+                return
 
     @contextlib.contextmanager
     def _embedder_away(self, definition: RunDefinition, workspace):
@@ -3865,8 +4317,12 @@ class RunExecutor:
             # captured stderr, so git's own reason was dropped (F1a1-b1).
             raise HarnessError("could not build the review workspace at %s: %s"
                                % (workspace, _error_detail(exc))) from exc
+        self._run_setup(definition, workspace)
         self._write_files(definition, workspace)
-        verify_visible(workspace, [path for path, _ in definition.files])
+        # A tracked file the run rewrites (R20's dirty copy) is no untracked file git lists.
+        committed = {path for step in definition.setup if isinstance(step, Commit)
+                     for path, _ in step.files}
+        verify_visible(workspace, [path for path, _ in definition.files if path not in committed])
         return workspace
 
     def _write_files(self, definition: RunDefinition,

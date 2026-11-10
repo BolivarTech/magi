@@ -23,13 +23,12 @@ Both measure what the product does with the bytes, never what a model answers.
 S54 needs no backend and declares ``inspects_timeouts``; S53 reaches the trio,
 so a timed-out R18 is reported as ``CANNOT_TEST`` by the runner.
 
-What S53 cannot see is the request a model endpoint receives: R18 talks to a
-real backend, which keeps no record the harness can read, so its leak check
-covers the process's own outputs (stdout, stderr, the run log). The bytes sent
-to the trio and to the embedder are pinned in the unit suite by recording
-doubles (``no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio``,
-``units_and_definitions_holding_a_one_line_secret_reach_the_trio_masked``,
-``a_batch_quoting_a_one_line_secret_sends_its_documentation_query_masked``).
+R18 sends every request through the harness's recording relay
+(``runs.recording_relay``, MAGI §6 MS3 loop9), so S53's leak check reads the
+bytes that left the process too: each prompt to the trio, each text to the
+embedder, each gate question, as well as stdout, stderr and the run log. The
+unit suite pins the same with recording doubles
+(``no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio``).
 
 Declared limits: the leak check looks for the secret's bytes (whole, and every
 :data:`LEAK_SLICE_BYTES` window), not for a transformed encoding of them
@@ -50,7 +49,7 @@ S53_ASSERTIONS = (
     "code_review.masked lists exactly the keyed file with cause secret and pattern "
     "anthropic-key, and masked_unlisted is 0",
     "code_review.skipped is empty and skipped_unlisted is 0: the keyed file was reviewed",
-    "the toy key reaches neither stdout, stderr nor the run log",
+    "the toy key reaches neither stdout, stderr, the run log nor any request the relay forwarded",
 )
 S54_ASSERTIONS = (
     "exit 2",
@@ -96,12 +95,15 @@ def _no_capture(texts, run_id):
         texts, run_id, "run %s produced no capture to inspect" % run_id)
 
 
-def _leak_finding(texts, index, run_id, run, needles, what):
+def _leak_finding(texts, index, run_id, run, needles, what, relayed=False):
     """Judge an assertion that none of *needles* left the process.
 
     Reads stdout, stderr and the captured run log, for each needle and a
     slice from inside it (:func:`_with_slices`). The needles are never
-    printed, only the outputs that hold one.
+    printed, only the outputs that hold one. With *relayed*, every request
+    the recording relay forwarded is read too (MAGI §6 MS3 loop9: the egress
+    itself, the trio's prompts and the embedder's texts included), and a run
+    whose record is missing or incomplete is ``CANNOT_TEST``.
 
     Args:
         texts: The scenario's assertion texts.
@@ -110,6 +112,7 @@ def _leak_finding(texts, index, run_id, run, needles, what):
         run: Its ``RunResult``, neither missing nor hung.
         needles: Byte strings that must appear in no output.
         what: Short name of what the needles are, for the failure detail.
+        relayed: Whether the run's forwarded requests are read too.
 
     Returns:
         Finding: ``FAIL`` naming each output holding a needle; ``CANNOT_TEST``
@@ -119,11 +122,16 @@ def _leak_finding(texts, index, run_id, run, needles, what):
     needles = _with_slices(needles)
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
+    if relayed:
+        outputs += (("a forwarded request", tuple(b for _, b in run.request_bodies or ())),)
     leaked = [name for name, bodies in outputs
               if any(needle in body for needle in needles for body in bodies)]
     if leaked:
         return code_review._finding(texts, index, Outcome.FAIL, run_id,
                                     "%s appears in %s" % (what, ", ".join(leaked)))
+    if relayed and run.request_bodies is None:
+        return code_review._finding(texts, index, Outcome.CANNOT_TEST, run_id,
+                                    "the relay's record of the run is missing or incomplete")
     if run.review_log_unreadable:
         return code_review._finding(
             texts, index, Outcome.CANNOT_TEST, run_id,
@@ -202,7 +210,7 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
     else:
         yield _masked_finding(section)
         yield _skipped_finding(section)
-    yield _leak_finding(texts, 3, "R18", run, (runs.REVIEW_MASKED_KEY,), "the toy key")
+    yield _leak_finding(texts, 3, "R18", run, (runs.REVIEW_MASKED_KEY,), "the toy key", relayed=True)
 
 
 def _masked_finding(section):

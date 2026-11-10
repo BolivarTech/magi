@@ -17,7 +17,7 @@ from smoke.outcome import Finding
 #: certificate renderer, which publishes "N of N scenarios evaluated", and by
 #: the test that asserts the registry actually holds that many. One constant
 #: with two readers is what keeps the headline and the registry from drifting.
-DECLARED_SCENARIO_COUNT = 55
+DECLARED_SCENARIO_COUNT = 57
 
 #: How many ASSERTIONS those scenarios promise between them, per section 8 of
 #: the spec. A separate constant because it answers a separate question, and
@@ -104,7 +104,13 @@ DECLARED_SCENARIO_COUNT = 55
 #: 165 on 2026-11-08: S52 adds "code_review.trimmed names an unavailable index
 #: or an embedder that did not answer" (RV07 declares the cause, not only the
 #: boolean), MAGI §6 MS3 loop 3, v0.25.0.
-DECLARED_ASSERTION_COUNT = 165
+#:
+#: 171 on 2026-11-10: S55 adds "the embedder was sent the file's doc comment
+#: alone, as a chunk, and a query of the batch", S56 adds 3 (RV21: a commit
+#: review reads the commit's doc comment, never the dirty working tree's) and
+#: S57 adds 2 (RV08: validated history reaches the trio), all read off the
+#: recording relay, MAGI §6 MS3 loop 9, v0.25.0. The scenario count goes 55 -> 57.
+DECLARED_ASSERTION_COUNT = 171
 
 #: A scenario takes the run it declared, and -- only when it declares
 #: needs_ambient -- the ambient state as a second argument. The union is

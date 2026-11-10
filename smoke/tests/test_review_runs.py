@@ -144,7 +144,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         # R18 (S53) a review of a file whose content holds a one-line key, masked.
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()
                      if d.argv[0] == "code-review" and d.needs_trio}
-        self.assertEqual({"R12", "R17", "R18"}, reviewing)
+        self.assertEqual({"R12", "R17", "R18", "R20", "R21"}, reviewing)
 
     def test_the_embedder_run_points_only_its_embedder_away(self) -> None:
         # S52: the trio and the gate keep the real backend; only [embedding] reaches the closed port.
