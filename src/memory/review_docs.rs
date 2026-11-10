@@ -1405,6 +1405,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebuilt_wipe_is_rechecked() {
+        // [MAGI S6 MS3 loop10, R1 Caspar] A rebuild wiped what another identity wrote after the
+        // plan; that write is now a conflict too, and the other identity keeps its rows.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        let open = |model: &str| {
+            let id = magi_rs::review::docs::doc_index_id(model, 3);
+            ReviewDocStore::new(mem.shared_conn(), mem.data_key().expect("dek"), id).expect("store")
+        };
+        let (mine, other) = (open("m1"), open("m2"));
+        let old = (src("d.md", "k"), vec![chunk("d.md", "A", "x")]);
+        let m2 = FakeEmbedder::new(3).named("m2");
+        other
+            .reindex(std::slice::from_ref(&old), &m2)
+            .await
+            .expect("m2");
+        let racing = RacingEmbedder {
+            other: &other,
+            sources: vec![(src("e.md", "k2"), vec![chunk("e.md", "B", "y")])],
+            raced: Default::default(),
+        };
+        let r = mine.reindex(&[old], &racing).await;
+        assert!(matches!(&r, Err(MemoryError::Storage(_))), "{r:?}");
+        let both = [src("d.md", "k"), src("e.md", "k2")];
+        assert!(other.missing(&both).expect("missing").is_empty());
+    }
+
+    #[tokio::test]
     async fn vectors_loaded_while_another_identity_holds_the_index_are_an_error_not_silence() {
         // [MAGI S6 MS3 loop6, R1 Caspar] A wrote, then B (another identity) rebuilt and wiped A's
         // rows: A loading afterwards got zero vectors and served no documentation undeclared.
