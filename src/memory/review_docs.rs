@@ -115,7 +115,10 @@ impl DocVectors {
 
 /// Encrypted, per-source index of documentation chunks (RV19, RV21).
 ///
-/// Shares the connection and the masked data key with `EncryptedSqliteMemory`.
+/// Shares the connection and the masked data key with `EncryptedSqliteMemory`. One index
+/// identity per database at a time: two embedding models used in turn rebuild the index on
+/// every switch, a full re-embedding declared each time (`identities_alternate_by_rebuild`); pin
+/// one `[embedding]` model per database.
 pub struct ReviewDocStore {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
@@ -1040,6 +1043,29 @@ mod tests {
             .await
             .expect("again");
         assert_eq!((again.embedded, again.sources, e.calls()), (0, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn identities_alternate_by_rebuild() {
+        // [MAGI S6 MS3 loop8, R1 Caspar] One identity at a time, by design: two models used in
+        // turn on one database rebuild on every switch (a full re-embedding), declared each time
+        // (`rebuilt`), never a comparison across models.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        let open = |m: &str| {
+            let id = magi_rs::review::docs::doc_index_id(m, 3);
+            ReviewDocStore::new(mem.shared_conn(), mem.data_key().expect("dek"), id).expect("s")
+        };
+        let sources = [(src("d.md", "k"), vec![chunk("d.md", "A", "x")])];
+        for (round, m) in ["m1", "m2", "m1"].into_iter().enumerate() {
+            let e = FakeEmbedder::new(3).named(m);
+            let s = open(m).reindex(&sources, &e).await.expect("reindex");
+            assert_eq!((s.embedded, s.rebuilt), (1, round > 0), "round {round}");
+        }
     }
 
     #[tokio::test]
