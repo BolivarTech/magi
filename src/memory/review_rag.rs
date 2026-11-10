@@ -3249,6 +3249,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_documentation_store_that_was_not_opened_is_declared_unavailable() {
+        // [MAGI S6 MS3 loop7, R2 Melchior] With a database and an embedder but no store, the
+        // documentation was absent with no cause, whatever the caller set in the preparation.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let mut rag = f.rag(true);
+        rag.docs = None;
+        let a = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            a.trimmed
+                .contains(&(ContextKind::Documentation, INDEX_UNAVAILABLE.to_string())),
+            "{:?}",
+            a.trimmed
+        );
+    }
+
+    #[tokio::test]
     async fn two_hunks_of_one_unit_are_charged_once_when_checking_for_room() {
         // [MAGI S6 MS3 loop2, R2 Melchior] `assemble` charges a repeated unit once; the room check
         // charged it per hunk, so a batch with room for one more item was declared full and its
