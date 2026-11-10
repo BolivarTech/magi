@@ -2208,7 +2208,8 @@ def embedder_pointed_away(config_path):
     freed ephemeral port can be dropped instead of refused; either way a hang.
 
     Args:
-        config_path: The review workspace's configuration, rewritten in place.
+        config_path: The review workspace's configuration, rewritten for the
+            block and restored byte for byte when it ends.
 
     Yields:
         str: The URL ``[embedding]`` now reaches.
@@ -2217,9 +2218,19 @@ def embedder_pointed_away(config_path):
         HarnessError: When the configuration cannot be read or written.
     """
     # MAGI FIX (S6 MS3 loop2): R17 pointed at port 9, the discard service where it runs.
+    # MAGI FIX (MS3 §6 loop8): the file is put back when the block ends, however it ends, so
+    # the rewrite never outlives its run even on a reused workspace.
+    try:
+        original = pathlib.Path(config_path).read_bytes()
+    except OSError as exc:
+        raise HarnessError("could not read %s to point its embedder away: %s"
+                           % (config_path, exc)) from exc
     with error_backend() as url:
         point_embedding_at(config_path, url)
-        yield url
+        try:
+            yield url
+        finally:
+            _replace_bytes(config_path, original, "restore %s" % config_path)
 
 
 #: The table whose endpoint :func:`point_embedding_at` rewrites.
@@ -2247,8 +2258,9 @@ def point_embedding_at(config_path, url: str) -> None:
     inline table, its key bare or quoted, is refused, named, and the file is
     left as it was.
 
-    Nothing restores the file: the executor runs every review on a fresh copy
-    of the workspace, so the rewrite never outlives its run.
+    The write is atomic (:func:`_replace_bytes`); :func:`embedder_pointed_away`
+    puts the file back when its block ends, so the rewrite never outlives its
+    run, whatever copy of the workspace the executor uses.
 
     Complexity: ``O(file bytes)``.
 
@@ -2305,11 +2317,33 @@ def point_embedding_at(config_path, url: str) -> None:
         lines.append(original)
     if not placed:
         lines.extend((_EMBEDDING_TABLE, line))
+    _replace_bytes(config_path, ("\n".join(lines) + "\n").encode("utf-8"),
+                   "point %s's embedder away" % config_path)
+
+
+def _replace_bytes(path, data: bytes, what: str) -> None:
+    """Write *data* to *path* atomically: a sibling temporary file, then one replace.
+
+    MAGI FIX (MS3 §6 loop8): the embedder rewrite wrote in place, so a failure
+    part way left half a configuration. A failed write leaves *path* whole and
+    no temporary file behind.
+
+    Args:
+        path: The file to replace.
+        data: Its new content.
+        what: What the write is for, for the error.
+
+    Raises:
+        HarnessError: When the temporary file cannot be written or replaced.
+    """
+    target = pathlib.Path(path)
+    temporary = target.with_name(target.name + ".tmp")
     try:
-        pathlib.Path(config_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temporary.write_bytes(data)
+        os.replace(temporary, target)
     except OSError as exc:
-        raise HarnessError("could not point %s's embedder away: %s"
-                           % (config_path, exc)) from exc
+        temporary.unlink(missing_ok=True)
+        raise HarnessError("could not %s: %s" % (what, exc)) from exc
 
 
 def _envelope(prompt: str, system: str) -> bytes:
