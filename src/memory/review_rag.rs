@@ -511,6 +511,37 @@ impl StoreRag<'_> {
 }
 
 impl StoreRag<'_> {
+    /// Documentation and history for `batch`, searched with the embedded query of `text`; a down
+    /// embedder gives neither and is declared once per review (its error is in the run log).
+    async fn retrieve(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        batch: &ReviewBatch,
+        text: &str,
+        declared: &mut Vec<(ContextKind, String)>,
+        withheld: &mut usize,
+    ) -> (Option<Vec<ContextItem>>, Option<Vec<ContextItem>>) {
+        let was_down = self.embedder_down.load(Ordering::SeqCst);
+        let Some(vector) = self.query_vector(embedder, text).await else {
+            // MAGI FIX (MS3 §6 loop2): a down embedder is said apart from a missing one.
+            if !was_down {
+                let layers = [
+                    (self.docs.is_some(), ContextKind::Documentation),
+                    (self.history.is_some(), ContextKind::History),
+                ];
+                for (_, kind) in layers.into_iter().filter(|(on, _)| *on) {
+                    declared.push((kind, EMBEDDER_DOWN.to_string()));
+                }
+            }
+            return (None, None);
+        };
+        let docs = self.documentation(&vector, declared);
+        (
+            Some(docs),
+            Some(self.history_items(&batch_files(batch), declared, withheld)),
+        )
+    }
+
     /// Whether neither documentation nor history can enter any later batch: each is absent,
     /// unavailable or failed for the rest of the review. A down embedder is not checked here:
     /// [`Self::query_vector`] answers `None` for it without a call, so the stores are what this
@@ -607,27 +638,8 @@ impl RagSource for StoreRag<'_> {
             // could bring nothing in; it is not embedded.
             (true, Some(_)) if self.both_layers_down() => (Some(Vec::new()), Some(Vec::new())),
             (true, Some(embedder)) => {
-                let was_down = self.embedder_down.load(Ordering::SeqCst);
-                match self.query_vector(embedder, &text).await {
-                    None => {
-                        // MAGI FIX (MS3 §6 loop2): a down embedder is said apart from a missing
-                        // one, once per review (the run log keeps its error).
-                        if !was_down {
-                            if self.docs.is_some() {
-                                declared
-                                    .push((ContextKind::Documentation, EMBEDDER_DOWN.to_string()));
-                            }
-                            if self.history.is_some() {
-                                declared.push((ContextKind::History, EMBEDDER_DOWN.to_string()));
-                            }
-                        }
-                        (None, None)
-                    }
-                    Some(vector) => (
-                        Some(self.documentation(&vector, &mut declared)),
-                        Some(self.history_items(&batch_files(batch), &mut declared, &mut withheld)),
-                    ),
-                }
+                self.retrieve(embedder, batch, &text, &mut declared, &mut withheld)
+                    .await
             }
         };
         let mut a = assemble(batch.tokens, limit, units, code, docs, history)?;
