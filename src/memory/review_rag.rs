@@ -2390,6 +2390,55 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_revision_that_reads_as_an_option_never_reaches_git() {
+        // [MAGI S6 MS3 loop7, R2 Caspar] The listing is refused before git runs; git gets argv,
+        // never a shell, so a newline in the revision is one argument, not two.
+        struct Recording(Mutex<Vec<String>>);
+        impl GitCommand for Recording {
+            fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                self.0.lock().expect("lock").push(a.join(" "));
+                Ok(Vec::new())
+            }
+        }
+        let f = RagFixture::new(&[("README.md", "# A\nx\n")]).await;
+        let git = Recording(Mutex::new(Vec::new()));
+        for rev in ["--output=x", "-c", "--upload-pack=touch x"] {
+            let prep = prepare_docs(
+                &f.docs,
+                Some(&git),
+                Some(rev),
+                &f.source,
+                &[],
+                &|_: &str| true,
+                &f.registry,
+                &f.embedder,
+                BOUND,
+            )
+            .await;
+            assert!(prep.docs_unavailable, "{rev}");
+        }
+        assert!(git.0.lock().expect("lock").is_empty(), "git ran");
+    }
+
+    #[test]
+    fn the_chunk_bound_drops_whole_sources_never_part_of_one() {
+        // [MAGI S6 MS3 loop7, R2 Caspar] U29 indexes a source whole or not at all: a source
+        // whose chunks would cross MAX_DOC_CHUNKS goes entirely, the ones before stay entire.
+        let many = |path: &str, n: usize| {
+            let chunks = (0..n).map(|i| chunk(path, &format!("s{i}"), "x")).collect();
+            (src(path, "k"), chunks)
+        };
+        let max = magi_rs::review::docs::MAX_DOC_CHUNKS;
+        let (kept, truncated) = bounded(vec![many("a.md", max - 1), many("b.md", 2)]);
+        assert!(truncated);
+        let shape: Vec<(&str, usize)> = kept
+            .iter()
+            .map(|(s, c)| (s.path.as_str(), c.len()))
+            .collect();
+        assert_eq!(shape, vec![("a.md", max - 1)]);
+    }
+
     /// Both sides by path, as `RevisionSource` serves a reviewed diff. [CP2 MS3 loop 10]
     struct TwoSides {
         new: Vec<(&'static str, &'static str)>,
