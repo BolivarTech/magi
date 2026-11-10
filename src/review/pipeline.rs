@@ -474,17 +474,14 @@ struct Faces {
 ///    local: no model and no endpoint is called.
 /// 4. With an explicit `--timeout` or a caller's deadline, check the budget
 ///    ([`precheck_budget`], over [`pre_budget`]) on the batch count alone, before any context
-///    is assembled: a refused review calls no model and no endpoint (the source's own indexing
-///    is the caller's check). Then the context source is bound, and each batch's context
-///    assembled (its query embedded), scanned and recorded; the budget is read again, and a
-///    preparation that overran its declared reserve runs on what is left (its calls were made).
-///    The total is the `--timeout`, at most what is left of the deadline then. Steps 1-4 are the
-///    preparation, measured apart (with [`RagSource::index_ms`]), never charged to the total.
+///    is assembled: a refused review calls no model and no endpoint. Then the context source is
+///    bound and each batch's context assembled, scanned and recorded; the budget is read again,
+///    and a preparation that overran its declared reserve runs on what is left. Steps 1-4 are
+///    the preparation, measured apart (with [`RagSource::index_ms`]), never charged to the total.
 /// 5. Run one `consult` per batch, in series, its context after its code under
-///    [`CONTEXT_HEADING`]. Without `--timeout` each batch runs on the normal
-///    `consult` clock; with it, each gets what is left split over the pending batches, counted
-///    from the first trio call. A batch whose wall clock ran out stops the review's batches
-///    (the cut ones are declared); any other failure is declared and the next batch runs.
+///    [`CONTEXT_HEADING`]: on the normal `consult` clock without `--timeout`, else on what is
+///    left split over the pending batches. A batch whose wall clock ran out stops the batches
+///    (the cut ones declared); any other failure is declared and the next batch runs.
 /// 6. Validate each completed batch against what all completed batches showed.
 /// 7. Consolidate.
 /// 8. Run the gate once per consolidated finding, within what is left of the `--timeout`.
@@ -1458,22 +1455,18 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
 
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
 ///
-/// Each item is passed through the secret detector (text, path and label, whatever its kind,
-/// [`context_egress`]): a one-line secret of its text or label is masked and its file declared
-/// as masked; an item whose path quotes a secret or that holds a private-key block never reaches
-/// the prompt, counts in `context_withheld` and lists its file as skipped with cause `secret`. The source's declarations (trimmed items, a missing embedder,
-/// `--no-memory`, withheld counts) reach `summary` here, so a batch the clock later cuts still
-/// declares them; the documentation paths the source left out for a secret are listed as
-/// skipped once each. A kept documentation or history item that carries a mask, and each
-/// documentation source the source indexed masked ([`RagSource::masked`]), declare their file
-/// as masked once (RV22 amended). The kept items are sorted, stably, by the fixed priority.
-/// O(items + bytes of the items).
+/// Each item passes the secret detector ([`context_egress`]): a one-line secret of its text or
+/// label is masked and its file declared masked; an item whose path quotes a secret or that
+/// holds a private-key block never reaches the prompt, counts in `context_withheld` and lists
+/// its file as skipped (`secret`). The source's declarations (trimmed items, a missing
+/// embedder, `--no-memory`, withheld counts) reach `summary` here, so a batch the clock later
+/// cuts still declares them. A kept documentation or history item carrying a mask, and each
+/// source indexed masked ([`RagSource::masked`]), declare their file masked once (RV22
+/// amended). Kept items are sorted, stably, by the fixed priority. O(items + their bytes).
 ///
-/// `rag` assembles the batches (the bound source, when there is one); `given` is the source the
-/// pipeline was handed, and the documentation declarations ([`RagSource::skipped`],
-/// [`RagSource::masked`]) are read from it, as the reserve and the indexing time are, so a
-/// bound source that keeps the trait's defaults never drops them
-/// (`the_documentation_declarations_come_from_the_source_given_not_the_bound_one`).
+/// `rag` assembles the batches (the bound source, if any); the documentation declarations
+/// ([`RagSource::skipped`], [`RagSource::masked`]) are read from `given`, the source the
+/// pipeline was handed, so a bound source keeping the trait's defaults never drops them.
 ///
 /// # Errors
 ///
