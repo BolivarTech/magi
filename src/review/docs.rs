@@ -89,6 +89,11 @@ const SECTION_CUT_MARK: &str = "…";
 /// larger one is cut, with the cut reported.
 pub const MAX_DOC_CHUNKS: usize = 20_000;
 
+/// Bound on the bytes (text and section) of the chunks one review indexes, next to
+/// [`MAX_DOC_CHUNKS`]: 32 MiB, so the plaintext a review holds stays bounded however big its
+/// chunks are; past it a source is cut and declared like a chunk-count cut.
+pub const MAX_DOC_INDEX_BYTES: usize = 32 * 1024 * 1024;
+
 /// Version of the chunking rules: bump it whenever [`chunk_source`] would cut a source
 /// differently, so every stored chunk is indexed again instead of mixing two chunkers.
 ///
@@ -1773,6 +1778,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b.md"]
         );
+    }
+
+    #[test]
+    fn bytes_bound_the_index_too() {
+        // [MAGI S6 MS3 loop8, R1 Caspar] A few huge sources under MAX_DOC_CHUNKS were held whole
+        // in memory; the bytes are bounded too, and a source past them is cut, declared.
+        let c = |p: &str, bytes: usize| -> (DocSource, Vec<DocChunk>) {
+            let chunk = DocChunk {
+                path: p.into(),
+                section: String::new(),
+                text: "x".repeat(bytes),
+                hash: p.into(),
+            };
+            let key = format!("k-{p}");
+            (
+                DocSource {
+                    path: p.into(),
+                    key,
+                },
+                vec![chunk],
+            )
+        };
+        let half = MAX_DOC_INDEX_BYTES / 2;
+        let (kept, truncated) = bounded(vec![c("a.md", half), c("b.md", half + 1), c("c.md", 1)]);
+        assert!(truncated);
+        let names: Vec<&str> = kept.iter().map(|(s, _)| s.path.as_str()).collect();
+        assert_eq!(names, vec!["a.md", "c.md"]);
     }
 
     #[test]
