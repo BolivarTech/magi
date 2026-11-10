@@ -715,7 +715,10 @@ pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
 /// * `e` - The error.
 ///
 /// # Returns
-/// The name, from an exhaustive match: a new variant must be named here.
+/// The name, from an exhaustive match: a new variant must be named here, so none reaches the
+/// run log unnamed (the compiler refuses the build first). The names are the run log's contract
+/// (its readers filter on `review.error`): a published name is never renamed, and a new variant
+/// gets a new one.
 pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
     match e {
         ReviewError::OutsideWorkspace(_) => "outside_workspace",
@@ -801,6 +804,12 @@ pub(crate) fn check_review_input(workspace: &Path, input: &ReviewInput) -> Resul
 }
 
 /// The agent tool `code-review`.
+///
+/// Its lock, and the runner's (`follow_up`), recover a poisoned mutex
+/// (`PoisonError::into_inner`) on purpose: each guarded value is only ever replaced whole under
+/// the lock (an `Option` set or taken, a list pushed to or taken whole), never left half
+/// written, so a panic while one is held leaves the old value or the new one, both valid, and
+/// one panicked review does not turn the tool into one that fails every later call.
 ///
 /// # Examples
 /// ```ignore
