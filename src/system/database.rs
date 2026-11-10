@@ -2311,6 +2311,21 @@ mod tests {
     }
 
     #[test]
+    fn a_schema_initialization_that_fails_part_way_leaves_no_table_behind() {
+        // [MAGI S6 MS3 loop7, R3 Caspar] Run statement by statement, a failure after `messages`
+        // left a file the pre-0.25 check reads as current but that lacks later tables. The last
+        // statement fails here (a stray `memories` without `scope`): nothing may stay.
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let conn = Connection::open(tmp.path()).expect("open");
+        conn.execute_batch("CREATE TABLE memories (id TEXT)")
+            .expect("stray");
+        assert!(init_schema(&conn).is_err(), "precondition: it fails");
+        for table in ["code_review_docs", PRE_0_25_MARKER_TABLE, "vault_meta"] {
+            assert!(!table_exists(&conn, table).expect("read"), "{table} stayed");
+        }
+    }
+
+    #[test]
     fn every_code_review_table_of_the_schema_is_a_table_the_pre_0_25_check_names() {
         // [MAGI S6 MS3 loop5, R3 Balthasar] Two hand-kept lists: a v0.25.0 table added to the
         // DDL and not to the check would let an older database without it open as current.
