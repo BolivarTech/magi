@@ -1731,6 +1731,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dimension_probe_answered_with_other_than_one_vector_opens_no_store() {
+        // [MAGI S6 MS3 loop7, R2 Caspar] Any successful probe set the index identity, even an
+        // answer the query path refuses (no vector, two, or an empty one).
+        struct Malformed(Vec<Vec<f32>>, std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Malformed {
+            async fn embed(&self, _t: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+                self.1.store(3, Ordering::SeqCst);
+                Ok(self.0.clone())
+            }
+            fn model_id(&self) -> &str {
+                "fake"
+            }
+            fn dim(&self) -> usize {
+                self.1.load(Ordering::SeqCst)
+            }
+            fn query_prefix(&self) -> &str {
+                ""
+            }
+            fn document_prefix(&self) -> &str {
+                ""
+            }
+        }
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        let memory =
+            ReviewMemory::open(mem.shared_conn(), mem.data_key().expect("dek")).expect("open");
+        for answer in [vec![], vec![vec![1.0; 3]; 2], vec![vec![]]] {
+            let e = Malformed(answer.clone(), Default::default());
+            assert!(memory.doc_store(&e).await.is_err(), "{answer:?}");
+        }
+        let good = Malformed(vec![vec![1.0; 3]], Default::default());
+        assert!(memory.doc_store(&good).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn a_failing_embedder_degrades_to_no_documentation_or_history() {
         // [CP2 MS3 loop 2] RV07: the review goes on without (3) and (4), declared.
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
