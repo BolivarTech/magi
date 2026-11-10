@@ -1377,6 +1377,13 @@ impl Default for TuiCodeReviewCommand {
     }
 }
 
+/// A `/code-review` error as the transcript may show it.
+fn code_review_error_text(e: &dyn std::fmt::Display) -> String {
+    crate::agent::Agent::sanitize_text(
+        magi_rs::redact::redact_foreign_text(&e.to_string()).as_str(),
+    )
+}
+
 /// The runner a `/code-review` command runs on: the session's, or with `--no-memory` the same
 /// runner without its review stores ([`crate::tools::code_review::CodeReviewRunner::stateless`]).
 ///
@@ -4426,30 +4433,31 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         Ok(cmd) => {
                                             app.push_message(format!("User: {trimmed}"));
                                             match app.code_review_runner.clone() {
-                                                Some(runner) => match runner_for_command(&cmd, runner)
-                                                    .and_then(|r| r.plan(&cmd.input).map(|p| (r, p)))
-                                                {
-                                                    Ok((runner, plan)) => app.begin_code_review_confirmation(
-                                                        cmd, runner, plan,
-                                                    ),
-                                                    Err(e) => apply_response(
-                                                        &mut app,
-                                                        AgentResponse::Error(
-                                                            crate::agent::Agent::sanitize_text(
-                                                                magi_rs::redact::redact_foreign_text(
-                                                                    &e.to_string(),
-                                                                )
-                                                                .as_str(),
+                                                Some(runner) => {
+                                                    match runner_for_command(&cmd, runner).and_then(
+                                                        |r| r.plan(&cmd.input).map(|p| (r, p)),
+                                                    ) {
+                                                        Ok((runner, plan)) => app
+                                                            .begin_code_review_confirmation(
+                                                                cmd, runner, plan,
+                                                            ),
+                                                        Err(e) => apply_response(
+                                                            &mut app,
+                                                            AgentResponse::Error(
+                                                                code_review_error_text(&e),
                                                             ),
                                                         ),
-                                                    ),
-                                                },
+                                                    }
+                                                }
                                                 None => {
-    let text = code_review_unavailable_message(
-        app.code_review_unavailable.as_deref(),
-    );
-    apply_response(&mut app, AgentResponse::Error(text));
-}
+                                                    let text = code_review_unavailable_message(
+                                                        app.code_review_unavailable.as_deref(),
+                                                    );
+                                                    apply_response(
+                                                        &mut app,
+                                                        AgentResponse::Error(text),
+                                                    );
+                                                }
                                             }
                                             continue;
                                         }
@@ -9526,6 +9534,18 @@ end"
             .position(|m| m.contains("HISTORY-WARNING"))
             .expect("the warning is on screen");
         assert!(report < warning, "{:?}", app.messages);
+    }
+
+    #[test]
+    fn plan_refusal_is_masked() {
+        // [MAGI S6 MS3 loop8, R5 Melchior] The plan arm redacted URL credentials only; a token in
+        // a path, ref or git output reached the transcript.
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let text = code_review_error_text(&format!("cannot read docs/{token}.md"));
+        assert!(
+            !text.contains(token) && text.contains("cannot read"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
