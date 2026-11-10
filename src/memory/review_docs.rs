@@ -71,6 +71,9 @@ pub struct ReindexStats {
     pub refused: Vec<String>,
 }
 
+/// One allowed row read raw: key, chunk hash, encrypted vector and its `dim` column.
+type RawVector = (String, String, Vec<u8>, i64);
+
 /// Everything `reindex` decides under the connection lock, before it embeds anything.
 struct Plan<'a> {
     /// The sources to write, each once, in input order.
@@ -521,7 +524,7 @@ impl ReviewDocStore {
 
     /// The decrypted vectors of the rows whose `(path, key)` is in `allowed`, of this identity:
     /// loaded once per review, scored by [`Self::search_loaded`] per batch. Read raw under the
-    /// lock, decrypted after it (R-V08). A row not of `dim` is an error
+    /// lock, decrypted after it (R-V08). A row not of `dim` (vector or `dim` column) is an error
     /// (`load_dim_mismatch_is_an_error`).
     ///
     /// With rows of another identity stored, a non-empty `allowed` is an error, never an empty
@@ -555,12 +558,13 @@ impl ReviewDocStore {
             self.allowed_vectors(&snapshot, allowed)?
         };
         let mut rows = Vec::with_capacity(candidates.len());
-        for (key, hash, blob) in candidates {
+        for (key, hash, blob, stored_dim) in candidates {
             let vector = self.unseal_vector(&blob)?;
             // MAGI FIX (MS3 §6 loop9): a row of another dimension was dropped in silence.
-            if vector.len() != dim {
+            // MAGI FIX (MS3 §6 loop10): the `dim` column was never read back.
+            if vector.len() != dim || usize::try_from(stored_dim).ok() != Some(dim) {
                 return Err(MemoryError::Storage(format!(
-                    "a stored vector of dimension {} where {dim} was asked",
+                    "a stored vector of dimension {} (column {stored_dim}) where {dim} was asked",
                     vector.len()
                 )));
             }
@@ -645,13 +649,13 @@ impl ReviewDocStore {
         &self,
         c: &Connection,
         allowed: &BTreeSet<DocSource>,
-    ) -> Result<Vec<(String, String, Vec<u8>)>, MemoryError> {
+    ) -> Result<Vec<RawVector>, MemoryError> {
         let pairs: Vec<&DocSource> = allowed.iter().collect();
         let mut out = Vec::new();
         for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
             let values = pair_values(batch.len());
             let sql = format!(
-                "SELECT key, chunk_hash, embedding_blob FROM code_review_docs \
+                "SELECT key, chunk_hash, embedding_blob, dim FROM code_review_docs \
                  WHERE index_id = ? AND (path, key) IN (VALUES {values})"
             );
             let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.index_id];
@@ -662,7 +666,7 @@ impl ReviewDocStore {
             let mut stmt = c.prepare(&sql).map_err(db_err)?;
             let rows = stmt
                 .query_map(rusqlite::params_from_iter(args), |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .map_err(db_err)?;
             for row in rows {
