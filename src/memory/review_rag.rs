@@ -1252,13 +1252,25 @@ pub async fn prepare_docs(
     prep.doc_index.truncated |= truncated;
     for batch in reindex_batches(kept) {
         let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() || !reindex_or_degrade(docs, &batch, embedder, left).await {
+        if left.is_zero() || !index_batch(docs, &batch, embedder, left, &mut prep).await {
             let cause = "a batch of documentation sources was not indexed";
             return degraded(prep, cause, started);
         }
     }
     prep.index_ms = millis(started.elapsed());
     prep
+}
+
+/// One reindex batch for `prep`: `false` when it failed.
+async fn index_batch(
+    docs: &ReviewDocStore,
+    batch: &[(DocSource, Vec<DocChunk>)],
+    embedder: &dyn EmbeddingProvider,
+    timeout: Duration,
+    prep: &mut DocPrep,
+) -> bool {
+    let _ = prep;
+    reindex_or_degrade(docs, batch, embedder, timeout).await
 }
 
 /// One [`ReviewDocStore::reindex`] under `timeout`: `true` when it wrote, `false` (with a WARN)
@@ -2145,6 +2157,28 @@ mod tests {
             vec![chunk("README.md", "Usage", "how a works, v2")],
         )];
         assert!(!reindex_or_degrade(&f.docs, &other, &FailingEmbedder, bound).await);
+    }
+
+    #[tokio::test]
+    async fn store_refusal_is_declared() {
+        // [MAGI S6 MS3 loop9, R2 Caspar] RV22: a source the store's own check refused was only
+        // logged; it is declared withheld and leaves the revision's sources.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let key = format!("sk-ant-api03-{}", "Q1w2E3r4".repeat(5)); // allow-secret-scan
+        let (bad, good) = (src("d.md", "k"), src("e.md", "k2"));
+        let batch = [
+            (bad.clone(), vec![chunk("d.md", "A", &format!("key {key}"))]),
+            (good.clone(), vec![chunk("e.md", "B", "fine")]),
+        ];
+        let mut prep = DocPrep {
+            doc_sources: BTreeSet::from([bad.clone(), good.clone()]),
+            ..DocPrep::default()
+        };
+        let bound = Duration::from_secs(REINDEX_TIMEOUT_SECS);
+        assert!(index_batch(&f.docs, &batch, &f.embedder, bound, &mut prep).await);
+        assert_eq!(prep.withheld_sources, vec!["d.md".to_string()]);
+        assert_eq!(prep.doc_index.withheld, 1);
+        assert_eq!(prep.doc_sources, BTreeSet::from([good]));
     }
 
     #[tokio::test]
