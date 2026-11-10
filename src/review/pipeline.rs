@@ -626,10 +626,8 @@ pub async fn run_review(
             (budget.map(|(total, _)| total), budget.map(|(_, c)| c))
         }
     };
-    // An overrun has no derived ceiling (`None`): the batches run on what is left, below the
-    // floor the check asks for, so below the configured ceiling whatever that one is.
     summary.ceiling_below_configured =
-        total.is_some() && ceiling.is_none_or(|c| c < req.agent_timeout_secs);
+        ceiling_below_configured(total, ceiling, req.agent_timeout_secs);
     summary.prep_ms =
         millis(prep.elapsed()).saturating_add(deps.rag.map_or(0, |rag| rag.index_ms()));
 
@@ -1149,6 +1147,13 @@ fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec
             prompt
         })
         .collect()
+}
+
+/// Whether a review with `total` runs below the `configured` ceiling: its derived `ceiling`, or,
+/// on an overrun (`None`, the batches run on what is left), the absolute floor each batch's
+/// ceiling never goes under. Without a `total`, never. O(1).
+fn ceiling_below_configured(total: Option<u64>, ceiling: Option<u64>, configured: u64) -> bool {
+    total.is_some() && ceiling.is_none_or(|c| c < configured)
 }
 
 /// Runs every batch in series (§5.0 step 5), recording metrics and failures in `summary`.
@@ -5474,6 +5479,17 @@ mod tests {
             "no context assembled"
         );
         assert_eq!(consult.calls(), 0);
+    }
+
+    #[test]
+    fn an_overrun_is_below_the_configured_ceiling_only_when_that_is_above_the_floor() {
+        // [MAGI S6 MS3 loop7, R4 Melchior] On an overrun each batch's ceiling is still at least
+        // the absolute floor, so a configured ceiling at or under it is not undercut.
+        let floor = crate::magi::AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS;
+        assert!(ceiling_below_configured(Some(100), None, floor + 1));
+        assert!(!ceiling_below_configured(Some(100), None, floor));
+        assert!(ceiling_below_configured(Some(100), Some(40), 41));
+        assert!(!ceiling_below_configured(None, None, floor + 1));
     }
 
     #[tokio::test]
