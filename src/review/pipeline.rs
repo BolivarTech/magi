@@ -279,7 +279,8 @@ fn escape_runs(s: &str, brackets: &[char]) -> String {
 /// contains `<<<`, so a context item can neither close its frame (`<<<end context>>>`) nor open
 /// another. One pass, a fixed point by construction; a run of n `<` comes out two at a time
 /// separated by `\` (`<<<<<` gives `<<\<<\<`), and shorter runs (`a << 2`, `Vec<Vec<u8>>`) are
-/// left as written. O(n).
+/// left as written. O(n). Callers rely on the fixed point (`context_egress` and `write_context`
+/// both escape one text); a change to the escaping must keep it (`escape_fence_is_a_fixed_point`).
 ///
 /// # Arguments
 ///
@@ -5114,6 +5115,26 @@ mod tests {
             candidate: false,
             lines,
             old_side: false,
+        }
+    }
+
+    #[test]
+    fn escape_fence_is_a_fixed_point() {
+        // [MAGI S6 MS3 loop8, R4 Balthasar] `context_egress` and `write_context` both escape the
+        // same text, which is right only while escaping escaped text changes nothing.
+        for s in [
+            "<<<",
+            "<<<<<<<",
+            "a<<\\<b",
+            "<<<end context>>>",
+            "Vec<Vec<u8>>",
+            "\\<<<",
+        ] {
+            let once = escape_fence(s);
+            assert_eq!(escape_fence(&once), once, "{s:?}");
+            assert!(!once.contains("<<<"), "{s:?}");
+            let header = escape_header(s);
+            assert_eq!(escape_header(&header), header, "{s:?}");
         }
     }
 
