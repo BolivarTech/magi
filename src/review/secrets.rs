@@ -1685,6 +1685,24 @@ mod tests {
     }
 
     #[test]
+    fn masking_with_lines_kept_writes_back_a_lone_cr_break() {
+        // [MAGI S6 MS3 loop7, R6a Caspar] A bare `\r` (a classic Mac break) inside a mask was
+        // dropped, so the masked side lost a line the raw diff kept.
+        let end = concat!("-----", "END RSA PRIVATE KEY-----");
+        let text = format!(
+            "fn a() {{}}\rconst K: &str = \"{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\rMIIBOgIBAAJBAK\r{end}\";\rfn b() {{}}\r"
+        );
+        let m = mask_secrets_keeping_lines(&text).expect("a key block");
+        assert_eq!(
+            m.text.matches('\r').count(),
+            text.matches('\r').count(),
+            "{:?}",
+            m.text
+        );
+        assert!(!m.text.contains("MIIB"), "{:?}", m.text);
+    }
+
+    #[test]
     fn masking_with_lines_kept_masks_a_one_line_secret_as_mask_secrets_does() {
         let text = "let u = \"postgres://svc:S3cr3t@db/app\";\nfn f() {}\n";
         let m = mask_secrets_keeping_lines(text).expect("a url credential");
