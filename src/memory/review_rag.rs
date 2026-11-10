@@ -3351,6 +3351,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_query_is_embedded_once_both_layers_have_failed() {
+        // [MAGI S6 MS3 loop7, R2 Caspar] With documentation and history both out for the rest of
+        // the review, every later batch still spent an embedder call (and its bound) for nothing.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let rag = f.rag(true);
+        rag.docs_failed.store(true, Ordering::SeqCst);
+        rag.history_failed.store(true, Ordering::SeqCst);
+        rag.context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert_eq!(f.embedder.calls(), 0);
+    }
+
+    #[tokio::test]
     async fn a_documentation_store_that_was_not_opened_is_declared_unavailable() {
         // [MAGI S6 MS3 loop7, R2 Melchior] With a database and an embedder but no store, the
         // documentation was absent with no cause, whatever the caller set in the preparation.
