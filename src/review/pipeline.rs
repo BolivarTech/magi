@@ -595,7 +595,7 @@ pub async fn run_review(
     // MAGI FIX (MS3 §6 loop6): every prompt is rendered now, before a caller's deadline is read
     // again and before the clock starts, so no batch's wall clock is computed before work the
     // total never counted (R4 Caspar).
-    let prompts = render_prompts(&batches, &contexts);
+    let prompts = render_prompts(&batches, &contexts)?;
     // Read again: the preparation spent part of a caller's deadline, and the total is what is
     // left when it ends. The check above reserved the preparation's bound; a preparation that
     // overran it has already made its outbound calls, so a refusal now would come after bytes
@@ -1138,7 +1138,10 @@ impl ReviewTimer<'_> {
 /// each prompt is masked once more, a no-op backstop no new path can skip
 /// (`a_prompt_masks_a_secret_its_stages_left_raw`). O(bytes).
 // MAGI FIX (MS3 §6 loop7): looked up by `batch.index`; and it trusted earlier stages to mask.
-fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec<String> {
+fn render_prompts(
+    batches: &[ReviewBatch],
+    contexts: &[Vec<ContextItem>],
+) -> Result<Vec<String>, ReviewError> {
     batches
         .iter()
         .enumerate()
@@ -1147,7 +1150,7 @@ fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec
             if let Some(items) = contexts.get(i) {
                 write_context(&mut prompt, items);
             }
-            mask_secrets(&prompt)
+            Ok(mask_secrets(&prompt))
         })
         .collect()
 }
@@ -2144,9 +2147,34 @@ mod tests {
             lines: None,
             old_side: false,
         };
-        let prompts = render_prompts(&[batch], &[vec![context]]);
+        let prompts = render_prompts(&[batch], &[vec![context]]).expect("renders");
         assert!(!prompts[0].contains("sk-ant-"), "{}", prompts[0]);
         assert!(prompts[0].contains("<redacted: anthropic-key>"));
+    }
+
+    #[test]
+    fn prompt_key_block_fails_closed() {
+        // [MAGI S6 MS3 loop9, R4 Balthasar] The prompt's mask covers a key block's header and
+        // footer, never its body: a block that reached the prompt fails it, nothing sent.
+        let header = concat!("-----", "BEGIN RSA ", "PRIVATE KEY-----");
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![BatchItem::WholeFile {
+                file: "a.rs".into(),
+                text: format!("const K: &str = \"\n{header}\nQUJDRA==\n\";\n"),
+                lines: 4,
+            }],
+        };
+        let r = render_prompts(&[batch], &[vec![]]);
+        assert!(matches!(
+            r,
+            Err(ReviewError::NotReviewable {
+                cause: "secret",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2166,7 +2194,7 @@ mod tests {
         };
         let mut raw = ctx(ContextKind::Documentation, "README.md", "Setup", None);
         raw.text = format!("x <<{key}\n");
-        let prompts = render_prompts(&[batch], &[vec![raw]]);
+        let prompts = render_prompts(&[batch], &[vec![raw]]).expect("renders");
         assert_eq!(prompts[0].matches("<<<").count(), 2, "{}", prompts[0]);
         assert!(!prompts[0].contains("sk-ant-"));
     }
