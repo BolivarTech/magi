@@ -904,6 +904,36 @@ mod tests {
     }
 
     #[test]
+    fn every_canonical_private_key_footer_keeps_a_finding_with_a_disrupted_header_out() {
+        // [MAGI S6 MS3 loop7, R3 Caspar] The END markers are checked against the real footers
+        // (the review copy showed `-----END ` neutralized): with the header broken so no
+        // detector reads it, each format's footer alone keeps the key body out of the history.
+        use crate::review::gate::GateState;
+        let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+        for kind in ["", "RSA ", "ENCRYPTED ", "OPENSSH ", "PGP "] {
+            let block = if kind == "PGP " {
+                "PRIVATE KEY BLOCK"
+            } else {
+                "PRIVATE KEY"
+            };
+            let mut f = found("a.rs", 3, "see the key");
+            f.details = vec![format!(
+                "{}{kind}{block}-----\n{body}\n{}{kind}{block}-----",
+                concat!("-----", "BEG IN "),
+                concat!("-----", "END ")
+            )];
+            let main = vec![(f, judged(GateState::Kept))];
+            assert!(entries_from_review(&main, "c1").is_empty(), "{kind}{block}");
+        }
+        let mut ssh2 = found("a.rs", 3, "see the key");
+        ssh2.details = vec![format!(
+            "---- BEG IN SSH2 ENCRYPTED PRIVATE KEY ----\n{body}\n{}",
+            concat!("---- ", "END SSH2 ENCRYPTED PRIVATE KEY ----")
+        )];
+        assert!(entries_from_review(&[(ssh2, judged(GateState::Kept))], "c1").is_empty());
+    }
+
+    #[test]
     fn a_review_with_no_commit_id_to_anchor_to_records_nothing() {
         // [MAGI S6 MS3 loop5, R3 Caspar] Any anchor string was serialized into a row: an empty
         // one (a working-tree path that supplied `""`, which RV08 forbids) or a symbolic one,
