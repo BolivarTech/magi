@@ -267,10 +267,11 @@ impl ReviewDocStore {
     /// Indexes whole sources, each with its chunks (possibly none); a source already indexed is
     /// skipped.
     ///
-    /// Order of work: check the embedder's identity, refuse chunks with secrets, read what is
-    /// stored (lock released), embed the rest in requests of at most [`EMBED_BATCH_ITEMS`]
-    /// texts (no lock held), then write everything in one transaction. All or nothing: any
-    /// failure before the write leaves the index as it was. A chunk already stored under any
+    /// Order of work: check the embedder's identity and the chunks' hashes, leave out the
+    /// sources with a secret ([`ReindexStats::refused`]), read what is stored (lock released),
+    /// embed the rest in requests of at most [`EMBED_BATCH_ITEMS`] texts (no lock held), then
+    /// write everything in one transaction. All or nothing: any failure before the write leaves
+    /// the index as it was. A chunk already stored under any
     /// source reuses its vector (re-encrypted under the new row), so an unchanged chunk is
     /// never embedded twice. Rows of another identity are wiped in the same transaction
     /// (`rebuilt`); nothing else is ever deleted here (see [`Self::gc`]).
@@ -282,9 +283,9 @@ impl ReviewDocStore {
     /// plaintext at the bounds, this repository about four times below).
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if the embedder's identity differs from the store's, a chunk
-    /// carries a secret, the embedder answers a vector of another length than it declares, or
-    /// a query fails; [`MemoryError::Embedding`] if the embedder fails; [`MemoryError::Crypto`]
+    /// [`MemoryError::Storage`] if the embedder's identity differs from the store's, a chunk's
+    /// hash or path does not match it, the embedder answers a vector of another length than it
+    /// declares, or a query fails; [`MemoryError::Embedding`] if the embedder fails; [`MemoryError::Crypto`]
     /// if encryption or decryption fails.
     pub async fn reindex(
         &self,
@@ -303,9 +304,9 @@ impl ReviewDocStore {
                 self.index_id
             )));
         }
-        refuse_secrets(sources)?;
         refuse_inconsistent_chunks(sources)?;
-        let plan = self.plan(sources)?;
+        let (safe, refused) = without_secret_sources(sources);
+        let plan = self.plan(&safe)?;
         let fresh = embed_all(&plan.to_embed, embedder).await?;
         let rows = self.encode_rows(&plan, &fresh)?;
         let rebuilt = self.write(&plan, &rows)?;
@@ -314,13 +315,16 @@ impl ReviewDocStore {
             reused: plan.reusable.len(),
             sources: plan.new_sources.len(),
             rebuilt,
-            refused: Vec::new(),
+            refused,
         })
     }
 
     /// Reads, under one short lock, what `reindex` needs to decide: foreign rows, the sources
     /// to write, and the stored vectors the new chunks can reuse (raw, still encrypted).
-    fn plan<'a>(&self, sources: &'a [(DocSource, Vec<DocChunk>)]) -> Result<Plan<'a>, MemoryError> {
+    fn plan<'a>(
+        &self,
+        sources: &[&'a (DocSource, Vec<DocChunk>)],
+    ) -> Result<Plan<'a>, MemoryError> {
         let c = self.locked_conn();
         let rebuilt = self.has_foreign_rows(&c)?;
         let indexed = if rebuilt {
@@ -330,7 +334,7 @@ impl ReviewDocStore {
         };
         let mut seen: BTreeSet<&DocSource> = BTreeSet::new();
         let mut new_sources: Vec<&'a (DocSource, Vec<DocChunk>)> = Vec::new();
-        for entry in sources {
+        for &entry in sources {
             if !indexed.contains(&entry.0) && seen.insert(&entry.0) {
                 new_sources.push(entry);
             }
@@ -750,49 +754,29 @@ fn optional<T>(r: rusqlite::Result<T>) -> Result<Option<T>, MemoryError> {
     }
 }
 
-/// Defense in depth (RV22): a source whose path, or a chunk whose path, section or text, matches
-/// a secret pattern is refused before anything is embedded or written. The message names the
-/// path as [`display_path`] shows it, never the secret.
-///
-/// Multi-line private-key blocks (PEM, OpenPGP, SSH2) are refused here too, by this same check:
-/// their headers are patterns of the table [`find_secret`] scans, and `holds_key_block` is a
-/// filter over that table, so a chunk holding one never reaches the embedder whatever its caller
-/// netted first (`a_chunk_holding_a_private_key_block_is_refused_before_anything_is_embedded`).
-///
-/// All or nothing, on purpose: one refused chunk fails the whole reindex, so the revision runs
-/// without documentation and says so (U29: "if the index of the revision cannot be completed,
-/// that revision runs without documentation"), rather than serving a partial index that hides
-/// which source is missing. It never fires for the product's caller (`prepare_docs`), which
-/// withholds a source whose path matches a pattern before chunking it and nets every chunk with
-/// `without_secrets`; `without_secrets` alone nets chunks, not sources, so a caller that only
-/// netted can still pass a chunkless source with such a path, and that is refused here. Its
-/// message names the path through [`display_path`], never the matching bytes
-/// (`a_source_path_shaped_like_a_secret_is_refused_without_quoting_it`).
-fn refuse_secrets(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
-    // MAGI FIX (MS3 §6 loop3): a source path is stored in clear and travels with each chunk.
-    if let Some((source, _)) = sources.iter().find(|s| find_secret(&s.0.path).is_some()) {
-        return Err(MemoryError::Storage(format!(
-            "documentation source `{}` has a path that matches a secret pattern and was not \
-             indexed",
-            display_path(&source.path)
-        )));
-    }
-    for chunk in sources.iter().flat_map(|entry| entry.1.iter()) {
-        if find_secret(&chunk.path).is_some() {
-            return Err(MemoryError::Storage(format!(
-                "documentation chunk of `{}` has a path that matches a secret pattern and was not \
-                 embedded",
-                display_path(&chunk.path)
-            )));
-        }
-        if find_secret(&chunk.text).is_some() || find_secret(&chunk.section).is_some() {
-            return Err(MemoryError::Storage(format!(
-                "documentation chunk of `{}` matches a secret pattern and was not embedded",
-                display_path(&chunk.path)
-            )));
-        }
-    }
-    Ok(())
+/// Defense in depth (RV22): splits `sources` into the ones safe to index and the
+/// [`display_path`] of each one left out because its path, or a chunk's path, section or text,
+/// matches a secret pattern (a private-key block included: its headers are patterns of the
+/// table [`find_secret`] scans). A left-out source is never embedded or written, and only it is
+/// left out, as `prepare_docs` withholds a source (`a_refused_source_spares_others`): one detector
+/// match no longer costs the revision all its documentation. Never fires for `prepare_docs`,
+/// which nets first. O(bytes of the chunks).
+// MAGI FIX (MS3 §6 loop3): a source path is stored in clear and travels with each chunk.
+// MAGI FIX (MS3 §6 loop8): one match refused the whole reindex.
+fn without_secret_sources(
+    sources: &[(DocSource, Vec<DocChunk>)],
+) -> (Vec<&(DocSource, Vec<DocChunk>)>, Vec<String>) {
+    let leaks = |(s, chunks): &(DocSource, Vec<DocChunk>)| {
+        find_secret(&s.path).is_some()
+            || chunks.iter().any(|c| {
+                [&c.path, &c.section, &c.text]
+                    .iter()
+                    .any(|t| find_secret(t).is_some())
+            })
+    };
+    let (refused, safe): (Vec<_>, Vec<_>) = sources.iter().partition(|e| leaks(e));
+    let names = refused.iter().map(|(s, _)| display_path(&s.path)).collect();
+    (safe, names)
 }
 
 /// Refuses a chunk whose hash is not [`chunk_hash`] of its own path, section and text, or whose
@@ -803,7 +787,7 @@ fn refuse_secrets(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryEr
 /// stored vector of other text without a word. The chunkers always agree; this checks the
 /// contract at the storage boundary instead of trusting it
 /// (`a_chunk_whose_hash_or_path_does_not_match_it_is_refused_before_any_reuse`). All or
-/// nothing, like [`refuse_secrets`]. O(total text) hashing. The message names the source path
+/// nothing: a broken contract is a caller bug, not one source's content. O(total text). The message names the source path
 /// through [`display_path`].
 // MAGI FIX (MS3 §6 loop6): the hash was trusted as given.
 fn refuse_inconsistent_chunks(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
@@ -1736,9 +1720,8 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(&r, Err(MemoryError::Storage(m)) if m.contains("leak.md") && !m.contains("sk-ant-")),
-            "{:?}",
-            r.as_ref().err()
+            matches!(&r, Ok(s) if s.refused == ["leak.md"] && s.sources == 0),
+            "{r:?}"
         );
         assert_eq!(e.calls(), 0);
     }
@@ -1755,9 +1738,8 @@ mod tests {
         for chunks in [vec![chunk(path, "Usage", "harmless text")], Vec::new()] {
             let r = store.reindex(&[(src(path, "k"), chunks)], &e).await;
             assert!(
-                matches!(&r, Err(MemoryError::Storage(m)) if !m.contains("sk-ant-")),
-                "{:?}",
-                r.as_ref().err()
+                matches!(&r, Ok(s) if s.refused.len() == 1 && !s.refused[0].contains("sk-ant-")),
+                "{r:?}"
             );
         }
         assert_eq!(e.calls(), 0);
@@ -1997,18 +1979,11 @@ mod tests {
         let text = "export KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
         let r = store
             .reindex(
-                &[
-                    (src("d.md", "k1"), vec![chunk("d.md", "A", "x")]),
-                    (src("leak.md", "k2"), vec![chunk("leak.md", "Setup", text)]),
-                ],
+                &[(src("leak.md", "k2"), vec![chunk("leak.md", "Setup", text)])],
                 &e,
             )
             .await;
-        assert!(
-            matches!(&r, Err(MemoryError::Storage(m)) if m.contains("leak.md") && !m.contains("sk-ant-")),
-            "{:?}",
-            r.as_ref().err()
-        );
+        assert!(matches!(&r, Ok(s) if s.refused == ["leak.md"]), "{r:?}");
         assert_eq!(e.calls(), 0);
     }
 
@@ -2112,9 +2087,8 @@ mod tests {
                     )
                     .await;
                 assert!(
-                    matches!(&r, Err(MemoryError::Storage(m)) if m.contains("key.md")),
-                    "{block:?} in {section:?}: {:?}",
-                    r.as_ref().err()
+                    matches!(&r, Ok(s) if s.refused == ["key.md"]),
+                    "{block:?} in {section:?}: {r:?}"
                 );
                 assert_eq!(e.calls(), 0, "{block:?} reached the embedder");
                 assert!(dims(&store).is_empty(), "nothing written");
@@ -2134,7 +2108,8 @@ mod tests {
         let e = FakeEmbedder::new(3);
         let r = store.reindex(&[(src(&path, "k"), vec![])], &e).await;
         match r {
-            Err(MemoryError::Storage(m)) => {
+            Ok(s) if s.refused.len() == 1 => {
+                let m = &s.refused[0];
                 assert!(!m.contains(token), "{m}");
                 assert!(m.contains("<path redacted: "), "{m}");
             }

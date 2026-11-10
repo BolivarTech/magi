@@ -1280,6 +1280,14 @@ pub async fn reindex_or_degrade(
             if stats.rebuilt {
                 tracing::event!(target: LOG_TARGET, tracing::Level::INFO, "{REBUILT_LINE}");
             }
+            for path in &stats.refused {
+                tracing::event!(
+                    target: LOG_TARGET,
+                    tracing::Level::WARN,
+                    path = path.as_str(),
+                    "a documentation source matches a secret pattern and was left out"
+                );
+            }
             true
         }
         Ok(Err(e)) => {
