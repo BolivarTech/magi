@@ -140,7 +140,9 @@ pub struct ReviewSummary {
     /// exception), one whose path quotes a secret (a path cannot be masked and still name its
     /// file), one in which masking left a match, plus those the context source withheld itself.
     /// An item holding a one-line secret is not counted here, even when its mask is longer than
-    /// what the budget charged: it is sent masked and declared in [`Self::masked`], and the batch
+    /// what the budget charged: it is sent masked, and its file (the item's path, as
+    /// [`display_path`](crate::review::secrets::display_path) shows it) is declared in
+    /// [`Self::masked`], which lists files, not context items; the batch
     /// pays for the growth with trimmed optional context, listed in [`Self::trimmed`] (RV22
     /// amended; pipeline tests `a_context_item_quoting_a_one_line_secret_reaches_the_prompt_masked`
     /// and `the_growth_of_a_mask_is_paid_by_trimming_optional_context_never_by_omitting_the_item`).
