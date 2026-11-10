@@ -695,18 +695,13 @@ pub(crate) fn init_schema(conn: &Connection) -> std::result::Result<(), SchemaIn
         });
     }
     // MAGI FIX (MS3 §6 loop7): run in autocommit, a failure after `messages` left a partial file
-    // the pre-0.25 check reads as current; one transaction now (a failed rollback is logged, and
-    // SQLite rolls back on close).
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    if let Err(e) = conn
-        .execute_batch(SCHEMA_DDL)
-        .and_then(|()| conn.execute_batch("COMMIT"))
-    {
-        if let Err(rollback) = conn.execute_batch("ROLLBACK") {
-            tracing::warn!(error = %rollback, "schema initialization rollback failed");
-        }
-        return Err(e.into());
-    }
+    // the pre-0.25 check reads as current; one transaction now.
+    // MAGI FIX (MS3 §6 loop9): a guard, not hand-written BEGIN/ROLLBACK: dropped, it rolls back.
+    // The write lock serializes concurrent openers for the milliseconds the DDL takes, each
+    // waiting up to the 5 s busy timeout before `SQLITE_BUSY` (declared).
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(SCHEMA_DDL)?;
+    tx.commit()?;
     Ok(())
 }
 
