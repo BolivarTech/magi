@@ -570,12 +570,9 @@ pub async fn run_review(
             "the lexical index hit its cap: the symbol check is off for this review"
         );
     }
-    // Invariant (R3-3): the index above came from `filtered.kept` only, so units, definitions and
-    // callers never name a skipped file, whose key-block sides the cache holds unmasked.
-    // §5.0 stage 3, before the clock: every batch's context is assembled and scanned now, so the
-    // embedder's latency is never charged to the review's total (RV06).
-    // MAGI FIX (SMOKE1): the budget check precedes assembling any context, which embeds each
-    // batch's query: a review refused for its budget sends no byte out of the process.
+    // Invariant (R3-3): the index came from `filtered.kept` only, so no context names a skipped
+    // file. Contexts are assembled before the clock, so the embedder is never charged (RV06).
+    // MAGI FIX (SMOKE1): the budget check precedes any context: a refused review sends nothing.
     // MAGI FIX (Loop1 r1, M6): a run deadline keeps room for the context preparation below.
     precheck_budget(
         req.timeout_secs,
