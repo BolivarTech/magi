@@ -166,7 +166,9 @@ impl ReviewSummary {
     ///
     /// # Returns
     ///
-    /// A copy of those findings, in order. O(findings · log off_revision). Each lookup builds a
+    /// A copy of those findings, in order: owned on purpose, since its one caller hands them to
+    /// the post-report work, which runs on a blocking thread after this summary was rendered and
+    /// dropped, so indices or borrows would not outlive it. O(findings · log off_revision). Each lookup builds a
     /// `(path, line)` key, one short path copy per finding beside the copy of the finding itself
     /// that the result holds anyway; a linear scan of `off_revision` would save it and lose the
     /// logarithm when the removed-line findings are many.
