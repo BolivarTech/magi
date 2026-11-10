@@ -491,7 +491,7 @@ S55 adds two assertions (55 scenarios and 164 assertions when it was added) and 
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes; and the relay saw the file's doc comment embedded alone, as a chunk, and a query of the batch | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
+| S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes; the relay saw the doc comment embedded as a chunk and the batch's query | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
 | S56 | R20 reviews `HEAD` of two commits, the file's working-tree copy dirty: exit 0, the commit's doc comment embedded as a chunk, the dirty one in no request (RV21) | `CANNOT_TEST` with no backend or an incomplete record |
 | S57 | R21 reviews a buggy commit, a commit rewriting it, and that commit again: every review exits 0, and a trio request of the third carries a `kind=history` frame on `hist/calc.rs` (RV08) | `CANNOT_TEST` with no backend, an incomplete record, or no located finding in the first review |
 
@@ -511,8 +511,7 @@ or a shape together with these scenarios.
 
 **Cost.** R18 is one batch by the real trio plus the gate over a four-line file, like R17: harness
 timeout 900 s, `TRIO_RUNS_MEASURED_S["R18"]` carries 300 s provisionally and has not been measured. R19
-never reaches a model. R20 is one batch like R18; R21 is three reviews of one small file, each with its own
-900 s clock; both carry R18's provisional 300 s.
+never reaches a model. R20 is one batch like R18, R21 three (900 s each); both carry R18's 300 s.
 
 ## Out of scope
 

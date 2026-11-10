@@ -330,8 +330,7 @@ def install_fake_runs(case: unittest.TestCase,
 #: ``.magi`` is copied in. [MAGI §6 MS2 loop 9, F1a-c1] S51 reads them off the result.
 R16_PROTECTED = (".magi/.magi-rs-memory.db", ".magi/logs/magi-2026-10-29.log", ".magi/magi.toml")
 
-#: What the recording relay sees of a healthy R18 (MAGI S6 MS3 loop9): the file's doc comment
-#: indexed, the batch's query embedded (masked), one trio request; ``scenario_result``'s R18 default.
+#: A healthy R18's relay record (MAGI S6 MS3 loop9): chunk, masked query, trio request.
 R18_HEALTHY_REQUESTS = tuple(
     ("/v1/embeddings", json.dumps({"input": [text]}).encode())
     for text in ("search_document: " + runs.REVIEW_MASKED_DOC.decode(),
