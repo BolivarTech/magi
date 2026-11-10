@@ -98,8 +98,9 @@ pub const MAX_DOC_CHUNKS: usize = 20_000;
 /// current patterns, so nothing leaks; the index is just stale). Pinned by
 /// `a_change_to_the_secret_patterns_comes_with_a_doc_index_version_bump`.
 ///
-/// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5).
-pub const DOC_INDEX_VERSION: u32 = 2;
+/// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5); 3 since
+/// [`chunk_hash`] length-prefixes its input (MS3 §6 loop 7). An index rebuild, not a DB change.
+pub const DOC_INDEX_VERSION: u32 = 3;
 
 /// Bound on the local references (branches and tags) [`live_doc_sources`] reads; with more, the
 /// clean-up is skipped for that review (RV19: "more than `MAX_GC_REFS` references").
@@ -241,7 +242,12 @@ fn bounded_section(section: &str) -> String {
     )
 }
 
-/// The hash a [`DocChunk`] carries: SHA-256 hex of `path + "\n" + section + "\n" + text`.
+/// The hash a [`DocChunk`] carries: SHA-256 hex of `len(path) ":" path len(section) ":"
+/// section text`, lengths in decimal bytes.
+///
+/// The length prefixes make the input unambiguous: git allows a newline in a path, and a plain
+/// separator let `("a\nb", "S", "T")` and `("a", "b", "S\nT")` share a hash, so a reused vector
+/// came from another chunk (`chunks_that_join_to_the_same_text_never_share_a_hash`).
 ///
 /// The one definition of the chunk hash, so the chunkers and the store that checks a chunk
 /// before reusing a stored vector by it cannot drift apart. O(n) in the three.
@@ -254,9 +260,10 @@ fn bounded_section(section: &str) -> String {
 /// let c = &chunk_markdown("README.md", "# A\nx\n")[0];
 /// assert_eq!(c.hash, chunk_hash(&c.path, &c.section, &c.text));
 /// ```
+// MAGI FIX (MS3 §6 loop7): the input was `path\nsection\ntext`, ambiguous for a path with a newline.
 pub fn chunk_hash(path: &str, section: &str, text: &str) -> String {
     lower_hex(&Sha256::digest(
-        format!("{path}\n{section}\n{text}").as_bytes(),
+        format!("{}:{path}{}:{section}{text}", path.len(), section.len()).as_bytes(),
     ))
 }
 
@@ -1521,9 +1528,8 @@ mod tests {
             kept[0].text.contains("<redacted: anthropic-key>") && !kept[0].text.contains("sk-ant-"),
             "{kept:?}"
         );
-        let expected = lower_hex(&Sha256::digest(
-            format!("README.md\nSetup\n{}", kept[0].text).as_bytes(),
-        ));
+        // [MAGI S6 MS3 loop7] Through `chunk_hash`, whose input is now length-prefixed.
+        let expected = chunk_hash("README.md", "Setup", &kept[0].text);
         assert_eq!(kept[0].hash, expected, "hashed over the masked text");
         // [CP2 MS3 loop 13] A secret in a heading is a secret too (the section is sent with the chunk).
         let heading = "# sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\nfine\n"; // allow-secret-scan
@@ -2036,7 +2042,7 @@ mod tests {
             .collect();
         assert_eq!(
             (DOC_INDEX_VERSION, names.as_slice()),
-            (2, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
+            (3, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
             "the secret patterns changed: bump DOC_INDEX_VERSION and update this list"
         );
     }
