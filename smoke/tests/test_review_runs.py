@@ -190,6 +190,19 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                 self.assertIn("[embedding] table", str(caught.exception))
                 self.assertEqual(text, path.read_text(encoding="utf-8"), "left as it was")
 
+    def test_a_quoted_dotted_or_inline_embedding_key_is_refused_too(self) -> None:
+        # [MAGI S6 MS3 loop7, R7a Melchior] The guard read bare keys only: a quoted one slipped
+        # past, got a second table appended, and the product refused a duplicate key.
+        for text in ('"embedding" = { base_url = "http://emb/v1" }\n',
+                     "'embedding'.base_url = \"http://emb/v1\"\n",
+                     '"embedding" . "base_url" = "http://emb/v1"\n'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "magi.toml"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(HarnessError):
+                    runs.point_embedding_at(path, "http://127.0.0.1:1/v1")
+                self.assertEqual(text, path.read_text(encoding="utf-8"), "left as it was")
+
     def test_a_spaced_or_commented_embedding_header_is_still_the_embedding_table(self) -> None:
         # [MAGI S6 MS3 loop2, R7a Caspar] `[ embedding ]` or a comment after the header was not
         # recognized, so a second `[embedding]` table was appended and the product refused it.
