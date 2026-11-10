@@ -15,7 +15,10 @@ use super::languages::{
 /// bytes, rounded up by the allocator), a `u32` id and a hash slot, plus the 24-byte header of
 /// its place list, about 70 bytes plus the name. At the cap, with 16-byte names, about 170 MB
 /// of heap (computed from that layout, not measured), plus at most 64 MB of places
-/// ([`MAX_INDEX_OCCURRENCES`]), on top of the content cache.
+/// ([`MAX_INDEX_OCCURRENCES`]), on top of the content cache. The definitions map is not under
+/// this cap: one entry per named top-level unit (the name, a copy of its path and two lines,
+/// about 60 bytes plus both strings), so it grows with the reviewed units and is bounded by the
+/// reviewed bytes the content cache admits (`MAX_REVIEW_TOTAL_BYTES`), not by a count of its own.
 // MAGI FIX (MS3 §6 loop5): each occurring name was stored twice (set and place-map key), and the
 // estimate left the second copy, the list headers and the map slots out.
 pub const MAX_INDEX_IDENTIFIERS: usize = 2_000_000;
