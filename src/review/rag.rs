@@ -182,7 +182,10 @@ fn dedup_key(item: &ContextItem) -> Option<(String, (u32, u32), bool)> {
 /// What [`assemble`] would charge for the batch with `units` and every item of `code`, with the
 /// same deduplication: a repeated unit, and a definition or caller that repeats a unit or another
 /// item, are charged once. A caller asks it whether anything could still follow `code` before it
-/// pays to fetch documentation and history. O(n) in items.
+/// pays to fetch documentation and history. Charging every code item, not only those that fit,
+/// is exact: [`assemble`] keeps a prefix, so once one code item is trimmed every later item is
+/// too, and documentation can enter only when all of `code` did (`docs_follow_overflowed_code_out`).
+/// O(n) in items.
 ///
 /// # Arguments
 ///
@@ -878,6 +881,32 @@ mod tests {
             lines: None,
             old_side: false,
         }
+    }
+
+    #[test]
+    fn docs_follow_overflowed_code_out() {
+        // [MAGI S6 MS3 loop8, R2 Melchior] What enters is a prefix: once a definition does not
+        // fit, a documentation chunk that would fit after it is trimmed too. So the room check,
+        // which charges every code item, skips exactly what `assemble` would trim.
+        let def = item(ContextKind::Definition, "big", 600);
+        let doc = item(ContextKind::Documentation, "small", 20);
+        let a = assemble(
+            500,
+            1000,
+            Vec::new(),
+            vec![def.clone()],
+            Some(vec![doc]),
+            Some(vec![]),
+        )
+        .expect("assembled");
+        assert!(a.items.is_empty(), "{:?}", a.items);
+        let kinds: Vec<ContextKind> = a.trimmed.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![ContextKind::Definition, ContextKind::Documentation]
+        );
+        let used = charged_tokens(500, &[], &[def]);
+        assert!(1000usize.saturating_sub(used) < CONTEXT_ITEM_FRAME_TOKENS);
     }
 
     fn spanning(kind: ContextKind, lines: Option<(u32, u32)>) -> ContextItem {
