@@ -584,7 +584,10 @@ fn kept_verdict(
 /// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
 /// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
 /// cannot be masked and still name its file). A context line is checked against both sides,
-/// written from the new one. O(diff + sides).
+/// written from the new one. O(diff + sides), plus O(hunks × side lines) for the function
+/// context ([`shown_by_a_side`] scans the sides once per hunk header; only a masked file pays
+/// it, and each line's `starts_with` stops at the first byte that differs).
+// MAGI FIX (MS3 §6 loop7): the bound left the per-hunk context scan out (R6a Melchior).
 ///
 /// The subset of git's unified diff it reads: lines before the first hunk and between files
 /// (`diff --git`, `index`, `---`, `+++`, rename and mode lines) are kept verbatim; a hunk opens
