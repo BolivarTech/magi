@@ -1414,7 +1414,7 @@ fn pay_for_growth(
     kept: &mut Vec<(ContextItem, Option<&'static str>)>,
     charged: usize,
     summary: &mut ReviewSummary,
-) {
+) -> usize {
     let mut sent: usize = kept.iter().map(|(item, _)| item_cost(item)).sum();
     while sent > charged {
         let Some((item, _)) = kept
@@ -1431,6 +1431,7 @@ fn pay_for_growth(
             });
         }
     }
+    0
 }
 
 /// The pattern a documentation or history item was sent masked for, if any: these two kinds
@@ -1500,7 +1501,7 @@ async fn prepare_contexts(
         }
         kept.sort_by_key(|(item, _)| kind_rank(&item.kind));
         // MAGI FIX (MS3 §6 loop6): what is sent is charged, masks included (R4 Caspar).
-        pay_for_growth(&mut kept, charged, summary);
+        let _ = pay_for_growth(&mut kept, charged, summary);
         for (item, pattern) in &kept {
             // MAGI FIX (MS3 §6 loop1): RV22 amended declares a file sent masked, the
             // documentation and history included.
@@ -5094,6 +5095,22 @@ mod tests {
             lines,
             old_side: false,
         }
+    }
+
+    #[test]
+    fn unit_growth_overflow_is_reported() {
+        // [MAGI S6 MS3 loop8, R4 Caspar] A mandatory unit that masking grows past its charge, with
+        // nothing optional left to trim, was sent with the overshoot unsaid; it is now returned
+        // (and logged at WARN by `prepare_contexts`), never hidden.
+        use crate::review::rag::item_cost;
+        let unit = ctx(ContextKind::Unit, "a.rs", "f", Some((1, 3)));
+        let charged = item_cost(&unit).saturating_sub(2);
+        let mut kept = vec![(unit, None)];
+        let mut summary = ReviewSummary::default();
+        assert_eq!(pay_for_growth(&mut kept, charged, &mut summary), 2);
+        assert_eq!(kept.len(), 1, "the unit is mandatory and stays");
+        let mut fits = kept.clone();
+        assert_eq!(pay_for_growth(&mut fits, charged + 2, &mut summary), 0);
     }
 
     #[test]
