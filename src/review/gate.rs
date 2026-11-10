@@ -505,6 +505,10 @@ pub struct Gate<'a> {
     stopped: Option<&'static str>,
     per_model: BTreeMap<String, usize>,
     questions: usize,
+    /// The last code scanned for a private-key block, and whether it holds one: the findings of
+    /// one file come together, so its whole-code scan runs once, not once per finding. Reused
+    /// only for byte-equal code, so it can never answer for another file.
+    last_scan: Option<(String, bool)>,
 }
 
 impl<'a> Gate<'a> {
@@ -533,7 +537,23 @@ impl<'a> Gate<'a> {
             stopped: None,
             per_model: BTreeMap::new(),
             questions: 0,
+            last_scan: None,
         }
+    }
+
+    /// Whether `code` holds a private-key block ([`holds_key_block`]), from [`Self::last_scan`]
+    /// when `code` is the code scanned last. O(bytes of `code`): a comparison, or the scan and
+    /// one copy when the file changed.
+    // MAGI FIX (MS3 §6 loop7): the whole-code scan ran once per finding (R6b Melchior).
+    fn code_holds_key_block(&mut self, code: &str) -> bool {
+        if let Some((last, holds)) = &self.last_scan {
+            if last == code {
+                return *holds;
+            }
+        }
+        let holds = holds_key_block(code);
+        self.last_scan = Some((code.to_string(), holds));
+        holds
     }
 
     /// Sets the per-call HTTP timeout (`[code_review].timeout_secs`).
@@ -746,7 +766,7 @@ impl<'a> Gate<'a> {
         // names, so [`Self::sendable`]'s check on the state could not see it.
         // MAGI FIX (MS3 §6 loop6): only a finding whose window overlaps a block's lines is
         // withheld; one far from it is judged (R6b).
-        if window_overlaps_key_block(code, line) {
+        if self.code_holds_key_block(code) && window_overlaps_key_block(code, line) {
             return Outcome::unfiltered(CAUSE_SECRET);
         }
         if deadline.is_some_and(|d| d <= Instant::now()) {
