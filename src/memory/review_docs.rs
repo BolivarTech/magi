@@ -653,7 +653,9 @@ impl ReviewDocStore {
     }
     /// The raw `(path, section blob, text blob)` of each `(key, chunk hash)` in `wanted` that
     /// still exists, read under one lock and decrypted by the caller off it (R-V08). A pair whose
-    /// row was deleted is simply absent.
+    /// row was deleted is simply absent. No `index_id` filter, and none is needed: `chunk_hash`
+    /// is injective over path, section and text, so a row of any identity with that pair holds
+    /// the same bytes, and the vector scored is this review's own.
     ///
     /// Complexity: one query per [`ALLOWED_PAIRS_PER_QUERY`] pairs.
     fn load_chunks(
