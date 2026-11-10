@@ -1713,8 +1713,11 @@ fn build_index(
             new_texts.push((file.path.clone(), text(bytes)));
         }
         if file.diff.is_some() {
-            if let Some(bytes) = source.read_old(&old_path(file))? {
-                old_texts.push((file.path.clone(), text(bytes)));
+            // MAGI FIX (MS3 §6 loop8): keyed by its old path, never the new one; it adds names
+            // only (`renamed_old_side_adds_names_only`).
+            let old = old_path(file);
+            if let Some(bytes) = source.read_old(&old)? {
+                old_texts.push((old, text(bytes)));
             }
         }
     }
@@ -5087,6 +5090,27 @@ mod tests {
             lines,
             old_side: false,
         }
+    }
+
+    #[test]
+    fn renamed_old_side_adds_names_only() {
+        // [MAGI S6 MS3 loop8, R4 Caspar] A rename's old side is read under its old path and adds
+        // identifiers only: its definitions are never listed under the new path's lines.
+        let diff = "diff --git a/old.rs b/new.rs\nrename from old.rs\nrename to new.rs\n";
+        let files = [ReviewFile {
+            path: "new.rs".into(),
+            diff: Some(diff.into()),
+        }];
+        let source = crate::review::test_support::MapSource::new(
+            &[("new.rs", "fn kept() {}\n")],
+            &[("old.rs", "fn kept() {}\nfn gone() {}\n")],
+        );
+        let index = build_index(&files, &source, &LanguageRegistry::new()).expect("index");
+        assert!(index.contains("gone"), "the old side's name is known");
+        assert!(
+            index.definitions("gone").is_empty(),
+            "never placed in new.rs"
+        );
     }
 
     #[test]
