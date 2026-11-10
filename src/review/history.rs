@@ -352,7 +352,9 @@ fn is_commit_id(commit: &str) -> bool {
 ///
 /// `commit` is the SHA recorded at review time (`record_history` resolves it with `rev-parse`);
 /// an abbreviation of the SHA `head` resolves to is the same commit, so it is compared as a
-/// prefix. A symbolic name is never recorded, and the code defends it: a `commit` that is not
+/// prefix. `head` itself is canonical here: `rev-parse --verify` prints the full name whatever
+/// `core.abbrev` says, so an abbreviated `head` equals a full stored SHA of its commit
+/// (`a_full_reviewed_sha_against_an_abbreviated_head_of_that_commit_stays_pending`). A symbolic name is never recorded, and the code defends it: a `commit` that is not
 /// hexadecimal (a branch name in a hand-edited row) gives no signal, `Pending`, since a prefix
 /// comparison with a SHA would read it as a later commit.
 // MAGI FIX (MS3 §6 loop3): an abbreviated SHA of HEAD itself read as a later commit.
