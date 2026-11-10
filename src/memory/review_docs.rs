@@ -57,7 +57,7 @@ fn pair_values(pairs: usize) -> String {
 }
 
 /// What one [`ReviewDocStore::reindex`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReindexStats {
     /// Chunks sent to the embedder (each distinct chunk hash once).
     pub embedded: usize,
@@ -67,6 +67,8 @@ pub struct ReindexStats {
     pub sources: usize,
     /// The index held rows of another identity (model, dimension or chunker) and was wiped.
     pub rebuilt: bool,
+    /// Sources left out for a secret pattern, by [`display_path`]: never embedded or written.
+    pub refused: Vec<String>,
 }
 
 /// Everything `reindex` decides under the connection lock, before it embeds anything.
@@ -312,6 +314,7 @@ impl ReviewDocStore {
             reused: plan.reusable.len(),
             sources: plan.new_sources.len(),
             rebuilt,
+            refused: Vec::new(),
         })
     }
 
@@ -2007,6 +2010,54 @@ mod tests {
             r.as_ref().err()
         );
         assert_eq!(e.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refused_source_spares_others() {
+        // [MAGI S6 MS3 loop8, R1 Caspar] One source with a secret refused the whole reindex, so
+        // the revision lost all its documentation; now only that source is left out, by name.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let text = "export KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let stats = store
+            .reindex(
+                &[
+                    (src("d.md", "k1"), vec![chunk("d.md", "A", "x")]),
+                    (src("leak.md", "k2"), vec![chunk("leak.md", "Setup", text)]),
+                ],
+                &e,
+            )
+            .await
+            .expect("the clean source is indexed");
+        assert_eq!(
+            (stats.sources, stats.refused.clone()),
+            (1, vec!["leak.md".to_string()])
+        );
+        assert_eq!(e.calls(), 1, "only the clean chunk was embedded");
+        assert_eq!(
+            store
+                .missing(&[src("d.md", "k1"), src("leak.md", "k2")])
+                .expect("missing"),
+            vec![src("leak.md", "k2")]
+        );
+    }
+
+    #[tokio::test]
+    async fn risk_based_heading_is_indexed() {
+        // [MAGI S6 MS3 loop8, R1 Caspar] Text next to a pattern's opener (`sk-` in "Risk-based")
+        // is no secret: the source is indexed, nothing refused.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let c = chunk(
+            "d.md",
+            "Risk-based testing",
+            "Prefer risk-based, task-sized tests.",
+        );
+        let stats = store
+            .reindex(&[(src("d.md", "k1"), vec![c])], &e)
+            .await
+            .expect("indexed");
+        assert_eq!((stats.sources, stats.refused.len()), (1, 0));
     }
 
     #[tokio::test]
