@@ -1273,13 +1273,20 @@ pub async fn prepare_docs(
     prep
 }
 
-/// [`bounded`] over `chunked`, recording a cut in `prep` (declared truncated).
+/// [`bounded`] over `chunked`, recording a cut in `prep` (declared truncated); a cut source leaves
+/// `doc_sources`, so the load never asks for it (`cut_source_leaves_doc_sources`).
+// MAGI FIX (MS3 §6 loop10): a cut source stayed in `doc_sources`.
 fn bounded_into(
     prep: &mut DocPrep,
     chunked: Vec<(DocSource, Vec<DocChunk>)>,
 ) -> Vec<(DocSource, Vec<DocChunk>)> {
+    let offered: Vec<DocSource> = chunked.iter().map(|(s, _)| s.clone()).collect();
     let (kept, truncated) = bounded(chunked);
     prep.doc_index.truncated |= truncated;
+    let kept_set: BTreeSet<&DocSource> = kept.iter().map(|(s, _)| s).collect();
+    for s in offered.iter().filter(|s| !kept_set.contains(s)) {
+        prep.doc_sources.remove(s);
+    }
     kept
 }
 
