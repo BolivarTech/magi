@@ -5093,6 +5093,16 @@ mod tests {
     }
 
     #[test]
+    fn frame_escapes_control_chars() {
+        // [MAGI S6 MS3 loop8, R4 Caspar] A path with a newline split the frame header into two
+        // prompt lines when a caller passed it raw; the frame escapes it itself.
+        let (open, close) = context_frame(&ContextKind::Unit, "a\nb\r\u{1b}.rs", false);
+        assert!(!open.chars().any(char::is_control), "{open:?}");
+        assert!(open.contains("a\\nb\\r"), "{open:?}");
+        assert_eq!(close, FRAME_END);
+    }
+
+    #[test]
     fn renamed_old_side_adds_names_only() {
         // [MAGI S6 MS3 loop8, R4 Caspar] A rename's old side is read under its old path and adds
         // identifiers only: its definitions are never listed under the new path's lines.
