@@ -177,8 +177,11 @@ def _normalized_masked(items):
 
     Returns:
         list: The same entries with each dict's ``path`` slashed; anything that
-        is not a dict with a string path is returned unchanged, so it fails the
-        comparison.
+        is not a dict with a string path (a missing ``path`` included) is
+        returned unchanged, so it fails the comparison as a FAIL finding, never
+        a crash. The comparison is exact on purpose (smoke/README, "Exact
+        strings"): an extra field or another cause fails loudly
+        (``test_a_masked_entry_with_an_extra_field_fails``).
     """
     return [dict(item, path=code_review._slashed(item["path"]))
             if isinstance(item, dict) and isinstance(item.get("path"), str) else item
