@@ -141,8 +141,8 @@ pub trait RagSource: Send + Sync {
     ///
     /// That indexing calls the embedder before `run_review` exists for the review, so its
     /// budget check is the caller's: run [`precheck_budget`] before it, as the production runner
-    /// does (pinned there by `a_review_refused_for_its_budget_sends_nothing_to_the_embedder` and
-    /// `a_review_refused_for_its_budget_never_probes_the_embedder_dimension`).
+    /// does (pinned in `tools::code_review` by its two tests named
+    /// `a_review_refused_for_its_budget_…`: nothing sent to the embedder, no dimension probe).
     fn index_ms(&self) -> u64 {
         0
     }
@@ -1370,7 +1370,8 @@ enum ContextEgress {
 /// or label masked, and both escaped for its frame as the prompt writes it (a mask may sit
 /// next to `<<`; [`escape_fence`] is a fixed point, so a source that escaped already is
 /// unchanged), with the first pattern found. An item whose path quotes a secret (a path cannot
-/// be masked and still name its file) or whose text or label holds a private-key block (RV22's
+/// be masked and still name its file; the user's decision: a path with a secret shape stays
+/// omitted, its content too) or whose text or label holds a private-key block (RV22's
 /// exception) is withheld, as is one in which masking left a match (fail closed). O(text).
 ///
 /// A backstop: every item arrives masked already (units, definitions and callers from the
