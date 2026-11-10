@@ -70,6 +70,31 @@ S53_EXPECTED_MASKED = [{"path": runs.REVIEW_MASKED_FILE, "cause": "secret",
 #: What S54's omission list must read: the key-block file, as ``secret``.
 S54_EXPECTED_OMISSIONS = [(runs.REVIEW_KEYBLOCK_FILE, "secret")]
 
+#: Bytes of the slice taken from inside each needle, so a truncated echo of a
+#: secret still fails the leak check (RV22: no byte of the secret leaves).
+LEAK_SLICE_BYTES = 12
+
+
+def _with_slices(needles):
+    """Each needle and a slice from inside it, a quarter of the way in.
+
+    MAGI FIX (S6 MS3 loop7): only whole needles were looked for, so a product
+    that echoed part of a secret passed.
+
+    Args:
+        needles: The secrets, as bytes.
+
+    Returns:
+        tuple: Every needle followed by its inner slice of
+        :data:`LEAK_SLICE_BYTES` (the whole needle when it is shorter).
+
+    Example:
+        >>> _with_slices((b"0123456789abcdefghij",))
+        (b'0123456789abcdefghij', b'56789abcdefg')
+    """
+    return tuple(piece for n in needles
+                 for piece in (n, n[len(n) // 4:len(n) // 4 + LEAK_SLICE_BYTES]))
+
 
 def _no_capture(texts, run_id):
     """One ``CANNOT_TEST`` finding per assertion of a run that left no capture.
@@ -88,7 +113,8 @@ def _no_capture(texts, run_id):
 def _leak_finding(texts, index, run_id, run, needles, what):
     """Judge an assertion that none of *needles* left the process.
 
-    Reads stdout, stderr and the captured run log. The needles are never
+    Reads stdout, stderr and the captured run log, for each needle and a
+    slice from inside it (:func:`_with_slices`). The needles are never
     printed, only the outputs that hold one.
 
     Args:
@@ -104,6 +130,7 @@ def _leak_finding(texts, index, run_id, run, needles, what):
         when none does but a log file could not be read whole; otherwise
         ``PASS`` (an absent log directory carries nothing).
     """
+    needles = _with_slices(needles)
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
     leaked = [name for name, bodies in outputs
