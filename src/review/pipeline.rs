@@ -1521,6 +1521,12 @@ async fn prepare_contexts(
 
 /// What the completed batches showed as context (U24, RV09): a containing unit's lines count as
 /// reviewed, every other item's file as context only. O(items · log r).
+///
+/// An old-side unit's numbers join the same set as the new side's, on purpose: a finding names a
+/// file and a line, no side, so a number shown on either side is reviewed (as a hunk's deleted
+/// lines are). The side is kept where it decides something, the gate's faces
+/// ([`add_unit_faces`]): an old-only line is judged on the old side, a number on both sides is
+/// `ambiguous diff side` and never filtered (`old_unit_lines_keep_their_side`).
 fn record_shown_context(
     reviewed: &mut Reviewed,
     contexts: &[Vec<ContextItem>],
@@ -5081,6 +5087,37 @@ mod tests {
             lines,
             old_side: false,
         }
+    }
+
+    #[test]
+    fn old_unit_lines_keep_their_side() {
+        // [MAGI S6 MS3 loop8, R4 Caspar] An old-side unit's numbers are reviewed for RV09 (a
+        // finding has no side, as a hunk's deleted lines), and the side lives in the gate's faces:
+        // a line only the old unit shows is judged on the old side, never as new-side code.
+        let hunk = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "x".into(),
+            first_line: 2,
+            last_line: 1,
+            old_first_line: 2,
+            old_last_line: 2,
+        };
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![hunk],
+        };
+        let mut gone = ctx(ContextKind::Unit, "a.rs", "gone", Some((1, 3)));
+        gone.old_side = true;
+        let contexts = vec![vec![gone]];
+        let mut reviewed = Reviewed::default();
+        record_shown_context(&mut reviewed, &contexts, &BTreeSet::from([0]));
+        assert!(reviewed.contains_line("a.rs", 3));
+        let mut faces = HashMap::new();
+        add_unit_faces(&mut faces, &[batch], &contexts, &BTreeSet::from([0]));
+        let f = faces.get("a.rs").expect("faces");
+        assert_eq!((f.new.clone(), f.old.clone()), (vec![], vec![(1, 3)]));
     }
 
     #[test]
