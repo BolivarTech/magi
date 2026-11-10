@@ -1010,10 +1010,8 @@ pub fn display_path(path: &str) -> String {
 /// texts it masks are small (paths, one-line errors, report fields); a reviewed file is masked
 /// once, through [`mask_secrets_keeping_lines`], and k is the number of secrets it holds.
 ///
-/// That bound is loose: each search only moves forward (a rerun starts at the mask's end, past
-/// the span it had), so over the whole text a search reads each byte about once and the
-/// amortized cost is O(n · s), linear in the text; measured near 0.15 s per MiB of dense secrets
-/// in release (MS3 §6 loop3). The output can be longer than the text (a mask is longer than a
+/// That bound is loose: each search only moves forward, so the amortized cost is O(n · s),
+/// linear in the text (near 0.15 s per MiB of dense secrets in release, MS3 §6 loop3). The output can be longer than the text (a mask is longer than a
 /// short URL password); [`mask_secrets_keeping_lines_within`] bounds it, and the review's cache
 /// uses that bound, so a file dense in secrets is left out instead of growing.
 // MAGI FIX (S6 loop 13, A2-b6): the bound omitted the k factor of a search rerun after each mask.
@@ -1034,10 +1032,8 @@ const MASK_FAILED: &str = "<redacted: masking failed>";
 /// The name of the first pattern (in table order) whose mask, `<redacted: <name>>`, appears in
 /// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
 ///
-/// It reads the text, not a record of the masking, so it serves declarations only: a text
-/// masked for several patterns names the first in table order, not the one masked first, and a
-/// text that quotes a mask literally (documentation of this very format, say) is declared
-/// masked though nothing was. Both err toward declaring, never toward a byte leaving.
+/// It reads the text, not a record of the masking, so it serves declarations only (a quoted
+/// mask is declared too): both err toward declaring, never toward a byte leaving.
 ///
 /// # Arguments
 /// * `text` - A text that may have been masked.
