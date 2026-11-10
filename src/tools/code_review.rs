@@ -2619,6 +2619,41 @@ mod tests {
         assert_eq!(runner.plans.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn an_approval_shown_without_a_plan_never_runs_one_planned_later() {
+        // [MAGI S6 MS3 loop7, R5 Caspar] When the prompt's plan failed, the prompt showed no
+        // batches, and `execute` planned afresh: a plan that now succeeded ran though it was
+        // never shown for these arguments. It is refused; the failure still reads as itself.
+        struct FailsFirst(PlanCounter, std::sync::atomic::AtomicBool);
+        #[async_trait::async_trait]
+        impl CodeReviewRunner for FailsFirst {
+            fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+                if !self.1.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return Err(ReviewError::Git("not yet".into()));
+                }
+                self.0.plan(input)
+            }
+            async fn run(
+                &self,
+                plan: ReviewPlan,
+                budget: crate::tools::code_review::ReviewBudget,
+                c: &CancellationToken,
+            ) -> Result<Rendered, ReviewError> {
+                self.0.run(plan, budget, c).await
+            }
+        }
+        let runner = Arc::new(FailsFirst(PlanCounter::default(), Default::default()));
+        let t = CodeReviewTool::new(runner.clone(), false);
+        let args = serde_json::json!({});
+        assert!(
+            t.approval_detail(&args).is_none(),
+            "precondition: no plan shown"
+        );
+        let r = t.execute(args, &CancellationToken::new()).await;
+        assert!(r.is_err(), "{r:?}");
+        assert!(runner.0.ran.lock().expect("lock").is_none(), "nothing ran");
+    }
+
     /// A trio double that counts the batches it is asked to review.
     #[derive(Default)]
     struct CountingConsult(std::sync::atomic::AtomicUsize);
