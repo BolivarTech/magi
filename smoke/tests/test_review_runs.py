@@ -246,6 +246,30 @@ class ReviewRunDefinitionTests(unittest.TestCase):
             self.assertEqual(original, config.read_text(encoding="utf-8"))
             self.assertEqual(["magi.toml"], sorted(p.name for p in pathlib.Path(tmp).iterdir()))
 
+    def test_a_quoted_base_url_key_in_embedding_is_replaced(self) -> None:
+        # [MAGI S6 MS3 loop9, R7a Caspar] `"base_url" = ...` was kept and a bare one added, a duplicate key the
+        # product refuses with a parse error that hides the cause.
+        url = "http://127.0.0.1:1/v1"
+        for key in ('"base_url"', "'base_url'"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "magi.toml"
+                path.write_text('[embedding]\n%s = "http://emb/v1"\n' % key, encoding="utf-8")
+                runs.point_embedding_at(path, url)
+                self.assertEqual(url, tomllib.loads(path.read_text(encoding="utf-8"))["embedding"]["base_url"])
+
+    def test_the_rewrite_keeps_the_config_s_permissions(self) -> None:
+        # [MAGI S6 MS3 loop9, R7a Caspar] The temporary file took the umask's mode, so a 0600 config came back
+        # world-readable after the restore.
+        # Windows keeps no 0600 mode to read back, so the copy of the mode is observed on the calls.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "magi.toml"
+            config.write_text('[embedding]\nbase_url = "http://emb/v1"\n', encoding="utf-8")
+            mode = types.SimpleNamespace(st_mode=0o100600)
+            with mock.patch.object(runs.os, "stat", return_value=mode), \
+                    mock.patch.object(runs.os, "chmod") as chmod:
+                runs.point_embedding_at(config, "http://127.0.0.1:1/v1")
+            chmod.assert_called_once_with(config.with_name("magi.toml.tmp"), 0o600)
+
     def test_a_config_without_an_embedding_table_gains_one(self) -> None:
         url = "http://127.0.0.1:1/v1"
         with tempfile.TemporaryDirectory() as tmp:
