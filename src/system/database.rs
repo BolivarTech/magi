@@ -96,9 +96,11 @@ fn table_exists(conn: &Connection, table: &str) -> std::result::Result<bool, Vau
 /// Refuses a database written by 0.24.x or earlier, naming the first v0.25.0 table it lacks
 /// ([`PRE_0_25_MISSING_TABLES`]). Read-only: it runs before any write on every open path
 /// (`new_with_vault` before `init_schema`, and both envelope branches of the state machine), so
-/// the refused file stays byte for byte as it was. A file without the older data tables
-/// ([`PRE_0_25_MARKER_TABLE`]) is not an older database and passes, to get the open's own
-/// answer.
+/// the refused file stays byte for byte as it was. Byte for byte holds for a WAL database, the
+/// only kind the product writes: the open's `journal_mode` pragma runs before this check, so a
+/// file in another journal mode would get its header flipped, never data. A file without the
+/// older data tables ([`PRE_0_25_MARKER_TABLE`]) is not an older database and passes, to get the
+/// open's own answer.
 ///
 /// # Errors
 ///
