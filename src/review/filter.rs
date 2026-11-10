@@ -158,7 +158,10 @@ pub struct Filtered {
 pub struct Masked {
     /// The path, as it may leave the process ([`display_path`]).
     pub path: String,
-    /// Why it is declared: always [`SkipCause::Secret`].
+    /// Why it is declared: always [`SkipCause::Secret`], the cause RV22's amendment names
+    /// ("`secret`, masked, not omitted"). The list tells a masked file from an omitted one, never
+    /// the cause: a masked file is in [`Filtered::masked`] and never in `skipped`, an omitted one
+    /// the reverse (`a_masked_file_and_an_omitted_one_share_the_cause_and_never_the_list`).
     pub cause: SkipCause,
     /// The name of the first secret pattern found in it.
     pub pattern: &'static str,
@@ -1384,6 +1387,38 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(src.0.load(SeqCst), 0, "no side was read");
+    }
+
+    #[test]
+    fn a_masked_file_and_an_omitted_one_share_the_cause_and_never_the_list() {
+        // [MAGI S6 MS3 loop7, R6a Balthasar] Both carry RV22's `secret`; what tells a masked file
+        // (reviewed) from an omitted one (left out) is the list, never the cause.
+        let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let block =
+            format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAAS\n-----END PRIVATE KEY-----\n");
+        let inner = MapSource::new(
+            &[("m.rs", &format!("let k = \"{key}\";\n")), ("k.rs", &block)],
+            &[],
+        );
+        let files = ["m.rs", "k.rs"].map(|p| ReviewFile {
+            path: p.into(),
+            diff: None,
+        });
+        let src = CachedSource::new(&inner);
+        let f = filter_files(files.into(), &src, &LanguageRegistry::new(), false, &|_| {
+            false
+        })
+        .expect("m.rs kept");
+        assert_eq!(f.masked, vec![masked("m.rs", "openai-key")]);
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "k.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+        assert_eq!(f.masked[0].cause, SkipCause::Secret);
     }
 
     #[test]
