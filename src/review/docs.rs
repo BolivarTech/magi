@@ -709,15 +709,10 @@ fn py_statement_ends(after: &str) -> bool {
 /// The docstring starting on line `at` (`"""` or `'''`, with an optional `r`/`u` prefix): its text
 /// and the index of the line after it.
 ///
-/// One `r`/`R`/`u`/`U` prefix is accepted; a bytes prefix (`b`, `rb`, `br`, any case) is not,
-/// on purpose: Python keeps only a `str` literal as `__doc__`, so a bytes literal in docstring
-/// position is data (`a_bytes_literal_is_no_python_docstring_whatever_its_prefix`). An f-string
-/// (`f`, `fr`, `rf`, any case) is no docstring either: it is an expression, and Python leaves
-/// `__doc__` as `None` (`an_f_string_is_no_python_docstring_whatever_its_prefix`).
-///
-/// The string must be a statement of its own: one followed by more code on its closing line
-/// (`"""a""" + x`) is data, and one that never closes is no docstring (malformed code indexes
-/// nothing, it never swallows the rest of the file).
+/// One `r`/`R`/`u`/`U` prefix is accepted. A bytes prefix (`b`, `rb`, `br`) or an f-string
+/// (`f`, `fr`, `rf`), in any case, is no docstring: Python keeps only a plain `str` literal as
+/// `__doc__`. The string must be a statement of its own (`"""a""" + x` is data), and one that
+/// never closes is no docstring (it never swallows the rest of the file).
 // MAGI FIX (MS3 §6 loop2): an expression that opened with a string, or an unterminated string,
 // was chunked as a docstring.
 fn py_docstring_at(lines: &[&str], at: usize) -> Option<(String, usize)> {
