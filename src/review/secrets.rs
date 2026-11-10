@@ -1682,6 +1682,26 @@ mod tests {
     }
 
     #[test]
+    fn a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts() {
+        // [MAGI S6 MS3 loop7, R6a Caspar, Balthasar] A binary side whose token prefix itself was
+        // interrupted (`gh` NUL `p_…`, or an invalid byte decoded as U+FFFD) matched no opening,
+        // so the side could be served again once released.
+        for bytes in [
+            &b"gh\0p_AAAA"[..],
+            &b"s\0k-ant-x"[..],
+            &b"AK\xffIA0000"[..],
+            &b"-----BEG\0IN RSA"[..],
+            &b"postgres:/\0/u:p@h"[..],
+        ] {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(holds_secret_prefix(&text), "{bytes:?}");
+        }
+        assert!(!holds_secret_prefix(&String::from_utf8_lossy(
+            b"\0\x01plain\xff"
+        )));
+    }
+
+    #[test]
     fn masking_with_lines_kept_writes_back_a_lone_cr_break() {
         // [MAGI S6 MS3 loop7, R6a Caspar] A bare `\r` (a classic Mac break) inside a mask was
         // dropped, so the masked side lost a line the raw diff kept.
