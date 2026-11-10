@@ -1994,6 +1994,16 @@ mod tests {
             "[CP2 MS3 loop 13] root files by exact path"
         );
     }
+    #[test]
+    fn chunks_that_join_to_the_same_text_never_share_a_hash() {
+        // [MAGI S6 MS3 loop7, R1 Melchior] A newline in a git path once let two chunks alias.
+        assert_ne!(
+            chunk_hash("docs/x.md\nfoo.md", "S", "T"),
+            chunk_hash("docs/x.md", "foo.md", "S\nT")
+        );
+        assert_ne!(chunk_hash("a", "b\nc", "d"), chunk_hash("a", "b", "c\nd"));
+    }
+
     /// The secret patterns, by name and in table order, that `DOC_INDEX_VERSION` was last
     /// bumped for.
     const PATTERNS_OF_THIS_DOC_INDEX_VERSION: &[&str] = &[
