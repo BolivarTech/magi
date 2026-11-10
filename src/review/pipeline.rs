@@ -1135,8 +1135,13 @@ impl ReviewTimer<'_> {
 /// the review clock starts (§5.0 step 3, part of the preparation RV06 keeps off the clock).
 /// `contexts[i]` is the context of `batches[i]`, by position, as every other stage pairs them;
 /// the planner numbers batches by position too (`batch.index == i`, which `run_batches`'s
-/// pending count also relies on). O(bytes of the batches and their contexts).
-// MAGI FIX (MS3 §6 loop7): looked up by `batch.index` while every other stage zips by position.
+/// pending count also relies on). Precondition: the batches' code (the filter's masked sides)
+/// and their context ([`context_egress`]) arrive masked; each prompt is masked once more here,
+/// a backstop that changes nothing then (masking is a fixed point) and that no future path into
+/// the prompt can skip (`a_prompt_masks_a_secret_its_stages_left_raw`). O(bytes of the batches
+/// and their contexts).
+// MAGI FIX (MS3 §6 loop7): looked up by `batch.index` while every other stage zips by position;
+// and the prompt trusted every earlier stage to have masked.
 fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec<String> {
     batches
         .iter()
@@ -1146,7 +1151,7 @@ fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec
             if let Some(items) = contexts.get(i) {
                 write_context(&mut prompt, items);
             }
-            prompt
+            mask_secrets(&prompt)
         })
         .collect()
 }
