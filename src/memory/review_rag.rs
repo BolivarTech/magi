@@ -2820,6 +2820,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_runs_under_the_deadline() {
+        // [MAGI S6 MS3 loop9, R2 Caspar] The `missing` read ran past the bound unchecked; the
+        // deadline is read again right after it.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &[],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(prep.docs_unavailable, "{prep:?}");
+    }
+
+    #[tokio::test]
     async fn a_working_tree_path_listed_twice_is_read_and_indexed_once() {
         // [MAGI S6 MS3 loop5, R2 Balthasar] Duplicate paths were each read, chunked and handed
         // to the reindex; the store is content-addressed, so it was waste, not a wrong index.
