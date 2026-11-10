@@ -41,6 +41,9 @@ const BINARY_SUFFIX: &str = " differ";
 /// What opens the header of one file in git's diff.
 const DIFF_HEADER_PREFIX: &str = "diff --git ";
 
+/// Mode prefix of a regular file in `git ls-tree` (`100644`, `100755`); a symlink is `120000`.
+const REGULAR_FILE_MODE_PREFIX: &str = "100";
+
 /// What became of a remembered finding, judged from git alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -273,12 +276,43 @@ fn signal(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Signal {
     ]);
     // MAGI FIX (MS3 §6 loop6): a directory as `file` is a tree-wide pathspec; a diff that names
     // any other file is no signal about this entry.
-    let diff = diff.ok().filter(|text| names_only(text, &entry.file));
-    match diff.and_then(|text| diff_covers(&text, line)) {
+    let Some(text) = diff.ok().filter(|text| names_only(text, &entry.file)) else {
+        return Signal::Unknown;
+    };
+    match diff_covers(&text, line) {
         None => Signal::Unknown,
         Some(true) => Signal::Status(HistoryStatus::Attended),
-        Some(false) => weak_reject_if_later(commit, head, git),
+        // MAGI FIX (MS3 §6 loop7): an empty diff names no file, so `names_only` passes for a
+        // directory or a path that never existed; a weak reject then needs a regular file there.
+        Some(false) => match weak_reject_if_later(commit, head, git) {
+            Signal::Status(HistoryStatus::WeakReject)
+                if text.trim().is_empty() && !is_regular_file_at(commit, &entry.file, git) =>
+            {
+                Signal::Unknown
+            }
+            other => other,
+        },
     }
+}
+
+/// Whether `file` is a regular file (a blob of mode `100…`, never a tree, a submodule or a
+/// symlink) at `commit`: `git ls-tree -z <commit> -- <file>` lists exactly that one entry. The
+/// path is read relative to the runner's root, as the diff's `--relative` is. A git failure is
+/// `false`, the safe direction (no weak reject). One local git call, O(bytes of the listing).
+fn is_regular_file_at(commit: &str, file: &str, git: &dyn GitCommand) -> bool {
+    let Ok(listing) = git.run(&["ls-tree", "-z", commit, "--", file]) else {
+        return false;
+    };
+    let entries: Vec<&str> = listing.split('\0').filter(|e| !e.is_empty()).collect();
+    let [only] = entries.as_slice() else {
+        return false;
+    };
+    let Some((meta, path)) = only.split_once('\t') else {
+        return false;
+    };
+    let fields: Vec<&str> = meta.split_whitespace().collect();
+    path == file
+        && matches!(fields.as_slice(), [mode, "blob", _] if mode.starts_with(REGULAR_FILE_MODE_PREFIX))
 }
 
 /// Whether every file header of the diff `text` (`diff --git a/<path> b/<path>`, `--no-renames`
@@ -563,6 +597,9 @@ mod tests {
     const DIFF_C1_HEAD: &str = "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative c1 HEAD -- a.rs";
     /// [CP2 MS3 loop 12] A weak reject needs a commit after the reviewed one.
     const HEAD_IS_C2: &str = "rev-parse --verify HEAD^{commit}";
+    /// [MAGI S6 MS3 loop7] `a.rs` is a regular file at `c1` (an empty diff weak-rejects only one).
+    const A_RS_IS_A_FILE_AT_C1: (&str, Result<&str, &str>) =
+        ("ls-tree -z c1 -- a.rs", Ok("100644 blob bbbb\ta.rs\0"));
 
     #[test]
     fn lines_inserted_above_do_not_count_as_a_change_to_the_finding_line() {
@@ -691,6 +728,8 @@ mod tests {
                 Ok("c2
 "),
             ),
+            // [MAGI S6 MS3 loop7] An empty diff weak-rejects a regular file only.
+            A_RS_IS_A_FILE_AT_C1,
         ]);
         let (updates, _) = reclassify_then_record(&[done], &[], "HEAD", &git);
         assert_eq!(updates, vec![("i".to_string(), HistoryStatus::WeakReject)]);
@@ -1013,10 +1052,12 @@ mod tests {
 
     #[test]
     fn merged_without_changes_is_a_weak_reject() {
+        // [MAGI S6 MS3 loop7] An empty diff weak-rejects a regular file only: `a.rs` is one.
         let git = FakeGit::from(&[
             ("merge-base --is-ancestor c1 HEAD", Ok("")),
             (DIFF_C1_HEAD, Ok("")),
             (HEAD_IS_C2, Ok("c2\n")),
+            A_RS_IS_A_FILE_AT_C1,
         ]);
         assert_eq!(
             classify(&entry(Some(5)), "HEAD", &git),
