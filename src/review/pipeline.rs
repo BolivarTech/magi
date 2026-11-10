@@ -831,16 +831,11 @@ pub fn plan_review(
 /// SHA-256 over every kept file's path, diff and content, in input order, each part
 /// length-prefixed so no two different reviews hash alike by moving bytes between parts.
 ///
-/// The content comes from `source`, the same cached reads the batches are built from, so the
-/// digest covers the reviewed code the prompt is built from: the legend, the context heading and
-/// the frames are fixed text added deterministically to it. The retrieved context
-/// (documentation and history, RV07(3)-(4)) is not covered: it is reference text chosen per
-/// batch after the approval, from the reviewed revision (RV21), never code under review, so a
-/// documentation edit between the approval and the run does not refuse the review
-/// (`the_approval_digest_covers_the_reviewed_files_and_never_the_retrieved_documentation`). The
-/// cost, accepted: such an edit is a narrow prompt-injection surface after the approval, bounded
-/// by the context being framed as reference data and secret-scanned like every other byte.
-/// O(bytes reviewed).
+/// The content comes from `source`, the cached reads the batches are built from, so the digest
+/// covers the reviewed code (legend, heading and frames are fixed text). Retrieved documentation
+/// and history are not covered: reference text chosen after the approval, so a documentation edit
+/// in between does not refuse the review; accepted as a narrow injection surface, framed as
+/// reference data and secret-scanned. O(bytes reviewed).
 ///
 /// # Errors
 ///
@@ -1146,12 +1141,9 @@ impl ReviewTimer<'_> {
     }
 }
 
-/// The prompt of every batch, its code and then its context, in batch order: rendered before
-/// the review clock starts (§5.0 step 3, part of the preparation RV06 keeps off the clock).
-/// `contexts[i]` is the context of `batches[i]`, by position, as every other stage pairs them;
-/// the planner numbers batches by position too (`batch.index == i`, which `run_batches`'s
-/// pending count also relies on). Code and context arrive masked (the filter, [`context_egress`]);
-/// each prompt is masked once more, a no-op backstop no new path can skip
+/// The prompt of every batch, its code then its context, rendered before the review clock
+/// starts (RV06). `contexts[i]` is the context of `batches[i]`, by position (`batch.index == i`).
+/// Code and context arrive masked; each prompt is masked once more, a no-op backstop
 /// (`a_prompt_masks_a_secret_its_stages_left_raw`). O(bytes).
 ///
 /// # Errors
@@ -1743,15 +1735,10 @@ fn renamed_old_paths(files: &[ReviewFile]) -> HashMap<String, String> {
 
 /// The lexical index over both sides of every reviewed file. O(bytes reviewed).
 ///
-/// Scope, as the approved plan sets it (MS2 T2.6; RV19): the files under review, not the whole
-/// revision. Declared consequence: RV07(2) finds definitions and callers in reviewed files only,
-/// and RV09's symbol check counts a name in no reviewed file as unknown (PM-S-2; a `critical` is
-/// never discarded for it, RV-S35). A revision-wide index is a change of scope left to the user.
-///
-/// `files` must be the files the filter kept: the cache holds a key-block side unmasked (RV22's
-/// exception) and the filter leaves that file out, so indexing a skipped file would hand its
-/// bytes to every stage reading through the index. `read_old` answers `Ok(None)` for a source
-/// with no old side or a path absent from it.
+/// Scope (MS2 T2.6; RV19): the files under review, not the revision. Declared: RV07(2) finds
+/// definitions and callers in reviewed files only, and RV09 counts a name in none as unknown
+/// (PM-S-2; never a `critical`'s discard, RV-S35). `files` must be the kept files: the cache
+/// holds a key-block side unmasked and the filter leaves its file out.
 fn build_index(
     files: &[ReviewFile],
     source: &dyn ContentSource,
