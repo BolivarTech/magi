@@ -1707,25 +1707,15 @@ fn renamed_old_paths(files: &[ReviewFile]) -> HashMap<String, String> {
 
 /// The lexical index over both sides of every reviewed file. O(bytes reviewed).
 ///
-/// Scope, as the approved plan sets it (MS2 T2.6, "índice léxico O(bytes revisados)"; RV19):
-/// the files under review, not the whole revision. Consequence, declared: RV07(2) finds the
-/// definitions and callers that live in reviewed files only, so a helper defined or called only
-/// in an unchanged file is not retrieved, and RV09's symbol check sees the identifiers of the
-/// reviewed text (comments and calls included), so a finding that cites a name appearing in no
-/// reviewed file is counted as an unknown symbol (PM-S-2; a `critical` is never discarded for
-/// it, RV-S35). A revision-wide index would read every file of the revision through the cache,
-/// against its total cap (`MAX_REVIEW_TOTAL_BYTES`) and its secret filter; that is a change of
-/// scope left to the user.
+/// Scope, as the approved plan sets it (MS2 T2.6; RV19): the files under review, not the whole
+/// revision. Declared consequence: RV07(2) finds definitions and callers in reviewed files only,
+/// and RV09's symbol check counts a name in no reviewed file as unknown (PM-S-2; a `critical` is
+/// never discarded for it, RV-S35). A revision-wide index is a change of scope left to the user.
 ///
-/// `files` must be the files the filter kept. The review's cache holds a side that carries a
-/// multi-line private-key block unmasked (RV22's exception), and the filter leaves that file out;
-/// indexing a skipped file would hand its bytes to every stage that resolves units, definitions
-/// or callers through the index. Pinned by
-/// `a_skipped_key_block_file_never_reaches_a_prompt_as_a_definition`.
-///
-/// `read_old` cannot panic here: it is a required method of [`ContentSource`] with no default
-/// body, and every implementation returns `Ok(None)` when the source has no old side (the
-/// worktree with no git revision behind it) or the path is absent from it.
+/// `files` must be the files the filter kept: the cache holds a key-block side unmasked (RV22's
+/// exception) and the filter leaves that file out, so indexing a skipped file would hand its
+/// bytes to every stage reading through the index. `read_old` answers `Ok(None)` for a source
+/// with no old side or a path absent from it.
 fn build_index(
     files: &[ReviewFile],
     source: &dyn ContentSource,
@@ -1976,17 +1966,13 @@ impl GateCode {
 /// range or the file was shown whole, else the old side when it lies in an old range (a rename's
 /// under its old path, `old_paths`). A number in a new range that is also a deleted line, or a
 /// line of an old-side containing unit, names two shown lines: it is read on the new side and
-/// marked [`GateCode::ambiguous`], never filtered ([`Gate::judge_ambiguous_side`];
-/// `a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous`). An old-side context line
-/// in a new range is not ambiguous (its code is live). `None` (`no location`) without a line, a
-/// face that holds it, or a read (a WARN; unreachable with the cache). `source` is the review's
-/// `CachedSource`, sides already masked, so the gate sends the masked text the batch saw
-/// (`a_file_with_a_secret_is_reviewed_with_it_masked_in_the_prompt_and_the_gate`,
-/// `a_secret_on_a_deleted_line_is_masked_in_the_batch_and_the_gate`); `Gate::judge` masks its
-/// state again and withholds a key block (pinned in `gate.rs`). The full side is returned, the
-/// state shows its ±40 lines (`the_request_sent_holds_forty_lines_each_side_not_the_whole_file`);
-/// each finding decodes its side once (at most two copies of a file live, milliseconds against
-/// the `decide` call), so no per-file decoded cache is kept.
+/// marked [`GateCode::ambiguous`], never filtered ([`Gate::judge_ambiguous_side`]). An old-side
+/// context line in a new range is not ambiguous (its code is live). `None` (`no location`)
+/// without a line, a face that holds it, or a read (a WARN; unreachable with the cache).
+/// `source` is the review's `CachedSource`, sides already masked, so the gate sends the masked
+/// text the batch saw; `Gate::judge` masks its state again and withholds a key block. The full
+/// side is returned (the state shows ±40 lines); each finding decodes its side once (at most two
+/// copies of a file live), so no per-file decoded cache is kept.
 // MAGI FIX (S6 loop 6, D-m1): the new-side preference on a colliding line, stated.
 // MAGI FIX (S6 loop 7, D-b3/D-c3): a deleted line whose number is live is ambiguous, not new.
 fn gate_code(
