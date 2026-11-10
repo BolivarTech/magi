@@ -200,9 +200,13 @@ impl LexicalIndex {
         index.paths = files.iter().map(|(path, _)| path.clone()).collect();
         // New side first, with occurrences; then the old side, identifiers only (the validator
         // accepts a name from either side, but line numbers of the old side mean nothing here).
+        // MAGI FIX (MS3 §6 loop7): a path given twice is one file: only its first copy is scanned,
+        // so a line is never listed (or counted against the cap) twice.
+        let mut first_copy: HashSet<&str> = HashSet::new();
         let scanned = files
             .iter()
             .enumerate()
+            .filter(|(_, (path, _))| first_copy.insert(path.as_str()))
             .map(|(id, (_, text))| (Some(id), text))
             .chain(old_files.iter().map(|(_, text)| (None, text)));
         for (id, text) in scanned {
