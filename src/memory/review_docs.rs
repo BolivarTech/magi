@@ -547,7 +547,8 @@ impl ReviewDocStore {
     /// text are read and decrypted. A `query` of another dimension than `vectors`, or holding a
     /// value that is not finite, is an error (`dimension_mismatch_is_an_error`,
     /// `non_finite_query_is_an_error`), as the stored vectors are checked by `embed_all`; a hit
-    /// whose row was deleted since `vectors` was loaded is skipped.
+    /// whose row was deleted since `vectors` was loaded is skipped. A zero-norm vector, or one
+    /// whose norm overflows, on either side scores 0 (`degenerate_query_scores_zero`).
     ///
     /// Complexity: O(r * d) to score plus O(r log r) to order the `r` loaded rows.
     ///
@@ -575,7 +576,15 @@ impl ReviewDocStore {
         let mut scored: Vec<(f32, &str, &str)> = vectors
             .rows
             .iter()
-            .map(|(key, hash, v)| (cosine(query, v), key.as_str(), hash.as_str()))
+            // MAGI FIX (MS3 §6 loop10): an overflowing norm scored NaN; it now scores 0.
+            .map(|(key, hash, v)| {
+                let s = cosine(query, v);
+                (
+                    if s.is_finite() { s } else { 0.0 },
+                    key.as_str(),
+                    hash.as_str(),
+                )
+            })
             .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
         scored.truncate(k);
