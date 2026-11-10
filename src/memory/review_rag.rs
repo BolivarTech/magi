@@ -1003,6 +1003,7 @@ fn list_worktree(
     paths: &[String],
     wanted: &dyn Fn(&str) -> bool,
     deadline: Instant,
+    _timeout: Duration,
     prep: &mut DocPrep,
 ) -> Result<Vec<Listed>, String> {
     let mut listed = Vec::new();
@@ -1146,7 +1147,14 @@ pub async fn prepare_docs(
             .map(|v| v.into_iter().map(|s| (s, None)).collect())
             .map_err(|e| outward_text(&e.to_string())),
         (Some(_), None) => Err("no repository to list the reviewed revision".to_string()),
-        (None, _) => list_worktree(sources, worktree_paths, &wanted, deadline, &mut prep),
+        (None, _) => list_worktree(
+            sources,
+            worktree_paths,
+            &wanted,
+            deadline,
+            timeout,
+            &mut prep,
+        ),
     };
     let listed: Vec<Listed> = match listed {
         Ok(listed) => listed,
@@ -1506,6 +1514,24 @@ mod tests {
                 on_line: Mutex::new(HashMap::new()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn timeout_cause_names_its_bound() {
+        // [MAGI S6 MS3 loop8, R2 Melchior] The cause printed REINDEX_TIMEOUT_SECS whatever bound
+        // the caller passed.
+        let f = RagFixture::new(&[("README.md", "# A\nx\n")]).await;
+        let paths = vec!["README.md".to_string()];
+        let mut prep = DocPrep::default();
+        let r = list_worktree(
+            &f.source,
+            &paths,
+            &|_: &str| true,
+            Instant::now(),
+            Duration::from_secs(7),
+            &mut prep,
+        );
+        assert_eq!(r.err().as_deref(), Some("not listed within 7 s"));
     }
 
     #[tokio::test]
