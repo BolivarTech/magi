@@ -3380,6 +3380,24 @@ mod tests {
         assert_eq!(fake.calls(), 0, "the embedder was never called");
     }
 
+    #[test]
+    fn a_history_anchor_that_is_not_a_full_sha_records_nothing() {
+        // [MAGI S6 MS3 loop7, R5 Caspar] The anchor was whatever `rev-parse` printed; an
+        // abbreviated id would be compared with full SHAs later. Only a full object name anchors
+        // (real git always prints one: `rev_parse_verify_prints_the_full_sha_whatever_core_abbrev_says`).
+        struct Prints(&'static str);
+        impl GitCommand for Prints {
+            fn run_bytes(&self, _a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                Ok(self.0.as_bytes().to_vec())
+            }
+        }
+        let (_db, _mem, memory) = review_memory();
+        let r = record_history(&memory, &Prints("abc1234\n"), "main", &[]);
+        assert!(r.is_err(), "{r:?}");
+        let full = "abc1234def5678901234567890123456789abcde\n";
+        assert!(record_history(&memory, &Prints(full), "main", &[]).is_ok());
+    }
+
     #[tokio::test]
     async fn a_zero_or_sub_second_total_is_a_typed_refusal_never_truncated_to_nothing() {
         // [MAGI S6 MS3 loop7, R5 Caspar] `as_secs` truncated half a second to zero; the total is
