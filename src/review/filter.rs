@@ -468,27 +468,17 @@ struct SidesRead<'a> {
 
 /// The verdict on a file whose content may be reviewed, with any secret masked (RV22).
 ///
-/// The sides come masked from the source ([`ContentSource::masked`] says what it masked; a side
-/// holding a private-key block is never masked and never reaches here, [`content_verdict`]
-/// leaves it out); a secret in `diff` alone is gone once the diff is rebuilt. When anything was
-/// masked, the diff is rebuilt from the masked sides ([`rebuilt_diff`]) and the file is declared
-/// with the first pattern found. The file is left out instead, the safe direction, when the diff
-/// cannot be rebuilt from the sides (cause `diff not rebuilt`,
-/// `a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_its_own_cause`) or the rebuilt
-/// diff still holds a secret (cause `secret`).
+/// The sides come masked from the source ([`ContentSource::masked`]; a key-block side never
+/// reaches here, [`content_verdict`] leaves it out). When anything was masked, the diff is
+/// rebuilt from the masked sides ([`rebuilt_diff`]) and the file declared with the first
+/// pattern found; it is left out instead when the diff cannot be rebuilt (`diff not rebuilt`)
+/// or the rebuilt one still holds a secret (`secret`).
 ///
-/// That fallback omits rather than masking the diff text itself on purpose: a hunk shows only
-/// some lines, and a pattern may need lines it leaves out (a YAML value on the line after its
-/// key), so a diff masked alone can still carry a secret the whole side masks
-/// (`a_diff_alone_cannot_be_masked_safely_so_an_unrebuildable_one_is_left_out`). RV22's
-/// tie-break, "no byte of the secret leaves the process", wins over "mask, do not omit" there; a
-/// file named explicitly is then refused like a file holding a key block.
-///
-/// The diff is rebuilt even when it holds no detectable secret of its own, for the same reason:
-/// a clean-looking hunk can carry the value line of a secret whose key line it does not show
-/// (the YAML case above), so only the side's masked text is trusted; the hunk's function context
-/// is kept only as a masked side shows it (see [`rebuilt_diff`]). The diff is moved in, never copied: a file
-/// with no secret keeps the very string git produced. O(diff + sides).
+/// That fallback omits rather than masking the diff alone on purpose: a hunk shows only some
+/// lines, and a pattern may need one it leaves out (a YAML value under its key), so RV22's
+/// tie-break ("no byte of the secret leaves") wins over "mask, do not omit"; a file named
+/// explicitly is then refused. For the same reason the diff is rebuilt even when it shows no
+/// secret of its own; a file with no secret keeps the very string git produced. O(diff + sides).
 ///
 /// # Arguments
 ///
@@ -572,21 +562,16 @@ fn kept_verdict(
 /// `diff` with every content line taken from the (masked) side it shows: a context or added line
 /// from `new` (a context line compared with `old` too, never written from it), a deleted line
 /// from `old`, at the numbers its hunk header gives. Header lines and `\ No newline` markers are
-/// kept; a hunk header keeps its ranges, and its function context when a masked side line shows
-/// it as it is ([`shown_by_a_side`]; else it is dropped,
-/// `a_hunk_context_that_no_masked_side_line_shows_is_dropped`). `None` when a line names a side
-/// line that does not exist, a header does not parse or a body line has no marker. A body line
-/// that differs from its side's line is replaced by the side's text (what git would print), and
-/// counted unless masking the diff's line gives the side's; the caller logs the count at WARN
-/// (two revisions mixed: RV21) and checks the result for secrets again
-/// (`a_rebuilt_hunk_keeps_its_function_context_masked_and_counts_every_unexplained_difference`).
-/// Header lines (`diff --git`, `index`, `---`, `+++`) are kept as they are: a secret-shaped path
-/// in one leaves the file out (a path cannot be masked and still name its file).
+/// kept; a hunk header keeps its ranges, and its function context only when a masked side line
+/// shows it as it is ([`shown_by_a_side`]). `None` when a line names a side line that does not
+/// exist, a header does not parse or a body line has no marker. A body line that differs from
+/// its side's is replaced by the side's text, and counted unless masking the diff's line gives
+/// the side's; the caller logs the count (RV21) and checks the result for secrets again. Header
+/// lines are kept as they are: a secret-shaped path in one leaves the file out.
 ///
-/// The subset of git's unified diff it reads: lines outside hunks are kept verbatim; a hunk
-/// opens at `@@ -a[,b] +c[,d] @@` (a combined `@@@` gives `None`); body lines start with ` `,
-/// `+`, `-` or `\`, anything else gives `None`, and the caller leaves the file out as
-/// `diff not rebuilt`, never sending the raw diff (`real_git_diffs_rebuild_unchanged_from_their_own_sides`).
+/// Subset of git's unified diff read: lines outside hunks verbatim; a hunk opens at
+/// `@@ -a[,b] +c[,d] @@` (`@@@` gives `None`); body lines start with ` `, `+`, `-` or `\`,
+/// anything else gives `None`, and the caller leaves the file out (`diff not rebuilt`).
 ///
 /// O(diff + sides) plus O(hunks × side lines × 80) for the function context (a prefix compare of
 /// at most git's 80-byte context per side line; masked files only).
