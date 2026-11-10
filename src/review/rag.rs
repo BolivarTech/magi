@@ -516,8 +516,7 @@ impl FileUnits {
 ///
 /// # Returns
 ///
-/// The `Definition` items; a file that is gone or cannot be read gives none (see
-/// [`read_or_note`]).
+/// The `Definition` items; a file that is gone or cannot be read gives none.
 pub fn definitions_for(
     text: &str,
     index: &LexicalIndex,
