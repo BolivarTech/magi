@@ -98,8 +98,9 @@ pub const MAX_DOC_INDEX_BYTES: usize = 32 * 1024 * 1024;
 /// differently, so every stored chunk is indexed again instead of mixing two chunkers.
 ///
 /// A change to the secret patterns (`SECRET_PATTERNS` in [`crate::review::secrets`]) counts:
-/// chunks are masked before they are hashed, so an old index stays masked the old way until
-/// this changes (egress masks with the current patterns, so nothing leaks). Pinned by
+/// chunks are masked before they are hashed and embedded, and only this bump makes every source
+/// be chunked and masked again with the new table; egress masking covers what the trio is sent,
+/// never the embedder path. Pinned by
 /// `a_change_to_the_secret_patterns_comes_with_a_doc_index_version_bump`.
 ///
 /// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5); 3 since
