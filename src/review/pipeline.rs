@@ -2097,6 +2097,35 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_masks_a_secret_its_stages_left_raw() {
+        // [MAGI S6 MS3 loop7, R4 Balthasar] `prompt_of` and `write_context` trusted every stage
+        // before them to mask; a new path that skipped the filter would have sent the secret.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![BatchItem::WholeFile {
+                file: "a.rs".into(),
+                text: format!("let k = \"{key}\";\n"),
+                lines: 1,
+            }],
+        };
+        let context = ContextItem {
+            kind: ContextKind::Documentation,
+            file: "README.md".into(),
+            label: "Setup".into(),
+            text: format!("export KEY={key}\n"),
+            candidate: false,
+            lines: None,
+            old_side: false,
+        };
+        let prompts = render_prompts(&[batch], &[vec![context]]);
+        assert!(!prompts[0].contains("sk-ant-"), "{}", prompts[0]);
+        assert!(prompts[0].contains("<redacted: anthropic-key>"));
+    }
+
+    #[test]
     fn a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous() {
         // [MAGI S6 MS3 loop7, R4 Melchior] An old-side unit's line and a new-side hunk line can
         // share a number once a hunk shifts the numbering; the gate read the new side and could
