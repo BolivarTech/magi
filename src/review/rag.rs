@@ -107,6 +107,8 @@ pub struct IndexDeclarations {
     pub size_capped: bool,
     /// Whether a source was left out because its bytes are not UTF-8 text.
     pub not_utf8: bool,
+    /// Whether a working-tree source was left out because it could not be read.
+    pub unreadable: bool,
 }
 
 /// What the report says when a documentation source was left out for the review's size cap.
@@ -1653,6 +1655,20 @@ mod tests {
                 format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})")
             )]
         );
+    }
+
+    #[test]
+    fn a_documentation_source_that_could_not_be_read_is_declared() {
+        // [MAGI S6 MS3 loop7, R2 Caspar] A working-tree file the review could not read left the
+        // index with a WARN only.
+        let mut a = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+        let d = IndexDeclarations {
+            unreadable: true,
+            ..Default::default()
+        };
+        declare_index(&mut a, &d);
+        let want = "a documentation source that could not be read was left out";
+        assert_eq!(a.trimmed, vec![(ContextKind::Documentation, want.into())]);
     }
 
     #[test]

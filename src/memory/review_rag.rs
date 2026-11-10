@@ -2487,6 +2487,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unreadable_working_tree_source_is_declared_not_only_logged() {
+        // [MAGI S6 MS3 loop7, R2 Caspar] It was left out with a WARN only; the report said nothing.
+        struct Unreadable;
+        impl ContentSource for Unreadable {
+            fn read(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Err(ReviewError::Io(format!("{p} is held open")))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &Unreadable,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.doc_index.unreadable, "{prep:?}");
+        assert!(!prep.docs_unavailable, "one file, never the whole index");
+    }
+
+    #[tokio::test]
     async fn a_working_tree_path_listed_twice_is_read_and_indexed_once() {
         // [MAGI S6 MS3 loop5, R2 Balthasar] Duplicate paths were each read, chunked and handed
         // to the reindex; the store is content-addressed, so it was waste, not a wrong index.
