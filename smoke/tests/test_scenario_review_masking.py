@@ -214,8 +214,8 @@ class S54Tests(unittest.TestCase):
     def test_the_fixture_is_a_whole_block_with_unique_body_lines(self) -> None:
         (_, body), = runs.review_keyblock_files()
         lines = body.split(b"\n")
-        self.assertTrue(lines[0].startswith(b"-----BEGIN "))
-        self.assertTrue(lines[-2].startswith(b"-----END "))
+        self.assertTrue(lines[0].startswith(b"-----" + b"BEGIN "))
+        self.assertTrue(lines[-2].startswith(b"-----" + b"END "))
         for line in runs.REVIEW_KEYBLOCK_BODY_LINES:
             self.assertEqual(1, lines.count(line))
 

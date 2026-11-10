@@ -1727,7 +1727,7 @@ mod tests {
         // lines (none does today; a detector that does is given here) let its body be sent.
         let opens = |t: &str| t.contains("OPEN") || t.contains("SPLIT\nHEADER");
         let tail: String = (0..100).map(|i| format!("fn f{i}() {{}}\n")).collect();
-        let code = format!("OPEN\nbody\n-----END x\n{tail}SPLIT\nHEADER\nbody2\n");
+        let code = format!("OPEN\nbody\n{ARMOR_DASHES}END x\n{tail}SPLIT\nHEADER\nbody2\n");
         let header = 104;
         assert!(window_overlaps_block_of(&code, header, &opens));
         assert!(

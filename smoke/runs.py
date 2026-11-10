@@ -2155,8 +2155,8 @@ REVIEW_KEYBLOCK_BODY_LINES = (b"TOYBODYLINEONE" + b"".join(b"%02dQ" % i for i in
                               b"TOYBODYLINETWO" + b"".join(b"%02dR" % i for i in range(14)))
 
 #: The toy block's marker lines (split so the source holds no PEM header).
-REVIEW_KEYBLOCK_HEADER = b"-----BEGIN " + b"RSA PRIVATE KEY-----"  # allow-secret-scan
-REVIEW_KEYBLOCK_FOOTER = b"-----END " + b"RSA PRIVATE KEY-----"  # allow-secret-scan
+REVIEW_KEYBLOCK_HEADER = b"-----" + b"BEGIN RSA PRIVATE KEY-----"  # allow-secret-scan
+REVIEW_KEYBLOCK_FOOTER = b"-----" + b"END RSA PRIVATE KEY-----"  # allow-secret-scan
 
 #: Every line of the toy block, header to footer: S54 looks for each in every
 #: output, since RV22 leaves the whole block out, its marker lines too.

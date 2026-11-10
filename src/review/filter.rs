@@ -1386,8 +1386,8 @@ mod tests {
         // [MAGI S6 MS3 loop7, R6a Balthasar] Both are `secret`; the list tells them apart.
         let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
-        let block =
-            format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAAS\n-----END PRIVATE KEY-----\n");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let block = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAAS\n{end}\n");
         let inner = MapSource::new(
             &[("m.rs", &format!("let k = \"{key}\";\n")), ("k.rs", &block)],
             &[],
@@ -1425,7 +1425,9 @@ mod tests {
              --- a/old.rs\n+++ b/new.rs\n@@ -1,2 +1,1 @@\n fn f() {{}}\n{removed}\n"
         );
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
-        let old_key = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\nBBBB\n-----END PRIVATE KEY-----\n");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let old_key =
+            format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\nBBBB\n{end}\n");
         let new_key = old_key.replace("\nBBBB\n", "\nAAAA\n");
         let body_only = "diff --git a/k_old.rs b/k_new.rs\nsimilarity index 90%\nrename from k_old.rs\n\
                          rename to k_new.rs\n--- a/k_old.rs\n+++ b/k_new.rs\n@@ -3,1 +3,1 @@\n-BBBB\n+AAAA\n";
@@ -1674,7 +1676,9 @@ mod tests {
         // the amendment.
         // Split so tests/no_hardcoded_secrets.rs (which flags the literal `-----BEGIN`) does not read a header here.
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
-        let new = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\nAAAA\n-----END PRIVATE KEY-----\n");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let new =
+            format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEA\nAAAA\n{end}\n");
         let old = new.replace("\nAAAA\n", "\nBBBB\n");
         let files = vec![
             ReviewFile {
