@@ -6596,6 +6596,50 @@ mod tests {
         assert_eq!(consult.calls(), 0);
     }
 
+    /// An assembled context of `items`, nothing trimmed or withheld.
+    fn assembled(items: Vec<ContextItem>) -> Assembled {
+        Assembled {
+            items,
+            trimmed: vec![],
+            without_embedder: false,
+            without_memory: false,
+            withheld: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_unit_fails_closed() {
+        // [MAGI S6 MS3 loop9, R4 all three] RV04 rested on the source's contract: a unit far past
+        // the batch limit (its companion charged 0 at planning) was sent. Nothing is now.
+        let mut unit = ctx(ContextKind::Unit, "f0.rs", "f0", Some((1, 26)));
+        unit.text = "x ".repeat(300_000);
+        let rag = FakeRag(assembled(vec![unit]));
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        assert!(matches!(r, Err(ReviewError::TooLargeForBatch { .. })));
+        assert_eq!(consult.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn over_limit_context_is_trimmed() {
+        // [MAGI S6 MS3 loop9, R4] Optional context past the limit is trimmed, lowest first, and
+        // declared; the batch runs.
+        let defs = (0..3).map(|i| {
+            let mut d = ctx(ContextKind::Definition, "g.rs", &format!("d{i}"), None);
+            d.text = "y ".repeat(120_000);
+            d
+        });
+        let rag = FakeRag(assembled(defs.collect()));
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        let trimmed = r.expect("runs").summary.trimmed;
+        let labels: Vec<_> = trimmed.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, vec!["d2", "d1"]);
+        assert_eq!(consult.calls(), 1);
+    }
+
     #[test]
     fn the_budgeted_frame_covers_the_written_frame_and_a_candidate_is_marked() {
         // [CP2 MS3 loop 12] CONTEXT_ITEM_FRAME_TOKENS is checked against what run_review writes, not against itself; the
