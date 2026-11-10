@@ -171,6 +171,9 @@ pub struct StoreRag<'a> {
     pub history_git: Option<&'a dyn GitCommand>,
     /// `served_as_validated` by reviewed commit, so entries sharing one cost one git call.
     pub on_line: Mutex<HashMap<String, bool>>,
+    /// The ids of the history entries already counted as withheld, so an entry two batches meet
+    /// counts once.
+    pub withheld_history: Mutex<HashSet<String>>,
 }
 
 /// What the documentation preparation of one review produced.
@@ -445,6 +448,14 @@ impl StoreRag<'_> {
             .or_insert_with(|| served_as_validated(entry, HISTORY_HEAD, git))
     }
 
+    /// Whether the history entry `id` is withheld for the first time in this review. O(1).
+    fn first_withheld(&self, id: &str) -> bool {
+        self.withheld_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.to_string())
+    }
+
     /// The validated history on `files`, each one-line secret of a title or detail masked
     /// ([`mask_secrets`], RV22 amended); an entry whose title or detail holds a private-key block
     /// counts in `withheld` instead (RV22's exception). A read error leaves history out for the
@@ -481,7 +492,10 @@ impl StoreRag<'_> {
                     .filter(|e| self.served_on_heads_line(e))
                     .filter_map(|e| {
                         if holds_key_block(&e.title) || holds_key_block(&e.detail) {
-                            *withheld = withheld.saturating_add(1);
+                            // MAGI FIX (MS3 §6 loop9): counted again by every batch on its file.
+                            if self.first_withheld(&e.id) {
+                                *withheld = withheld.saturating_add(1);
+                            }
                             None
                         } else {
                             Some(history_item(HistoryEntry {
@@ -830,6 +844,7 @@ impl RagSource for ReviewRag<'_> {
             units: UnitCache::default(),
             history_git: self.history_git,
             on_line: Mutex::new(HashMap::new()),
+            withheld_history: Mutex::new(HashSet::new()),
         }
         .with_prep(self.prep.clone());
         Some(Box::new(rag))
@@ -1539,6 +1554,7 @@ mod tests {
                 units: UnitCache::default(),
                 history_git: Some(&ON_HEADS_LINE),
                 on_line: Mutex::new(HashMap::new()),
+                withheld_history: Mutex::new(HashSet::new()),
             }
         }
     }
