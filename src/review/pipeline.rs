@@ -618,7 +618,7 @@ pub async fn run_review(
         req.retry_disabled,
         0,
     ) {
-        Err(ReviewError::Budget { .. }) if sent_out => (
+        Err(e) if runs_on_overrun(&e, sent_out) => (
             review_total(req.timeout_secs, req.deadline, 0).map(|(total, _)| total),
             None,
         ),
@@ -1070,6 +1070,12 @@ pub fn precheck_budget(
             }
             e
         })
+}
+
+/// Whether the second budget check's `e` lets a review that already called out run on what is
+/// left of the run (RV06, the loop-2 decision).
+fn runs_on_overrun(e: &ReviewError, sent_out: bool) -> bool {
+    sent_out && matches!(e, ReviewError::Budget { .. })
 }
 
 /// `e` with its budget bound set to `limit` (any other error unchanged), so the message names the
@@ -2162,6 +2168,20 @@ mod tests {
         let prompts = render_prompts(&[batch], &[vec![context]]).expect("renders");
         assert!(!prompts[0].contains("sk-ant-"), "{}", prompts[0]);
         assert!(prompts[0].contains("<redacted: anthropic-key>"));
+    }
+
+    #[test]
+    fn timeout_floor_never_swallowed() {
+        // [MAGI S6 MS3 loop9, R4 Balthasar] The overrun fallback caught every budget refusal; only
+        // a run deadline's lets a review that called out run on the rest, never `--timeout`'s.
+        let floor = crate::review::clock::pre_budget(60, 4, 2, false).expect_err("below");
+        let deadline = with_budget_limit(
+            crate::review::clock::pre_budget(60, 4, 2, false).expect_err("below"),
+            BudgetLimit::RunDeadline,
+        );
+        assert!(!runs_on_overrun(&floor, true));
+        assert!(runs_on_overrun(&deadline, true));
+        assert!(!runs_on_overrun(&deadline, false));
     }
 
     #[test]
