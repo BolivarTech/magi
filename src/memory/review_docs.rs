@@ -275,10 +275,9 @@ impl ReviewDocStore {
     /// nothing. A chunk stored under any source reuses its vector, so it is never embedded twice;
     /// rows of another identity are wiped in that transaction (`rebuilt`), nothing else.
     ///
-    /// O(chunks) lookups plus the embedder. Memory: one call's sealed rows, the sealed vectors
-    /// dominating (about 12 KB each at 768 dimensions); `prepare_docs` calls per batch of at most
-    /// [`EMBED_BATCH_ITEMS`] chunks or one source, and bounds a review's plaintext by
-    /// `MAX_DOC_INDEX_BYTES`, so only one source of many chunks costs more (declared).
+    /// O(chunks) lookups plus the embedder. Memory: one call's sealed rows, mostly the sealed
+    /// vectors (about 12 KB each at 768 dimensions); `prepare_docs` calls per batch of at most
+    /// [`EMBED_BATCH_ITEMS`] chunks or one source (a source of many chunks costs more, declared).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] for another identity, a chunk whose hash or path does not match
@@ -403,15 +402,12 @@ impl ReviewDocStore {
     }
 
     /// Writes the wipe, the rows and the source rows in one transaction; answers whether it
-    /// wiped. Foreign rows are deleted only when the plan saw them (`rebuilt`). Foreign rows that
-    /// appear only by the time the transaction starts (another identity indexed while this one
-    /// embedded) are a conflict: nothing is written or deleted, and the losing review runs
-    /// without documentation and says so. A `rebuilt` wipe is not re-checked: a racing
-    /// identity's next [`Self::load_vectors`] then fails on this store's rows and its review
-    /// declares the index unavailable. This store's own rows are never deleted here; inserts
-    /// are `OR IGNORE`, so one identity indexing a source twice writes the same thing; a source
-    /// another process's clean-up deleted after the plan is written back, stale until the next
-    /// clean-up (declared, `reinserted_rows_are_gc_again`).
+    /// wiped. Foreign rows are wiped only when the plan saw them (`rebuilt`); ones that appear by
+    /// the time the transaction starts are a conflict (nothing written, the review runs without
+    /// documentation and says so). A `rebuilt` wipe is not re-checked: a racing identity's next
+    /// [`Self::load_vectors`] fails on this store's rows and declares the index unavailable.
+    /// Inserts are `OR IGNORE`; a source another process's clean-up deleted after the plan is
+    /// written back, stale until the next clean-up (declared, `reinserted_rows_are_gc_again`).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] for the conflict or a failing statement.
@@ -511,9 +507,8 @@ impl ReviewDocStore {
     /// (`load_dim_mismatch_is_an_error`).
     ///
     /// With rows of another identity stored, a non-empty `allowed` is an error, never an empty
-    /// answer: only another identity's rebuild can have put them there, maybe wiping this
-    /// review's rows, and the review then declares its documentation unavailable. Check and read
-    /// share one read transaction (one snapshot). O(r) decryptions for `r` allowed rows.
+    /// answer (another identity's rebuild may have wiped this review's rows); the review declares
+    /// its documentation unavailable. One snapshot. O(r) decryptions for `r` allowed rows.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if another identity holds the index, a row is not of `dim` or a
