@@ -752,11 +752,9 @@ fn optional<T>(r: rusqlite::Result<T>) -> Result<Option<T>, MemoryError> {
 
 /// Defense in depth (RV22): splits `sources` into the ones safe to index and the
 /// [`display_path`] of each one left out because its path, or a chunk's path, section or text,
-/// matches a secret pattern (a private-key block included: its headers are patterns of the
-/// table [`find_secret`] scans). A left-out source is never embedded or written, and only it is
-/// left out, as `prepare_docs` withholds a source (`a_refused_source_spares_others`): one detector
-/// match no longer costs the revision all its documentation. Never fires for `prepare_docs`,
-/// which nets first. O(bytes of the chunks).
+/// matches a secret pattern (a private-key block's headers included). A left-out source is never
+/// embedded or written, and only it (`a_refused_source_spares_others`); `prepare_docs` nets first
+/// and declares any refusal withheld. O(bytes of the chunks).
 // MAGI FIX (MS3 §6 loop3): a source path is stored in clear and travels with each chunk.
 // MAGI FIX (MS3 §6 loop8): one match refused the whole reindex.
 fn without_secret_sources(
@@ -778,13 +776,10 @@ fn without_secret_sources(
 /// Refuses a chunk whose hash is not [`chunk_hash`] of its own path, section and text, or whose
 /// path is not its source's path, before anything is read, embedded or written.
 ///
-/// Vector reuse ([`ReviewDocStore::reindex`]'s plan) is keyed by the chunk hash, so a stale
-/// hash on changed text, or a chunk filed under another source, would otherwise serve the
-/// stored vector of other text without a word. The chunkers always agree; this checks the
-/// contract at the storage boundary instead of trusting it
-/// (`a_chunk_whose_hash_or_path_does_not_match_it_is_refused_before_any_reuse`). All or
-/// nothing: a broken contract is a caller bug, not one source's content. O(total text). The message names the source path
-/// through [`display_path`].
+/// Vector reuse is keyed by the chunk hash, so a stale hash on changed text, or a chunk filed
+/// under another source, would serve another text's vector unsaid; the chunkers agree, and this
+/// checks it at the storage boundary. All or nothing (a caller bug, not one source's content).
+/// O(total text). The message names the path through [`display_path`].
 // MAGI FIX (MS3 §6 loop6): the hash was trusted as given.
 fn refuse_inconsistent_chunks(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
     for (source, chunks) in sources {
