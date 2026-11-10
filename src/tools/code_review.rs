@@ -51,7 +51,8 @@ use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::review_docs::ReviewDocStore;
 use crate::memory::review_rag::{
     collect_garbage, doc_revision, outbound_prep_reserve_secs, prepare_docs, record_review,
-    DocPrep, RecordStats, ReviewMemory, ReviewRag, RECLASSIFY_BUDGET_SECS, REINDEX_TIMEOUT_SECS,
+    DocPrep, RecordStats, ReviewMemory, ReviewRag, HISTORY_HEAD, RECLASSIFY_BUDGET_SECS,
+    REINDEX_TIMEOUT_SECS,
 };
 use crate::system::path_guard::PathGuard;
 use crate::system::review_git::{review_path_guard, ScrubbedGit};
@@ -1268,6 +1269,7 @@ impl ProductionReviewRunner {
             embedder: self.parts.embedder.as_deref(),
             limit_tokens: self.limit_tokens(),
             prep,
+            history_git: Some(&self.git),
         }
     }
 
@@ -1816,9 +1818,6 @@ fn record_history(
     )
     .map_err(|e| egress_text(&e.to_string()))
 }
-
-/// What the history is reclassified against: everything after the reviewed commit, up to now.
-const HISTORY_HEAD: &str = "HEAD";
 
 /// Why the history of a revision starting with `-` is not recorded.
 const DASHED_REVISION: &str = "the reviewed revision starts with `-` and is never passed to git";

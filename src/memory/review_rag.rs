@@ -17,7 +17,7 @@
 //! The query is embedded before any store is touched, and every store call is a short
 //! synchronous one: no database lock is ever held across an `.await`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,7 +31,13 @@ use magi_rs::review::docs::{
     worktree_key, yields_doc_chunks, DocChunk, DocSource,
 };
 use magi_rs::review::error::ReviewError;
-use magi_rs::review::history::{reclassify_then_record, HistoryEntry, MAX_RECLASSIFY_PER_REVIEW};
+use magi_rs::review::history::{
+    reclassify_then_record, served_as_validated, HistoryEntry, MAX_RECLASSIFY_PER_REVIEW,
+};
+
+/// What the history is reclassified and served against: everything after the reviewed commit,
+/// up to now. One definition for the runner's reclassification and the context read.
+pub const HISTORY_HEAD: &str = "HEAD";
 use magi_rs::review::index::LexicalIndex;
 use magi_rs::review::input::SourceKind;
 use magi_rs::review::languages::LanguageRegistry;
@@ -160,6 +166,11 @@ pub struct StoreRag<'a> {
     /// The last file's units on each side, so consecutive hunks of one file (planning and each
     /// batch walk them in order) extract it once.
     pub units: UnitCache,
+    /// The git each served history entry is checked against (`served_as_validated` on `HEAD`);
+    /// `None` serves no history entry, since none can be checked.
+    pub history_git: Option<&'a dyn GitCommand>,
+    /// `served_as_validated` by reviewed commit, so entries sharing one cost one git call.
+    pub on_line: Mutex<HashMap<String, bool>>,
 }
 
 /// What the documentation preparation of one review produced.
@@ -406,6 +417,22 @@ impl StoreRag<'_> {
         docs.search_loaded(&vectors, query, DOC_SEARCH_K)
     }
 
+    /// Whether `entry` may be served: [`served_as_validated`] on `HEAD` through
+    /// [`Self::history_git`], once per reviewed commit (memoized in [`Self::on_line`]); without a
+    /// git, nothing is served. O(1) after the first call for a commit.
+    fn served_on_heads_line(&self, entry: &HistoryEntry) -> bool {
+        let Some(git) = self.history_git else {
+            return false;
+        };
+        let mut memo = self
+            .on_line
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *memo
+            .entry(entry.reviewed_commit.clone())
+            .or_insert_with(|| served_as_validated(entry, HISTORY_HEAD, git))
+    }
+
     /// The validated history on `files`, each one-line secret of a title or detail masked
     /// ([`mask_secrets`], RV22 amended); an entry whose title or detail holds a private-key block
     /// counts in `withheld` instead (RV22's exception). A read error leaves history out for the
@@ -437,6 +464,9 @@ impl StoreRag<'_> {
                 }
                 entries
                     .into_iter()
+                    // MAGI FIX (MS3 §6 loop7): an entry validated off HEAD's line (another
+                    // branch) was served; each one is checked against HEAD first.
+                    .filter(|e| self.served_on_heads_line(e))
                     .filter_map(|e| {
                         if holds_key_block(&e.title) || holds_key_block(&e.detail) {
                             *withheld = withheld.saturating_add(1);
@@ -709,6 +739,8 @@ pub struct ReviewRag<'a> {
     pub limit_tokens: usize,
     /// What [`prepare_docs`] produced.
     pub prep: DocPrep,
+    /// The workspace's git, for the served history's check (see [`StoreRag::history_git`]).
+    pub history_git: Option<&'a dyn GitCommand>,
 }
 
 #[async_trait::async_trait]
@@ -770,6 +802,8 @@ impl RagSource for ReviewRag<'_> {
             index_ms: 0,
             doc_vectors: Mutex::new(None),
             units: UnitCache::default(),
+            history_git: self.history_git,
+            on_line: Mutex::new(HashMap::new()),
         }
         .with_prep(self.prep.clone());
         Some(Box::new(rag))
@@ -1454,8 +1488,58 @@ mod tests {
                 index_ms: 0,
                 doc_vectors: Mutex::new(None),
                 units: UnitCache::default(),
+                history_git: Some(&ON_HEADS_LINE),
+                on_line: Mutex::new(HashMap::new()),
             }
         }
+    }
+
+    /// A git for which every reviewed commit is on `HEAD`'s line (the fixture's history is).
+    struct OnHeadsLine;
+    impl GitCommand for OnHeadsLine {
+        fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+            match a.first() {
+                Some(&"merge-base") => Ok(Vec::new()),
+                _ => Err(ReviewError::Git(a.join(" "))),
+            }
+        }
+    }
+    static ON_HEADS_LINE: OnHeadsLine = OnHeadsLine;
+
+    #[tokio::test]
+    async fn a_validated_entry_off_heads_line_is_never_served() {
+        // [MAGI S6 MS3 loop7, R3 Caspar] An entry validated on another branch reached the context
+        // of a review on this one; each served entry is now checked against HEAD.
+        struct OffLine;
+        impl GitCommand for OffLine {
+            fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                Err(ReviewError::Git(a.join(" ")))
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        f.history
+            .record(&[attended("h1", "a was off by one")])
+            .expect("record");
+        f.history
+            .update_status("h1", HistoryStatus::Attended)
+            .expect("status");
+        let f = &f;
+        let served = |git: Option<&'static dyn GitCommand>| async move {
+            let mut rag = f.rag(true);
+            rag.history_git = git;
+            let a = rag
+                .context_for(&batch_on("a.rs", "fn a() {}"))
+                .await
+                .expect("context");
+            a.items.iter().any(|i| i.kind == ContextKind::History)
+        };
+        static OFF: OffLine = OffLine;
+        assert!(
+            served(Some(&ON_HEADS_LINE)).await,
+            "precondition: served on HEAD's line"
+        );
+        assert!(!served(Some(&OFF)).await, "served off HEAD's line");
+        assert!(!served(None).await, "served with no git to check it");
     }
 
     fn batch_on(file: &str, text: &str) -> ReviewBatch {
@@ -3320,6 +3404,7 @@ mod tests {
             embedder: Some(&f.embedder),
             limit_tokens: 100_000,
             prep: DocPrep::default(),
+            history_git: None,
         };
         let without = ReviewRag {
             embedder: None,
