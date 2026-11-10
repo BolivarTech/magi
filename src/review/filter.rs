@@ -583,7 +583,8 @@ fn kept_verdict(
 /// and nothing else changed, unless the diff and the sides disagree (counted). The diff's header lines (`diff --git`,
 /// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
 /// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
-/// cannot be masked and still name its file). O(diff + sides).
+/// cannot be masked and still name its file). A context line is checked against both sides,
+/// written from the new one. O(diff + sides).
 ///
 /// The subset of git's unified diff it reads: lines before the first hunk and between files
 /// (`diff --git`, `index`, `---`, `+++`, rename and mode lines) are kept verbatim; a hunk opens
@@ -625,19 +626,22 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
         } else if !in_hunk || line.starts_with('\\') {
             out.push_str(line);
         } else {
-            let (marker, text) = match line.chars().next()? {
+            // MAGI FIX (MS3 §6 loop7): a context line is compared with the old side too (read,
+            // never written), so a stale old side counts (R6a Caspar).
+            let (marker, text, old_context) = match line.chars().next()? {
                 ' ' => {
-                    next_old = next_old.saturating_add(1);
-                    (' ', take(&new_lines, &mut next_new)?)
+                    let old_text = take(&old_lines, &mut next_old)?;
+                    (' ', take(&new_lines, &mut next_new)?, Some(old_text))
                 }
-                '+' => ('+', take(&new_lines, &mut next_new)?),
-                '-' => ('-', take(&old_lines, &mut next_old)?),
+                '+' => ('+', take(&new_lines, &mut next_new)?, None),
+                '-' => ('-', take(&old_lines, &mut next_old)?, None),
                 _ => return None,
             };
             // MAGI FIX (MS3 §6 loop6): a difference counts unless masking the diff's own line
             // gives the side's; a mask on the side's line no longer excused any difference.
             let shown = line.get(1..).unwrap_or_default();
-            if shown != text && mask_secrets(shown) != text {
+            let differs = |side: &str| shown != side && mask_secrets(shown) != side;
+            if differs(text) || old_context.is_some_and(differs) {
                 diverged = diverged.saturating_add(1);
             }
             out.push(marker);
