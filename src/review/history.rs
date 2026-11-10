@@ -1186,6 +1186,29 @@ mod tests {
     }
 
     #[test]
+    fn stored_sha_is_compared_in_full() {
+        // [MAGI S6 MS3 loop8, R3 Balthasar] An abbreviated stored commit that is a prefix of
+        // HEAD's SHA but resolves to another commit read as HEAD itself (a prefix comparison).
+        let head = "abc1234def5678901234567890123456789abcde";
+        let other = "abc1234000000000000000000000000000000000";
+        let git = FakeGit::from(&[
+            ("merge-base --is-ancestor abc1234 HEAD", Ok("")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative abc1234 HEAD -- a.rs",
+                Ok(""),
+            ),
+            (HEAD_IS_C2, Ok(head)),
+            ("rev-parse --verify abc1234^{commit}", Ok(other)),
+            ("ls-tree -z abc1234 -- a.rs", Ok("100644 blob f00\ta.rs\0")),
+        ]);
+        let short = HistoryEntry {
+            reviewed_commit: "abc1234".into(),
+            ..entry(Some(5))
+        };
+        assert_eq!(classify(&short, "HEAD", &git), HistoryStatus::WeakReject);
+    }
+
+    #[test]
     fn a_reviewed_commit_that_is_not_a_sha_stays_pending_never_a_weak_reject() {
         // [MAGI S6 MS3 loop4, R3 Melchior] The prefix comparison is exact only for a SHA. A
         // symbolic name (a hand-edited row, a future caller) compared unequal to HEAD's SHA and
