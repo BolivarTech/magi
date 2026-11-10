@@ -469,6 +469,15 @@ impl StoreRag<'_> {
 }
 
 impl StoreRag<'_> {
+    /// Whether neither documentation nor history can enter any later batch: each is absent,
+    /// unavailable or failed for the rest of the review. O(1).
+    fn both_layers_down(&self) -> bool {
+        let docs =
+            self.docs.is_none() || self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst);
+        let history = self.history.is_none() || self.history_failed.load(Ordering::SeqCst);
+        docs && history
+    }
+
     /// What a batch with no room left declares for documentation and history: `no room` for each
     /// layer this review has, unless that layer is already out for a cause declared once on its
     /// own (an unavailable or failed index, a down embedder, a failed history read). O(1).
@@ -550,6 +559,9 @@ impl RagSource for StoreRag<'_> {
                 declared.extend(self.no_room_declarations());
                 (Some(Vec::new()), Some(Vec::new()))
             }
+            // MAGI FIX (MS3 §6 loop7): with both layers out (each declared once already), a query
+            // could bring nothing in; it is not embedded.
+            (true, Some(_)) if self.both_layers_down() => (Some(Vec::new()), Some(Vec::new())),
             (true, Some(embedder)) => {
                 let was_down = self.embedder_down.load(Ordering::SeqCst);
                 match self.query_vector(embedder, &text).await {
