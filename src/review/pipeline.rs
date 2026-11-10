@@ -132,7 +132,7 @@ pub trait RagSource: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Any [`ReviewError`] the source meets on the review's own content (a definition that
+    /// Any [`ReviewError`] the source meets on the review's own content (a containing unit that
     /// cannot be read): it ends the review in its preparation, before any trio call.
     async fn context_for(&self, batch: &ReviewBatch) -> Result<Assembled, ReviewError>;
 
@@ -149,6 +149,10 @@ pub trait RagSource: Send + Sync {
 
     /// What an item drags into its batch at planning: its containing units, each as
     /// `(key, tokens)`, so a batch is planned with the units already counted.
+    ///
+    /// Invariant: a companion's tokens are the `item_cost` of the unit item later assembled
+    /// under that key; the pipeline does not trust it, and a unit past the batch limit fails the
+    /// review before any call (`oversized_unit_fails_closed`, its companion charged 0).
     ///
     /// # Errors
     ///
@@ -188,7 +192,9 @@ pub trait RagSource: Send + Sync {
         Vec::new()
     }
 
-    /// This source bound to one review's material, or `None` when it serves as it is.
+    /// This source bound to one review's material, or `None` when it serves as it is. Called once
+    /// by each planning ([`plan_review`] too) and once by the run, each for a fresh binding (`for_review_runs_once_per_pass`),
+    /// so it must be cheap and free of side effects.
     fn for_review<'r>(&'r self, material: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
         let _ = material;
         None
@@ -987,6 +993,10 @@ fn bind<'r>(
 /// The review's total in seconds, read when the preparation ends, with the bound that set it:
 /// the explicit `--timeout`, at most what is left of the caller's deadline less `reserve_secs`
 /// (the preparation still to run on that clock); `None` when there is neither.
+///
+/// The reserve is subtracted only from the deadline: a source whose outbound preparation stays
+/// within the reserve it declared keeps the second reading on the bound the first one chose
+/// (`review_total_table`).
 ///
 /// The deadline is an absolute [`Instant`] of the calling run, so what is left of it is read on
 /// the real clock; the injected [`ReviewClock`] only measures the batches' progress from this
@@ -2179,6 +2189,49 @@ mod tests {
         let prompts = render_prompts(&[batch], &[vec![context]]).expect("renders");
         assert!(!prompts[0].contains("sk-ant-"), "{}", prompts[0]);
         assert!(prompts[0].contains("<redacted: anthropic-key>"));
+    }
+
+    #[tokio::test]
+    async fn for_review_runs_once_per_pass() {
+        // [MAGI S6 MS3 loop9, R4 Balthasar] Pinned contract: `for_review` is called once by
+        // planning and once by the run, each time for a fresh binding.
+        struct Counting(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl RagSource for Counting {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(assembled(vec![]))
+            }
+            fn for_review<'r>(&'r self, _m: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                None
+            }
+        }
+        let rag = Counting(Default::default());
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        assert!(r.is_ok());
+        assert_eq!(rag.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn review_total_table() {
+        // [MAGI S6 MS3 loop9, R4 Balthasar] The two-phase budget, one row per bound: the total
+        // and the bound that set it (a tie binds the deadline; the reserve binds it only).
+        let soon = Some(Instant::now() + Duration::from_secs(100));
+        let rows = [
+            (None, None, 0, None),
+            (Some(50), None, 30, Some(BudgetLimit::Timeout)),
+            (Some(50), soon, 0, Some(BudgetLimit::Timeout)),
+            (Some(500), soon, 0, Some(BudgetLimit::RunDeadline)),
+            (None, soon, 30, Some(BudgetLimit::RunDeadline)),
+        ];
+        for (timeout, deadline, reserve, want) in rows {
+            let got = review_total(timeout, deadline, reserve).map(|(_, l)| l);
+            assert_eq!(got, want, "{timeout:?} {reserve}");
+        }
+        let (left, _) = review_total(None, soon, 30).expect("deadline");
+        assert!(left <= 70, "{left}");
     }
 
     #[test]
