@@ -30,6 +30,12 @@ to the trio and to the embedder are pinned in the unit suite by recording
 doubles (``no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio``,
 ``units_and_definitions_holding_a_one_line_secret_reach_the_trio_masked``,
 ``a_batch_quoting_a_one_line_secret_sends_its_documentation_query_masked``).
+
+Declared limits: the leak check looks for the secret's bytes (whole, and every
+:data:`LEAK_SLICE_BYTES` window), not for a transformed encoding of them
+(base64, percent-encoding, another case); and S53 reviews a directory, so the
+amended clause that a file NAMED explicitly with a one-line key is reviewed
+masked, not refused, is pinned in the unit suite only.
 """
 
 from smoke import runs
