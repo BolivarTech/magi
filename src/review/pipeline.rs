@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use super::batching::{
     file_header, plan_batches, plan_batches_with, prompt_limit_tokens, BatchItem, BodyLine,
-    Companion, HunkLine, HunkLines, ReviewBatch, LINE_NUMBER_LEGEND,
+    Companion, HunkChange, HunkLine, HunkLines, ReviewBatch, LINE_NUMBER_LEGEND,
 };
 use super::clock::{batch_wall_clock_secs, pre_budget};
 use super::consolidate::{
@@ -1533,41 +1533,47 @@ fn record_shown_context(
     }
 }
 
-/// Whether a hunk of `file` in `batch` explains a containing unit read from the side `old_side`
-/// names (`ContextItem::old_side`, recorded by `rag::containing_units`): one of the hunk's
-/// changed lines ([`BatchItem::hunk_change`], the anchors `containing_units` used) lies in
-/// `range`, on that side. O(changed lines) per hunk.
+/// Each hunk of `batch` with its file and changed lines ([`BatchItem::hunk_change`], the anchors
+/// `containing_units` used): parsed once per batch. O(bytes of the hunks).
+fn hunk_changes(batch: &ReviewBatch) -> Vec<(&str, HunkChange)> {
+    batch
+        .items
+        .iter()
+        .filter_map(|item| match (item, item.hunk_change()) {
+            (BatchItem::Hunk { file, .. }, Some(change)) => Some((file.as_str(), change)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a hunk of `file` among `changes` (its batch's [`hunk_changes`]) explains a containing
+/// unit read from the side `old_side` names (`ContextItem::old_side`, recorded by
+/// `rag::containing_units`): one of the hunk's changed lines lies in `range`, on that side.
+/// O(changed lines) per hunk.
 // MAGI FIX (Loop1 r1, I1): the hunk's first line, git's leading context, is not its change.
 fn explains_unit(
-    batch: &ReviewBatch,
+    changes: &[(&str, HunkChange)],
     file: &str,
     (first, last): (u32, u32),
     old_side: bool,
 ) -> bool {
-    batch.items.iter().any(|item| {
-        let (
-            BatchItem::Hunk {
-                file: hunk_file, ..
-            },
-            Some(change),
-        ) = (item, item.hunk_change())
-        else {
-            return false;
-        };
+    changes.iter().any(|(hunk_file, change)| {
         // MAGI FIX (Loop1 r2, Minor 3): each side's changed lines explain that side's units.
         let lines = if old_side {
             &change.removed
         } else {
             &change.added
         };
-        hunk_file == file && lines.iter().any(|l| (first..=last).contains(l))
+        *hunk_file == file && lines.iter().any(|l| (first..=last).contains(l))
     })
 }
 
 /// Adds each completed batch's containing units to the faces the gate reads, on the side each
 /// was read from (`ContextItem::old_side`), so a finding on a unit line the trio was shown
 /// reaches the gate with that code (RV10). A unit no hunk of its batch explains on that side
-/// ([`explains_unit`]) adds no face. O(items²) per batch, bounded by the batch size.
+/// ([`explains_unit`]) adds no face. Each hunk is parsed once per batch, so O(items x changed
+/// lines) per batch, bounded by the batch size.
+// MAGI FIX (MS3 §6 loop7): every unit re-parsed every hunk of its batch.
 fn add_unit_faces<'b>(
     faces: &mut HashMap<&'b str, Faces>,
     batches: &[ReviewBatch],
@@ -1578,11 +1584,12 @@ fn add_unit_faces<'b>(
         if !completed.contains(&batch.index) {
             continue;
         }
+        let changes = hunk_changes(batch);
         for item in items {
             let (ContextKind::Unit, Some(range)) = (&item.kind, item.lines) else {
                 continue;
             };
-            if !explains_unit(batch, &item.file, range, item.old_side) {
+            if !explains_unit(&changes, &item.file, range, item.old_side) {
                 continue;
             }
             let face = faces.entry(item.file.as_str()).or_default();
