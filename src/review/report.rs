@@ -986,9 +986,9 @@ fn listed(text: &str) -> String {
 
 /// `base`, or `base (2)`, `base (3)`, ... : the first spelling `taken` does not hold yet. Two keys
 /// that redact alike (two model names holding the same secret pattern) stay two fields.
-/// O(collisions · log size of `taken`). Public because a second module uses it, not for its
-/// doctest: the agent tool's own JSON masking (`tools::code_review`) keeps colliding keys the
-/// same way.
+/// O(collisions · log size of `taken`). Public, not `pub(crate)`, because its consumer is in
+/// another crate: the agent tool's own JSON masking (`tools::code_review`, in the binary) keeps
+/// colliding keys the same way, and a `pub(crate)` item of this library would not compile there.
 ///
 /// # Arguments
 /// * `taken` - The object the key goes into.
