@@ -89,7 +89,8 @@ pub struct Assembled {
     pub without_embedder: bool,
     /// Whether `--no-memory` left out the stores.
     pub without_memory: bool,
-    /// History entries and doc chunks the secret detector left out.
+    /// Items the secret detector left out: one per history entry and one per documentation
+    /// source (a source is withheld whole, however many of its chunks held the secret; U29).
     pub withheld: usize,
 }
 
@@ -99,7 +100,8 @@ pub const MAX_CALLERS_PER_NAME: usize = 10;
 /// What indexing left out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexDeclarations {
-    /// Chunks the secret detector left out.
+    /// Documentation sources the secret detector left out, one per source however many of its
+    /// chunks held the secret (a source is indexed whole or not at all, U29).
     pub withheld: usize,
     /// Whether indexing stopped at its cap.
     pub truncated: bool,
