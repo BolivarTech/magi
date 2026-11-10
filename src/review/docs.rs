@@ -94,7 +94,7 @@ pub const MAX_DOC_CHUNKS: usize = 20_000;
 /// chunks are; past it a source is cut and declared like a chunk-count cut.
 pub const MAX_DOC_INDEX_BYTES: usize = 32 * 1024 * 1024;
 
-/// Version of the chunking rules: bump it whenever [`chunk_source`] would cut a source
+/// Version of the chunking rules: bump it whenever [`netted_chunks`] would cut a source
 /// differently, so every stored chunk is indexed again instead of mixing two chunkers.
 ///
 /// A change to the secret patterns (`SECRET_PATTERNS` in [`crate::review::secrets`]) counts:
@@ -255,9 +255,10 @@ fn bounded_section(section: &str) -> String {
 /// # Examples
 ///
 /// ```
-/// use magi_rs::review::docs::{chunk_hash, chunk_markdown};
+/// use magi_rs::review::docs::{chunk_hash, netted_chunks};
+/// use magi_rs::review::languages::LanguageRegistry;
 ///
-/// let c = &chunk_markdown("README.md", "# A\nx\n")[0];
+/// let c = &netted_chunks("README.md", "# A\nx\n", &LanguageRegistry::new()).0[0];
 /// assert_eq!(c.hash, chunk_hash(&c.path, &c.section, &c.text));
 /// ```
 // MAGI FIX (MS3 §6 loop7): the input was `path\nsection\ntext`, ambiguous for a path with a newline.
@@ -384,13 +385,8 @@ fn fence_of(line: &str) -> Option<(char, usize)> {
 ///
 /// # Examples
 ///
-/// ```
-/// use magi_rs::review::docs::chunk_markdown;
-///
-/// let c = chunk_markdown("README.md", "# A\nx\n## B\ny\n");
-/// assert_eq!(c[1].section, "A > B");
-/// ```
-pub fn chunk_markdown(path: &str, text: &str) -> Vec<DocChunk> {
+/// Crate-private: the public entry is [`netted_chunks`] (RV22).
+pub(crate) fn chunk_markdown(path: &str, text: &str) -> Vec<DocChunk> {
     let mut chunks = Vec::new();
     let mut stack: Vec<(usize, String)> = Vec::new();
     let mut section = String::new();
@@ -867,13 +863,17 @@ fn py_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
 /// # Examples
 ///
 /// ```
-/// use magi_rs::review::docs::chunk_doc_comments;
+/// use magi_rs::review::docs::netted_chunks;
 /// use magi_rs::review::languages::LanguageRegistry;
 ///
-/// let c = chunk_doc_comments("a.rs", "/// Adds.\nfn add() {}\n", &LanguageRegistry::new());
+/// let c = netted_chunks("a.rs", "/// Adds.\nfn add() {}\n", &LanguageRegistry::new()).0;
 /// assert_eq!(c[0].section, "add");
 /// ```
-pub fn chunk_doc_comments(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<DocChunk> {
+pub(crate) fn chunk_doc_comments(
+    path: &str,
+    text: &str,
+    registry: &LanguageRegistry,
+) -> Vec<DocChunk> {
     let Some(language) = doc_comment_language(path, registry) else {
         return Vec::new();
     };
@@ -908,8 +908,8 @@ fn doc_comment_language(path: &str, registry: &LanguageRegistry) -> Option<DocCo
     }
 }
 
-/// Whether [`chunk_source`] can give `path` any chunk: a Markdown file that [`is_doc_source`]
-/// accepts, or a file whose doc comments [`chunk_doc_comments`] reads. A file for which this is
+/// Whether [`netted_chunks`] can give `path` any chunk: a Markdown file that [`is_doc_source`]
+/// accepts, or a file whose doc comments are chunked. A file for which this is
 /// `false` never yields documentation, so a review neither reads nor keys it for the index.
 ///
 /// # Arguments
@@ -957,7 +957,7 @@ pub fn yields_doc_chunks(path: &str, registry: &LanguageRegistry) -> bool {
 /// # Returns
 ///
 /// The chunks, possibly none.
-pub fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<DocChunk> {
+pub(crate) fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<DocChunk> {
     if path.ends_with(".md") {
         if is_doc_source(path) {
             chunk_markdown(path, text)
@@ -969,13 +969,42 @@ pub fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<
     }
 }
 
-/// Netted chunks of one source (stub).
+/// The chunks of one documentation source, netted (RV22): `chunk_source`'s, through
+/// [`without_secrets`], and none at all when the file holds a private-key block anywhere (its
+/// code included). The one public way to chunk a source, so a caller cannot send key-block
+/// bytes by forgetting the net (`chunking_is_netted_by_default`); the raw chunkers are
+/// crate-private. O(n) in the text.
+///
+/// # Arguments
+///
+/// * `path` - Path of the file in the revision.
+/// * `text` - Its content.
+/// * `registry` - Languages the review has extractors for.
+///
+/// # Returns
+///
+/// The chunks safe to send, and the [`display_path`] of the source once per dropped chunk (one
+/// entry for a key block in the file); a non-empty second part means: withhold the source.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::docs::netted_chunks;
+/// use magi_rs::review::languages::LanguageRegistry;
+///
+/// let (c, dropped) = netted_chunks("README.md", "# A\nx\n## B\ny\n", &LanguageRegistry::new());
+/// assert_eq!((c[1].section.as_str(), dropped.len()), ("A > B", 0));
+/// ```
+// MAGI FIX (MS3 §6 loop8): the public chunkers returned key-block chunks unnetted.
 pub fn netted_chunks(
     path: &str,
     text: &str,
     registry: &LanguageRegistry,
 ) -> (Vec<DocChunk>, Vec<String>) {
-    (chunk_source(path, text, registry), Vec::new())
+    if holds_key_block(text) {
+        return (Vec::new(), vec![display_path(path)]);
+    }
+    without_secrets(chunk_source(path, text, registry))
 }
 
 /// Splits `chunks` into those safe to send and the sources of those holding a secret.

@@ -27,8 +27,8 @@ use tokio::time::Instant;
 
 use magi_rs::review::batching::{BatchItem, Companion, ReviewBatch};
 use magi_rs::review::docs::{
-    bounded, chunk_source, doc_index_id, live_doc_sources, revision_doc_sources, without_secrets,
-    worktree_key, yields_doc_chunks, DocChunk, DocSource,
+    bounded, doc_index_id, live_doc_sources, netted_chunks, revision_doc_sources, worktree_key,
+    yields_doc_chunks, DocChunk, DocSource,
 };
 use magi_rs::review::error::ReviewError;
 use magi_rs::review::history::{
@@ -1078,10 +1078,9 @@ fn reindex_batches(
 ///    count; a path that quotes a secret is never read or stored (its
 ///    path would sit in a clear column) and counts as withheld.
 /// 2. **Index what is missing**: each source the store lacks is read through `sources`, chunked
-///    with `chunk_source` (which masks every one-line secret, RV22 amended), then passed through
-///    `without_secrets` (every chunk, before any embedding) and `bounded`, in that order. A
-///    source indexed with a mask is declared in `masked_sources`; a source that holds a
-///    private-key block anywhere, or any chunk `without_secrets` drops, is withheld whole.
+///    with `netted_chunks` (every one-line secret masked, RV22 amended; every chunk netted
+///    before any embedding), then `bounded`. A source indexed with a mask is declared in
+///    `masked_sources`; one holding a private-key block, or a chunk the net drops, is withheld.
 ///    The rest is indexed in batches of at most [`EMBED_BATCH_ITEMS`] chunks, one
 ///    [`reindex_or_degrade`] each, given what is left of `timeout`; what a batch wrote stays.
 /// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails (a revision source git
@@ -1207,11 +1206,7 @@ pub async fn prepare_docs(
         // each chunk left out for a secret, which after the chunker's masking means a private-key
         // block. A non-empty `dropped` withholds the whole source: U29 indexes a source whole or
         // not at all, so it is never served partly.
-        let (kept, dropped) = if holds_key_block(&text) {
-            (Vec::new(), vec![display_path(&source.path)])
-        } else {
-            without_secrets(chunk_source(&source.path, &text, registry))
-        };
+        let (kept, dropped) = netted_chunks(&source.path, &text, registry);
         if dropped.is_empty() {
             if let Some(pattern) = kept
                 .iter()
