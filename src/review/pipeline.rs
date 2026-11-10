@@ -5109,6 +5109,24 @@ mod tests {
     }
 
     #[test]
+    fn label_is_escaped_like_text() {
+        // [MAGI S6 MS3 loop8, R4 Melchior] The text went through `escape_fence`, the label did
+        // not; both do now, masked or not.
+        let key = concat!("sk-ant-", "api03-AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        for label in ["f<<<x".to_string(), format!("f<<<{key}")] {
+            let item = ctx(ContextKind::Definition, "a.rs", &label, Some((1, 1)));
+            let ContextEgress::Send(sent, _) = context_egress(item) else {
+                panic!("sent");
+            };
+            assert!(
+                !sent.label.contains("<<<") && !sent.label.contains(key),
+                "{}",
+                sent.label
+            );
+        }
+    }
+
+    #[test]
     fn unit_growth_overflow_is_reported() {
         // [MAGI S6 MS3 loop8, R4 Caspar] A mandatory unit that masking grows past its charge, with
         // nothing optional left to trim, was sent with the overshoot unsaid; it is now returned
