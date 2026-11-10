@@ -1152,8 +1152,11 @@ fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec
 /// Whether a review with `total` runs below the `configured` ceiling: its derived `ceiling`, or,
 /// on an overrun (`None`, the batches run on what is left), the absolute floor each batch's
 /// ceiling never goes under. Without a `total`, never. O(1).
+// MAGI FIX (MS3 §6 loop7): an overrun always said "below", wrong for a configured ceiling at or
+// under the floor.
 fn ceiling_below_configured(total: Option<u64>, ceiling: Option<u64>, configured: u64) -> bool {
-    total.is_some() && ceiling.is_none_or(|c| c < configured)
+    let floor = crate::magi::AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS;
+    total.is_some() && ceiling.unwrap_or(floor) < configured
 }
 
 /// Runs every batch in series (§5.0 step 5), recording metrics and failures in `summary`.
