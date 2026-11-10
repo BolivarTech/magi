@@ -155,7 +155,9 @@ impl ContextItem {
 }
 
 /// What `assemble` charges for one item: the tokens of what the prompt carries for it, its text,
-/// its path ([`display_path`]) and its fixed frame ([`CONTEXT_ITEM_FRAME_TOKENS`]).
+/// its path ([`display_path`]) and its fixed frame ([`CONTEXT_ITEM_FRAME_TOKENS`]). The label is
+/// not charged because it is never written: the frame carries the kind, the path and the
+/// candidate mark only (`an_items_label_is_never_written_so_it_is_never_charged`).
 ///
 /// # Arguments
 ///
@@ -1665,6 +1667,26 @@ mod tests {
                 format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})")
             )]
         );
+    }
+
+    #[test]
+    fn an_items_label_is_never_written_so_it_is_never_charged() {
+        // [MAGI S6 MS3 loop7, R2 Balthasar] `item_cost` leaves the label out because the frame
+        // the prompt writes carries the kind, the path and the candidate mark, never the label.
+        let label = "A-LABEL-THAT-THE-PROMPT-NEVER-CARRIES";
+        let item = |label: &str| ContextItem {
+            kind: ContextKind::Documentation,
+            file: "README.md".into(),
+            label: label.into(),
+            text: "how it works".into(),
+            candidate: true,
+            lines: None,
+            old_side: false,
+        };
+        assert_eq!(item_cost(&item(label)), item_cost(&item("")));
+        let (open, close) =
+            crate::review::pipeline::context_frame(&ContextKind::Documentation, "README.md", true);
+        assert!(!format!("{open}{close}").contains(label));
     }
 
     #[test]
