@@ -2335,9 +2335,18 @@ mod tests {
     }
 
     #[test]
-    fn every_code_review_table_of_the_schema_is_a_table_the_pre_0_25_check_names() {
-        // [MAGI S6 MS3 loop5, R3 Balthasar] Two hand-kept lists: a v0.25.0 table added to the
-        // DDL and not to the check would let an older database without it open as current.
+    fn every_ddl_table_is_classified() {
+        // [MAGI S6 MS3 loop5/loop8, R3 Balthasar] Two hand-kept lists: a table added to the DDL
+        // and to neither the pre-0.25 check nor the older tables (whatever its name) fails here,
+        // so an older database without it can never open as current.
+        const OLDER: [&str; 6] = [
+            "sessions",
+            "messages",
+            "knowledge",
+            "vault_meta",
+            "model_capabilities",
+            "memories",
+        ];
         const OPEN: &str = "CREATE TABLE IF NOT EXISTS ";
         let created: std::collections::BTreeSet<&str> = SCHEMA_DDL
             .match_indices(OPEN)
@@ -2345,11 +2354,14 @@ mod tests {
                 let rest = SCHEMA_DDL.get(at + OPEN.len()..)?;
                 rest.split([' ', '(']).next()
             })
-            .filter(|t| t.starts_with("code_review_"))
             .collect();
-        let checked: std::collections::BTreeSet<&str> =
-            PRE_0_25_MISSING_TABLES.into_iter().collect();
-        assert_eq!(created, checked);
+        let classified: std::collections::BTreeSet<&str> =
+            PRE_0_25_MISSING_TABLES.into_iter().chain(OLDER).collect();
+        assert_eq!(
+            classified.len(),
+            OLDER.len() + PRE_0_25_MISSING_TABLES.len()
+        );
+        assert_eq!(created, classified);
     }
 
     #[test]
