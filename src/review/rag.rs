@@ -415,8 +415,11 @@ fn read_or_note(
     file: &str,
     unread: &mut Vec<String>,
 ) -> Option<String> {
-    let _ = unread;
-    read_text(sources, file, false).unwrap_or(None)
+    // MAGI FIX (MS3 §6 loop9): one unreadable file failed the batch's whole context.
+    read_text(sources, file, false).unwrap_or_else(|_| {
+        unread.push(display_path(file));
+        None
+    })
 }
 
 /// Lines `first..=last` (1-based) of `text`, joined by `\n`. O(`last`).

@@ -46,6 +46,7 @@ use magi_rs::review::rag::{
     assemble, callers_for, charged_tokens, containing_units_cached, declare_index, declare_lexical,
     definitions_for, doc_search_query, item_cost, Assembled, ContextItem, ContextKind,
     IndexDeclarations, UnitCache, CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
+    UNREADABLE_CONTEXT,
 };
 use magi_rs::review::secrets::{
     display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
@@ -628,12 +629,18 @@ impl RagSource for StoreRag<'_> {
                     .map(escaped),
             );
         }
-        let mut unread = Vec::new();
-        let mut code = definitions_for(&text, self.index, self.sources, &mut unread);
+        // MAGI FIX (MS3 §6 loop9): an unreadable file costs its own items, declared.
+        let (mut unread_defs, mut unread_callers) = (Vec::new(), Vec::new());
+        let mut code = definitions_for(&text, self.index, self.sources, &mut unread_defs);
         let names = changed_names(batch, &units);
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let (callers, capped) =
-            callers_for(&refs, self.index, self.sources, self.registry, &mut unread);
+        let (callers, capped) = callers_for(
+            &refs,
+            self.index,
+            self.sources,
+            self.registry,
+            &mut unread_callers,
+        );
         code.extend(callers);
         let code: Vec<ContextItem> = code.into_iter().map(escaped).collect();
         let limit = self
@@ -671,6 +678,12 @@ impl RagSource for StoreRag<'_> {
             )
         }));
         a.trimmed.extend(declared);
+        let unread = (unread_defs
+            .into_iter()
+            .map(|f| (ContextKind::Definition, f)))
+        .chain(unread_callers.into_iter().map(|f| (ContextKind::Caller, f)));
+        a.trimmed
+            .extend(unread.map(|(kind, f)| (kind, format!("{f}: {UNREADABLE_CONTEXT}"))));
         if !self.declared.swap(true, Ordering::SeqCst) {
             declare_index(&mut a, &self.doc_index);
             declare_lexical(&mut a, self.index);
@@ -1486,7 +1499,7 @@ mod tests {
     use crate::memory::review_docs::test_embedder::{chunk, src, FailingEmbedder, FakeEmbedder};
     use magi_rs::review::history::MAX_RECLASSIFY_PER_REVIEW;
     use magi_rs::review::history::{HistoryEntry, HistoryStatus};
-    use magi_rs::review::rag::{ContextKind, UNREADABLE_CONTEXT};
+    use magi_rs::review::rag::ContextKind;
     use magi_rs::review::source::WorktreeSource;
 
     /// [CP2 MS3 loop 8] The production budget, for the tests that are not about it.
