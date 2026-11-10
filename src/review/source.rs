@@ -700,17 +700,26 @@ impl ContentSource for RevisionSource<'_> {
 ///
 /// Every stage of a review (the filter, the batches, the index and the gate) reads through one
 /// cache, so a file is read once per side and every stage sees the bytes the filter scanned,
-/// even if the file changes on disk meanwhile. A text side is held with each one-line secret
+/// even if the file changes on disk meanwhile.
+///
+/// A text side is held with each one-line secret
 /// masked, line breaks kept (RV22; [`ContentSource::masked`] says what was masked). A side held
 /// raw with a secret (a private-key block, a text too dense to mask, a binary side) is safe only
 /// because the filter leaves its file out, and the cache enforces it: such a side, once released,
 /// is refused ([`ReviewError::EgressSecret`]), stays refused even if the file later loses its
 /// header, and after [`ContentSource::seal`] is served to no stage. What no pattern recognises (a
-/// key body with no header anywhere) is beyond these checks, as beyond the detector. An `Err` is
-/// never kept; the filter releases every side of a file it leaves out
-/// ([`ContentSource::release`]), so only what is reviewed stays held, bounded by
-/// [`MAX_REVIEW_TOTAL_BYTES`] ([`ContentSource::settle`]; until then by both sides of one file at
-/// [`MAX_REVIEW_FILE_BYTES`]). Memory O(bytes reviewed); a lookup O(1) expected plus its copy.
+/// key body with no header anywhere) is beyond these checks, as beyond the detector.
+///
+/// An `Err` is never kept, and the filter releases
+/// every side of a file it leaves out that no kept file was scanned with
+/// ([`ContentSource::release`]), so the cap and the memory count only
+/// what is reviewed and no skipped secret stays held. The bytes held are
+/// bounded by [`MAX_REVIEW_TOTAL_BYTES`], checked by [`ContentSource::settle`] once the caller
+/// released what it left out; until then a read may pass it by both sides of one file at the
+/// per-file cap ([`MAX_REVIEW_FILE_BYTES`]),
+/// and one that would go further is refused and not kept. A read of what is already held costs
+/// nothing. Memory is O(bytes reviewed); a lookup is
+/// O(1) expected plus the copy it returns.
 pub struct CachedSource<'a> {
     inner: &'a dyn ContentSource,
     cap: u64,
