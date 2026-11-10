@@ -269,8 +269,27 @@ fn numbered_window(code: &str, line: u32) -> String {
     out
 }
 
-/// The armor that opens the `END` line of a PEM or OpenPGP block, and of an SSH2 one.
-const KEY_BLOCK_END_OPENERS: [&str; 2] = ["-----END ", "---- END "];
+/// The five dashes of PEM and OpenPGP armor.
+const ARMOR_DASHES: &str = "-----";
+/// The four dashes of SSH2 armor.
+const SSH2_DASHES: &str = "----";
+/// What opens an armor `END` line, as `(dashes, word right after them)`: five dashes then
+/// `END ` (PEM, OpenPGP), four then ` END ` (SSH2). Built from named dashes because the review
+/// tool showed the joined literal mangled; pinned by `armor_end_lines_close_a_block`.
+const KEY_BLOCK_END_OPENERS: [(&str, &str); 2] = [(ARMOR_DASHES, "END "), (SSH2_DASHES, " END ")];
+
+/// Whether `text` holds an armor `END` opener ([`KEY_BLOCK_END_OPENERS`]) anywhere. A real key
+/// body cannot close a block early: its lines are base64 or radix-64, whose alphabet has no
+/// space and no run of dashes. O(bytes of `text`).
+fn holds_armor_end(text: &str) -> bool {
+    text.char_indices().any(|(i, _)| {
+        let rest = text.get(i..).unwrap_or_default();
+        KEY_BLOCK_END_OPENERS.iter().any(|(dashes, word)| {
+            rest.strip_prefix(dashes)
+                .is_some_and(|r| r.starts_with(word))
+        })
+    })
+}
 
 /// Whether the window [`numbered_window`] cuts around `line` overlaps a private-key block of
 /// `code` (RV10's state is the finding plus ±[`GATE_CONTEXT_LINES`]; RV22's exception keeps a
@@ -321,7 +340,7 @@ fn overlaps_tracked_block(code: &str, line: u32, opens: &dyn Fn(&str) -> bool) -
     for (n, text) in (1u32..).zip(code.lines()) {
         match opened {
             None if opens(text) => opened = Some(n),
-            Some(start) if KEY_BLOCK_END_OPENERS.iter().any(|e| text.contains(e)) => {
+            Some(start) if holds_armor_end(text) => {
                 if start <= last && n >= first {
                     return true;
                 }
@@ -344,7 +363,7 @@ fn untracked_block(code: &str, opens: &dyn Fn(&str) -> bool) -> bool {
     for text in code.lines() {
         if !opened && opens(text) {
             opened = true;
-        } else if opened && KEY_BLOCK_END_OPENERS.iter().any(|e| text.contains(e)) {
+        } else if opened && holds_armor_end(text) {
             opened = false;
         } else if !opened {
             outside.push_str(text);
@@ -1667,6 +1686,33 @@ mod tests {
             keys(&state["finding"]),
             ["detail", "file", "line", "severity", "title"]
         );
+    }
+
+    #[test]
+    fn armor_end_lines_close_a_block() {
+        // [MAGI S6 MS3 loop8] The openers are built from named dashes (the review tool mangled
+        // the joined literal): checked against an independent count, and every canonical footer
+        // closes a block, so a finding past it is outside.
+        assert_eq!(
+            (ARMOR_DASHES, SSH2_DASHES),
+            ("-".repeat(5).as_str(), "-".repeat(4).as_str())
+        );
+        let d = ARMOR_DASHES;
+        for footer in [
+            format!("{d}END PRIVATE KEY{d}"),
+            format!("{d}END PGP PRIVATE KEY BLOCK{d}"),
+            format!("x{d}-END RSA PRIVATE KEY{d}"),
+            format!("{SSH2_DASHES} END SSH2 ENCRYPTED PRIVATE KEY {SSH2_DASHES}"),
+        ] {
+            assert!(holds_armor_end(&footer), "{footer}");
+            let tail: String = (0..100).map(|i| format!("f{i}\n")).collect();
+            let code = format!("OPEN\nbody\n{footer}\n{tail}");
+            assert!(
+                !window_overlaps_block_of(&code, 90, &|t| t.contains("OPEN")),
+                "{footer}"
+            );
+        }
+        assert!(!holds_armor_end("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC+/="));
     }
 
     #[test]
