@@ -152,7 +152,9 @@ pub struct ReviewSummary {
     /// whose number can only be a removed line (read on the old side only). A number that is
     /// both a removed and a live line (an in-place edit, or a removed line whose old number
     /// falls in a new-side range) is not here: it is anchored on the new side, as the gate reads
-    /// it. The review history does not record these (RV08). Internal: never serialized.
+    /// it. The review history does not record these (RV08). Internal: never serialized. Each key
+    /// is the consolidated finding's own `file`, inserted from that finding by the pipeline, so
+    /// the spellings agree by construction; the match is exact (`off_revision_matches_exact_file`).
     #[serde(skip)]
     pub off_revision: BTreeSet<(String, u32)>,
 }
@@ -1367,6 +1369,51 @@ mod tests {
                 (Some("a.rs".to_string()), None),
             ]
         );
+    }
+
+    #[test]
+    fn off_revision_matches_exact_file() {
+        // [MAGI S6 MS3 loop8, R6b Melchior] The key is the finding's own `file` string, inserted
+        // by the pipeline from that very finding; the match is exact, so another spelling of the
+        // path (`./a.rs`) is a different key and is never dropped by accident.
+        let f = |file: &str| {
+            let finding = ConsolidatedFinding {
+                file: Some(file.into()),
+                line: Some(9),
+                severity: Severity::Warning,
+                reported_severity: Severity::Warning,
+                titles: vec!["t".into()],
+                details: vec![],
+                categories: vec![Category::Other],
+                sources: vec![AgentName::Melchior],
+                marks: vec![],
+                batches: vec![0],
+            };
+            let verdict = GateVerdict {
+                state: GateState::Kept,
+                cause: None,
+                causes: vec![],
+                model: None,
+                lean: None,
+                confidence: None,
+                skipped: vec![],
+                status: None,
+            };
+            (finding, verdict)
+        };
+        let s = |off: &str| ReviewSummary {
+            findings: vec![f("a.rs"), f("./a.rs")],
+            off_revision: BTreeSet::from([(off.to_string(), 9)]),
+            ..ReviewSummary::default()
+        };
+        let files = |s: ReviewSummary| -> Vec<Option<String>> {
+            s.anchored_findings()
+                .into_iter()
+                .map(|(f, _)| f.file)
+                .collect()
+        };
+        assert_eq!(files(s("a.rs")), vec![Some("./a.rs".to_string())]);
+        assert_eq!(files(s("./a.rs")), vec![Some("a.rs".to_string())]);
     }
 
     #[test]
