@@ -1261,8 +1261,7 @@ pub async fn prepare_docs(
             withhold(&mut prep, &source.path);
         }
     }
-    let (kept, truncated) = bounded(chunked);
-    prep.doc_index.truncated |= truncated;
+    let kept = bounded_into(&mut prep, chunked);
     for batch in reindex_batches(kept) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() || !index_batch(docs, &batch, embedder, left, &mut prep).await {
@@ -1272,6 +1271,16 @@ pub async fn prepare_docs(
     }
     prep.index_ms = millis(started.elapsed());
     prep
+}
+
+/// [`bounded`] over `chunked`, recording a cut in `prep` (declared truncated).
+fn bounded_into(
+    prep: &mut DocPrep,
+    chunked: Vec<(DocSource, Vec<DocChunk>)>,
+) -> Vec<(DocSource, Vec<DocChunk>)> {
+    let (kept, truncated) = bounded(chunked);
+    prep.doc_index.truncated |= truncated;
+    kept
 }
 
 /// One reindex batch for `prep`: `false` when it failed. Each source the store's own check
@@ -2745,6 +2754,24 @@ mod tests {
             .map(|(s, c)| (s.path.as_str(), c.len()))
             .collect();
         assert_eq!(shape, vec![("a.md", max - 1)]);
+    }
+
+    #[test]
+    fn cut_source_leaves_doc_sources() {
+        // [MAGI S6 MS3 loop10, R2 Caspar] A source `bounded` cut stayed in `doc_sources`.
+        let many = |path: &str, n: usize| {
+            let chunks = (0..n).map(|i| chunk(path, &format!("s{i}"), "x")).collect();
+            (src(path, "k"), chunks)
+        };
+        let mut prep = DocPrep {
+            doc_sources: BTreeSet::from([src("a.md", "k"), src("b.md", "k")]),
+            ..Default::default()
+        };
+        let max = magi_rs::review::docs::MAX_DOC_CHUNKS;
+        let kept = bounded_into(&mut prep, vec![many("a.md", 1), many("b.md", max + 1)]);
+        assert_eq!(kept.len(), 1);
+        assert!(prep.doc_index.truncated);
+        assert_eq!(prep.doc_sources, BTreeSet::from([src("a.md", "k")]));
     }
 
     /// Both sides by path, as `RevisionSource` serves a reviewed diff. [CP2 MS3 loop 10]
