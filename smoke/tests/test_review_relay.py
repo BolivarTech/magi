@@ -88,48 +88,51 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(["a/b.rs"], listed)
 
 
+P, F, C = Outcome.PASS, Outcome.FAIL, Outcome.CANNOT_TEST
+_with = dataclasses.replace
+
+
+def _judged(sid: str, result, texts) -> list:
+    """The outcomes of *sid* over *result*, in the order of *texts*."""
+    outcomes = _outcomes(sid, result)
+    return [outcomes[a] for a in texts]
+
+
 class RelayScenarioTests(unittest.TestCase):
 
-    def test_s53_fails_when_a_forwarded_request_carries_a_window_of_the_key(self) -> None:
+    def test_s53_reads_the_forwarded_requests(self) -> None:
         doc = {"code_review": {"masked": rm.S53_EXPECTED_MASKED, "masked_unlisted": 0,
                                "skipped": [], "skipped_unlisted": 0}}
         part = runs.REVIEW_MASKED_KEY[3:3 + rm.LEAK_SLICE_BYTES]
-        r = dataclasses.replace(_result("R18", 0, doc), request_bodies=(("/api/chat", b'{"c":"' + part + b'"}'),))
-        self.assertEqual(Outcome.FAIL, _outcomes("S53", r)[rm.S53_ASSERTIONS[3]])
-        unrecorded = dataclasses.replace(r, request_bodies=None)
-        self.assertEqual(Outcome.CANNOT_TEST, _outcomes("S53", unrecorded)[rm.S53_ASSERTIONS[3]])
+        r = _with(_result("R18", 0, doc), request_bodies=(("/api/chat", b'"' + part + b'"'),))
+        self.assertEqual([F], _judged("S53", r, rm.S53_ASSERTIONS[3:]))
+        self.assertEqual([C], _judged("S53", _with(r, request_bodies=None), rm.S53_ASSERTIONS[3:]))
 
-    def test_s55_needs_the_doc_comment_indexed_and_a_query_embedded(self) -> None:
+    def test_s55_needs_the_chunk_and_the_query(self) -> None:
         doc = {"code_review": {"without_embedder": False, "trimmed": []}}
-        query = _chunk("pub fn token() " + runs.REVIEW_MASKED_DOC.decode())
-        for bodies, want in ((R18_HEALTHY_REQUESTS, Outcome.PASS), ((query,), Outcome.FAIL),
-                             ((_chunk(runs.REVIEW_MASKED_DOC.decode()),), Outcome.FAIL)):
-            r = dataclasses.replace(_result("R18", 0, doc), request_bodies=bodies)
-            self.assertEqual(want, _outcomes("S55", r)[rc.S55_ASSERTIONS[2]], bodies)
+        doc_text = runs.REVIEW_MASKED_DOC.decode()
+        for bodies, want in ((R18_HEALTHY_REQUESTS, P), ((_chunk("pub fn token() " + doc_text),), F),
+                             ((_chunk(doc_text),), F)):
+            r = _with(_result("R18", 0, doc), request_bodies=bodies)
+            self.assertEqual([want], _judged("S55", r, rc.S55_ASSERTIONS[2:]), bodies)
 
-    def test_s56_reads_the_committed_doc_and_never_the_dirty_one(self) -> None:
-        committed = _chunk(runs.REVIEW_COMMITTED_DOC.decode())
-        dirty = _chunk(runs.REVIEW_DIRTY_DOC.decode())
-        cases = (((committed,), [Outcome.PASS, Outcome.PASS, Outcome.PASS]),
-                 ((committed, dirty), [Outcome.PASS, Outcome.PASS, Outcome.FAIL]),
-                 ((), [Outcome.PASS, Outcome.FAIL, Outcome.PASS]),
-                 (None, [Outcome.PASS, Outcome.CANNOT_TEST, Outcome.CANNOT_TEST]))
-        for bodies, want in cases:
-            r = dataclasses.replace(_result("R20", 0, {}), request_bodies=bodies)
-            self.assertEqual(want, [_outcomes("S56", r)[a] for a in rc.S56_ASSERTIONS], bodies)
+    def test_s56_never_reads_the_dirty_doc(self) -> None:
+        good, dirty = _chunk(runs.REVIEW_COMMITTED_DOC.decode()), _chunk(runs.REVIEW_DIRTY_DOC.decode())
+        for bodies, want in (((good,), [P, P, P]), ((good, dirty), [P, P, F]), ((), [P, F, P]),
+                             (None, [P, C, C])):
+            r = _with(_result("R20", 0, {}), request_bodies=bodies)
+            self.assertEqual(want, _judged("S56", r, rc.S56_ASSERTIONS), bodies)
 
-    def test_s57_serves_the_validated_history_or_says_it_could_not(self) -> None:
-        located = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3}]}}
-        first = ProductOutput(stdout=json.dumps(located).encode(), stderr=b"", exit_code=0, command=["m"])
-        empty = dataclasses.replace(first, stdout=json.dumps({"code_review": {"findings": []}}).encode())
-        served = (("/api/chat", b'"<<<context kind=history file=' + runs.REVIEW_HISTORY_FILE.encode() + b'>>>"'),)
-        cases = (((first, first), served, [Outcome.PASS, Outcome.PASS]),
-                 ((first, first), (), [Outcome.PASS, Outcome.FAIL]),
-                 ((empty, first), served, [Outcome.PASS, Outcome.CANNOT_TEST]),
-                 ((first, dataclasses.replace(first, exit_code=1)), served, [Outcome.FAIL, Outcome.PASS]))
-        for setup, bodies, want in cases:
-            r = dataclasses.replace(_result("R21", 0, {}), request_bodies=bodies, setup_outputs=setup)
-            self.assertEqual(want, [_outcomes("S57", r)[a] for a in rc.S57_ASSERTIONS])
+    def test_s57_serves_validated_history(self) -> None:
+        found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3}]}}
+        first = ProductOutput(stdout=json.dumps(found).encode(), stderr=b"", exit_code=0, command=["m"])
+        empty = _with(first, stdout=b'{"code_review": {"findings": []}}')
+        served = (("/api/chat", b"<<<context kind=history file=%s>>>" % runs.REVIEW_HISTORY_FILE.encode()),)
+        for setup, bodies, want in (((first, first), served, [P, P]), ((first, first), (), [P, F]),
+                                    ((empty, first), served, [P, C]),
+                                    ((first, _with(first, exit_code=1)), served, [F, P])):
+            r = _with(_result("R21", 0, {}), request_bodies=bodies, setup_outputs=setup)
+            self.assertEqual(want, _judged("S57", r, rc.S57_ASSERTIONS))
 
 
 if __name__ == "__main__":
