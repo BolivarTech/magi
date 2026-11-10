@@ -670,8 +670,8 @@ pub fn containing_units(
     containing_units_cached(item, sources, registry, &UnitCache::default())
 }
 
-/// A file's read path and its units, as [`UnitCache`] holds them for one side.
-type HeldUnits = Option<(String, std::sync::Arc<FileUnits>)>;
+/// A file's read path, its reviewed file and its units, as [`UnitCache`] holds them for one side.
+type HeldUnits = Option<(String, String, std::sync::Arc<FileUnits>)>;
 
 /// The units of the last file read on each side, so consecutive hunks of one file (the order
 /// the planner and a batch walk them in) extract it once instead of once per hunk. Holds at most
@@ -693,7 +693,8 @@ impl UnitCache {
     /// The units of `text` (side `old_side`, read under `read_path`), extracted unless they
     /// are the ones held for that side. The lock is held through the extraction, which never
     /// awaits; a review reads its batches in series (RV05), so it is never contended. Keyed by
-    /// path because a review's content source gives the same bytes for a path on every read.
+    /// read path (a review's content source gives the same bytes for a path on every read) and
+    /// by reviewed file, which labels the units (`unit_cache_keys_by_file_too`).
     fn units(
         &self,
         old_side: bool,
@@ -707,15 +708,17 @@ impl UnitCache {
             .last
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(Some((path, units))) = last.get(slot) {
-            if path == read_path {
+        // MAGI FIX (MS3 §6 loop8): keyed by read path alone, another file reused these labels.
+        if let Some(Some((path, held_file, units))) = last.get(slot) {
+            if path == read_path && held_file == file {
                 return std::sync::Arc::clone(units);
             }
         }
         let units = std::sync::Arc::new(FileUnits::load(extractor, file, text));
         self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(held) = last.get_mut(slot) {
-            *held = Some((read_path.to_string(), std::sync::Arc::clone(&units)));
+            let units = std::sync::Arc::clone(&units);
+            *held = Some((read_path.to_string(), file.to_string(), units));
         }
         units
     }
