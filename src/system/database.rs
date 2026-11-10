@@ -692,7 +692,21 @@ pub(crate) fn init_schema(conn: &Connection) -> std::result::Result<(), SchemaIn
             detail: pre_0_25_detail(table),
         });
     }
-    conn.execute_batch(SCHEMA_DDL)?;
+    // MAGI FIX (MS3 §6 loop7): the statements ran one by one in autocommit, so a failure (a
+    // crash, a full disk) after `messages` left a partial file the pre-0.25 check reads as
+    // current. One immediate transaction: the schema appears whole or not at all.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    if let Err(e) = conn
+        .execute_batch(SCHEMA_DDL)
+        .and_then(|()| conn.execute_batch("COMMIT"))
+    {
+        // The DDL's own error is the one reported; a rollback that fails too leaves SQLite to
+        // roll the open transaction back when the connection closes.
+        if let Err(rollback) = conn.execute_batch("ROLLBACK") {
+            tracing::warn!(error = %rollback, "schema initialization rollback failed");
+        }
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -776,14 +790,15 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
         .expect("count")
 }
 
-/// The DDL [`init_schema`] runs, statement by statement (autocommit, no transaction), in
-/// this order.
+/// The DDL [`init_schema`] runs, in this order, inside one immediate transaction (so it
+/// appears whole or not at all:
+/// `a_schema_initialization_that_fails_part_way_leaves_no_table_behind`).
 ///
 /// **The v0.25.0 tables ([`PRE_0_25_MISSING_TABLES`]) come first, before the marker
-/// [`PRE_0_25_MARKER_TABLE`].** A second opener racing on a brand-new file reads the schema
-/// while the first is still creating it; with this order it can never see the marker
-/// without every v0.25.0 table, so it never refuses a fresh database as an older one, and no
-/// open needs a write lock for the check (RV19).
+/// [`PRE_0_25_MARKER_TABLE`].** Kept although the transaction already hides a half-created
+/// schema from a second opener: the order is the second line of defense, so a reader never
+/// sees the marker without every v0.25.0 table, never refuses a fresh database as an older
+/// one, and no open needs a write lock for the check (RV19).
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
