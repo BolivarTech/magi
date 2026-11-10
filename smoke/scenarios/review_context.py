@@ -29,6 +29,15 @@ declare ``inspects_timeouts``, so the runner reports it as ``CANNOT_TEST``.
   carries a ``///`` doc comment, a documentation source of its own, so the
   documentation index is built and each batch's query embedded. A history the review would retrieve needs a chain
   of revision reviews, which no smoke run makes, so it stays in the unit suite.
+
+Declared gaps, so the segment's "observed end to end" is read for what it is:
+RV08's positive path (history recorded, re-gated and retrieved) and RV21's
+commit side (documentation read from a reviewed commit, not the working tree)
+have no smoke observation: every smoke review (R17-R19) is of a working-tree
+directory, which records no history (RV08). Both stay pinned in the unit suite
+(``src/review/history.rs``, ``src/memory/review_rag.rs``, RV-S36..RV-S39); S52
+observes priorities (3) and (4) together only through their degraded
+declaration.
 """
 
 from smoke.errors import ProductOutputError
