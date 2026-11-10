@@ -34,7 +34,7 @@ doubles (``no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio``,
 
 from smoke import runs
 from smoke.errors import ProductOutputError
-from smoke.outcome import Finding, Outcome
+from smoke.outcome import Outcome
 from smoke.registry import scenario
 from smoke.scenarios import code_review
 
