@@ -120,6 +120,34 @@ class S53Tests(unittest.TestCase):
         part = _KEY.encode()[10:22]
         self.assertEqual(Outcome.FAIL, self._judge(3, _result("R18", 0, _doc(), stderr=b"x " + part)))
 
+    def test_any_window_of_the_key_fails_the_leak_assertion(self) -> None:
+        # [MAGI S6 MS3 loop8, R7a Melchior] One inner slice was probed: an echo of another part
+        # of the key (its tail, say) passed.
+        key = _KEY.encode()
+        for i in range(len(key) - rm.LEAK_SLICE_BYTES + 1):
+            part = key[i:i + rm.LEAK_SLICE_BYTES]
+            with self.subTest(at=i):
+                self.assertEqual(Outcome.FAIL, self._judge(3, _result("R18", 0, _doc(), stderr=b"x " + part)))
+
+    def test_a_masked_entry_without_a_path_fails_without_crashing(self) -> None:
+        # [MAGI S6 MS3 loop8, R7a Caspar] A missing `path` must be a FAIL finding, never a KeyError.
+        bad = [{"cause": "secret", "pattern": runs.REVIEW_MASKED_PATTERN}]
+        self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, _doc(masked=bad))))
+
+    def test_a_masked_entry_with_another_cause_fails(self) -> None:
+        # [MAGI S6 MS3 loop8, R7b Melchior] The README promises exact equality; each drift fails.
+        bad = [dict(rm.S53_EXPECTED_MASKED[0], cause="binary")]
+        self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, _doc(masked=bad))))
+
+    def test_a_masked_entry_with_an_extra_field_fails(self) -> None:
+        bad = [dict(rm.S53_EXPECTED_MASKED[0], line=3)]
+        self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, _doc(masked=bad))))
+
+    def test_a_null_masked_list_fails(self) -> None:
+        doc = _doc()
+        doc["code_review"]["masked"] = None
+        self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, doc)))
+
     def test_the_fixture_file_holds_the_key_but_its_name_does_not(self) -> None:
         (path, body), = runs.review_masked_files()
         self.assertIn(runs.REVIEW_MASKED_KEY, body)
@@ -166,6 +194,11 @@ class S54Tests(unittest.TestCase):
         # [MAGI S6 MS3 loop7, R7a Melchior] A slice of a body line is a byte of the block too.
         r = _result("R19", 2, None, _REFUSAL)
         self.assertEqual(Outcome.FAIL, self._judge(2, r, log=b"x " + _BODY[13:25]))
+
+    def test_the_tail_of_a_body_line_fails_the_leak_assertion(self) -> None:
+        # [MAGI S6 MS3 loop8, R7a Melchior] Every window is probed, the last one included.
+        r = _result("R19", 2, None, _REFUSAL)
+        self.assertEqual(Outcome.FAIL, self._judge(2, r, log=b"x " + _BODY[-rm.LEAK_SLICE_BYTES:]))
 
     def test_the_second_body_line_in_the_run_log_fails_too(self) -> None:
         r = _result("R19", 2, None, _REFUSAL)
