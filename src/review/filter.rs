@@ -569,39 +569,31 @@ fn kept_verdict(
 }
 
 /// `diff` with every content line taken from the (masked) side it shows: a context or added line
-/// from `new`, a deleted line from `old`, each at the line number its hunk header gives. Header
-/// lines and `\ No newline` markers are kept; a hunk header keeps its ranges, and its function
-/// context when a masked side line shows that context as it is ([`shown_by_a_side`]; one that
-/// carries a secret, which the sides hold masked, is dropped:
-/// `a_hunk_context_that_no_masked_side_line_shows_is_dropped`). `None` when a line names a side line that does not exist, a hunk
-/// header does not parse, or a body line has no marker: the positions of the diff and the sides
-/// disagree. A body line whose text differs from its side's line at that position is replaced by
-/// the side's (masked) text, which is what git would print for these sides (a rename's stale line
-/// included). Such a line is counted unless masking the diff's own line gives the side's line
-/// (the difference is then the mask's, and nothing else), and the caller logs the count at WARN (a
-/// stale diff, two revisions mixed: RV21) and checks the rebuilt diff for secrets again
+/// from `new` (a context line compared with `old` too, never written from it), a deleted line
+/// from `old`, at the numbers its hunk header gives. Header lines and `\ No newline` markers are
+/// kept; a hunk header keeps its ranges, and its function context when a masked side line shows
+/// it as it is ([`shown_by_a_side`]; else it is dropped,
+/// `a_hunk_context_that_no_masked_side_line_shows_is_dropped`). `None` when a line names a side
+/// line that does not exist, a header does not parse or a body line has no marker. A body line
+/// that differs from its side's line is replaced by the side's text (what git would print), and
+/// counted unless masking the diff's line gives the side's; the caller logs the count at WARN
+/// (two revisions mixed: RV21) and checks the result for secrets again
 /// (`a_rebuilt_hunk_keeps_its_function_context_masked_and_counts_every_unexplained_difference`).
-/// A masked file is thus reviewed through the diff git printed, with the masks the sides carry
-/// and nothing else changed, unless the diff and the sides disagree (counted). The diff's header lines (`diff --git`,
-/// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
-/// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
-/// cannot be masked and still name its file). A context line is checked against both sides,
-/// written from the new one. O(diff + sides) plus O(hunks × side lines) for the function
-/// context ([`shown_by_a_side`], once per hunk header; masked files only).
-// MAGI FIX (MS3 §6 loop7): the bound left the per-hunk context scan out (R6a Melchior).
+/// Header lines (`diff --git`, `index`, `---`, `+++`) are kept as they are: a secret-shaped path
+/// in one leaves the file out (a path cannot be masked and still name its file).
 ///
-/// The subset of git's unified diff it reads: lines before the first hunk and between files
-/// (`diff --git`, `index`, `---`, `+++`, rename and mode lines) are kept verbatim; a hunk opens
-/// at a `@@ -a[,b] +c[,d] @@` header (a combined diff's `@@@` header does not parse, so it
-/// gives `None`); its body lines start with ` `, `+`, `-` or `\`. Anything else
-/// inside a hunk returns `None`, and the caller then leaves the file out as `secret`, never sends
-/// the raw diff (pinned against real git output by
-/// `real_git_diffs_rebuild_unchanged_from_their_own_sides`).
+/// The subset of git's unified diff it reads: lines outside hunks are kept verbatim; a hunk
+/// opens at `@@ -a[,b] +c[,d] @@` (a combined `@@@` gives `None`); body lines start with ` `,
+/// `+`, `-` or `\`, anything else gives `None`, and the caller leaves the file out as
+/// `diff not rebuilt`, never sending the raw diff (`real_git_diffs_rebuild_unchanged_from_their_own_sides`).
+///
+/// O(diff + sides) plus O(hunks × side lines) for the function context (masked files only).
 ///
 /// # Returns
 ///
 /// The rebuilt diff and the number of lines that diverged beyond a mask, or `None`.
 // MAGI FIX (MS3 §6 loop5): the divergence was replaced silently, and the parsed subset unstated.
+// MAGI FIX (MS3 §6 loop7): the bound left the per-hunk context scan out (R6a Melchior).
 fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(String, usize)> {
     let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
     let (mut next_new, mut next_old) = (0usize, 0usize);
