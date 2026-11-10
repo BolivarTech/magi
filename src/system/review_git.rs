@@ -1503,6 +1503,32 @@ mod tests {
     }
 
     #[test]
+    fn rev_parse_verify_prints_the_full_sha_whatever_core_abbrev_says() {
+        // [MAGI S6 MS3 loop7, R3 Caspar, R5 Caspar] The history anchors and compares full SHAs
+        // (`record_history`, `history::weak_reject_if_later`); a repository's `core.abbrev` never
+        // shortens what `rev-parse --verify` prints through the runner.
+        let d = repo();
+        std::fs::write(d.path().join("a.rs"), "one\n").expect("write");
+        git(d.path(), &["add", "a.rs"]);
+        git(d.path(), &["commit", "-q", "-m", "1"]);
+        git(d.path(), &["config", "core.abbrev", "7"]);
+        let g = ScrubbedGit::new(d.path().to_path_buf());
+        let full = g
+            .run(&["rev-parse", "--verify", "HEAD^{commit}"])
+            .expect("resolves");
+        let full = full.trim();
+        assert!(
+            full.len() == 40 && full.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{full}"
+        );
+        let short = full.get(..7).expect("ascii");
+        let again = g
+            .run(&["rev-parse", "--verify", &format!("{short}^{{commit}}")])
+            .expect("resolves");
+        assert_eq!(again.trim(), full);
+    }
+
+    #[test]
     fn a_shallow_commit_is_never_reviewed_as_a_root_commit() {
         // [MAGI S6 loop 5, A1-m2] the parent of a shallow clone's tip is not in the repository:
         // the review fails typed instead of sending the whole tree as an addition.

@@ -1119,6 +1119,31 @@ mod tests {
     }
 
     #[test]
+    fn a_full_reviewed_sha_against_an_abbreviated_head_of_that_commit_stays_pending() {
+        // [MAGI S6 MS3 loop7, R3 Caspar] The other direction: `head` is resolved by `rev-parse
+        // --verify`, which prints the full name whatever `core.abbrev` says (pinned against real
+        // git by `rev_parse_verify_prints_the_full_sha_whatever_core_abbrev_says`), so a full
+        // stored SHA equals what an abbreviated `head` resolves to: no later commit, pending.
+        let full = "abc1234def5678901234567890123456789abcde";
+        let diff = format!(
+            "diff --no-color --no-ext-diff --no-textconv --no-renames --unified=0 --relative {full} abc1234 -- a.rs"
+        );
+        let git = FakeGit::from(&[
+            (
+                format!("merge-base --is-ancestor {full} abc1234").as_str(),
+                Ok(""),
+            ),
+            (diff.as_str(), Ok("")),
+            ("rev-parse --verify abc1234^{commit}", Ok(full)),
+        ]);
+        let anchored = HistoryEntry {
+            reviewed_commit: full.into(),
+            ..entry(Some(5))
+        };
+        assert_eq!(classify(&anchored, "abc1234", &git), HistoryStatus::Pending);
+    }
+
+    #[test]
     fn a_reviewed_commit_that_is_not_a_sha_stays_pending_never_a_weak_reject() {
         // [MAGI S6 MS3 loop4, R3 Melchior] The prefix comparison is exact only for a SHA. A
         // symbolic name (a hand-edited row, a future caller) compared unequal to HEAD's SHA and
