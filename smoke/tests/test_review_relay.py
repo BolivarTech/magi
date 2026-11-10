@@ -1,12 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
 # Date: 2026-11-08
-"""Unit tests for the recording relay, the review runs' setup steps and S53/S55-S57 over what it records.
-
-[MAGI S6 MS3 loop9, R7a Balthasar] S53 and S55 read only the product's own outputs and flags, and no
-smoke run reviewed a commit; the relay records every request a review sends, so the egress itself and
-RV08/RV21 end to end are observed.
-"""
+"""The recording relay, the setup steps and S53/S55-S57 over the relay's record (MAGI S6 MS3 loop9, R7a)."""
 
 import dataclasses
 import http.server

@@ -478,13 +478,10 @@ S49 covers a secret in a file's NAME; these cover its CONTENT.
 | S54 | `code-review rv22pem` over a directory holding only a toy PEM private-key block exits 2, stderr says nothing to review and its omission list is exactly `rv22pem/server.pem (secret)`, and no line of the block, its `BEGIN` and `END` lines included, appears in stdout, stderr or the run log | none: R19 reaches no model and a hang is a `FAIL` |
 
 The `<redacted: anthropic-key>` marker goes to the model only, so the harness reads the pattern name the
-product publishes instead. S53's leak check reads the process's outputs (stdout, stderr, the run log) and
-the requests themselves: R18 sends every request through the harness's recording relay
-(`runs.recording_relay`, a loopback server that keeps each request's path and body and forwards it to the
-workspace's one endpoint), so each trio prompt, embedder text and gate question is searched too. A record
-the relay could not keep whole is `CANNOT_TEST`. The leak check finds the key whole and every 8-byte window
-of it (`LEAK_SLICE_BYTES`, shared with S49); a shorter echo, or one transformed (base64, another case,
-wrapped), is a declared limit. S54 reads the omission from stderr, not from a JSON `skipped` list, because a
+product publishes instead. S53's leak check reads stdout, stderr, the run log and every request R18 sent
+through the recording relay (`runs.recording_relay`: a loopback server that keeps each request and forwards
+it to the workspace's endpoint); an incomplete record is `CANNOT_TEST`. It finds the key and every 8-byte
+window of it; a shorter or transformed echo is a declared limit. S54 reads the omission from stderr, not from a JSON `skipped` list, because a
 refusal prints no JSON document. The toy key and the block are assembled from pieces in `smoke/runs.py`
 so no scanner sees a key-shaped literal in the source.
 
@@ -495,19 +492,16 @@ S55 adds two assertions (55 scenarios and 164 assertions when it was added) and 
 | Id | Invariant | Without its environment |
 |---|---|---|
 | S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes; and the relay saw the file's doc comment embedded alone, as a chunk, and a query of the batch | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
-| S56 | R20: a commit review of `HEAD` in a two-commit history whose working-tree copy of `docrev/answer.rs` is left dirty exits 0; the relay saw the commit's doc comment embedded as a chunk, and no forwarded request carries the dirty one (RV21, RV-S36) | `CANNOT_TEST` with no reachable backend or an incomplete record |
-| S57 | R21: a buggy commit is reviewed, every line of it rewritten in the next commit and reviewed again (the reclassification marks the first entries attended), then reviewed a third time. Every review exits 0, and a trio request of the third carries a `kind=history` frame on `hist/calc.rs` (RV08) | `CANNOT_TEST` with no reachable backend, an incomplete record, or no located finding in the first review (the trio's answer: no history to serve) |
+| S56 | R20 reviews `HEAD` of two commits, the file's working-tree copy dirty: exit 0, the commit's doc comment embedded as a chunk, the dirty one in no request (RV21) | `CANNOT_TEST` with no backend or an incomplete record |
+| S57 | R21 reviews a buggy commit, a commit rewriting it, and that commit again: every review exits 0, and a trio request of the third carries a `kind=history` frame on `hist/calc.rs` (RV08) | `CANNOT_TEST` with no backend, an incomplete record, or no located finding in the first review |
 
 Without S55 the suite could not tell a working RAG from one that degrades on every run: S52 expects the
 degradation. What S55 observes is that the embedder answered, indexed the chunk and embedded the query, and no
 index degraded; whether a retrieved chunk was relevant is the model side and is never asserted. S55 costs no
 run of its own: it reads R18.
 
-**RV08 and RV21 are observed end to end** (MAGI §6 MS3 loop 9). A run's `setup` steps (`runs.Commit`,
-`runs.Invocation`) commit files in the review workspace's own repository and run the product before the
-measured run, so R20 reviews a commit and R21 chains three reviews over two commits; the relay records what
-each measured run sends. S57's history is the trio's finding, so with none there is nothing to serve, said as
-`CANNOT_TEST`, never `PASS`.
+**RV08 and RV21 end to end.** A run's `setup` steps (`runs.Commit`, `runs.Invocation`) commit files and
+run the product before the measured run. S57's history is the trio's finding: with none, `CANNOT_TEST`.
 
 **Exact strings, on purpose.** S52 and S55 compare the product's trimmed labels (`index unavailable`, `the
 embedder did not answer`) and S49 and S53 its redacted path and masked entry shapes exactly: a reworded label
