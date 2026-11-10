@@ -1721,21 +1721,32 @@ impl CodeReviewRunner for ProductionReviewRunner {
         Some(Box::new(move || {
             let git = ScrubbedGit::new(workspace);
             let deadline = std::time::Instant::now() + Duration::from_secs(POST_REPORT_LIMIT_SECS);
-            let mut warnings: Vec<String> = Vec::new();
-            for follow in follows {
-                if past(Some(deadline)) {
-                    tracing::event!(
-                        target: REVIEW_LOG_TARGET,
-                        tracing::Level::WARN,
-                        "{POST_REPORT_BOUND_REACHED}"
-                    );
-                    break;
-                }
-                warnings.extend(follow_up_work_until(&memory, &git, follow, Some(deadline)));
-            }
-            (!warnings.is_empty()).then(|| warnings.join("\n"))
+            run_follow_ups(&memory, &git, follows, deadline)
         }))
     }
+}
+
+/// Runs every follow-up in `follows`, oldest first, under `deadline`
+/// ([`POST_REPORT_LIMIT_SECS`] from the report); the joined warnings, or `None`.
+fn run_follow_ups(
+    memory: &ReviewMemory,
+    git: &dyn GitCommand,
+    follows: Vec<FollowUp>,
+    deadline: std::time::Instant,
+) -> Option<String> {
+    let mut warnings: Vec<String> = Vec::new();
+    for follow in follows {
+        if past(Some(deadline)) {
+            tracing::event!(
+                target: REVIEW_LOG_TARGET,
+                tracing::Level::WARN,
+                "{POST_REPORT_BOUND_REACHED}"
+            );
+            break;
+        }
+        warnings.extend(follow_up_work_until(memory, git, follow, Some(deadline)));
+    }
+    (!warnings.is_empty()).then(|| warnings.join("\n"))
 }
 
 /// What a review leaves for after its report: the history of a revision review (anchored to
@@ -3260,6 +3271,39 @@ mod tests {
         let mut expected = vec![first, second];
         expected.sort();
         assert_eq!(anchors, expected);
+    }
+
+    #[test]
+    fn bound_keeps_every_history() {
+        // [MAGI S6 MS3 loop8, R5 Caspar] Past the post-report bound the queue was dropped with
+        // its history (evidence a later review cannot rebuild); now only the clean-ups yield.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        git_in(&ws, &["init", "-q"]);
+        std::fs::write(ws.join("a.rs"), "fn a() {}\n").expect("a.rs");
+        git_in(&ws, &["add", "a.rs"]);
+        let mut revs = Vec::new();
+        for i in 0..3 {
+            git_in(
+                &ws,
+                &["commit", "-q", "--allow-empty", "-m", &format!("c{i}")],
+            );
+            revs.push(git_in(&ws, &["rev-parse", "HEAD"]));
+        }
+        let (_db, _mem, memory) = review_memory();
+        let follows = revs.iter().map(|r| follow_up(Some(r))).collect();
+        let past = std::time::Instant::now();
+        let _ = run_follow_ups(&memory, &ScrubbedGit::new(ws), follows, past);
+        let mut anchors: Vec<String> = memory
+            .history()
+            .all()
+            .expect("all")
+            .into_iter()
+            .map(|e| e.reviewed_commit)
+            .collect();
+        anchors.sort();
+        revs.sort();
+        assert_eq!(anchors, revs);
     }
 
     #[tokio::test]
