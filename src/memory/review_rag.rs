@@ -1261,7 +1261,9 @@ pub async fn prepare_docs(
     prep
 }
 
-/// One reindex batch for `prep`: `false` when it failed.
+/// One reindex batch for `prep`: `false` when it failed. Each source the store's own check
+/// refused (RV22's backstop) is declared withheld and leaves `doc_sources`, never only logged.
+// MAGI FIX (MS3 §6 loop9): a refused source was logged only.
 async fn index_batch(
     docs: &ReviewDocStore,
     batch: &[(DocSource, Vec<DocChunk>)],
@@ -1269,12 +1271,21 @@ async fn index_batch(
     timeout: Duration,
     prep: &mut DocPrep,
 ) -> bool {
-    let _ = prep;
-    reindex_or_degrade(docs, batch, embedder, timeout).await
+    let Some(refused) = reindex_or_degrade(docs, batch, embedder, timeout).await else {
+        return false;
+    };
+    for (source, _) in batch {
+        if refused.contains(&display_path(&source.path)) {
+            prep.doc_sources.remove(source);
+            withhold(prep, &source.path);
+        }
+    }
+    true
 }
 
-/// One [`ReviewDocStore::reindex`] under `timeout`: `true` when it wrote, `false` (with a WARN)
-/// when it failed or did not finish. A timeout writes nothing, by the store's contract: `reindex`
+/// One [`ReviewDocStore::reindex`] under `timeout`: the sources the store refused, as
+/// `display_path`, when it wrote; `None` (with a WARN) when it failed or did not finish. A
+/// timeout writes nothing, by the store's contract: `reindex`
 /// embeds first, then writes in **one** transaction with no `.await` inside, so a future dropped
 /// here never commits and the sources stay `missing`. Leaves an INFO with its duration, the
 /// rebuilt line when the index changed identity, and a WARN per source left out for a secret.
@@ -1287,13 +1298,13 @@ async fn index_batch(
 ///
 /// # Returns
 ///
-/// Whether the sources are indexed now.
+/// The refused sources when the rest is indexed now, `None` otherwise.
 pub async fn reindex_or_degrade(
     docs: &ReviewDocStore,
     sources: &[(DocSource, Vec<DocChunk>)],
     embedder: &dyn EmbeddingProvider,
     timeout: Duration,
-) -> bool {
+) -> Option<Vec<String>> {
     let started = Instant::now();
     match tokio::time::timeout(timeout, docs.reindex(sources, embedder)).await {
         Ok(Ok(stats)) => {
@@ -1317,7 +1328,7 @@ pub async fn reindex_or_degrade(
                     "a documentation source matches a secret pattern and was left out"
                 );
             }
-            true
+            Some(stats.refused)
         }
         Ok(Err(e)) => {
             let error = outward_text(&e.to_string());
@@ -1327,7 +1338,7 @@ pub async fn reindex_or_degrade(
                 error = error.as_str(),
                 "the documentation index could not be updated"
             );
-            false
+            None
         }
         Err(_) => {
             tracing::event!(
@@ -1336,7 +1347,7 @@ pub async fn reindex_or_degrade(
                 ms = millis(started.elapsed()),
                 "the documentation index was not updated in time"
             );
-            false
+            None
         }
     }
 }
@@ -2147,7 +2158,9 @@ mod tests {
         )]; // [RV21 D+B, 2026-10-20]
         let bound = Duration::from_secs(REINDEX_TIMEOUT_SECS);
         assert!(
-            reindex_or_degrade(&f.docs, &docs, &f.embedder, bound).await,
+            reindex_or_degrade(&f.docs, &docs, &f.embedder, bound)
+                .await
+                .is_some(),
             "a healthy embedder indexes"
         );
         // [CP2 MS3 loop 13] Another source: `docs` is indexed now and would be skipped without calling the embedder, so
@@ -2156,7 +2169,9 @@ mod tests {
             src("README.md", "k2"),
             vec![chunk("README.md", "Usage", "how a works, v2")],
         )];
-        assert!(!reindex_or_degrade(&f.docs, &other, &FailingEmbedder, bound).await);
+        assert!(reindex_or_degrade(&f.docs, &other, &FailingEmbedder, bound)
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -2250,7 +2265,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(r, Ok(false)),
+            matches!(r, Ok(None)),
             "the reindex bound fires before the test's own: {r:?}"
         );
     }
