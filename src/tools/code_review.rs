@@ -891,7 +891,9 @@ impl CodeReviewTool {
         let Some(deadline) = self.deadline else {
             return Ok(ReviewBudget::Unbounded);
         };
-        let spent = || ToolError::ExecutionError(SPENT_RUN_MESSAGE.to_string());
+        // MAGI FIX (MS3 §6 loop7): through `egress_text` like every error string the tool builds,
+        // so a future change that adds text to it cannot skip the mask.
+        let spent = || ToolError::ExecutionError(egress_text(SPENT_RUN_MESSAGE));
         let end = deadline
             .checked_sub(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS))
             .ok_or_else(spent)?;
