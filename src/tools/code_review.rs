@@ -333,7 +333,9 @@ pub(crate) async fn finish_after_report(
 /// Bound on the post-report work of a surface that has no run deadline and no cancellation of
 /// its own (the subcommand, the TUI), so a stuck git never pins it after the report was
 /// delivered. The reclassification stops at [`RECLASSIFY_BUDGET_SECS`] plus the git call in
-/// flight; the clean-up of the documentation index gets as much again.
+/// flight; the clean-up of the documentation index gets as much again. With several reviews
+/// queued, each still records its history within its own reclassification budget, and only the
+/// clean-ups past this bound are skipped ([`run_follow_ups`]).
 pub(crate) const POST_REPORT_LIMIT_SECS: u64 = 2 * RECLASSIFY_BUDGET_SECS;
 
 /// What the run log says when the post-report work reached its own bound
@@ -1727,7 +1729,11 @@ impl CodeReviewRunner for ProductionReviewRunner {
 }
 
 /// Runs every follow-up in `follows`, oldest first, under `deadline`
-/// ([`POST_REPORT_LIMIT_SECS`] from the report); the joined warnings, or `None`.
+/// ([`POST_REPORT_LIMIT_SECS`] from the report); the joined warnings, or `None`. Every history
+/// is recorded, past the deadline too (evidence a later review cannot rebuild, each step bounded
+/// by [`RECLASSIFY_BUDGET_SECS`]); only the derived index clean-ups yield to it
+/// (`bound_keeps_every_history`).
+// MAGI FIX (MS3 §6 loop8): the queue was dropped at the bound, its histories with it.
 fn run_follow_ups(
     memory: &ReviewMemory,
     git: &dyn GitCommand,
@@ -1736,14 +1742,6 @@ fn run_follow_ups(
 ) -> Option<String> {
     let mut warnings: Vec<String> = Vec::new();
     for follow in follows {
-        if past(Some(deadline)) {
-            tracing::event!(
-                target: REVIEW_LOG_TARGET,
-                tracing::Level::WARN,
-                "{POST_REPORT_BOUND_REACHED}"
-            );
-            break;
-        }
         warnings.extend(follow_up_work_until(memory, git, follow, Some(deadline)));
     }
     (!warnings.is_empty()).then(|| warnings.join("\n"))
@@ -3291,7 +3289,14 @@ mod tests {
             revs.push(git_in(&ws, &["rev-parse", "HEAD"]));
         }
         let (_db, _mem, memory) = review_memory();
-        let follows = revs.iter().map(|r| follow_up(Some(r))).collect();
+        let follows = (1u32..)
+            .zip(&revs)
+            .map(|(line, r)| {
+                let mut f = follow_up(Some(r));
+                f.findings[0].0.line = Some(line); // distinct entries, one per review
+                f
+            })
+            .collect();
         let past = std::time::Instant::now();
         let _ = run_follow_ups(&memory, &ScrubbedGit::new(ws), follows, past);
         let mut anchors: Vec<String> = memory
