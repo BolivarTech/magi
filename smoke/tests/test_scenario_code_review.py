@@ -5,9 +5,6 @@
 
 import dataclasses
 import json
-import pathlib
-import tempfile
-import types
 import unittest
 
 from smoke import runner as runner_module
@@ -16,7 +13,6 @@ from smoke.outcome import Outcome
 from smoke.product import ProductOutput
 from smoke.registry import DEFAULT_REGISTRY, Registry
 from smoke.runner import Ambient, Runner
-from smoke.runs import RunResult
 from smoke.scenarios import code_review  # noqa: F401 - import registers it
 from smoke.scenarios import review_context  # noqa: F401 - import registers it
 from smoke.scenarios import trio
