@@ -116,6 +116,37 @@ S49_EXPECTED_OMISSIONS = (
 #: every output and never prints it.
 S49_SECRET = runs.review_skipped_files()[1][1].split(b"=", 1)[1].strip()
 
+#: The shortest fragment of a secret the leak checks find (RV22: no byte of the
+#: secret leaves): every window this long across a needle is probed, so an echo
+#: of at least this many consecutive bytes fails. Shorter is a declared limit: 7
+#: bytes of a toy key are as likely to be ordinary text as a piece of it.
+LEAK_SLICE_BYTES = 8
+
+
+def _with_slices(needles):
+    """Each needle and every window of :data:`LEAK_SLICE_BYTES` across it.
+
+    MAGI FIX (S6 MS3 loop7): only whole needles were looked for, so a product
+    that echoed part of a secret passed. MAGI FIX (MS3 §6 loop8): one inner
+    slice only; every window is probed (the toy secrets are non-uniform, so no
+    window is ordinary text). MAGI FIX (MS3 §6 loop9): moved here for S49, the
+    floor lowered from 12 bytes to 8.
+
+    Args:
+        needles: The secrets, as bytes.
+
+    Returns:
+        tuple: Every needle followed by each of its windows, in order; a needle
+        no longer than a window is its only piece.
+
+    Example:
+        >>> _with_slices((b"0123456789", b"short"))
+        (b'0123456789', b'01234567', b'12345678', b'23456789', b'short')
+    """
+    return tuple(piece for n in needles
+                 for piece in (n, *(n[i:i + LEAK_SLICE_BYTES]
+                                    for i in range(len(n) - LEAK_SLICE_BYTES + 1))))
+
 #: The product's wording that S48 and S49 look for in stderr. Every stderr
 #: text S48-S51 parse (these two phrases, ``; left out: ``, ``, and N more``,
 #: :data:`OMISSION_CAUSES` and :data:`BUDGET_PATTERN`) is pinned against
@@ -931,10 +962,13 @@ def _secret_finding(run):
         ``PASS``: a refusal may stop before logging, and an absent log carries
         nothing.
     """
+    # MAGI FIX (MS3 §6 loop9): the whole key only; the key is the file's name now,
+    # the value a log most often echoes cut short, so every window is probed.
+    needles = _with_slices((S49_SECRET,))
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
     leaked = [name for name, bodies in outputs
-              if any(S49_SECRET in body for body in bodies)]
+              if any(n in body for n in needles for body in bodies)]
     if leaked:
         return _finding(S49_ASSERTIONS, 2, Outcome.FAIL, "R14",
                         "the toy secret appears in %s" % ", ".join(leaked))

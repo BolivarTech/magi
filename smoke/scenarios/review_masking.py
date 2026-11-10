@@ -76,33 +76,10 @@ S53_EXPECTED_MASKED = [{"path": runs.REVIEW_MASKED_FILE, "cause": "secret",
 #: What S54's omission list must read: the key-block file, as ``secret``.
 S54_EXPECTED_OMISSIONS = [(runs.REVIEW_KEYBLOCK_FILE, "secret")]
 
-#: Bytes of each window taken across a needle, so a truncated echo of a secret
-#: still fails the leak check (RV22: no byte of the secret leaves).
-LEAK_SLICE_BYTES = 12
-
-
-def _with_slices(needles):
-    """Each needle and every window of :data:`LEAK_SLICE_BYTES` across it.
-
-    MAGI FIX (S6 MS3 loop7): only whole needles were looked for, so a product
-    that echoed part of a secret passed. MAGI FIX (MS3 §6 loop8): one inner
-    slice only, so an echo of any other part passed; every window is probed
-    (the toy secrets are non-uniform, so no window is ordinary text).
-
-    Args:
-        needles: The secrets, as bytes.
-
-    Returns:
-        tuple: Every needle followed by each of its windows, in order; a needle
-        no longer than a window is its only piece.
-
-    Example:
-        >>> _with_slices((b"0123456789abcd", b"short"))
-        (b'0123456789abcd', b'0123456789ab', b'123456789abc', b'23456789abcd', b'short')
-    """
-    return tuple(piece for n in needles
-                 for piece in (n, *(n[i:i + LEAK_SLICE_BYTES]
-                                    for i in range(len(n) - LEAK_SLICE_BYTES + 1))))
+#: The leak probe S49 shares (:func:`smoke.scenarios.code_review._with_slices`).
+#: MAGI FIX (MS3 §6 loop9): one definition for S49, S53 and S54; the floor is 8 bytes.
+LEAK_SLICE_BYTES = code_review.LEAK_SLICE_BYTES
+_with_slices = code_review._with_slices
 
 
 def _no_capture(texts, run_id):

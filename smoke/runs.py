@@ -846,7 +846,9 @@ REVIEW_ROOT_PATH = "."
 #: the first a binary; the second carries a key-shaped toy secret. Both are
 #: worth nothing.
 _TOY_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-_TOY_SECRET_FILE = b"token = sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"  # allow-secret-scan
+#: MAGI FIX (MS3 §6 loop9): non-uniform, like S53's, so no window of it is ordinary text.
+_TOY_SECRET_FILE = (b"token = sk-ant-api03-"  # allow-secret-scan
+                    + b"".join(b"%02dA" % i for i in range(9)) + b"A\n")
 
 #: The name of R14's secret file: the toy key itself. Since T3.7 (RV22 amended)
 #: a secret in a file's CONTENT is masked and the file reviewed, which would
