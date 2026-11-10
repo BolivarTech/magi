@@ -177,7 +177,7 @@ impl ReviewHistoryStore {
                 row.id, row.status
             ))
         })?;
-        // MAGI FIX (MS3 §6 loop4): a line out of range read silently as no line.
+        // MAGI FIX (MS3 §6 loop4): a line out of range read silently as no line; now an error.
         let line = row
             .line
             .map(|l| {

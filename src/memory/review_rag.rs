@@ -170,7 +170,8 @@ pub struct StoreRag<'a> {
     /// The git each served history entry is checked against (`served_as_validated` on `HEAD`);
     /// `None` serves no history entry, since none can be checked.
     pub history_git: Option<&'a dyn GitCommand>,
-    /// `served_as_validated` by reviewed commit, so entries sharing one cost one git call.
+    /// `served_as_validated` by reviewed commit, so entries sharing one cost one git call. Sound
+    /// while its verdict reads only the entry's commit (`merge-base --is-ancestor <commit> HEAD`).
     pub on_line: Mutex<HashMap<String, bool>>,
     /// The ids of the history entries already counted as withheld, so an entry two batches meet
     /// counts once.
