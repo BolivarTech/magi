@@ -472,22 +472,18 @@ struct Faces {
 
 /// Runs a review, in the order of the spec's §5.0.
 ///
-/// 1. Resolve the input and its single content source, wrapped in [`CachedSource`] so every
-///    stage reads the same bytes, once.
+/// 1. Resolve the input and its single content source, a [`CachedSource`] (same bytes, once).
 /// 2. Filter what never leaves the process and what is not code.
-/// 3. Build the lexical index and plan the batches against the pool window; with a context
-///    source (`deps.rag`), each item's containing unit is charged at planning. All of it is
-///    local: no model and no endpoint is called.
-/// 4. With an explicit `--timeout` or a caller's deadline, check the budget
-///    ([`precheck_budget`], over [`pre_budget`]) on the batch count alone, before any context
-///    is assembled: a refused review calls no model and no endpoint. Then the context source is
-///    bound and each batch's context assembled, scanned and recorded; the budget is read again,
-///    and a preparation that overran its declared reserve runs on what is left. Steps 1-4 are
-///    the preparation, measured apart (with [`RagSource::index_ms`]), never charged to the total.
-/// 5. Run one `consult` per batch, in series, its context after its code under
-///    [`CONTEXT_HEADING`]: on the normal `consult` clock without `--timeout`, else on what is
-///    left split over the pending batches. A batch whose wall clock ran out stops the batches
-///    (the cut ones declared); any other failure is declared and the next batch runs.
+/// 3. Build the lexical index and plan the batches against the pool window, each item's
+///    containing unit charged with a context source (`deps.rag`); all local.
+/// 4. With an explicit `--timeout` or a caller's deadline, check the budget ([`precheck_budget`])
+///    on the batch count alone, before any context: a refused review calls no one. Then each
+///    batch's context is assembled, scanned, held to the batch limit and rendered; the budget is
+///    read again (an overrun of the declared reserve runs on what is left). Steps 1-4 are the
+///    preparation, measured apart (with [`RagSource::index_ms`]), never charged to the total.
+/// 5. Run one `consult` per batch, in series, on the `consult` clock or, with `--timeout`, on
+///    what is left split over the pending batches; a batch out of clock stops the rest
+///    (declared), any other failure is declared and the next batch runs.
 /// 6. Validate each completed batch against what all completed batches showed.
 /// 7. Consolidate.
 /// 8. Run the gate once per consolidated finding, within what is left of the `--timeout`.
@@ -602,15 +598,11 @@ pub async fn run_review(
     // again and before the clock starts, so no batch's wall clock is computed before work the
     // total never counted (R4 Caspar).
     let prompts = render_prompts(&batches, &contexts)?;
-    // Read again: the preparation spent part of a caller's deadline, and the total is what is
-    // left when it ends. The check above reserved the preparation's bound; a preparation that
-    // overran it has already made its outbound calls, so a refusal now would come after bytes
-    // left the process (§5.0 stage 4). `sent_out` is the declared reserve, not the egress seen:
-    // a source that reserved for calls may have sent them, so it runs on what is left; only a
-    // review whose source declared no outbound call (no reserve) may still be refused here.
-    // MAGI FIX (MS3 §6 loop2): it refused after the embedder was called; now the review runs on
-    // what is left, its ceiling declared below the configured one, and the clock cuts and
-    // declares the batches that do not fit (RV06, M-5).
+    // Read again: the total is what is left of a caller's deadline. A preparation that overran
+    // its reserve already made its calls, so a refusal now would come after the egress (§5.0
+    // stage 4): a source that declared a reserve (`sent_out`) runs on what is left.
+    // MAGI FIX (MS3 §6 loop2): it refused after the embedder was called; now it runs on what is
+    // left, its ceiling declared below the configured one, the clock cutting what does not fit.
     let sent_out = deps
         .rag
         .is_some_and(|rag| rag.outbound_reserve_secs(planned) > 0);
@@ -1022,18 +1014,15 @@ fn review_total(
 /// The RV06 budget pre-check (§5.0 stage 4): with an explicit `--timeout` or a caller's
 /// deadline, whether `batches` fit the review's total ([`pre_budget`]).
 ///
-/// It needs only the number of batches, which does not depend on the RAG, so a caller runs it
-/// before any step of the preparation that calls a model or an endpoint (the documentation
-/// indexing and its embedder, the history, a batch's context); a refused review then sends no
-/// byte out of the process. The duration of the preparation (`prep_ms`) keeps counting all of
-/// it, whichever side of the check it ran on.
+/// It needs only the batch count (independent of the RAG), so a caller runs it before any step
+/// that calls a model or an endpoint (indexing, history, a batch's context): a refused review
+/// sends no byte out. `prep_ms` counts the whole preparation either side of it.
 ///
-/// An explicit `--timeout` is counted from the first trio call, so the preparation never spends
-/// it. A calling run's deadline is wall clock and the preparation does spend it: the caller
-/// passes in `reserve_secs` the bound of the outbound preparation still to run (the
-/// documentation indexing, each batch's query), and the check holds that much of the deadline
-/// back, so a later check cannot refuse the review after those calls were made. The reserve
-/// then counts in the minimum the error names.
+/// An explicit `--timeout` counts from the first trio call, so the preparation never spends it.
+/// A calling run's deadline is wall clock: the caller passes in `reserve_secs` the bound of the
+/// outbound preparation still to run, held back from the deadline (and counted in the error's
+/// minimum), so a later check cannot refuse the review after those calls. `Budget` has one cause,
+/// each batch's wall clock below the floor's; its `limit` names the total that set it.
 ///
 /// # Arguments
 ///
