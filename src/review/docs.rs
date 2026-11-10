@@ -157,8 +157,9 @@ pub const SYMLINK_MODE: &str = "120000";
 /// The three quote characters of a Python docstring opener.
 const PY_TRIPLE_QUOTES: [&str; 2] = ["\"\"\"", "'''"];
 
-/// Whether `path` is a documentation source by path: `README.md` or `CLAUDE.md` at the root, or
-/// anything under `docs/` or `adr/`.
+/// Whether `path` is a Markdown documentation source by path: `README.md` or `CLAUDE.md` at the
+/// root, or a `.md` under `docs/` or `adr/`. Other files there (`.rst`, `.txt`) are not indexed,
+/// a declared limit (`docs_txt_is_not_a_doc_source`).
 ///
 /// O(`DOC_SOURCES`) per call.
 ///
@@ -170,14 +171,16 @@ const PY_TRIPLE_QUOTES: [&str; 2] = ["\"\"\"", "'''"];
 /// assert!(is_doc_source("docs/guide.md"));
 /// assert!(!is_doc_source("sub/CLAUDE.md"));
 /// ```
+// MAGI FIX (MS3 §6 loop10): `docs/api.txt` was a source that never yields chunks.
 pub fn is_doc_source(path: &str) -> bool {
-    DOC_SOURCES.iter().any(|s| {
-        if s.ends_with('/') {
-            path.starts_with(s)
-        } else {
-            path == *s
-        }
-    })
+    path.ends_with(".md")
+        && DOC_SOURCES.iter().any(|s| {
+            if s.ends_with('/') {
+                path.starts_with(s)
+            } else {
+                path == *s
+            }
+        })
 }
 
 /// Builds the chunk (or the bounded parts of it) for one section.
