@@ -1099,30 +1099,23 @@ fn reindex_batches(
 ///
 /// 1. **List**: `rev` = the reviewed revision's new side, listed through `git` without reading
 ///    any file; `None` = the working tree, each of `worktree_paths` read through `sources` and
-///    keyed by [`worktree_key`]. Only the paths `keep` accepts that can yield a chunk
-///    ([`yields_doc_chunks`]: a Markdown doc source, or a file whose doc comments are chunked)
-///    count; a path that quotes a secret is never read or stored (its
-///    path would sit in a clear column) and counts as withheld.
-/// 2. **Index what is missing**: each source the store lacks is read through `sources`, chunked
-///    with `netted_chunks` (every one-line secret masked, RV22 amended; every chunk netted
-///    before any embedding), then `bounded`. A source indexed with a mask is declared in
-///    `masked_sources`; one holding a private-key block, or a chunk the net drops, is withheld.
-///    The rest is indexed in batches of at most [`EMBED_BATCH_ITEMS`] chunks, one
-///    [`reindex_or_degrade`] each, given what is left of `timeout`; what a batch wrote stays.
-/// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails (a revision source git
-///    lists but the content source cannot give back included), and `timeout` itself,
+///    keyed by [`worktree_key`]. Only paths `keep` accepts that can yield a chunk
+///    ([`yields_doc_chunks`]) count; a path that quotes a secret is never read or stored and
+///    counts as withheld.
+/// 2. **Index what is missing**: each source the store lacks is read, chunked with
+///    `netted_chunks` (one-line secrets masked, every chunk netted before any embedding), then
+///    `bounded`. A masked source is declared in `masked_sources`; one holding a private-key
+///    block, or a chunk the net drops, is withheld. The rest is indexed in batches of at most
+///    [`EMBED_BATCH_ITEMS`] chunks, one [`reindex_or_degrade`] each; what a batch wrote stays.
+/// 3. **Degrade (B)**: a listing, `missing`, read or reindex that fails, and `timeout` itself,
 ///    set `docs_unavailable` with a WARN; the first failing batch stops the rest. The size cap
-///    only cuts (declared as `size_capped`), it never degrades. The two read failures differ on
-///    purpose: a revision's source that git lists but cannot give back means that revision's
-///    index cannot be completed, and U29 then serves no documentation rather than a partial
-///    one; a working-tree file that cannot be read is one the review itself leaves out (MS2's
-///    rule for a listed file), so it is not part of the revision's documentation at all.
+///    only cuts (`size_capped`). A revision's source git lists but cannot give back degrades
+///    (U29: no partial index); an unreadable working-tree file is one the review leaves out.
 ///
-/// Never fails. `timeout` bounds the whole preparation, checked between steps and sources (a git
-/// call or read in flight ends by its own bound). O(listed sources + bytes read).
+/// Never fails. `timeout` bounds the whole preparation, checked between steps and sources.
+/// O(listed sources + bytes read).
 ///
 /// # Arguments
-///
 /// * `docs` - The documentation index.
 /// * `git` - The review's git; `None` without a repository.
 /// * `rev` - The reviewed revision's new side, or `None` for the working tree.
@@ -1269,17 +1262,12 @@ pub async fn prepare_docs(
 }
 
 /// One [`ReviewDocStore::reindex`] under `timeout`: `true` when it wrote, `false` (with a WARN)
-/// when it failed or did not finish. A reindex is all or nothing, so a timeout writes nothing
-/// and the next review tries the same sources again. That rests on the store's contract, not on
-/// this function: `reindex` embeds first and then writes every row in **one** transaction with
-/// no `.await` inside it (its rustdoc, "all or nothing"; pinned by
-/// `a_reindex_whose_embedder_fails_leaves_the_previous_index_whole` in `memory::review_docs`), so
-/// a future dropped here is dropped before that transaction starts, and the sources stay
-/// `missing`. A store that committed per batch would break this and must change it here too. Leaves an INFO with its duration, and the
-/// fixed rebuilt line when the index changed identity.
+/// when it failed or did not finish. A timeout writes nothing, by the store's contract: `reindex`
+/// embeds first, then writes in **one** transaction with no `.await` inside, so a future dropped
+/// here never commits and the sources stay `missing`. Leaves an INFO with its duration, the
+/// rebuilt line when the index changed identity, and a WARN per source left out for a secret.
 ///
 /// # Arguments
-///
 /// * `docs` - The documentation index.
 /// * `sources` - Whole sources with their chunks.
 /// * `embedder` - The `[embedding]` embedder.
