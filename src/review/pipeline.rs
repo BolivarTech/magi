@@ -5458,6 +5458,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_batch_whose_wall_clock_is_zero_is_cut_without_calling_the_trio() {
+        // [MAGI S6 MS3 loop7, R4 Caspar] A zero wall still polled the consult future once, so a
+        // prompt could leave the process after the budget was spent; it is cut before the call.
+        let batch = |index| ReviewBatch {
+            index,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![],
+        };
+        let batches = vec![batch(0), batch(1)];
+        let prompts = vec!["a".to_string(), "b".to_string()];
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let clock = FakeClock::default();
+        let timer = ReviewTimer {
+            clock: &clock,
+            t0: 0,
+            total: Some(1),
+        };
+        let mut summary = ReviewSummary::default();
+        let done = run_batches(&batches, &prompts, &consult, &timer, &mut summary).await;
+        assert!(done.is_empty());
+        assert_eq!(consult.calls(), 0, "the trio was called with no time left");
+        let cut: Vec<usize> = summary.failed_batches.iter().map(|(k, _)| *k).collect();
+        assert_eq!(cut, vec![0, 1]);
+    }
+
+    #[tokio::test]
     async fn a_preparation_that_overran_its_reserve_runs_on_what_is_left_never_refused() {
         // [MAGI S6 MS3 loop2, R4 Caspar/Melchior] the check after the context preparation refused
         // a review whose preparation overran the reserve it declared: by then its outbound calls
