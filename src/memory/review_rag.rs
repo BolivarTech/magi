@@ -1498,6 +1498,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn unindexed_source_is_skipped() {
+        // [MAGI S6 MS3 loop8, R2 Caspar] A source `bounded` cut stays in `doc_sources` without a
+        // row; the search loads what is indexed and skips it, never an error.
+        let f = RagFixture::new(&[]).await;
+        f.docs
+            .reindex(
+                &[(src("d.md", "k"), vec![chunk("d.md", "A", "x")])],
+                &f.embedder,
+            )
+            .await
+            .expect("indexed");
+        let mut rag = f.rag(true);
+        rag.doc_sources = BTreeSet::from([src("d.md", "k"), src("cut.md", "k2")]);
+        let hits = rag
+            .search_docs(&f.docs, &[0.5, 0.5, 0.5])
+            .expect("searched");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.path, "d.md");
+    }
+
     /// A git for which every reviewed commit is on `HEAD`'s line (the fixture's history is).
     struct OnHeadsLine;
     impl GitCommand for OnHeadsLine {
