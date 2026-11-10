@@ -225,6 +225,14 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
         None
     }
 
+    /// Whether [`Self::after_report`] would return work, without taking it.
+    ///
+    /// # Returns
+    /// `true` when work is queued.
+    fn has_after_report(&self) -> bool {
+        false
+    }
+
     /// The same runner without the review stores, for a review asked with `--no-memory` on a
     /// surface whose runner holds them (the TUI's): no documentation, no history read or
     /// written, no embedder called.
@@ -247,7 +255,7 @@ pub(crate) type PostReport = Box<dyn FnOnce() -> Option<String> + Send>;
 
 /// What the tool's result says when the run had no time left for the post-report work.
 const POST_REPORT_SKIPPED: &str =
-    "note: the review history and the documentation index clean-up were skipped: the run's time is spent";
+    "note: the review history and the documentation index clean-up are left for the next review: the run's time is spent";
 
 /// What a surface says when the post-report work did not finish before the run ended.
 const POST_REPORT_CUT: &str =
@@ -256,7 +264,8 @@ const POST_REPORT_CUT: &str =
 /// Runs the work [`CodeReviewRunner::after_report`] leaves, off the async runtime
 /// (`spawn_blocking`), bounded by `limit` and `cancel` when given.
 ///
-/// When `limit` is zero the work is skipped; when `limit` passes or `cancel` fires first, the
+/// When `limit` is zero the work is not taken: it stays queued for the runner's next review
+/// (`with_no_time_left_the_post_report_step_is_skipped_and_said`); when `limit` passes or `cancel` fires first, the
 /// surface goes on and the work is left to finish on its blocking thread (each git call inside
 /// has its own bound). Both are logged and returned as a note.
 ///
@@ -272,8 +281,12 @@ pub(crate) async fn finish_after_report(
     limit: Option<Duration>,
     cancel: Option<&CancellationToken>,
 ) -> Option<String> {
-    let work = runner.after_report()?;
+    // MAGI FIX (MS3 §6 loop7): the work was taken before the zero check and dropped; it is now
+    // left queued, so the runner's next review (the TUI's shared runner) still does it.
     if limit.is_some_and(|l| l.is_zero()) {
+        if !runner.has_after_report() {
+            return None;
+        }
         tracing::event!(
             target: REVIEW_LOG_TARGET,
             tracing::Level::WARN,
@@ -281,6 +294,7 @@ pub(crate) async fn finish_after_report(
         );
         return Some(POST_REPORT_SKIPPED.to_string());
     }
+    let work = runner.after_report()?;
     let task = tokio::task::spawn_blocking(work);
     let bounded = async {
         match limit {
@@ -1674,6 +1688,15 @@ impl CodeReviewRunner for ProductionReviewRunner {
     /// new side) and cleans the documentation index, after the report ([`follow_up_work`]), as
     /// owned work over its own git runner, so it can run on a blocking thread. Every pending
     /// review is taken, oldest first: one whose surface reports later finds its work done.
+    fn has_after_report(&self) -> bool {
+        self.parts.memory.is_some()
+            && !self
+                .follow_up
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+    }
+
     fn after_report(&self) -> Option<PostReport> {
         let follows = std::mem::take(
             &mut *self
@@ -2891,6 +2914,9 @@ mod tests {
                 failure: None,
             })
         }
+        fn has_after_report(&self) -> bool {
+            self.release.lock().expect("lock").is_some()
+        }
         fn after_report(&self) -> Option<PostReport> {
             let rx = self.release.lock().expect("lock").take()?;
             let started = Arc::clone(&self.started);
@@ -2965,6 +2991,9 @@ mod tests {
             !started.load(std::sync::atomic::Ordering::SeqCst),
             "the work never ran"
         );
+        // [MAGI S6 MS3 loop7, R5 Melchior] Deferred, not dropped: the work was taken and thrown
+        // away; it stays queued for the runner's next review (the TUI shares one runner).
+        assert!(runner.after_report().is_some(), "the work was dropped");
     }
 
     /// The SHA [`ShaGit`] resolves every revision to.
