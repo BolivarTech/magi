@@ -1517,6 +1517,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn history_items_carry_no_span() {
+        // [MAGI S6 MS3 loop8, R2 Melchior] A history item's text is no span of its file, yet it
+        // carried `lines`, the field a later stage could read as reviewed lines.
+        let e = HistoryEntry {
+            id: "i".into(),
+            file: "a.rs".into(),
+            line: Some(5),
+            reviewed_commit: "c1".into(),
+            title: "t".into(),
+            detail: "d".into(),
+            status: HistoryStatus::Attended,
+        };
+        assert_eq!(history_item(e).lines, None);
+    }
+
     #[tokio::test]
     async fn timeout_cause_names_its_bound() {
         // [MAGI S6 MS3 loop8, R2 Melchior] The cause printed REINDEX_TIMEOUT_SECS whatever bound
