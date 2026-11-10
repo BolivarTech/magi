@@ -823,8 +823,10 @@ impl ReviewMemory {
     ///
     /// # Errors
     ///
-    /// [`MemoryError::Storage`] when the dimension is still unknown or the schema cannot be
-    /// checked, [`MemoryError::Crypto`] when the key cannot be duplicated.
+    /// [`MemoryError::Storage`] when the probe fails or answers other than exactly one non-empty
+    /// vector (`a_dimension_probe_answered_with_other_than_one_vector_opens_no_store`), when the
+    /// dimension is still unknown or the schema cannot be checked, [`MemoryError::Crypto`] when
+    /// the key cannot be duplicated.
     pub async fn doc_store(
         &self,
         embedder: &dyn EmbeddingProvider,
@@ -835,8 +837,11 @@ impl ReviewMemory {
             // Its vectors are not used: a successful call sets the dimension; a failed one leaves
             // it at 0, checked right below.
             // MAGI FIX (MS3 §6 loop5): its error was discarded; the run log now says why.
+            // MAGI FIX (MS3 §6 loop7): any successful answer set the identity; like a query, the
+            // probe must answer exactly one non-empty vector, or no store opens.
             let failure = match tokio::time::timeout(bound, embedder.embed(&probe)).await {
-                Ok(Ok(_)) => None,
+                Ok(Ok(v)) if v.len() == 1 && v.iter().all(|x| !x.is_empty()) => None,
+                Ok(Ok(_)) => Some("the probe was not answered with one vector".to_string()),
                 Ok(Err(e)) => Some(outward_text(&e.to_string())),
                 Err(_) => Some(format!("no answer within {DIMENSION_PROBE_TIMEOUT_SECS} s")),
             };
@@ -847,6 +852,9 @@ impl ReviewMemory {
                     error = error.as_str(),
                     "the embedder's dimension probe failed"
                 );
+                return Err(MemoryError::Storage(format!(
+                    "the embedder's dimension probe failed: {error}"
+                )));
             }
         }
         if embedder.dim() == 0 {
