@@ -1197,6 +1197,12 @@ pub async fn prepare_docs(
         Ok(missing) => missing.into_iter().collect(),
         Err(e) => return degraded(prep, &outward_text(&e.to_string()), started),
     };
+    // MAGI FIX (MS3 §6 loop9): a slow `missing` read (one synchronous SQLite query, its lock
+    // wait bounded by the busy timeout) was not checked against the bound.
+    if Instant::now() >= deadline {
+        let cause = format!("not indexed within {} s", timeout.as_secs());
+        return degraded(prep, &cause, started);
+    }
     let mut chunked = Vec::new();
     for (source, bytes) in pairs.into_iter().filter(|(s, _)| missing.contains(s)) {
         if Instant::now() >= deadline {
