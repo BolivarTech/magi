@@ -1073,9 +1073,20 @@ pub fn precheck_budget(
 }
 
 /// Whether the second budget check's `e` lets a review that already called out run on what is
-/// left of the run (RV06, the loop-2 decision).
+/// left of the run (RV06, the loop-2 decision). Only a refusal set by the run's deadline does:
+/// `Budget` has one cause (each batch below the floor's wall clock) and `limit` names the total
+/// that set it, so the explicit `--timeout`'s refusal is never swallowed
+/// (`timeout_floor_never_swallowed`).
+// MAGI FIX (MS3 §6 loop9): every budget refusal was caught here.
 fn runs_on_overrun(e: &ReviewError, sent_out: bool) -> bool {
-    sent_out && matches!(e, ReviewError::Budget { .. })
+    sent_out
+        && matches!(
+            e,
+            ReviewError::Budget {
+                limit: BudgetLimit::RunDeadline,
+                ..
+            }
+        )
 }
 
 /// `e` with its budget bound set to `limit` (any other error unchanged), so the message names the
