@@ -1367,7 +1367,7 @@ enum ContextEgress {
 }
 
 /// A context item as it may leave the process (RV22 amended): each one-line secret of its text
-/// or label masked, and the text escaped for its frame as the prompt writes it (a mask may sit
+/// or label masked, and both escaped for its frame as the prompt writes it (a mask may sit
 /// next to `<<`; [`escape_fence`] is a fixed point, so a source that escaped already is
 /// unchanged), with the first pattern found. An item whose path quotes a secret (a path cannot
 /// be masked and still name its file) or whose text or label holds a private-key block (RV22's
@@ -1389,13 +1389,21 @@ fn context_egress(item: ContextItem) -> ContextEgress {
     {
         return ContextEgress::Withhold(item.file);
     }
+    // MAGI FIX (MS3 §6 loop8): the label skipped `escape_fence`; it is escaped like the text.
     let Some(pattern) = find_secret(&item.text).or_else(|| find_secret(&item.label)) else {
-        let text = escape_fence(&item.text);
-        return ContextEgress::Send(ContextItem { text, ..item }, None);
+        let (text, label) = (escape_fence(&item.text), escape_fence(&item.label));
+        return ContextEgress::Send(
+            ContextItem {
+                text,
+                label,
+                ..item
+            },
+            None,
+        );
     };
     let masked = ContextItem {
         text: escape_fence(&mask_secrets(&item.text)),
-        label: mask_secrets(&item.label),
+        label: escape_fence(&mask_secrets(&item.label)),
         ..item
     };
     if holds_secret(&masked) {
