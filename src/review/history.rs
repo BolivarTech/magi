@@ -500,11 +500,21 @@ pub fn entries_from_review(
         .collect()
 }
 
-/// The END markers of the private-key blocks RV22 leaves out (PEM and OpenPGP armor, SSH2), each
-/// as `(start of the line, text the line must also hold)`, compared without ASCII case.
-const KEY_BLOCK_END_MARKERS: &[(&str, &str)] = &[
-    ("-----END ", "PRIVATE KEY"),
-    ("---- END SSH2 ", "PRIVATE KEY"),
+/// The five dashes that open and close a PEM or OpenPGP armor line.
+const ARMOR_DASHES: &str = "-----";
+/// The four dashes that open and close an SSH2 armor line.
+const SSH2_DASHES: &str = "----";
+/// The text every private-key END line holds.
+const PRIVATE_KEY: &str = "PRIVATE KEY";
+
+/// The END markers of the private-key blocks RV22 leaves out, each as `(dashes the line starts
+/// with, word right after them, text the line must also hold)`, compared without ASCII case. The
+/// first matches the PEM footers (plain, RSA, EC, OPENSSH, ENCRYPTED) and the OpenPGP one (PGP
+/// ... BLOCK); the second the SSH2 one. Pinned by `canonical_footers_are_recognized`.
+// MAGI FIX (MS3 §6 loop8): built from named dashes, the review tool mangled the joined literal.
+const KEY_BLOCK_END_MARKERS: &[(&str, &str, &str)] = &[
+    (ARMOR_DASHES, "END ", PRIVATE_KEY),
+    (SSH2_DASHES, " END SSH2 ", PRIVATE_KEY),
 ];
 
 /// Whether a finding's texts quote a private-key block that no single joined string shows by its
@@ -529,9 +539,11 @@ fn quotes_a_split_key_block(titles: &[String], details: &[String]) -> bool {
 fn holds_key_block_end(text: &str) -> bool {
     text.lines().any(|line| {
         let line = line.trim().to_ascii_uppercase();
-        KEY_BLOCK_END_MARKERS
-            .iter()
-            .any(|(start, holds)| line.starts_with(start) && line.contains(holds))
+        KEY_BLOCK_END_MARKERS.iter().any(|(dashes, word, holds)| {
+            line.strip_prefix(dashes)
+                .is_some_and(|rest| rest.starts_with(word))
+                && line.contains(holds)
+        })
     })
 }
 
@@ -972,6 +984,34 @@ mod tests {
             concat!("---- ", "END SSH2 ENCRYPTED PRIVATE KEY ----")
         )];
         assert!(entries_from_review(&[(ssh2, judged(GateState::Kept))], "c1").is_empty());
+    }
+
+    #[test]
+    fn canonical_footers_are_recognized() {
+        // [MAGI S6 MS3 loop8, R3 Caspar/Melchior] The review tool showed the armor dashes
+        // mangled; the markers are built from named dash constants, checked here against an
+        // independent count, and every canonical footer built from them keeps the body out.
+        use crate::review::gate::GateState;
+        assert_eq!(
+            (ARMOR_DASHES, SSH2_DASHES),
+            ("-".repeat(5).as_str(), "-".repeat(4).as_str())
+        );
+        let d = ARMOR_DASHES;
+        let footers = [
+            format!("{d}END {PRIVATE_KEY}{d}"),
+            format!("{d}END RSA {PRIVATE_KEY}{d}"),
+            format!("{d}END OPENSSH {PRIVATE_KEY}{d}"),
+            format!("{d}END PGP {PRIVATE_KEY} BLOCK{d}"),
+            format!("{SSH2_DASHES} END SSH2 ENCRYPTED {PRIVATE_KEY} {SSH2_DASHES}"),
+        ];
+        for footer in footers {
+            assert!(holds_key_block_end(&footer), "{footer}");
+            let mut f = found("a.rs", 3, "see the key");
+            f.details = vec![format!(
+                "{d}BEG IN {PRIVATE_KEY}{d}\nMIIEvQIBADANBg\n{footer}"
+            )];
+            assert!(entries_from_review(&[(f, judged(GateState::Kept))], "c1").is_empty());
+        }
     }
 
     #[test]
