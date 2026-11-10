@@ -283,22 +283,26 @@ impl LexicalIndex {
         places.push(entry);
     }
 
-    /// Records the named top-level units of `text` as definitions: a function, a method, a type
-    /// (class, struct, enum, trait) or a module. An impl block is not a definition of its type, and
-    /// the gap and declaration-group units an extractor emits carry a label, not a name.
-    /// O(bytes of `text`) for the extraction.
-    ///
-    /// Known limitation: the extractor yields top-level units only, so the methods inside an
-    /// `impl`, `class` or `trait` block are never definitions, and a call to one finds no
-    /// definition in RV07(2) (in Rust or Java, most called names). Splitting each block one
-    /// level down (`LanguageExtractor::split_block`, as the containing-unit lookup already does)
-    /// would cover them; it is not done in v0.25.0.
+    /// Records the named units of `text` as definitions: a function, a method, a type (class,
+    /// struct, enum, trait) or a module, at the top level and one level down a block (an `impl`,
+    /// class, trait or module, cut by [`LanguageExtractor::split_block`] as the containing-unit
+    /// lookup does), so a method is a definition (`methods_are_retrieved_as_defs`). An impl
+    /// block is not a definition of its type; a block's own header pieces, and the gap and
+    /// declaration-group units, carry no new name. O(bytes of `text`) for the extraction.
     // MAGI FIX (Loop1 r1, M5): the limitation is declared where it lives.
+    // MAGI FIX (MS3 §6 loop9): methods were never recorded; blocks are split one level now.
     fn record_definitions(&mut self, extractor: &ExtractorKind, file: &str, text: &str) {
         // MAGI FIX (MS3 §6 loop5): the duplicate check scanned each name's list, O(n^2) for a
         // name defined many times in one file (generated code); spans seen are now a set.
         let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
-        for unit in extractor.extract_units(text, file, ChangedLines::All) {
+        let units = extractor.extract_units(text, file, ChangedLines::All);
+        let members = units.iter().flat_map(|block| {
+            extractor
+                .split_block(block)
+                .into_iter()
+                .filter(move |p| p.kind != block.kind || p.name != block.name)
+        });
+        for unit in units.iter().cloned().chain(members) {
             if !matches!(
                 unit.kind,
                 UnitKind::Function
