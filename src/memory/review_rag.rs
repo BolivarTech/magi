@@ -1003,7 +1003,7 @@ fn list_worktree(
     paths: &[String],
     wanted: &dyn Fn(&str) -> bool,
     deadline: Instant,
-    _timeout: Duration,
+    timeout: Duration,
     prep: &mut DocPrep,
 ) -> Result<Vec<Listed>, String> {
     let mut listed = Vec::new();
@@ -1014,7 +1014,7 @@ fn list_worktree(
         .filter(|p| wanted(p) && seen.insert(p.as_str()))
     {
         if Instant::now() >= deadline {
-            return Err(format!("not listed within {REINDEX_TIMEOUT_SECS} s"));
+            return Err(format!("not listed within {} s", timeout.as_secs()));
         }
         if find_secret(path).is_some() {
             listed.push((
@@ -1177,7 +1177,8 @@ pub async fn prepare_docs(
     let mut chunked = Vec::new();
     for (source, bytes) in pairs.into_iter().filter(|(s, _)| missing.contains(s)) {
         if Instant::now() >= deadline {
-            let cause = format!("not indexed within {REINDEX_TIMEOUT_SECS} s");
+            // MAGI FIX (MS3 §6 loop8): both causes named the constant, not the bound passed.
+            let cause = format!("not indexed within {} s", timeout.as_secs());
             return degraded(prep, &cause, started);
         }
         let bytes = match bytes {
