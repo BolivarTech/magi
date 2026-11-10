@@ -295,6 +295,15 @@ impl ReviewHistoryStore {
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
     pub fn due(&self, limit: usize) -> Result<(Vec<HistoryEntry>, usize), MemoryError> {
+        self.due_bounded(limit, usize::MAX)
+    }
+
+    /// [`Self::due`] with the count stopped at `count_cap`.
+    fn due_bounded(
+        &self,
+        limit: usize,
+        _count_cap: usize,
+    ) -> Result<(Vec<HistoryEntry>, usize), MemoryError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         // MAGI FIX (MS3 §6 loop4): the count and the rows took two locks, so a write between
         // them made `total` disagree with the rows.
@@ -800,6 +809,20 @@ mod tests {
             .validated_on_files(&["src/b.rs".to_string()])
             .expect("read");
         assert!(few.is_empty() && !cut);
+    }
+
+    #[test]
+    fn the_due_count_stops_at_its_bound_instead_of_reading_the_whole_history() {
+        // [MAGI S6 MS3 loop7, R3 Caspar] `due` counted every row on every review, O(history)
+        // whatever its limit; the count now reads at most its bound and saturates there.
+        let (store, _tmp) = store_for_test();
+        let entries: Vec<HistoryEntry> = (0..5)
+            .map(|i| stored(&format!("e{i}"), Some(1), "c1"))
+            .collect();
+        store.record(&entries).expect("record");
+        let (rows, total) = store.due_bounded(2, 3).expect("due");
+        assert_eq!((rows.len(), total), (2, 3));
+        assert_eq!(store.due_bounded(2, 10).expect("due").1, 5);
     }
 
     #[test]
