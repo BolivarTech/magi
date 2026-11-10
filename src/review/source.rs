@@ -936,26 +936,27 @@ struct HeldSide {
 }
 
 /// [`masked_side`] with an explicit bound on the masked side. O(bytes), in passes over the side:
-/// a clean text side is scanned once (the detector finds nothing); a masked one three times (the
-/// detector, the span masking, then the key-block check); a binary one once for the openings of
-/// the patterns. The filter's `content_verdict` scans the served sides once more, on purpose: it
-/// trusts no source to have masked (a source that masks nothing reaches it too), so the cost of
-/// a masked file is four passes, a constant factor on bytes the review caps
-/// (`MAX_REVIEW_TOTAL_BYTES`).
+/// a text side is scanned for a key block first, then masked (one detector pass, the span
+/// masking only when something matched), so a key-block side is never masked at all; a binary
+/// one is scanned once for the openings of the patterns. The filter's `content_verdict` scans
+/// the served sides once more, on purpose: it trusts no source to have masked (a source that
+/// masks nothing reaches it too), so the cost of a masked file is four passes, a constant
+/// factor on bytes the review caps (`MAX_REVIEW_TOTAL_BYTES`).
 // MAGI FIX (MS3 §6 loop6): the count said one pass for a masked side (R6a Melchior).
+// MAGI FIX (MS3 §6 loop7): the key-block check ran after the (up to 16 MiB) mask was built,
+// which was then thrown away (R6a Melchior); it runs first now.
 fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
-    // MAGI FIX (MS3 §6 loop2): the key-block scan ran over every side; a key block is a secret
-    // match, so it is looked for only in a side that holds one (one scan for most files).
     // MAGI FIX (MS3 §6 loop4): the mask is bounded; a side too dense to mask is held as read.
     let text = read
         .as_deref()
         .filter(|bytes| !bytes.contains(&0))
         .and_then(|bytes| std::str::from_utf8(bytes).ok());
     let (masked, raw_secret) = match text {
+        Some(text) if holds_key_block(text) => (None, true),
         Some(text) => match mask_secrets_keeping_lines_within(text, max_bytes) {
             BoundedMask::Clean => (None, false),
-            BoundedMask::Masked(m) if !holds_key_block(text) => (Some(m), false),
-            BoundedMask::Masked(_) | BoundedMask::TooLarge => (None, true),
+            BoundedMask::Masked(m) => (Some(m), false),
+            BoundedMask::TooLarge => (None, true),
         },
         // MAGI FIX (MS3 §6 loop5): a binary side is never masked; whether it holds a secret is
         // what decides that it is never served again once released.
