@@ -346,8 +346,22 @@ const NON_TOKEN_PREFIXES: &[&str] = &[
 /// For bytes no pattern can be matched over: a binary side, whose NULs break a token's tail
 /// (`ghp_\0AAAA…`), is never masked and never sent, but whether it may be served again once
 /// released rests on this (`CachedSource`): over-matching only refuses a later read of a file
-/// already left out, the safe direction. O(n · p).
+/// already left out, the safe direction. The text is also read with every control character
+/// and U+FFFD (an invalid byte of the lossy decoding) taken out, so an opening split by one of
+/// them counts too (`a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts`).
+/// O(n · p).
+// MAGI FIX (MS3 §6 loop7): `gh\0p_…` split the opening itself and matched nothing.
 pub(crate) fn holds_secret_prefix(text: &str) -> bool {
+    let squeezed: String = text
+        .chars()
+        .filter(|c| !c.is_control() && *c != char::REPLACEMENT_CHARACTER)
+        .collect();
+    opens_a_secret(text) || opens_a_secret(&squeezed)
+}
+
+/// Whether `text` holds the opening of any secret pattern, as [`holds_secret_prefix`] reads one
+/// text. O(n · p).
+fn opens_a_secret(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let mut tokens = SECRET_PATTERNS.iter().filter_map(|p| match p.matcher {
         Matcher::Token { prefixes, .. } => Some(prefixes),
