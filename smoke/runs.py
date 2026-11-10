@@ -2312,8 +2312,9 @@ def point_embedding_at(config_path, url: str) -> None:
                 lines.append(line)
                 placed = True
             continue
-        is_endpoint = (stripped.startswith("base_url")
-                       and stripped[len("base_url"):].lstrip().startswith("="))
+        # MAGI FIX (MS3 §6 loop9): a quoted `"base_url"` key was kept beside the added one.
+        key = stripped.split("=", 1)[0].strip().strip("\"'") if "=" in stripped else ""
+        is_endpoint = key == "base_url"
         if in_embedding and is_endpoint:
             continue
         lines.append(original)
@@ -2328,7 +2329,9 @@ def _replace_bytes(path, data: bytes, what: str) -> None:
 
     MAGI FIX (MS3 §6 loop8): the embedder rewrite wrote in place, so a failure
     part way left half a configuration. A failed write leaves *path* whole and
-    no temporary file behind.
+    no temporary file behind. MAGI FIX (MS3 §6 loop9): the temporary file took
+    the umask's mode, so a ``0600`` configuration came back wider; it carries
+    the target's mode now.
 
     Args:
         path: The file to replace.
@@ -2341,7 +2344,9 @@ def _replace_bytes(path, data: bytes, what: str) -> None:
     target = pathlib.Path(path)
     temporary = target.with_name(target.name + ".tmp")
     try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
         temporary.write_bytes(data)
+        os.chmod(temporary, mode)
         os.replace(temporary, target)
     except OSError as exc:
         temporary.unlink(missing_ok=True)
