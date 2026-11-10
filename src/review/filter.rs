@@ -75,7 +75,7 @@ pub struct Skipped {
 /// Serialized as the text the report shows, spelled in one place (`SkipCause::as_str`, pinned by
 /// `skip_causes_serialize_with_the_spec_texts`): `binary`, `not utf-8`, `secret`, `ignored`,
 /// `outside workspace`, `too large`, `not a regular file`, `hard link`, `unreadable`,
-/// `disappeared` and `diff not rebuilt`. A file named explicitly that is skipped fails with that same text as the cause
+/// and `disappeared`. A file named explicitly that is skipped fails with that same text as the cause
 /// of [`ReviewError::NotReviewable`].
 // MAGI FIX (S6 loop 13, A2-m6 / A2-b5): the list named 7 of the 10 causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,10 +102,6 @@ pub enum SkipCause {
     Unreadable,
     /// A listed file removed between the listing and its read.
     Disappeared,
-    /// A file with a one-line secret whose diff could not be rebuilt from its masked sides: it
-    /// cannot be sent masked, so it is left out, the safe direction of RV22's tie-break ("no
-    /// byte of the secret leaves the process").
-    DiffNotRebuilt,
 }
 
 impl serde::Serialize for SkipCause {
@@ -135,7 +131,6 @@ impl SkipCause {
             Self::HardLink => HARD_LINK_CAUSE,
             Self::Unreadable => "unreadable",
             Self::Disappeared => "disappeared",
-            Self::DiffNotRebuilt => "diff not rebuilt",
         }
     }
 }
@@ -471,8 +466,9 @@ struct SidesRead<'a> {
 /// The sides come masked from the source ([`ContentSource::masked`]; a key-block side never
 /// reaches here, [`content_verdict`] leaves it out). When anything was masked, the diff is
 /// rebuilt from the masked sides ([`rebuilt_diff`]) and the file declared with the first
-/// pattern found; it is left out instead when the diff cannot be rebuilt (`diff not rebuilt`)
-/// or the rebuilt one still holds a secret (`secret`).
+/// pattern found; it is left out as `secret` instead when the diff cannot be rebuilt or the
+/// rebuilt one still holds a secret (RV22's cause either way, `unrebuilt_diff_skips_as_secret`),
+/// with a WARN naming which.
 ///
 /// That fallback omits rather than masking the diff alone on purpose: a hunk shows only some
 /// lines, and a pattern may need one it leaves out (a YAML value under its key), so RV22's
@@ -541,12 +537,9 @@ fn kept_verdict(
                     pattern = pattern,
                     "a masked file's diff could not be rebuilt from its sides; the file is left out"
                 );
-                // MAGI FIX (MS3 §6 loop6): a structural failure has its own cause; `secret` is
-                // kept for a rebuilt diff that still holds one.
-                return match rebuilt {
-                    None => Verdict::Skip(SkipCause::DiffNotRebuilt),
-                    Some(_) => secret(read.path, pattern),
-                };
+                // MAGI FIX (MS3 §6 loop6): a structural failure had its own cause.
+                // MAGI FIX (MS3 §6 loop9): RV22's cause is `secret` either way; the WARN says why.
+                return secret(read.path, pattern);
             }
         },
         None => None,
@@ -571,7 +564,7 @@ fn kept_verdict(
 ///
 /// Subset of git's unified diff read: lines outside hunks verbatim; a hunk opens at
 /// `@@ -a[,b] +c[,d] @@` (`@@@` gives `None`); body lines start with ` `, `+`, `-` or `\`,
-/// anything else gives `None`, and the caller leaves the file out (`diff not rebuilt`).
+/// anything else gives `None`, and the caller leaves the file out (`secret`).
 ///
 /// O(diff + sides) plus O(hunks × side lines × 80) for the function context (a prefix compare of
 /// at most git's 80-byte context per side line; masked files only).
@@ -1632,7 +1625,6 @@ mod tests {
             SkipCause::OutsideWorkspace,
             SkipCause::TooLarge,
             SkipCause::NotRegularFile,
-            SkipCause::DiffNotRebuilt,
         ]
         .iter()
         .map(|c| serde_json::to_string(c).expect("serializes"))
@@ -1646,8 +1638,7 @@ mod tests {
                 "\"ignored\"",
                 "\"outside workspace\"",
                 "\"too large\"",
-                "\"not a regular file\"",
-                "\"diff not rebuilt\""
+                "\"not a regular file\""
             ]
         );
     }
