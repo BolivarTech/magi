@@ -347,7 +347,10 @@ const NON_TOKEN_PREFIXES: &[&str] = &[
 /// whether it may be served again once released rests on this (`CachedSource`); over-matching
 /// only refuses a later read, the safe direction. Read also with control characters and U+FFFD
 /// taken out, so a split opening counts
-/// (`a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts`). O(n · p).
+/// (`a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts`). A short prefix
+/// over-matches plain words (`sk-` in `task-`, `risk-`), fail-closed by design: it only changes
+/// which refusal an already-skipped side gets. O(n · p), with up to three copies of a binary
+/// side (each at most `MAX_REVIEW_FILE_BYTES`).
 // MAGI FIX (MS3 §6 loop7): `gh\0p_…` split the opening itself and matched nothing.
 pub(crate) fn holds_secret_prefix(text: &str) -> bool {
     let squeezed: String = text
