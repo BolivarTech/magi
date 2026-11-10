@@ -1377,11 +1377,12 @@ impl Default for TuiCodeReviewCommand {
     }
 }
 
-/// A `/code-review` error as the transcript may show it.
+/// A `/code-review` error as the transcript may show it: the tool path's two stages (URL
+/// credentials, then the RV22 detector, `egress_text`), then the transcript sanitizer. One
+/// helper for the plan and the run arms (`plan_refusal_is_masked`).
+// MAGI FIX (MS3 §6 loop8): the plan arm redacted URL credentials alone.
 fn code_review_error_text(e: &dyn std::fmt::Display) -> String {
-    crate::agent::Agent::sanitize_text(
-        magi_rs::redact::redact_foreign_text(&e.to_string()).as_str(),
-    )
+    crate::agent::Agent::sanitize_text(&crate::tools::code_review::egress_text(&e.to_string()))
 }
 
 /// The runner a `/code-review` command runs on: the session's, or with `--no-memory` the same
@@ -2473,11 +2474,7 @@ impl App {
                 // credentials, then the RV22 detector), not URL redaction alone; the transcript
                 // auditor still runs after it
                 // (`a_failed_tui_review_writes_its_error_with_its_secrets_masked`).
-                let text = crate::tools::code_review::egress_text(&e.to_string());
-                apply_response(
-                    self,
-                    AgentResponse::Error(crate::agent::Agent::sanitize_text(&text)),
-                );
+                apply_response(self, AgentResponse::Error(code_review_error_text(&e)));
             }
         }
     }
