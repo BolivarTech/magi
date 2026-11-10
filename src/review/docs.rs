@@ -1960,7 +1960,7 @@ mod tests {
         let git = TableGit(vec![
             ("rev-parse --verify HEAD^{commit}", b"h1\n".to_vec()),
             (
-                "for-each-ref --format=%(objectname) refs/heads refs/tags",
+                "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags",
                 b"h1\nb2\n".to_vec(),
             ),
             ("ls-tree -r -z h1", b"100644 blob k1\tREADME.md\0".to_vec()),
@@ -1976,13 +1976,29 @@ mod tests {
     }
 
     #[test]
+    fn annotated_tag_peels_to_commit() {
+        // [MAGI S6 MS3 loop9, R1 Caspar] An annotated tag's own object id listed its tree a
+        // second time; it is peeled to the commit it names, so that commit is listed once.
+        let git = TableGit(vec![
+            ("rev-parse --verify HEAD^{commit}", b"h1\n".to_vec()),
+            (
+                "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags",
+                b"h1 \nt1 h1\n".to_vec(),
+            ),
+            ("ls-tree -r -z h1", b"100644 blob k1\tREADME.md\0".to_vec()),
+        ]);
+        let live = live_doc_sources(&git, &|_: &str| true).expect("ok");
+        assert_eq!(live.map(|s| s.len()), Some(1));
+    }
+
+    #[test]
     fn past_the_ref_cap_the_clean_up_is_skipped_never_partial() {
         // [RV21 D+B, 2026-10-20] A partial live set would delete what an unwalked ref still reaches.
         let refs: String = (0..=MAX_GC_REFS).map(|i| format!("r{i}\n")).collect();
         let git = TableGit(vec![
             ("rev-parse --verify HEAD^{commit}", b"r0\n".to_vec()),
             (
-                "for-each-ref --format=%(objectname) refs/heads refs/tags",
+                "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags",
                 refs.into_bytes(),
             ),
         ]);
@@ -1999,7 +2015,7 @@ mod tests {
             TableGit(vec![
                 ("rev-parse --verify HEAD^{commit}", b"h1\n".to_vec()),
                 (
-                    "for-each-ref --format=%(objectname) refs/heads refs/tags",
+                    "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags",
                     refs.as_bytes().to_vec(),
                 ),
                 ("ls-tree -r -z h1", b"100644 blob k1\tREADME.md\0".to_vec()),
@@ -2019,7 +2035,7 @@ mod tests {
     fn an_unborn_head_contributes_nothing_and_is_not_an_error() {
         // [CP2 MS3 loop 13] A repository with no commit yet: rev-parse fails, no refs, an empty live set.
         let git = TableGit(vec![(
-            "for-each-ref --format=%(objectname) refs/heads refs/tags",
+            "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags",
             Vec::new(),
         )]);
         assert_eq!(
@@ -2033,7 +2049,7 @@ mod tests {
         // [CP2 MS3 loop 14 (pasada final)] HEAD unreadable while refs exist is not «unborn»: never delete on a broken git.
         let refs_but_no_head = TableGit(vec![
             (
-                "for-each-ref --format=%(objectname) refs/heads refs/tags",
+                "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags",
                 b"b2\n".to_vec(),
             ),
             ("ls-tree -r -z b2", b"100644 blob k2\tREADME.md\0".to_vec()),
