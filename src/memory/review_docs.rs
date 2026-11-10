@@ -77,6 +77,8 @@ struct Plan<'a> {
     new_sources: Vec<&'a (DocSource, Vec<DocChunk>)>,
     /// Foreign rows exist: the index is wiped in the write transaction.
     rebuilt: bool,
+    /// [`ReviewDocStore::foreign_fingerprint`] at plan time; the write requires it unchanged.
+    foreign: [i64; 4],
     /// Encrypted vectors already stored under this identity, by chunk hash.
     reusable: BTreeMap<String, Vec<u8>>,
     /// Distinct chunks (by hash, first appearance) that still need a vector.
@@ -225,6 +227,20 @@ impl ReviewDocStore {
         .map_err(db_err)
     }
 
+    /// Count and highest rowid of the foreign rows of each table: any write or delete by another
+    /// identity changes it (a delete of its highest row plus one insert would not; declared).
+    fn foreign_fingerprint(&self, c: &Connection) -> Result<[i64; 4], MemoryError> {
+        c.query_row(
+            "SELECT (SELECT COUNT(*) FROM code_review_docs WHERE index_id <> ?1), \
+             (SELECT COALESCE(MAX(rowid), 0) FROM code_review_docs WHERE index_id <> ?1), \
+             (SELECT COUNT(*) FROM code_review_doc_sources WHERE index_id <> ?1), \
+             (SELECT COALESCE(MAX(rowid), 0) FROM code_review_doc_sources WHERE index_id <> ?1)",
+            [&self.index_id],
+            |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]),
+        )
+        .map_err(db_err)
+    }
+
     /// The sources already indexed under this identity.
     fn indexed_sources(&self, c: &Connection) -> Result<BTreeSet<DocSource>, MemoryError> {
         let mut stmt = c
@@ -322,7 +338,8 @@ impl ReviewDocStore {
         sources: &[&'a (DocSource, Vec<DocChunk>)],
     ) -> Result<Plan<'a>, MemoryError> {
         let c = self.locked_conn();
-        let rebuilt = self.has_foreign_rows(&c)?;
+        let foreign = self.foreign_fingerprint(&c)?;
+        let rebuilt = foreign != [0; 4];
         let indexed = if rebuilt {
             BTreeSet::new()
         } else {
@@ -362,6 +379,7 @@ impl ReviewDocStore {
         Ok(Plan {
             new_sources,
             rebuilt,
+            foreign,
             reusable,
             to_embed,
         })
@@ -402,11 +420,10 @@ impl ReviewDocStore {
     }
 
     /// Writes the wipe, the rows and the source rows in one transaction; answers whether it
-    /// wiped. Foreign rows are wiped only when the plan saw them (`rebuilt`); ones that appear by
-    /// the time the transaction starts are a conflict (nothing written, the review runs without
-    /// documentation and says so). A `rebuilt` wipe is not re-checked: a racing identity's next
-    /// [`Self::load_vectors`] fails on this store's rows and declares the index unavailable.
-    /// Inserts are `OR IGNORE`; a source another process's clean-up deleted after the plan is
+    /// wiped. Foreign rows are wiped only when the plan saw them (`rebuilt`); any change to them
+    /// by the time the transaction starts is a conflict (nothing written, the review runs without
+    /// documentation and says so), so a wipe never erases a write made after the plan
+    /// (`rebuilt_wipe_is_rechecked`). Inserts are `OR IGNORE`; a source another process's clean-up deleted after the plan is
     /// written back, stale until the next clean-up (declared, `reinserted_rows_are_gc_again`).
     ///
     /// # Errors
@@ -420,7 +437,8 @@ impl ReviewDocStore {
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
-        if !plan.rebuilt && self.has_foreign_rows(&tx)? {
+        // MAGI FIX (MS3 §6 loop10): a rebuilt wipe was not re-checked.
+        if self.foreign_fingerprint(&tx)? != plan.foreign {
             return Err(identity_conflict());
         }
         let wiped = plan.rebuilt;
