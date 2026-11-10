@@ -512,7 +512,9 @@ impl StoreRag<'_> {
 
 impl StoreRag<'_> {
     /// Whether neither documentation nor history can enter any later batch: each is absent,
-    /// unavailable or failed for the rest of the review. O(1).
+    /// unavailable or failed for the rest of the review. A down embedder is not checked here:
+    /// [`Self::query_vector`] answers `None` for it without a call, so the stores are what this
+    /// adds. O(1).
     fn both_layers_down(&self) -> bool {
         let docs =
             self.docs.is_none() || self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst);
