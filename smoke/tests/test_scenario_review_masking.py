@@ -3,12 +3,14 @@
 # Date: 2026-11-08
 """Unit tests for S53-S54 (REQ-RV22: a secret in a file's content never leaves the process)."""
 
+import pathlib
 import unittest
 
 from smoke import runs
 from smoke.outcome import Outcome
 from smoke.scenarios import review_masking as rm
-from smoke.tests.test_scenario_code_review import _outcomes, _result
+from smoke.tests.rust_source import secret_openings
+from smoke.tests.support import scenario_outcomes as _outcomes, scenario_result as _result
 
 _KEY = runs.REVIEW_MASKED_KEY.decode("ascii")
 _BODY = runs.REVIEW_KEYBLOCK_BODY_LINES[0]
@@ -124,13 +126,13 @@ class S53Tests(unittest.TestCase):
         self.assertNotIn(_KEY, path)
         # [MAGI S6 MS3 loop6, R7b Melchior] S53 needs the path to match no secret pattern at all
         # (a path match leaves the file out instead of masking it), not only to lack the full
-        # key: no opening of a pattern may appear in it, in any case. The openings are those of
-        # the product's table (`SECRET_PATTERNS`, `src/review/secrets.rs`) the key's family
-        # shares, plus the fixed headers and the URL authority.
+        # key: no opening of a pattern may appear in it, in any case.
+        # [MAGI S6 MS3 loop7, R7b] The openings are read from the product's table now, not
+        # copied here: `test_rust_sync.ReviewMaskingSyncTests`
+        # (`test_the_s53_fixture_path_holds_no_opening_of_any_product_pattern`).
+        root = pathlib.Path(__file__).resolve().parent.parent.parent
         lowered = path.lower()
-        for opening in (_KEY[:len("sk-ant-")].lower(), "sk-", "ghp_", "github_pat_", "akia",
-                        "asia", "aiza", "xox", "glpat-", "sk_live_", "rk_live_", "-----begin",
-                        "---- begin", "aws_secret", "secretaccesskey", "://"):
+        for opening in secret_openings(root):
             with self.subTest(opening=opening):
                 self.assertNotIn(opening, lowered)
 

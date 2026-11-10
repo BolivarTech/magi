@@ -728,3 +728,38 @@ def one_occurrence(text: str, needle: str, where: str) -> re.Match:
     # MAGI FIX (S6 loop 38): a line inside a multi-line literal (a test fixture) was counted, so with the
     # production line gone a stale fixture copy answered for it.
     return _exactly_one(regex, text, where, outside_literals=True, needle_length=len(needle))
+
+#: The product's secret detector, the source :func:`secret_openings` reads.
+SECRETS_SOURCE = "src/review/secrets.rs"
+
+
+def secret_openings(root: pathlib.Path) -> list:
+    """Every opening of the product's secret patterns, lowercase, read from its source.
+
+    The token prefixes of ``SECRET_PATTERNS`` (``prefixes: &[...]``), the fixed
+    openings of ``NON_TOKEN_PREFIXES`` and ``URL_AUTHORITY_START``, which that
+    list names by identifier. [MAGI S6 MS3 loop7, R7b] One reading, so no test
+    keeps a hand copy of the table (one missed ``gho_``, ``ghu_``, ``ghs_``,
+    ``ghr_``).
+
+    Args:
+        root: The repository root.
+
+    Returns:
+        list: The openings.
+
+    Raises:
+        AssertionError: When the table does not parse (a part matched nothing).
+    """
+    text = without_comments(read_source(SECRETS_SOURCE, root))
+    literal = re.compile(r'"([^"]*)"')
+    tokens = [s for group in re.findall(r"prefixes: &\[([^\]]*)\]", text)
+              for s in literal.findall(group)]
+    fixed = one_definition(text, r"const NON_TOKEN_PREFIXES: &\[&str\] = &\[(.*?)\];",
+                           SECRETS_SOURCE, re.S).group(1)
+    url = one_definition(text, r'const URL_AUTHORITY_START: &str = "([^"]+)";',
+                         SECRETS_SOURCE).group(1)
+    openings = tokens + literal.findall(fixed) + [url]
+    if len(tokens) < 2 or "URL_AUTHORITY_START" not in fixed:
+        raise AssertionError("%s: the openings did not parse: %r" % (SECRETS_SOURCE, openings))
+    return [o.lower() for o in openings]

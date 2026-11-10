@@ -35,7 +35,7 @@ from unittest import mock
 from smoke import logs, runs
 from smoke.scenarios import code_review
 from smoke.tests.rust_source import (char_list, one_definition, one_occurrence, read_source,
-                                     structure_only, without_comments)
+                                     secret_openings, structure_only, without_comments)
 
 #: The repository root, three levels above this file.
 _ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
@@ -2024,6 +2024,39 @@ class RagDeclarationSyncTests(unittest.TestCase):
         text = _source("src/review/report.rs")
         one_definition(text, r"pub struct TrimmedItem \{[^}]*\bpub %s: String,"
                        % re.escape(review_context.TRIMMED_LABEL_KEY), "src/review/report.rs", re.S)
+
+
+def _secret_openings() -> list[str]:
+    """The product's secret-pattern openings (:func:`smoke.tests.rust_source.secret_openings`)."""
+    return secret_openings(_ROOT)
+
+
+class ReviewMaskingSyncTests(unittest.TestCase):
+    """S53's fixture and the README's purge text, read against the product.
+
+    [MAGI S6 MS3 loop7, R7b Caspar, Melchior, Balthasar] The fixture path's
+    guard held a hand-copied list of openings (missing ``gho_``, ``ghu_``,
+    ``ghs_``, ``ghr_``), and the README's purge SQL names tables no test read
+    from the schema: either could drift with every test still green.
+    """
+
+    def test_the_s53_fixture_path_holds_no_opening_of_any_product_pattern(self) -> None:
+        (path, _), = runs.review_masked_files()
+        lowered = path.lower()
+        for opening in _secret_openings():
+            with self.subTest(opening=opening):
+                self.assertNotIn(opening, lowered)
+
+    def test_the_openings_parse_includes_every_github_token_prefix(self) -> None:
+        self.assertTrue({"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "://"} <= set(_secret_openings()))
+
+    def test_the_readme_purge_tables_are_the_schemas_review_tables(self) -> None:
+        schema = without_comments(_source("src/system/database.rs"))
+        created = set(re.findall(r"CREATE TABLE IF NOT EXISTS (code_review_\w+)", schema))
+        readme = _source("README.md")
+        purged = set(re.findall(r"DELETE FROM (code_review_\w+);", readme))
+        self.assertEqual(3, len(created), created)
+        self.assertEqual(created, purged)
 
 
 if __name__ == "__main__":
