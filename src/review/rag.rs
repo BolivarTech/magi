@@ -117,6 +117,9 @@ const SIZE_CAPPED_SOURCE: &str = "a documentation source over the review's size 
 /// What the report says when a documentation source was left out because it is not UTF-8.
 const NOT_UTF8_SOURCE: &str = "a documentation source that is not UTF-8 text was left out";
 
+/// What the report says when a working-tree documentation source could not be read.
+const UNREADABLE_SOURCE: &str = "a documentation source that could not be read was left out";
+
 /// Fixed tokens of one item's frame in the prompt.
 pub const CONTEXT_ITEM_FRAME_TOKENS: usize = 18;
 
@@ -336,6 +339,11 @@ pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
     if d.not_utf8 {
         a.trimmed
             .push((ContextKind::Documentation, NOT_UTF8_SOURCE.to_string()));
+    }
+    // MAGI FIX (MS3 §6 loop7): a working-tree source that could not be read was only logged.
+    if d.unreadable {
+        a.trimmed
+            .push((ContextKind::Documentation, UNREADABLE_SOURCE.to_string()));
     }
 }
 

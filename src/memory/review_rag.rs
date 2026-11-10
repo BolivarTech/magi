@@ -940,7 +940,8 @@ type Listed = (DocSource, Option<Vec<u8>>);
 /// and a path given twice is one source.
 ///
 /// A file that cannot be read (a hard link, a link that escapes the workspace or names a
-/// directory, a file another process holds open) is left out with one WARN naming it, as MS2
+/// directory, a file another process holds open) is left out with one WARN naming it and
+/// declared (`unreadable`, `an_unreadable_working_tree_source_is_declared_not_only_logged`), as MS2
 /// leaves a listed file out of a review: one such file never costs the rest their documentation.
 /// The size cap cuts the source (declared as `size_capped`).
 ///
@@ -990,6 +991,8 @@ fn list_worktree(
             Ok(None) => {}
             Err(e) if is_size_cap(&e) => prep.doc_index.size_capped = true,
             Err(e) => {
+                // MAGI FIX (MS3 §6 loop7): declared in the report too, not only logged.
+                prep.doc_index.unreadable = true;
                 let (shown, error) = (display_path(path), outward_text(&e.to_string()));
                 tracing::event!(
                     target: LOG_TARGET,
