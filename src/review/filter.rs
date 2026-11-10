@@ -548,6 +548,7 @@ fn kept_verdict(
                     tracing::Level::WARN,
                     path = shown.as_str(),
                     cause = why,
+                    pattern = pattern,
                     "a masked file's diff could not be rebuilt from its sides; the file is left out"
                 );
                 // MAGI FIX (MS3 §6 loop6): a structural failure has its own cause; `secret` is
