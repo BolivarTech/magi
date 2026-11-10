@@ -1372,12 +1372,9 @@ enum ContextEgress {
 /// omitted, its content too) or whose text or label holds a private-key block (RV22's
 /// exception) is withheld, as is one in which masking left a match (fail closed). O(text).
 ///
-/// A backstop: every item arrives masked already (units, definitions and callers from the
-/// review's cache, documentation at chunking, history at retrieval; see the `review::rag`
-/// module doc), so this pass normally changes nothing. A one-line secret is never a reason to
-/// omit an item: one whose mask is longer than its secret is sent masked, and
-/// [`prepare_contexts`] charges what is sent, trimming optional context to pay for the growth
-/// (`a_context_item_whose_mask_outgrows_its_charge_is_still_sent_masked`).
+/// A backstop: every item arrives masked already (from the review's cache, at chunking, at
+/// retrieval), so this pass normally changes nothing. A one-line secret never omits an item:
+/// a mask longer than its secret is sent, and [`prepare_contexts`] pays for the growth.
 // MAGI FIX (MS3 §6 loop2): a context item holding a one-line secret was withheld, not masked.
 // MAGI FIX (MS3 §6 loop6): nor withheld when its mask grows it; the batch pays with optional
 // context instead.
