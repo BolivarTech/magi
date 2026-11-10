@@ -1592,8 +1592,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_skips_rows_of_another_dimension() {
-        // A query of another dimension skips every row, never compares them.
+    async fn non_finite_query_is_an_error() {
+        // [MAGI S6 MS3 loop9, R1 Caspar] A NaN or infinite query scored every row NaN and
+        // `total_cmp` returned arbitrary chunks, with no error.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        store
+            .reindex(&[(src("d.md", "k"), vec![chunk("d.md", "A", "x")])], &e)
+            .await
+            .expect("dim 3");
+        let vectors = store
+            .load_vectors(3, &BTreeSet::from([src("d.md", "k")]))
+            .expect("load");
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let r = store.search_loaded(&vectors, &[bad, 0.0, 0.0], 5);
+            assert!(matches!(r, Err(MemoryError::Storage(_))), "{bad}: {r:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn load_dim_mismatch_is_an_error() {
+        // [MAGI S6 MS3 loop9, R1 Melchior] Rows of another dimension than asked are never
+        // compared; they were dropped in silence, read as "no documentation".
         let (store, _dir) = store_for_test();
         store
             .reindex(
@@ -1602,10 +1622,10 @@ mod tests {
             )
             .await
             .expect("dim 3");
-        assert!(store
-            .search(&[1.0, 0.0], 5, &BTreeSet::from([src("d.md", "k")]))
-            .expect("search")
-            .is_empty());
+        let allowed = BTreeSet::from([src("d.md", "k")]);
+        let r = store.load_vectors(2, &allowed);
+        assert!(matches!(r, Err(MemoryError::Storage(_))), "{r:?}");
+        assert!(store.search(&[1.0, 0.0], 5, &allowed).is_err());
     }
 
     #[tokio::test]
