@@ -588,7 +588,8 @@ fn kept_verdict(
 /// `+`, `-` or `\`, anything else gives `None`, and the caller leaves the file out as
 /// `diff not rebuilt`, never sending the raw diff (`real_git_diffs_rebuild_unchanged_from_their_own_sides`).
 ///
-/// O(diff + sides) plus O(hunks × side lines) for the function context (masked files only).
+/// O(diff + sides) plus O(hunks × side lines × 80) for the function context (a prefix compare of
+/// at most git's 80-byte context per side line; masked files only).
 ///
 /// # Returns
 ///
