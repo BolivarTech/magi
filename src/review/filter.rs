@@ -2156,6 +2156,23 @@ mod tests {
     }
 
     #[test]
+    fn a_context_line_that_differs_on_the_old_side_counts_as_a_divergence() {
+        // [MAGI S6 MS3 loop7, R6a Caspar] A context line advanced the old side without looking at
+        // it, so a stale diff whose old side differed there was counted as clean (RV21's signal).
+        let diff = "@@ -1,3 +1,3 @@\n a\n b\n c\n";
+        let (rebuilt, diverged) =
+            rebuilt_diff(diff, Some(b"a\nb\nc\n"), Some(b"a\nX\nc\n")).expect("rebuilds");
+        assert_eq!(
+            rebuilt, diff,
+            "the old side's text is compared, never written"
+        );
+        assert_eq!(diverged, 1);
+        let (_, clean) =
+            rebuilt_diff(diff, Some(b"a\nb\nc\n"), Some(b"a\nb\nc\n")).expect("rebuilds");
+        assert_eq!(clean, 0);
+    }
+
+    #[test]
     fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_its_own_cause() {
         // [MAGI S6 MS3 loop2, R6a Balthasar] the safe fallback of `kept_verdict`: a diff that
         // names a line its masked side does not have cannot be rebuilt, so the raw diff, which
