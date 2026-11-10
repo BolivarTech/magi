@@ -184,6 +184,19 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
     }
 }
 
+/// Whether a stored validated `entry` may be served as validated context against `head`.
+///
+/// # Arguments
+/// * `entry` - the stored entry.
+/// * `head` - the revision the review runs against.
+/// * `git` - the git runner.
+///
+/// # Returns
+/// Whether it may be served.
+pub fn served_as_validated(_entry: &HistoryEntry, _head: &str, _git: &dyn GitCommand) -> bool {
+    true
+}
+
 /// What git says of a remembered finding: a status, a definitive lack of signal, or no answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Signal {
@@ -685,6 +698,31 @@ mod tests {
         )]);
         let (updates, _) = reclassify_then_record(&[done], &[], "HEAD", &git);
         assert!(updates.is_empty(), "{updates:?}");
+    }
+
+    #[test]
+    fn a_validated_entry_off_heads_line_goes_back_to_pending_and_is_never_served() {
+        // [MAGI S6 MS3 loop7, R3 Caspar] Attended on `feature`, then HEAD on `main`, where the
+        // reviewed commit is no ancestor: git's answer is definitive (both commits resolve), yet
+        // the entry stayed attended and was served on `main`.
+        let off_line = FakeGit::from(&[
+            ("merge-base --is-ancestor c1 HEAD", Err("exit 1")),
+            ("rev-parse --verify c1^{commit}", Ok("c1\n")),
+            (HEAD_IS_C2, Ok("c2\n")),
+        ]);
+        for status in [HistoryStatus::Attended, HistoryStatus::WeakReject] {
+            let mut done = entry(Some(5));
+            done.status = status;
+            assert!(!served_as_validated(&done, "HEAD", &off_line), "{status:?}");
+            let (updates, _) = reclassify_then_record(&[done], &[], "HEAD", &off_line);
+            assert_eq!(updates, vec![("i".to_string(), HistoryStatus::Pending)]);
+        }
+        let on_line = FakeGit::from(&[("merge-base --is-ancestor c1 HEAD", Ok(""))]);
+        let mut done = entry(Some(5));
+        done.status = HistoryStatus::Attended;
+        assert!(served_as_validated(&done, "HEAD", &on_line));
+        let broken = FakeGit::from(&[]);
+        assert!(!served_as_validated(&done, "HEAD", &broken), "fails closed");
     }
 
     #[test]
