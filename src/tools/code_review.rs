@@ -1709,6 +1709,8 @@ impl CodeReviewRunner for ProductionReviewRunner {
     }
 
     fn after_report(&self) -> Option<PostReport> {
+        // MAGI FIX (MS3 §6 loop8): checked before the take, so a queue is never taken and lost.
+        let memory = Arc::clone(self.parts.memory.as_ref()?);
         let follows = std::mem::take(
             &mut *self
                 .follow_up
@@ -1718,7 +1720,6 @@ impl CodeReviewRunner for ProductionReviewRunner {
         if follows.is_empty() {
             return None;
         }
-        let memory = Arc::clone(self.parts.memory.as_ref()?);
         let workspace = self.workspace.clone();
         Some(Box::new(move || {
             let git = ScrubbedGit::new(workspace);
