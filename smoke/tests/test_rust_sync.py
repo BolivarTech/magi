@@ -890,7 +890,7 @@ def _omission_causes(filter_text: str, source_text: str) -> list[str]:
         AssertionError: When ``as_str`` is not defined once, or an arm is neither a string literal nor a
             bare constant defined in ``src/review/source.rs``.
     """
-    found = one_definition(filter_text, r"fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n",
+    found = one_definition(filter_text, r"(?:pub\(crate\) )?fn as_str\(self\) -> &'static str \{(.*?)\n    \}\n",
                            "src/review/filter.rs", re.S)
     causes = []
     # MAGI FIX (S6 loop 46, F1b2a-melchior): only literal and bare-constant arms were read, so an arm in
