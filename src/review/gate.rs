@@ -278,9 +278,10 @@ const KEY_BLOCK_END_OPENERS: [&str; 2] = ["-----END ", "---- END "];
 /// has none: a window inside a long block holds body lines only, which no pattern names, and is
 /// still withheld (`a_key_block_longer_than_the_window_is_found_in_the_whole_code_and_never_sent`),
 /// while a finding far from the block is judged
-/// (`a_key_block_far_from_the_window_does_not_withhold_the_finding`). When the whole code holds a
-/// block that no single line opens (a header the detector reads only across lines), the whole
-/// code counts as the block: the safe direction. Declared limit: a body line copied far from
+/// (`a_key_block_far_from_the_window_does_not_withhold_the_finding`). When the code outside the
+/// blocks tracked by their lines still holds a block (a header the detector reads only across
+/// lines), the whole code counts as the block, whatever else was tracked: the safe direction
+/// (`a_header_read_only_across_lines_is_not_hidden_by_another_tracked_block`). Declared limit: a body line copied far from
 /// its block is not recognized here; the filter leaves every file holding a block out first
 /// (RV22's file-level exception), so this is a backstop. O(bytes of `code`).
 // MAGI FIX (MS3 §6 loop6): the whole-code check withheld every finding of such a file.
@@ -298,27 +299,28 @@ fn window_overlaps_block_of(code: &str, line: u32, opens: &dyn Fn(&str) -> bool)
     let first = line.saturating_sub(GATE_CONTEXT_LINES).max(1);
     let last = line.saturating_add(GATE_CONTEXT_LINES);
     let mut opened: Option<u32> = None;
-    let mut found = false;
+    // The lines outside every block opened by a line: what the tracked blocks do not explain.
+    let mut outside = String::new();
     for (n, text) in (1u32..).zip(code.lines()) {
         match opened {
-            None if opens(text) => {
-                found = true;
-                opened = Some(n);
-            }
+            None if opens(text) => opened = Some(n),
             Some(start) if KEY_BLOCK_END_OPENERS.iter().any(|e| text.contains(e)) => {
                 if start <= last && n >= first {
                     return true;
                 }
                 opened = None;
             }
-            None | Some(_) => {}
+            None => {
+                outside.push_str(text);
+                outside.push('\n');
+            }
+            Some(_) => {}
         }
     }
-    // A block still open at the end runs to the last line; none found by line is the whole code.
-    match opened {
-        Some(start) => start <= last,
-        None => !found,
-    }
+    // A block still open at the end runs to the last line. A block the detector still finds
+    // outside the tracked ones (a header read only across lines) makes the whole code count.
+    // MAGI FIX (MS3 §6 loop7): that fallback was off once any block was tracked by its lines.
+    opened.is_some_and(|start| start <= last) || opens(&outside)
 }
 
 /// Whether `code` has a line numbered `line` (from 1). O(bytes up to that line).
