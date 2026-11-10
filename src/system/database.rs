@@ -796,6 +796,8 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
 /// **The v0.25.0 tables ([`PRE_0_25_MISSING_TABLES`]) come first, before the marker
 /// [`PRE_0_25_MARKER_TABLE`]**, a second line of defense: a reader never sees the marker
 /// without every v0.25.0 table, so a fresh database is never refused as an older one (RV19).
+/// The doc tables' keys leave `index_id` out on purpose: one identity holds the index at a time
+/// (a rebuild wipes, a race is a conflict; `ReviewDocStore`), enforced there, not by the schema.
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
