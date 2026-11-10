@@ -1189,7 +1189,9 @@ pub fn revision_doc_sources(
 ///
 /// # Errors
 ///
-/// [`ReviewError::Git`] when a listed ref cannot be listed or parsed.
+/// [`ReviewError::Git`] when a listed ref cannot be listed or parsed (a tag naming a blob, say).
+/// It deletes nothing either: the caller (`collect_garbage`) returns it, and the runner skips
+/// the clean-up and logs it, never failing the review.
 pub fn live_doc_sources(
     git: &dyn GitCommand,
     keep: &dyn Fn(&str) -> bool,
