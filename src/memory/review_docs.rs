@@ -1423,6 +1423,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vanished_source_is_an_error() {
+        // [MAGI S6 MS3 loop10, R1 Melchior] A source deleted after the reindex (a wipe, another
+        // process's clean-up) loaded as "no documentation"; it is now the index unavailable.
+        let (store, _dir) = store_for_test();
+        let s = (src("d.md", "k"), vec![chunk("d.md", "A", "x")]);
+        store
+            .reindex(&[s], &FakeEmbedder::new(3))
+            .await
+            .expect("dim 3");
+        let allowed = BTreeSet::from([src("d.md", "k")]);
+        assert_eq!(store.load_vectors(3, &allowed).expect("load").rows.len(), 1);
+        store.gc(&BTreeSet::new(), false).expect("gc");
+        assert!(matches!(
+            store.load_vectors(3, &allowed),
+            Err(MemoryError::Storage(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn rebuilt_wipe_is_rechecked() {
         // [MAGI S6 MS3 loop10, R1 Caspar] A rebuild wiped what another identity wrote after the
         // plan; that write is now a conflict too, and the other identity keeps its rows.
