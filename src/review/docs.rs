@@ -969,6 +969,15 @@ pub fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<
     }
 }
 
+/// Netted chunks of one source (stub).
+pub fn netted_chunks(
+    path: &str,
+    text: &str,
+    registry: &LanguageRegistry,
+) -> (Vec<DocChunk>, Vec<String>) {
+    (chunk_source(path, text, registry), Vec::new())
+}
+
 /// Splits `chunks` into those safe to send and the sources of those holding a secret.
 ///
 /// The chunkers mask every one-line secret, so a chunk they built is dropped only when it holds
@@ -1788,6 +1797,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["b.md"]
         );
+    }
+
+    #[test]
+    fn chunking_is_netted_by_default() {
+        // [MAGI S6 MS3 loop8, R1 Caspar] The public chunkers handed a private-key block to any
+        // caller that forgot `without_secrets`; the public entry nets the source itself.
+        let reg = LanguageRegistry::new();
+        let body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC";
+        let block = format!(
+            "{}\n{body}\n",
+            concat!("-----", "BEGIN ", "PRIVATE KEY-----")
+        );
+        let md = format!("# Setup\n{block}# Usage\nrun it\n");
+        let rs = format!("/// Adds.\nfn add() {{}}\nconst K: &str = \"{block}\";\n");
+        for (path, text) in [("README.md", md.as_str()), ("src/a.rs", rs.as_str())] {
+            let (kept, dropped) = netted_chunks(path, text, &reg);
+            assert!(kept.is_empty() && !dropped.is_empty(), "{path}: {kept:?}");
+        }
+        let (kept, dropped) = netted_chunks("README.md", "# A\nplain\n", &reg);
+        assert_eq!((kept.len(), dropped.len()), (1, 0));
     }
 
     #[test]
