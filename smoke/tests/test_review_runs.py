@@ -247,8 +247,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
             self.assertEqual(["magi.toml"], sorted(p.name for p in pathlib.Path(tmp).iterdir()))
 
     def test_a_quoted_base_url_key_in_embedding_is_replaced(self) -> None:
-        # [MAGI S6 MS3 loop9, R7a Caspar] `"base_url" = ...` was kept and a bare one added, a duplicate key the
-        # product refuses with a parse error that hides the cause.
+        # [MAGI S6 MS3 loop9, R7a Caspar] a quoted key was kept beside the added one: a duplicate key.
         url = "http://127.0.0.1:1/v1"
         for key in ('"base_url"', "'base_url'"):
             with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
@@ -258,9 +257,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                 self.assertEqual(url, tomllib.loads(path.read_text(encoding="utf-8"))["embedding"]["base_url"])
 
     def test_the_rewrite_keeps_the_config_s_permissions(self) -> None:
-        # [MAGI S6 MS3 loop9, R7a Caspar] The temporary file took the umask's mode, so a 0600 config came back
-        # world-readable after the restore.
-        # Windows keeps no 0600 mode to read back, so the copy of the mode is observed on the calls.
+        # [MAGI S6 MS3 loop9, R7a Caspar] the umask's mode replaced 0600; observed on the calls (Windows has none).
         with tempfile.TemporaryDirectory() as tmp:
             config = pathlib.Path(tmp) / "magi.toml"
             config.write_text('[embedding]\nbase_url = "http://emb/v1"\n', encoding="utf-8")

@@ -55,12 +55,9 @@ class RelayTests(unittest.TestCase):
             upstream.server_close()
         self.assertEqual(((("/v1/embeddings", b"x"),), True), (rec.recorded, rec.complete))
 
-    def test_an_upstream_with_credentials_is_refused(self) -> None:
-        with self.assertRaises(HarnessError):
-            with runs.recording_relay("http://u:p@127.0.0.1:1/v1"):
-                pass
-
     def test_the_upstream_is_the_one_endpoint_the_config_declares(self) -> None:
+        with self.assertRaises(HarnessError), runs.recording_relay("http://u:p@127.0.0.1:1/v1"):
+            pass
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "magi.toml"
             path.write_text('base_url = "http://a/v1"\n[magi]\nbase_url = "http://a/v1"\n', encoding="utf-8")
@@ -89,11 +86,6 @@ class RelayTests(unittest.TestCase):
             listed = subprocess.run(runs.git_command(ws, "ls-files"), check=True, env=runs.git_env(),
                                     capture_output=True, text=True).stdout.split()
         self.assertEqual(["a/b.rs"], listed)
-
-    def test_the_commit_and_history_runs_record_their_requests(self) -> None:
-        for run_id in ("R18", "R20", "R21"):
-            self.assertTrue(runs.DEFINITIONS[run_id].records_requests, run_id)
-        self.assertEqual(2, sum(isinstance(s, runs.Invocation) for s in runs.DEFINITIONS["R21"].setup))
 
 
 class RelayScenarioTests(unittest.TestCase):

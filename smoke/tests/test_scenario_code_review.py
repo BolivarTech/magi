@@ -482,8 +482,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, _outcomes("S49", r, log=b"x " + secret)[code_review.S49_ASSERTIONS[2]])
 
     def test_s49_fails_on_any_fragment_down_to_the_floor(self) -> None:
-        # [MAGI S6 MS3 loop9, R7a Melchior, Balthasar] S49 probed the whole key only, while the key is now the file's
-        # name, the value a log most often echoes cut short: every LEAK_SLICE_BYTES (8) window fails it.
+        # [MAGI S6 MS3 loop9, R7a] the whole key only was probed; now every 8-byte window of it.
         secret, n = code_review.S49_SECRET, code_review.LEAK_SLICE_BYTES
         self.assertEqual(8, n)
         r = _result("R14", 2, None, _SKIPPED_STDERR)
