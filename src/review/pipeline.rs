@@ -1137,6 +1137,11 @@ impl ReviewTimer<'_> {
 /// pending count also relies on). Code and context arrive masked (the filter, [`context_egress`]);
 /// each prompt is masked once more, a no-op backstop no new path can skip
 /// (`a_prompt_masks_a_secret_its_stages_left_raw`). O(bytes).
+///
+/// # Errors
+///
+/// [`ReviewError::NotReviewable`] (`secret`) for a prompt holding a private-key block, which
+/// masking cannot cover (`prompt_key_block_fails_closed`); nothing is sent.
 // MAGI FIX (MS3 §6 loop7): looked up by `batch.index`; and it trusted earlier stages to mask.
 fn render_prompts(
     batches: &[ReviewBatch],
@@ -1149,6 +1154,13 @@ fn render_prompts(
             let mut prompt = prompt_of(batch);
             if let Some(items) = contexts.get(i) {
                 write_context(&mut prompt, items);
+            }
+            // MAGI FIX (MS3 §6 loop9): the mask covers a key block's armor, never its body.
+            if holds_key_block(&prompt) {
+                return Err(ReviewError::NotReviewable {
+                    path: format!("batch {}", batch.index),
+                    cause: SkipCause::Secret.as_str(),
+                });
             }
             Ok(mask_secrets(&prompt))
         })

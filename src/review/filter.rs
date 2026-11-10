@@ -123,7 +123,7 @@ impl std::fmt::Display for Skipped {
 
 impl SkipCause {
     /// The cause's text: the one place it is spelled.
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Binary => "binary",
             Self::NotUtf8 => "not utf-8",
