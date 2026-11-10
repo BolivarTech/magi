@@ -1133,13 +1133,17 @@ impl ReviewTimer<'_> {
 
 /// The prompt of every batch, its code and then its context, in batch order: rendered before
 /// the review clock starts (§5.0 step 3, part of the preparation RV06 keeps off the clock).
-/// O(bytes of the batches and their contexts).
+/// `contexts[i]` is the context of `batches[i]`, by position, as every other stage pairs them;
+/// the planner numbers batches by position too (`batch.index == i`, which `run_batches`'s
+/// pending count also relies on). O(bytes of the batches and their contexts).
+// MAGI FIX (MS3 §6 loop7): looked up by `batch.index` while every other stage zips by position.
 fn render_prompts(batches: &[ReviewBatch], contexts: &[Vec<ContextItem>]) -> Vec<String> {
     batches
         .iter()
-        .map(|batch| {
+        .enumerate()
+        .map(|(i, batch)| {
             let mut prompt = prompt_of(batch);
-            if let Some(items) = contexts.get(batch.index) {
+            if let Some(items) = contexts.get(i) {
                 write_context(&mut prompt, items);
             }
             prompt
