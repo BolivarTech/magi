@@ -1092,6 +1092,10 @@ pub async fn prepare_docs(
     let deadline = started + timeout;
     let mut prep = DocPrep::default();
     // MAGI FIX (Loop1 r2, Minor 1): only a file that can yield chunks is listed and keyed.
+    // A path that quotes a secret is listed whatever its kind, on purpose: it is never read, and
+    // it is declared as held back for a secret (CP2 MS3 loop 11, pinned by
+    // `a_working_tree_review_keys_its_sources_by_their_bytes`). The pipeline merges that entry
+    // with the reviewed side's own `secret` skip of the same path, so it is listed once.
     let wanted = |p: &str| keep(p) && (find_secret(p).is_some() || yields_doc_chunks(p, registry));
     let listed = match (rev, git) {
         (Some(rev), Some(git)) => revision_doc_sources(git, rev, &wanted)
