@@ -1077,14 +1077,11 @@ fn mask_spans(text: &str, keep_lines: bool, max_bytes: usize) -> Option<String> 
         out.push('>');
         let end = merged_end(span.end, next.iter().flatten());
         if keep_lines {
-            // MAGI FIX (MS3 §6 loop6): each break as it was, `\r\n` included (R6a Caspar); a
-            // `\r` ending the covered text is kept with the `\n` that follows it.
+            // MAGI FIX (MS3 §6 loop6): each break as it was, `\r\n` included (R6a Caspar).
+            // MAGI FIX (MS3 §6 loop7): a lone `\r` too: every break byte, in order.
             let covered = text.get(span.start..end).unwrap_or_default();
-            for (at, _) in covered.match_indices('\n') {
-                let crlf = at
-                    .checked_sub(1)
-                    .is_some_and(|before| covered.as_bytes().get(before) == Some(&b'\r'));
-                out.push_str(if crlf { "\r\n" } else { "\n" });
+            for b in covered.bytes().filter(|b| matches!(b, b'\r' | b'\n')) {
+                out.push(char::from(b));
             }
         }
         if out.len() > max_bytes {
