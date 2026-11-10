@@ -813,18 +813,6 @@ fn side_units(
     }
     Ok(found)
 }
-/// The doc-search query: `text` cut to at most [`DOC_QUERY_MAX_BYTES`] bytes, on a char boundary.
-///
-/// # Arguments
-///
-/// * `text` - The text to search with.
-///
-/// # Returns
-///
-/// A prefix of `text`. O(1) in the cut, never slices inside a character.
-pub fn doc_query(text: &str) -> &str {
-    cut_on_char(text, DOC_QUERY_MAX_BYTES)
-}
 
 /// `text` cut to at most `max` bytes, on a char boundary. O(1) in the cut.
 fn cut_on_char(text: &str, max: usize) -> &str {
@@ -1657,13 +1645,14 @@ mod tests {
     #[test]
     fn the_doc_query_is_cut_on_a_char_boundary() {
         // [CP2 MS3 loop 4] A byte cut inside a multi-byte char would panic (§0: no slicing).
-        assert_eq!(doc_query("abc"), "abc");
+        let doc_query = |t: &str| cut_on_char(t, DOC_QUERY_MAX_BYTES).len();
+        assert_eq!(doc_query("abc"), 3);
         assert_eq!(
-            doc_query(&"é".repeat(DOC_QUERY_MAX_BYTES)).len(),
+            doc_query(&"é".repeat(DOC_QUERY_MAX_BYTES)),
             DOC_QUERY_MAX_BYTES
         );
         assert_eq!(
-            doc_query(&format!("a{}", "é".repeat(DOC_QUERY_MAX_BYTES))).len(),
+            doc_query(&format!("a{}", "é".repeat(DOC_QUERY_MAX_BYTES))),
             DOC_QUERY_MAX_BYTES - 1
         );
     }
