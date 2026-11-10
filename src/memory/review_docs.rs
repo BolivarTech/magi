@@ -1610,6 +1610,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn degenerate_query_scores_zero() {
+        // [MAGI S6 MS3 loop10, R1 Caspar] A zero query, or one whose norm overflows, scored NaN.
+        let (store, _dir) = store_for_test();
+        store
+            .reindex(
+                &[(src("d.md", "k"), vec![chunk("d.md", "A", "x")])],
+                &FakeEmbedder::new(3),
+            )
+            .await
+            .expect("dim 3");
+        let vectors = store
+            .load_vectors(3, &BTreeSet::from([src("d.md", "k")]))
+            .expect("load");
+        for q in [[0.0; 3], [f32::MAX; 3]] {
+            let hits = store.search_loaded(&vectors, &q, 5).expect("search");
+            assert_eq!(hits.len(), 1, "{q:?}");
+            assert_eq!(hits[0].1, 0.0, "{q:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn load_dim_mismatch_is_an_error() {
         // [MAGI S6 MS3 loop9, R1 Melchior] Rows of another dimension than asked are never
         // compared; they were dropped in silence, read as "no documentation".
