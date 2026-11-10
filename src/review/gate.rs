@@ -71,7 +71,8 @@ const CAUSE_CHAIN_EXHAUSTED: &str = "chain exhausted";
 /// A round number declared post hoc: without a bound the rule protected 6 `critical` false
 /// positives and the gate removed 16/42 (38.1 %, criterion 2 asks 40 %). The risk to real
 /// `critical` defects was not measured: neither `tune` nor `verify` holds a real `critical`
-/// judged `false_positive`.
+/// judged `false_positive`. A constant, not configuration, by the user's decision (U21, bound at
+/// 0.75): moving it is a recalibration, decided with evidence, never an operator knob.
 pub const CRITICAL_MIN_CONFIDENCE: f64 = 0.75;
 /// Cause of a critical finding judged a false positive with low confidence: it stays in the main list.
 const CAUSE_CRITICAL_NEVER_FILTERED: &str = "critical never filtered";
@@ -882,6 +883,10 @@ impl<'a> Gate<'a> {
     /// every one-line secret of every string is masked ([`mask_secrets`]), and the masked state
     /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left a match
     /// (`secret`). O(bytes of the state).
+    ///
+    /// Declared limit (RV22): the check is per string, so key-body lines quoted in a detail
+    /// without their header in that same string are not recognized here; the filter's file-level
+    /// rule (a file holding a block is left out) and the window check above come first.
     ///
     /// # Errors
     /// The cause the state is withheld for.
