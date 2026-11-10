@@ -354,7 +354,8 @@ impl ReviewHistoryStore {
     ///
     /// Complexity: each batch searches the `code_review_history_by_file` index for its files'
     /// validated rows (never a scan of the history) and sorts only those, O(m log m) for the `m`
-    /// such rows; O(files + (file batches x bound) log) raw rows kept, O(bound) decryptions.
+    /// such rows; at most 2 x (bound + 1) raw rows held at once (the newest are kept after each
+    /// file batch), O(bound) decryptions.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
@@ -366,6 +367,12 @@ impl ReviewHistoryStore {
         // (every validated row of the files was decrypted for every batch).
         let distinct: Vec<&String> = files.iter().collect::<BTreeSet<_>>().into_iter().collect();
         let over = i64::try_from(MAX_HISTORY_PER_BATCH.saturating_add(1)).unwrap_or(i64::MAX);
+        let newest_first = |a: &RawRow, b: &RawRow| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        };
+        let keep = MAX_HISTORY_PER_BATCH.saturating_add(1);
         let mut raw = Vec::new();
         for batch in distinct.chunks(FILES_PER_QUERY) {
             let mut args: Vec<&dyn rusqlite::ToSql> =
@@ -375,12 +382,11 @@ impl ReviewHistoryStore {
                 &validated_sql(batch.len()),
                 rusqlite::params_from_iter(args),
             )?);
+            // MAGI FIX (MS3 §6 loop7): every batch's rows were kept until the end, linear in the
+            // files; the newest bound + 1 are kept after each one, so the buffer is O(bound).
+            raw.sort_by(newest_first);
+            raw.truncate(keep);
         }
-        raw.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
         let cut = raw.len() > MAX_HISTORY_PER_BATCH;
         raw.truncate(MAX_HISTORY_PER_BATCH);
         Ok((self.decode_all(raw)?, cut))
