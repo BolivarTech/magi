@@ -800,8 +800,9 @@ pub(crate) struct CodeReviewTool {
     auto_approve: bool,
     /// The calling run's deadline, when it has a wall clock.
     deadline: Option<Instant>,
-    /// The plan the last approval prompt showed, with its arguments; taken once by `execute`.
-    approved: Mutex<Option<(Value, ReviewPlan)>>,
+    /// The arguments the last approval prompt was shown for, with the plan it showed (`None`
+    /// when its plan failed and it showed none); taken once by `execute`.
+    approved: Mutex<Option<(Value, Option<ReviewPlan>)>>,
     /// The bound of the result the agent reads, in bytes.
     output_cap: usize,
 }
@@ -852,12 +853,18 @@ impl CodeReviewTool {
     }
 
     /// The plan for `args`: the one the approval prompt computed for the same arguments (taken
-    /// once), or a fresh one when no prompt was shown (auto-approved, or already used).
+    /// once), or a fresh one when no prompt was shown (auto-approved, a headless tier that
+    /// authorizes by policy without a prompt, or a prompt already used). A fresh plan is bound to
+    /// `args` by construction: `input` is parsed from these `args` in this same call, so it can
+    /// never be another call's plan.
     ///
     /// # Errors
-    /// [`ReviewError::ContentChanged`] when the prompt was shown for other arguments: what runs
-    /// would not be what was approved. Any [`ReviewError`] of a fresh plan.
+    /// [`ReviewError::ContentChanged`] when the prompt was shown for other arguments, or was shown
+    /// with no plan (its plan failed) and a plan now succeeds: what would run was never shown
+    /// (`an_approval_shown_without_a_plan_never_runs_one_planned_later`). Any [`ReviewError`] of
+    /// a fresh plan.
     // MAGI FIX (MS3 §6 loop3): a prompt for other arguments was dropped and a fresh plan run.
+    // MAGI FIX (MS3 §6 loop7): a prompt whose plan failed let a later, unshown plan run.
     fn plan_for(&self, args: &Value, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
         let cached = self
             .approved
@@ -865,7 +872,11 @@ impl CodeReviewTool {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         match cached {
-            Some((shown, plan)) if &shown == args => Ok(plan),
+            Some((shown, Some(plan))) if &shown == args => Ok(plan),
+            Some((shown, None)) if &shown == args => {
+                self.runner.plan(input)?;
+                Err(ReviewError::ContentChanged)
+            }
             Some(_) => Err(ReviewError::ContentChanged),
             None => self.runner.plan(input),
         }
@@ -1099,13 +1110,13 @@ impl Tool for CodeReviewTool {
     /// report).
     fn approval_detail(&self, args: &Value) -> Option<String> {
         let input = parse_tool_input(args).ok()?;
-        let plan = self.runner.plan(&input).ok()?;
-        let detail = format!(
-            "{} batches; worst case {} s",
-            plan.batches, plan.worst_case_secs
-        );
+        let plan = self.runner.plan(&input).ok();
+        let detail = plan
+            .as_ref()
+            .map(|p| format!("{} batches; worst case {} s", p.batches, p.worst_case_secs));
+        // A failed plan is remembered too: the prompt was shown for `args` with no plan.
         *self.approved.lock().unwrap_or_else(PoisonError::into_inner) = Some((args.clone(), plan));
-        Some(detail)
+        detail
     }
 }
 
