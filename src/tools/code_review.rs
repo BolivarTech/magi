@@ -3272,6 +3272,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_no_embedder_early_return_keeps_the_revision_and_the_repository() {
+        // [MAGI S6 MS3 loop7, R5 Caspar] The early return without an embedder, pinned on its own:
+        // it keeps the history anchor and the repository flag, and names no failure (the context
+        // source says `without_embedder` itself).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        git_in(&ws, &["init", "-q"]);
+        std::fs::write(ws.join("a.rs"), "fn a() {}\n").expect("a.rs");
+        git_in(&ws, &["add", "a.rs"]);
+        git_in(&ws, &["commit", "-q", "-m", "one"]);
+        let head = git_in(&ws, &["rev-parse", "HEAD"]);
+        let (_db, _mem, memory) = review_memory();
+        let runner = production_runner_with_memory(&ws, Some(memory), None);
+        let doc = runner
+            .prepare_documentation(&ReviewInput::Commit(Some(head.clone())))
+            .await;
+        assert_eq!(doc.rev.as_deref(), Some(head.as_str()));
+        assert!(doc.repository, "the repository flag was lost");
+        assert!(!doc.prep.docs_unavailable, "no failure to declare");
+        assert!(doc.docs.is_none() && doc.worktree.is_none());
+    }
+
+    #[tokio::test]
     async fn a_revision_review_indexes_documentation_the_working_tree_ignores() {
         // [MAGI S6 MS3 loop2, R5 Melchior] `.gitignore` is a working-tree rule: a revision review
         // applies none (MS2), and its documentation listing must not either.
