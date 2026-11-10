@@ -4,23 +4,19 @@
 
 //! Project documentation as chunks for the `code-review` context.
 //!
-//! Three kinds of source feed the documentation index: Markdown files (one chunk per ATX heading;
-//! a setext heading is text, `setext_headings_stay_one_chunk`),
-//! Rust and Python doc comments (one chunk per documented item) and nothing else: code is never
-//! documentation. Every chunk carries a SHA-256 over its path, section and text, so the index can
-//! store a chunk once however many revisions contain it.
-//!
-//! A documentation source is identified by [`DocSource`] (path plus the key of its content), which
-//! lets the index serve each reviewed revision exactly its own documentation.
+//! Three kinds of source feed the documentation index: Markdown (one chunk per ATX heading; a
+//! setext heading is text, `setext_headings_stay_one_chunk`), Rust and Python doc comments (one
+//! chunk per documented item), nothing else. Every chunk carries a SHA-256 over its path, section
+//! and text, so it is stored once however many revisions hold it. A [`DocSource`] (path plus the
+//! key of its content) lets the index serve each revision exactly its own documentation.
 //!
 //! # Limits of line-based extraction
 //!
-//! Doc comments are found line by line, without a lexer, so the cut is bounded but not exact: a
-//! `///` line inside a plain `/* */` comment or a string literal is taken as documentation, a
-//! `def` line inside a Python triple-quoted string can yield a chunk of its own, and a Python
-//! header whose default value holds an odd number of quotes inside a triple-quoted string hides
-//! the docstrings after it in that file. Each case changes only which text is retrieved: every
-//! chunk is still masked and netted for secrets, and malformed input never panics.
+//! Doc comments are found line by line, without a lexer: a `///` line inside a `/* */` comment or
+//! a string is taken as documentation, a `def` line inside a Python triple-quoted string can yield
+//! a chunk, and a Python default holding an odd number of quotes inside one hides the docstrings
+//! after it. Each changes only what is retrieved: every chunk is still masked and netted, and
+//! malformed input never panics.
 //!
 //! # No panics
 //!
