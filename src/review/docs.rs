@@ -2107,6 +2107,16 @@ mod tests {
         );
     }
     #[test]
+    fn docs_txt_is_not_a_doc_source() {
+        // [MAGI S6 MS3 loop10, R1 Caspar] The two predicates disagreed on `docs/api.txt`.
+        let reg = LanguageRegistry::new();
+        for p in ["docs/api.txt", "docs/guide.rst", "adr/1.adoc"] {
+            assert!(!is_doc_source(p), "{p}");
+            assert!(!yields_doc_chunks(p, &reg), "{p}");
+        }
+    }
+
+    #[test]
     fn chunks_that_join_to_the_same_text_never_share_a_hash() {
         // [MAGI S6 MS3 loop7, R1 Melchior] A newline in a git path once let two chunks alias.
         assert_ne!(
