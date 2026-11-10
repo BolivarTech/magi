@@ -1594,6 +1594,22 @@ mod tests {
         assert_eq!((v.state, v.cause), (GateState::Unfiltered, Some("secret")));
     }
 
+    #[test]
+    fn a_header_read_only_across_lines_is_not_hidden_by_another_tracked_block() {
+        // [MAGI S6 MS3 loop7, R6b Melchior, Caspar] With one block opened and closed by lines,
+        // the whole-code fallback was off, so a second header the detector reads only across
+        // lines (none does today; a detector that does is given here) let its body be sent.
+        let opens = |t: &str| t.contains("OPEN") || t.contains("SPLIT\nHEADER");
+        let tail: String = (0..100).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        let code = format!("OPEN\nbody\n-----END x\n{tail}SPLIT\nHEADER\nbody2\n");
+        let header = 104;
+        assert!(window_overlaps_block_of(&code, header, &opens));
+        assert!(
+            !window_overlaps_block_of(&tail, 50, &opens),
+            "no block at all"
+        );
+    }
+
     #[tokio::test]
     async fn a_key_block_far_from_the_window_does_not_withhold_the_finding() {
         // [MAGI S6 MS3 loop6, R6b Melchior, Caspar] The whole-code check withheld every finding
