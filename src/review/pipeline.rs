@@ -200,7 +200,9 @@ pub trait RagSource: Send + Sync {
 /// The opening names the item's kind and its path, and a homonym definition (RV07(2)) carries
 /// ` candidate` before the closing `>>>`; both fields are escaped like [`escape_fence`], with the
 /// same rule applied to `>` (a run of three becomes `>>\>`, and a path that ends in `>` gets a
-/// closing `\` before the closer), so no file name ends the header early or opens another frame. The label and the lines are never
+/// closing `\` before the closer), and the path's control characters are escaped
+/// (`frame_escapes_control_chars`), so no file name ends the header early, opens another frame
+/// or adds a prompt line. The label and the lines are never
 /// written: [`super::rag::item_cost`] therefore covers everything variable that is written,
 /// and [`super::rag::CONTEXT_ITEM_FRAME_TOKENS`] the fixed rest.
 ///
@@ -217,7 +219,9 @@ pub fn context_frame(kind: &ContextKind, path: &str, candidate: bool) -> (String
     let mark = if candidate { CANDIDATE_MARK } else { "" };
     // MAGI FIX (MS3 §6 loop3): `foo>>` before the closing `>>>` wrote `>>>>>`; a path that ends
     // in `>` gets a closing `\`, so its own brackets never start the closer early.
-    let mut file = escape_header(path);
+    // MAGI FIX (MS3 §6 loop8): a raw newline in `path` split the header; controls are escaped
+    // here too (idempotent on a `display_path`), so the frame is one line whatever it is given.
+    let mut file = escape_header(&crate::review::secrets::escape_controls(path));
     if file.ends_with('>') {
         file.push('\\');
     }
