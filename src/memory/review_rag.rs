@@ -628,10 +628,12 @@ impl RagSource for StoreRag<'_> {
                     .map(escaped),
             );
         }
-        let mut code = definitions_for(&text, self.index, self.sources)?;
+        let mut unread = Vec::new();
+        let mut code = definitions_for(&text, self.index, self.sources, &mut unread);
         let names = changed_names(batch, &units);
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let (callers, capped) = callers_for(&refs, self.index, self.sources, self.registry)?;
+        let (callers, capped) =
+            callers_for(&refs, self.index, self.sources, self.registry, &mut unread);
         code.extend(callers);
         let code: Vec<ContextItem> = code.into_iter().map(escaped).collect();
         let limit = self
@@ -1484,7 +1486,7 @@ mod tests {
     use crate::memory::review_docs::test_embedder::{chunk, src, FailingEmbedder, FakeEmbedder};
     use magi_rs::review::history::MAX_RECLASSIFY_PER_REVIEW;
     use magi_rs::review::history::{HistoryEntry, HistoryStatus};
-    use magi_rs::review::rag::ContextKind;
+    use magi_rs::review::rag::{ContextKind, UNREADABLE_CONTEXT};
     use magi_rs::review::source::WorktreeSource;
 
     /// [CP2 MS3 loop 8] The production budget, for the tests that are not about it.
@@ -2823,6 +2825,37 @@ mod tests {
         .await;
         assert!(prep.doc_index.unreadable, "{prep:?}");
         assert!(!prep.docs_unavailable, "one file, never the whole index");
+    }
+
+    #[tokio::test]
+    async fn unread_def_is_declared() {
+        // [MAGI S6 MS3 loop9, R2 Melchior] A definition file that cannot be read failed the
+        // batch's whole context; that item is left out and declared, the rest is served.
+        struct HalfBroken;
+        impl ContentSource for HalfBroken {
+            fn read(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                match p {
+                    "a.rs" => Ok(Some(b"fn a() {\n    b();\n}\n".to_vec())),
+                    _ => Err(ReviewError::Io("disk".into())),
+                }
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let f =
+            RagFixture::new(&[("a.rs", "fn a() {\n    b();\n}\n"), ("b.rs", "fn b() {}\n")]).await;
+        let rag = StoreRag {
+            sources: &HalfBroken,
+            ..f.rag(false)
+        };
+        let a = rag.context_for(&batch_on("a.rs", "    b();")).await;
+        let a = a.expect("the batch keeps its context");
+        let cause = (
+            ContextKind::Definition,
+            format!("b.rs: {UNREADABLE_CONTEXT}"),
+        );
+        assert!(a.trimmed.contains(&cause), "{:?}", a.trimmed);
     }
 
     #[tokio::test]

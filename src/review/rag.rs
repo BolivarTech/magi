@@ -405,6 +405,20 @@ fn read_text(
         .transpose()
 }
 
+/// What a definition or caller file that could not be read declares, after its path.
+pub const UNREADABLE_CONTEXT: &str = "could not be read and was left out";
+
+/// The new side of a context file, or `None` when it is gone or cannot be read; a read error
+/// pushes the file onto `unread`, so it costs its own items only, declared, never the batch.
+fn read_or_note(
+    sources: &dyn ContentSource,
+    file: &str,
+    unread: &mut Vec<String>,
+) -> Option<String> {
+    let _ = unread;
+    read_text(sources, file, false).unwrap_or(None)
+}
+
 /// Lines `first..=last` (1-based) of `text`, joined by `\n`. O(`last`).
 fn lines_text(text: &str, first: u32, last: u32) -> String {
     let skip = first.saturating_sub(1) as usize;
@@ -495,19 +509,18 @@ impl FileUnits {
 /// * `text` - The raw code of the batch.
 /// * `index` - The lexical index of the review.
 /// * `sources` - The content source of the review (the cached one).
+/// * `unread` - Receives each file that could not be read, as [`display_path`] shows it.
 ///
 /// # Returns
 ///
-/// The `Definition` items.
-///
-/// # Errors
-///
-/// An error of `sources`, unchanged; a file that is gone (`Ok(None)`) is skipped.
+/// The `Definition` items; a file that is gone or cannot be read gives none (see
+/// [`read_or_note`]).
 pub fn definitions_for(
     text: &str,
     index: &LexicalIndex,
     sources: &dyn ContentSource,
-) -> Result<Vec<ContextItem>, ReviewError> {
+    unread: &mut Vec<String>,
+) -> Vec<ContextItem> {
     let mut names = HashSet::new();
     let mut files: HashMap<&str, Option<String>> = HashMap::new();
     let mut items = Vec::new();
@@ -518,7 +531,7 @@ pub fn definitions_for(
         let places = index.definitions(name);
         for (file, first, last) in places {
             if !files.contains_key(file.as_str()) {
-                files.insert(file, read_text(sources, file, false)?);
+                files.insert(file, read_or_note(sources, file, unread));
             }
             let Some(Some(body)) = files.get(file.as_str()) else {
                 continue;
@@ -534,7 +547,7 @@ pub fn definitions_for(
             });
         }
     }
-    Ok(items)
+    items
 }
 
 /// The units that name any of `names` (the changed units), one item per `(file, unit)` and never
@@ -553,21 +566,19 @@ pub fn definitions_for(
 /// * `index` - The lexical index of the review.
 /// * `sources` - The content source of the review (the cached one).
 /// * `registry` - The language extractors.
+/// * `unread` - Receives each file that could not be read, as [`display_path`] shows it.
 ///
 /// # Returns
 ///
 /// The `Caller` items (labelled with the caller unit's name), and the names whose callers the
-/// cap cut, in `names` order, for the caller to declare.
-///
-/// # Errors
-///
-/// An error of `sources`, unchanged.
+/// cap cut, in `names` order, for the caller to declare; an unreadable file gives none.
 pub fn callers_for(
     names: &[&str],
     index: &LexicalIndex,
     sources: &dyn ContentSource,
     registry: &LanguageRegistry,
-) -> Result<(Vec<ContextItem>, Vec<String>), ReviewError> {
+    unread: &mut Vec<String>,
+) -> (Vec<ContextItem>, Vec<String>) {
     let mut items = Vec::new();
     let mut capped = Vec::new();
     let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
@@ -589,7 +600,7 @@ pub fn callers_for(
             }
             if !files.contains_key(file) {
                 let loaded = match registry.get(file) {
-                    Some(extractor) => read_text(sources, file, false)?
+                    Some(extractor) => read_or_note(sources, file, unread)
                         .map(|text| FileUnits::load(extractor, file, &text)),
                     None => None,
                 };
@@ -619,7 +630,7 @@ pub fn callers_for(
             items.push(unit_item(ContextKind::Caller, unit));
         }
     }
-    Ok((items, capped))
+    (items, capped)
 }
 
 /// The units that contain a batch item's changed lines, as `Unit` items with their `lines`
@@ -1237,9 +1248,10 @@ mod tests {
     }
 
     #[test]
-    fn a_source_read_error_while_gathering_context_is_returned_never_skipped() {
-        // [CP2 MS3 loop 6] No silent failure: a definition or caller that cannot be read fails the
-        // preparation, typed.
+    fn unreadable_file_degrades_item() {
+        // [CP2 MS3 loop 6] No silent failure. [MAGI S6 MS3 loop9, R2 Melchior] One unreadable
+        // definition or caller file failed the whole review; it now leaves out its own items
+        // only, each file named for the caller to declare.
         struct Broken;
         impl ContentSource for Broken {
             fn read(&self, _p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
@@ -1257,14 +1269,13 @@ mod tests {
             ),
         ];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
-        assert!(matches!(
-            definitions_for("parse();", &index, &Broken),
-            Err(ReviewError::Io(_))
-        ));
-        assert!(matches!(
-            callers_for(&["parse"], &index, &Broken, &LanguageRegistry::new()),
-            Err(ReviewError::Io(_))
-        ));
+        let mut unread = Vec::new();
+        let defs = definitions_for("parse();", &index, &Broken, &mut unread);
+        assert!(defs.is_empty());
+        let reg = LanguageRegistry::new();
+        let (callers, _) = callers_for(&["parse"], &index, &Broken, &reg, &mut unread);
+        assert!(callers.is_empty());
+        assert_eq!(unread, vec!["a.rs".to_string(), "b.rs".to_string()]);
     }
 
     #[test]
@@ -1827,7 +1838,12 @@ mod tests {
             ],
             &[],
         );
-        let defs = definitions_for("call `parse` and `only` here", &index, &src).expect("reads");
+        let defs = definitions_for(
+            "call `parse` and `only` here",
+            &index,
+            &src,
+            &mut Vec::new(),
+        );
         let parse: Vec<_> = defs.iter().filter(|d| d.label == "parse").collect();
         assert_eq!(parse.len(), 2);
         assert!(parse
@@ -1850,8 +1866,8 @@ mod tests {
             "fn caller() {\n    parse();\n    parse();\n}\n",
             &index,
             &src,
-        )
-        .expect("reads");
+            &mut Vec::new(),
+        );
         assert_eq!(
             defs.iter().map(|d| d.label.as_str()).collect::<Vec<_>>(),
             vec!["parse"],
@@ -1872,7 +1888,7 @@ mod tests {
         ];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", rs), ("c.py", py)], &[]);
-        let defs = definitions_for("s.run(); c.go()", &index, &src).expect("reads");
+        let defs = definitions_for("s.run(); c.go()", &index, &src, &mut Vec::new());
         let got: Vec<_> = defs.iter().map(|d| (d.label.as_str(), d.lines)).collect();
         assert_eq!(got, vec![("run", Some((4, 4))), ("go", Some((2, 3)))]);
     }
@@ -1888,8 +1904,12 @@ mod tests {
         )];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", "struct Config {\n    n: u32,\n}\n")], &[]);
-        let defs =
-            definitions_for("fn f(c: Config) -> u32 {\n    c.n\n}\n", &index, &src).expect("reads");
+        let defs = definitions_for(
+            "fn f(c: Config) -> u32 {\n    c.n\n}\n",
+            &index,
+            &src,
+            &mut Vec::new(),
+        );
         assert_eq!(
             defs.iter().map(|d| d.label.as_str()).collect::<Vec<_>>(),
             vec!["Config"]
@@ -1931,8 +1951,13 @@ mod tests {
         ];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", a), ("b.rs", b)], &[]);
-        let (callers, capped) =
-            callers_for(&["parse"], &index, &src, &LanguageRegistry::new()).expect("reads");
+        let (callers, capped) = callers_for(
+            &["parse"],
+            &index,
+            &src,
+            &LanguageRegistry::new(),
+            &mut Vec::new(),
+        );
         assert_eq!(
             callers
                 .iter()
@@ -1959,8 +1984,13 @@ mod tests {
         ];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", a.as_str()), ("b.rs", b.as_str())], &[]);
-        let (callers, capped) =
-            callers_for(&["parse"], &index, &src, &LanguageRegistry::new()).expect("reads");
+        let (callers, capped) = callers_for(
+            &["parse"],
+            &index,
+            &src,
+            &LanguageRegistry::new(),
+            &mut Vec::new(),
+        );
         assert_eq!(callers.len(), MAX_CALLERS_PER_NAME);
         assert_eq!(capped, vec!["parse".to_string()]);
     }
@@ -1981,8 +2011,13 @@ mod tests {
         ];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", a.as_str()), ("b.rs", b.as_str())], &[]);
-        let (callers, capped) =
-            callers_for(&["m"], &index, &src, &LanguageRegistry::new()).expect("reads");
+        let (callers, capped) = callers_for(
+            &["m"],
+            &index,
+            &src,
+            &LanguageRegistry::new(),
+            &mut Vec::new(),
+        );
         assert!(capped.is_empty(), "{capped:?}");
         assert_eq!(callers.len(), MAX_CALLERS_PER_NAME);
         assert!(callers.iter().all(|c| c.file == "b.rs"), "{callers:?}");
