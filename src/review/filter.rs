@@ -2190,13 +2190,12 @@ mod tests {
     }
 
     #[test]
-    fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_its_own_cause() {
+    fn unrebuilt_diff_skips_as_secret() {
         // [MAGI S6 MS3 loop2, R6a Balthasar] the safe fallback of `kept_verdict`: a diff that
         // names a line its masked side does not have cannot be rebuilt, so the raw diff, which
         // carries the key, is never kept; the file is left out instead.
-        // [MAGI S6 MS3 loop6, R6a Melchior, R7b Caspar] Under `diff not rebuilt`, not `secret`:
-        // the omission is the RV22 tie-break's safe direction, and the cause says that the diff
-        // could not be rebuilt rather than that no masking was possible.
+        // [MAGI S6 MS3 loop9, R6a Caspar] RV22 names the cause of a file left out for a secret:
+        // `secret`, whatever stopped the masking (loop 6 had a `diff not rebuilt` cause).
         let removed = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
         let diff = format!("@@ -5,2 +5,1 @@\n-{removed}\n fn f() {{}}\n");
         let old = format!("{removed}\nfn f() {{}}\n");
@@ -2221,7 +2220,7 @@ mod tests {
             f.skipped,
             vec![Skipped {
                 path: "a.rs".into(),
-                cause: SkipCause::DiffNotRebuilt
+                cause: SkipCause::Secret
             }]
         );
         assert!(f.masked.is_empty(), "{:?}", f.masked);
@@ -2235,7 +2234,7 @@ mod tests {
         assert!(matches!(
             filter_files(one, &src, &LanguageRegistry::new(), true, &|_| false),
             Err(ReviewError::NotReviewable {
-                cause: "diff not rebuilt",
+                cause: "secret",
                 ..
             })
         ));
@@ -2309,11 +2308,11 @@ mod tests {
     }
 
     #[test]
-    fn a_masked_file_whose_diff_cannot_be_rebuilt_is_left_out_with_a_warning() {
+    fn unrebuilt_diff_warns_and_skips() {
         // [MAGI S6 MS3 loop4, R6a Balthasar] The fallback branch itself: a masked file whose diff
         // disagrees with its sides (a body line without a marker) is left out, the safe
         // direction, and the run log says why at WARN so a parser drift is visible.
-        // [MAGI S6 MS3 loop6] Its cause is now `diff not rebuilt`, no longer `secret`.
+        // [MAGI S6 MS3 loop9] Its cause is `secret` (RV22); the warning still says why.
         use tracing_subscriber::layer::SubscriberExt;
         #[derive(Clone, Default)]
         struct Warns(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -2351,7 +2350,7 @@ mod tests {
             skipped,
             vec![Skipped {
                 path: "a.rs".into(),
-                cause: SkipCause::DiffNotRebuilt
+                cause: SkipCause::Secret
             }]
         );
         assert_eq!(warns.0.load(std::sync::atomic::Ordering::SeqCst), 1);
