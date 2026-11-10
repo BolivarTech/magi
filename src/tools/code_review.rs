@@ -1019,6 +1019,20 @@ fn fit_escaped(report: &str, budget: usize) -> String {
     best.unwrap_or_default()
 }
 
+/// A `--timeout` total in whole seconds, rounded up: a fraction is never truncated away, so
+/// half a second is one second (and refused for its budget like any total too short), never a
+/// zero read as no time at all
+/// (`a_zero_or_sub_second_total_is_a_typed_refusal_never_truncated_to_nothing`). O(1).
+// MAGI FIX (MS3 §6 loop7): `as_secs` truncated a sub-second total to zero.
+fn total_secs(total: Duration) -> u64 {
+    let whole = total.as_secs();
+    if total.subsec_nanos() == 0 {
+        whole
+    } else {
+        whole.saturating_add(1)
+    }
+}
+
 /// A review error as the tool's execution error, redacted.
 fn tool_error(e: &ReviewError) -> ToolError {
     ToolError::ExecutionError(egress_text(&e.to_string()))
@@ -1514,7 +1528,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
         // review both read the same, shorter end; nothing here adds the margin back.
         let (timeout_secs, deadline) = match budget {
             ReviewBudget::Unbounded => (None, None),
-            ReviewBudget::Total(t) => (Some(t.as_secs()), None),
+            ReviewBudget::Total(t) => (Some(total_secs(t)), None),
             ReviewBudget::Until(d) => (None, Some(d)),
         };
         run_cancellable(cancel, async {
@@ -3363,6 +3377,31 @@ mod tests {
             "{:?}",
             run.err()
         );
+        assert_eq!(fake.calls(), 0, "the embedder was never called");
+    }
+
+    #[tokio::test]
+    async fn a_zero_or_sub_second_total_is_a_typed_refusal_never_truncated_to_nothing() {
+        // [MAGI S6 MS3 loop7, R5 Caspar] `as_secs` truncated half a second to zero; the total is
+        // now rounded up to whole seconds, and a zero or tiny total is refused for its budget
+        // before the embedder, never read as no total at all.
+        assert_eq!(total_secs(Duration::from_millis(500)), 1);
+        assert_eq!(total_secs(Duration::from_millis(1_200)), 2);
+        assert_eq!(total_secs(Duration::from_secs(2)), 2);
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        for total in [Duration::ZERO, Duration::from_millis(500)] {
+            let plan = runner
+                .plan(&ReviewInput::File("src".into()))
+                .expect("plans");
+            let run = runner
+                .run(plan, ReviewBudget::Total(total), &CancellationToken::new())
+                .await;
+            assert!(matches!(run, Err(ReviewError::Budget { .. })), "{total:?}");
+        }
         assert_eq!(fake.calls(), 0, "the embedder was never called");
     }
 
