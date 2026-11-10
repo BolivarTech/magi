@@ -285,7 +285,14 @@ const KEY_BLOCK_END_OPENERS: [&str; 2] = ["-----END ", "---- END "];
 /// (RV22's file-level exception), so this is a backstop. O(bytes of `code`).
 // MAGI FIX (MS3 §6 loop6): the whole-code check withheld every finding of such a file.
 fn window_overlaps_key_block(code: &str, line: u32) -> bool {
-    if !holds_key_block(code) {
+    window_overlaps_block_of(code, line, &holds_key_block)
+}
+
+/// [`window_overlaps_key_block`] with the block detector `opens` given, so the cases the real
+/// detector cannot produce today (a header read only across lines) are testable. O(bytes of
+/// `code`) times the cost of `opens`.
+fn window_overlaps_block_of(code: &str, line: u32, opens: &dyn Fn(&str) -> bool) -> bool {
+    if !opens(code) {
         return false;
     }
     let first = line.saturating_sub(GATE_CONTEXT_LINES).max(1);
@@ -294,7 +301,7 @@ fn window_overlaps_key_block(code: &str, line: u32) -> bool {
     let mut found = false;
     for (n, text) in (1u32..).zip(code.lines()) {
         match opened {
-            None if holds_key_block(text) => {
+            None if opens(text) => {
                 found = true;
                 opened = Some(n);
             }
