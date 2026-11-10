@@ -330,9 +330,18 @@ def install_fake_runs(case: unittest.TestCase,
 #: ``.magi`` is copied in. [MAGI §6 MS2 loop 9, F1a-c1] S51 reads them off the result.
 R16_PROTECTED = (".magi/.magi-rs-memory.db", ".magi/logs/magi-2026-10-29.log", ".magi/magi.toml")
 
+#: What the recording relay sees of a healthy R18 (MAGI S6 MS3 loop9): the file's doc comment
+#: indexed, the batch's query embedded (masked), one trio request; ``scenario_result``'s R18 default.
+R18_HEALTHY_REQUESTS = tuple(
+    ("/v1/embeddings", json.dumps({"input": [text]}).encode())
+    for text in ("search_document: " + runs.REVIEW_MASKED_DOC.decode(),
+                 "search_query: " + runs.REVIEW_MASKED_DOC.decode() + "\npub fn token() <redacted: anthropic-key>")
+) + (("/api/chat", b'{"messages": []}'),)
+
 
 def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",
-                    timed_out: bool = False, review_log=None, protected_visible=None):
+                    timed_out: bool = False, review_log=None, protected_visible=None,
+                    requests=None):
     """A real ``RunResult`` for *run_id* whose stdout is *document* serialised.
 
     [MAGI S6 MS3 loop7, R7b Balthasar] Moved here from the code-review scenario
@@ -348,6 +357,8 @@ def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: byte
         review_log: The captured run-log bodies, or ``None``.
         protected_visible: The protected paths git listed; defaults to
             :data:`R16_PROTECTED` for R16 and to nothing for every other run.
+        requests: What the recording relay saw, ``(path, body)`` pairs; defaults to
+            :data:`R18_HEALTHY_REQUESTS` for R18 and to nothing recorded (``()``) otherwise.
 
     Returns:
         RunResult: The result.
@@ -356,11 +367,13 @@ def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: byte
     body = b"" if document is None else json.dumps(document).encode()
     if protected_visible is None:
         protected_visible = R16_PROTECTED if run_id == "R16" else ()
+    if requests is None:
+        requests = R18_HEALTHY_REQUESTS if run_id == "R18" else ()
     return RunResult(run_id=run_id,
                      output=ProductOutput(stdout=body, stderr=stderr, exit_code=exit_code,
                                           command=["magi-rs"]),
                      duration_s=1.0, timed_out=timed_out, planted=(), review_log=review_log,
-                     protected_visible=protected_visible)
+                     protected_visible=protected_visible, request_bodies=requests)
 
 
 def scenario_findings(scenario_id: str, result, log=b"") -> list:
