@@ -188,6 +188,9 @@ pub fn gate_state(finding: &ConsolidatedFinding, code: &str) -> Value {
 /// assert_eq!(state["code"], "1: fn a() {}\n2: fn b() {}\n");
 /// assert_eq!(state["finding"]["severity"], "info");
 /// ```
+// Invariant: every object key here is one of this function's own literals, never foreign text;
+// `masked_strings` masks values only and relies on it (a key built from a path or a title would
+// make the state withheld). Pinned by `the_gate_state_keys_are_the_gates_own_literals`.
 pub fn gate_state_of(finding: &ConsolidatedFinding, i: usize, code: &str) -> Value {
     let pairs = constituents(finding);
     let (title, detail) = pairs
@@ -1614,6 +1617,26 @@ mod tests {
             .judge(&finding(Severity::Warning, Some(line)), Some(&code), None)
             .await;
         assert_eq!((v.state, v.cause), (GateState::Unfiltered, Some("secret")));
+    }
+
+    #[test]
+    fn the_gate_state_keys_are_the_gates_own_literals() {
+        // [MAGI S6 MS3 loop7, R6b Balthasar] `masked_strings` masks values, not keys: whatever
+        // the finding holds, the state's keys are the gate's fixed field names.
+        let mut f = finding(Severity::Warning, Some(1));
+        f.file = Some("sk-ant-api03-AAAAAAAAAAAAAAAAAAAA.rs".into()); // allow-secret-scan
+        f.titles = vec!["title".into()];
+        let state = gate_state_of(&f, 0, "fn a() {}\n");
+        let keys = |v: &Value| -> Vec<String> {
+            v.as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(keys(&state), ["code", "finding"]);
+        assert_eq!(
+            keys(&state["finding"]),
+            ["detail", "file", "line", "severity", "title"]
+        );
     }
 
     #[test]
