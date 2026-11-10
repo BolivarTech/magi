@@ -267,30 +267,22 @@ impl ReviewDocStore {
             .collect())
     }
 
-    /// Indexes whole sources, each with its chunks (possibly none); a source already indexed is
-    /// skipped.
+    /// Indexes whole sources, each with its chunks (possibly none); one already indexed is skipped.
     ///
-    /// Order of work: check the embedder's identity and the chunks' hashes, leave out the
-    /// sources with a secret ([`ReindexStats::refused`]), read what is stored (lock released),
-    /// embed the rest in requests of at most [`EMBED_BATCH_ITEMS`] texts (no lock held), then
-    /// write everything in one transaction. All or nothing: any failure before the write leaves
-    /// the index as it was. A chunk already stored under any
-    /// source reuses its vector (re-encrypted under the new row), so an unchanged chunk is
-    /// never embedded twice. Rows of another identity are wiped in the same transaction
-    /// (`rebuilt`); nothing else is ever deleted here (see [`Self::gc`]).
+    /// Checks the embedder's identity and the chunks' hashes, leaves out the sources with a
+    /// secret ([`ReindexStats::refused`]), reads what is stored, embeds the rest in requests of at
+    /// most [`EMBED_BATCH_ITEMS`] texts (no lock held), then writes in one transaction: all or
+    /// nothing. A chunk stored under any source reuses its vector, so it is never embedded twice;
+    /// rows of another identity are wiped in that transaction (`rebuilt`), nothing else.
     ///
-    /// Complexity: O(chunks) hash lookups, plus the embedder's cost for the new chunks.
-    ///
-    /// Memory: every sealed row of one call is built before its write, a few times its chunks'
-    /// bytes. The product's caller (`prepare_docs`) calls once per batch of at most
-    /// [`EMBED_BATCH_ITEMS`] chunks or one source, so the sealed rows and the write stay bounded
-    /// by a batch, and a review's plaintext by `MAX_DOC_INDEX_BYTES` (`bounded`).
+    /// O(chunks) lookups plus the embedder. Memory: one call's sealed rows, a few times its
+    /// chunks' bytes; `prepare_docs` calls per batch of at most [`EMBED_BATCH_ITEMS`] chunks or
+    /// one source, and bounds a review's plaintext by `MAX_DOC_INDEX_BYTES`.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if the embedder's identity differs from the store's, a chunk's
-    /// hash or path does not match it, the embedder answers a vector of another length than it
-    /// declares, or a query fails; [`MemoryError::Embedding`] if the embedder fails; [`MemoryError::Crypto`]
-    /// if encryption or decryption fails.
+    /// [`MemoryError::Storage`] for another identity, a chunk whose hash or path does not match
+    /// it, a vector of another length than declared, or a failing query;
+    /// [`MemoryError::Embedding`]; [`MemoryError::Crypto`].
     pub async fn reindex(
         &self,
         sources: &[(DocSource, Vec<DocChunk>)],
@@ -409,19 +401,14 @@ impl ReviewDocStore {
         Ok(rows)
     }
 
-    /// Writes the wipe, the rows and the source rows in one transaction, and answers whether it
-    /// wiped. Rows of another identity are deleted only when the plan saw them (`rebuilt`: an
-    /// index left by an earlier model, dimension or chunker). Rows of another identity that
-    /// appear only by the time the transaction starts mean another identity's reindex ran while
-    /// this one embedded unlocked: that is a conflict, and the write fails with nothing written
-    /// or deleted, so neither side erases the other's successful write in silence
-    /// (`a_reindex_raced_by_another_identity_is_a_conflict_that_deletes_nothing`); the review
-    /// that loses runs without documentation and says so. A `rebuilt` wipe is not re-checked: a
-    /// racing identity's rows go too, and its next [`Self::load_vectors`] fails on this store's
-    /// rows, so its review declares the index unavailable (caught at the read,
-    /// `vectors_loaded_while_another_identity_holds_the_index_are_an_error_not_silence`). This store's own rows are never
-    /// deleted here. Inserts are `OR IGNORE` by key: two processes indexing the same source
-    /// under one identity write the same thing.
+    /// Writes the wipe, the rows and the source rows in one transaction; answers whether it
+    /// wiped. Foreign rows are deleted only when the plan saw them (`rebuilt`). Foreign rows that
+    /// appear only by the time the transaction starts (another identity indexed while this one
+    /// embedded) are a conflict: nothing is written or deleted, and the losing review runs
+    /// without documentation and says so. A `rebuilt` wipe is not re-checked: a racing
+    /// identity's next [`Self::load_vectors`] then fails on this store's rows and its review
+    /// declares the index unavailable. This store's own rows are never deleted here; inserts
+    /// are `OR IGNORE`, so one identity indexing a source twice writes the same thing.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] for the conflict or a failing statement.
@@ -516,19 +503,13 @@ impl ReviewDocStore {
     }
 
     /// The decrypted vectors of the rows whose `(path, key)` is in `allowed`, of this identity
-    /// and `dim`: what [`Self::search_loaded`] scores against, loaded once and searched by every
-    /// batch of a review. Rows are read raw under the connection lock and decrypted after it is
-    /// released (R-V08).
+    /// and `dim`: loaded once per review, scored by [`Self::search_loaded`] per batch. Read raw
+    /// under the lock, decrypted after it (R-V08).
     ///
-    /// While rows of another identity are stored, a non-empty `allowed` is an error, never an
-    /// empty answer: after this review indexed, only another identity's rebuild can have put
-    /// them there, and it may have wiped this review's rows
-    /// (`vectors_loaded_while_another_identity_holds_the_index_are_an_error_not_silence`). The
-    /// review then declares its documentation unavailable instead of serving none undeclared.
-    /// The check and the read run in one read transaction under one lock, so they see one
-    /// snapshot: another process's rebuild lands before both or after both, never between.
-    ///
-    /// Complexity: O(r) decryptions for the `r` allowed rows.
+    /// With rows of another identity stored, a non-empty `allowed` is an error, never an empty
+    /// answer: only another identity's rebuild can have put them there, maybe wiping this
+    /// review's rows, and the review then declares its documentation unavailable. Check and read
+    /// share one read transaction (one snapshot). O(r) decryptions for `r` allowed rows.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if another identity holds the index or a query fails;
@@ -689,15 +670,10 @@ impl ReviewDocStore {
     /// `keep_worktree_keys`, a source whose key is a working-tree key stays. Returns how many
     /// sources it deleted.
     ///
-    /// Caller contract: `live` holds every source a local ref reaches, plus the current
-    /// working-tree set when the review listed it (then `keep_worktree_keys` is `false`, so
-    /// older working-tree versions go); a review that did not list the working tree passes
-    /// `true` and leaves those sources for the next one that does. Never `DROP TABLE`: a
-    /// dropped table would make the next open read this database as one from an older version.
-    ///
-    /// Every identity's rows are considered, on purpose: `live` names sources by `(path, key)`
-    /// alone, so an unreached row is garbage and a live one stays whatever wrote it (two
-    /// identities never hold the index at once: a rebuild wipes, a race is a conflict).
+    /// Caller contract: `live` holds every source a local ref reaches, plus the working-tree set
+    /// when the review listed it (`keep_worktree_keys` `false`); a review that did not list it
+    /// passes `true` and leaves those sources. Never `DROP TABLE` (the next open would read an
+    /// older database). Every identity's rows count: `live` names sources by `(path, key)`.
     ///
     /// Complexity: O(stored sources), one pair of deletes per [`ALLOWED_PAIRS_PER_QUERY`] doomed
     /// sources; each delete by `(path, key)` scans `code_review_docs` (keyed `(key, chunk_hash)`),

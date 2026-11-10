@@ -191,13 +191,9 @@ pub fn is_doc_source(path: &str) -> bool {
 ///
 /// Every one-line secret of the section and the text is masked ([`mask_secrets`]) before the
 /// text is split, so no part holds a byte of one and the hash is over what is sent (RV22
-/// amended). A section or text that holds a private-key block is neither masked nor split: it
-/// stays one chunk for [`without_secrets`] to drop (RV22's exception). That drop rests on
-/// `find_secret` matching the block's header, the same table `holds_key_block` filters; it is
-/// pinned here (`a_chunk_holding_a_private_key_block_is_left_out`) and again at the store,
-/// which refuses such a chunk by itself
-/// (`a_chunk_holding_a_private_key_block_is_refused_before_anything_is_embedded`). O(n) in the
-/// text.
+/// amended). A section or text holding a private-key block is neither masked nor split: it
+/// stays one chunk for [`without_secrets`] to drop (RV22's exception), by its header, which
+/// `find_secret` matches; the store refuses such a chunk too. O(n) in the text.
 // MAGI FIX (MS3 §6 loop1): a chunk with a one-line secret was kept whole so that
 // `without_secrets` could drop it; RV22 amended masks it instead.
 fn make_chunks(path: &str, section: &str, text: &str) -> Vec<DocChunk> {
@@ -970,21 +966,18 @@ pub(crate) fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) 
 }
 
 /// The chunks of one documentation source, netted (RV22): `chunk_source`'s, through
-/// [`without_secrets`], and none at all when the file holds a private-key block anywhere (its
-/// code included). The one public way to chunk a source, so a caller cannot send key-block
-/// bytes by forgetting the net (`chunking_is_netted_by_default`); the raw chunkers are
-/// crate-private. O(n) in the text.
+/// [`without_secrets`], and none when the file holds a private-key block anywhere. The one
+/// public way to chunk a source, so no caller sends key-block bytes by forgetting the net
+/// (`chunking_is_netted_by_default`). O(n) in the text.
 ///
 /// # Arguments
-///
 /// * `path` - Path of the file in the revision.
 /// * `text` - Its content.
 /// * `registry` - Languages the review has extractors for.
 ///
 /// # Returns
-///
-/// The chunks safe to send, and the [`display_path`] of the source once per dropped chunk (one
-/// entry for a key block in the file); a non-empty second part means: withhold the source.
+/// The chunks safe to send, and the source's [`display_path`] once per dropped chunk; a
+/// non-empty second part means: withhold the source.
 ///
 /// # Examples
 ///
@@ -1009,19 +1002,14 @@ pub fn netted_chunks(
 
 /// Splits `chunks` into those safe to send and the sources of those holding a secret.
 ///
-/// The chunkers mask every one-line secret, so a chunk they built is dropped only when it holds
-/// a private-key block (RV22's exception). This is also the net before any embedding: a chunk
-/// whose section or text still matches [`find_secret`] (one built by hand, or a part whose cut
-/// made a match the whole text did not have) is dropped too, never sent (the section travels
-/// with the chunk). O(total text) plus O(chunks log sources).
+/// The chunkers mask every one-line secret, so a chunk they built is dropped only for a
+/// private-key block (RV22's exception); a chunk whose path, section or text still matches
+/// [`find_secret`] (built by hand, or cut into a new match) is dropped too, before any
+/// embedding. O(total text) plus O(chunks log sources).
 ///
-/// **Source-scoped** (RV22's exception omits the *file*): once any chunk of a path is dropped,
-/// every chunk of that path is dropped, its clean siblings included. A body line of a key block
-/// copied into another section matches no pattern of its own, so only the whole source being
-/// left out keeps it from the embedder
-/// (`a_private_key_block_in_one_chunk_withholds_every_chunk_of_its_source`). A caller holding
-/// the whole file should still test it with `holds_key_block` first: a block in the file's code
-/// is in no doc-comment chunk at all (the product's caller does, `prepare_docs`).
+/// **Source-scoped** (RV22 omits the *file*): once any chunk of a path is dropped, every chunk
+/// of that path is, since a key body line copied elsewhere matches no pattern. A block in the
+/// file's code is in no chunk, which is why [`netted_chunks`] also checks the whole file.
 ///
 /// # Returns
 ///
