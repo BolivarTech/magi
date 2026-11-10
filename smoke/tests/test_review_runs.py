@@ -220,6 +220,32 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                 lines = path.read_text(encoding="utf-8").splitlines()
                 self.assertEqual([header, 'base_url = "http://127.0.0.1:1/v1"', 'model = "m"'], lines)
 
+    def test_the_pointed_away_config_is_restored_on_exit(self) -> None:
+        # [MAGI S6 MS3 loop8, R7a Caspar] The rewrite outlived its block, so a reused workspace
+        # copy would carry the error endpoint into the next run.
+        original = '[embedding]\nbase_url = "http://emb/v1"\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "magi.toml"
+            config.write_text(original, encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                with runs.embedder_pointed_away(config):
+                    self.assertNotEqual(original, config.read_text(encoding="utf-8"))
+                    raise RuntimeError("the run fails")
+            self.assertEqual(original, config.read_text(encoding="utf-8"))
+
+    def test_a_failed_rewrite_leaves_the_config_whole(self) -> None:
+        # [MAGI S6 MS3 loop8, R7a Caspar] The rewrite was an in-place write: a failure part way
+        # left half a file. It is a temporary file replaced in one step now.
+        original = '[embedding]\nbase_url = "http://emb/v1"\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "magi.toml"
+            config.write_text(original, encoding="utf-8")
+            with mock.patch.object(runs.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(HarnessError):
+                    runs.point_embedding_at(config, "http://127.0.0.1:1/v1")
+            self.assertEqual(original, config.read_text(encoding="utf-8"))
+            self.assertEqual(["magi.toml"], sorted(p.name for p in pathlib.Path(tmp).iterdir()))
+
     def test_a_config_without_an_embedding_table_gains_one(self) -> None:
         url = "http://127.0.0.1:1/v1"
         with tempfile.TemporaryDirectory() as tmp:
