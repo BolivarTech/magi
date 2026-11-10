@@ -192,6 +192,16 @@ pub struct DocPrep {
     pub masked_sources: Vec<(String, &'static str)>,
 }
 
+impl DocPrep {
+    /// The working-tree set [`collect_garbage`] may judge `wt:` sources by: `doc_sources` for a
+    /// working-tree review (`rev` is `None`) whose listing completed; `None` otherwise, so a
+    /// degraded, partial listing never deletes a source it did not reach (RV19,
+    /// `degraded_listing_keeps_worktree`).
+    pub fn gc_worktree(&self, rev: Option<&str>) -> Option<BTreeSet<DocSource>> {
+        (rev.is_none() && !self.docs_unavailable).then(|| self.doc_sources.clone())
+    }
+}
+
 /// What one [`record_review`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordStats {
@@ -1496,6 +1506,49 @@ mod tests {
                 on_line: Mutex::new(HashMap::new()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn degraded_listing_keeps_worktree() {
+        // [MAGI S6 MS3 loop8, R2 Caspar] A partial working-tree listing (the preparation
+        // degraded) is never the live set: the clean-up keeps every `wt:` source then.
+        let f = RagFixture::new(&[]).await;
+        let wt = src("README.md", "wt:aa");
+        f.docs
+            .reindex(
+                &[(wt.clone(), vec![chunk("README.md", "A", "x")])],
+                &f.embedder,
+            )
+            .await
+            .expect("indexed");
+        let degraded = DocPrep {
+            docs_unavailable: true,
+            ..DocPrep::default()
+        };
+        assert_eq!(degraded.gc_worktree(None), None);
+        let gc = collect_garbage(
+            &f.docs,
+            None,
+            &|_: &str| true,
+            degraded.gc_worktree(None).as_ref(),
+        );
+        assert_eq!(
+            gc.expect("gc"),
+            None,
+            "nothing known to be live, nothing deleted"
+        );
+        assert!(f
+            .docs
+            .missing(std::slice::from_ref(&wt))
+            .expect("m")
+            .is_empty());
+        let complete = DocPrep::default();
+        assert_eq!(complete.gc_worktree(None), Some(BTreeSet::new()));
+        assert_eq!(
+            complete.gc_worktree(Some("abc")),
+            None,
+            "a revision lists no worktree"
+        );
     }
 
     #[tokio::test]
