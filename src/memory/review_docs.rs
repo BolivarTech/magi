@@ -1587,6 +1587,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dimension_mismatch_is_an_error() {
+        // [MAGI S6 MS3 loop8, R1 Melchior] A query of another dimension than the loaded vectors
+        // (a caller bug) matched nothing in silence, read as "no documentation hits".
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        store
+            .reindex(&[(src("d.md", "k"), vec![chunk("d.md", "A", "x")])], &e)
+            .await
+            .expect("dim 3");
+        let vectors = store
+            .load_vectors(3, &BTreeSet::from([src("d.md", "k")]))
+            .expect("load");
+        let r = store.search_loaded(&vectors, &[1.0, 0.0], 5);
+        assert!(matches!(r, Err(MemoryError::Storage(_))), "{r:?}");
+    }
+
+    #[tokio::test]
     async fn search_skips_rows_of_another_dimension() {
         // A query of another dimension skips every row, never compares them.
         let (store, _dir) = store_for_test();
