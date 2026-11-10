@@ -52,6 +52,14 @@ WITHOUT_EMBEDDER_KEY = "without_embedder"
 #: The run S52 reads.
 RUN_ID = "R17"
 
+#: The key of the context the review left out, and of each entry's cause.
+TRIMMED_KEY = "trimmed"
+TRIMMED_LABEL_KEY = "label"
+
+#: The ``trimmed`` labels of a degraded RAG (``INDEX_UNAVAILABLE`` and
+#: ``EMBEDDER_DOWN`` in ``src/memory/review_rag.rs``); a trim for room is not one.
+DEGRADED_LABELS = ("index unavailable", "the embedder did not answer")
+
 
 def _finding(index, outcome, detail=""):
     """Build the finding for assertion *index* of :data:`S52_ASSERTIONS`.
@@ -133,14 +141,6 @@ S55_ASSERTIONS = (
 
 #: The run S55 reads: a review with the environment's own embedder.
 S55_RUN_ID = "R18"
-
-#: The key of the context the review left out, and of each entry's cause.
-TRIMMED_KEY = "trimmed"
-TRIMMED_LABEL_KEY = "label"
-
-#: The ``trimmed`` labels of a degraded RAG (``INDEX_UNAVAILABLE`` and
-#: ``EMBEDDER_DOWN`` in ``src/memory/review_rag.rs``); a trim for room is not one.
-DEGRADED_LABELS = ("index unavailable", "the embedder did not answer")
 
 
 def _s55_finding(index, outcome, detail=""):
