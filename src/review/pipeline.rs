@@ -1938,31 +1938,20 @@ impl GateCode {
 }
 
 /// The code the gate sees for a finding (RV10 + RV21): the new side when the line lies in a new
-/// range or the file was shown whole, else the old side when it lies in an old range, numbered
-/// as that side; the old side of a renamed file is read under its old path (`old_paths`). A
-/// line number that falls in a new range and is also a line a hunk deleted names two different
-/// lines, and a finding does not say which side it meant: it is read on the new side and marked
-/// [`GateCode::ambiguous`], so the gate never filters it ([`Gate::judge_ambiguous_side`]); so is
-/// one in a new range and in an old-side containing unit, which also names two shown lines
-/// (`a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous`). A
-/// number in a new range that is a context line on the old side is not ambiguous: the code it
-/// names is still live. A finding that named the old path of a rename is validated under its new
-/// path (RV09) and reaches this function with no side either; its old-side lines are found
-/// through `old_paths`, and a colliding one is ambiguous as above.
-/// `None` (the gate's `no location`) without a line, without a face that holds
-/// it, or when the read fails, with a WARN; with the cache that read is unreachable, because
-/// every face of a reviewed file was read during the preparation. `source` is the review's
-/// `CachedSource`, which serves every side with its one-line secrets already masked, so the text
-/// the gate sends is the masked text the batch saw
+/// range or the file was shown whole, else the old side when it lies in an old range (a rename's
+/// under its old path, `old_paths`). A number in a new range that is also a deleted line, or a
+/// line of an old-side containing unit, names two shown lines: it is read on the new side and
+/// marked [`GateCode::ambiguous`], never filtered ([`Gate::judge_ambiguous_side`];
+/// `a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous`). An old-side context line
+/// in a new range is not ambiguous (its code is live). `None` (`no location`) without a line, a
+/// face that holds it, or a read (a WARN; unreachable with the cache). `source` is the review's
+/// `CachedSource`, sides already masked, so the gate sends the masked text the batch saw
 /// (`a_file_with_a_secret_is_reviewed_with_it_masked_in_the_prompt_and_the_gate`,
-/// `a_secret_on_a_deleted_line_is_masked_in_the_batch_and_the_gate`); `Gate::judge` masks every
-/// string of its state again and withholds one whose whole code holds a private-key block,
-/// before the window is cut (both pinned in `gate.rs`). The full side is returned:
-/// the gate's state shows only RV10's ±40 numbered lines of it (`gate::gate_state_of`; pinned by
-/// `the_request_sent_holds_forty_lines_each_side_not_the_whole_file`). Each finding copies its
-/// side out of the cache and decodes it once: at most two copies of one file
-/// ([`super::source::MAX_REVIEW_FILE_BYTES`]) live at a time, and the copy costs milliseconds
-/// against the seconds of the `decide` call it feeds, so no per-file decoded cache is kept.
+/// `a_secret_on_a_deleted_line_is_masked_in_the_batch_and_the_gate`); `Gate::judge` masks its
+/// state again and withholds a key block (pinned in `gate.rs`). The full side is returned, the
+/// state shows its ±40 lines (`the_request_sent_holds_forty_lines_each_side_not_the_whole_file`);
+/// each finding decodes its side once (at most two copies of a file live, milliseconds against
+/// the `decide` call), so no per-file decoded cache is kept.
 // MAGI FIX (S6 loop 6, D-m1): the new-side preference on a colliding line, stated.
 // MAGI FIX (S6 loop 7, D-b3/D-c3): a deleted line whose number is live is ambiguous, not new.
 fn gate_code(
