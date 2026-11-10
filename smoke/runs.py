@@ -2242,7 +2242,8 @@ def point_embedding_at(config_path, url: str) -> None:
     table is appended. Line-based like :func:`point_config_at`, and parsed back
     by the product, which refuses a duplicate key. The ``[embedding]`` table is
     the only form it knows (the one ``magi init`` writes); a dotted key or an
-    inline table is refused, named, and the file is left as it was.
+    inline table, its key bare or quoted, is refused, named, and the file is
+    left as it was.
 
     Nothing restores the file: the executor runs every review on a fresh copy
     of the workspace, so the rewrite never outlives its run.
@@ -2274,9 +2275,12 @@ def point_embedding_at(config_path, url: str) -> None:
                            % (config_path, exc)) from exc
     # MAGI FIX (MS3 §6 loop4): a dotted key or an inline table got a second table appended,
     # and the product then refused the file with a parse error that hid the cause.
+    # MAGI FIX (MS3 §6 loop7): a quoted key (`"embedding" = {...}`, `'embedding'.base_url`)
+    # slipped past; the first dotted segment is compared with its quotes and spaces taken off.
     for original in text.splitlines():
         key = original.split("=", 1)[0].strip() if "=" in original else ""
-        if key == "embedding" or key.startswith("embedding."):
+        first = key.split(".", 1)[0].strip().strip("\"'")
+        if first == "embedding":
             raise HarnessError(
                 "%s sets the embedder as %r; point_embedding_at rewrites only the "
                 "[embedding] table form the harness writes" % (config_path, key))
