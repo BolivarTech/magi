@@ -855,7 +855,10 @@ mod tests {
             detail: "d".into(),
             status: HistoryStatus::Pending,
         };
-        assert_eq!(classify(&magic, "HEAD", &g), HistoryStatus::WeakReject);
+        // [MAGI S6 MS3 loop7] Pending, no longer a weak reject: the literal path is no file at
+        // c1, and an empty diff weak-rejects only a regular file. Read as magic it would be
+        // attended, so the literal reading is still what this pins.
+        assert_eq!(classify(&magic, "HEAD", &g), HistoryStatus::Pending);
         let real = HistoryEntry {
             file: "a.rs".into(),
             ..magic
