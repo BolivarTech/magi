@@ -1166,9 +1166,11 @@ pub fn live_doc_sources(
     keep: &dyn Fn(&str) -> bool,
 ) -> Result<Option<BTreeSet<DocSource>>, ReviewError> {
     let head = git.run_bytes(&["rev-parse", "--verify", "HEAD^{commit}"]);
+    // MAGI FIX (MS3 §6 loop9): an annotated tag's own id listed its commit's tree twice; each
+    // line is `<id> <peeled id>`, the peeled one empty unless the ref is an annotated tag.
     let Ok(refs) = git.run_bytes(&[
         "for-each-ref",
-        "--format=%(objectname)",
+        "--format=%(objectname) %(*objectname)",
         "refs/heads",
         "refs/tags",
     ]) else {
@@ -1177,7 +1179,11 @@ pub fn live_doc_sources(
     let to_ids = |bytes: &[u8]| -> Result<Vec<String>, ReviewError> {
         let text = std::str::from_utf8(bytes)
             .map_err(|_| ReviewError::Git("git printed a non-UTF-8 object id".to_string()))?;
-        Ok(text.split_whitespace().map(str::to_string).collect())
+        Ok(text
+            .lines()
+            .filter_map(|l| l.split_whitespace().last())
+            .map(str::to_string)
+            .collect())
     };
     let ref_ids = to_ids(&refs)?;
     // MAGI FIX (MS3 §6 loop6): RV19 bounds the references; the bound counted distinct commits.
