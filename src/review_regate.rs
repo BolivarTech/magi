@@ -9,6 +9,8 @@
 //! `MagiConfig` and `effective_code_review()` are bin items: an integration test sees only the
 //! lib. Nothing here adds surface to the product: the measurement is the `#[ignore]` test
 //! `regate_verify_set`, run with `cargo nextest run --run-ignored only regate_verify_set`.
+//! It sits at the crate root on purpose: the bin has no test tree, and a `#[path]` module in a
+//! test directory would add no isolation (`cfg(test)` already keeps it out of every build).
 
 /// Criterion 2's floor on the false positives the gate removes, in percent.
 const FP_REMOVED_MIN_PCT: f64 = 40.0;
