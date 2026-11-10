@@ -478,7 +478,7 @@ impl ReviewDocStore {
     /// The `k` chunks most similar to `query` among the rows whose `(path, key)` is in
     /// `allowed` and whose identity is this store's, best first.
     ///
-    /// Rows of another dimension are skipped (vectors of two models are never compared). Only
+    /// A row of another dimension is an error (vectors of two models are never compared). Only
     /// the vectors of allowed rows are decrypted, and the section and text only for the `k`
     /// returned. Rows are read raw under the lock and decrypted after it is released.
     ///
@@ -502,9 +502,10 @@ impl ReviewDocStore {
         self.search_loaded(&vectors, query, k)
     }
 
-    /// The decrypted vectors of the rows whose `(path, key)` is in `allowed`, of this identity
-    /// and `dim`: loaded once per review, scored by [`Self::search_loaded`] per batch. Read raw
-    /// under the lock, decrypted after it (R-V08).
+    /// The decrypted vectors of the rows whose `(path, key)` is in `allowed`, of this identity:
+    /// loaded once per review, scored by [`Self::search_loaded`] per batch. Read raw under the
+    /// lock, decrypted after it (R-V08). A row not of `dim` is an error
+    /// (`load_dim_mismatch_is_an_error`).
     ///
     /// With rows of another identity stored, a non-empty `allowed` is an error, never an empty
     /// answer: only another identity's rebuild can have put them there, maybe wiping this
@@ -512,8 +513,8 @@ impl ReviewDocStore {
     /// share one read transaction (one snapshot). O(r) decryptions for `r` allowed rows.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if another identity holds the index or a query fails;
-    /// [`MemoryError::Crypto`] if decryption fails.
+    /// [`MemoryError::Storage`] if another identity holds the index, a row is not of `dim` or a
+    /// query fails; [`MemoryError::Crypto`] if decryption fails.
     // MAGI FIX (MS3 §6 loop6): a wipe by another identity read as an empty index.
     // MAGI FIX (MS3 §6 loop7): the check and the read took two locks, each its own snapshot.
     pub fn load_vectors(
@@ -527,27 +528,33 @@ impl ReviewDocStore {
             if !allowed.is_empty() && self.has_foreign_rows(&snapshot)? {
                 return Err(identity_conflict());
             }
-            self.allowed_vectors(&snapshot, dim, allowed)?
+            self.allowed_vectors(&snapshot, allowed)?
         };
         let mut rows = Vec::with_capacity(candidates.len());
         for (key, hash, blob) in candidates {
             let vector = self.unseal_vector(&blob)?;
-            if vector.len() == dim {
-                rows.push((key, hash, vector));
+            // MAGI FIX (MS3 §6 loop9): a row of another dimension was dropped in silence.
+            if vector.len() != dim {
+                return Err(MemoryError::Storage(format!(
+                    "a stored vector of dimension {} where {dim} was asked",
+                    vector.len()
+                )));
             }
+            rows.push((key, hash, vector));
         }
         Ok(DocVectors { dim, rows })
     }
 
     /// The `k` chunks of `vectors` most similar to `query`, best first; only their section and
-    /// text are read and decrypted. A `query` of another dimension than `vectors` is an error
-    /// (`dimension_mismatch_is_an_error`), and a hit whose row was deleted since `vectors` was
-    /// loaded is skipped.
+    /// text are read and decrypted. A `query` of another dimension than `vectors`, or holding a
+    /// value that is not finite, is an error (`dimension_mismatch_is_an_error`,
+    /// `non_finite_query_is_an_error`), as the stored vectors are checked by `embed_all`; a hit
+    /// whose row was deleted since `vectors` was loaded is skipped.
     ///
     /// Complexity: O(r * d) to score plus O(r log r) to order the `r` loaded rows.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] for the dimension mismatch or a failing query;
+    /// [`MemoryError::Storage`] for such a query or a failing query;
     /// [`MemoryError::Crypto`] if decryption fails.
     pub fn search_loaded(
         &self,
@@ -556,9 +563,10 @@ impl ReviewDocStore {
         k: usize,
     ) -> Result<Vec<(DocChunk, f32)>, MemoryError> {
         // MAGI FIX (MS3 §6 loop8): a mismatch matched nothing in silence.
-        if query.len() != vectors.dim {
+        // MAGI FIX (MS3 §6 loop9): a NaN query ranked arbitrary chunks first.
+        if query.len() != vectors.dim || query.iter().any(|x| !x.is_finite()) {
             return Err(MemoryError::Storage(format!(
-                "a query of dimension {} against vectors of dimension {}",
+                "a query of dimension {} against vectors of dimension {}, or not finite",
                 query.len(),
                 vectors.dim
             )));
@@ -595,7 +603,7 @@ impl ReviewDocStore {
         Ok(hits)
     }
 
-    /// `(key, chunk hash, encrypted vector)` of the allowed rows of this identity and `dim`.
+    /// `(key, chunk hash, encrypted vector)` of the allowed rows of this identity.
     ///
     /// The `(path, key)` filter runs in SQL, in batches of [`ALLOWED_PAIRS_PER_QUERY`] pairs
     /// (so no query passes SQLite's 999-parameter limit), so the blobs of other revisions are
@@ -603,19 +611,17 @@ impl ReviewDocStore {
     fn allowed_vectors(
         &self,
         c: &Connection,
-        dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<Vec<(String, String, Vec<u8>)>, MemoryError> {
-        let dim = i64::try_from(dim).unwrap_or(i64::MAX);
         let pairs: Vec<&DocSource> = allowed.iter().collect();
         let mut out = Vec::new();
         for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
             let values = pair_values(batch.len());
             let sql = format!(
                 "SELECT key, chunk_hash, embedding_blob FROM code_review_docs \
-                 WHERE index_id = ? AND dim = ? AND (path, key) IN (VALUES {values})"
+                 WHERE index_id = ? AND (path, key) IN (VALUES {values})"
             );
-            let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.index_id, &dim];
+            let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.index_id];
             for s in batch {
                 args.push(&s.path);
                 args.push(&s.key);
