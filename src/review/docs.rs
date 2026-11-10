@@ -719,7 +719,9 @@ fn py_statement_ends(after: &str) -> bool {
 ///
 /// One `r`/`R`/`u`/`U` prefix is accepted; a bytes prefix (`b`, `rb`, `br`, any case) is not,
 /// on purpose: Python keeps only a `str` literal as `__doc__`, so a bytes literal in docstring
-/// position is data (`a_bytes_literal_is_no_python_docstring_whatever_its_prefix`).
+/// position is data (`a_bytes_literal_is_no_python_docstring_whatever_its_prefix`). An f-string
+/// (`f`, `fr`, `rf`, any case) is no docstring either: it is an expression, and Python leaves
+/// `__doc__` as `None` (`an_f_string_is_no_python_docstring_whatever_its_prefix`).
 ///
 /// The string must be a statement of its own: one followed by more code on its closing line
 /// (`"""a""" + x`) is data, and one that never closes is no docstring (malformed code indexes
@@ -1836,6 +1838,17 @@ mod tests {
             let c = py_doc_chunks("m.py", &text.lines().collect::<Vec<_>>());
             assert_eq!(c.len(), 1, "{prefix}: {c:?}");
             assert_eq!(c[0].text, "Module doc.", "{prefix}");
+        }
+    }
+
+    #[test]
+    fn an_f_string_is_no_python_docstring_whatever_its_prefix() {
+        // [MAGI S6 MS3 loop7, R1 Balthasar] An f-string compiles to an expression, never a
+        // constant, so Python leaves `__doc__` as `None`: it is data, like a bytes literal.
+        for prefix in ["f", "F", "fr", "rf", "Rf", "fR"] {
+            let text = format!("{prefix}\"\"\"Not a doc.\"\"\"\n");
+            let c = py_doc_chunks("m.py", &text.lines().collect::<Vec<_>>());
+            assert!(c.is_empty(), "{prefix}: {c:?}");
         }
     }
 
