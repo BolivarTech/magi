@@ -301,7 +301,8 @@ fn history_item(e: HistoryEntry) -> ContextItem {
     let text = format!("{} ({})\n{}", e.title, e.status.as_str(), e.detail);
     ContextItem {
         kind: ContextKind::History,
-        lines: e.line.map(|l| (l, l)),
+        // MAGI FIX (MS3 §6 loop8): its text is no span of the file, so it has no `lines`.
+        lines: None,
         label: e.title,
         file: e.file,
         text: escape_fence(&text),
