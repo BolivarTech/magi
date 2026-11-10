@@ -3588,6 +3588,28 @@ mod tests {
     }
 
     #[test]
+    fn fit_escaped_stays_within_its_budget_on_multibyte_text_for_every_budget() {
+        // [MAGI S6 MS3 loop7, R5 Caspar] The bound, over text whose bytes, characters and escaped
+        // length all differ: every budget gives a result that fits it and is the longest
+        // truncation that does (one more character would not).
+        let report = "é\"日\u{1}🦀\\ñ".repeat(30);
+        let full = escaped_len(&report);
+        for budget in (0..=full + 4).step_by(7) {
+            let out = fit_escaped(&report, budget);
+            assert!(escaped_len(&out) <= budget, "budget {budget}");
+            if out == report {
+                continue;
+            }
+            let longest = (0..report.len())
+                .rev()
+                .map(|cut| truncate_result(&report, cut))
+                .find(|cut| escaped_len(cut) <= budget)
+                .unwrap_or_default();
+            assert_eq!(out, longest, "budget {budget}");
+        }
+    }
+
+    #[test]
     fn the_json_forms_drop_format_characters_like_the_text() {
         // [MAGI S6 MS3 loop4, R5 Melchior] A bidi override or a zero-width character inside a
         // finding reached the headless JSON envelope: serde escapes C0 controls, not these.
