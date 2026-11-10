@@ -1899,6 +1899,27 @@ mod tests {
         assert_eq!(a.withheld, 1, "only the key-block entry is withheld");
     }
 
+    #[tokio::test]
+    async fn key_block_entry_counted_once() {
+        // [MAGI S6 MS3 loop9, R2 Caspar] The same withheld entry, met by two batches on its
+        // file, counted once per batch: the report's total named more entries than exist.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        f.history
+            .record(&[attended("h3", &format!("{begin}\nQQQQ"))])
+            .expect("record");
+        f.history
+            .update_status("h3", HistoryStatus::Attended)
+            .expect("status");
+        let rag = f.rag(true);
+        let mut total = 0;
+        for _ in 0..2 {
+            let a = rag.context_for(&batch_on("a.rs", "fn a() {}")).await;
+            total += a.expect("context").withheld;
+        }
+        assert_eq!(total, 1);
+    }
+
     use crate::memory::error::EmbeddingError;
 
     /// An embedder that never answers. [CP2 MS3 loop 6] FailingEmbedder now lives in review_docs::test_embedder (T3.3).
