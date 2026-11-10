@@ -164,6 +164,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         # it, measured live for R6), and a freed port can be dropped instead of refused: either way a
         # hang, never the refusal S52 needs. A served error answers at once on every machine.
         import urllib.error
+        import urllib.parse
         import urllib.request
         pointed = getattr(runs, "embedder_pointed_away", None)
         self.assertIsNotNone(pointed, "the embedder must reach a served error, not a guessed port")
@@ -172,6 +173,10 @@ class ReviewRunDefinitionTests(unittest.TestCase):
             config.write_text('[embedding]\nbase_url = "http://emb/v1"\n', encoding="utf-8")
             with pointed(config):
                 url = tomllib.loads(config.read_text(encoding="utf-8"))["embedding"]["base_url"]
+                # [MAGI S6 MS3 loop7, R7b Caspar] This self-test needs no network beyond the
+                # loopback interface: the server it reaches is the harness's own, bound to
+                # 127.0.0.1, and the opener has no proxy handler (a host's proxy is never used).
+                self.assertEqual("127.0.0.1", urllib.parse.urlsplit(url).hostname)
                 with self.assertRaises(urllib.error.HTTPError):
                     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     opener.open(url + "/embeddings", timeout=5)
