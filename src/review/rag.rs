@@ -4,24 +4,17 @@
 
 //! Review context assembled by a fixed priority (REQ-RV07, RV03).
 //!
-//! Each batch carries, besides its own code, what the trio needs to judge it: the unit that
-//! contains each change, the definitions of what the code uses, the units that call a changed
-//! one, project documentation and validated history. The priority is fixed (the order of
-//! [`ContextKind`]): the batch's code, its containing units, definitions and callers,
-//! documentation, history. What does not fit the batch budget is cut from the end and named; the
-//! containing unit is never cut, so a unit that cannot fit is a typed error.
+//! Each batch carries, besides its code, the unit containing each change, the definitions of what
+//! it uses, the units calling a changed one, documentation and validated history, in that fixed
+//! priority ([`ContextKind`]). What does not fit is cut from the end and named; a containing unit
+//! is never cut, so one that cannot fit is a typed error.
 //!
 //! # Secrets (RV22)
 //!
-//! The units, definitions and callers are read from the `sources` they are given, and the
-//! pipeline gives the review's `CachedSource`: it holds every text side with each one-line secret
-//! masked before any stage reads it, and refuses a side the filter left out for a private-key
-//! block. So these items are masked when they are built, and the text charged to the budget is the
-//! masked text (pinned by
-//! `a_secret_outside_the_changed_lines_reaches_every_code_context_item_masked` in
-//! `memory::review_rag`). Documentation is masked when it is chunked, history when it is
-//! retrieved, and the doc query in [`doc_search_query`]; the pipeline's egress pass over every
-//! item is a backstop on top of that.
+//! Units, definitions and callers are read from the review's `CachedSource`, which holds every
+//! side masked and refuses a key-block side, so they are built masked and charged masked.
+//! Documentation is masked when chunked, history when retrieved, the query in
+//! [`doc_search_query`]; the pipeline's egress pass is a backstop on top.
 
 use std::collections::{HashMap, HashSet};
 
@@ -548,13 +541,10 @@ pub fn definitions_for(
     items
 }
 
-/// The units that name any of `names` (the changed units), one item per `(file, unit)` and never
-/// the definition itself nor a unit with the same name (a nested method the index does not
-/// record, a homonym, a recursive call); at most [`MAX_CALLERS_PER_NAME`] per name, the first by
-/// `(file, line)`.
-///
-/// Each file is read and split once. A file without an extractor, or that is gone, gives no
-/// caller. A unit already given for an earlier name or occurrence is not repeated.
+/// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
+/// the definition nor a unit of the same name (a homonym, a recursive call); at most
+/// [`MAX_CALLERS_PER_NAME`] per name, the first by `(file, line)`. Each file is read and split
+/// once; one without an extractor, or gone, gives none; a unit already given is not repeated.
 ///
 /// O(occurrences of `names` log occurrences + bytes of the files read).
 ///
