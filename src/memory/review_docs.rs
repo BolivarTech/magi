@@ -514,6 +514,8 @@ impl ReviewDocStore {
     /// them there, and it may have wiped this review's rows
     /// (`vectors_loaded_while_another_identity_holds_the_index_are_an_error_not_silence`). The
     /// review then declares its documentation unavailable instead of serving none undeclared.
+    /// The check and the read run in one read transaction under one lock, so they see one
+    /// snapshot: another process's rebuild lands before both or after both, never between.
     ///
     /// Complexity: O(r) decryptions for the `r` allowed rows.
     ///
@@ -521,15 +523,20 @@ impl ReviewDocStore {
     /// [`MemoryError::Storage`] if another identity holds the index or a query fails;
     /// [`MemoryError::Crypto`] if decryption fails.
     // MAGI FIX (MS3 §6 loop6): a wipe by another identity read as an empty index.
+    // MAGI FIX (MS3 §6 loop7): the check and the read took two locks, each its own snapshot.
     pub fn load_vectors(
         &self,
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<DocVectors, MemoryError> {
-        if !allowed.is_empty() && self.has_foreign_rows(&self.locked_conn())? {
-            return Err(identity_conflict());
-        }
-        let candidates = self.allowed_vectors(dim, allowed)?;
+        let candidates = {
+            let mut c = self.locked_conn();
+            let snapshot = c.transaction().map_err(db_err)?;
+            if !allowed.is_empty() && self.has_foreign_rows(&snapshot)? {
+                return Err(identity_conflict());
+            }
+            self.allowed_vectors(&snapshot, dim, allowed)?
+        };
         let mut rows = Vec::with_capacity(candidates.len());
         for (key, hash, blob) in candidates {
             let vector = self.unseal_vector(&blob)?;
@@ -590,15 +597,15 @@ impl ReviewDocStore {
     ///
     /// The `(path, key)` filter runs in SQL, in batches of [`ALLOWED_PAIRS_PER_QUERY`] pairs
     /// (so no query passes SQLite's 999-parameter limit), so the blobs of other revisions are
-    /// never copied under the connection lock.
+    /// never copied under the connection lock. Runs on the caller's locked connection `c`.
     fn allowed_vectors(
         &self,
+        c: &Connection,
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<Vec<(String, String, Vec<u8>)>, MemoryError> {
         let dim = i64::try_from(dim).unwrap_or(i64::MAX);
         let pairs: Vec<&DocSource> = allowed.iter().collect();
-        let c = self.locked_conn();
         let mut out = Vec::new();
         for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
             let values = pair_values(batch.len());
