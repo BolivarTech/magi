@@ -242,12 +242,9 @@ fn bounded_section(section: &str) -> String {
     )
 }
 
-/// The hash a [`DocChunk`] carries: SHA-256 hex of `len(path) ":" path len(section) ":"
-/// section text`, lengths in decimal bytes.
-///
-/// The length prefixes make the input unambiguous: git allows a newline in a path, and a plain
-/// separator let `("a\nb", "S", "T")` and `("a", "b", "S\nT")` share a hash, so a reused vector
-/// came from another chunk (`chunks_that_join_to_the_same_text_never_share_a_hash`).
+/// The hash a [`DocChunk`] carries: SHA-256 hex of `len(path):path len(section):section text`,
+/// length-prefixed so no two chunks share one (a git path may hold a newline;
+/// `chunks_that_join_to_the_same_text_never_share_a_hash`).
 ///
 /// The one definition of the chunk hash, so the chunkers and the store that checks a chunk
 /// before reusing a stored vector by it cannot drift apart. O(n) in the three.

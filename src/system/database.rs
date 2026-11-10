@@ -692,16 +692,14 @@ pub(crate) fn init_schema(conn: &Connection) -> std::result::Result<(), SchemaIn
             detail: pre_0_25_detail(table),
         });
     }
-    // MAGI FIX (MS3 §6 loop7): the statements ran one by one in autocommit, so a failure (a
-    // crash, a full disk) after `messages` left a partial file the pre-0.25 check reads as
-    // current. One immediate transaction: the schema appears whole or not at all.
+    // MAGI FIX (MS3 §6 loop7): run in autocommit, a failure after `messages` left a partial file
+    // the pre-0.25 check reads as current; one transaction now (a failed rollback is logged, and
+    // SQLite rolls back on close).
     conn.execute_batch("BEGIN IMMEDIATE")?;
     if let Err(e) = conn
         .execute_batch(SCHEMA_DDL)
         .and_then(|()| conn.execute_batch("COMMIT"))
     {
-        // The DDL's own error is the one reported; a rollback that fails too leaves SQLite to
-        // roll the open transaction back when the connection closes.
         if let Err(rollback) = conn.execute_batch("ROLLBACK") {
             tracing::warn!(error = %rollback, "schema initialization rollback failed");
         }
@@ -790,15 +788,12 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
         .expect("count")
 }
 
-/// The DDL [`init_schema`] runs, in this order, inside one immediate transaction (so it
-/// appears whole or not at all:
-/// `a_schema_initialization_that_fails_part_way_leaves_no_table_behind`).
+/// The DDL [`init_schema`] runs, in this order, in one transaction
+/// (`a_schema_initialization_that_fails_part_way_leaves_no_table_behind`).
 ///
 /// **The v0.25.0 tables ([`PRE_0_25_MISSING_TABLES`]) come first, before the marker
-/// [`PRE_0_25_MARKER_TABLE`].** Kept although the transaction already hides a half-created
-/// schema from a second opener: the order is the second line of defense, so a reader never
-/// sees the marker without every v0.25.0 table, never refuses a fresh database as an older
-/// one, and no open needs a write lock for the check (RV19).
+/// [`PRE_0_25_MARKER_TABLE`]**, a second line of defense: a reader never sees the marker
+/// without every v0.25.0 table, so a fresh database is never refused as an older one (RV19).
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
@@ -2327,9 +2322,8 @@ mod tests {
 
     #[test]
     fn a_schema_initialization_that_fails_part_way_leaves_no_table_behind() {
-        // [MAGI S6 MS3 loop7, R3 Caspar] Run statement by statement, a failure after `messages`
-        // left a file the pre-0.25 check reads as current but that lacks later tables. The last
-        // statement fails here (a stray `memories` without `scope`): nothing may stay.
+        // [MAGI S6 MS3 loop7, R3 Caspar] The last statement fails (a stray `memories` without
+        // `scope`); nothing created before it may stay.
         let tmp = tempfile::NamedTempFile::new().expect("tmp");
         let conn = Connection::open(tmp.path()).expect("open");
         conn.execute_batch("CREATE TABLE memories (id TEXT)")

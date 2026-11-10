@@ -408,13 +408,10 @@ impl ReviewDocStore {
     /// this one embedded unlocked: that is a conflict, and the write fails with nothing written
     /// or deleted, so neither side erases the other's successful write in silence
     /// (`a_reindex_raced_by_another_identity_is_a_conflict_that_deletes_nothing`); the review
-    /// that loses runs without documentation and says so. With `rebuilt` the wipe is not
-    /// re-checked: rows another identity wrote after the plan go with the stale ones, and that
-    /// identity's next [`Self::load_vectors`] sees this store's rows as foreign and fails, so its
-    /// review declares the index unavailable instead of serving none undeclared (the same end
-    /// state as a rebuild after its write,
-    /// `vectors_loaded_while_another_identity_holds_the_index_are_an_error_not_silence`). The
-    /// silent loss is ruled out at the read, not here. This store's own rows are never
+    /// that loses runs without documentation and says so. A `rebuilt` wipe is not re-checked: a
+    /// racing identity's rows go too, and its next [`Self::load_vectors`] fails on this store's
+    /// rows, so its review declares the index unavailable (caught at the read,
+    /// `vectors_loaded_while_another_identity_holds_the_index_are_an_error_not_silence`). This store's own rows are never
     /// deleted here. Inserts are `OR IGNORE` by key: two processes indexing the same source
     /// under one identity write the same thing.
     ///
