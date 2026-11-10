@@ -1170,6 +1170,14 @@ async fn run_batches(
             Duration::from_secs(batch_wall_clock_secs(left, pending))
         });
         let started = Instant::now();
+        // MAGI FIX (MS3 §6 loop7): a zero wall still polled the call once; it is cut unsent, and
+        // with no metrics, as a batch cut before it started spent nothing.
+        if wall.is_some_and(|w| w.is_zero()) {
+            summary
+                .failed_batches
+                .extend((batch.index..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
+            break;
+        }
         match consult.consult(prompt, wall).await {
             Ok(report) => {
                 summary
