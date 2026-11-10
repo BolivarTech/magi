@@ -1364,6 +1364,9 @@ pub fn collect_garbage(
     if let Some(worktree) = worktree {
         live.extend(worktree.iter().cloned());
     }
+    // `gc`'s second argument is `keep_worktree_keys`: a review that did not list the working
+    // tree (`worktree` is `None`, a revision review) keeps every `wt:` source, so a commit review
+    // never drops the working tree's documentation; one that listed it judges them by `live`.
     docs.gc(&live, worktree.is_none()).map(Some)
 }
 
