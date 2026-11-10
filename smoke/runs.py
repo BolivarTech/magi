@@ -2135,9 +2135,10 @@ REVIEW_MASKED_DIR = "rv22keyed"
 REVIEW_MASKED_FILE = REVIEW_MASKED_DIR + "/keyed.rs"
 
 #: The toy key inside that file. Built from two pieces so the source holds no
-#: key-shaped literal; it matches the product's ``anthropic-key`` pattern.
+#: key-shaped literal; it matches the product's ``anthropic-key`` pattern. Its
+#: body is non-uniform (numbered), so no window S53 probes is ordinary text.
 _TOY_MASKED_PREFIX = "sk-ant-api03-"  # allow-secret-scan
-REVIEW_MASKED_KEY = (_TOY_MASKED_PREFIX + "M" * 28).encode("ascii")
+REVIEW_MASKED_KEY = (_TOY_MASKED_PREFIX + "".join("%02dM" % i for i in range(9)) + "M").encode("ascii")
 
 #: The pattern the product reports for it (``name`` in ``src/review/secrets.rs``).
 REVIEW_MASKED_PATTERN = "anthropic-key"
@@ -2150,7 +2151,8 @@ REVIEW_KEYBLOCK_FILE = REVIEW_KEYBLOCK_DIR + "/server.pem"
 #: The body lines of the toy block, each unique and none carrying a header.
 #: S54 looks for each in every output: a body has no pattern of its own, so the
 #: only protection is leaving the whole file out.
-REVIEW_KEYBLOCK_BODY_LINES = (b"TOYBODYLINEONE" + b"Q" * 40, b"TOYBODYLINETWO" + b"R" * 40)
+REVIEW_KEYBLOCK_BODY_LINES = (b"TOYBODYLINEONE" + b"".join(b"%02dQ" % i for i in range(14)),
+                              b"TOYBODYLINETWO" + b"".join(b"%02dR" % i for i in range(14)))
 
 #: The toy block's marker lines (split so the source holds no PEM header).
 REVIEW_KEYBLOCK_HEADER = b"-----BEGIN " + b"RSA PRIVATE KEY-----"  # allow-secret-scan
