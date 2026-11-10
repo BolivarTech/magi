@@ -114,6 +114,9 @@ def a_review_without_an_embedder_runs_and_says_so(run):
         return
     code = run.output.exit_code
     yield _verdict(0, code == EXIT_OK, "exited %d" % code)
+    # A root that is not an object (`null`, a list) never reaches `.get`: `ProductOutput.json`
+    # raises ProductOutputError for it, a FAIL below (`test_s52_fails_on_valid_json_that_is_not_an_object`,
+    # `test_s55_fails_on_valid_json_that_is_not_an_object`).
     try:
         report = run.output.json()
     except ProductOutputError as exc:
@@ -205,6 +208,7 @@ def a_review_with_its_embedder_up_is_not_degraded(run):
                                "run %s produced no capture to inspect" % S55_RUN_ID)
         return
     try:
+        # `.json()` raises for a root that is not an object, so `.get` is always on a dict.
         summary = run.output.json().get(CODE_REVIEW_KEY)
     except ProductOutputError as exc:
         for index in range(len(S55_ASSERTIONS)):

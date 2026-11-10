@@ -900,6 +900,16 @@ class CodeReviewWithEmbedderTests(unittest.TestCase):
                 doc = self._doc(trimmed=[entry])
                 self.assertEqual(Outcome.FAIL, self._outcomes(doc)[review_context.S55_ASSERTIONS[1]])
 
+    def test_s55_fails_on_valid_json_that_is_not_an_object(self) -> None:
+        # [MAGI S6 MS3 loop7, R7a Caspar] A root that is not an object must be a FAIL, not a crash.
+        for root in ([1, 2], "text", 7):
+            with self.subTest(root=root):
+                try:
+                    outcomes = _outcomes("S55", _result("R18", 0, root))
+                except AttributeError as exc:
+                    self.fail("a non-object document crashed S55: %s" % exc)
+                self.assertEqual({Outcome.FAIL}, set(outcomes.values()))
+
     def test_s55_fails_when_a_declaration_is_missing_or_ill_typed(self) -> None:
         for summary in ({"trimmed": []}, {"without_embedder": False}, {"without_embedder": 0, "trimmed": []}):
             with self.subTest(summary=summary):

@@ -198,6 +198,8 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
         return
     code = run.output.exit_code
     yield code_review._verdict(texts, 0, "R18", code == EXIT_OK, "exited %d" % code)
+    # `ProductOutput.json` raises ProductOutputError for a root that is not an object, so `.get`
+    # is always on a dict (`test_valid_json_that_is_not_an_object_fails_both_json_assertions`).
     try:
         section = run.output.json().get(CODE_REVIEW_KEY)
     except ProductOutputError as exc:
