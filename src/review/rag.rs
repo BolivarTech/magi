@@ -1860,6 +1860,24 @@ mod tests {
     }
 
     #[test]
+    fn methods_are_retrieved_as_defs() {
+        // [MAGI S6 MS3 loop9, R2 Melchior] RV07(2): a method of a Rust `impl` or a Python class
+        // was never recorded, so `obj.method()` brought no definition.
+        use crate::review::test_support::MapSource;
+        let rs = "struct S;\n\nimpl S {\n    fn run(&self) {}\n}\n";
+        let py = "class C:\n    def go(self):\n        pass\n";
+        let files = vec![
+            ("a.rs".to_string(), rs.to_string()),
+            ("c.py".to_string(), py.to_string()),
+        ];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let src = MapSource::new(&[("a.rs", rs), ("c.py", py)], &[]);
+        let defs = definitions_for("s.run(); c.go()", &index, &src).expect("reads");
+        let got: Vec<_> = defs.iter().map(|d| (d.label.as_str(), d.lines)).collect();
+        assert_eq!(got, vec![("run", Some((4, 4))), ("go", Some((2, 3)))]);
+    }
+
+    #[test]
     fn a_referenced_type_reaches_the_definitions() {
         // [CP2 MS3 loop 10] RV07(2) names referenced types too: a `struct` is a top-level unit with
         // a name.
