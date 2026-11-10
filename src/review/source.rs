@@ -935,16 +935,13 @@ struct HeldSide {
     raw_secret: bool,
 }
 
-/// [`masked_side`] with an explicit bound on the masked side. O(bytes), in passes over the side:
-/// a text side is scanned for a key block first, then masked (one detector pass, the span
-/// masking only when something matched), so a key-block side is never masked at all; a binary
-/// one is scanned once for the openings of the patterns. The filter's `content_verdict` scans
-/// the served sides once more, on purpose: it trusts no source to have masked (a source that
-/// masks nothing reaches it too), so the cost of a masked file is four passes, a constant
-/// factor on bytes the review caps (`MAX_REVIEW_TOTAL_BYTES`).
+/// [`masked_side`] with an explicit bound on the masked side. O(bytes), in passes: a text side
+/// is scanned for a key block first, then masked (a key-block side is never masked); a binary
+/// one once for the patterns' openings. The filter's `content_verdict` scans the served sides
+/// again, trusting no source to have masked: four passes for a masked file, a constant factor
+/// on bytes the review caps (`MAX_REVIEW_TOTAL_BYTES`).
 // MAGI FIX (MS3 §6 loop6): the count said one pass for a masked side (R6a Melchior).
-// MAGI FIX (MS3 §6 loop7): the key-block check ran after the (up to 16 MiB) mask was built,
-// which was then thrown away (R6a Melchior); it runs first now.
+// MAGI FIX (MS3 §6 loop7): the key-block check ran after the mask was built and dropped.
 fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
     // MAGI FIX (MS3 §6 loop4): the mask is bounded; a side too dense to mask is held as read.
     let text = read

@@ -343,13 +343,11 @@ const NON_TOKEN_PREFIXES: &[&str] = &[
 /// (`ghp_`, `sk-`, `AKIA`…) or a header, name or URL opening ([`NON_TOKEN_PREFIXES`]), whatever
 /// follows it.
 ///
-/// For bytes no pattern can be matched over: a binary side, whose NULs break a token's tail
-/// (`ghp_\0AAAA…`), is never masked and never sent, but whether it may be served again once
-/// released rests on this (`CachedSource`): over-matching only refuses a later read of a file
-/// already left out, the safe direction. The text is also read with every control character
-/// and U+FFFD (an invalid byte of the lossy decoding) taken out, so an opening split by one of
-/// them counts too (`a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts`).
-/// O(n · p).
+/// For bytes no pattern can be matched over: a binary side (`ghp_\0AAAA…`) is never sent, but
+/// whether it may be served again once released rests on this (`CachedSource`); over-matching
+/// only refuses a later read, the safe direction. Read also with control characters and U+FFFD
+/// taken out, so a split opening counts
+/// (`a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts`). O(n · p).
 // MAGI FIX (MS3 §6 loop7): `gh\0p_…` split the opening itself and matched nothing.
 pub(crate) fn holds_secret_prefix(text: &str) -> bool {
     let squeezed: String = text
@@ -1697,9 +1695,7 @@ mod tests {
 
     #[test]
     fn a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts() {
-        // [MAGI S6 MS3 loop7, R6a Caspar, Balthasar] A binary side whose token prefix itself was
-        // interrupted (`gh` NUL `p_…`, or an invalid byte decoded as U+FFFD) matched no opening,
-        // so the side could be served again once released.
+        // [MAGI S6 MS3 loop7, R6a] An opening split by a NUL or an invalid byte matched nothing.
         for bytes in [
             &b"gh\0p_AAAA"[..],
             &b"s\0k-ant-x"[..],
@@ -1717,8 +1713,7 @@ mod tests {
 
     #[test]
     fn masking_with_lines_kept_writes_back_a_lone_cr_break() {
-        // [MAGI S6 MS3 loop7, R6a Caspar] A bare `\r` (a classic Mac break) inside a mask was
-        // dropped, so the masked side lost a line the raw diff kept.
+        // [MAGI S6 MS3 loop7, R6a Caspar] A bare `\r` inside a mask was dropped.
         let end = concat!("-----", "END RSA PRIVATE KEY-----");
         let text = format!(
             "fn a() {{}}\rconst K: &str = \"{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\rMIIBOgIBAAJBAK\r{end}\";\rfn b() {{}}\r"

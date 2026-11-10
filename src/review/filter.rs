@@ -158,10 +158,9 @@ pub struct Filtered {
 pub struct Masked {
     /// The path, as it may leave the process ([`display_path`]).
     pub path: String,
-    /// Why it is declared: always [`SkipCause::Secret`], the cause RV22's amendment names
-    /// ("`secret`, masked, not omitted"). The list tells a masked file from an omitted one, never
-    /// the cause: a masked file is in [`Filtered::masked`] and never in `skipped`, an omitted one
-    /// the reverse (`a_masked_file_and_an_omitted_one_share_the_cause_and_never_the_list`).
+    /// Why it is declared: always [`SkipCause::Secret`], as RV22 amended names it; the list, not
+    /// the cause, tells it from an omission
+    /// (`a_masked_file_and_an_omitted_one_share_the_cause_and_never_the_list`).
     pub cause: SkipCause,
     /// The name of the first secret pattern found in it.
     pub pattern: &'static str,
@@ -587,9 +586,8 @@ fn kept_verdict(
 /// `index`, `---`, `+++`) are kept as they are: a one-line secret in one of them (a file name
 /// shaped like a key) makes that check leave the file out, the safe direction of RV22 (a path
 /// cannot be masked and still name its file). A context line is checked against both sides,
-/// written from the new one. O(diff + sides), plus O(hunks × side lines) for the function
-/// context ([`shown_by_a_side`] scans the sides once per hunk header; only a masked file pays
-/// it, and each line's `starts_with` stops at the first byte that differs).
+/// written from the new one. O(diff + sides) plus O(hunks × side lines) for the function
+/// context ([`shown_by_a_side`], once per hunk header; masked files only).
 // MAGI FIX (MS3 §6 loop7): the bound left the per-hunk context scan out (R6a Melchior).
 ///
 /// The subset of git's unified diff it reads: lines before the first hunk and between files
@@ -1391,8 +1389,7 @@ mod tests {
 
     #[test]
     fn a_masked_file_and_an_omitted_one_share_the_cause_and_never_the_list() {
-        // [MAGI S6 MS3 loop7, R6a Balthasar] Both carry RV22's `secret`; what tells a masked file
-        // (reviewed) from an omitted one (left out) is the list, never the cause.
+        // [MAGI S6 MS3 loop7, R6a Balthasar] Both are `secret`; the list tells them apart.
         let key = concat!("sk-", "proj-", "AAAAAAAAAAAAAAAAAAAAAAAA");
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
         let block =
@@ -2199,8 +2196,7 @@ mod tests {
 
     #[test]
     fn a_context_line_that_differs_on_the_old_side_counts_as_a_divergence() {
-        // [MAGI S6 MS3 loop7, R6a Caspar] A context line advanced the old side without looking at
-        // it, so a stale diff whose old side differed there was counted as clean (RV21's signal).
+        // [MAGI S6 MS3 loop7, R6a Caspar] A context line never looked at the old side.
         let diff = "@@ -1,3 +1,3 @@\n a\n b\n c\n";
         let (rebuilt, diverged) =
             rebuilt_diff(diff, Some(b"a\nb\nc\n"), Some(b"a\nX\nc\n")).expect("rebuilds");
