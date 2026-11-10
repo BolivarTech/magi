@@ -1398,17 +1398,12 @@ enum ContextEgress {
     Withhold(String),
 }
 
-/// A context item as it may leave the process (RV22 amended): each one-line secret of its text
-/// or label masked, and both escaped for its frame as the prompt writes it (a mask may sit
-/// next to `<<`; [`escape_fence`] is a fixed point, so a source that escaped already is
-/// unchanged), with the first pattern found. An item whose path quotes a secret (a path cannot
-/// be masked and still name its file; the user's decision: a path with a secret shape stays
-/// omitted, its content too) or whose text or label holds a private-key block (RV22's
-/// exception) is withheld, as is one in which masking left a match (fail closed). O(text).
-///
-/// A backstop: every item arrives masked already (from the review's cache, at chunking, at
-/// retrieval), so this pass normally changes nothing. A one-line secret never omits an item:
-/// a mask longer than its secret is sent, and [`prepare_contexts`] pays for the growth.
+/// A context item as it may leave the process (RV22 amended): text and label masked, then
+/// escaped for the frame ([`escape_fence`], a fixed point), with the first pattern found. An item
+/// whose path quotes a secret (the user's decision: omitted with its content), whose text or
+/// label holds a private-key block, or in which masking left a match (fail closed) is withheld.
+/// A backstop (items arrive masked); a mask longer than its secret is sent and paid by
+/// [`prepare_contexts`]. O(text).
 // MAGI FIX (MS3 §6 loop2): a context item holding a one-line secret was withheld, not masked.
 // MAGI FIX (MS3 §6 loop6): nor withheld when its mask grows it; the batch pays with optional
 // context instead.
@@ -1486,21 +1481,15 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
 
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
 ///
-/// Each item passes the secret detector ([`context_egress`]): a one-line secret of its text or
-/// label is masked and its file declared masked; an item whose path quotes a secret or that
-/// holds a private-key block never reaches the prompt, counts in `context_withheld` and lists
-/// its file as skipped (`secret`). The source's declarations (trimmed items, a missing
-/// embedder, `--no-memory`, withheld counts) reach `summary` here, so a batch the clock later
-/// cuts still declares them. A kept documentation or history item carrying a mask, and each
-/// source indexed masked ([`RagSource::masked`]), declare their file masked once (RV22
-/// amended). Kept items are sorted, stably, by the fixed priority. O(items + their bytes).
+/// Each item passes [`context_egress`]: a one-line secret is masked and its file declared masked;
+/// a secret-shaped path or a key block withholds it (`context_withheld`, file skipped `secret`).
+/// The source's declarations reach `summary` here, so a batch the clock cuts still declares them;
+/// a kept store item carrying a mask, and each source indexed masked, declare their file once.
+/// Kept items are sorted stably by priority. O(items + bytes). `rag` assembles (the bound source);
+/// [`RagSource::skipped`]/[`RagSource::masked`] are read from `given`, the source handed in.
 ///
-/// `rag` assembles the batches (the bound source, if any); the documentation declarations
-/// ([`RagSource::skipped`], [`RagSource::masked`]) are read from `given`, the source the
-/// pipeline was handed, so a bound source keeping the trait's defaults never drops them.
-///
-/// `limit` is the batch limit (RV04): what the batch's code and the heading leave is the most
-/// its kept context may cost, whatever the source charged (`over_limit_context_is_trimmed`).
+/// `limit` is the batch limit (RV04): what the code and the heading leave is the most the kept
+/// context may cost, whatever the source charged (`over_limit_context_is_trimmed`).
 ///
 /// # Errors
 ///
@@ -2010,16 +1999,12 @@ impl GateCode {
 }
 
 /// The code the gate sees for a finding (RV10 + RV21): the new side when the line lies in a new
-/// range or the file was shown whole, else the old side when it lies in an old range (a rename's
-/// under its old path, `old_paths`). A number in a new range that is also a deleted line, or a
-/// line of an old-side containing unit, names two shown lines: it is read on the new side and
-/// marked [`GateCode::ambiguous`], never filtered ([`Gate::judge_ambiguous_side`]). An old-side
-/// context line in a new range is not ambiguous (its code is live). `None` (`no location`)
-/// without a line, a face that holds it, or a read (a WARN; unreachable with the cache).
-/// `source` is the review's `CachedSource`, sides already masked, so the gate sends the masked
-/// text the batch saw; `Gate::judge` masks its state again and withholds a key block. The full
-/// side is returned (the state shows ±40 lines); each finding decodes its side once (at most two
-/// copies of a file live), so no per-file decoded cache is kept.
+/// range or the file was shown whole, else the old side in an old range (a rename's under its old
+/// path). A new-range number that is also a deleted line, or an old-side unit's line, names two
+/// shown lines: read on the new side, [`GateCode::ambiguous`], never filtered. `None`
+/// (`no location`) without a line, a face holding it, or a read (WARN). `source` is the masked
+/// `CachedSource`; `Gate::judge` masks its state again. The full side is returned (the state
+/// shows ±40 lines), decoded once per finding.
 // MAGI FIX (S6 loop 6, D-m1): the new-side preference on a colliding line, stated.
 // MAGI FIX (S6 loop 7, D-b3/D-c3): a deleted line whose number is live is ambiguous, not new.
 fn gate_code(
@@ -2067,15 +2052,11 @@ fn gate_code(
 
 /// `path` without Windows' verbatim prefix, so a reported absolute location compares with the
 /// workspace as an editor writes it: `\\?\C:\w` becomes `C:\w` and `\\?\UNC\srv\share\w` becomes
-/// `\\srv\share\w`. Any other path (a volume GUID path, a device path, any path off Windows) is
-/// returned as it is. It works on the path's components, so a component that is not Unicode
-/// keeps every unit it had. O(components).
+/// `\\srv\share\w`; any other path is returned as it is, component by component. O(components).
 ///
-/// It is no sandbox check: it is applied to the workspace root only, so that RV09 can compare a
-/// model's reported absolute location with it, and nothing is opened or read through the
-/// result. The sandbox is the `guard` a review is given (the binary's `PathGuard`) at input
-/// resolution, and every read goes through the review's [`ContentSource`]. A path whose prefix is
-/// left in place only fails to match, and its finding is discarded (`file not reviewed`).
+/// No sandbox check: applied to the workspace root only, for RV09 to compare a reported absolute
+/// location, and nothing is read through it (the sandbox is the review's `guard` and
+/// [`ContentSource`]). A prefix left in place only fails to match (`file not reviewed`).
 // MAGI FIX (S6 loop 7, D-c4): why a prefix it leaves in place cannot widen the sandbox.
 fn without_verbatim_prefix(path: &Path) -> PathBuf {
     let mut components = path.components();
