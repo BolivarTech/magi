@@ -93,9 +93,8 @@ pub const MAX_DOC_CHUNKS: usize = 20_000;
 /// differently, so every stored chunk is indexed again instead of mixing two chunkers.
 ///
 /// A change to the secret patterns (`SECRET_PATTERNS` in [`crate::review::secrets`]) counts:
-/// chunks are masked before they are hashed, so a source indexed under the old patterns keeps
-/// serving chunks masked the old way until this version changes (egress still masks with the
-/// current patterns, so nothing leaks; the index is just stale). Pinned by
+/// chunks are masked before they are hashed, so an old index stays masked the old way until
+/// this changes (egress masks with the current patterns, so nothing leaks). Pinned by
 /// `a_change_to_the_secret_patterns_comes_with_a_doc_index_version_bump`.
 ///
 /// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5); 3 since
@@ -105,12 +104,10 @@ pub const DOC_INDEX_VERSION: u32 = 3;
 /// Bound on the local references (branches and tags) [`live_doc_sources`] reads; with more, the
 /// clean-up is skipped for that review (RV19: "more than `MAX_GC_REFS` references").
 ///
-/// The bound counts references, as specified, so sixty-five refs at one commit still skip
-/// (`past_the_ref_cap_the_clean_up_is_skipped_even_when_every_ref_shares_one_commit`). Under it,
-/// the tips are deduplicated into distinct commits before listing, a cost optimization only:
-/// every ref at one commit costs one `ls-tree`, and never more than `MAX_GC_REFS + 1` run (the
-/// refs plus `HEAD`). Deletion is unaffected: only what no ref tip nor the working tree reaches
-/// goes.
+/// It counts references, as specified, so 65 refs at one commit still skip
+/// (`past_the_ref_cap_the_clean_up_is_skipped_even_when_every_ref_shares_one_commit`); under it
+/// the tips are deduplicated into commits before listing, a cost optimization only (at most
+/// `MAX_GC_REFS + 1` `ls-tree` runs).
 pub const MAX_GC_REFS: usize = 64;
 
 /// How far below a doc block the item line is looked for (attributes and plain comments between).

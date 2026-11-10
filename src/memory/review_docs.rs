@@ -275,12 +275,9 @@ impl ReviewDocStore {
     ///
     /// Complexity: O(chunks) hash lookups, plus the embedder's cost for the new chunks.
     ///
-    /// Memory: every sealed row (section, text and vector ciphertexts) is built before the one
-    /// write, beside the caller's chunks, so the peak is a few times the chunks' bytes. A review
-    /// passes at most [`magi_rs::review::docs::MAX_DOC_CHUNKS`] chunks of at most
-    /// `MAX_DOC_CHUNK_BYTES` text and `MAX_DOC_SECTION_BYTES` section each (~170 MB of
-    /// plaintext at the bound, measured repository about four times below it); raising either
-    /// bound raises this peak with it.
+    /// Memory: every sealed row is built before the one write, a few times the chunks' bytes; a
+    /// review passes at most [`magi_rs::review::docs::MAX_DOC_CHUNKS`] chunks (~170 MB of
+    /// plaintext at the bounds, this repository about four times below).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if the embedder's identity differs from the store's, a chunk
